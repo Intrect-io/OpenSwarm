@@ -4,6 +4,7 @@
 
 import {
   Client,
+  Events,
   GatewayIntentBits,
   TextChannel,
   Message,
@@ -53,7 +54,7 @@ export async function initDiscord(token: string, channelId: string): Promise<voi
     ],
   });
 
-  client.on('ready', () => {
+  client.once(Events.ClientReady, () => {
     console.log(`Discord bot logged in as ${client?.user?.tag}`);
   });
 
