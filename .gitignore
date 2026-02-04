@@ -6,6 +6,8 @@ dist/
 
 # Config with secrets
 config.json
+config.yaml
+config.yml
 
 # Logs
 *.log
