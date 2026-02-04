@@ -136,3 +136,133 @@ export async function createSession(
 export async function killSession(sessionName: string): Promise<void> {
   await execAsync(`tmux kill-session -t "${sessionName}"`);
 }
+
+/**
+ * tmux 명령 직접 실행
+ */
+export async function execCommand(command: string): Promise<string> {
+  try {
+    const { stdout } = await execAsync(command);
+    return stdout;
+  } catch (err) {
+    console.error(`tmux command failed: ${command}`, err);
+    throw err;
+  }
+}
+
+/**
+ * 세션의 pane 개수 조회
+ */
+export async function getPaneCount(sessionName: string): Promise<number> {
+  try {
+    const { stdout } = await execAsync(
+      `tmux list-panes -t "${sessionName}" | wc -l`
+    );
+    return parseInt(stdout.trim(), 10);
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * 특정 pane에 명령 전송
+ */
+export async function sendKeysToPane(paneTarget: string, message: string): Promise<void> {
+  // 특수 문자 이스케이프
+  const escaped = message
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`');
+
+  await execAsync(`tmux send-keys -t "${paneTarget}" "${escaped}" Enter`);
+}
+
+/**
+ * 특정 pane의 출력 캡처
+ */
+export async function capturePaneOutput(
+  paneTarget: string,
+  lines: number = 50
+): Promise<string> {
+  try {
+    const { stdout } = await execAsync(
+      `tmux capture-pane -t "${paneTarget}" -p -S -${lines}`
+    );
+    return stdout;
+  } catch (err) {
+    console.error(`Failed to capture pane ${paneTarget}:`, err);
+    return '';
+  }
+}
+
+/**
+ * pane 목록 조회 (세션:윈도우.pane 형식)
+ */
+export async function listPanes(sessionName: string): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync(
+      `tmux list-panes -t "${sessionName}" -F "#{pane_index}:#{pane_current_path}"`
+    );
+    return stdout.trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 새 pane 생성 (특정 디렉토리에서)
+ */
+export async function createPane(
+  sessionName: string,
+  workingDir: string,
+  command?: string
+): Promise<number> {
+  const expandedDir = workingDir.replace('~', process.env.HOME || '');
+
+  // 새 pane 분할
+  if (command) {
+    await execAsync(
+      `tmux split-window -t "${sessionName}" -v -c "${expandedDir}" "${command}"`
+    );
+  } else {
+    await execAsync(
+      `tmux split-window -t "${sessionName}" -v -c "${expandedDir}"`
+    );
+  }
+
+  // 레이아웃 정리
+  await execAsync(`tmux select-layout -t "${sessionName}" tiled`);
+
+  // 새로 생성된 pane 인덱스 반환
+  return (await getPaneCount(sessionName)) - 1;
+}
+
+/**
+ * pane 종료
+ */
+export async function killPane(paneTarget: string): Promise<void> {
+  await execAsync(`tmux kill-pane -t "${paneTarget}"`);
+}
+
+/**
+ * 세션의 활성 윈도우 인덱스 조회
+ */
+export async function getActiveWindowIndex(sessionName: string): Promise<number> {
+  try {
+    const { stdout } = await execAsync(
+      `tmux list-windows -t "${sessionName}" -F "#{window_index}:#{window_active}" | grep ":1$" | cut -d: -f1`
+    );
+    return parseInt(stdout.trim(), 10) || 0;
+  } catch {
+    // 실패 시 첫 번째 윈도우 인덱스 시도
+    try {
+      const { stdout } = await execAsync(
+        `tmux list-windows -t "${sessionName}" -F "#{window_index}" | head -1`
+      );
+      return parseInt(stdout.trim(), 10) || 0;
+    } catch {
+      return 0;
+    }
+  }
+}

@@ -10,14 +10,48 @@ import {
   Message,
   EmbedBuilder,
 } from 'discord.js';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
 import type { SwarmEvent, AgentStatus, LinearIssueInfo } from './types.js';
 import * as tmux from './tmux.js';
 import * as linear from './linear.js';
 import * as github from './github.js';
 import * as dev from './dev.js';
+import * as memory from './memory.js';
+import * as scheduler from './scheduler.js';
 
 let client: Client | null = null;
 let reportChannelId: string = '';
+
+// 허용된 유저 ID (환경변수에서 로드)
+const ALLOWED_USER_IDS = process.env.DISCORD_ALLOWED_USERS?.split(',').map(id => id.trim()) || [];
+
+// 대화 내역 저장 경로
+const CHAT_HISTORY_FILE = '/tmp/claude-swarm-chat-history.json';
+
+// VEGA 시스템 프롬프트
+const VEGA_SYSTEM_PROMPT = `# VEGA (Vector Encoded General Agent)
+
+너는 VEGA, Discord를 통해 소통하는 AI 어시스턴트다.
+
+## 핵심 원칙
+- 명확하고 간결하게 답변
+- 코드 작업 시 변경 내용 보고
+- 불확실한 것은 확인 후 답변
+
+## 작업 보고서 (코드 변경 시에만)
+**수정한 파일:** 파일명과 변경 요약
+**실행한 명령:** 명령어와 결과
+`;
+
+// 대화 내역 타입
+interface ChatEntry {
+  timestamp: string;
+  user: string;
+  userId: string;
+  message: string;
+  response: string;
+}
 
 // 콜백 함수들 (service에서 설정)
 let onPauseAgent: ((name: string) => void) | null = null;
@@ -68,6 +102,15 @@ export async function initDiscord(token: string, channelId: string): Promise<voi
  */
 async function handleMessage(msg: Message): Promise<void> {
   if (msg.author.bot) return;
+
+  // 허용된 유저의 일반 메시지에 응답 (! 명령어 제외)
+  if (ALLOWED_USER_IDS.length > 0 &&
+      ALLOWED_USER_IDS.includes(msg.author.id) &&
+      !msg.content.startsWith('!')) {
+    await handleChat(msg);
+    return;
+  }
+
   if (!msg.content.startsWith('!')) return;
 
   const [command, ...args] = msg.content.slice(1).split(' ');
@@ -129,6 +172,11 @@ async function handleMessage(msg: Message): Promise<void> {
 
       case 'limits':
         await handleLimits(msg);
+        break;
+
+      case 'schedule':
+      case 'schedules':
+        await handleSchedule(msg, args);
         break;
 
       case 'help':
@@ -551,6 +599,116 @@ async function handleLimits(msg: Message): Promise<void> {
 }
 
 /**
+ * !schedule - 스케줄 관리
+ */
+async function handleSchedule(msg: Message, args: string[]): Promise<void> {
+  const subCommand = args[0];
+
+  // !schedule list 또는 !schedule (목록)
+  if (!subCommand || subCommand === 'list') {
+    const schedules = await scheduler.listSchedules();
+    const formatted = scheduler.formatScheduleList(schedules);
+
+    const embed = new EmbedBuilder()
+      .setTitle('📅 스케줄 목록')
+      .setDescription(formatted)
+      .setColor(0x00ae86)
+      .setTimestamp();
+
+    await msg.reply({ embeds: [embed] });
+    return;
+  }
+
+  // !schedule run <name> - 즉시 실행
+  if (subCommand === 'run') {
+    const name = args[1];
+    if (!name) {
+      await msg.reply('사용법: `!schedule run <name>`');
+      return;
+    }
+
+    const success = await scheduler.runNow(name);
+    if (success) {
+      await msg.reply(`▶️ **${name}** 스케줄 즉시 실행 시작`);
+    } else {
+      await msg.reply(`❌ 스케줄을 찾을 수 없습니다: \`${name}\``);
+    }
+    return;
+  }
+
+  // !schedule toggle <name> - 활성화/비활성화
+  if (subCommand === 'toggle') {
+    const name = args[1];
+    if (!name) {
+      await msg.reply('사용법: `!schedule toggle <name>`');
+      return;
+    }
+
+    const job = await scheduler.toggleSchedule(name);
+    if (job) {
+      const status = job.enabled ? '🟢 활성화' : '⏸️ 비활성화';
+      await msg.reply(`${status}: **${job.name}**`);
+    } else {
+      await msg.reply(`❌ 스케줄을 찾을 수 없습니다: \`${name}\``);
+    }
+    return;
+  }
+
+  // !schedule add <name> <project> <interval> "<prompt>"
+  if (subCommand === 'add') {
+    const name = args[1];
+    const projectPath = args[2];
+    const interval = args[3];
+    const promptMatch = msg.content.match(/!schedule add \S+ \S+ \S+ "(.+)"/s);
+    const prompt = promptMatch?.[1];
+
+    if (!name || !projectPath || !interval || !prompt) {
+      await msg.reply(
+        '**사용법:**\n`!schedule add <name> <project_path> <interval> "<prompt>"`\n\n' +
+        '**예시:**\n`!schedule add myproject-check ~/dev/myproject 30m "테스트 실행하고 결과 보고해줘"`\n\n' +
+        '**interval:** `30m`, `1h`, `2h`, `1d` 또는 cron 표현식'
+      );
+      return;
+    }
+
+    try {
+      const job = await scheduler.addSchedule(name, projectPath, prompt, interval, msg.author.username);
+      await msg.reply(`✅ 스케줄 추가됨: **${job.name}** (${job.schedule})`);
+    } catch (err) {
+      await msg.reply(`❌ 스케줄 추가 실패: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
+
+  // !schedule remove <name>
+  if (subCommand === 'remove' || subCommand === 'delete') {
+    const name = args[1];
+    if (!name) {
+      await msg.reply('사용법: `!schedule remove <name>`');
+      return;
+    }
+
+    const success = await scheduler.removeSchedule(name);
+    if (success) {
+      await msg.reply(`🗑️ 스케줄 삭제됨: **${name}**`);
+    } else {
+      await msg.reply(`❌ 스케줄을 찾을 수 없습니다: \`${name}\``);
+    }
+    return;
+  }
+
+  // 알 수 없는 서브 명령
+  await msg.reply(
+    '**스케줄 명령어:**\n' +
+    '`!schedule` - 스케줄 목록\n' +
+    '`!schedule run <name>` - 즉시 실행\n' +
+    '`!schedule toggle <name>` - 활성화/비활성화\n' +
+    '`!schedule add <name> <path> <interval> "<prompt>"` - 추가\n' +
+    '`!schedule remove <name>` - 삭제'
+  );
+}
+
+/**
  * !help - 도움말
  */
 async function handleHelp(msg: Message): Promise<void> {
@@ -576,6 +734,12 @@ async function handleHelp(msg: Message): Promise<void> {
 **Linear**
 \`!issues [session]\` - Linear 이슈 목록
 \`!limits\` - 에이전트 일일 제한 현황
+
+**📅 스케줄**
+\`!schedule\` - 스케줄 목록
+\`!schedule run <name>\` - 즉시 실행
+\`!schedule toggle <name>\` - 활성화/비활성화
+\`!schedule add <name> <path> <interval> "<prompt>"\` - 추가
 
 **GitHub**
 \`!ci\` - CI 실패 상태 확인
@@ -650,5 +814,233 @@ export async function stopDiscord(): Promise<void> {
   if (client) {
     await client.destroy();
     client = null;
+  }
+}
+
+// ============================================
+// VEGA 대화 기능
+// ============================================
+
+/**
+ * 일반 대화 처리
+ */
+async function handleChat(msg: Message): Promise<void> {
+  const content = msg.content.trim();
+  if (!content) return;
+
+  console.log(`[VEGA] Chat from ${msg.author.username}: ${content.slice(0, 50)}...`);
+
+  const channel = msg.channel as TextChannel;
+
+  // typing 표시 (8초마다 갱신)
+  let typingInterval: NodeJS.Timeout | null = null;
+  if ('sendTyping' in channel) {
+    channel.sendTyping();
+    typingInterval = setInterval(() => channel.sendTyping(), 8000);
+  }
+
+  try {
+    // 1. 최근 대화 히스토리 (맥락 유지용)
+    const recentConversations = await memory.getRecentConversations(msg.channel.id, 5);
+    const recentContext = formatRecentContext(recentConversations);
+
+    // 2. 시맨틱 검색 (관련 기억 확장)
+    const memories = await memory.searchMemory(content, undefined, 3);
+    const memoryContext = memory.formatMemoryContext(memories);
+
+    // 3. 프롬프트 구성 (최근 대화 + 시맨틱 기억 + 현재 질문)
+    let prompt = VEGA_SYSTEM_PROMPT;
+    if (recentContext) {
+      prompt += `\n\n## 최근 대화 (이 맥락을 유지할 것)\n${recentContext}`;
+    }
+    if (memoryContext) {
+      prompt += `\n\n${memoryContext}`;
+    }
+    prompt += `\n\n---\n\n**현재 질문:** ${content}`;
+
+    // Claude CLI 실행
+    const response = await runClaude(prompt);
+
+    // typing 중지
+    if (typingInterval) clearInterval(typingInterval);
+
+    // 응답 전송 (2000자 제한)
+    const chunks = splitMessage(response, 2000);
+    for (const chunk of chunks) {
+      await msg.reply(chunk);
+    }
+
+    // 대화 내역 저장
+    await saveChatHistory({
+      timestamp: new Date().toISOString(),
+      user: msg.author.username,
+      userId: msg.author.id,
+      message: content,
+      response: response,
+    });
+
+    // 메모리에 저장
+    await memory.saveConversation(msg.channel.id, msg.author.id, msg.author.username, content, response);
+    console.log(`[VEGA] Response sent (${response.length} chars)`);
+
+  } catch (err) {
+    if (typingInterval) clearInterval(typingInterval);
+    console.error('[VEGA] Error:', err);
+    await msg.reply('오류가 발생했습니다. 다시 시도해주세요.');
+  }
+}
+
+/**
+ * Claude CLI 실행 (spawn + stdin ignore 방식)
+ */
+async function runClaude(prompt: string): Promise<string> {
+  // 프롬프트를 임시 파일에 저장
+  const promptFile = '/tmp/vega-prompt.txt';
+  await fs.writeFile(promptFile, prompt);
+
+  return new Promise((resolve, reject) => {
+    // echo로 stdin에 빈 데이터 보내서 입력 대기 방지
+    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format json --permission-mode bypassPermissions`;
+
+    console.log('[Claude CLI] Starting...');
+    const proc = spawn(cmd, {
+      shell: true,
+      cwd: process.cwd(), // 현재 작업 디렉토리
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout?.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr?.on('data', (data) => { stderr += data.toString(); });
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        console.error('[Claude CLI] Error:', stderr.slice(0, 200));
+        reject(new Error(`Claude CLI failed with code ${code}`));
+        return;
+      }
+      resolve(parseClaudeJson(stdout));
+    });
+
+    proc.on('error', (err) => {
+      reject(new Error(`Claude CLI spawn error: ${err.message}`));
+    });
+
+    // 5분 타임아웃
+    setTimeout(() => {
+      proc.kill('SIGKILL');
+      reject(new Error('Claude CLI timeout (5min)'));
+    }, 5 * 60 * 1000);
+  });
+}
+
+/**
+ * Claude JSON 출력 파싱 (result만 사용)
+ */
+function parseClaudeJson(output: string): string {
+  try {
+    const match = output.match(/\[[\s\S]*\]/);
+    if (!match) return output.trim() || '(응답 없음)';
+
+    const arr = JSON.parse(match[0]);
+
+    // result 타입에서 최종 결과만 추출
+    for (const item of arr) {
+      if (item.type === 'result' && item.result) {
+        return item.result;
+      }
+    }
+
+    return '(응답 없음)';
+  } catch {
+    return output.trim() || '(응답 없음)';
+  }
+}
+
+/**
+ * 최근 대화를 컨텍스트로 포맷
+ */
+function formatRecentContext(conversations: memory.MemorySearchResult[]): string {
+  if (conversations.length === 0) return '';
+
+  // 시간순 정렬 (오래된 것부터)
+  const sorted = [...conversations].sort((a, b) => a.timestamp - b.timestamp);
+
+  return sorted
+    .map((c) => {
+      const time = new Date(c.timestamp).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      return `[${time}] ${c.userName}: ${c.content}\n→ VEGA: ${c.response.slice(0, 300)}${c.response.length > 300 ? '...' : ''}`;
+    })
+    .join('\n\n');
+}
+
+/**
+ * 메시지 분할
+ */
+function splitMessage(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+
+    let splitAt = remaining.lastIndexOf('\n', maxLen);
+    if (splitAt === -1 || splitAt < maxLen / 2) {
+      splitAt = remaining.lastIndexOf(' ', maxLen);
+    }
+    if (splitAt === -1 || splitAt < maxLen / 2) {
+      splitAt = maxLen;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+
+  return chunks;
+}
+
+/**
+ * 대화 내역 저장
+ */
+async function saveChatHistory(entry: ChatEntry): Promise<void> {
+  try {
+    let history: ChatEntry[] = [];
+    try {
+      const data = await fs.readFile(CHAT_HISTORY_FILE, 'utf-8');
+      history = JSON.parse(data);
+    } catch {
+      // 파일이 없으면 빈 배열
+    }
+
+    history.push(entry);
+
+    // 최근 100개만 유지
+    if (history.length > 100) {
+      history = history.slice(-100);
+    }
+
+    await fs.writeFile(CHAT_HISTORY_FILE, JSON.stringify(history, null, 2));
+  } catch (err) {
+    console.error('[VEGA] Failed to save chat history:', err);
+  }
+}
+
+/**
+ * 대화 내역 조회 (웹 API용)
+ */
+export async function getChatHistory(): Promise<ChatEntry[]> {
+  try {
+    const data = await fs.readFile(CHAT_HISTORY_FILE, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return [];
   }
 }
