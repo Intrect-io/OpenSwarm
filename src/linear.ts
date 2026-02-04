@@ -8,6 +8,38 @@ import type { LinearIssueInfo, LinearComment } from './types.js';
 let client: LinearClient | null = null;
 let teamId: string = '';
 
+// 일일 이슈 생성 제한
+const DAILY_ISSUE_LIMIT = 10;
+let dailyIssueCount = 0;
+let lastResetDate: string = '';
+
+/**
+ * 일일 카운터 리셋 (날짜 변경 시)
+ */
+function resetDailyCounterIfNeeded(): void {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  if (today !== lastResetDate) {
+    dailyIssueCount = 0;
+    lastResetDate = today;
+  }
+}
+
+/**
+ * 오늘 남은 이슈 생성 가능 횟수
+ */
+export function getRemainingDailyIssues(): number {
+  resetDailyCounterIfNeeded();
+  return Math.max(0, DAILY_ISSUE_LIMIT - dailyIssueCount);
+}
+
+/**
+ * 오늘 생성된 이슈 수
+ */
+export function getDailyIssueCount(): number {
+  resetDailyCounterIfNeeded();
+  return dailyIssueCount;
+}
+
 /**
  * Linear 클라이언트 초기화
  */
@@ -235,13 +267,23 @@ export async function logBlocked(
 }
 
 /**
- * 새 이슈 생성
+ * 새 이슈 생성 (일일 제한 적용)
  */
 export async function createIssue(
   title: string,
   description: string,
-  labels: string[] = []
-): Promise<LinearIssueInfo> {
+  labels: string[] = [],
+  options?: { bypassLimit?: boolean }
+): Promise<LinearIssueInfo | { error: string }> {
+  resetDailyCounterIfNeeded();
+
+  // 일일 제한 체크 (bypassLimit이 아닌 경우)
+  if (!options?.bypassLimit && dailyIssueCount >= DAILY_ISSUE_LIMIT) {
+    return {
+      error: `일일 이슈 생성 한도(${DAILY_ISSUE_LIMIT}개) 도달. 내일 다시 시도하세요.`,
+    };
+  }
+
   const linear = getClient();
 
   // 라벨 ID 조회
@@ -263,6 +305,9 @@ export async function createIssue(
     throw new Error('Failed to create issue');
   }
 
+  // 카운터 증가
+  dailyIssueCount++;
+
   return {
     id: issue.id,
     identifier: issue.identifier,
@@ -271,6 +316,93 @@ export async function createIssue(
     state: 'Backlog',
     priority: issue.priority,
     labels,
+    comments: [],
+  };
+}
+
+/**
+ * 에이전트가 작업 제안을 Backlog에 올리기
+ * - 일일 10개 제한 적용
+ * - 자동으로 'agent-proposal' 라벨 추가
+ * - 낮은 우선순위(4)로 생성
+ */
+export async function proposeWork(
+  sessionName: string,
+  title: string,
+  rationale: string,
+  suggestedApproach?: string
+): Promise<LinearIssueInfo | { error: string }> {
+  resetDailyCounterIfNeeded();
+
+  // 일일 제한 체크
+  if (dailyIssueCount >= DAILY_ISSUE_LIMIT) {
+    console.log(`[${sessionName}] 일일 이슈 생성 한도 도달 (${dailyIssueCount}/${DAILY_ISSUE_LIMIT})`);
+    return {
+      error: `일일 이슈 생성 한도(${DAILY_ISSUE_LIMIT}개) 도달. 제안을 내일로 미루세요.`,
+    };
+  }
+
+  const linear = getClient();
+
+  // Backlog 상태 ID 조회
+  const team = await linear.team(teamId);
+  const states = await team.states();
+  const backlogState = states.nodes.find((s) =>
+    s.name.toLowerCase() === 'backlog'
+  );
+
+  // 라벨 ID 조회 (agent-proposal + sessionName)
+  const teamLabels = await team.labels();
+  const proposalLabel = teamLabels.nodes.find((l) => l.name === 'agent-proposal');
+  const sessionLabel = teamLabels.nodes.find((l) => l.name === sessionName);
+
+  const labelIds: string[] = [];
+  if (proposalLabel) labelIds.push(proposalLabel.id);
+  if (sessionLabel) labelIds.push(sessionLabel.id);
+
+  // 설명 구성
+  const description = `## 🤖 에이전트 제안
+
+**제안자:** ${sessionName}
+**생성 시간:** ${new Date().toISOString()}
+
+---
+
+### 제안 이유
+${rationale}
+
+${suggestedApproach ? `### 제안 접근법\n${suggestedApproach}` : ''}
+
+---
+_이 이슈는 에이전트가 자동으로 생성했습니다. 검토 후 우선순위를 조정하거나 삭제해주세요._`;
+
+  const issuePayload = await linear.createIssue({
+    teamId,
+    title: `[제안] ${title}`,
+    description,
+    labelIds,
+    stateId: backlogState?.id,
+    priority: 4, // Low priority
+  });
+
+  const issue = await issuePayload.issue;
+  if (!issue) {
+    throw new Error('Failed to create proposal issue');
+  }
+
+  // 카운터 증가
+  dailyIssueCount++;
+
+  console.log(`[${sessionName}] 작업 제안 생성: ${issue.identifier} (오늘 ${dailyIssueCount}/${DAILY_ISSUE_LIMIT})`);
+
+  return {
+    id: issue.id,
+    identifier: issue.identifier,
+    title: issue.title,
+    description: issue.description ?? undefined,
+    state: 'Backlog',
+    priority: 4,
+    labels: ['agent-proposal', sessionName].filter(Boolean),
     comments: [],
   };
 }
