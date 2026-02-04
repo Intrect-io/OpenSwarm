@@ -126,6 +126,10 @@ async function handleMessage(msg: Message): Promise<void> {
         await handleCancel(msg, args[0]);
         break;
 
+      case 'limits':
+        await handleLimits(msg);
+        break;
+
       case 'help':
         await handleHelp(msg);
         break;
@@ -520,6 +524,32 @@ async function handleCancel(msg: Message, taskId: string): Promise<void> {
 }
 
 /**
+ * !limits - 에이전트 일일 제한 현황
+ */
+async function handleLimits(msg: Message): Promise<void> {
+  const remaining = linear.getRemainingDailyIssues();
+  const used = linear.getDailyIssueCount();
+  const total = 10;
+
+  const progressBar = '█'.repeat(used) + '░'.repeat(remaining);
+
+  const embed = new EmbedBuilder()
+    .setTitle('📊 에이전트 일일 제한')
+    .setColor(remaining > 3 ? 0x00ae86 : remaining > 0 ? 0xffaa00 : 0xff0000)
+    .addFields(
+      {
+        name: 'Linear 이슈 생성',
+        value: `${progressBar} ${used}/${total}\n남은 횟수: **${remaining}**개`,
+        inline: false,
+      }
+    )
+    .setFooter({ text: '매일 자정(UTC) 리셋' })
+    .setTimestamp();
+
+  await msg.reply({ embeds: [embed] });
+}
+
+/**
  * !help - 도움말
  */
 async function handleHelp(msg: Message): Promise<void> {
@@ -544,6 +574,7 @@ async function handleHelp(msg: Message): Promise<void> {
 
 **Linear**
 \`!issues [session]\` - Linear 이슈 목록
+\`!limits\` - 에이전트 일일 제한 현황
 
 **GitHub**
 \`!ci\` - CI 실패 상태 확인
