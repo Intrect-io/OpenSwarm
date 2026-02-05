@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 
 /**
  * 알려진 저장소 목록 (별칭 -> 경로)
@@ -14,6 +15,7 @@ const KNOWN_REPOS: Record<string, string> = {
   // Tools
   pykis: '~/dev/tools/pykis',
   pykiwoom: '~/dev/tools/pykiwoom',
+  'pykiwoom-rest': '~/dev/tools/pykiwoom-rest',
 
   // Projects - 필요에 따라 추가
   'claude-swarm': '~/dev/claude-swarm',
@@ -110,6 +112,7 @@ export function scanDevRepos(): string[] {
 
 /**
  * Dev 작업 실행
+ * @param bypassTimeWindow - true면 시간 제한 무시 (수동 요청 시 사용)
  */
 export async function runDevTask(
   repo: string,
@@ -117,7 +120,18 @@ export async function runDevTask(
   requestedBy: string,
   onProgress?: (chunk: string) => void,
   onComplete?: (output: string, exitCode: number | null) => void,
+  bypassTimeWindow = false,
 ): Promise<{ taskId: string; path: string } | { error: string }> {
+  // 시간 윈도우 체크 (수동 요청이 아닌 경우만)
+  if (!bypassTimeWindow) {
+    const timeCheck = checkWorkAllowed();
+    if (!timeCheck.allowed) {
+      return {
+        error: `작업 차단: ${timeCheck.reason}\n현재: ${timeCheck.currentTime}\n${timeCheck.nextAllowedTime ? `다음 허용 시간: ${timeCheck.nextAllowedTime}` : ''}`,
+      };
+    }
+  }
+
   const path = resolveRepoPath(repo);
 
   if (!path) {
@@ -308,4 +322,15 @@ function formatDuration(seconds: number): string {
   const hours = Math.floor(minutes / 60);
   const remainingMin = minutes % 60;
   return `${hours}시간 ${remainingMin}분`;
+}
+
+/**
+ * 현재 작업 가능 상태 조회
+ */
+export function getWorkStatus(): { canWork: boolean; summary: string } {
+  const timeCheck = checkWorkAllowed();
+  return {
+    canWork: timeCheck.allowed,
+    summary: getTimeWindowSummary(),
+  };
 }

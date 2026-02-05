@@ -97,6 +97,8 @@ export type SwarmConfig = {
   githubRepos?: string[];
   /** GitHub CI 체크 간격 (ms) */
   githubCheckInterval?: number;
+  /** 시간 윈도우 설정 (에이전트 자율 작업 제한) */
+  timeWindow?: TimeWindowConfig;
 };
 
 /**
@@ -107,4 +109,28 @@ export type ServiceState = {
   startedAt?: number;
   agents: Map<string, AgentStatus>;
   timers: Map<string, NodeJS.Timeout>;
+};
+
+/**
+ * 시간 범위
+ */
+export type TimeRange = {
+  start: string; // "HH:MM" (24시간 형식)
+  end: string;
+};
+
+/**
+ * 시간 윈도우 설정
+ */
+export type TimeWindowConfig = {
+  /** 시간 제한 활성화 여부 */
+  enabled: boolean;
+  /** 허용된 작업 시간대 */
+  allowedWindows: TimeRange[];
+  /** 차단된 시간대 (장중 등) */
+  blockedWindows: TimeRange[];
+  /** 제한 적용 요일 (0=일, 1=월, ..., 6=토) */
+  restrictedDays?: number[];
+  /** 타임존 */
+  timezone?: string;
 };

@@ -8,6 +8,7 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import * as tmux from './tmux.js';
+import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 
 // 스케줄 저장 경로
 const SCHEDULE_DIR = resolve(homedir(), '.claude-swarm');
@@ -138,6 +139,17 @@ async function getOrCreatePane(jobId: string, projectPath: string): Promise<stri
  * 스케줄 작업 실행
  */
 async function runScheduledJob(job: ScheduledJob): Promise<void> {
+  // 시간 윈도우 체크
+  const timeCheck = checkWorkAllowed();
+  if (!timeCheck.allowed) {
+    console.log(`[Scheduler] Job "${job.name}" 스킵: ${timeCheck.reason} (현재: ${timeCheck.currentTime})`);
+    // 다음 허용 시간까지 대기
+    if (timeCheck.nextAllowedTime) {
+      console.log(`[Scheduler] 다음 허용 시간: ${timeCheck.nextAllowedTime}`);
+    }
+    return;
+  }
+
   console.log(`[Scheduler] Running job: ${job.name}`);
 
   try {
@@ -150,8 +162,8 @@ async function runScheduledJob(job: ScheduledJob): Promise<void> {
 
     // Claude Code 실행 명령 전송 (bash 사용하여 glob 확장 방지)
     const expandedPath = job.projectPath.replace('~', homedir());
-    // bash -c로 실행하여 zsh glob 문제 회피
-    const command = `bash -c 'cd "${expandedPath}" && claude -p "$(cat ${promptFile})"'`;
+    // bash -c로 실행하여 zsh glob 문제 회피, --permission-mode bypassPermissions로 신뢰 프롬프트 회피
+    const command = `bash -c 'cd "${expandedPath}" && claude -p "$(cat ${promptFile})" --permission-mode bypassPermissions'`;
 
     await tmux.sendKeysToPane(paneTarget, command);
 
@@ -318,13 +330,31 @@ export async function listSchedules(): Promise<ScheduledJob[]> {
 }
 
 /**
- * 즉시 실행
+ * 즉시 실행 (시간 제한 무시 옵션)
  */
-export async function runNow(nameOrId: string): Promise<boolean> {
+export async function runNow(nameOrId: string, bypassTimeWindow = false): Promise<boolean> {
   const schedules = await loadSchedules();
   const job = schedules.find((s) => s.name === nameOrId || s.id === nameOrId);
 
   if (!job) return false;
+
+  if (bypassTimeWindow) {
+    // 시간 제한 무시하고 직접 실행
+    console.log(`[Scheduler] Running job: ${job.name} (시간 제한 우회)`);
+    const paneTarget = await getOrCreatePane(job.id, job.projectPath);
+    const promptFile = resolve(SCHEDULE_DIR, `prompt-${job.id}.txt`);
+    await fs.writeFile(promptFile, job.prompt);
+    const expandedPath = job.projectPath.replace('~', homedir());
+    const command = `bash -c 'cd "${expandedPath}" && claude -p "$(cat ${promptFile})" --permission-mode bypassPermissions'`;
+    await tmux.sendKeysToPane(paneTarget, command);
+
+    const updatedSchedules = await loadSchedules();
+    const updated = updatedSchedules.map((s) =>
+      s.id === job.id ? { ...s, lastRun: Date.now() } : s
+    );
+    await saveSchedules(updated);
+    return true;
+  }
 
   await runScheduledJob(job);
   return true;
@@ -382,11 +412,49 @@ export function formatScheduleList(schedules: ScheduledJob[]): string {
     return '등록된 스케줄이 없습니다.';
   }
 
-  return schedules
+  // 시간 윈도우 상태 포함
+  const timeStatus = getTimeWindowSummary();
+
+  const list = schedules
     .map((s, i) => {
       const status = s.enabled ? '🟢' : '⏸️';
       const lastRun = s.lastRun ? new Date(s.lastRun).toLocaleString('ko-KR') : '없음';
       return `${i + 1}. ${status} **${s.name}**\n   📁 ${s.projectPath}\n   ⏰ ${s.schedule}\n   🕐 마지막 실행: ${lastRun}`;
     })
     .join('\n\n');
+
+  return `${timeStatus}\n\n---\n\n${list}`;
+}
+
+// 메인 진입점 - 직접 실행 시 스케줄러 시작
+import { fileURLToPath } from 'url';
+import { argv } from 'process';
+
+const isMainModule = argv[1]?.includes('scheduler');
+
+if (isMainModule) {
+  console.log('[Scheduler] Starting Claude Swarm Scheduler...');
+
+  startAllSchedules()
+    .then(() => {
+      console.log('[Scheduler] All schedules loaded. Running...');
+      console.log('[Scheduler] Press Ctrl+C to stop.');
+    })
+    .catch((err) => {
+      console.error('[Scheduler] Failed to start:', err);
+      process.exit(1);
+    });
+
+  // 프로세스 종료 시 정리
+  process.on('SIGINT', () => {
+    console.log('\n[Scheduler] Shutting down...');
+    stopAllSchedules();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    console.log('\n[Scheduler] Terminated.');
+    stopAllSchedules();
+    process.exit(0);
+  });
 }

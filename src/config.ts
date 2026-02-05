@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import YAML from 'yaml';
-import type { SwarmConfig, AgentSession } from './types.js';
+import type { SwarmConfig, AgentSession, TimeWindowConfig } from './types.js';
+import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from './timeWindow.js';
 
 // ============================================
 // Constants
@@ -51,10 +52,24 @@ const GitHubConfigSchema = z.object({
   checkInterval: z.number().positive().default(DEFAULT_GITHUB_CHECK_INTERVAL),
 }).optional();
 
+const TimeRangeSchema = z.object({
+  start: z.string().regex(/^\d{2}:\d{2}$/, 'Format: HH:MM'),
+  end: z.string().regex(/^\d{2}:\d{2}$/, 'Format: HH:MM'),
+});
+
+const TimeWindowConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  allowedWindows: z.array(TimeRangeSchema).default([]),
+  blockedWindows: z.array(TimeRangeSchema).default([]),
+  restrictedDays: z.array(z.number().min(0).max(6)).optional(),
+  timezone: z.string().default('Asia/Seoul'),
+}).optional();
+
 const RawConfigSchema = z.object({
   discord: DiscordConfigSchema,
   linear: LinearConfigSchema,
   github: GitHubConfigSchema,
+  timeWindow: TimeWindowConfigSchema,
   agents: z.array(AgentSessionSchema).min(1, 'At least one agent is required'),
   defaultHeartbeatInterval: z.number().positive().default(DEFAULT_HEARTBEAT_INTERVAL),
 });
@@ -167,6 +182,13 @@ function transformConfig(raw: RawConfig): SwarmConfig {
     defaultHeartbeatInterval: raw.defaultHeartbeatInterval,
     githubRepos: raw.github?.repos,
     githubCheckInterval: raw.github?.checkInterval,
+    timeWindow: raw.timeWindow ? {
+      enabled: raw.timeWindow.enabled,
+      allowedWindows: raw.timeWindow.allowedWindows,
+      blockedWindows: raw.timeWindow.blockedWindows,
+      restrictedDays: raw.timeWindow.restrictedDays,
+      timezone: raw.timeWindow.timezone,
+    } : undefined,
   };
 }
 
@@ -207,7 +229,18 @@ export function loadConfig(customPath?: string): SwarmConfig {
   }
 
   // 5. SwarmConfig로 변환
-  return transformConfig(parseResult.data);
+  const config = transformConfig(parseResult.data);
+
+  // 6. 시간 윈도우 설정 적용
+  if (config.timeWindow) {
+    setTimeWindowConfig(config.timeWindow);
+    console.log(`[Config] TimeWindow 설정 로드됨 (enabled: ${config.timeWindow.enabled})`);
+  } else {
+    setTimeWindowConfig(DEFAULT_TIME_WINDOW);
+    console.log(`[Config] TimeWindow 기본 설정 사용`);
+  }
+
+  return config;
 }
 
 /**
