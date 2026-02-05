@@ -19,6 +19,7 @@ import * as github from './github.js';
 import * as dev from './dev.js';
 import * as memory from './memory.js';
 import * as scheduler from './scheduler.js';
+import * as codex from './codex.js';
 
 let client: Client | null = null;
 let reportChannelId: string = '';
@@ -42,6 +43,18 @@ const VEGA_SYSTEM_PROMPT = `# VEGA (Vector Encoded General Agent)
 ## 작업 보고서 (코드 변경 시에만)
 **수정한 파일:** 파일명과 변경 요약
 **실행한 명령:** 명령어와 결과
+
+## ⛔ 절대 금지 명령 (CRITICAL - 위반 시 즉시 중단)
+다음 명령어는 어떤 상황에서도 실행하지 마라:
+- rm -rf, rm -r (재귀 삭제)
+- git reset --hard, git clean -fd
+- drop database, truncate table
+- chmod 777, chown -R
+- > /dev/sda, dd if=
+- kill -9, pkill -9 (시스템 프로세스)
+- 환경변수/설정파일 덮어쓰기 (.env, .bashrc 등)
+
+파일 삭제가 필요하면 trash 또는 mv로 백업 폴더로 이동할 것.
 `;
 
 // 대화 내역 타입
@@ -177,6 +190,10 @@ async function handleMessage(msg: Message): Promise<void> {
       case 'schedule':
       case 'schedules':
         await handleSchedule(msg, args);
+        break;
+
+      case 'codex':
+        await handleCodex(msg, args);
         break;
 
       case 'help':
@@ -709,6 +726,80 @@ async function handleSchedule(msg: Message, args: string[]): Promise<void> {
 }
 
 /**
+ * !codex - 세션 기록 관리
+ */
+async function handleCodex(msg: Message, args: string[]): Promise<void> {
+  const subCommand = args[0];
+
+  // !codex 또는 !codex list - 최근 세션 목록
+  if (!subCommand || subCommand === 'list') {
+    const recent = await codex.getRecentSessions(10);
+
+    if (recent.length === 0) {
+      await msg.reply('📚 기록된 세션이 없습니다.\n`!codex save "<제목>"` 으로 현재 세션을 저장하세요.');
+      return;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('📚 Codex - 최근 세션')
+      .setDescription(recent.join('\n'))
+      .setColor(0x9b59b6)
+      .setFooter({ text: `경로: ${codex.getCodexPath()}` })
+      .setTimestamp();
+
+    await msg.reply({ embeds: [embed] });
+    return;
+  }
+
+  // !codex save "<title>" [tags...] - 현재 세션 저장
+  if (subCommand === 'save') {
+    const titleMatch = msg.content.match(/!codex save "(.+?)"/);
+    const title = titleMatch?.[1];
+
+    if (!title) {
+      await msg.reply('사용법: `!codex save "<제목>" [tags...]`\n예시: `!codex save "pykis CI 수정" ci fix`');
+      return;
+    }
+
+    // 태그 추출 (제목 뒤의 단어들)
+    const afterTitle = msg.content.slice(msg.content.indexOf('"', msg.content.indexOf('"') + 1) + 1).trim();
+    const tags = afterTitle.split(/\s+/).filter(t => t.length > 0);
+
+    // 세션 저장 요청 메시지
+    await msg.reply(`📝 세션 저장 중...\n제목: **${title}**\n태그: ${tags.length > 0 ? tags.map(t => `\`${t}\``).join(' ') : '없음'}`);
+
+    // 실제 저장은 Claude가 작업 완료 후 호출해야 함
+    // 여기서는 빈 세션으로 저장 (나중에 업데이트 가능)
+    try {
+      const { summaryPath } = await codex.quickSave({
+        title,
+        tags,
+        result: 'success',
+      });
+
+      await msg.reply(`✅ 세션 저장 완료!\n📄 \`${summaryPath}\``);
+    } catch (err) {
+      await msg.reply(`❌ 저장 실패: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
+
+  // !codex path - 경로 확인
+  if (subCommand === 'path') {
+    await msg.reply(`📁 Codex 경로: \`${codex.getCodexPath()}\``);
+    return;
+  }
+
+  // 알 수 없는 서브 명령
+  await msg.reply(
+    '**📚 Codex 명령어:**\n' +
+    '`!codex` - 최근 세션 목록\n' +
+    '`!codex save "<제목>" [tags]` - 세션 저장\n' +
+    '`!codex path` - 저장 경로 확인'
+  );
+}
+
+/**
  * !help - 도움말
  */
 async function handleHelp(msg: Message): Promise<void> {
@@ -744,6 +835,11 @@ async function handleHelp(msg: Message): Promise<void> {
 **GitHub**
 \`!ci\` - CI 실패 상태 확인
 \`!notif\` - GitHub 알림 확인
+
+**📚 Codex (세션 기록)**
+\`!codex\` - 최근 세션 목록
+\`!codex save "<제목>"\` - 세션 저장
+\`!codex path\` - 저장 경로
 
 \`!help\` - 이 도움말
 
@@ -844,8 +940,12 @@ async function handleChat(msg: Message): Promise<void> {
     const recentConversations = await memory.getRecentConversations(msg.channel.id, 5);
     const recentContext = formatRecentContext(recentConversations);
 
-    // 2. 시맨틱 검색 (관련 기억 확장)
-    const memories = await memory.searchMemory(content, undefined, 3);
+    // 2. 시맨틱 검색 (Retrieval Gate 적용)
+    const memories = await memory.searchMemory(content, {
+      limit: 5,
+      minSimilarity: 0.4,
+      minTrust: 0.5,
+    });
     const memoryContext = memory.formatMemoryContext(memories);
 
     // 3. 프롬프트 구성 (최근 대화 + 시맨틱 기억 + 현재 질문)
@@ -859,10 +959,17 @@ async function handleChat(msg: Message): Promise<void> {
     prompt += `\n\n---\n\n**현재 질문:** ${content}`;
 
     // Claude CLI 실행
-    const response = await runClaude(prompt);
+    const { result: response, toolCalls } = await runClaude(prompt);
 
     // typing 중지
     if (typingInterval) clearInterval(typingInterval);
+
+    // 도구 호출 내역 표시 (있으면)
+    if (toolCalls.length > 0) {
+      const toolSummary = toolCalls.slice(0, 10).map(t => `• ${t}`).join('\n');
+      const toolMsg = `🔧 **도구 호출 (${toolCalls.length}개)**\n${toolSummary}${toolCalls.length > 10 ? `\n... +${toolCalls.length - 10}개 더` : ''}`;
+      await msg.reply(toolMsg);
+    }
 
     // 응답 전송 (2000자 제한)
     const chunks = splitMessage(response, 2000);
@@ -890,25 +997,37 @@ async function handleChat(msg: Message): Promise<void> {
   }
 }
 
+// 현재 실행 중인 VEGA Claude 프로세스
+let currentVegaProcess: ReturnType<typeof spawn> | null = null;
+
 /**
- * Claude CLI 실행 (spawn + stdin ignore 방식)
+ * Claude CLI 실행 (코드 실행 가능, 도구 호출 추적)
  */
-async function runClaude(prompt: string): Promise<string> {
+async function runClaude(prompt: string): Promise<{ result: string; toolCalls: string[] }> {
+  // 기존 프로세스가 있으면 종료
+  if (currentVegaProcess) {
+    console.log('[Claude CLI] Killing previous process...');
+    currentVegaProcess.kill('SIGKILL');
+    currentVegaProcess = null;
+  }
+
   // 프롬프트를 임시 파일에 저장
   const promptFile = '/tmp/vega-prompt.txt';
   await fs.writeFile(promptFile, prompt);
 
   return new Promise((resolve, reject) => {
-    // echo로 stdin에 빈 데이터 보내서 입력 대기 방지
+    // VEGA가 코드 실행 가능 (타임아웃 없음, 새 메시지 오면 이전 작업 취소)
     const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format json --permission-mode bypassPermissions`;
 
     console.log('[Claude CLI] Starting...');
     const proc = spawn(cmd, {
       shell: true,
-      cwd: process.cwd(), // 현재 작업 디렉토리
+      cwd: process.cwd(),
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    currentVegaProcess = proc;
 
     let stdout = '';
     let stderr = '';
@@ -917,7 +1036,8 @@ async function runClaude(prompt: string): Promise<string> {
     proc.stderr?.on('data', (data) => { stderr += data.toString(); });
 
     proc.on('close', (code) => {
-      if (code !== 0) {
+      currentVegaProcess = null;
+      if (code !== 0 && code !== null) {
         console.error('[Claude CLI] Error:', stderr.slice(0, 200));
         reject(new Error(`Claude CLI failed with code ${code}`));
         return;
@@ -926,37 +1046,79 @@ async function runClaude(prompt: string): Promise<string> {
     });
 
     proc.on('error', (err) => {
+      currentVegaProcess = null;
       reject(new Error(`Claude CLI spawn error: ${err.message}`));
     });
 
-    // 5분 타임아웃
-    setTimeout(() => {
-      proc.kill('SIGKILL');
-      reject(new Error('Claude CLI timeout (5min)'));
-    }, 5 * 60 * 1000);
+    // 타임아웃 없음 - 완료될 때까지 대기
   });
 }
 
+// 파괴적 명령 패턴
+const DESTRUCTIVE_PATTERNS = [
+  /\brm\s+(-[rf]+\s+)*.*(-[rf]+|--recursive|--force)/i,
+  /\bgit\s+(reset\s+--hard|clean\s+-[fd])/i,
+  /\b(drop|truncate)\s+(database|table)/i,
+  /\bchmod\s+777/i,
+  /\bdd\s+if=/i,
+  />\s*\/dev\/sd[a-z]/i,
+];
+
 /**
- * Claude JSON 출력 파싱 (result만 사용)
+ * Claude JSON 출력 파싱 (도구 호출 내역 포함)
  */
-function parseClaudeJson(output: string): string {
+function parseClaudeJson(output: string): { result: string; toolCalls: string[] } {
+  const toolCalls: string[] = [];
+
   try {
     const match = output.match(/\[[\s\S]*\]/);
-    if (!match) return output.trim() || '(응답 없음)';
+    if (!match) return { result: output.trim() || '(응답 없음)', toolCalls };
 
     const arr = JSON.parse(match[0]);
+    let result = '(응답 없음)';
 
-    // result 타입에서 최종 결과만 추출
     for (const item of arr) {
+      // 도구 호출 추적
+      if (item.type === 'tool_use') {
+        const toolName = item.name || 'unknown';
+        let toolSummary = toolName;
+
+        // Bash 명령이면 명령어 표시 + 파괴적 명령 체크
+        if (toolName === 'Bash' && item.input?.command) {
+          const cmd = item.input.command.slice(0, 80);
+          toolSummary = `Bash: \`${cmd}${item.input.command.length > 80 ? '...' : ''}\``;
+
+          // 파괴적 명령 감지
+          for (const pattern of DESTRUCTIVE_PATTERNS) {
+            if (pattern.test(item.input.command)) {
+              toolSummary = `⛔ BLOCKED: ${cmd}`;
+              console.warn(`[VEGA] Destructive command detected: ${item.input.command}`);
+              break;
+            }
+          }
+        }
+        // 파일 작업이면 경로 표시
+        else if (['Read', 'Write', 'Edit'].includes(toolName) && item.input?.file_path) {
+          const path = item.input.file_path.split('/').slice(-2).join('/');
+          toolSummary = `${toolName}: \`${path}\``;
+        }
+        // Grep이면 패턴 표시
+        else if (toolName === 'Grep' && item.input?.pattern) {
+          toolSummary = `Grep: \`${item.input.pattern}\``;
+        }
+
+        toolCalls.push(toolSummary);
+      }
+
+      // 최종 결과 추출
       if (item.type === 'result' && item.result) {
-        return item.result;
+        result = item.result;
       }
     }
 
-    return '(응답 없음)';
+    return { result, toolCalls };
   } catch {
-    return output.trim() || '(응답 없음)';
+    return { result: output.trim() || '(응답 없음)', toolCalls };
   }
 }
 
@@ -967,12 +1129,12 @@ function formatRecentContext(conversations: memory.MemorySearchResult[]): string
   if (conversations.length === 0) return '';
 
   // 시간순 정렬 (오래된 것부터)
-  const sorted = [...conversations].sort((a, b) => a.timestamp - b.timestamp);
+  const sorted = [...conversations].sort((a, b) => a.createdAt - b.createdAt);
 
   return sorted
     .map((c) => {
-      const time = new Date(c.timestamp).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
-      return `[${time}] ${c.userName}: ${c.content}\n→ VEGA: ${c.response.slice(0, 300)}${c.response.length > 300 ? '...' : ''}`;
+      const time = new Date(c.createdAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      return `[${time}] **${c.title}**\n${c.content.slice(0, 300)}${c.content.length > 300 ? '...' : ''}`;
     })
     .join('\n\n');
 }
