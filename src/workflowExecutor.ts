@@ -389,7 +389,7 @@ export class WorkflowExecutor {
     const paneTarget = await this.getOrCreatePane(step.id);
 
     // Claude 실행 명령
-    const command = `bash -c 'cd "${expandedPath}" && claude -p "$(cat ${promptFile})" --permission-mode bypassPermissions 2>&1 | tee /tmp/claude-step-${step.id}.log'`;
+    const command = `bash -c 'cd "${expandedPath}" && claude -p "$(cat ${promptFile})" --dangerously-skip-permissions 2>&1 | tee /tmp/claude-step-${step.id}.log'`;
 
     await tmux.sendKeysToPane(paneTarget, command);
 

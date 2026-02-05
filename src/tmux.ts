@@ -126,7 +126,7 @@ export async function createSession(
   projectPath: string
 ): Promise<void> {
   await execAsync(
-    `tmux new-session -d -s "${sessionName}" -c "${projectPath}" "claude"`
+    `tmux new-session -d -s "${sessionName}" -c "${projectPath}" "claude --dangerously-skip-permissions"`
   );
 }
 
