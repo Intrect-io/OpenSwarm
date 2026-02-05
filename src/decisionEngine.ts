@@ -12,6 +12,7 @@ import {
   listWorkflows,
   createCIPipelineTemplate,
 } from './workflow.js';
+import { parseTask, saveParsedTask, loadParsedTask, formatParsedTaskSummary } from './taskParser.js';
 import { runWorkflowConfig, ExecutorResult } from './workflowExecutor.js';
 import { checkWorkAllowed } from './timeWindow.js';
 import { searchMemory, saveCognitiveMemory } from './memory.js';
@@ -362,7 +363,7 @@ export class DecisionEngine {
   }
 
   /**
-   * Task를 Workflow로 변환
+   * Task를 Workflow로 변환 (자동 파싱 포함)
    */
   private async taskToWorkflow(task: TaskItem): Promise<WorkflowConfig | null> {
     // 1. 명시적 workflow ID가 있으면 로드
@@ -378,12 +379,57 @@ export class DecisionEngine {
     );
     if (matching) return matching;
 
-    // 3. 기본 CI 파이프라인 생성
+    // 3. 이미 파싱된 결과가 있으면 사용
+    if (task.issueId) {
+      const existingParsed = await loadParsedTask(task.issueId);
+      if (existingParsed) {
+        console.log(`[DecisionEngine] Using cached parsed workflow for ${task.issueId}`);
+        return existingParsed.workflow;
+      }
+    }
+
+    // 4. 이슈 자동 파싱하여 워크플로우 생성
+    if (task.title && task.issueId) {
+      console.log(`[DecisionEngine] Auto-parsing task: ${task.title}`);
+      const parsed = parseTask({
+        id: task.issueId,
+        title: task.title,
+        description: task.description,
+        projectPath: task.projectPath,
+      });
+
+      // 파싱 결과 저장
+      await saveParsedTask(parsed);
+
+      // 복잡한 작업이면 경고 로그
+      if (parsed.analysis.requiresHumanReview) {
+        console.log(`[DecisionEngine] ⚠️ Complex task detected (${parsed.analysis.complexity})`);
+        console.log(`[DecisionEngine] Risks: ${parsed.analysis.risks.join(', ') || 'none'}`);
+      }
+
+      console.log(`[DecisionEngine] Generated ${parsed.subtasks.length} subtasks:`);
+      for (const st of parsed.subtasks) {
+        console.log(`  ${st.order}. ${st.title}`);
+      }
+
+      return parsed.workflow;
+    }
+
+    // 5. 폴백: 기본 CI 파이프라인
     if (task.projectPath) {
       return createCIPipelineTemplate(task.projectPath);
     }
 
     return null;
+  }
+
+  /**
+   * 파싱 결과 요약 가져오기 (Linear 코멘트용)
+   */
+  async getTaskParseSummary(issueId: string): Promise<string | null> {
+    const parsed = await loadParsedTask(issueId);
+    if (!parsed) return null;
+    return formatParsedTaskSummary(parsed);
   }
 
   /**
