@@ -3,7 +3,25 @@
 // ============================================
 
 import { LinearClient } from '@linear/sdk';
-import type { LinearIssueInfo, LinearComment } from './types.js';
+import type { LinearIssueInfo, LinearComment, LinearProjectInfo } from './types.js';
+
+/**
+ * 이슈에서 프로젝트 정보 추출
+ */
+async function getProjectInfo(issue: any): Promise<LinearProjectInfo | undefined> {
+  try {
+    const project = await issue.project;
+    if (!project) return undefined;
+    return {
+      id: project.id,
+      name: project.name,
+      icon: project.icon ?? undefined,
+      color: project.color ?? undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 let client: LinearClient | null = null;
 let teamId: string = '';
@@ -77,8 +95,11 @@ export async function getInProgressIssues(
   const result: LinearIssueInfo[] = [];
 
   for (const issue of issues.nodes) {
-    const comments = await issue.comments();
-    const labels = await issue.labels();
+    const [comments, labels, project] = await Promise.all([
+      issue.comments(),
+      issue.labels(),
+      getProjectInfo(issue),
+    ]);
 
     result.push({
       id: issue.id,
@@ -94,6 +115,7 @@ export async function getInProgressIssues(
         createdAt: c.createdAt.toISOString(),
         user: undefined, // TODO: resolve user name
       })),
+      project,
     });
   }
 
@@ -128,8 +150,11 @@ export async function getNextBacklogIssue(
   const issue = sorted[0];
   if (!issue) return null;
 
-  const comments = await issue.comments();
-  const labels = await issue.labels();
+  const [comments, labels, project] = await Promise.all([
+    issue.comments(),
+    issue.labels(),
+    getProjectInfo(issue),
+  ]);
 
   return {
     id: issue.id,
@@ -145,6 +170,7 @@ export async function getNextBacklogIssue(
       createdAt: c.createdAt.toISOString(),
       user: undefined,
     })),
+    project,
   };
 }
 
@@ -175,8 +201,11 @@ export async function getMyIssues(
   const result: LinearIssueInfo[] = [];
 
   for (const issue of issues.nodes) {
-    const comments = await issue.comments();
-    const labels = await issue.labels();
+    const [comments, labels, project] = await Promise.all([
+      issue.comments(),
+      issue.labels(),
+      getProjectInfo(issue),
+    ]);
 
     result.push({
       id: issue.id,
@@ -192,6 +221,7 @@ export async function getMyIssues(
         createdAt: c.createdAt.toISOString(),
         user: undefined,
       })),
+      project,
     });
   }
 

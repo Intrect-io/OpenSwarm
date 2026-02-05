@@ -270,11 +270,17 @@ export class AutonomousRunner {
    */
   private async executeTask(task: TaskItem, workflow: any): Promise<void> {
     // 시작 보고
+    const projectInfo = task.linearProject?.name
+      ? `📁 **${task.linearProject.name}**\n`
+      : '';
+    const issueRef = task.issueIdentifier || task.issueId || 'N/A';
+
     const startEmbed = new EmbedBuilder()
       .setTitle('🚀 작업 시작')
       .setColor(0x00AE86)
       .addFields(
-        { name: '작업', value: task.title, inline: false },
+        { name: '작업', value: `${projectInfo}${task.title}`, inline: false },
+        { name: 'Issue', value: issueRef, inline: true },
         { name: 'Priority', value: `P${task.priority}`, inline: true },
         { name: 'Steps', value: `${workflow.steps?.length || '?'}`, inline: true },
       )
@@ -305,12 +311,17 @@ export class AutonomousRunner {
   private async requestApproval(decision: DecisionResult): Promise<void> {
     if (!decision.task) return;
 
+    const projectInfo = decision.task.linearProject?.name
+      ? `📁 **${decision.task.linearProject.name}**\n`
+      : '';
+    const issueRef = decision.task.issueIdentifier || decision.task.issueId || 'N/A';
+
     const embed = new EmbedBuilder()
       .setTitle('⏳ 승인 대기')
       .setColor(0xFFA500)
-      .setDescription(`다음 작업을 실행할까요?\n\n**${decision.task.title}**`)
+      .setDescription(`다음 작업을 실행할까요?\n\n${projectInfo}**${decision.task.title}**`)
       .addFields(
-        { name: 'Issue', value: decision.task.issueId || 'N/A', inline: true },
+        { name: 'Issue', value: issueRef, inline: true },
         { name: 'Priority', value: `P${decision.task.priority}`, inline: true },
         { name: '사유', value: decision.reason, inline: false },
       )
@@ -338,12 +349,15 @@ export class AutonomousRunner {
     const completedCount = Object.values(result.execution.stepResults)
       .filter(r => r.status === 'completed').length;
 
+    const projectPrefix = task.linearProject?.name ? `[${task.linearProject.name}] ` : '';
+    const taskDisplay = `${projectPrefix}${task.title}`;
+
     if (result.success) {
       const embed = new EmbedBuilder()
         .setTitle('✅ 작업 완료')
         .setColor(0x00FF00)
         .addFields(
-          { name: '작업', value: task.title, inline: false },
+          { name: '작업', value: taskDisplay, inline: false },
           { name: '소요 시간', value: `${duration}s`, inline: true },
           { name: '완료 Step', value: `${completedCount}/${stepCount}`, inline: true },
         )
@@ -362,7 +376,7 @@ export class AutonomousRunner {
         .setTitle('❌ 작업 실패')
         .setColor(0xFF0000)
         .addFields(
-          { name: '작업', value: task.title, inline: false },
+          { name: '작업', value: taskDisplay, inline: false },
           { name: '실패 Step', value: result.failedStep || 'Unknown', inline: true },
           { name: 'Rollback', value: result.rollbackPerformed ? '✅' : '❌', inline: true },
         )

@@ -40,6 +40,16 @@ export type AgentStatus = {
 };
 
 /**
+ * Linear 프로젝트 정보
+ */
+export type LinearProjectInfo = {
+  id: string;
+  name: string;
+  icon?: string;
+  color?: string;
+};
+
+/**
  * Linear 이슈 간략 정보
  */
 export type LinearIssueInfo = {
@@ -51,6 +61,8 @@ export type LinearIssueInfo = {
   priority: number;
   labels: string[];
   comments: LinearComment[];
+  /** Linear 프로젝트 정보 */
+  project?: LinearProjectInfo;
 };
 
 /**

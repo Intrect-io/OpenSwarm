@@ -27,6 +27,14 @@ import { searchMemory, saveCognitiveMemory } from './memory.js';
 export type TaskSource = 'linear' | 'local' | 'discovered';
 
 /**
+ * Linear 프로젝트 정보 (간략)
+ */
+export interface LinearProject {
+  id: string;
+  name: string;
+}
+
+/**
  * 작업 아이템
  */
 export interface TaskItem {
@@ -35,8 +43,10 @@ export interface TaskItem {
   title: string;
   description?: string;
   priority: number;        // 1=Urgent, 2=High, 3=Normal, 4=Low
-  projectPath?: string;
+  projectPath?: string;    // 로컬 파일시스템 경로
+  linearProject?: LinearProject;  // Linear 프로젝트 정보
   issueId?: string;        // Linear issue ID
+  issueIdentifier?: string; // Linear issue identifier (예: LIN-123)
   workflowId?: string;     // 매핑된 워크플로우
   createdAt: number;
   dueDate?: number;
@@ -528,7 +538,7 @@ export function linearIssueToTask(issue: {
   description?: string;
   priority: number;
   dueDate?: string;
-  project?: { id: string };
+  project?: { id: string; name: string };
 }): TaskItem {
   return {
     id: issue.id,
@@ -537,6 +547,11 @@ export function linearIssueToTask(issue: {
     description: issue.description,
     priority: issue.priority || 3,
     issueId: issue.id,
+    issueIdentifier: issue.identifier,
+    linearProject: issue.project ? {
+      id: issue.project.id,
+      name: issue.project.name,
+    } : undefined,
     createdAt: Date.now(),
     dueDate: issue.dueDate ? new Date(issue.dueDate).getTime() : undefined,
   };
