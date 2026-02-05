@@ -149,6 +149,61 @@ export async function getNextBacklogIssue(
 }
 
 /**
+ * 내게 할당된 모든 작업 가능한 이슈 가져오기
+ * (Backlog, Todo, In Progress 상태)
+ */
+export async function getMyIssues(
+  agentLabel?: string
+): Promise<LinearIssueInfo[]> {
+  const linear = getClient();
+
+  const filter: any = {
+    team: { id: { eq: teamId } },
+    state: { name: { in: ['Backlog', 'Todo', 'In Progress', 'Started'] } },
+  };
+
+  // agentLabel이 있으면 라벨 필터 추가
+  if (agentLabel) {
+    filter.labels = { name: { eq: agentLabel } };
+  }
+
+  const issues = await linear.issues({
+    filter,
+    first: 50,
+  });
+
+  const result: LinearIssueInfo[] = [];
+
+  for (const issue of issues.nodes) {
+    const comments = await issue.comments();
+    const labels = await issue.labels();
+
+    result.push({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description ?? undefined,
+      state: (await issue.state)?.name ?? 'Unknown',
+      priority: issue.priority,
+      labels: labels.nodes.map((l) => l.name),
+      comments: comments.nodes.map((c) => ({
+        id: c.id,
+        body: c.body,
+        createdAt: c.createdAt.toISOString(),
+        user: undefined,
+      })),
+    });
+  }
+
+  // priority 기준 정렬
+  return result.sort((a, b) => {
+    const pa = a.priority === 0 ? 999 : a.priority;
+    const pb = b.priority === 0 ? 999 : b.priority;
+    return pa - pb;
+  });
+}
+
+/**
  * 이슈 상태 변경
  */
 export async function updateIssueState(

@@ -20,6 +20,8 @@ import * as dev from './dev.js';
 import * as memory from './memory.js';
 import * as scheduler from './scheduler.js';
 import * as codex from './codex.js';
+import * as autonomous from './autonomousRunner.js';
+import { linearIssueToTask, TaskItem } from './decisionEngine.js';
 
 let client: Client | null = null;
 let reportChannelId: string = '';
@@ -217,6 +219,18 @@ async function handleMessage(msg: Message): Promise<void> {
 
       case 'codex':
         await handleCodex(msg, args);
+        break;
+
+      case 'auto':
+        await handleAuto(msg, args);
+        break;
+
+      case 'approve':
+        await handleApprove(msg);
+        break;
+
+      case 'reject':
+        await handleReject(msg);
         break;
 
       case 'help':
@@ -822,6 +836,175 @@ async function handleCodex(msg: Message, args: string[]): Promise<void> {
   );
 }
 
+// ============================================
+// Autonomous Runner Commands
+// ============================================
+
+/**
+ * !auto - 자율 실행 모드 관리
+ */
+async function handleAuto(msg: Message, args: string[]): Promise<void> {
+  const subCommand = args[0];
+
+  // !auto status 또는 !auto - 상태 확인
+  if (!subCommand || subCommand === 'status') {
+    try {
+      const runner = autonomous.getRunner();
+      const stats = runner.getStats();
+
+      const embed = new EmbedBuilder()
+        .setTitle('🤖 자율 실행 상태')
+        .setColor(stats.isRunning ? 0x00AE86 : 0x95A5A6)
+        .addFields(
+          { name: '상태', value: stats.isRunning ? '✅ 실행 중' : '⏹️ 중지', inline: true },
+          { name: '완료/실패', value: `${stats.engineStats.totalCompleted}/${stats.engineStats.totalFailed}`, inline: true },
+          { name: '승인 대기', value: stats.pendingApproval ? '⏳ 있음' : '없음', inline: true },
+        )
+        .setTimestamp();
+
+      if (stats.lastHeartbeat > 0) {
+        embed.addFields({
+          name: '마지막 Heartbeat',
+          value: new Date(stats.lastHeartbeat).toLocaleString('ko-KR'),
+          inline: false,
+        });
+      }
+
+      await msg.reply({ embeds: [embed] });
+    } catch {
+      await msg.reply('🤖 자율 실행이 초기화되지 않았습니다.\n`!auto start` 로 시작하세요.');
+    }
+    return;
+  }
+
+  // !auto start [schedule] - 시작
+  if (subCommand === 'start') {
+    const schedule = args[1] || '0 */2 * * *'; // 기본: 2시간마다
+
+    await msg.reply(`🚀 자율 실행 모드 시작 중...\nSchedule: \`${schedule}\``);
+
+    try {
+      // Discord reporter 등록
+      autonomous.setDiscordReporter(async (content) => {
+        const channel = msg.channel as TextChannel;
+        if (typeof content === 'string') {
+          await channel.send(content);
+        } else {
+          await channel.send(content);
+        }
+      });
+
+      // Linear fetcher 등록
+      autonomous.setLinearFetcher(async (): Promise<TaskItem[]> => {
+        try {
+          const issues = await linear.getMyIssues();
+          return issues.map((issue: any) => linearIssueToTask({
+            id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+            description: issue.description,
+            priority: issue.priority || 3,
+            dueDate: issue.dueDate,
+            project: issue.project,
+          }));
+        } catch (err) {
+          console.error('Linear fetch error:', err);
+          return [];
+        }
+      });
+
+      // Runner 시작
+      await autonomous.startAutonomous({
+        linearTeamId: process.env.LINEAR_TEAM_ID || '',
+        allowedProjects: ['~/dev'],
+        heartbeatSchedule: schedule,
+        autoExecute: false, // 기본은 승인 필요
+        maxConsecutiveTasks: 3,
+        cooldownSeconds: 300,
+        dryRun: false,
+      });
+
+      await msg.reply('✅ 자율 실행 모드가 시작되었습니다.');
+    } catch (err) {
+      await msg.reply(`❌ 시작 실패: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
+
+  // !auto stop - 중지
+  if (subCommand === 'stop') {
+    autonomous.stopAutonomous();
+    await msg.reply('⏹️ 자율 실행 모드가 중지되었습니다.');
+    return;
+  }
+
+  // !auto run - 즉시 heartbeat 실행
+  if (subCommand === 'run') {
+    try {
+      const runner = autonomous.getRunner();
+      await msg.reply('🔄 Heartbeat 실행 중...');
+      await runner.runNow();
+    } catch {
+      await msg.reply('❌ Runner가 시작되지 않았습니다. `!auto start` 먼저 실행하세요.');
+    }
+    return;
+  }
+
+  // !auto approve on/off - 자동 승인 토글
+  if (subCommand === 'approve' && (args[1] === 'on' || args[1] === 'off')) {
+    const autoApprove = args[1] === 'on';
+    await msg.reply(`${autoApprove ? '⚠️ 자동 실행' : '✅ 수동 승인'} 모드로 변경하려면 재시작이 필요합니다.`);
+    return;
+  }
+
+  // 도움말
+  await msg.reply(
+    '**🤖 자율 실행 명령어:**\n' +
+    '`!auto` - 상태 확인\n' +
+    '`!auto start [cron]` - 시작 (기본: 2시간마다)\n' +
+    '`!auto stop` - 중지\n' +
+    '`!auto run` - 즉시 실행\n' +
+    '`!approve` - 대기 중인 작업 승인\n' +
+    '`!reject` - 대기 중인 작업 거부'
+  );
+}
+
+/**
+ * !approve - 대기 중인 작업 승인
+ */
+async function handleApprove(msg: Message): Promise<void> {
+  try {
+    const runner = autonomous.getRunner();
+    const approved = await runner.approve();
+
+    if (approved) {
+      await msg.reply('✅ 작업이 승인되어 실행됩니다.');
+    } else {
+      await msg.reply('⏳ 승인 대기 중인 작업이 없습니다.');
+    }
+  } catch {
+    await msg.reply('❌ Runner가 시작되지 않았습니다.');
+  }
+}
+
+/**
+ * !reject - 대기 중인 작업 거부
+ */
+async function handleReject(msg: Message): Promise<void> {
+  try {
+    const runner = autonomous.getRunner();
+    const rejected = runner.reject();
+
+    if (rejected) {
+      await msg.reply('❌ 작업이 거부되었습니다.');
+    } else {
+      await msg.reply('⏳ 승인 대기 중인 작업이 없습니다.');
+    }
+  } catch {
+    await msg.reply('❌ Runner가 시작되지 않았습니다.');
+  }
+}
+
 /**
  * !help - 도움말
  */
@@ -863,6 +1046,14 @@ async function handleHelp(msg: Message): Promise<void> {
 \`!codex\` - 최근 세션 목록
 \`!codex save "<제목>"\` - 세션 저장
 \`!codex path\` - 저장 경로
+
+**🤖 자율 실행**
+\`!auto\` - 자율 실행 상태
+\`!auto start [cron]\` - 시작 (기본: 2시간마다)
+\`!auto stop\` - 중지
+\`!auto run\` - 즉시 heartbeat
+\`!approve\` - 작업 승인
+\`!reject\` - 작업 거부
 
 \`!help\` - 이 도움말
 
