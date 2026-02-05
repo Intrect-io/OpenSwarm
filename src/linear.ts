@@ -175,8 +175,8 @@ export async function getNextBacklogIssue(
 }
 
 /**
- * 내게 할당된 모든 작업 가능한 이슈 가져오기
- * (Backlog, Todo, In Progress 상태)
+ * 내게 할당된 작업 중인 이슈 가져오기
+ * (Todo, In Progress, Review 상태 - Backlog 제외)
  */
 export async function getMyIssues(
   agentLabel?: string
@@ -185,7 +185,7 @@ export async function getMyIssues(
 
   const filter: any = {
     team: { id: { eq: teamId } },
-    state: { name: { in: ['Backlog', 'Todo', 'In Progress', 'Started'] } },
+    state: { name: { in: ['Todo', 'In Progress', 'Started', 'In Review'] } },
   };
 
   // agentLabel이 있으면 라벨 필터 추가
