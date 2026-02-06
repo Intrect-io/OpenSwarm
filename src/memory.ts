@@ -36,6 +36,40 @@ const TTL_REPOMAP = 30 * 24 * 60 * 60 * 1000; // 30일
 // 영구 보관 sentinel (year 9999) - null 대신 사용 (LanceDB 스키마 추론 호환)
 const PERMANENT_EXPIRY = new Date('9999-12-31T23:59:59Z').getTime();
 
+/**
+ * LanceDB createTable 전 레코드 정규화
+ * - 타입 추론 에러 방지 (특히 expiresAt)
+ * - BigInt → Number 변환, undefined → 기본값
+ */
+function normalizeRecords(records: any[]): CognitiveMemoryRecord[] {
+  const now = Date.now();
+  return records.map(r => ({
+    id: String(r.id || `unknown-${now}-${Math.random().toString(36).slice(2, 6)}`),
+    type: String(r.type || 'journal') as MemoryType,
+    content: String(r.content || ''),
+    vector: Array.isArray(r.vector) ? r.vector.map(Number) : new Array(EMBEDDING_DIM).fill(0),
+
+    importance: Number(r.importance) || 0.5,
+    confidence: Number(r.confidence) || 0.7,
+    createdAt: Number(r.createdAt) || now,
+    lastUpdated: Number(r.lastUpdated) || now,
+    lastAccessed: Number(r.lastAccessed) || now,
+    revisionCount: Number(r.revisionCount) || 0,
+    decay: Number(r.decay) || 0,
+
+    stability: (r.stability as StabilityLevel) || 'low',
+    contradicts: typeof r.contradicts === 'string' ? r.contradicts : JSON.stringify(r.contradicts || []),
+    supports: typeof r.supports === 'string' ? r.supports : JSON.stringify(r.supports || []),
+    derivedFrom: String(r.derivedFrom || 'unknown'),
+
+    repo: String(r.repo || 'unknown'),
+    title: String(r.title || ''),
+    metadata: typeof r.metadata === 'string' ? r.metadata : JSON.stringify(r.metadata || {}),
+    trust: Number(r.trust) || 0.5,
+    expiresAt: Number(r.expiresAt) || PERMANENT_EXPIRY,
+  }));
+}
+
 // ==============================================
 // PRD Memory Types (Cognitive Memory)
 // ==============================================
@@ -640,6 +674,7 @@ export async function logWork(
     metadata: { filesChanged, issueRef, timestamp: new Date().toISOString() },
     ttlDays: 14,
     skipDistillation: true,
+    derivedFrom: issueRef,  // channelId 저장용
   });
   return id!;
 }
@@ -864,10 +899,10 @@ export async function reviseMemory(
     const allRecords = results.filter((r: any) => r.id !== memoryId);
     allRecords.push(revised);
 
-    // Recreate table with updated data
+    // Recreate table with updated data (정규화 적용)
     const tableName = 'cognitive_memory';
     await db.dropTable(tableName);
-    table = await db.createTable(tableName, allRecords);
+    table = await db.createTable(tableName, normalizeRecords(allRecords));
 
     console.log(`[Memory] Revised ${memoryId} (rev: ${newRevisionCount}, stability: ${revised.stability})`);
     return true;
@@ -956,10 +991,10 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
     memory1.importance = Math.max(0.2, (memory1.importance ?? 0.5) - 0.15);
     memory2.importance = Math.max(0.2, (memory2.importance ?? 0.5) - 0.15);
 
-    // Recreate table
+    // Recreate table (정규화 적용)
     const tableName = 'cognitive_memory';
     await db.dropTable(tableName);
-    table = await db.createTable(tableName, results);
+    table = await db.createTable(tableName, normalizeRecords(results));
 
     console.log(`[Memory] Marked contradiction between ${memoryId1} and ${memoryId2}`);
     return true;
@@ -1006,10 +1041,10 @@ export async function reconcileContradiction(
       },
     });
 
-    // Recreate table
+    // Recreate table (정규화 적용)
     const tableName = 'cognitive_memory';
     await db.dropTable(tableName);
-    table = await db.createTable(tableName, results);
+    table = await db.createTable(tableName, normalizeRecords(results));
 
     console.log(`[Memory] Reconciled: kept ${keepId}, archived ${archiveId}`);
     return true;
@@ -1214,10 +1249,10 @@ export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
     }
 
     if (decayed > 0) {
-      // Recreate table
+      // Recreate table (정규화 적용)
       const tableName = 'cognitive_memory';
       await db.dropTable(tableName);
-      table = await db.createTable(tableName, results);
+      table = await db.createTable(tableName, normalizeRecords(results));
       console.log(`[Memory] Decay applied: ${decayed} memories decayed, ${archived} archived`);
     }
 
@@ -1295,10 +1330,10 @@ export async function consolidateMemories(): Promise<{
       // Remove merged memories
       const remainingRecords = results.filter((r: any) => !merged.includes(r.id));
 
-      // Recreate table
+      // Recreate table (정규화 적용)
       const tableName = 'cognitive_memory';
       await db.dropTable(tableName);
-      table = await db.createTable(tableName, remainingRecords);
+      table = await db.createTable(tableName, normalizeRecords(remainingRecords));
 
       console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
     }
@@ -1464,17 +1499,66 @@ export async function saveConversation(
 }
 
 /**
- * 최근 대화 가져오기 (레거시 호환)
+ * 최근 대화 가져오기 (createdAt 기준 정렬)
+ * - 시맨틱 검색이 아닌 시간순 조회
+ * - channelId는 derivedFrom 필드에 저장됨 (legacy: metadata.issueRef)
  */
 export async function getRecentConversations(
   channelId: string,
   limit: number = 10,
 ): Promise<MemorySearchResult[]> {
-  return searchMemory(channelId, {
-    types: ['journal'],
-    repo: 'discord',
-    limit,
-    minSimilarity: 0,
-    minTrust: 0,
-  });
+  try {
+    await initDatabase();
+    if (!table) return [];
+
+    // journal 타입 + discord repo 필터링 후 createdAt 내림차순
+    const results = await table
+      .search(new Array(EMBEDDING_DIM).fill(0))  // dummy vector for full scan
+      .limit(1000)  // 충분히 큰 수
+      .toArray();
+
+    // 필터: journal + discord (channelId는 느슨하게 - 기존 데이터 호환)
+    const filtered = results
+      .filter((r: any) => {
+        if (r.type !== 'journal' || r.repo !== 'discord') return false;
+
+        // channelId 매칭: derivedFrom 또는 metadata.issueRef
+        if (!channelId) return true;  // 전체
+        if (r.derivedFrom === channelId) return true;
+        if (r.derivedFrom === 'unknown') return true;  // legacy 데이터 포함
+
+        // metadata.issueRef fallback
+        try {
+          const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
+          if (meta?.issueRef === channelId) return true;
+        } catch { /* ignore */ }
+
+        return false;
+      })
+      .sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0))  // 최신순
+      .slice(0, limit);
+
+    // MemorySearchResult 형태로 변환
+    return filtered.map((r: any) => ({
+      id: r.id,
+      type: r.type,
+      repo: r.repo,
+      title: r.title,
+      content: r.content,
+      metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata || '{}') : r.metadata,
+      trust: r.trust,
+      createdAt: r.createdAt,
+      score: 1.0,  // 시간순 조회라 score 무의미
+      freshness: calculateFreshness(r.createdAt),
+      importance: r.importance,
+      confidence: r.confidence,
+      stability: r.stability,
+      revisionCount: r.revisionCount,
+      decay: r.decay,
+      similarityScore: 1.0,
+    }));
+  } catch (error) {
+    console.error('[Memory] getRecentConversations error:', error);
+    return [];
+  }
 }
