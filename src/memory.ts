@@ -18,16 +18,20 @@
  * - decision, repomap, journal, fact
  */
 import { connect, Table, Connection } from '@lancedb/lancedb';
+import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
 import { resolve } from 'path';
 import { homedir } from 'os';
 
 // 메모리 저장 경로
 const MEMORY_DIR = resolve(homedir(), '.claude-swarm/memory');
 
-// Ollama 임베딩 설정
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const EMBEDDING_MODEL = 'nomic-embed-text';
+// Xenova 임베딩 설정 (로컬 실행, 외부 의존 없음)
+const EMBEDDING_MODEL = 'Xenova/multilingual-e5-base';  // 768차원, 다국어 지원
 const EMBEDDING_DIM = 768;
+
+// Xenova 파이프라인 싱글톤
+let embeddingPipeline: FeatureExtractionPipeline | null = null;
+let pipelineInitializing = false;
 
 // TTL 설정 (밀리초)
 const TTL_JOURNAL = 14 * 24 * 60 * 60 * 1000; // 14일
@@ -177,29 +181,39 @@ let db: Connection | null = null;
 let table: Table | null = null;
 
 /**
- * Ollama로 임베딩 생성
+ * Xenova/transformers로 임베딩 생성 (로컬, 외부 의존 없음)
  */
 async function getEmbedding(text: string): Promise<number[]> {
   try {
-    const response = await fetch(`${OLLAMA_URL}/api/embed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input: text.slice(0, 8000), // 토큰 제한
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Ollama API error: ${response.status}`);
+    // 파이프라인 초기화 (첫 호출 시 모델 다운로드, 이후 캐시)
+    if (!embeddingPipeline && !pipelineInitializing) {
+      pipelineInitializing = true;
+      console.log('[Memory] Loading embedding model (first time may take a while)...');
+      embeddingPipeline = await pipeline('feature-extraction', EMBEDDING_MODEL, {
+        quantized: true,  // 더 빠른 로딩, 약간의 품질 손실
+      });
+      console.log('[Memory] Embedding model loaded:', EMBEDDING_MODEL);
+      pipelineInitializing = false;
     }
 
-    const data = await response.json();
+    // 초기화 중이면 대기
+    while (pipelineInitializing && !embeddingPipeline) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
 
-    if (data.embeddings?.[0]) return data.embeddings[0];
-    if (data.embedding) return data.embedding;
+    if (!embeddingPipeline) {
+      throw new Error('Embedding pipeline not initialized');
+    }
 
-    throw new Error('Invalid embedding response');
+    // E5 모델은 "query: " 또는 "passage: " 접두사 권장
+    const input = `query: ${text.slice(0, 512)}`;  // 토큰 제한
+    const result = await embeddingPipeline(input, {
+      pooling: 'mean',
+      normalize: true,
+    });
+
+    // Float32Array → number[]
+    return Array.from(result.data as Float32Array);
   } catch (error) {
     console.error('[Memory] Embedding error:', error);
     return new Array(EMBEDDING_DIM).fill(0);
