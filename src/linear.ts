@@ -3,7 +3,7 @@
 // ============================================
 
 import { LinearClient } from '@linear/sdk';
-import type { LinearIssueInfo, LinearComment, LinearProjectInfo } from './types.js';
+import type { LinearIssueInfo, LinearProjectInfo } from './types.js';
 
 /**
  * 이슈에서 프로젝트 정보 추출
@@ -234,29 +234,94 @@ export async function getMyIssues(
 }
 
 /**
+ * 특정 이슈 조회 (ID 또는 identifier로)
+ */
+export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo | null> {
+  const linear = getClient();
+
+  try {
+    // identifier (예: LIN-123) 형식인지 확인
+    const isIdentifier = /^[A-Z]+-\d+$/.test(issueIdOrIdentifier);
+
+    let issue;
+    if (isIdentifier) {
+      // identifier로 검색 - number 필드 사용
+      const numPart = issueIdOrIdentifier.split('-')[1];
+      const issueNumber = parseInt(numPart, 10);
+
+      const issues = await linear.issues({
+        filter: {
+          team: { id: { eq: teamId } },
+          number: { eq: issueNumber },
+        },
+        first: 1,
+      });
+      issue = issues.nodes[0];
+    } else {
+      // ID로 직접 조회
+      issue = await linear.issue(issueIdOrIdentifier);
+    }
+
+    if (!issue) return null;
+
+    const [comments, labels, project] = await Promise.all([
+      issue.comments(),
+      issue.labels(),
+      getProjectInfo(issue),
+    ]);
+
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description ?? undefined,
+      state: (await issue.state)?.name ?? 'Unknown',
+      priority: issue.priority,
+      labels: labels.nodes.map((l) => l.name),
+      comments: comments.nodes.map((c) => ({
+        id: c.id,
+        body: c.body,
+        createdAt: c.createdAt.toISOString(),
+        user: undefined,
+      })),
+      project,
+    };
+  } catch (error) {
+    console.error(`[Linear] getIssue error for ${issueIdOrIdentifier}:`, error);
+    return null;
+  }
+}
+
+/**
  * 이슈 상태 변경
  */
 export async function updateIssueState(
   issueId: string,
-  stateName: 'In Progress' | 'Done' | 'Blocked' | 'Backlog'
+  stateName: 'In Progress' | 'In Review' | 'Done' | 'Blocked' | 'Backlog' | 'Todo'
 ): Promise<void> {
   const linear = getClient();
 
-  // 팀의 workflow states 조회
-  const team = await linear.team(teamId);
-  const states = await team.states();
-  const targetState = states.nodes.find((s) =>
-    s.name.toLowerCase().includes(stateName.toLowerCase())
-  );
+  try {
+    // 팀의 workflow states 조회
+    const team = await linear.team(teamId);
+    const states = await team.states();
+    const targetState = states.nodes.find((s) =>
+      s.name.toLowerCase().includes(stateName.toLowerCase())
+    );
 
-  if (!targetState) {
-    console.error(`State "${stateName}" not found in team workflow`);
-    return;
+    if (!targetState) {
+      console.error(`State "${stateName}" not found in team workflow`);
+      return;
+    }
+
+    await linear.updateIssue(issueId, {
+      stateId: targetState.id,
+    });
+
+    console.log(`[Linear] Issue ${issueId} state changed to ${stateName}`);
+  } catch (error) {
+    console.error(`[Linear] Failed to update issue state:`, error);
   }
-
-  await linear.updateIssue(issueId, {
-    stateId: targetState.id,
-  });
 }
 
 /**
@@ -349,6 +414,159 @@ export async function logBlocked(
 
   await addComment(issueId, body);
   await updateIssueState(issueId, 'Blocked');
+}
+
+// ============================================
+// Pair Mode Linear Integration
+// ============================================
+
+/**
+ * 페어 세션 시작 코멘트
+ */
+export async function logPairStart(
+  issueId: string,
+  sessionId: string,
+  projectPath: string
+): Promise<void> {
+  const timestamp = new Date().toLocaleString('ko-KR');
+  const body = `👥 **[Pair Session] 작업 시작**
+
+🆔 Session: \`${sessionId}\`
+📁 Project: \`${projectPath}\`
+⏰ 시간: ${timestamp}
+
+Worker/Reviewer 페어 모드로 작업을 시작합니다.
+
+---
+_자동 생성됨_`;
+
+  await addComment(issueId, body);
+  await updateIssueState(issueId, 'In Progress');
+}
+
+/**
+ * 페어 세션 리뷰 시작 코멘트
+ */
+export async function logPairReview(
+  issueId: string,
+  sessionId: string,
+  attempt: number
+): Promise<void> {
+  const timestamp = new Date().toLocaleString('ko-KR');
+  const body = `🔍 **[Pair Session] 리뷰 중**
+
+🆔 Session: \`${sessionId}\`
+🔢 시도: ${attempt}회차
+⏰ 시간: ${timestamp}
+
+Reviewer가 Worker의 작업을 검토 중입니다.`;
+
+  await addComment(issueId, body);
+  await updateIssueState(issueId, 'In Review');
+}
+
+/**
+ * 페어 세션 수정 요청 코멘트
+ */
+export async function logPairRevision(
+  issueId: string,
+  sessionId: string,
+  feedback: string,
+  issues: string[]
+): Promise<void> {
+  const timestamp = new Date().toLocaleString('ko-KR');
+  const issueList = issues.length > 0
+    ? issues.map((i, idx) => `${idx + 1}. ${i}`).join('\n')
+    : '(없음)';
+
+  const body = `🔄 **[Pair Session] 수정 요청**
+
+🆔 Session: \`${sessionId}\`
+⏰ 시간: ${timestamp}
+
+**피드백:** ${feedback}
+
+**문제점:**
+${issueList}
+
+Worker가 수정 작업을 진행합니다.`;
+
+  await addComment(issueId, body);
+  await updateIssueState(issueId, 'In Progress');
+}
+
+/**
+ * 페어 세션 완료 코멘트
+ */
+export async function logPairComplete(
+  issueId: string,
+  sessionId: string,
+  stats: {
+    attempts: number;
+    duration: number;
+    filesChanged: string[];
+  }
+): Promise<void> {
+  const timestamp = new Date().toLocaleString('ko-KR');
+  const durationStr = stats.duration < 60
+    ? `${stats.duration}초`
+    : `${Math.floor(stats.duration / 60)}분 ${stats.duration % 60}초`;
+
+  const filesStr = stats.filesChanged.length > 0
+    ? stats.filesChanged.slice(0, 10).map(f => `- \`${f}\``).join('\n')
+    : '(없음)';
+
+  const body = `✅ **[Pair Session] 작업 완료**
+
+🆔 Session: \`${sessionId}\`
+⏰ 완료 시간: ${timestamp}
+
+**📊 통계:**
+- 시도 횟수: ${stats.attempts}회
+- 소요 시간: ${durationStr}
+- 변경 파일: ${stats.filesChanged.length}개
+
+**변경된 파일:**
+${filesStr}
+
+---
+_Worker/Reviewer 페어 리뷰 승인됨_`;
+
+  await addComment(issueId, body);
+  await updateIssueState(issueId, 'Done');
+}
+
+/**
+ * 페어 세션 실패/거부 코멘트
+ */
+export async function logPairFailed(
+  issueId: string,
+  sessionId: string,
+  reason: 'rejected' | 'max_attempts' | 'error',
+  details: string
+): Promise<void> {
+  const timestamp = new Date().toLocaleString('ko-KR');
+  const reasonText = {
+    rejected: '❌ Reviewer가 작업을 거부했습니다',
+    max_attempts: '⚠️ 최대 시도 횟수를 초과했습니다',
+    error: '💥 오류가 발생했습니다',
+  }[reason];
+
+  const body = `❌ **[Pair Session] 작업 실패**
+
+🆔 Session: \`${sessionId}\`
+⏰ 시간: ${timestamp}
+
+**사유:** ${reasonText}
+
+**상세:**
+${details}
+
+---
+_수동 개입이 필요합니다_`;
+
+  await addComment(issueId, body);
+  // 실패 시 상태는 변경하지 않고 사용자가 결정하도록 함
 }
 
 /**

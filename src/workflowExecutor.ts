@@ -12,8 +12,6 @@ import {
   WorkflowStep,
   WorkflowExecution,
   StepResult,
-  StepStatus,
-  FailureStrategy,
   topologicalSort,
   getParallelGroups,
   saveExecution,
@@ -422,7 +420,7 @@ export class WorkflowExecutor {
   /**
    * Tmux pane 생성/조회
    */
-  private async getOrCreatePane(stepId: string): Promise<string> {
+  private async getOrCreatePane(_stepId: string): Promise<string> {
     // 세션 존재 확인
     const sessionExists = await tmux.sessionExists(this.tmuxSession);
 

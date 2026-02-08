@@ -12,7 +12,10 @@
     "start": "node --env-file=.env dist/index.js",
     "stop": "pkill -f 'node --env-file=.env.*claude-swarm' 2>/dev/null || echo 'No process running'",
     "lint": "oxlint src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",
+    "test:watch": "node --experimental-vm-modules node_modules/vitest/vitest.mjs",
+    "ci": "npm run lint && npm run typecheck && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
@@ -28,8 +31,10 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "bun-types": "^1.1.0",
+    "oxlint": "^1.43.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   },
   "engines": {
     "node": ">=22"

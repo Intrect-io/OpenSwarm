@@ -111,6 +111,10 @@ export type SwarmConfig = {
   githubCheckInterval?: number;
   /** 시간 윈도우 설정 (에이전트 자율 작업 제한) */
   timeWindow?: TimeWindowConfig;
+  /** Worker/Reviewer 페어 모드 설정 */
+  pairMode?: PairModeConfig;
+  /** 자율 실행 모드 설정 */
+  autonomous?: AutonomousStartupConfig;
 };
 
 /**
@@ -145,4 +149,104 @@ export type TimeWindowConfig = {
   restrictedDays?: number[];
   /** 타임존 */
   timezone?: string;
+};
+
+/**
+ * Worker/Reviewer 페어 모드 설정
+ */
+export type PairModeConfig = {
+  /** 페어 모드 활성화 */
+  enabled: boolean;
+  /** Worker 최대 시도 횟수 */
+  maxAttempts: number;
+  /** Worker 타임아웃 (ms) */
+  workerTimeoutMs: number;
+  /** Reviewer 타임아웃 (ms) */
+  reviewerTimeoutMs: number;
+  /** Webhook URL (완료/실패 시 알림) */
+  webhookUrl?: string;
+  /** 자동 Linear 상태 업데이트 */
+  autoLinearUpdate: boolean;
+};
+
+/**
+ * 모델 설정
+ */
+export type ModelConfig = {
+  /** Worker 에이전트 모델 */
+  worker: string;
+  /** Reviewer 에이전트 모델 */
+  reviewer: string;
+};
+
+/**
+ * 역할별 설정
+ */
+export type RoleConfig = {
+  /** 역할 활성화 여부 */
+  enabled: boolean;
+  /** 모델 ID */
+  model: string;
+  /** 타임아웃 (ms), 0 = 무제한 */
+  timeoutMs: number;
+};
+
+/**
+ * 파이프라인 스테이지
+ */
+export type PipelineStage = 'worker' | 'reviewer' | 'tester' | 'documenter';
+
+/**
+ * 프로젝트별 에이전트 설정
+ */
+export type ProjectAgentConfig = {
+  /** 프로젝트 경로 */
+  projectPath: string;
+  /** Linear 프로젝트 ID (선택) */
+  linearProjectId?: string;
+  /** 역할별 설정 오버라이드 */
+  roles?: {
+    worker?: Partial<RoleConfig>;
+    reviewer?: Partial<RoleConfig>;
+    tester?: Partial<RoleConfig>;
+    documenter?: Partial<RoleConfig>;
+  };
+};
+
+/**
+ * 기본 역할 설정
+ */
+export type DefaultRolesConfig = {
+  worker: RoleConfig;
+  reviewer: RoleConfig;
+  tester?: RoleConfig;
+  documenter?: RoleConfig;
+};
+
+/**
+ * 자율 실행 모드 설정
+ */
+export type AutonomousStartupConfig = {
+  /** 서비스 시작 시 자동 활성화 */
+  enabled: boolean;
+  /** Worker/Reviewer 페어 모드 사용 */
+  pairMode: boolean;
+  /** 실행 스케줄 (cron 표현식) */
+  schedule: string;
+  /** 페어 모드 최대 시도 횟수 */
+  maxAttempts: number;
+  /** 허용된 프로젝트 경로 */
+  allowedProjects: string[];
+  /** 모델 설정 (레거시) */
+  models?: ModelConfig;
+  /** Worker 타임아웃 (ms), 0 = 무제한 (레거시) */
+  workerTimeoutMs?: number;
+  /** Reviewer 타임아웃 (ms), 0 = 무제한 (레거시) */
+  reviewerTimeoutMs?: number;
+  /** 동시 실행 가능한 최대 태스크 수 */
+  maxConcurrentTasks?: number;
+  /** 기본 역할 설정 */
+  defaultRoles?: DefaultRolesConfig;
+  /** 프로젝트별 에이전트 설정 */
+  projectAgents?: ProjectAgentConfig[];
 };
