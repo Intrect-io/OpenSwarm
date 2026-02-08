@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import YAML from 'yaml';
-import type { SwarmConfig, AgentSession, TimeWindowConfig } from './types.js';
+import type { SwarmConfig, AgentSession } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from './timeWindow.js';
 
 // ============================================
@@ -65,11 +65,104 @@ const TimeWindowConfigSchema = z.object({
   timezone: z.string().default('Asia/Seoul'),
 }).optional();
 
+const PairModeConfigSchema = z.object({
+  /** 페어 모드 활성화 */
+  enabled: z.boolean().default(false),
+  /** Worker 최대 시도 횟수 */
+  maxAttempts: z.number().min(1).max(10).default(3),
+  /** Worker 타임아웃 (ms) */
+  workerTimeoutMs: z.number().positive().default(300000), // 5분
+  /** Reviewer 타임아웃 (ms) */
+  reviewerTimeoutMs: z.number().positive().default(180000), // 3분
+  /** Webhook URL (완료/실패 시 알림) */
+  webhookUrl: z.string().url().optional(),
+  /** 자동 Linear 상태 업데이트 */
+  autoLinearUpdate: z.boolean().default(true),
+}).optional();
+
+const ModelConfigSchema = z.object({
+  /** Worker 에이전트 모델 */
+  worker: z.string().default('claude-sonnet-4-20250514'),
+  /** Reviewer 에이전트 모델 */
+  reviewer: z.string().default('claude-sonnet-4-20250514'),
+}).optional();
+
+/** 역할별 설정 스키마 */
+const RoleConfigSchema = z.object({
+  /** 역할 활성화 여부 */
+  enabled: z.boolean().default(true),
+  /** 모델 ID */
+  model: z.string(),
+  /** 타임아웃 (ms), 0 = 무제한 */
+  timeoutMs: z.number().min(0).default(0),
+});
+
+/** 기본 역할 설정 스키마 */
+const DefaultRolesConfigSchema = z.object({
+  worker: RoleConfigSchema.default({
+    enabled: true,
+    model: 'claude-sonnet-4-20250514',
+    timeoutMs: 0,
+  }),
+  reviewer: RoleConfigSchema.default({
+    enabled: true,
+    model: 'claude-3-5-haiku-20241022',
+    timeoutMs: 0,
+  }),
+  tester: RoleConfigSchema.optional(),
+  documenter: RoleConfigSchema.optional(),
+}).optional();
+
+/** 프로젝트별 역할 오버라이드 스키마 */
+const ProjectRolesOverrideSchema = z.object({
+  worker: RoleConfigSchema.partial().optional(),
+  reviewer: RoleConfigSchema.partial().optional(),
+  tester: RoleConfigSchema.partial().optional(),
+  documenter: RoleConfigSchema.partial().optional(),
+}).optional();
+
+/** 프로젝트별 에이전트 설정 스키마 */
+const ProjectAgentConfigSchema = z.object({
+  /** 프로젝트 경로 */
+  projectPath: z.string().min(1),
+  /** Linear 프로젝트 ID */
+  linearProjectId: z.string().optional(),
+  /** 역할별 설정 오버라이드 */
+  roles: ProjectRolesOverrideSchema,
+});
+
+const AutonomousConfigSchema = z.object({
+  /** 서비스 시작 시 자동 활성화 */
+  enabled: z.boolean().default(false),
+  /** Worker/Reviewer 페어 모드 */
+  pairMode: z.boolean().default(true),
+  /** 실행 스케줄 (cron 표현식) */
+  schedule: z.string().default('*/30 * * * *'),
+  /** 페어 모드 최대 시도 횟수 */
+  maxAttempts: z.number().min(1).max(10).default(3),
+  /** 허용된 프로젝트 경로 */
+  allowedProjects: z.array(z.string()).default(['~/dev']),
+  /** 모델 설정 (레거시) */
+  models: ModelConfigSchema,
+  /** Worker 타임아웃 (ms) - 0 = 무제한 (레거시) */
+  workerTimeoutMs: z.number().min(0).default(0),
+  /** Reviewer 타임아웃 (ms) - 0 = 무제한 (레거시) */
+  reviewerTimeoutMs: z.number().min(0).default(0),
+  /** 동시 실행 가능한 최대 태스크 수 */
+  maxConcurrentTasks: z.number().min(1).max(10).default(1),
+  /** 기본 역할 설정 */
+  defaultRoles: DefaultRolesConfigSchema,
+  /** 프로젝트별 에이전트 설정 */
+  projectAgents: z.array(ProjectAgentConfigSchema).optional(),
+}).optional();
+
 const RawConfigSchema = z.object({
   discord: DiscordConfigSchema,
   linear: LinearConfigSchema,
   github: GitHubConfigSchema,
   timeWindow: TimeWindowConfigSchema,
+  pairMode: PairModeConfigSchema,
+  autonomous: AutonomousConfigSchema,
   agents: z.array(AgentSessionSchema).min(1, 'At least one agent is required'),
   defaultHeartbeatInterval: z.number().positive().default(DEFAULT_HEARTBEAT_INTERVAL),
 });
@@ -188,6 +281,33 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       blockedWindows: raw.timeWindow.blockedWindows,
       restrictedDays: raw.timeWindow.restrictedDays,
       timezone: raw.timeWindow.timezone,
+    } : undefined,
+    pairMode: raw.pairMode ? {
+      enabled: raw.pairMode.enabled,
+      maxAttempts: raw.pairMode.maxAttempts,
+      workerTimeoutMs: raw.pairMode.workerTimeoutMs,
+      reviewerTimeoutMs: raw.pairMode.reviewerTimeoutMs,
+      webhookUrl: raw.pairMode.webhookUrl,
+      autoLinearUpdate: raw.pairMode.autoLinearUpdate,
+    } : undefined,
+    autonomous: raw.autonomous ? {
+      enabled: raw.autonomous.enabled,
+      pairMode: raw.autonomous.pairMode,
+      schedule: raw.autonomous.schedule,
+      maxAttempts: raw.autonomous.maxAttempts,
+      allowedProjects: raw.autonomous.allowedProjects,
+      models: raw.autonomous.models ? {
+        worker: raw.autonomous.models.worker,
+        reviewer: raw.autonomous.models.reviewer,
+      } : undefined,
+      workerTimeoutMs: raw.autonomous.workerTimeoutMs,
+      reviewerTimeoutMs: raw.autonomous.reviewerTimeoutMs,
+      maxConcurrentTasks: raw.autonomous.maxConcurrentTasks,
+      defaultRoles: raw.autonomous.defaultRoles,
+      projectAgents: raw.autonomous.projectAgents?.map(pa => ({
+        ...pa,
+        projectPath: expandPath(pa.projectPath),
+      })),
     } : undefined,
   };
 }
@@ -324,5 +444,14 @@ agents:
 
 # 기본 heartbeat 간격 (ms)
 defaultHeartbeatInterval: 1800000
+
+# Worker/Reviewer 페어 모드 설정
+pairMode:
+  enabled: false              # 페어 모드 활성화
+  maxAttempts: 3              # Worker 최대 시도 횟수
+  workerTimeoutMs: 300000     # Worker 타임아웃 (5분)
+  reviewerTimeoutMs: 180000   # Reviewer 타임아웃 (3분)
+  webhookUrl: \${PAIR_WEBHOOK_URL:-}  # 완료/실패 알림 (선택)
+  autoLinearUpdate: true      # Linear 상태 자동 업데이트
 `;
 }

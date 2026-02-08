@@ -51,7 +51,7 @@ function normalizeRecords(records: any[]): CognitiveMemoryRecord[] {
     id: String(r.id || `unknown-${now}-${Math.random().toString(36).slice(2, 6)}`),
     type: String(r.type || 'journal') as MemoryType,
     content: String(r.content || ''),
-    vector: Array.isArray(r.vector) ? r.vector.map(Number) : new Array(EMBEDDING_DIM).fill(0),
+    vector: Array.isArray(r.vector) ? r.vector.map(Number) : Array.from({ length: EMBEDDING_DIM }, () => 0),
 
     importance: Number(r.importance) || 0.5,
     confidence: Number(r.confidence) || 0.7,
@@ -121,8 +121,8 @@ interface CognitiveMemoryRecord {
   expiresAt: number;
 }
 
-// 레거시 호환용 별칭
-interface MemoryRecord extends CognitiveMemoryRecord {}
+// 레거시 호환용 별칭 (export하여 사용 가능)
+export interface MemoryRecord extends CognitiveMemoryRecord {}
 
 // ==============================================
 // Importance Score by Type (PRD Table)
@@ -216,7 +216,7 @@ async function getEmbedding(text: string): Promise<number[]> {
     return Array.from(result.data as Float32Array);
   } catch (error) {
     console.error('[Memory] Embedding error:', error);
-    return new Array(EMBEDDING_DIM).fill(0);
+    return Array.from({ length: EMBEDDING_DIM }, () => 0);
   }
 }
 
@@ -877,7 +877,7 @@ export async function reviseMemory(
     if (!table || !db) return false;
 
     // Find existing memory
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
     const existing = results.find((r: any) => r.id === memoryId);
 
     if (!existing) {
@@ -982,7 +982,7 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
     await initDatabase();
     if (!table || !db) return false;
 
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
     const memory1 = results.find((r: any) => r.id === memoryId1);
     const memory2 = results.find((r: any) => r.id === memoryId2);
 
@@ -1030,7 +1030,7 @@ export async function reconcileContradiction(
     await initDatabase();
     if (!table || !db) return false;
 
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
     const keepMemory = results.find((r: any) => r.id === keepId);
     const archiveMemory = results.find((r: any) => r.id === archiveId);
 
@@ -1186,7 +1186,7 @@ export async function cleanupExpired(): Promise<number> {
     if (!table || !db) return 0;
 
     const now = Date.now();
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
 
     const expiredIds = results
       .filter((r: any) => r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now)
@@ -1226,7 +1226,7 @@ export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
     await initDatabase();
     if (!table || !db) return { decayed: 0, archived: 0 };
 
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
     const now = Date.now();
 
     let decayed = 0;
@@ -1289,7 +1289,7 @@ export async function consolidateMemories(): Promise<{
     await initDatabase();
     if (!table || !db) return { merged: 0, groups: [] };
 
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
     const validMemories = results.filter((r: any) => r.id !== 'init');
 
     const merged: string[] = [];
@@ -1397,7 +1397,7 @@ export async function runBackgroundCognition(): Promise<{
   const consolidationResult = await consolidateMemories();
 
   // 3. Detect contradictions (log only, don't auto-resolve)
-  const stats = await getMemoryStats();
+  const _stats = await getMemoryStats(); // 향후 확장용
   let contradictionCount = 0;
 
   // Sample check for contradictions among high-importance beliefs
@@ -1457,7 +1457,7 @@ export async function getMemoryStats(): Promise<{
     await initDatabase();
     if (!table) return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0, avgDecay: 0 };
 
-    const results = await table.search(new Array(EMBEDDING_DIM).fill(0)).limit(10000).toArray();
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
 
     const byType: Record<MemoryType, number> = { ...DEFAULT_BY_TYPE };
     const byRepo: Record<string, number> = {};
@@ -1527,7 +1527,7 @@ export async function getRecentConversations(
 
     // journal 타입 + discord repo 필터링 후 createdAt 내림차순
     const results = await table
-      .search(new Array(EMBEDDING_DIM).fill(0))  // dummy vector for full scan
+      .search(Array.from({ length: EMBEDDING_DIM }, () => 0))  // dummy vector for full scan
       .limit(1000)  // 충분히 큰 수
       .toArray();
 

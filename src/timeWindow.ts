@@ -78,7 +78,7 @@ function isInTimeRange(currentMinutes: number, range: TimeRange): boolean {
 /**
  * 현재 KST 시간 가져오기
  */
-function getKSTTime(): Date {
+function _getKSTTime(): Date {
   const now = new Date();
   // UTC를 KST로 변환 (UTC+9)
   const kstOffset = 9 * 60; // 분 단위
@@ -115,8 +115,7 @@ export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
   const kstMinutes = (utcMinutes + kstOffset) % (24 * 60);
 
   // 요일 계산 (KST 기준)
-  const kstHours = Math.floor(kstMinutes / 60);
-  const dayOffset = kstHours < (now.getUTCHours()) ? 1 : 0;
+  // 요일 계산 (KST 기준)
   const kstDay = (now.getUTCDay() + (utcMinutes + kstOffset >= 24 * 60 ? 1 : 0)) % 7;
 
   const currentTimeStr = `${String(Math.floor(kstMinutes / 60)).padStart(2, '0')}:${String(kstMinutes % 60).padStart(2, '0')}`;

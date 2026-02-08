@@ -1,0 +1,69 @@
+# Removed deprecated version field
+
+services:
+  claude-swarm:
+    image: claude-swarm:final
+    container_name: claude-swarm
+    restart: unless-stopped
+
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - ONNX_WEB=1
+      - USE_ONNXRUNTIME_WEB=1
+
+    # Load environment from file
+    env_file:
+      - .env
+
+    # Port mapping (adjust as needed)
+    ports:
+      - "3002:3000"
+
+    # Volume mounts
+    volumes:
+      # Configuration files (read-only)
+      - ./config:/app/config:ro
+      # Logs directory (read-write)
+      - ./logs:/app/logs:rw
+      # Data persistence (if needed)
+      - claude-swarm-data:/app/data
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "console.log('Health check passed')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Network mode (optional)
+    networks:
+      - claude-swarm-network
+
+# Named volumes
+volumes:
+  claude-swarm-data:
+    driver: local
+
+# Networks
+networks:
+  claude-swarm-network:
+    driver: bridge

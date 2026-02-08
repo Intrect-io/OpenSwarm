@@ -15,7 +15,7 @@ import {
 import { parseTask, saveParsedTask, loadParsedTask, formatParsedTaskSummary } from './taskParser.js';
 import { runWorkflowConfig, ExecutorResult } from './workflowExecutor.js';
 import { checkWorkAllowed } from './timeWindow.js';
-import { searchMemory, saveCognitiveMemory } from './memory.js';
+import { saveCognitiveMemory } from './memory.js';
 
 // ============================================
 // Types
@@ -227,7 +227,9 @@ export class DecisionEngine {
     }
 
     // 7. 워크플로우 매핑
+    console.log(`[DecisionEngine] Mapping task to workflow: ${selectedTask.id}`);
     const workflow = await this.taskToWorkflow(selectedTask);
+    console.log(`[DecisionEngine] Workflow mapped: ${workflow ? 'yes' : 'no'}`);
     if (!workflow) {
       return {
         action: 'skip',
@@ -237,6 +239,7 @@ export class DecisionEngine {
     }
 
     // 8. 결정 반환
+    console.log(`[DecisionEngine] Returning decision: autoExecute=${this.config.autoExecute}`);
     return {
       action: this.config.autoExecute ? 'execute' : 'defer',
       task: selectedTask,

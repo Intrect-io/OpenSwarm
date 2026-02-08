@@ -7,7 +7,6 @@ import type {
   AgentSession,
   AgentStatus,
   ServiceState,
-  SwarmEvent,
 } from './types.js';
 import * as tmux from './tmux.js';
 import * as linear from './linear.js';
@@ -15,6 +14,7 @@ import * as discord from './discord.js';
 import * as github from './github.js';
 import * as scheduler from './scheduler.js';
 import * as web from './web.js';
+import * as autonomous from './autonomousRunner.js';
 
 let state: ServiceState = {
   running: false,
@@ -33,16 +33,19 @@ export async function startService(config: SwarmConfig): Promise<void> {
   console.log('Starting Claude Swarm service...');
 
   // Linear 초기화
+  console.log('🔗 Initializing Linear client...');
   linear.initLinear(config.linearApiKey, config.linearTeamId);
-  console.log('Linear client initialized');
+  console.log('✅ Linear client connected');
 
   // Discord 초기화
+  console.log('🤖 Connecting Discord bot...');
   await discord.initDiscord(config.discordToken, config.discordChannelId);
-  console.log('Discord bot started');
+  console.log('✅ Discord bot connected successfully');
 
   // 웹 인터페이스 시작
+  console.log('🌐 Starting web interface...');
   await web.startWebServer(3847);
-  console.log('Web interface started at http://localhost:3847');
+  console.log('✅ Web interface ready');
 
   // GitHub 레포 설정
   githubRepos = config.githubRepos ?? [];
@@ -50,8 +53,11 @@ export async function startService(config: SwarmConfig): Promise<void> {
   // GitHub CI 모니터링 시작
   if (githubRepos.length > 0) {
     const checkInterval = config.githubCheckInterval ?? 5 * 60 * 1000; // 기본 5분
+    console.log(`📊 Starting GitHub CI monitoring for ${githubRepos.length} repos...`);
     startGitHubMonitoring(checkInterval);
-    console.log(`GitHub CI monitoring started for ${githubRepos.length} repos (interval: ${checkInterval}ms)`);
+    console.log(`✅ GitHub monitoring active (interval: ${Math.floor(checkInterval/1000/60)}min)`);
+  } else {
+    console.log('⚠️ No GitHub repos configured - CI monitoring disabled');
   }
 
   // Discord 콜백 설정
@@ -61,6 +67,17 @@ export async function startService(config: SwarmConfig): Promise<void> {
     getStatus: getAgentStatuses,
     getRepos: () => githubRepos,
   });
+
+  // Pair 모드 설정
+  if (config.pairMode) {
+    discord.setPairModeConfig({
+      webhookUrl: config.pairMode.webhookUrl,
+      maxAttempts: config.pairMode.maxAttempts,
+      workerTimeoutMs: config.pairMode.workerTimeoutMs,
+      reviewerTimeoutMs: config.pairMode.reviewerTimeoutMs,
+    });
+    console.log(`Pair mode configured (maxAttempts: ${config.pairMode.maxAttempts})`);
+  }
 
   // 에이전트 상태 초기화
   for (const agent of config.agents) {
@@ -86,13 +103,76 @@ export async function startService(config: SwarmConfig): Promise<void> {
   const schedules = await scheduler.listSchedules();
   console.log(`Scheduler started with ${schedules.length} schedules`);
 
-  console.log(`Service started with ${config.agents.length} agents`);
+  console.log('');
+  console.log('🎉 ════════════════════════════════════════');
+  console.log('🎉  Claude Swarm 서비스 시작 완료!');
+  console.log(`🎉  ├─ 에이전트: ${config.agents.length}개`);
+  console.log(`🎉  ├─ GitHub 레포: ${githubRepos.length}개`);
+  console.log(`🎉  └─ 기본 heartbeat: ${Math.floor(config.defaultHeartbeatInterval/1000/60)}분`);
+  console.log('🎉 ════════════════════════════════════════');
+  console.log('');
+
+  // 자율 모드 자동 시작
+  if (config.autonomous?.enabled) {
+    console.log('[Service] Autonomous mode auto-start enabled');
+
+    // Linear fetcher 등록
+    autonomous.setLinearFetcher(async () => {
+      const issues = await linear.getMyIssues();
+      const { linearIssueToTask } = await import('./decisionEngine.js');
+      return issues.map((issue: any) => linearIssueToTask({
+        id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        description: issue.description,
+        priority: issue.priority,
+        project: issue.project ? {
+          id: issue.project.id,
+          name: issue.project.name,
+        } : undefined,
+      }));
+    });
+    console.log('[Service] Linear fetcher registered');
+
+    // Discord reporter 등록 (기본 채널로)
+    autonomous.setDiscordReporter(async (content: any) => {
+      await discord.sendToChannel(content);
+    });
+    console.log('[Service] Discord reporter registered');
+
+    await autonomous.startAutonomous({
+      linearTeamId: config.linearTeamId,
+      allowedProjects: config.autonomous.allowedProjects,
+      heartbeatSchedule: config.autonomous.schedule,
+      autoExecute: true,
+      maxConsecutiveTasks: 3,
+      cooldownSeconds: 300,
+      dryRun: false,
+      pairMode: config.autonomous.pairMode,
+      pairMaxAttempts: config.autonomous.maxAttempts,
+      workerModel: config.autonomous.models?.worker,
+      reviewerModel: config.autonomous.models?.reviewer,
+      workerTimeoutMs: config.autonomous.workerTimeoutMs || 0, // 0 = 무제한
+      reviewerTimeoutMs: config.autonomous.reviewerTimeoutMs || 0, // 0 = 무제한
+      triggerNow: true,  // 시작 시 즉시 실행
+      maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
+      defaultRoles: config.autonomous.defaultRoles,
+      projectAgents: config.autonomous.projectAgents,
+    });
+    const modelInfo = config.autonomous.models
+      ? `, Worker: ${config.autonomous.models.worker || 'default'}, Reviewer: ${config.autonomous.models.reviewer || 'default'}`
+      : '';
+    console.log(`[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`);
+  }
 
   // 시작 알림
+  const autoStatus = config.autonomous?.enabled
+    ? `, 자율모드 활성 (${config.autonomous.pairMode ? 'Pair' : 'Solo'})`
+    : '';
   await discord.reportEvent({
     type: 'issue_started',
     session: 'swarm',
-    message: `Claude Swarm 시작됨. ${config.agents.length}개 에이전트, ${schedules.length}개 스케줄 활성화.`,
+    message: `Claude Swarm 시작됨. ${config.agents.length}개 에이전트, ${schedules.length}개 스케줄 활성화${autoStatus}.`,
     timestamp: Date.now(),
   });
 }
@@ -139,11 +219,17 @@ async function runHeartbeat(agent: AgentSession): Promise<void> {
 
   console.log(`[${agent.name}] Running heartbeat...`);
 
-  // 세션 존재 확인
+  // 세션 존재 확인 및 생성
   const exists = await tmux.sessionExists(agent.name);
   if (!exists) {
-    console.warn(`[${agent.name}] Session does not exist, skipping`);
-    return;
+    console.log(`[${agent.name}] Creating new tmux session...`);
+    try {
+      await tmux.createSession(agent.name, agent.projectPath);
+      console.log(`[${agent.name}] Tmux session created successfully`);
+    } catch (error) {
+      console.error(`[${agent.name}] Failed to create tmux session:`, error);
+      return;
+    }
   }
 
   // Linear에서 현재 작업 중인 이슈 확인

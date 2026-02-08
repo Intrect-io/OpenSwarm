@@ -154,28 +154,47 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
  * 웹 서버 시작
  */
 export async function startWebServer(port: number = 3847): Promise<void> {
-  server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const url = req.url || '/';
+  // 이미 실행 중이면 스킵
+  if (server) {
+    console.log('Web interface already running, skipping...');
+    return;
+  }
 
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
+  return new Promise((resolve, reject) => {
+    server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      const url = req.url || '/';
 
-    if (url === '/' || url === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(HTML_TEMPLATE);
-    } else if (url === '/api/history') {
-      const history = await getChatHistory();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(history));
-    } else {
-      res.writeHead(404);
-      res.end('Not Found');
-    }
-  });
+      // CORS headers
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET');
 
-  server.listen(port, () => {
-    console.log(`Web interface running at http://localhost:${port}`);
+      if (url === '/' || url === '/index.html') {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(HTML_TEMPLATE);
+      } else if (url === '/api/history') {
+        const history = await getChatHistory();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(history));
+      } else {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
+    });
+
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.warn(`Port ${port} is already in use, skipping web server...`);
+        server = null;
+        resolve(); // 에러를 무시하고 계속 진행
+      } else {
+        reject(err);
+      }
+    });
+
+    server.listen(port, () => {
+      console.log(`Web interface running at http://localhost:${port}`);
+      resolve();
+    });
   });
 }
 

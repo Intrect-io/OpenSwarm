@@ -12,7 +12,7 @@
  */
 
 import { promises as fs } from 'fs';
-import { resolve, dirname, basename, join } from 'path';
+import { resolve, basename, join } from 'path';
 import { homedir } from 'os';
 
 // Codex 저장 경로

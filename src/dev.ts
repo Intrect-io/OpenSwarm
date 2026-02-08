@@ -4,7 +4,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
-import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 
@@ -150,7 +150,7 @@ export async function runDevTask(
   const claudeProcess = spawn('claude', [
     '-p', task,
     '--output-format', 'text',
-    '--dangerously-skip-permissions'
+    '--permission-mode', 'bypassPermissions'
   ], {
     cwd: path,
     env: process.env,
@@ -249,8 +249,7 @@ function generateReport(task: DevTask, exitCode: number | null, durationSec: num
   // reports 디렉토리 생성
   try {
     if (!existsSync(reportsDir)) {
-      const fs = require('fs');
-      fs.mkdirSync(reportsDir, { recursive: true });
+      mkdirSync(reportsDir, { recursive: true });
     }
   } catch (err) {
     console.error(`[Report] Failed to create reports directory: ${err}`);
