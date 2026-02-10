@@ -15,6 +15,7 @@ import * as github from './github.js';
 import * as scheduler from './scheduler.js';
 import * as web from './web.js';
 import * as autonomous from './autonomousRunner.js';
+import { PRProcessor } from './prProcessor.js';
 
 let state: ServiceState = {
   running: false,
@@ -23,8 +24,8 @@ let state: ServiceState = {
 };
 
 let githubRepos: string[] = [];
-let seenFailures: Set<number> = new Set(); // 이미 보고한 CI 실패 ID들
 let githubCheckTimer: NodeJS.Timeout | null = null;
+let prProcessor: PRProcessor | null = null;
 
 /**
  * 서비스 시작
@@ -158,11 +159,28 @@ export async function startService(config: SwarmConfig): Promise<void> {
       maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
       defaultRoles: config.autonomous.defaultRoles,
       projectAgents: config.autonomous.projectAgents,
+      // 작업 분해 (Planner) 설정
+      enableDecomposition: config.autonomous.decomposition?.enabled ?? false,
+      decompositionThresholdMinutes: config.autonomous.decomposition?.thresholdMinutes ?? 30,
+      plannerModel: config.autonomous.decomposition?.plannerModel,
     });
     const modelInfo = config.autonomous.models
       ? `, Worker: ${config.autonomous.models.worker || 'default'}, Reviewer: ${config.autonomous.models.reviewer || 'default'}`
       : '';
     console.log(`[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`);
+  }
+
+  // PR Auto-Improvement 시작
+  if (config.prProcessor?.enabled && githubRepos.length > 0) {
+    prProcessor = new PRProcessor({
+      repos: githubRepos,
+      schedule: config.prProcessor.schedule,
+      cooldownHours: config.prProcessor.cooldownHours,
+      maxIterations: config.prProcessor.maxIterations,
+      roles: config.autonomous?.defaultRoles,
+    });
+    prProcessor.start();
+    console.log(`[Service] PR Processor started (schedule: ${config.prProcessor.schedule}, repos: ${githubRepos.length})`);
   }
 
   // 시작 알림
@@ -448,46 +466,85 @@ function startGitHubMonitoring(interval: number): void {
 }
 
 /**
- * GitHub CI 실패 확인 및 알림
+ * GitHub CI 상태 체크 (상태 기반)
+ * - 레포별 healthy/broken 상태를 파일로 persist
+ * - 상태 전환 시 Discord 알림 (실패 감지, 복구)
+ * - broken 상태 지속 시 24시간마다 리마인더
  */
 async function checkGitHubCI(): Promise<void> {
   if (githubRepos.length === 0) return;
 
   console.log('[GitHub] Checking CI status...');
 
-  const failures = await github.getAllFailedRuns(githubRepos, 5);
+  const ciState = await github.loadCIState();
 
-  for (const failure of failures) {
-    // 이미 보고한 실패는 스킵
-    if (seenFailures.has(failure.id)) continue;
+  for (const repo of githubRepos) {
+    const current = ciState.repos[repo];
+    const { health, transition } = await github.checkRepoHealth(repo, current);
 
-    // 24시간 이내 실패만 보고
-    const failureTime = new Date(failure.createdAt).getTime();
-    const hoursAgo = (Date.now() - failureTime) / (1000 * 60 * 60);
-    if (hoursAgo > 24) continue;
+    if (transition) {
+      if (transition.to === 'broken') {
+        const failureList = health.activeFailures
+          .map((f) => `  - **${f.workflow}** (${f.branch})`)
+          .join('\n');
 
-    // 새 실패 발견 - Discord 알림
-    console.log(`[GitHub] New CI failure: ${failure.repo} - ${failure.name}`);
+        console.log(`[GitHub] CI broken: ${repo}`);
+        await discord.reportEvent({
+          type: 'ci_failed',
+          session: 'github',
+          message: `**${repo}** CI 실패 감지\n${failureList}`,
+          timestamp: Date.now(),
+          url: health.activeFailures[0]?.url,
+        });
+        health.lastReminder = new Date().toISOString();
 
-    await discord.reportEvent({
-      type: 'ci_failed',
-      session: 'github',
-      message: `**${failure.repo}**\nWorkflow: ${failure.name}\nBranch: ${failure.branch}`,
-      timestamp: failureTime,
-      url: failure.url,
-    });
+      } else if (transition.to === 'healthy' && transition.from === 'broken') {
+        const duration = transition.brokenSince
+          ? formatDuration(Date.now() - new Date(transition.brokenSince).getTime())
+          : '알 수 없음';
 
-    // 보고 완료로 기록
-    seenFailures.add(failure.id);
+        console.log(`[GitHub] CI recovered: ${repo} (after ${duration})`);
+        await discord.reportEvent({
+          type: 'ci_recovered' as any,
+          session: 'github',
+          message: `**${repo}** CI 복구됨 (${duration} 만에)`,
+          timestamp: Date.now(),
+        });
+      }
+    }
+
+    // broken 상태 지속 중 + 리마인더 주기 도래
+    if (health.status === 'broken' && !transition && github.needsReminder(health)) {
+      const days = health.brokenSince
+        ? Math.floor((Date.now() - new Date(health.brokenSince).getTime()) / (1000 * 60 * 60 * 24))
+        : '?';
+
+      const failureList = health.activeFailures
+        .map((f) => `  - **${f.workflow}** (${f.branch})`)
+        .join('\n');
+
+      console.log(`[GitHub] CI still broken: ${repo} (${days}d)`);
+      await discord.reportEvent({
+        type: 'ci_failed',
+        session: 'github',
+        message: `**${repo}** CI 여전히 실패 중 (${days}일째)\n${failureList}`,
+        timestamp: Date.now(),
+        url: health.activeFailures[0]?.url,
+      });
+      health.lastReminder = new Date().toISOString();
+    }
+
+    ciState.repos[repo] = health;
   }
 
-  // seenFailures 정리 (48시간 이상 지난 것 제거)
-  // 참고: 실패 ID는 시간순이 아니므로 별도 관리 필요할 수 있음
-  // 현재는 무한 증가 방지를 위해 1000개 초과 시 초기화
-  if (seenFailures.size > 1000) {
-    console.log('[GitHub] Clearing old seen failures cache');
-    seenFailures.clear();
-  }
+  await github.saveCIState(ciState);
+}
+
+function formatDuration(ms: number): string {
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+  if (hours < 24) return `${hours}시간`;
+  const days = Math.floor(hours / 24);
+  return `${days}일`;
 }
 
 /**
@@ -509,6 +566,13 @@ export async function stopService(): Promise<void> {
     console.log(`Timer stopped for ${name}`);
   }
   state.timers.clear();
+
+  // PR Processor 중지
+  if (prProcessor) {
+    prProcessor.stop();
+    prProcessor = null;
+    console.log('PR Processor stopped');
+  }
 
   // 스케줄러 중지
   scheduler.stopAllSchedules();

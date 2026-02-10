@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
+import * as gitTracker from './gitTracker.js';
 
 /**
  * ~ 경로를 홈 디렉토리로 확장
@@ -65,23 +66,32 @@ ${feedbackSection}
 - 환경 설정 파일(.env, .bashrc 등) 수정 금지
 - 시스템 레벨 변경 금지
 
-## Output Format (IMPORTANT - 반드시 이 형식으로 마지막에 출력)
+## Output Format (CRITICAL - 반드시 이 형식으로 마지막에 출력)
 작업 완료 후 반드시 다음 JSON 형식으로 결과를 출력하라:
 
 \`\`\`json
 {
   "success": true,
-  "summary": "작업 요약 (1-2문장)",
-  "filesChanged": ["변경된 파일 경로 목록"],
-  "commands": ["실행한 주요 명령어 목록"]
+  "summary": "내가 수행한 작업 요약 (1-2문장, Reviewer 피드백 복사 금지)",
+  "filesChanged": ["실제로 Edit/Write한 파일의 전체 경로"],
+  "commands": ["실행한 Bash 명령어 목록"]
 }
 \`\`\`
+
+**IMPORTANT:**
+- **summary**: 내가 직접 수행한 작업을 설명 (예: "API 응답 캐싱 추가", "DB 쿼리 최적화")
+  - ❌ Reviewer 피드백을 복사하지 마라
+  - ❌ "작업 완료 요약" 같은 제목 넣지 마라
+- **filesChanged**: Edit/Write 도구로 실제 변경한 파일의 **전체 경로** 목록
+  - ❌ 빈 배열 금지 (파일을 변경했다면 반드시 기록)
+  - ❌ 읽기만 한 파일 제외
+- **commands**: Bash로 실행한 명령어 (npm run build, pytest 등)
 
 실패 시:
 \`\`\`json
 {
   "success": false,
-  "summary": "실패 이유",
+  "summary": "실패 이유 (구체적으로)",
   "filesChanged": [],
   "commands": [],
   "error": "상세 에러 메시지"
@@ -96,21 +106,50 @@ ${feedbackSection}
 
 /**
  * Worker 에이전트 실행
+ * Git 기반 파일 변경 추적 통합 (Aider 스타일)
  */
 export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   const prompt = buildWorkerPrompt(options);
   const promptFile = `/tmp/worker-prompt-${Date.now()}.txt`;
+  const cwd = expandPath(options.projectPath);
+
+  // Git 스냅샷 (작업 전 상태)
+  let snapshotHash = '';
+  const isGitRepo = await gitTracker.isGitRepo(cwd);
+  if (isGitRepo) {
+    snapshotHash = await gitTracker.takeSnapshot(cwd);
+    console.log(`[Worker] Git snapshot: ${snapshotHash.slice(0, 8)}`);
+  }
 
   try {
     // 프롬프트 저장
     await fs.writeFile(promptFile, prompt);
 
     // Claude CLI 실행
-    const cwd = expandPath(options.projectPath);
     const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
 
-    // 결과 파싱
-    return parseWorkerOutput(output);
+    // 결과 파싱 (LLM 출력에서)
+    const parsedResult = parseWorkerOutput(output);
+
+    // Git diff로 실제 변경된 파일 추출 (LLM 보고와 별개로)
+    if (isGitRepo && snapshotHash) {
+      const gitChangedFiles = await gitTracker.getChangedFilesSinceSnapshot(cwd, snapshotHash);
+
+      if (gitChangedFiles.length > 0) {
+        console.log(`[Worker] Git detected changes: ${gitChangedFiles.join(', ')}`);
+
+        // LLM이 보고한 것과 병합 (Git 결과 우선)
+        const mergedFiles = new Set([
+          ...gitChangedFiles,
+          ...parsedResult.filesChanged,
+        ]);
+        parsedResult.filesChanged = Array.from(mergedFiles);
+      } else if (parsedResult.filesChanged.length === 0) {
+        console.log('[Worker] No file changes detected by Git or LLM');
+      }
+    }
+
+    return parsedResult;
   } catch (error) {
     return {
       success: false,

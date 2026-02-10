@@ -1,0 +1,80 @@
+# Claude Swarm Docker Configuration
+# Docker 컨테이너 환경용 설정 파일
+
+# 시간 제한 비활성화 (테스트용)
+timeWindow:
+  enabled: false
+
+discord:
+  token: ${DISCORD_TOKEN}
+  channelId: ${DISCORD_CHANNEL_ID}
+  webhookUrl: ${DISCORD_WEBHOOK_URL:-}  # 선택적
+
+linear:
+  apiKey: ${LINEAR_API_KEY}
+  teamId: ${LINEAR_TEAM_ID}
+
+github:
+  repos:
+    - unohee/CryptoNet          # 실제 존재하는 레포
+    - unohee/StockDataManager   # 실제 존재하는 레포
+    - unohee/ci-templates       # 실제 존재하는 레포
+  checkInterval: 300000  # 5분 (ms)
+
+# 에이전트 목록 - Docker 컨테이너 경로 사용
+agents:
+  - name: main
+    projectPath: /home/claude/dev/claude-swarm  # Docker 컨테이너 내부 경로
+    heartbeatInterval: 1800000  # 30분 (ms)
+    linearLabel: main  # Linear 이슈 필터용 라벨
+    enabled: true
+    paused: false
+
+# 기본 heartbeat 간격 (ms)
+defaultHeartbeatInterval: 1800000  # 30분
+
+# 자율 실행 모드 설정
+autonomous:
+  enabled: true
+  pairMode: true
+  schedule: "*/30 * * * *"  # 30분마다
+  maxAttempts: 3
+  maxConcurrentTasks: 3  # 동시 3개 태스크
+
+  allowedProjects:
+    - /home/claude/dev/claude-swarm  # Docker 컨테이너 내부 경로
+
+  # 레거시 설정 (하위 호환용)
+  models:
+    worker: claude-sonnet-4-20250514
+    reviewer: claude-3-5-haiku-20241022
+  workerTimeoutMs: 0      # 0 = 무제한
+  reviewerTimeoutMs: 0    # 0 = 무제한
+
+  # 새로운 역할별 설정
+  defaultRoles:
+    worker:
+      enabled: true
+      model: claude-sonnet-4-20250514
+      timeoutMs: 1800000  # 30분
+    reviewer:
+      enabled: true
+      model: claude-3-5-haiku-20241022
+      timeoutMs: 600000   # 10분
+    tester:
+      enabled: true
+      model: claude-3-5-haiku-20241022
+      timeoutMs: 300000   # 5분
+    documenter:
+      enabled: false  # 기본 비활성
+      model: claude-3-5-haiku-20241022
+      timeoutMs: 120000   # 2분
+
+  # 프로젝트별 설정 오버라이드
+  projectAgents:
+    - projectPath: /home/claude/dev/claude-swarm  # Docker 컨테이너 내부 경로
+      roles:
+        tester:
+          enabled: true
+        documenter:
+          enabled: false

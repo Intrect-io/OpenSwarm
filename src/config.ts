@@ -131,6 +131,16 @@ const ProjectAgentConfigSchema = z.object({
   roles: ProjectRolesOverrideSchema,
 });
 
+/** 작업 분해(Planner) 설정 스키마 */
+const DecompositionConfigSchema = z.object({
+  /** 분해 활성화 */
+  enabled: z.boolean().default(false),
+  /** 분해 기준 시간 (분) - 이 시간 초과 예상 작업은 분해 */
+  thresholdMinutes: z.number().min(10).max(120).default(30),
+  /** Planner 모델 */
+  plannerModel: z.string().default('claude-sonnet-4-20250514'),
+}).optional();
+
 const AutonomousConfigSchema = z.object({
   /** 서비스 시작 시 자동 활성화 */
   enabled: z.boolean().default(false),
@@ -154,6 +164,15 @@ const AutonomousConfigSchema = z.object({
   defaultRoles: DefaultRolesConfigSchema,
   /** 프로젝트별 에이전트 설정 */
   projectAgents: z.array(ProjectAgentConfigSchema).optional(),
+  /** 작업 분해 설정 (Planner Agent) */
+  decomposition: DecompositionConfigSchema,
+}).optional();
+
+const PRProcessorConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  schedule: z.string().default('*/15 * * * *'),
+  cooldownHours: z.number().default(6),
+  maxIterations: z.number().min(1).max(10).default(3),
 }).optional();
 
 const RawConfigSchema = z.object({
@@ -163,6 +182,7 @@ const RawConfigSchema = z.object({
   timeWindow: TimeWindowConfigSchema,
   pairMode: PairModeConfigSchema,
   autonomous: AutonomousConfigSchema,
+  prProcessor: PRProcessorConfigSchema,
   agents: z.array(AgentSessionSchema).min(1, 'At least one agent is required'),
   defaultHeartbeatInterval: z.number().positive().default(DEFAULT_HEARTBEAT_INTERVAL),
 });
@@ -308,6 +328,17 @@ function transformConfig(raw: RawConfig): SwarmConfig {
         ...pa,
         projectPath: expandPath(pa.projectPath),
       })),
+      decomposition: raw.autonomous.decomposition ? {
+        enabled: raw.autonomous.decomposition.enabled,
+        thresholdMinutes: raw.autonomous.decomposition.thresholdMinutes,
+        plannerModel: raw.autonomous.decomposition.plannerModel,
+      } : undefined,
+    } : undefined,
+    prProcessor: raw.prProcessor ? {
+      enabled: raw.prProcessor.enabled,
+      schedule: raw.prProcessor.schedule,
+      cooldownHours: raw.prProcessor.cooldownHours,
+      maxIterations: raw.prProcessor.maxIterations,
     } : undefined,
   };
 }

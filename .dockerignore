@@ -4,8 +4,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Build outputs
-dist/
+# Build outputs (keep dist for copying in multi-stage)
 build/
 *.tgz
 
@@ -91,10 +90,12 @@ __tests__/
 test/
 tests/
 
-# Documentation
+# Documentation (but keep config files)
 README.md
-*.md
 docs/
+*.md
+!config.yaml
+!config.example.yaml
 
 # OpenClaw subdirectory (if present)
 openclaw/
@@ -105,3 +106,11 @@ temp/
 
 # Claude Code cache
 .claude/
+
+# Development files
+.github/
+vitest.config.ts
+!tsconfig.json
+
+# Data directories that will be mounted as volumes
+data/

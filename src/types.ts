@@ -79,7 +79,7 @@ export type LinearComment = {
  * Discord 이벤트 (보고용)
  */
 export type SwarmEvent = {
-  type: 'issue_started' | 'issue_completed' | 'issue_blocked' | 'build_failed' | 'test_failed' | 'commit' | 'error' | 'ci_failed' | 'github_notification';
+  type: 'issue_started' | 'issue_completed' | 'issue_blocked' | 'build_failed' | 'test_failed' | 'commit' | 'error' | 'ci_failed' | 'ci_recovered' | 'github_notification' | 'pr_improved' | 'pr_failed';
   session: string;
   message: string;
   issueId?: string;
@@ -115,6 +115,22 @@ export type SwarmConfig = {
   pairMode?: PairModeConfig;
   /** 자율 실행 모드 설정 */
   autonomous?: AutonomousStartupConfig;
+  /** PR Auto-Improvement 설정 */
+  prProcessor?: PRProcessorConfig;
+};
+
+/**
+ * PR 자동 개선 설정
+ */
+export type PRProcessorConfig = {
+  /** 활성화 */
+  enabled: boolean;
+  /** 체크 스케줄 (cron) */
+  schedule: string;
+  /** 처리 후 쿨다운 (시간) */
+  cooldownHours: number;
+  /** Worker-Reviewer 최대 반복 횟수 */
+  maxIterations: number;
 };
 
 /**
@@ -224,6 +240,18 @@ export type DefaultRolesConfig = {
 };
 
 /**
+ * 작업 분해(Planner) 설정
+ */
+export type DecompositionConfig = {
+  /** 분해 활성화 */
+  enabled: boolean;
+  /** 분해 기준 시간 (분) - 이 시간 초과 예상 작업은 분해 */
+  thresholdMinutes: number;
+  /** Planner 모델 */
+  plannerModel: string;
+};
+
+/**
  * 자율 실행 모드 설정
  */
 export type AutonomousStartupConfig = {
@@ -249,4 +277,6 @@ export type AutonomousStartupConfig = {
   defaultRoles?: DefaultRolesConfig;
   /** 프로젝트별 에이전트 설정 */
   projectAgents?: ProjectAgentConfig[];
+  /** 작업 분해 설정 (Planner Agent) */
+  decomposition?: DecompositionConfig;
 };

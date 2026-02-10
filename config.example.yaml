@@ -27,3 +27,42 @@ agents:
 
 # 기본 heartbeat 간격 (ms)
 defaultHeartbeatInterval: 1800000  # 30분
+
+# 자율 실행 모드 설정
+autonomous:
+  enabled: true
+  pairMode: true
+  schedule: "*/30 * * * *"  # 30분마다
+  maxAttempts: 3
+  maxConcurrentTasks: 1  # 동시 실행 태스크 수
+
+  allowedProjects:
+    - ~/dev/claude-swarm
+
+  # 작업 분해 설정 (Planner Agent)
+  decomposition:
+    enabled: true                    # 분해 활성화
+    thresholdMinutes: 30             # 이 시간 초과 예상 시 분해
+    plannerModel: claude-sonnet-4-20250514  # Planner 모델
+
+  # 역할별 설정
+  defaultRoles:
+    worker:
+      enabled: true
+      model: claude-sonnet-4-20250514
+      timeoutMs: 1800000  # 30분
+    reviewer:
+      enabled: true
+      model: claude-3-5-haiku-20241022
+      timeoutMs: 600000   # 10분
+    tester:
+      enabled: false
+    documenter:
+      enabled: false
+
+# PR Auto-Improvement
+prProcessor:
+  enabled: true
+  schedule: "*/15 * * * *"    # 15분마다 체크
+  cooldownHours: 6            # 처리 후 6시간 대기
+  maxIterations: 3            # Worker-Reviewer 최대 3회 반복

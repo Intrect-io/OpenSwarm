@@ -29,9 +29,11 @@ const MEMORY_DIR = resolve(homedir(), '.claude-swarm/memory');
 const EMBEDDING_MODEL = 'Xenova/multilingual-e5-base';  // 768차원, 다국어 지원
 const EMBEDDING_DIM = 768;
 
-// Xenova 파이프라인 싱글톤
+// Xenova 파이프라인 싱글톤 (Promise 기반 초기화로 race condition 방지)
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
-let pipelineInitializing = false;
+let pipelineInitPromise: Promise<FeatureExtractionPipeline> | null = null;
+let pipelineInitFailed = false;
+let pipelineInitError: Error | null = null;
 
 // TTL 설정 (밀리초)
 const TTL_JOURNAL = 14 * 24 * 60 * 60 * 1000; // 14일
@@ -176,48 +178,84 @@ export interface SearchOptions {
   includeExpired?: boolean;       // 만료된 항목 포함 여부
 }
 
+// 검색 결과 (에러와 empty 구분)
+export interface SearchResult {
+  success: boolean;
+  memories: MemorySearchResult[];
+  error?: string;
+  errorCode?: 'DB_INIT_FAILED' | 'EMBEDDING_FAILED' | 'QUERY_FAILED' | 'UNKNOWN';
+}
+
 // 싱글톤 연결
 let db: Connection | null = null;
 let table: Table | null = null;
 
 /**
+ * 임베딩 파이프라인 초기화 (Promise 기반, race condition 방지)
+ */
+async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
+  // 이미 초기화됨
+  if (embeddingPipeline) {
+    return embeddingPipeline;
+  }
+
+  // 이전에 초기화 실패했으면 같은 에러 반환
+  if (pipelineInitFailed && pipelineInitError) {
+    throw pipelineInitError;
+  }
+
+  // 초기화 중이면 기존 Promise 대기 (race condition 방지)
+  if (pipelineInitPromise) {
+    return pipelineInitPromise;
+  }
+
+  // 새로 초기화 시작
+  pipelineInitPromise = (async () => {
+    try {
+      console.log('[Memory] Loading embedding model (first time may take a while)...');
+      const loadedPipeline = await pipeline('feature-extraction', EMBEDDING_MODEL, {
+        quantized: true,
+      });
+      embeddingPipeline = loadedPipeline;
+      console.log('[Memory] Embedding model loaded:', EMBEDDING_MODEL);
+      return loadedPipeline;
+    } catch (error) {
+      pipelineInitFailed = true;
+      pipelineInitError = error instanceof Error ? error : new Error(String(error));
+      pipelineInitPromise = null;  // 다음 시도에서 재시도 가능하도록
+      console.error('[Memory] CRITICAL: Embedding model load failed:', error);
+      throw pipelineInitError;
+    }
+  })();
+
+  return pipelineInitPromise;
+}
+
+/**
  * Xenova/transformers로 임베딩 생성 (로컬, 외부 의존 없음)
+ * @throws Error - 임베딩 생성 실패 시 (zero vector fallback 제거됨)
  */
 async function getEmbedding(text: string): Promise<number[]> {
-  try {
-    // 파이프라인 초기화 (첫 호출 시 모델 다운로드, 이후 캐시)
-    if (!embeddingPipeline && !pipelineInitializing) {
-      pipelineInitializing = true;
-      console.log('[Memory] Loading embedding model (first time may take a while)...');
-      embeddingPipeline = await pipeline('feature-extraction', EMBEDDING_MODEL, {
-        quantized: true,  // 더 빠른 로딩, 약간의 품질 손실
-      });
-      console.log('[Memory] Embedding model loaded:', EMBEDDING_MODEL);
-      pipelineInitializing = false;
-    }
+  // 파이프라인 초기화 (실패 시 throw)
+  const pipe = await initEmbeddingPipeline();
 
-    // 초기화 중이면 대기
-    while (pipelineInitializing && !embeddingPipeline) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+  // E5 모델은 "query: " 또는 "passage: " 접두사 권장
+  const input = `query: ${text.slice(0, 512)}`;  // 토큰 제한
+  const result = await pipe(input, {
+    pooling: 'mean',
+    normalize: true,
+  });
 
-    if (!embeddingPipeline) {
-      throw new Error('Embedding pipeline not initialized');
-    }
+  // Float32Array → number[]
+  const vector = Array.from(result.data as Float32Array);
 
-    // E5 모델은 "query: " 또는 "passage: " 접두사 권장
-    const input = `query: ${text.slice(0, 512)}`;  // 토큰 제한
-    const result = await embeddingPipeline(input, {
-      pooling: 'mean',
-      normalize: true,
-    });
-
-    // Float32Array → number[]
-    return Array.from(result.data as Float32Array);
-  } catch (error) {
-    console.error('[Memory] Embedding error:', error);
-    return Array.from({ length: EMBEDDING_DIM }, () => 0);
+  // 유효성 검증: zero vector면 에러
+  const vectorSum = vector.reduce((a, b) => Math.abs(a) + Math.abs(b), 0);
+  if (vectorSum < 0.001) {
+    throw new Error('Generated embedding is a zero vector (invalid)');
   }
+
+  return vector;
 }
 
 // ==============================================
@@ -733,15 +771,23 @@ function calculateHybridScore(
 }
 
 /**
- * 메모리 검색 (PRD Hybrid Retrieval)
+ * 메모리 검색 (PRD Hybrid Retrieval) - Safe 버전
+ * 에러와 empty 결과를 구분할 수 있음
  */
-export async function searchMemory(
+export async function searchMemorySafe(
   query: string,
   options: SearchOptions = {}
-): Promise<MemorySearchResult[]> {
+): Promise<SearchResult> {
   try {
     await initDatabase();
-    if (!table) return [];
+    if (!table) {
+      return {
+        success: false,
+        memories: [],
+        error: 'Database table not initialized',
+        errorCode: 'DB_INIT_FAILED',
+      };
+    }
 
     const {
       types,
@@ -749,37 +795,36 @@ export async function searchMemory(
       minSimilarity = 0.4,
       minTrust = 0.3,
       minFreshness = 0,
-      limit = 10,          // PRD 권장: 5-12
+      limit = 10,
       includeExpired = false,
     } = options;
 
-    const queryVector = await getEmbedding(query);
-    const results = await table.vectorSearch(queryVector).limit(limit * 5).toArray();
+    let queryVector: number[];
+    try {
+      queryVector = await getEmbedding(query);
+    } catch (embeddingError) {
+      return {
+        success: false,
+        memories: [],
+        error: `Embedding generation failed: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`,
+        errorCode: 'EMBEDDING_FAILED',
+      };
+    }
 
+    const results = await table.vectorSearch(queryVector).limit(limit * 5).toArray();
     const now = Date.now();
 
     // Hybrid Retrieval with PRD scoring
     const scored = results
       .filter((r: any) => {
         if (r.id === 'init') return false;
-
-        // 만료 체크
         if (!includeExpired && r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) return false;
-
-        // 타입 필터
         if (types && !types.includes(r.type)) return false;
-
-        // 저장소 필터
         if (repo && r.repo !== repo && r.repo !== 'system' && r.repo !== 'cognitive') return false;
-
-        // 신뢰도/confidence 필터
         const confidence = r.confidence ?? r.trust ?? 0;
         if (confidence < minTrust) return false;
-
-        // 유사도 필터
         const similarity = r._distance ? 1 - r._distance : 0;
         if (similarity < minSimilarity) return false;
-
         return true;
       })
       .map((r: any) => {
@@ -787,33 +832,14 @@ export async function searchMemory(
         const recency = calculateFreshness(r.createdAt);
         const importance = r.importance ?? calculateImportance(r.type);
         const accessCount = r.accessCount ?? 1;
-
-        // Decay 적용
         const effectiveImportance = importance * (1 - (r.decay ?? 0));
-
-        // PRD Hybrid Score
-        const hybridScore = calculateHybridScore(
-          similarity,
-          effectiveImportance,
-          recency,
-          accessCount
-        );
-
-        return {
-          record: r,
-          similarity,
-          recency,
-          importance: effectiveImportance,
-          hybridScore,
-        };
+        const hybridScore = calculateHybridScore(similarity, effectiveImportance, recency, accessCount);
+        return { record: r, similarity, recency, importance: effectiveImportance, hybridScore };
       })
-      // 신선도 필터
       .filter(item => item.recency >= minFreshness)
-      // Hybrid Score로 정렬 (PRD: not similarity-only!)
       .sort((a, b) => b.hybridScore - a.hybridScore)
       .slice(0, limit);
 
-    // Update last_accessed for retrieved memories (async, don't wait)
     updateAccessTime(scored.map(s => s.record.id)).catch(() => {});
 
     const formatted: MemorySearchResult[] = scored.map(({ record: r, similarity, recency, importance, hybridScore }) => ({
@@ -825,23 +851,44 @@ export async function searchMemory(
       metadata: JSON.parse(r.metadata || '{}'),
       trust: r.trust ?? r.confidence ?? 0.7,
       createdAt: r.createdAt,
-      score: hybridScore,           // hybrid score, not just similarity
+      score: hybridScore,
       freshness: recency,
-      // PRD additions
       importance,
       confidence: r.confidence ?? r.trust ?? 0.7,
       stability: r.stability ?? 'medium',
       revisionCount: r.revisionCount ?? 0,
       decay: r.decay ?? 0,
-      similarityScore: similarity,  // raw similarity for debugging
+      similarityScore: similarity,
     }));
 
     console.log(`[Memory] Found ${formatted.length} memories (hybrid retrieval, query: "${query.slice(0, 30)}...")`);
-    return formatted;
+    return { success: true, memories: formatted };
+
   } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
     console.error('[Memory] Search error:', error);
-    return [];
+    return {
+      success: false,
+      memories: [],
+      error: errorMsg,
+      errorCode: 'QUERY_FAILED',
+    };
   }
+}
+
+/**
+ * 메모리 검색 (PRD Hybrid Retrieval) - 레거시 호환
+ * @deprecated searchMemorySafe 사용 권장
+ */
+export async function searchMemory(
+  query: string,
+  options: SearchOptions = {}
+): Promise<MemorySearchResult[]> {
+  const result = await searchMemorySafe(query, options);
+  if (!result.success) {
+    console.warn(`[Memory] Search failed silently: ${result.error} (code: ${result.errorCode})`);
+  }
+  return result.memories;
 }
 
 /**

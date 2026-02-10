@@ -163,6 +163,21 @@ export class TaskScheduler extends EventEmitter {
     return false;
   }
 
+  /**
+   * 현재 작업 중인 프로젝트 목록 반환
+   */
+  getBusyProjects(): string[] {
+    if (this.config.allowSameProjectConcurrent) {
+      return [];
+    }
+
+    const projects = new Set<string>();
+    for (const running of this.runningTasks.values()) {
+      projects.add(running.projectPath);
+    }
+    return Array.from(projects);
+  }
+
   // ============================================
   // Execution
   // ============================================

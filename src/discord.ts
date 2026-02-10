@@ -28,6 +28,7 @@ import * as agentPair from './agentPair.js';
 import * as worker from './worker.js';
 import * as reviewer from './reviewer.js';
 import * as pairMetrics from './pairMetrics.js';
+import * as projectMapper from './projectMapper.js';
 import * as pairWebhook from './pairWebhook.js';
 // WorkerResult is re-exported from agentPair
 
@@ -149,6 +150,81 @@ function buildHistoryContext(channelId: string, currentMessage: string): string 
   const historyText = pastEntries.map(formatHistoryEntry).join('\n\n');
 
   return `${HISTORY_CONTEXT_MARKER}\n${historyText}\n\n${CURRENT_MESSAGE_MARKER}\n${currentMessage}`;
+}
+
+// ============================================
+// Project Context Detection
+// ============================================
+
+// 프로젝트 스캔 기본 경로
+const PROJECT_BASE_PATHS = ['~/dev', '~/dev/tools', '~/projects'];
+
+// 프로젝트명 패턴 (Linear 이슈 ID, 프로젝트명 등)
+const PROJECT_PATTERNS = [
+  // Linear 이슈 ID에서 프로젝트 추출 (예: INT-123, STONKS-456)
+  /\b([A-Z]{2,10})-\d+\b/g,
+  // 명시적 프로젝트 언급
+  /\b(STONKS|VELA|PyKIS|pykis|pykiwoom|HIVE|claude-swarm)\b/gi,
+  // "~~ 프로젝트" 패턴
+  /(\w+)\s*프로젝트/gi,
+];
+
+// 이슈 접두사 → 프로젝트명 매핑 (Linear 이슈 ID 기반)
+const ISSUE_PREFIX_MAP: Record<string, string> = {
+  'INT': 'claude-swarm',  // HIVE 프로젝트
+  'STONKS': 'STONKS',
+  'VELA': 'VELA',
+  'PYKIS': 'pykis',
+  'PKW': 'pykiwoom',
+  'SA': 'STONKS',  // STONKS-SaaS
+};
+
+/**
+ * 메시지에서 프로젝트 힌트 추출
+ */
+function extractProjectHints(message: string): string[] {
+  const hints: Set<string> = new Set();
+
+  for (const pattern of PROJECT_PATTERNS) {
+    const matches = message.matchAll(pattern);
+    for (const match of matches) {
+      const hint = match[1] || match[0];
+      hints.add(hint.toUpperCase());
+    }
+  }
+
+  return Array.from(hints);
+}
+
+/**
+ * 프로젝트 힌트로 로컬 경로 찾기
+ */
+async function resolveProjectPath(hints: string[]): Promise<string | null> {
+  if (hints.length === 0) return null;
+
+  // 로컬 프로젝트 스캔
+  const localProjects = await projectMapper.scanLocalProjects(PROJECT_BASE_PATHS);
+
+  for (const hint of hints) {
+    // 1. 이슈 접두사 매핑 확인
+    const mappedName = ISSUE_PREFIX_MAP[hint];
+    if (mappedName) {
+      const match = projectMapper.findBestMatch(mappedName, localProjects);
+      if (match && match.confidence >= 0.7) {
+        console.log(`[ProjectContext] Resolved via prefix: ${hint} → ${match.project.path}`);
+        return match.project.path;
+      }
+    }
+
+    // 2. 직접 매칭 시도
+    const match = projectMapper.findBestMatch(hint, localProjects);
+    if (match && match.confidence >= 0.6) {
+      console.log(`[ProjectContext] Resolved: ${hint} → ${match.project.path}`);
+      return match.project.path;
+    }
+  }
+
+  return null;
 }
 
 // VEGA 시스템 프롬프트 v2.0
@@ -1243,9 +1319,12 @@ export async function reportEvent(event: SwarmEvent): Promise<void> {
     build_failed: '❌',
     test_failed: '❌',
     ci_failed: '🔴',
+    ci_recovered: '🟢',
     github_notification: '📬',
     commit: '📝',
     error: '🔥',
+    pr_improved: '🔧',
+    pr_failed: '💔',
   }[event.type] ?? '📢';
 
   const embed = new EmbedBuilder()
@@ -1321,6 +1400,16 @@ async function handleChat(msg: Message): Promise<void> {
   });
 
   try {
+    // 0. 프로젝트 경로 감지 (메시지 + 히스토리에서 힌트 추출)
+    const historyMessages = channelHistoryMap.get(channelId) ?? [];
+    const allMessages = historyMessages.map(h => h.body).join(' ') + ' ' + content;
+    const projectHints = extractProjectHints(allMessages);
+    const projectPath = await resolveProjectPath(projectHints);
+
+    if (projectPath) {
+      console.log(`[VEGA] Project detected: ${projectPath}`);
+    }
+
     // 1. 채널 히스토리 컨텍스트 구성 (OpenClaw 스타일 - 전체 내용, 잘림 없음)
     const currentMessageFormatted = `[${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}] ${msg.author.username}: ${content}`;
     const historyContext = buildHistoryContext(channelId, currentMessageFormatted);
@@ -1333,8 +1422,13 @@ async function handleChat(msg: Message): Promise<void> {
     });
     const memoryContext = memory.formatMemoryContext(memories);
 
-    // 3. 프롬프트 구성 (시스템 프롬프트 + 대화 히스토리 + 장기 기억)
+    // 3. 프롬프트 구성 (시스템 프롬프트 + 프로젝트 컨텍스트 + 대화 히스토리 + 장기 기억)
     let prompt = VEGA_SYSTEM_PROMPT;
+
+    // 프로젝트 컨텍스트 추가 (감지된 경우)
+    if (projectPath) {
+      prompt += `\n\n## 프로젝트 컨텍스트\n- **작업 디렉토리**: ${projectPath}\n- 이 프로젝트의 코드베이스에서 작업 중입니다.`;
+    }
 
     // 대화 히스토리 추가 (OpenClaw 스타일)
     prompt += `\n\n## 대화 컨텍스트\n${historyContext}`;
@@ -1346,8 +1440,8 @@ async function handleChat(msg: Message): Promise<void> {
 
     console.log(`[VEGA] History context: ${channelHistoryMap.get(channelId)?.length ?? 0} messages`);
 
-    // Claude CLI 실행
-    const { result: response, toolCalls } = await runClaude(prompt);
+    // Claude CLI 실행 (프로젝트 경로에서 실행)
+    const { result: response, toolCalls } = await runClaude(prompt, { cwd: projectPath || undefined });
 
     // typing 중지
     if (typingInterval) clearInterval(typingInterval);
@@ -1393,8 +1487,13 @@ let currentVegaProcess: ReturnType<typeof spawn> | null = null;
 
 /**
  * Claude CLI 실행 (코드 실행 가능, 도구 호출 추적)
+ * @param prompt - 프롬프트 내용
+ * @param options - 실행 옵션 (cwd: 작업 디렉토리)
  */
-async function runClaude(prompt: string): Promise<{ result: string; toolCalls: string[] }> {
+async function runClaude(
+  prompt: string,
+  options?: { cwd?: string }
+): Promise<{ result: string; toolCalls: string[] }> {
   // 기존 프로세스가 있으면 종료
   if (currentVegaProcess) {
     console.log('[Claude CLI] Killing previous process...');
@@ -1406,14 +1505,17 @@ async function runClaude(prompt: string): Promise<{ result: string; toolCalls: s
   const promptFile = '/tmp/vega-prompt.txt';
   await fs.writeFile(promptFile, prompt);
 
+  // 작업 디렉토리 결정 (옵션 > 현재 디렉토리)
+  const workingDir = options?.cwd || process.cwd();
+
   return new Promise((resolve, reject) => {
     // VEGA가 코드 실행 가능 (타임아웃 없음, 새 메시지 오면 이전 작업 취소)
     const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format json --permission-mode bypassPermissions`;
 
-    console.log('[Claude CLI] Starting...');
+    console.log(`[Claude CLI] Starting in ${workingDir}...`);
     const proc = spawn(cmd, {
       shell: true,
-      cwd: process.cwd(),
+      cwd: workingDir,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

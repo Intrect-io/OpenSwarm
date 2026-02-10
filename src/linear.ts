@@ -624,6 +624,124 @@ export async function createIssue(
 }
 
 /**
+ * Sub-issue 생성 (Planner 분해용)
+ * - parentId를 지정하여 부모 이슈의 하위 이슈로 생성
+ * - 일일 제한에서 제외 (자동 분해는 필수 작업)
+ */
+export async function createSubIssue(
+  parentId: string,
+  title: string,
+  description: string,
+  options?: {
+    priority?: number;  // 1=Urgent, 2=High, 3=Normal, 4=Low
+    labels?: string[];
+    projectId?: string;
+    estimatedMinutes?: number;
+  }
+): Promise<LinearIssueInfo | { error: string }> {
+  const linear = getClient();
+
+  try {
+    // 부모 이슈 정보 가져오기
+    const parentIssue = await linear.issue(parentId);
+    if (!parentIssue) {
+      return { error: `Parent issue not found: ${parentId}` };
+    }
+
+    // 라벨 ID 조회
+    const team = await linear.team(teamId);
+    const teamLabels = await team.labels();
+    const labelIds = (options?.labels || [])
+      .map((name) => teamLabels.nodes.find((l) => l.name === name)?.id)
+      .filter((id): id is string => !!id);
+
+    // 자동 분해 라벨 추가
+    const autoLabel = teamLabels.nodes.find((l) => l.name === 'auto-decomposed');
+    if (autoLabel) {
+      labelIds.push(autoLabel.id);
+    }
+
+    // Sub-issue 생성
+    const issuePayload = await linear.createIssue({
+      teamId,
+      parentId,  // 부모 이슈 연결
+      title,
+      description,
+      labelIds,
+      priority: options?.priority ?? 3,
+      projectId: options?.projectId,
+    });
+
+    const issue = await issuePayload.issue;
+    if (!issue) {
+      throw new Error('Failed to create sub-issue');
+    }
+
+    console.log(`[Linear] Created sub-issue: ${issue.identifier} under ${parentIssue.identifier}`);
+
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description ?? undefined,
+      state: 'Backlog',
+      priority: issue.priority,
+      labels: options?.labels || [],
+      comments: [],
+    };
+  } catch (error) {
+    console.error('[Linear] createSubIssue error:', error);
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * 부모 이슈를 '분해됨' 상태로 표시
+ */
+export async function markAsDecomposed(
+  issueId: string,
+  subIssueCount: number,
+  totalMinutes: number
+): Promise<void> {
+  const timestamp = new Date().toLocaleString('ko-KR');
+  const body = `📋 **[Planner] 작업 분해 완료**
+
+⏰ 시간: ${timestamp}
+
+**분해 결과:**
+- Sub-issues 생성: ${subIssueCount}개
+- 총 예상 시간: ${totalMinutes}분
+
+이 이슈는 sub-issues로 분해되었습니다.
+각 sub-issue가 완료되면 자동으로 이 이슈도 완료 처리됩니다.
+
+---
+_Planner 에이전트에 의해 자동 분해됨_`;
+
+  await addComment(issueId, body);
+
+  // 라벨 추가 (decomposed 라벨이 있으면)
+  try {
+    const linear = getClient();
+    const team = await linear.team(teamId);
+    const teamLabels = await team.labels();
+    const decomposedLabel = teamLabels.nodes.find((l) => l.name === 'decomposed');
+
+    if (decomposedLabel) {
+      const issue = await linear.issue(issueId);
+      const currentLabels = await issue.labels();
+      const currentLabelIds = currentLabels.nodes.map(l => l.id);
+
+      await linear.updateIssue(issueId, {
+        labelIds: [...currentLabelIds, decomposedLabel.id],
+      });
+    }
+  } catch (err) {
+    console.warn('[Linear] Failed to add decomposed label:', err);
+  }
+}
+
+/**
  * 에이전트가 작업 제안을 Backlog에 올리기
  * - 일일 10개 제한 적용
  * - 자동으로 'agent-proposal' 라벨 추가

@@ -24,7 +24,7 @@ import { saveCognitiveMemory } from './memory.js';
 /**
  * 작업 소스
  */
-export type TaskSource = 'linear' | 'local' | 'discovered';
+export type TaskSource = 'linear' | 'local' | 'discovered' | 'github_pr';
 
 /**
  * Linear 프로젝트 정보 (간략)
@@ -61,6 +61,16 @@ export interface DecisionResult {
   task?: TaskItem;
   reason: string;
   workflow?: WorkflowConfig;
+}
+
+/**
+ * 복수 태스크 결정 결과 (병렬 처리용)
+ */
+export interface DecisionResultMultiple {
+  action: 'execute' | 'skip' | 'defer';
+  tasks: Array<{ task: TaskItem; workflow: WorkflowConfig }>;
+  reason: string;
+  skippedCount: number;
 }
 
 /**
@@ -251,6 +261,122 @@ export class DecisionEngine {
   }
 
   /**
+   * Heartbeat 실행 - 복수 태스크 반환 (병렬 처리용)
+   * @param tasks - 후보 태스크 목록
+   * @param maxTasks - 최대 반환 태스크 수
+   * @param excludeProjects - 제외할 프로젝트 경로 (이미 실행 중인 프로젝트)
+   */
+  async heartbeatMultiple(
+    tasks: TaskItem[],
+    maxTasks: number = 3,
+    excludeProjects: string[] = []
+  ): Promise<DecisionResultMultiple> {
+    console.log(`[DecisionEngine] Heartbeat multiple triggered (max: ${maxTasks})`);
+
+    // 1. 시간 윈도우 체크
+    const timeCheck = checkWorkAllowed();
+    if (!timeCheck.allowed) {
+      return {
+        action: 'skip',
+        tasks: [],
+        reason: `Time window blocked: ${timeCheck.reason}`,
+        skippedCount: tasks.length,
+      };
+    }
+
+    // 2. 쿨다운 체크
+    const now = Date.now();
+    const timeSinceLastRun = (now - this.state.lastRunAt) / 1000;
+    if (timeSinceLastRun < this.config.cooldownSeconds) {
+      return {
+        action: 'defer',
+        tasks: [],
+        reason: `Cooldown: ${Math.ceil(this.config.cooldownSeconds - timeSinceLastRun)}s remaining`,
+        skippedCount: tasks.length,
+      };
+    }
+
+    // 3. 연속 작업 제한 체크
+    if (this.state.consecutiveTasksRun >= this.config.maxConsecutiveTasks) {
+      console.log('[DecisionEngine] Max consecutive tasks reached, resetting');
+      this.state.consecutiveTasksRun = 0;
+      await saveState(this.state);
+      return {
+        action: 'defer',
+        tasks: [],
+        reason: 'Max consecutive tasks reached, taking a break',
+        skippedCount: tasks.length,
+      };
+    }
+
+    // 4. 작업 가능한 태스크 필터링
+    const executableTasks = this.filterExecutableTasks(tasks);
+    if (executableTasks.length === 0) {
+      return {
+        action: 'skip',
+        tasks: [],
+        reason: 'No executable tasks in backlog',
+        skippedCount: tasks.length,
+      };
+    }
+
+    // 5. 우선순위 정렬
+    const sorted = this.prioritizeTasks(executableTasks);
+
+    // 6. 복수 태스크 선택 (프로젝트별 1개, 최대 maxTasks개)
+    const selectedTasks: Array<{ task: TaskItem; workflow: WorkflowConfig }> = [];
+    const usedProjects = new Set<string>(excludeProjects);
+    let skippedCount = 0;
+
+    for (const task of sorted) {
+      if (selectedTasks.length >= maxTasks) break;
+
+      // 프로젝트 경로 확인 (같은 프로젝트 중복 방지)
+      const projectPath = task.projectPath || task.linearProject?.name || 'unknown';
+      if (usedProjects.has(projectPath)) {
+        skippedCount++;
+        continue;
+      }
+
+      // 범위 검증
+      const scopeCheck = this.validateScope(task);
+      if (!scopeCheck.valid) {
+        skippedCount++;
+        continue;
+      }
+
+      // 워크플로우 매핑
+      const workflow = await this.taskToWorkflow(task);
+      if (!workflow) {
+        skippedCount++;
+        continue;
+      }
+
+      selectedTasks.push({ task, workflow });
+      usedProjects.add(projectPath);
+    }
+
+    if (selectedTasks.length === 0) {
+      return {
+        action: 'skip',
+        tasks: [],
+        reason: 'No tasks passed validation/workflow mapping',
+        skippedCount: sorted.length,
+      };
+    }
+
+    console.log(`[DecisionEngine] Selected ${selectedTasks.length} tasks for parallel execution`);
+    return {
+      action: this.config.autoExecute ? 'execute' : 'defer',
+      tasks: selectedTasks,
+      reason: this.config.autoExecute
+        ? `Auto-executing ${selectedTasks.length} tasks`
+        : `Ready to execute ${selectedTasks.length} tasks (requires approval)`,
+      skippedCount,
+    };
+  }
+
+  /**
    * 작업 실행
    */
   async executeTask(task: TaskItem, workflow: WorkflowConfig): Promise<ExecutorResult> {
@@ -272,17 +398,25 @@ export class DecisionEngine {
     // 결과 기록
     if (result.success) {
       this.state.totalTasksCompleted++;
-      await saveCognitiveMemory('strategy',
-        `Task "${task.title}" completed successfully with workflow "${workflow.name}"`,
-        { confidence: 0.8, derivedFrom: task.id }
-      );
+      try {
+        await saveCognitiveMemory('strategy',
+          `Task "${task.title}" completed successfully with workflow "${workflow.name}"`,
+          { confidence: 0.8, derivedFrom: task.id }
+        );
+      } catch (memErr) {
+        console.warn(`[DecisionEngine] Memory save failed (non-critical):`, memErr);
+      }
     } else {
       this.state.totalTasksFailed++;
       this.state.consecutiveTasksRun = 0; // 실패 시 리셋
-      await saveCognitiveMemory('belief',
-        `Task "${task.title}" failed: ${result.failedStep || 'unknown reason'}`,
-        { confidence: 0.6, derivedFrom: task.id }
-      );
+      try {
+        await saveCognitiveMemory('belief',
+          `Task "${task.title}" failed: ${result.failedStep || 'unknown reason'}`,
+          { confidence: 0.6, derivedFrom: task.id }
+        );
+      } catch (memErr) {
+        console.warn(`[DecisionEngine] Memory save failed (non-critical):`, memErr);
+      }
     }
     await saveState(this.state);
 
@@ -467,10 +601,14 @@ export class DecisionEngine {
     await fs.writeFile(DISCOVERED_TASKS_FILE, JSON.stringify(discoveredTasks, null, 2));
 
     // 메모리에도 기록
-    await saveCognitiveMemory('belief',
-      `Discovered potential task: "${discovered.title}" from ${discovered.source}`,
-      { confidence: 0.5, derivedFrom: 'discovery' }
-    );
+    try {
+      await saveCognitiveMemory('belief',
+        `Discovered potential task: "${discovered.title}" from ${discovered.source}`,
+        { confidence: 0.5, derivedFrom: 'discovery' }
+      );
+    } catch (memErr) {
+      console.warn(`[DecisionEngine] Memory save failed (non-critical):`, memErr);
+    }
   }
 
   /**

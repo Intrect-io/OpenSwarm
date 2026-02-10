@@ -1,8 +1,10 @@
-# Removed deprecated version field
-
 services:
   claude-swarm:
-    image: claude-swarm:final
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: claude-swarm:latest
     container_name: claude-swarm
     restart: unless-stopped
 
@@ -11,12 +13,15 @@ services:
       - NODE_ENV=production
       - ONNX_WEB=1
       - USE_ONNXRUNTIME_WEB=1
+      - TZ=Asia/Seoul
+      - HOME=/home/claude
+      - PROJECT_PATH=/app
 
     # Load environment from file
     env_file:
       - .env
 
-    # Port mapping (adjust as needed)
+    # Port mapping
     ports:
       - "3002:3000"
 
@@ -26,8 +31,10 @@ services:
       - ./config:/app/config:ro
       # Logs directory (read-write)
       - ./logs:/app/logs:rw
-      # Data persistence (if needed)
-      - claude-swarm-data:/app/data
+      # Data persistence
+      - claude-swarm-data:/app/data:rw
+      # Config file (if exists)
+      - ./config.yaml:/app/config.yaml:ro
 
     # Resource limits
     deploy:
@@ -41,11 +48,11 @@ services:
 
     # Health check
     healthcheck:
-      test: ["CMD", "node", "-e", "console.log('Health check passed')"]
+      test: ["CMD", "node", "-e", "process.exit(0)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 30s
 
     # Logging configuration
     logging:
@@ -54,9 +61,16 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Network mode (optional)
+    # Network
     networks:
       - claude-swarm-network
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+
+    # Read-only root filesystem (except for volumes)
+    read_only: false  # Set to true if app doesn't need to write to filesystem
 
 # Named volumes
 volumes:
@@ -67,3 +81,6 @@ volumes:
 networks:
   claude-swarm-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/24

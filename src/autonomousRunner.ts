@@ -15,17 +15,19 @@ import { checkWorkAllowed } from './timeWindow.js';
 import { formatParsedTaskSummary, loadParsedTask } from './taskParser.js';
 import { saveCognitiveMemory } from './memory.js';
 import { EmbedBuilder } from 'discord.js';
-import * as workerAgent from './worker.js';
-import * as reviewerAgent from './reviewer.js';
-import * as projectMapper from './projectMapper.js';
 import * as linear from './linear.js';
 import { TaskScheduler, initScheduler } from './taskScheduler.js';
 import {
   PipelineResult,
-  createPipelineFromConfig,
   formatPipelineResult,
 } from './pairPipeline.js';
-import type { DefaultRolesConfig, ProjectAgentConfig, PipelineStage } from './types.js';
+import type { DefaultRolesConfig, ProjectAgentConfig } from './types.js';
+import * as planner from './planner.js';
+import * as execution from './runnerExecution.js';
+import { reportToDiscord, fetchLinearTasks } from './runnerExecution.js';
+
+// Re-export integration setters (used by service.ts)
+export { setDiscordReporter, setLinearFetcher } from './runnerExecution.js';
 
 // ============================================
 // Types
@@ -85,6 +87,15 @@ export interface AutonomousConfig {
 
   /** 프로젝트별 에이전트 설정 */
   projectAgents?: ProjectAgentConfig[];
+
+  /** 작업 분해 활성화 */
+  enableDecomposition?: boolean;
+
+  /** 작업 분해 기준 시간 (분, 기본 30분) */
+  decompositionThresholdMinutes?: number;
+
+  /** Planner 모델 */
+  plannerModel?: string;
 }
 
 export interface RunnerState {
@@ -96,75 +107,6 @@ export interface RunnerState {
   consecutiveErrors: number;
 }
 
-// ============================================
-// Discord Reporter
-// ============================================
-
-type DiscordSendFn = (content: string | { embeds: EmbedBuilder[] }) => Promise<void>;
-
-let discordSend: DiscordSendFn | null = null;
-
-/**
- * Discord 보고 함수 등록
- */
-export function setDiscordReporter(sendFn: DiscordSendFn): void {
-  discordSend = sendFn;
-  console.log('[AutonomousRunner] Discord reporter registered');
-}
-
-/**
- * Discord로 메시지 보내기
- */
-async function reportToDiscord(message: string | EmbedBuilder): Promise<void> {
-  if (!discordSend) {
-    console.log('[AutonomousRunner] No Discord reporter, logging instead:',
-      typeof message === 'string' ? message : message.data.title);
-    return;
-  }
-
-  try {
-    if (typeof message === 'string') {
-      await discordSend(message);
-    } else {
-      await discordSend({ embeds: [message] });
-    }
-  } catch (error) {
-    console.error('[AutonomousRunner] Discord report failed:', error);
-  }
-}
-
-// ============================================
-// Linear Integration
-// ============================================
-
-type LinearFetchFn = () => Promise<TaskItem[]>;
-
-let linearFetch: LinearFetchFn | null = null;
-
-/**
- * Linear 이슈 조회 함수 등록
- */
-export function setLinearFetcher(fetchFn: LinearFetchFn): void {
-  linearFetch = fetchFn;
-  console.log('[AutonomousRunner] Linear fetcher registered');
-}
-
-/**
- * Linear에서 할당된 이슈 가져오기
- */
-async function fetchLinearTasks(): Promise<TaskItem[]> {
-  if (!linearFetch) {
-    console.log('[AutonomousRunner] No Linear fetcher registered');
-    return [];
-  }
-
-  try {
-    return await linearFetch();
-  } catch (error) {
-    console.error('[AutonomousRunner] Linear fetch failed:', error);
-    return [];
-  }
-}
 
 // ============================================
 // Autonomous Runner
@@ -229,10 +171,14 @@ export class AutonomousRunner {
           console.error(`[Scheduler] Failed to update issue state:`, err);
         }
 
-        await saveCognitiveMemory('strategy',
-          `Pipeline execution succeeded: "${task.title}"`,
-          { confidence: 0.9, derivedFrom: task.issueId }
-        );
+        try {
+          await saveCognitiveMemory('strategy',
+            `Pipeline execution succeeded: "${task.title}"`,
+            { confidence: 0.9, derivedFrom: task.issueId }
+          );
+        } catch (memErr) {
+          console.warn(`[Scheduler] Memory save failed (non-critical):`, memErr);
+        }
       }
     });
 
@@ -426,7 +372,7 @@ export class AutonomousRunner {
   }
 
   /**
-   * 병렬 처리 Heartbeat
+   * 병렬 처리 Heartbeat (DecisionEngine.heartbeatMultiple 사용)
    */
   private async heartbeatParallel(tasks: TaskItem[]): Promise<void> {
     console.log(`[AutonomousRunner] Parallel heartbeat: ${tasks.length} tasks`);
@@ -437,12 +383,24 @@ export class AutonomousRunner {
       return;
     }
 
-    // 우선순위순 정렬 (1=Urgent가 가장 높음)
-    const sortedTasks = [...tasks].sort((a, b) => a.priority - b.priority);
+    // 이미 실행 중인 프로젝트 목록 가져오기
+    const busyProjects = this.scheduler.getBusyProjects();
 
-    // 실행 가능한 태스크들을 큐에 추가
+    // DecisionEngine에서 검증된 태스크 목록 가져오기
+    const decision = await this.engine.heartbeatMultiple(
+      tasks,
+      availableSlots,
+      busyProjects
+    );
+
+    if (decision.action === 'skip' || decision.action === 'defer') {
+      console.log(`[AutonomousRunner] Decision: ${decision.action} - ${decision.reason}`);
+      return;
+    }
+
+    // 검증된 태스크들을 큐에 추가
     let enqueuedCount = 0;
-    for (const task of sortedTasks) {
+    for (const { task } of decision.tasks) {
       // 이미 큐에 있거나 실행 중이면 스킵
       if (this.scheduler.isTaskQueued(task.id) || this.scheduler.isTaskRunning(task.id)) {
         continue;
@@ -450,7 +408,13 @@ export class AutonomousRunner {
 
       const projectPath = await this.resolveProjectPath(task);
 
-      // 프로젝트가 이미 작업 중이면 스킵
+      // 프로젝트 경로 매핑 실패 시 스킵
+      if (!projectPath) {
+        console.error(`[AutonomousRunner] Skipping task "${task.title}" - project path not resolved`);
+        continue;
+      }
+
+      // 프로젝트가 이미 작업 중이면 스킵 (이중 체크)
       if (this.scheduler.isProjectBusy(projectPath)) {
         console.log(`[AutonomousRunner] Project busy: ${projectPath}`);
         continue;
@@ -458,14 +422,9 @@ export class AutonomousRunner {
 
       this.scheduler.enqueue(task, projectPath);
       enqueuedCount++;
-
-      // 사용 가능한 슬롯만큼만 추가
-      if (enqueuedCount >= availableSlots) {
-        break;
-      }
     }
 
-    console.log(`[AutonomousRunner] Enqueued ${enqueuedCount} tasks`);
+    console.log(`[AutonomousRunner] Enqueued ${enqueuedCount} tasks (skipped: ${decision.skippedCount})`);
 
     // 태스크 실행
     await this.runAvailableTasks();
@@ -561,7 +520,33 @@ export class AutonomousRunner {
 
     // 프로젝트 경로 자동 탐색
     const projectPath = await this.resolveProjectPath(task);
+
+    // 프로젝트 경로 매핑 실패 시 에러
+    if (!projectPath) {
+      const errorMsg = `Failed to resolve project path for "${task.linearProject?.name || task.title}"`;
+      console.error(`[AutonomousRunner] ${errorMsg}`);
+      await reportToDiscord(`❌ **프로젝트 매핑 실패**: ${task.title}\n프로젝트: ${task.linearProject?.name || 'unknown'}`);
+      return;
+    }
+
     console.log(`[AutonomousRunner] projectPath: ${projectPath}`);
+
+    // 작업 분해 체크 (enableDecomposition 설정 시)
+    if (this.config.enableDecomposition) {
+      const threshold = this.config.decompositionThresholdMinutes ?? 30;
+      const needsDecomp = planner.needsDecomposition(task, threshold);
+
+      if (needsDecomp) {
+        console.log(`[AutonomousRunner] Task "${task.title}" needs decomposition (>${threshold}min estimated)`);
+        const decomposed = await this.decomposeTask(task, projectPath, threshold);
+        if (decomposed) {
+          // 분해 성공 - sub-tasks가 큐에 추가됨, 원본 태스크는 실행하지 않음
+          return;
+        }
+        // 분해 실패 - 원본 태스크 그대로 실행
+        console.log('[AutonomousRunner] Decomposition failed, executing original task');
+      }
+    }
 
     // 병렬 처리 모드면 스케줄러 사용
     if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1) {
@@ -586,10 +571,14 @@ export class AutonomousRunner {
           });
           console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Done`);
 
-          await saveCognitiveMemory('strategy',
-            `Pair execution succeeded: "${task.title}"`,
-            { confidence: 0.9, derivedFrom: task.issueId }
-          );
+          try {
+            await saveCognitiveMemory('strategy',
+              `Pair execution succeeded: "${task.title}"`,
+              { confidence: 0.9, derivedFrom: task.issueId }
+            );
+          } catch (memErr) {
+            console.warn(`[AutonomousRunner] Memory save failed (non-critical):`, memErr);
+          }
         } else if (result.finalStatus === 'rejected') {
           // 리뷰 거부 시 Blocked로 변경
           await linear.logBlocked(task.issueId, 'autonomous-runner',
@@ -604,190 +593,40 @@ export class AutonomousRunner {
     }
   }
 
-  /**
-   * 프로젝트 경로 탐색
-   */
-  private async resolveProjectPath(task: TaskItem): Promise<string> {
-    if (task.linearProject?.id && task.linearProject?.name) {
-      const mappedPath = await projectMapper.mapLinearProject(
-        task.linearProject.id,
-        task.linearProject.name,
-        this.config.allowedProjects
-      );
-      return mappedPath || this.config.allowedProjects[0];
-    }
+  // ============================================
+  // Delegation to runnerExecution.ts
+  // ============================================
 
-    console.warn('[AutonomousRunner] No Linear project info, using default path');
-    return this.config.allowedProjects[0];
+  private getExecCtx(): execution.ExecutionContext {
+    return {
+      allowedProjects: this.config.allowedProjects,
+      plannerModel: this.config.plannerModel,
+      pairMaxAttempts: this.config.pairMaxAttempts,
+      enableDecomposition: this.config.enableDecomposition,
+      decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
+      getRolesForProject: (p) => this.getRolesForProject(p),
+      reportToDiscord,
+    };
   }
 
-  /**
-   * PairPipeline으로 태스크 실행
-   */
+  private async resolveProjectPath(task: TaskItem): Promise<string | null> {
+    return execution.resolveProjectPath(this.getExecCtx(), task);
+  }
+
+  private async decomposeTask(task: TaskItem, projectPath: string, targetMinutes: number): Promise<boolean> {
+    return execution.decomposeTask(this.getExecCtx(), task, projectPath, targetMinutes);
+  }
+
   private async executePipeline(task: TaskItem, projectPath: string): Promise<PipelineResult> {
-    console.log(`[AutonomousRunner] executePipeline: ${task.title}`);
-
-    const roles = this.getRolesForProject(projectPath);
-    const pipeline = createPipelineFromConfig(roles, this.config.pairMaxAttempts ?? 3);
-
-    // 파이프라인 이벤트 핸들링
-    pipeline.on('stage:start', ({ stage }) => {
-      console.log(`[Pipeline] Stage started: ${stage}`);
-    });
-
-    pipeline.on('stage:complete', async ({ stage, result }) => {
-      console.log(`[Pipeline] Stage completed: ${stage}, success=${result.success}`);
-      await this.reportStageResult(stage, result);
-    });
-
-    pipeline.on('revision:start', ({ stage }) => {
-      void reportToDiscord(`🔄 수정이 필요합니다. ${stage} 피드백으로 Worker가 재작업합니다...`);
-    });
-
-    // 시작 보고
-    const stages = this.getEnabledStages(roles);
-    const startEmbed = new EmbedBuilder()
-      .setTitle('🚀 파이프라인 시작')
-      .setColor(0x00AE86)
-      .addFields(
-        { name: '작업', value: task.title, inline: false },
-        { name: 'Project', value: projectPath.split('/').slice(-2).join('/'), inline: true },
-        { name: 'Stages', value: stages.join(' → '), inline: true },
-      )
-      .setTimestamp();
-
-    await reportToDiscord(startEmbed);
-
-    // Linear 이슈 상태를 In Progress로 변경
-    if (task.issueId) {
-      await linear.updateIssueState(task.issueId, 'In Progress');
-    }
-
-    // 파이프라인 실행
-    return pipeline.run(task, projectPath);
+    return execution.executePipeline(this.getExecCtx(), task, projectPath);
   }
 
-  /**
-   * 활성화된 스테이지 목록 가져오기
-   */
-  private getEnabledStages(roles?: DefaultRolesConfig): PipelineStage[] {
-    const stages: PipelineStage[] = [];
-
-    if (roles?.worker?.enabled !== false) stages.push('worker');
-    if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
-    if (roles?.tester?.enabled) stages.push('tester');
-    if (roles?.documenter?.enabled) stages.push('documenter');
-
-    return stages;
-  }
-
-  /**
-   * 스테이지 결과 보고
-   */
-  private async reportStageResult(stage: PipelineStage, result: any): Promise<void> {
-    switch (stage) {
-      case 'worker':
-        await reportToDiscord(workerAgent.formatWorkReport(result.result));
-        break;
-      case 'reviewer':
-        await reportToDiscord(reviewerAgent.formatReviewFeedback(result.result));
-        break;
-      case 'tester':
-        const { formatTestReport } = await import('./tester.js');
-        await reportToDiscord(formatTestReport(result.result));
-        break;
-      case 'documenter':
-        const { formatDocReport } = await import('./documenter.js');
-        await reportToDiscord(formatDocReport(result.result));
-        break;
-    }
-  }
-
-  /**
-   * 승인 요청
-   */
   private async requestApproval(decision: DecisionResult): Promise<void> {
-    if (!decision.task) return;
-
-    const projectInfo = decision.task.linearProject?.name
-      ? `📁 **${decision.task.linearProject.name}**\n`
-      : '';
-    const issueRef = decision.task.issueIdentifier || decision.task.issueId || 'N/A';
-
-    const embed = new EmbedBuilder()
-      .setTitle('⏳ 승인 대기')
-      .setColor(0xFFA500)
-      .setDescription(`다음 작업을 실행할까요?\n\n${projectInfo}**${decision.task.title}**`)
-      .addFields(
-        { name: 'Issue', value: issueRef, inline: true },
-        { name: 'Priority', value: `P${decision.task.priority}`, inline: true },
-        { name: '사유', value: decision.reason, inline: false },
-      )
-      .setFooter({ text: '!approve 또는 !reject 로 응답' })
-      .setTimestamp();
-
-    await reportToDiscord(embed);
-
-    // 파싱 결과도 같이 표시
-    if (decision.task.issueId) {
-      const parsed = await loadParsedTask(decision.task.issueId);
-      if (parsed) {
-        const summary = formatParsedTaskSummary(parsed);
-        await reportToDiscord(`\`\`\`\n${summary.slice(0, 1800)}\n\`\`\``);
-      }
-    }
+    return execution.requestApproval(decision, reportToDiscord);
   }
 
-  /**
-   * 실행 결과 보고
-   */
   private async reportExecutionResult(task: TaskItem, result: ExecutorResult): Promise<void> {
-    const duration = (result.duration / 1000).toFixed(1);
-    const stepCount = Object.keys(result.execution.stepResults).length;
-    const completedCount = Object.values(result.execution.stepResults)
-      .filter(r => r.status === 'completed').length;
-
-    const projectPrefix = task.linearProject?.name ? `[${task.linearProject.name}] ` : '';
-    const taskDisplay = `${projectPrefix}${task.title}`;
-
-    if (result.success) {
-      const embed = new EmbedBuilder()
-        .setTitle('✅ 작업 완료')
-        .setColor(0x00FF00)
-        .addFields(
-          { name: '작업', value: taskDisplay, inline: false },
-          { name: '소요 시간', value: `${duration}s`, inline: true },
-          { name: '완료 Step', value: `${completedCount}/${stepCount}`, inline: true },
-        )
-        .setTimestamp();
-
-      await reportToDiscord(embed);
-
-      // Memory에 성공 기록
-      await saveCognitiveMemory('strategy',
-        `Autonomous execution succeeded: "${task.title}"`,
-        { confidence: 0.8, derivedFrom: task.issueId }
-      );
-
-    } else {
-      const embed = new EmbedBuilder()
-        .setTitle('❌ 작업 실패')
-        .setColor(0xFF0000)
-        .addFields(
-          { name: '작업', value: taskDisplay, inline: false },
-          { name: '실패 Step', value: result.failedStep || 'Unknown', inline: true },
-          { name: 'Rollback', value: result.rollbackPerformed ? '✅' : '❌', inline: true },
-        )
-        .setTimestamp();
-
-      await reportToDiscord(embed);
-
-      // 상세 에러 정보
-      const failedStepResult = result.execution.stepResults[result.failedStep || ''];
-      if (failedStepResult?.error) {
-        await reportToDiscord(`\`\`\`\n${failedStepResult.error.slice(0, 1500)}\n\`\`\``);
-      }
-    }
+    return execution.reportExecutionResult(task, result, reportToDiscord);
   }
 
   /**

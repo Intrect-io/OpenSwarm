@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",
     "test:watch": "node --experimental-vm-modules node_modules/vitest/vitest.mjs",
+    "chat": "node --env-file=.env --import=tsx src/chat.ts",
     "ci": "npm run lint && npm run typecheck && npm run build"
   },
   "dependencies": {

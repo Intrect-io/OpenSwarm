@@ -15,6 +15,7 @@ import * as workerAgent from './worker.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
 import * as documenterAgent from './documenter.js';
+import { StuckDetector, createStuckDetector } from './stuckDetector.js';
 
 // ============================================
 // Types
@@ -92,6 +93,7 @@ export type PipelineEventType =
 
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
+  private stuckDetector: StuckDetector;
 
   constructor(config: PipelineConfig) {
     super();
@@ -101,6 +103,11 @@ export class PairPipeline extends EventEmitter {
       maxIterations: 3,
       ...config,
     };
+    // Stuck detector 초기화
+    this.stuckDetector = createStuckDetector({
+      sameErrorRepeat: 2,
+      revisionLoop: 4,
+    });
   }
 
   // ============================================
@@ -117,6 +124,9 @@ export class PairPipeline extends EventEmitter {
     const startTime = Date.now();
     const stages: StageResult[] = [];
     const maxIterations = this.config.maxIterations ?? 3;
+
+    // Stuck detector 리셋 (새 파이프라인 실행)
+    this.stuckDetector.reset();
 
     // 세션 생성
     const session = agentPair.createPairSession({
@@ -354,6 +364,21 @@ export class PairPipeline extends EventEmitter {
 
     while (context.currentIteration < maxIterations) {
       context.currentIteration++;
+
+      // Stuck 감지 체크 (iteration 시작 전)
+      const stuckCheck = this.stuckDetector.check();
+      if (stuckCheck.isStuck) {
+        console.error(`[Pipeline] STUCK DETECTED: ${stuckCheck.reason}`);
+        console.error(`[Pipeline] Suggestion: ${stuckCheck.suggestion}`);
+        this.emit('stuck', {
+          reason: stuckCheck.reason,
+          suggestion: stuckCheck.suggestion,
+          context,
+        });
+        agentPair.updateSessionStatus(context.session.id, 'failed');
+        return { success: false };
+      }
+
       this.emit('iteration:start', {
         iteration: context.currentIteration,
         maxIterations,
@@ -366,6 +391,15 @@ export class PairPipeline extends EventEmitter {
       agentPair.updateSessionStatus(context.session.id, 'working');
       const workerResult = await this.runStage('worker', context);
       stages.push(workerResult);
+
+      // Stuck detector에 Worker 결과 기록
+      this.stuckDetector.addEntry({
+        stage: 'worker',
+        success: workerResult.success,
+        output: (workerResult.result as WorkerResult).summary,
+        error: (workerResult.result as WorkerResult).error,
+        timestamp: Date.now(),
+      });
 
       if (!workerResult.success) {
         console.log('[Pipeline] Worker failed, retrying...');
@@ -384,6 +418,15 @@ export class PairPipeline extends EventEmitter {
         stages.push(reviewerResult);
 
         const decision = (reviewerResult.result as ReviewResult).decision;
+
+        // Stuck detector에 Reviewer 결과 기록
+        this.stuckDetector.addEntry({
+          stage: 'reviewer',
+          success: reviewerResult.success,
+          decision: decision,
+          output: (reviewerResult.result as ReviewResult).feedback,
+          timestamp: Date.now(),
+        });
 
         if (decision === 'reject') {
           // reject = 즉시 종료
