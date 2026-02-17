@@ -39,11 +39,21 @@ export interface ReviewerOptions {
  * Reviewer 프롬프트 생성
  */
 function buildReviewerPrompt(options: ReviewerOptions): string {
+  const files = options.workerResult.filesChanged;
+  const filesSummary = files.length <= 20
+    ? (files.join(', ') || '(none)')
+    : `${files.slice(0, 20).join(', ')} (+${files.length - 20} more)`;
+
+  const cmds = options.workerResult.commands;
+  const cmdsSummary = cmds.length <= 10
+    ? (cmds.join(', ') || '(none)')
+    : `${cmds.slice(0, 10).join(', ')} (+${cmds.length - 10} more)`;
+
   const workerReport = `
 - **Success:** ${options.workerResult.success}
 - **Summary:** ${options.workerResult.summary}
-- **Files Changed:** ${options.workerResult.filesChanged.join(', ') || '(none)'}
-- **Commands:** ${options.workerResult.commands.join(', ') || '(none)'}
+- **Files Changed (${files.length}):** ${filesSummary}
+- **Commands:** ${cmdsSummary}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
 
 ### Worker Output (excerpt)

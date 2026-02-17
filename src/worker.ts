@@ -407,7 +407,11 @@ export function formatWorkReport(result: WorkerResult): string {
   lines.push(`**요약:** ${result.summary}`);
 
   if (result.filesChanged.length > 0) {
-    lines.push(`**변경 파일:** ${result.filesChanged.join(', ')}`);
+    const files = result.filesChanged;
+    const fileList = files.length <= 15
+      ? files.join(', ')
+      : `${files.slice(0, 15).join(', ')} (+${files.length - 15}개 더)`;
+    lines.push(`**변경 파일 (${files.length}):** ${fileList}`);
   }
 
   if (result.commands.length > 0) {
