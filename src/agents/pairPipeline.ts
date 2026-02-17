@@ -10,6 +10,7 @@ import type { TesterResult } from './tester.js';
 import type { DocumenterResult } from './documenter.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
 
+import { broadcastEvent } from '../core/eventHub.js';
 import * as agentPair from './agentPair.js';
 import * as workerAgent from './worker.js';
 import * as reviewerAgent from './reviewer.js';
@@ -226,13 +227,17 @@ export class PairPipeline extends EventEmitter {
   ): Promise<StageResult> {
     const startTime = Date.now();
     this.emit('stage:start', { stage, context });
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'start' } });
 
     try {
       let result: WorkerResult | ReviewResult | TesterResult | DocumenterResult;
 
       switch (stage) {
-        case 'worker':
+        case 'worker': {
           agentPair.updateSessionStatus(context.session.id, 'working');
+          const taskId = context.task.id;
+          const onLog = (line: string) =>
+            broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line } });
           result = await workerAgent.runWorker({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
@@ -244,10 +249,12 @@ export class PairPipeline extends EventEmitter {
             model: this.config.roles?.worker?.model,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
+            onLog,
           });
           agentPair.saveWorkerResult(context.session.id, result as WorkerResult);
           context.workerResult = result as WorkerResult;
           break;
+        }
 
         case 'reviewer':
           agentPair.updateSessionStatus(context.session.id, 'reviewing');
@@ -308,6 +315,7 @@ export class PairPipeline extends EventEmitter {
       };
 
       this.emit('stage:complete', { stage, result: stageResult, context });
+      broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'complete' } });
       return stageResult;
 
     } catch (error) {
@@ -322,6 +330,7 @@ export class PairPipeline extends EventEmitter {
       };
 
       this.emit('stage:fail', { stage, result: stageResult, context, error });
+      broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'fail' } });
       return stageResult;
     }
   }
@@ -399,6 +408,7 @@ export class PairPipeline extends EventEmitter {
         maxIterations,
         context,
       });
+      broadcastEvent({ type: 'pipeline:iteration', data: { taskId: context.task.id, iteration: context.currentIteration } });
 
       console.log(`[Pipeline] Iteration ${context.currentIteration}/${maxIterations}`);
 

@@ -21,6 +21,7 @@ export interface PlannerOptions {
   timeoutMs?: number;
   model?: string;
   targetMinutes?: number;  // Target time per sub-task (default 25 min)
+  onLog?: (line: string) => void;  // Stream planner stdout to dashboard
 }
 
 export interface SubTask {
@@ -73,7 +74,8 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
       promptFile,
       cwd,
       options.timeoutMs ?? 600000,  // 10 min timeout (CLI startup + analysis time)
-      options.model ?? 'claude-sonnet-4-20250514'
+      options.model ?? 'claude-sonnet-4-20250514',
+      options.onLog
     );
 
     return parsePlannerOutput(output, options.taskTitle);
@@ -102,25 +104,26 @@ function runClaudeCli(
   promptFile: string,
   cwd: string,
   timeoutMs: number,
-  model: string
+  model: string,
+  onLog?: (line: string) => void
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Use stdbuf -oL to force line-buffered stdout on the pipe
+    // (Claude CLI buffers stdout when not attached to a TTY, causing no real-time output)
     const args = [
-      '-p', `$(cat ${promptFile})`,
-      '--output-format', 'json',
-      '--permission-mode', 'bypassPermissions',
-      '--model', model,
-      '--max-turns', '3',  // Limit exploration: analysis only
+      '-c',
+      `stdbuf -oL claude -p "$(cat ${promptFile})" --output-format stream-json --permission-mode bypassPermissions --model ${model} --max-turns 3`,
     ];
 
-    const proc = spawn('claude', args, {
+    const proc = spawn('/bin/sh', args, {
       cwd,
-      shell: true,
+      shell: false,
       env: { ...process.env, FORCE_COLOR: '0' },
     });
 
     let stdout = '';
     let stderr = '';
+    let lineBuffer = '';
 
     const timer = setTimeout(() => {
       proc.kill('SIGTERM');
@@ -131,7 +134,35 @@ function runClaudeCli(
       reject(new Error(`Planner timeout after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stdout.on('data', (data) => {
+      const chunk = data.toString();
+      stdout += chunk;
+      // Parse stream-json lines and extract human-readable text for dashboard
+      if (onLog) {
+        lineBuffer += chunk;
+        const lines = lineBuffer.split('\n');
+        lineBuffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as Record<string, unknown>;
+            // Extract text from assistant streaming events
+            if (event.type === 'assistant') {
+              const msg = event.message as Record<string, unknown> | undefined;
+              const content = msg?.content;
+              if (Array.isArray(content)) {
+                for (const block of content as Array<Record<string, unknown>>) {
+                  if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+                    // Split long text into lines for readability
+                    block.text.split('\n').filter((l: string) => l.trim()).forEach((l: string) => onLog(l));
+                  }
+                }
+              }
+            }
+          } catch { /* incomplete or non-JSON line */ }
+        }
+      }
+    });
     proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
     proc.on('close', (code) => {
@@ -151,54 +182,63 @@ function runClaudeCli(
 }
 
 /**
- * Parse Planner output
+ * Parse Planner output (supports stream-json and legacy json format)
  */
 function parsePlannerOutput(output: string, originalTitle: string): PlannerResult {
   try {
-    // Extract result from Claude JSON array
+    // Try stream-json format: find the result line (newline-delimited JSON events)
+    const lines = output.split('\n').filter(l => l.trim());
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        if (event.type === 'result' && typeof event.result === 'string') {
+          return parsePlanResult(event.result as string, originalTitle);
+        }
+      } catch { /* not a complete JSON line */ }
+    }
+
+    // Fallback: try legacy --output-format json (array format)
     const match = output.match(/\[[\s\S]*\]/);
-    if (!match) {
-      return extractFromText(output, originalTitle);
-    }
-
-    const arr = JSON.parse(match[0]);
-    let resultText = '';
-
-    for (const item of arr) {
-      if (item.type === 'result' && item.result) {
-        resultText = item.result;
-        break;
+    if (match) {
+      const arr = JSON.parse(match[0]) as Array<Record<string, unknown>>;
+      for (const item of arr) {
+        if (item.type === 'result' && typeof item.result === 'string') {
+          return parsePlanResult(item.result as string, originalTitle);
+        }
       }
     }
 
-    if (!resultText) {
-      return extractFromText(output, originalTitle);
-    }
-
-    // Extract JSON block
-    const jsonMatch = resultText.match(/```json\s*([\s\S]*?)\s*```/);
-    if (!jsonMatch) {
-      // Find JSON object directly
-      const objMatch = resultText.match(/\{\s*"needsDecomposition"/);
-      if (objMatch) {
-        return parseDirectJson(resultText, objMatch.index!, originalTitle);
-      }
-      return extractFromText(resultText, originalTitle);
-    }
-
-    const parsed = JSON.parse(jsonMatch[1]);
-    return {
-      success: true,
-      originalIssue: originalTitle,
-      needsDecomposition: Boolean(parsed.needsDecomposition),
-      reason: parsed.reason,
-      subTasks: Array.isArray(parsed.subTasks) ? parsed.subTasks : [],
-      totalEstimatedMinutes: parsed.totalEstimatedMinutes || 0,
-    };
+    return extractFromText(output, originalTitle);
   } catch (error) {
     console.error('[Planner] Parse error:', error);
     return extractFromText(output, originalTitle);
   }
+}
+
+/**
+ * Parse the planner result text (extracted from Claude output)
+ */
+function parsePlanResult(resultText: string, originalTitle: string): PlannerResult {
+  // Extract JSON block
+  const jsonMatch = resultText.match(/```json\s*([\s\S]*?)\s*```/);
+  if (!jsonMatch) {
+    // Find JSON object directly
+    const objMatch = resultText.match(/\{\s*"needsDecomposition"/);
+    if (objMatch) {
+      return parseDirectJson(resultText, objMatch.index!, originalTitle);
+    }
+    return extractFromText(resultText, originalTitle);
+  }
+
+  const parsed = JSON.parse(jsonMatch[1]) as Record<string, unknown>;
+  return {
+    success: true,
+    originalIssue: originalTitle,
+    needsDecomposition: Boolean(parsed.needsDecomposition),
+    reason: parsed.reason as string | undefined,
+    subTasks: Array.isArray(parsed.subTasks) ? parsed.subTasks as SubTask[] : [],
+    totalEstimatedMinutes: (parsed.totalEstimatedMinutes as number) || 0,
+  };
 }
 
 /**

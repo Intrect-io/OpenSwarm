@@ -17,6 +17,7 @@ import * as projectMapper from '../support/projectMapper.js';
 import * as linear from '../linear/index.js';
 import * as planner from '../support/planner.js';
 import { t } from '../locale/index.js';
+import { broadcastEvent } from '../core/eventHub.js';
 
 // ============================================
 // Discord Reporter
@@ -168,26 +169,43 @@ export async function decomposeTask(
 ): Promise<boolean> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
+  const taskId = task.issueId || task.id;
+  broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'start' } });
+
   await ctx.reportToDiscord(t('runner.decomposition.starting', {
     title: task.title,
     estimated: String(planner.estimateTaskDuration(task)),
     threshold: String(targetMinutes),
   }));
 
-  const result = await planner.runPlanner({
-    taskTitle: task.title,
-    taskDescription: task.description || '',
-    projectPath,
-    projectName: task.linearProject?.name,
-    targetMinutes,
-    model: ctx.plannerModel ?? 'claude-sonnet-4-20250514',
-    timeoutMs: ctx.plannerTimeoutMs ?? 600000,
-  });
+  // Periodic progress log while planner runs (fallback if stdout isn't streaming)
+  let elapsed = 0;
+  const progressTimer = setInterval(() => {
+    elapsed += 30;
+    broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `⏱ Planner running... ${elapsed}s` } });
+  }, 30000);
+
+  let result: Awaited<ReturnType<typeof planner.runPlanner>>;
+  try {
+    result = await planner.runPlanner({
+      taskTitle: task.title,
+      taskDescription: task.description || '',
+      projectPath,
+      projectName: task.linearProject?.name,
+      targetMinutes,
+      model: ctx.plannerModel ?? 'claude-sonnet-4-20250514',
+      timeoutMs: ctx.plannerTimeoutMs ?? 600000,
+      onLog: (line: string) => broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line } }),
+    });
+  } finally {
+    clearInterval(progressTimer);
+  }
 
   await ctx.reportToDiscord(planner.formatPlannerResult(result));
 
   if (!result.success) {
     console.error(`[AutonomousRunner] Planner failed: ${result.error}`);
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail' } });
     return false;
   }
 
@@ -239,6 +257,7 @@ export async function decomposeTask(
 
   if (createdSubIssues.length === 0) {
     console.error('[AutonomousRunner] No sub-issues created');
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail' } });
     return false;
   }
 
@@ -259,6 +278,11 @@ export async function decomposeTask(
     totalMinutes: String(result.totalEstimatedMinutes),
   }));
 
+  broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'complete' } });
+  // Log each sub-issue as a log line for the dashboard
+  for (const s of createdSubIssues) {
+    broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `↳ ${s.identifier}: ${s.title}` } });
+  }
   console.log(`[AutonomousRunner] Decomposition complete: ${createdSubIssues.length} sub-issues created`);
   return true;
 }

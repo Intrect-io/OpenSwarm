@@ -33,6 +33,7 @@ export interface WorkerOptions {
   model?: string;              // Claude model (default: claude-sonnet-4-20250514)
   issueIdentifier?: string;    // Linear issue ID (e.g., INT-123)
   projectName?: string;        // Linear project name
+  onLog?: (line: string) => void;  // Callback for stdout streaming
 }
 
 // ============================================
@@ -76,7 +77,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     await fs.writeFile(promptFile, prompt);
 
     // Run Claude CLI
-    const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
+    const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model, options.onLog);
 
     // Parse result (from LLM output)
     const parsedResult = parseWorkerOutput(output);
@@ -126,7 +127,8 @@ async function runClaudeCli(
   promptFile: string,
   cwd: string,
   timeoutMs: number = 300000, // 5 min default
-  model?: string
+  model?: string,
+  onLog?: (line: string) => void
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const modelFlag = model ? ` --model ${model}` : '';
@@ -142,8 +144,12 @@ async function runClaudeCli(
     let stdout = '';
     let stderr = '';
 
-    proc.stdout?.on('data', (data) => {
-      stdout += data.toString();
+    proc.stdout?.on('data', (data: Buffer) => {
+      const text = data.toString();
+      stdout += text;
+      if (onLog) {
+        text.split('\n').filter(l => l.trim()).forEach(l => onLog(l));
+      }
     });
 
     proc.stderr?.on('data', (data) => {

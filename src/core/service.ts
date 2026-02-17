@@ -131,6 +131,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
         title: issue.title,
         description: issue.description,
         priority: issue.priority,
+        state: issue.state,
         project: issue.project ? {
           id: issue.project.id,
           name: issue.project.name,
@@ -145,7 +146,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     });
     console.log('[Service] Discord reporter registered');
 
-    await autonomous.startAutonomous({
+    const runnerInstance = await autonomous.startAutonomous({
       linearTeamId: config.linearTeamId,
       allowedProjects: config.autonomous.allowedProjects,
       heartbeatSchedule: config.autonomous.schedule,
@@ -169,6 +170,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
       plannerModel: config.autonomous.decomposition?.plannerModel,
       plannerTimeoutMs: config.autonomous.decomposition?.plannerTimeoutMs,
     });
+    web.setWebRunner(runnerInstance);
     const modelInfo = config.autonomous.models
       ? `, Worker: ${config.autonomous.models.worker || 'default'}, Reviewer: ${config.autonomous.models.reviewer || 'default'}`
       : '';

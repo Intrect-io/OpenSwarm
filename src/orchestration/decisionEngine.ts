@@ -47,6 +47,7 @@ export interface TaskItem {
   linearProject?: LinearProject;  // Linear project info
   issueId?: string;        // Linear issue ID
   issueIdentifier?: string; // Linear issue identifier (e.g., LIN-123)
+  linearState?: string;    // Linear issue state (e.g., 'Todo', 'Backlog', 'In Progress')
   workflowId?: string;     // Mapped workflow
   createdAt: number;
   dueDate?: number;
@@ -679,6 +680,7 @@ export function linearIssueToTask(issue: {
   description?: string;
   priority: number;
   dueDate?: string;
+  state?: string;
   project?: { id: string; name: string };
 }): TaskItem {
   return {
@@ -689,6 +691,7 @@ export function linearIssueToTask(issue: {
     priority: issue.priority || 3,
     issueId: issue.id,
     issueIdentifier: issue.identifier,
+    linearState: issue.state,
     linearProject: issue.project ? {
       id: issue.project.id,
       name: issue.project.name,

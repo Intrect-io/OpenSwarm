@@ -186,7 +186,8 @@ export async function getMyIssues(
 
   const filter: any = {
     team: { id: { eq: teamId } },
-    state: { name: { in: ['Todo', 'In Progress', 'Started', 'In Review'] } },
+    // Fetch Todo + Backlog: Todo = ready to execute, Backlog = display only (not auto-executed)
+    state: { name: { in: ['Todo', 'Backlog'] } },
   };
 
   // Add label filter if agentLabel is provided
@@ -720,6 +721,13 @@ export async function markAsDecomposed(
 _Planner 에이전트에 의해 자동 분해됨_`;
 
   await addComment(issueId, body);
+
+  // Move parent issue to Done — sub-issues represent the actual work
+  try {
+    await updateIssueState(issueId, 'Done');
+  } catch (err) {
+    console.warn('[Linear] Failed to mark decomposed parent as Done:', err);
+  }
 
   // Add label (if decomposed label exists)
   try {
