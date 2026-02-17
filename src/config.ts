@@ -20,8 +20,8 @@ const CONFIG_PATHS = [
   join(process.cwd(), 'config.json'),
 ];
 
-const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30분
-const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5분
+const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 // ============================================
 // Zod Schemas
@@ -66,38 +66,38 @@ const TimeWindowConfigSchema = z.object({
 }).optional();
 
 const PairModeConfigSchema = z.object({
-  /** 페어 모드 활성화 */
+  /** Enable pair mode */
   enabled: z.boolean().default(false),
-  /** Worker 최대 시도 횟수 */
+  /** Worker max attempts */
   maxAttempts: z.number().min(1).max(10).default(3),
-  /** Worker 타임아웃 (ms) */
-  workerTimeoutMs: z.number().positive().default(300000), // 5분
-  /** Reviewer 타임아웃 (ms) */
-  reviewerTimeoutMs: z.number().positive().default(180000), // 3분
-  /** Webhook URL (완료/실패 시 알림) */
+  /** Worker timeout (ms) */
+  workerTimeoutMs: z.number().positive().default(300000), // 5 min
+  /** Reviewer timeout (ms) */
+  reviewerTimeoutMs: z.number().positive().default(180000), // 3 min
+  /** Webhook URL (notification on complete/failure) */
   webhookUrl: z.string().url().optional(),
-  /** 자동 Linear 상태 업데이트 */
+  /** Auto Linear status update */
   autoLinearUpdate: z.boolean().default(true),
 }).optional();
 
 const ModelConfigSchema = z.object({
-  /** Worker 에이전트 모델 */
+  /** Worker agent model */
   worker: z.string().default('claude-sonnet-4-20250514'),
-  /** Reviewer 에이전트 모델 */
+  /** Reviewer agent model */
   reviewer: z.string().default('claude-sonnet-4-20250514'),
 }).optional();
 
-/** 역할별 설정 스키마 */
+/** Per-role configuration schema */
 const RoleConfigSchema = z.object({
-  /** 역할 활성화 여부 */
+  /** Whether role is enabled */
   enabled: z.boolean().default(true),
-  /** 모델 ID */
+  /** Model ID */
   model: z.string(),
-  /** 타임아웃 (ms), 0 = 무제한 */
+  /** Timeout (ms), 0 = unlimited */
   timeoutMs: z.number().min(0).default(0),
 });
 
-/** 기본 역할 설정 스키마 */
+/** Default roles configuration schema */
 const DefaultRolesConfigSchema = z.object({
   worker: RoleConfigSchema.default({
     enabled: true,
@@ -113,7 +113,7 @@ const DefaultRolesConfigSchema = z.object({
   documenter: RoleConfigSchema.optional(),
 }).optional();
 
-/** 프로젝트별 역할 오버라이드 스키마 */
+/** Per-project role override schema */
 const ProjectRolesOverrideSchema = z.object({
   worker: RoleConfigSchema.partial().optional(),
   reviewer: RoleConfigSchema.partial().optional(),
@@ -121,50 +121,52 @@ const ProjectRolesOverrideSchema = z.object({
   documenter: RoleConfigSchema.partial().optional(),
 }).optional();
 
-/** 프로젝트별 에이전트 설정 스키마 */
+/** Per-project agent configuration schema */
 const ProjectAgentConfigSchema = z.object({
-  /** 프로젝트 경로 */
+  /** Project path */
   projectPath: z.string().min(1),
-  /** Linear 프로젝트 ID */
+  /** Linear project ID */
   linearProjectId: z.string().optional(),
-  /** 역할별 설정 오버라이드 */
+  /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });
 
-/** 작업 분해(Planner) 설정 스키마 */
+/** Task decomposition (Planner) configuration schema */
 const DecompositionConfigSchema = z.object({
-  /** 분해 활성화 */
+  /** Enable decomposition */
   enabled: z.boolean().default(false),
-  /** 분해 기준 시간 (분) - 이 시간 초과 예상 작업은 분해 */
+  /** Decomposition threshold (minutes) - tasks exceeding this estimate are decomposed */
   thresholdMinutes: z.number().min(10).max(120).default(30),
-  /** Planner 모델 */
+  /** Planner model */
   plannerModel: z.string().default('claude-sonnet-4-20250514'),
+  /** Planner timeout (ms) - default 600000 (10min) */
+  plannerTimeoutMs: z.number().min(60000).default(600000),
 }).optional();
 
 const AutonomousConfigSchema = z.object({
-  /** 서비스 시작 시 자동 활성화 */
+  /** Auto-enable on service start */
   enabled: z.boolean().default(false),
-  /** Worker/Reviewer 페어 모드 */
+  /** Worker/Reviewer pair mode */
   pairMode: z.boolean().default(true),
-  /** 실행 스케줄 (cron 표현식) */
+  /** Execution schedule (cron expression) */
   schedule: z.string().default('*/30 * * * *'),
-  /** 페어 모드 최대 시도 횟수 */
+  /** Pair mode max attempts */
   maxAttempts: z.number().min(1).max(10).default(3),
-  /** 허용된 프로젝트 경로 */
+  /** Allowed project paths */
   allowedProjects: z.array(z.string()).default(['~/dev']),
-  /** 모델 설정 (레거시) */
+  /** Model configuration (legacy) */
   models: ModelConfigSchema,
-  /** Worker 타임아웃 (ms) - 0 = 무제한 (레거시) */
+  /** Worker timeout (ms) - 0 = unlimited (legacy) */
   workerTimeoutMs: z.number().min(0).default(0),
-  /** Reviewer 타임아웃 (ms) - 0 = 무제한 (레거시) */
+  /** Reviewer timeout (ms) - 0 = unlimited (legacy) */
   reviewerTimeoutMs: z.number().min(0).default(0),
-  /** 동시 실행 가능한 최대 태스크 수 */
+  /** Max concurrent tasks */
   maxConcurrentTasks: z.number().min(1).max(10).default(1),
-  /** 기본 역할 설정 */
+  /** Default role configuration */
   defaultRoles: DefaultRolesConfigSchema,
-  /** 프로젝트별 에이전트 설정 */
+  /** Per-project agent configuration */
   projectAgents: z.array(ProjectAgentConfigSchema).optional(),
-  /** 작업 분해 설정 (Planner Agent) */
+  /** Task decomposition configuration (Planner Agent) */
   decomposition: DecompositionConfigSchema,
 }).optional();
 
@@ -176,6 +178,7 @@ const PRProcessorConfigSchema = z.object({
 }).optional();
 
 const RawConfigSchema = z.object({
+  language: z.enum(['en', 'ko']).default('en'),
   discord: DiscordConfigSchema,
   linear: LinearConfigSchema,
   github: GitHubConfigSchema,
@@ -194,12 +197,12 @@ export type RawConfig = z.infer<typeof RawConfigSchema>;
 // ============================================
 
 /**
- * 환경변수 패턴: ${VAR_NAME} 또는 ${VAR_NAME:-default}
+ * Environment variable pattern: ${VAR_NAME} or ${VAR_NAME:-default}
  */
 const ENV_VAR_PATTERN = /\$\{([^}:]+)(?::-([^}]*))?\}/g;
 
 /**
- * 문자열 내 환경변수 치환
+ * Substitute environment variables in string
  */
 function substituteEnvVars(value: string): string {
   return value.replace(ENV_VAR_PATTERN, (match, varName, defaultValue) => {
@@ -210,14 +213,14 @@ function substituteEnvVars(value: string): string {
     if (defaultValue !== undefined) {
       return defaultValue;
     }
-    // 환경변수가 없고 기본값도 없으면 빈 문자열 반환
+    // Return empty string if no env var and no default value
     console.warn(`Environment variable ${varName} is not set`);
     return '';
   });
 }
 
 /**
- * 객체 내 모든 문자열에 환경변수 치환 적용
+ * Apply environment variable substitution to all strings in an object
  */
 function substituteEnvVarsDeep(obj: unknown): unknown {
   if (typeof obj === 'string') {
@@ -237,7 +240,7 @@ function substituteEnvVarsDeep(obj: unknown): unknown {
 }
 
 /**
- * 경로 확장 (~/ 처리)
+ * Expand path (~/ handling)
  */
 function expandPath(path: string): string {
   if (path.startsWith('~/')) {
@@ -251,7 +254,7 @@ function expandPath(path: string): string {
 // ============================================
 
 /**
- * 설정 파일 찾기
+ * Find configuration file
  */
 function findConfigFile(): string | null {
   for (const path of CONFIG_PATHS) {
@@ -263,7 +266,7 @@ function findConfigFile(): string | null {
 }
 
 /**
- * 설정 파일 파싱
+ * Parse configuration file
  */
 function parseConfigFile(path: string): unknown {
   const content = readFileSync(path, 'utf-8');
@@ -272,15 +275,16 @@ function parseConfigFile(path: string): unknown {
     return JSON.parse(content);
   }
 
-  // YAML 파싱
+  // YAML parsing
   return YAML.parse(content);
 }
 
 /**
- * Raw config를 SwarmConfig로 변환
+ * Transform raw config to SwarmConfig
  */
 function transformConfig(raw: RawConfig): SwarmConfig {
   return {
+    language: raw.language,
     discordToken: raw.discord.token,
     discordChannelId: raw.discord.channelId,
     discordWebhookUrl: raw.discord.webhookUrl,
@@ -332,6 +336,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
         enabled: raw.autonomous.decomposition.enabled,
         thresholdMinutes: raw.autonomous.decomposition.thresholdMinutes,
         plannerModel: raw.autonomous.decomposition.plannerModel,
+        plannerTimeoutMs: raw.autonomous.decomposition.plannerTimeoutMs,
       } : undefined,
     } : undefined,
     prProcessor: raw.prProcessor ? {
@@ -344,10 +349,10 @@ function transformConfig(raw: RawConfig): SwarmConfig {
 }
 
 /**
- * 설정 로드 (환경변수 치환 + Zod 검증)
+ * Load config (env var substitution + Zod validation)
  */
 export function loadConfig(customPath?: string): SwarmConfig {
-  // 1. 설정 파일 찾기
+  // 1. Find config file
   const configPath = customPath ?? findConfigFile();
 
   if (!configPath) {
@@ -358,7 +363,7 @@ export function loadConfig(customPath?: string): SwarmConfig {
 
   console.log(`Loading config from: ${configPath}`);
 
-  // 2. 파일 파싱
+  // 2. Parse file
   let rawData: unknown;
   try {
     rawData = parseConfigFile(configPath);
@@ -366,10 +371,10 @@ export function loadConfig(customPath?: string): SwarmConfig {
     throw new Error(`Failed to parse config file: ${err}`);
   }
 
-  // 3. 환경변수 치환
+  // 3. Substitute environment variables
   const substituted = substituteEnvVarsDeep(rawData);
 
-  // 4. Zod 스키마 검증
+  // 4. Zod schema validation
   const parseResult = RawConfigSchema.safeParse(substituted);
 
   if (!parseResult.success) {
@@ -379,10 +384,10 @@ export function loadConfig(customPath?: string): SwarmConfig {
     throw new Error(`Config validation failed:\n${errors}`);
   }
 
-  // 5. SwarmConfig로 변환
+  // 5. Transform to SwarmConfig
   const config = transformConfig(parseResult.data);
 
-  // 6. 시간 윈도우 설정 적용
+  // 6. Apply time window config
   if (config.timeWindow) {
     setTimeWindowConfig(config.timeWindow);
     console.log(`[Config] TimeWindow 설정 로드됨 (enabled: ${config.timeWindow.enabled})`);
@@ -395,19 +400,19 @@ export function loadConfig(customPath?: string): SwarmConfig {
 }
 
 /**
- * 설정 유효성 검사 (이미 Zod에서 수행하지만 추가 검증용)
+ * Validate config (supplementary checks beyond Zod validation)
  */
 export function validateConfig(config: SwarmConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
-  // 에이전트 경로 존재 확인
+  // Verify agent project paths exist
   for (const agent of config.agents) {
     if (!existsSync(agent.projectPath)) {
       errors.push(`Agent "${agent.name}" project path does not exist: ${agent.projectPath}`);
     }
   }
 
-  // GitHub 레포 형식 확인
+  // Verify GitHub repo format
   if (config.githubRepos) {
     for (const repo of config.githubRepos) {
       if (!repo.includes('/')) {
@@ -420,7 +425,7 @@ export function validateConfig(config: SwarmConfig): { valid: boolean; errors: s
 }
 
 /**
- * 기본 에이전트 세션 생성
+ * Create a default agent session
  */
 export function createAgentSession(
   name: string,
@@ -438,7 +443,7 @@ export function createAgentSession(
 }
 
 /**
- * 샘플 설정 파일 생성
+ * Generate a sample configuration file
  */
 export function generateSampleConfig(): string {
   return `# Claude Swarm Configuration

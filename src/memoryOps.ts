@@ -28,7 +28,7 @@ import {
 
 /**
  * Revise existing belief with new information
- * PRD: append-only 탈피 - 기존 belief 수정
+ * PRD: moving beyond append-only - revise existing beliefs
  */
 export async function reviseMemory(
   memoryId: string,
@@ -81,7 +81,7 @@ export async function reviseMemory(
     const allRecords = results.filter((r: any) => r.id !== memoryId);
     allRecords.push(revised);
 
-    // Recreate table with updated data (정규화 적용)
+    // Recreate table with updated data (normalization applied)
     const tableName = 'cognitive_memory';
     await db.dropTable(tableName);
     const newTable = await db.createTable(tableName, normalizeRecords(allRecords));
@@ -97,7 +97,7 @@ export async function reviseMemory(
 
 /**
  * Find contradicting memories
- * PRD: semantic conflict 탐지
+ * PRD: detect semantic conflicts
  */
 export async function findContradictions(content: string): Promise<MemorySearchResult[]> {
   try {
@@ -172,11 +172,11 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
     memory1.contradicts = JSON.stringify(contradicts1);
     memory2.contradicts = JSON.stringify(contradicts2);
 
-    // Lower importance for both (PRD: 모순 발생 시 importance 감소)
+    // Lower importance for both (PRD: decrease importance on contradiction)
     memory1.importance = Math.max(0.2, (memory1.importance ?? 0.5) - 0.15);
     memory2.importance = Math.max(0.2, (memory2.importance ?? 0.5) - 0.15);
 
-    // Recreate table (정규화 적용)
+    // Recreate table (normalization applied)
     const tableName = 'cognitive_memory';
     await db.dropTable(tableName);
     const newTable = await db.createTable(tableName, normalizeRecords(results));
@@ -229,7 +229,7 @@ export async function reconcileContradiction(
       },
     });
 
-    // Recreate table (정규화 적용)
+    // Recreate table (normalization applied)
     const tableName = 'cognitive_memory';
     await db.dropTable(tableName);
     const newTable = await db.createTable(tableName, normalizeRecords(results));
@@ -244,7 +244,7 @@ export async function reconcileContradiction(
 }
 
 /**
- * 메모리를 컨텍스트로 포맷 (PRD v2.0 - Cognitive + Legacy)
+ * Format memories as context (PRD v2.0 - Cognitive + Legacy)
  */
 export function formatMemoryContext(memories: MemorySearchResult[]): string {
   if (memories.length === 0) return '';
@@ -272,7 +272,7 @@ export function formatMemoryContext(memories: MemorySearchResult[]): string {
 
   const sections: string[] = [];
 
-  // PRD Cognitive Types (높은 importance 순)
+  // PRD Cognitive Types (ordered by importance, highest first)
   if (grouped.constraint.length > 0) {
     const items = grouped.constraint.map(m =>
       `- ⚠️ **${m.content.slice(0, 100)}** (importance: ${(m.importance * 100).toFixed(0)}%, stability: ${m.stability})`
@@ -343,7 +343,7 @@ export function formatMemoryContext(memories: MemorySearchResult[]): string {
 }
 
 /**
- * 날짜 포맷
+ * Format date
  */
 function formatDate(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString('ko-KR', {
@@ -353,7 +353,7 @@ function formatDate(timestamp: number): string {
 }
 
 /**
- * 만료된 메모리 정리
+ * Clean up expired memories
  */
 export async function cleanupExpired(): Promise<number> {
   try {
@@ -370,8 +370,8 @@ export async function cleanupExpired(): Promise<number> {
       .map((r: any) => r.id);
 
     if (expiredIds.length > 0) {
-      // LanceDB는 직접 삭제가 어려워서 새 테이블로 교체 필요
-      // 여기서는 로깅만
+      // LanceDB doesn't support direct deletion, requires table replacement
+      // For now, just logging
       console.log(`[Memory] Found ${expiredIds.length} expired records`);
     }
 
@@ -388,12 +388,12 @@ export async function cleanupExpired(): Promise<number> {
 
 // Decay and archive thresholds
 const DECAY_INCREMENT = 0.03;      // PRD: decay += 0.03 weekly if not accessed
-const ARCHIVE_THRESHOLD = 0.7;    // PRD: threshold 초과 시 archive
-const CONSOLIDATION_SIMILARITY = 0.85;  // 중복 판단 기준
+const ARCHIVE_THRESHOLD = 0.7;    // PRD: archive when threshold exceeded
+const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
 /**
  * Apply decay to all memories (Background Worker)
- * PRD: 망각은 기능이다
+ * PRD: Forgetting is a feature
  */
 export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
   decayed: number;
@@ -442,7 +442,7 @@ export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
     }
 
     if (decayed > 0) {
-      // Recreate table (정규화 적용)
+      // Recreate table (normalization applied)
       const tableName = 'cognitive_memory';
       await db.dropTable(tableName);
       const newTable = await db.createTable(tableName, normalizeRecords(results));
@@ -459,7 +459,7 @@ export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
 
 /**
  * Consolidate duplicate/similar memories
- * PRD: Memory Consolidation - 중복 merge
+ * PRD: Memory Consolidation - merge duplicates
  */
 export async function consolidateMemories(): Promise<{
   merged: number;
@@ -526,7 +526,7 @@ export async function consolidateMemories(): Promise<{
       // Remove merged memories
       const remainingRecords = results.filter((r: any) => !merged.includes(r.id));
 
-      // Recreate table (정규화 적용)
+      // Recreate table (normalization applied)
       const tableName = 'cognitive_memory';
       await db.dropTable(tableName);
       const newTable = await db.createTable(tableName, normalizeRecords(remainingRecords));
@@ -564,7 +564,7 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 /**
  * Run all background cognitive tasks
- * PRD: 6-12시간 주기 권장
+ * PRD: recommended interval of 6-12 hours
  */
 export async function runBackgroundCognition(): Promise<{
   decay: { decayed: number; archived: number };
@@ -580,7 +580,7 @@ export async function runBackgroundCognition(): Promise<{
   const consolidationResult = await consolidateMemories();
 
   // 3. Detect contradictions (log only, don't auto-resolve)
-  const _stats = await getMemoryStats(); // 향후 확장용
+  const _stats = await getMemoryStats(); // For future expansion
   let contradictionCount = 0;
 
   // Sample check for contradictions among high-importance beliefs
@@ -627,7 +627,7 @@ const DEFAULT_BY_TYPE: Record<MemoryType, number> = {
 };
 
 /**
- * 메모리 통계 (PRD v2.0)
+ * Memory statistics (PRD v2.0)
  */
 export async function getMemoryStats(): Promise<{
   total: number;
@@ -674,11 +674,11 @@ export async function getMemoryStats(): Promise<{
 }
 
 // ============================================
-// 레거시 호환 함수 (기존 코드 지원)
+// Legacy compatibility functions (existing code support)
 // ============================================
 
 /**
- * 대화 저장 (레거시 호환)
+ * Save conversation (legacy compatible)
  */
 export async function saveConversation(
   channelId: string,
@@ -697,9 +697,9 @@ export async function saveConversation(
 }
 
 /**
- * 최근 대화 가져오기 (createdAt 기준 정렬)
- * - 시맨틱 검색이 아닌 시간순 조회
- * - channelId는 derivedFrom 필드에 저장됨 (legacy: metadata.issueRef)
+ * Get recent conversations (sorted by createdAt)
+ * - Chronological lookup, not semantic search
+ * - channelId is stored in the derivedFrom field (legacy: metadata.issueRef)
  */
 export async function getRecentConversations(
   channelId: string,
@@ -710,21 +710,21 @@ export async function getRecentConversations(
     const table = getTable();
     if (!table) return [];
 
-    // journal 타입 + discord repo 필터링 후 createdAt 내림차순
+    // Filter by journal type + discord repo, then sort by createdAt descending
     const results = await table
       .search(Array.from({ length: EMBEDDING_DIM }, () => 0))  // dummy vector for full scan
-      .limit(1000)  // 충분히 큰 수
+      .limit(1000)  // Sufficiently large number
       .toArray();
 
-    // 필터: journal + discord (channelId는 느슨하게 - 기존 데이터 호환)
+    // Filter: journal + discord (channelId matching is loose for legacy data compat)
     const filtered = results
       .filter((r: any) => {
         if (r.type !== 'journal' || r.repo !== 'discord') return false;
 
-        // channelId 매칭: derivedFrom 또는 metadata.issueRef
-        if (!channelId) return true;  // 전체
+        // channelId matching: derivedFrom or metadata.issueRef
+        if (!channelId) return true;  // All
         if (r.derivedFrom === channelId) return true;
-        if (r.derivedFrom === 'unknown') return true;  // legacy 데이터 포함
+        if (r.derivedFrom === 'unknown') return true;  // Include legacy data
 
         // metadata.issueRef fallback
         try {
@@ -734,10 +734,10 @@ export async function getRecentConversations(
 
         return false;
       })
-      .sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0))  // 최신순
+      .sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0))  // Newest first
       .slice(0, limit);
 
-    // MemorySearchResult 형태로 변환
+    // Convert to MemorySearchResult format
     return filtered.map((r: any) => ({
       id: r.id,
       type: r.type,
@@ -747,7 +747,7 @@ export async function getRecentConversations(
       metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata || '{}') : r.metadata,
       trust: r.trust,
       createdAt: r.createdAt,
-      score: 1.0,  // 시간순 조회라 score 무의미
+      score: 1.0,  // Score is meaningless for chronological lookup
       freshness: calculateFreshness(r.createdAt),
       importance: r.importance,
       confidence: r.confidence,

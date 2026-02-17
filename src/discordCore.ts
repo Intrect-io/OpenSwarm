@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import type { SwarmEvent, AgentStatus } from './types.js';
 import * as memory from './memory.js';
+import { t, getPrompts, getDateLocale } from './locale/index.js';
 
 // 핸들러 모듈 (라우팅용)
 import { handlePair } from './discordPair.js';
@@ -102,7 +103,7 @@ export function updateLastHistoryResponse(channelId: string, response: string): 
  * 히스토리 엔트리 포맷 (OpenClaw envelope 스타일)
  */
 function formatHistoryEntry(entry: HistoryEntry): string {
-  const time = new Date(entry.timestamp).toLocaleTimeString('ko-KR', {
+  const time = new Date(entry.timestamp).toLocaleTimeString(getDateLocale(), {
     hour: '2-digit',
     minute: '2-digit'
   });
@@ -216,55 +217,10 @@ export async function resolveProjectPath(hints: string[]): Promise<string | null
   return null;
 }
 
-// VEGA 시스템 프롬프트 v2.0
-export const VEGA_SYSTEM_PROMPT = `# VEGA (Vector Encoded General Agent)
-
-너는 VEGA, 형의 코드/지식 동료다. Discord를 통해 소통하고, Claude Code CLI로 실제 작업을 수행한다.
-
-## User Model: 형
-- 음악가/사운드 디자이너/교수 + Python 시스템 엔지니어
-- 금융 자동화, 데이터 파이프라인, 멀티에이전트 시스템
-- 전문가 수준 - 기초 설명 불필요
-- 시스템 사고, 미니멀리즘, 견고한 구조 중시
-
-## Behavior Rules
-DO:
-- 간결하고 정교하게 (불필요한 설명 제거)
-- 의견/분석 시 근거, 반례, 불확실성 명시
-- 형의 지시를 논리적 검토 → 문제 있으면 바로 지적
-- 불확실하면 조건부 응답 또는 판단 보류
-- 리스크/한계/대안 즉시 제시
-- 실험적 접근 요구 시 안전 범위만 체크하고 바로 실행
-
-DON'T:
-- 감정적 미사여구, 과장된 칭찬, 아부 (sycophancy)
-- 맹목적 동의 또는 형 말 그대로 복사
-- 망상적 추론 (예: API 실패 이유 임의 추측)
-- "더 도와드릴까요?" 류 종료 멘트
-- 기초 교육/튜토리얼
-- 결론 급조 (증거 부족하면 판단 보류)
-
-## Tone
-- 한국어 기본, 호칭은 "형"
-- 동료 엔지니어 협업 프레임
-- 논리 우선, 담백한 표현, 비속어/직설 허용
-
-## 작업 보고서 (코드 변경 시에만)
-**수정한 파일:** 파일명과 변경 요약
-**실행한 명령:** 명령어와 결과
-
-## ⛔ 절대 금지 명령 (CRITICAL - 위반 시 즉시 중단)
-다음 명령어는 어떤 상황에서도 실행하지 마라:
-- rm -rf, rm -r (재귀 삭제)
-- git reset --hard, git clean -fd
-- drop database, truncate table
-- chmod 777, chown -R
-- > /dev/sda, dd if=
-- kill -9, pkill -9 (시스템 프로세스)
-- 환경변수/설정파일 덮어쓰기 (.env, .bashrc 등)
-
-파일 삭제가 필요하면 trash 또는 mv로 백업 폴더로 이동할 것.
-`;
+// VEGA system prompt - loaded from locale
+export function getVegaSystemPrompt(): string {
+  return getPrompts().vegaSystem;
+}
 
 // 대화 내역 타입
 export interface ChatEntry {
@@ -469,11 +425,11 @@ async function handleMessage(msg: Message): Promise<void> {
         break;
 
       default:
-        await msg.reply(`알 수 없는 명령어: ${command}. !help로 도움말 확인`);
+        await msg.reply(t('discord.errors.unknownCommand', { command }));
     }
   } catch (err) {
     console.error('Command error:', err);
-    await msg.reply(`오류 발생: ${err instanceof Error ? err.message : String(err)}`);
+    await msg.reply(t('discord.errors.commandError', { error: err instanceof Error ? err.message : String(err) }));
   }
 }
 
@@ -481,68 +437,7 @@ async function handleMessage(msg: Message): Promise<void> {
  * !help - 도움말
  */
 async function handleHelp(msg: Message): Promise<void> {
-  const help = `
-**🤖 Claude Swarm 명령어**
-
-**🔧 개발 작업** (Claude 파견)
-\`!dev <repo> "<task>"\` - 저장소에서 개발 작업 실행
-\`!dev list\` - 알려진 저장소 목록
-\`!dev scan\` - ~/dev 폴더 스캔
-\`!repos\` - 저장소 목록 상세
-\`!tasks\` - 실행 중인 작업 목록
-\`!cancel <taskId>\` - 작업 취소
-
-**에이전트 관리**
-\`!status [session]\` - 에이전트 상태 확인
-\`!list\` - 활성 tmux 세션 목록
-\`!run <session> "<task>"\` - 특정 작업 실행
-\`!pause <session>\` - 자율 작업 일시 중지
-\`!resume <session>\` - 자율 작업 재개
-\`!log <session> [lines]\` - 최근 출력 확인
-
-**Linear**
-\`!issues [session]\` - Linear 이슈 목록
-\`!limits\` - 에이전트 일일 제한 현황
-
-**📅 스케줄**
-\`!schedule\` - 스케줄 목록
-\`!schedule run <name>\` - 즉시 실행
-\`!schedule toggle <name>\` - 활성화/비활성화
-\`!schedule add <name> <path> <interval> "<prompt>"\` - 추가
-
-**GitHub**
-\`!ci\` - CI 실패 상태 확인
-\`!notif\` - GitHub 알림 확인
-
-**📚 Codex (세션 기록)**
-\`!codex\` - 최근 세션 목록
-\`!codex save "<제목>"\` - 세션 저장
-\`!codex path\` - 저장 경로
-
-**🤖 자율 실행**
-\`!auto\` - 자율 실행 상태
-\`!auto start [cron] [--pair]\` - 시작 (기본: 30분마다, --pair로 페어 모드)
-\`!auto stop\` - 중지
-\`!auto run\` - 즉시 heartbeat
-\`!approve\` - 작업 승인
-\`!reject\` - 작업 거부
-
-**👥 Worker/Reviewer 페어**
-\`!pair\` - 페어 세션 상태
-\`!pair start [taskId]\` - 페어 세션 시작
-\`!pair run <taskId> [project]\` - 직접 페어 실행
-\`!pair stop [sessionId]\` - 세션 중지
-\`!pair history [n]\` - 히스토리 조회
-
-\`!help\` - 이 도움말
-
----
-**예시:**
-\`!dev pykis "get_balance 함수 파라미터 확인해줘"\`
-\`!dev tools/pykiwoom "실시간 구독 로직 분석"\`
-`;
-
-  await msg.reply(help);
+  await msg.reply(t('discord.help'));
 }
 
 /**
@@ -594,9 +489,9 @@ export function formatTimeAgo(timestamp: number): string {
   const minutes = Math.floor(diff / 60000);
   const hours = Math.floor(minutes / 60);
 
-  if (hours > 0) return `${hours}시간 전`;
-  if (minutes > 0) return `${minutes}분 전`;
-  return '방금 전';
+  if (hours > 0) return t('common.timeAgo.hoursAgo', { n: hours });
+  if (minutes > 0) return t('common.timeAgo.minutesAgo', { n: minutes });
+  return t('common.timeAgo.justNow');
 }
 
 /**
@@ -721,7 +616,7 @@ export async function handleChat(msg: Message): Promise<void> {
     }
 
     // 1. 채널 히스토리 컨텍스트 구성
-    const currentMessageFormatted = `[${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}] ${msg.author.username}: ${content}`;
+    const currentMessageFormatted = `[${new Date().toLocaleTimeString(getDateLocale(), { hour: '2-digit', minute: '2-digit' })}] ${msg.author.username}: ${content}`;
     const historyContext = buildHistoryContext(channelId, currentMessageFormatted);
 
     // 2. 시맨틱 검색 (장기 기억)
@@ -733,10 +628,10 @@ export async function handleChat(msg: Message): Promise<void> {
     const memoryContext = memory.formatMemoryContext(memories);
 
     // 3. 프롬프트 구성
-    let prompt = VEGA_SYSTEM_PROMPT;
+    let prompt = getVegaSystemPrompt();
 
     if (projectPath) {
-      prompt += `\n\n## 프로젝트 컨텍스트\n- **작업 디렉토리**: ${projectPath}\n- 이 프로젝트의 코드베이스에서 작업 중입니다.`;
+      prompt += `\n\n## ${t('discord.chatContext')}\n- **${t('discord.projectContext', { path: projectPath })}**`;
     }
 
     prompt += `\n\n## 대화 컨텍스트\n${historyContext}`;
@@ -755,8 +650,8 @@ export async function handleChat(msg: Message): Promise<void> {
     updateLastHistoryResponse(channelId, response);
 
     if (toolCalls.length > 0) {
-      const toolSummary = toolCalls.slice(0, 10).map(t => `• ${t}`).join('\n');
-      const toolMsg = `🔧 **도구 호출 (${toolCalls.length}개)**\n${toolSummary}${toolCalls.length > 10 ? `\n... +${toolCalls.length - 10}개 더` : ''}`;
+      const toolSummary = toolCalls.slice(0, 10).map(tc => `• ${tc}`).join('\n');
+      const toolMsg = `🔧 **${t('discord.toolCalls', { n: toolCalls.length })}**\n${toolSummary}${toolCalls.length > 10 ? `\n... ${t('common.moreItems', { n: toolCalls.length - 10 })}` : ''}`;
       await msg.reply(toolMsg);
     }
 
@@ -779,7 +674,7 @@ export async function handleChat(msg: Message): Promise<void> {
   } catch (err) {
     if (typingInterval) clearInterval(typingInterval);
     console.error('[VEGA] Error:', err);
-    await msg.reply('오류가 발생했습니다. 다시 시도해주세요.');
+    await msg.reply(t('discord.chatError'));
   }
 }
 
@@ -858,10 +753,10 @@ function parseClaudeJson(output: string): { result: string; toolCalls: string[] 
 
   try {
     const match = output.match(/\[[\s\S]*\]/);
-    if (!match) return { result: output.trim() || '(응답 없음)', toolCalls };
+    if (!match) return { result: output.trim() || t('common.fallback.noResponse'), toolCalls };
 
     const arr = JSON.parse(match[0]);
-    let result = '(응답 없음)';
+    let result = t('common.fallback.noResponse');
 
     for (const item of arr) {
       if (item.type === 'tool_use') {
@@ -896,7 +791,7 @@ function parseClaudeJson(output: string): { result: string; toolCalls: string[] 
 
     return { result, toolCalls };
   } catch {
-    return { result: output.trim() || '(응답 없음)', toolCalls };
+    return { result: output.trim() || t('common.fallback.noResponse'), toolCalls };
   }
 }
 

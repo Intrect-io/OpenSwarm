@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Edit Parser
-// Aider 스타일 SEARCH/REPLACE 블록 파싱
+// Aider-style SEARCH/REPLACE block parsing
 // ============================================
 
 export interface EditBlock {
@@ -16,26 +16,26 @@ export interface ParseResult {
   errors: string[];
 }
 
-// SEARCH/REPLACE 마커
+// SEARCH/REPLACE markers
 const HEAD = '<<<<<<< SEARCH';
 const DIVIDER = '=======';
 const UPDATED = '>>>>>>> REPLACE';
 
 /**
- * LLM 출력에서 SEARCH/REPLACE 블록 추출
+ * Extract SEARCH/REPLACE blocks from LLM output
  */
 export function parseSearchReplaceBlocks(content: string): ParseResult {
   const blocks: EditBlock[] = [];
   const errors: string[] = [];
 
-  // 코드 블록 추출 (```로 감싸진 부분)
+  // Extract code blocks (wrapped in ```)
   const codeBlockRegex = /```[\w]*\n([\s\S]*?)```/g;
   let match;
 
   while ((match = codeBlockRegex.exec(content)) !== null) {
     const blockContent = match[1];
 
-    // SEARCH/REPLACE 패턴 확인
+    // Check for SEARCH/REPLACE pattern
     if (!blockContent.includes(HEAD)) {
       continue;
     }
@@ -50,7 +50,7 @@ export function parseSearchReplaceBlocks(content: string): ParseResult {
     }
   }
 
-  // 코드 블록 없이 직접 SEARCH/REPLACE 사용한 경우도 처리
+  // Also handle direct SEARCH/REPLACE usage without code blocks
   if (blocks.length === 0 && content.includes(HEAD)) {
     try {
       const directBlocks = parseDirectBlocks(content);
@@ -68,7 +68,7 @@ export function parseSearchReplaceBlocks(content: string): ParseResult {
 }
 
 /**
- * 단일 코드 블록 파싱
+ * Parse single code block
  */
 function parseBlock(blockContent: string, fullContent: string, blockStart: number): EditBlock | null {
   const lines = blockContent.split('\n');
@@ -88,15 +88,15 @@ function parseBlock(blockContent: string, fullContent: string, blockStart: numbe
     return null;
   }
 
-  // SEARCH 내용 추출
+  // Extract SEARCH content
   const searchLines = lines.slice(headIndex + 1, dividerIndex);
   const search = searchLines.join('\n');
 
-  // REPLACE 내용 추출
+  // Extract REPLACE content
   const replaceLines = lines.slice(dividerIndex + 1, updatedIndex);
   const replace = replaceLines.join('\n');
 
-  // 파일 경로 추출 (블록 앞 1-3줄에서)
+  // Extract file path (from 1-3 lines before block)
   const filePath = extractFilePath(fullContent, blockStart);
 
   if (!filePath) {
@@ -112,7 +112,7 @@ function parseBlock(blockContent: string, fullContent: string, blockStart: numbe
 }
 
 /**
- * 직접 SEARCH/REPLACE 블록 파싱 (코드 블록 없이)
+ * Parse direct SEARCH/REPLACE blocks (without code blocks)
  */
 function parseDirectBlocks(content: string): EditBlock[] {
   const blocks: EditBlock[] = [];
@@ -123,7 +123,7 @@ function parseDirectBlocks(content: string): EditBlock[] {
     const line = lines[i].trim();
 
     if (line === HEAD) {
-      // 파일 경로 찾기 (앞 3줄 검사)
+      // Find file path (check preceding 3 lines)
       let filePath = '';
       for (let j = Math.max(0, i - 3); j < i; j++) {
         const candidate = extractFilePathFromLine(lines[j]);
@@ -133,7 +133,7 @@ function parseDirectBlocks(content: string): EditBlock[] {
         }
       }
 
-      // SEARCH 내용 수집
+      // Collect SEARCH content
       const searchLines: string[] = [];
       i++;
       while (i < lines.length && lines[i].trim() !== DIVIDER) {
@@ -141,7 +141,7 @@ function parseDirectBlocks(content: string): EditBlock[] {
         i++;
       }
 
-      // REPLACE 내용 수집
+      // Collect REPLACE content
       const replaceLines: string[] = [];
       i++; // skip DIVIDER
       while (i < lines.length && lines[i].trim() !== UPDATED) {
@@ -166,14 +166,14 @@ function parseDirectBlocks(content: string): EditBlock[] {
 }
 
 /**
- * 블록 앞에서 파일 경로 추출
+ * Extract file path from before the block
  */
 function extractFilePath(content: string, blockStart: number): string {
-  // 블록 시작 전 텍스트
+  // Text before block start
   const before = content.slice(Math.max(0, blockStart - 500), blockStart);
-  const lines = before.split('\n').slice(-5); // 마지막 5줄
+  const lines = before.split('\n').slice(-5); // Last 5 lines
 
-  // 뒤에서부터 파일 경로 찾기
+  // Search for file path from the end
   for (let i = lines.length - 1; i >= 0; i--) {
     const candidate = extractFilePathFromLine(lines[i]);
     if (candidate) {
@@ -185,17 +185,17 @@ function extractFilePath(content: string, blockStart: number): string {
 }
 
 /**
- * 한 줄에서 파일 경로 추출
+ * Extract file path from a single line
  */
 function extractFilePathFromLine(line: string): string {
-  // 빈 줄이나 마커 줄 제외
+  // Exclude empty lines and marker lines
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('```') || trimmed.startsWith('#')) {
     return '';
   }
 
-  // 파일 경로 패턴 매칭
-  // 예: "src/worker.ts", "path/to/file.py:", "`file.js`"
+  // File path pattern matching
+  // e.g.: "src/worker.ts", "path/to/file.py:", "`file.js`"
   const patterns = [
     /^([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+):?$/,           // simple path
     /^`([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+)`:?$/,         // backtick wrapped
@@ -210,7 +210,7 @@ function extractFilePathFromLine(line: string): string {
     }
   }
 
-  // 경로처럼 보이는 문자열 (슬래시 포함, 확장자 있음)
+  // String that looks like a path (contains slash, has extension)
   if (/^[a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]+$/.test(trimmed)) {
     return trimmed;
   }
@@ -219,15 +219,15 @@ function extractFilePathFromLine(line: string): string {
 }
 
 /**
- * 퍼지 매칭으로 SEARCH 텍스트 찾기
- * Aider의 SequenceMatcher 방식 간소화 버전
+ * Find SEARCH text using fuzzy matching
+ * Simplified version of Aider's SequenceMatcher approach
  */
 export function fuzzyMatch(
   fileContent: string,
   searchText: string,
   threshold: number = 0.8
 ): { found: boolean; start: number; end: number; similarity: number } {
-  // 정확한 매칭 먼저 시도
+  // Try exact match first
   const exactIndex = fileContent.indexOf(searchText);
   if (exactIndex !== -1) {
     return {
@@ -238,13 +238,13 @@ export function fuzzyMatch(
     };
   }
 
-  // 공백 정규화 후 매칭
+  // Match after whitespace normalization
   const normalizedSearch = normalizeWhitespace(searchText);
   const normalizedContent = normalizeWhitespace(fileContent);
 
   const normalizedIndex = normalizedContent.indexOf(normalizedSearch);
   if (normalizedIndex !== -1) {
-    // 원본에서 위치 찾기 (근사치)
+    // Find position in original (approximate)
     const ratio = normalizedIndex / normalizedContent.length;
     const approxStart = Math.floor(ratio * fileContent.length);
 
@@ -256,7 +256,7 @@ export function fuzzyMatch(
     };
   }
 
-  // 라인 단위 퍼지 매칭
+  // Line-by-line fuzzy matching
   const searchLines = searchText.split('\n');
   const contentLines = fileContent.split('\n');
 
@@ -276,7 +276,7 @@ export function fuzzyMatch(
 }
 
 /**
- * 공백 정규화
+ * Normalize whitespace
  */
 function normalizeWhitespace(text: string): string {
   return text
@@ -287,7 +287,7 @@ function normalizeWhitespace(text: string): string {
 }
 
 /**
- * 라인 배열 유사도 계산
+ * Calculate similarity between line arrays
  */
 function calculateSimilarity(a: string[], b: string[]): number {
   if (a.length !== b.length) return 0;
@@ -300,7 +300,7 @@ function calculateSimilarity(a: string[], b: string[]): number {
     if (simA === simB) {
       matches++;
     } else {
-      // 부분 유사도
+      // Partial similarity
       const longer = Math.max(simA.length, simB.length);
       if (longer === 0) {
         matches++;
@@ -316,7 +316,7 @@ function calculateSimilarity(a: string[], b: string[]): number {
 }
 
 /**
- * Levenshtein 거리 계산
+ * Calculate Levenshtein distance
  */
 function levenshteinDistance(a: string, b: string): number {
   if (a.length === 0) return b.length;
@@ -349,7 +349,7 @@ function levenshteinDistance(a: string, b: string): number {
 }
 
 /**
- * Edit 블록 적용
+ * Apply edit block
  */
 export async function applyEditBlock(
   block: EditBlock,
@@ -364,17 +364,17 @@ export async function applyEditBlock(
 
   try {
     if (block.isNewFile) {
-      // 새 파일 생성
+      // Create new file
       const dir = path.dirname(filePath);
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(filePath, block.replace);
       return { success: true };
     }
 
-    // 기존 파일 수정
+    // Modify existing file
     const content = await fs.readFile(filePath, 'utf-8');
 
-    // 퍼지 매칭으로 위치 찾기
+    // Find position using fuzzy matching
     const match = fuzzyMatch(content, block.search);
 
     if (!match.found) {
@@ -384,7 +384,7 @@ export async function applyEditBlock(
       };
     }
 
-    // 교체 적용
+    // Apply replacement
     const newContent =
       content.slice(0, match.start) +
       block.replace +
@@ -402,7 +402,7 @@ export async function applyEditBlock(
 }
 
 /**
- * Worker 프롬프트용 형식 설명
+ * Format description for Worker prompts
  */
 export const SEARCH_REPLACE_PROMPT = `
 ## 코드 편집 형식 (SEARCH/REPLACE)

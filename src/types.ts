@@ -3,44 +3,44 @@
 // ============================================
 
 /**
- * 에이전트 세션 설정
+ * Agent session configuration
  */
 export type AgentSession = {
-  /** tmux 세션 이름 */
+  /** Session name */
   name: string;
-  /** 프로젝트 경로 */
+  /** Project path */
   projectPath: string;
-  /** Heartbeat 간격 (ms) */
+  /** Heartbeat interval (ms) */
   heartbeatInterval: number;
-  /** Linear 프로젝트/팀 라벨 */
+  /** Linear project/team label */
   linearLabel?: string;
-  /** 활성화 여부 */
+  /** Whether enabled */
   enabled: boolean;
-  /** 일시 중지 여부 */
+  /** Whether paused */
   paused: boolean;
 };
 
 /**
- * 에이전트 상태
+ * Agent status
  */
 export type AgentStatus = {
   name: string;
-  /** 현재 작업 중인 Linear 이슈 */
+  /** Currently active Linear issue */
   currentIssue?: {
     id: string;
     identifier: string;
     title: string;
   };
-  /** 마지막 heartbeat 시간 */
+  /** Last heartbeat time */
   lastHeartbeat?: number;
-  /** 마지막 보고 내용 */
+  /** Last report content */
   lastReport?: string;
-  /** 상태 */
+  /** State */
   state: 'idle' | 'working' | 'blocked' | 'paused';
 };
 
 /**
- * Linear 프로젝트 정보
+ * Linear project info
  */
 export type LinearProjectInfo = {
   id: string;
@@ -50,7 +50,7 @@ export type LinearProjectInfo = {
 };
 
 /**
- * Linear 이슈 간략 정보
+ * Linear issue summary info
  */
 export type LinearIssueInfo = {
   id: string;
@@ -61,12 +61,12 @@ export type LinearIssueInfo = {
   priority: number;
   labels: string[];
   comments: LinearComment[];
-  /** Linear 프로젝트 정보 */
+  /** Linear project info */
   project?: LinearProjectInfo;
 };
 
 /**
- * Linear 코멘트
+ * Linear comment
  */
 export type LinearComment = {
   id: string;
@@ -76,7 +76,7 @@ export type LinearComment = {
 };
 
 /**
- * Discord 이벤트 (보고용)
+ * Discord event (for reporting)
  */
 export type SwarmEvent = {
   type: 'issue_started' | 'issue_completed' | 'issue_blocked' | 'build_failed' | 'test_failed' | 'commit' | 'error' | 'ci_failed' | 'ci_recovered' | 'github_notification' | 'pr_improved' | 'pr_failed';
@@ -88,53 +88,55 @@ export type SwarmEvent = {
 };
 
 /**
- * 전역 설정
+ * Global configuration
  */
 export type SwarmConfig = {
+  /** UI language: 'en' | 'ko' (default: 'en') */
+  language: 'en' | 'ko';
   /** Discord bot token */
   discordToken: string;
-  /** Discord 채널 ID (보고용) */
+  /** Discord channel ID (for reporting) */
   discordChannelId: string;
-  /** Discord Webhook URL (선택적) */
+  /** Discord Webhook URL (optional) */
   discordWebhookUrl?: string;
-  /** Linear API 키 */
+  /** Linear API key */
   linearApiKey: string;
-  /** Linear 팀 ID */
+  /** Linear team ID */
   linearTeamId: string;
-  /** 에이전트 세션 목록 */
+  /** Agent session list */
   agents: AgentSession[];
-  /** 기본 heartbeat 간격 (ms) */
+  /** Default heartbeat interval (ms) */
   defaultHeartbeatInterval: number;
-  /** GitHub 레포 목록 (CI 모니터링용) */
+  /** GitHub repo list (for CI monitoring) */
   githubRepos?: string[];
-  /** GitHub CI 체크 간격 (ms) */
+  /** GitHub CI check interval (ms) */
   githubCheckInterval?: number;
-  /** 시간 윈도우 설정 (에이전트 자율 작업 제한) */
+  /** Time window config (agent autonomous work restriction) */
   timeWindow?: TimeWindowConfig;
-  /** Worker/Reviewer 페어 모드 설정 */
+  /** Worker/Reviewer pair mode config */
   pairMode?: PairModeConfig;
-  /** 자율 실행 모드 설정 */
+  /** Autonomous execution mode config */
   autonomous?: AutonomousStartupConfig;
-  /** PR Auto-Improvement 설정 */
+  /** PR auto-improvement config */
   prProcessor?: PRProcessorConfig;
 };
 
 /**
- * PR 자동 개선 설정
+ * PR auto-improvement config
  */
 export type PRProcessorConfig = {
-  /** 활성화 */
+  /** Enabled */
   enabled: boolean;
-  /** 체크 스케줄 (cron) */
+  /** Check schedule (cron) */
   schedule: string;
-  /** 처리 후 쿨다운 (시간) */
+  /** Cooldown after processing (hours) */
   cooldownHours: number;
-  /** Worker-Reviewer 최대 반복 횟수 */
+  /** Worker-Reviewer max iteration count */
   maxIterations: number;
 };
 
 /**
- * 서비스 상태
+ * Service state
  */
 export type ServiceState = {
   running: boolean;
@@ -144,83 +146,83 @@ export type ServiceState = {
 };
 
 /**
- * 시간 범위
+ * Time range
  */
 export type TimeRange = {
-  start: string; // "HH:MM" (24시간 형식)
+  start: string; // "HH:MM" (24-hour format)
   end: string;
 };
 
 /**
- * 시간 윈도우 설정
+ * Time window configuration
  */
 export type TimeWindowConfig = {
-  /** 시간 제한 활성화 여부 */
+  /** Whether time restriction is enabled */
   enabled: boolean;
-  /** 허용된 작업 시간대 */
+  /** Allowed work time ranges */
   allowedWindows: TimeRange[];
-  /** 차단된 시간대 (장중 등) */
+  /** Blocked time ranges (e.g. market hours) */
   blockedWindows: TimeRange[];
-  /** 제한 적용 요일 (0=일, 1=월, ..., 6=토) */
+  /** Restricted days of week (0=Sun, 1=Mon, ..., 6=Sat) */
   restrictedDays?: number[];
-  /** 타임존 */
+  /** Timezone */
   timezone?: string;
 };
 
 /**
- * Worker/Reviewer 페어 모드 설정
+ * Worker/Reviewer pair mode configuration
  */
 export type PairModeConfig = {
-  /** 페어 모드 활성화 */
+  /** Enable pair mode */
   enabled: boolean;
-  /** Worker 최대 시도 횟수 */
+  /** Worker max attempts */
   maxAttempts: number;
-  /** Worker 타임아웃 (ms) */
+  /** Worker timeout (ms) */
   workerTimeoutMs: number;
-  /** Reviewer 타임아웃 (ms) */
+  /** Reviewer timeout (ms) */
   reviewerTimeoutMs: number;
-  /** Webhook URL (완료/실패 시 알림) */
+  /** Webhook URL (notification on complete/failure) */
   webhookUrl?: string;
-  /** 자동 Linear 상태 업데이트 */
+  /** Auto Linear status update */
   autoLinearUpdate: boolean;
 };
 
 /**
- * 모델 설정
+ * Model configuration
  */
 export type ModelConfig = {
-  /** Worker 에이전트 모델 */
+  /** Worker agent model */
   worker: string;
-  /** Reviewer 에이전트 모델 */
+  /** Reviewer agent model */
   reviewer: string;
 };
 
 /**
- * 역할별 설정
+ * Per-role configuration
  */
 export type RoleConfig = {
-  /** 역할 활성화 여부 */
+  /** Whether role is enabled */
   enabled: boolean;
-  /** 모델 ID */
+  /** Model ID */
   model: string;
-  /** 타임아웃 (ms), 0 = 무제한 */
+  /** Timeout (ms), 0 = unlimited */
   timeoutMs: number;
 };
 
 /**
- * 파이프라인 스테이지
+ * Pipeline stage
  */
 export type PipelineStage = 'worker' | 'reviewer' | 'tester' | 'documenter';
 
 /**
- * 프로젝트별 에이전트 설정
+ * Per-project agent configuration
  */
 export type ProjectAgentConfig = {
-  /** 프로젝트 경로 */
+  /** Project path */
   projectPath: string;
-  /** Linear 프로젝트 ID (선택) */
+  /** Linear project ID (optional) */
   linearProjectId?: string;
-  /** 역할별 설정 오버라이드 */
+  /** Per-role configuration override */
   roles?: {
     worker?: Partial<RoleConfig>;
     reviewer?: Partial<RoleConfig>;
@@ -230,7 +232,7 @@ export type ProjectAgentConfig = {
 };
 
 /**
- * 기본 역할 설정
+ * Default roles configuration
  */
 export type DefaultRolesConfig = {
   worker: RoleConfig;
@@ -240,43 +242,45 @@ export type DefaultRolesConfig = {
 };
 
 /**
- * 작업 분해(Planner) 설정
+ * Task decomposition (Planner) configuration
  */
 export type DecompositionConfig = {
-  /** 분해 활성화 */
+  /** Enable decomposition */
   enabled: boolean;
-  /** 분해 기준 시간 (분) - 이 시간 초과 예상 작업은 분해 */
+  /** Decomposition threshold (minutes) - tasks exceeding this estimate are decomposed */
   thresholdMinutes: number;
-  /** Planner 모델 */
+  /** Planner model */
   plannerModel: string;
+  /** Planner timeout (ms) - default 600000 (10min) */
+  plannerTimeoutMs: number;
 };
 
 /**
- * 자율 실행 모드 설정
+ * Autonomous execution mode configuration
  */
 export type AutonomousStartupConfig = {
-  /** 서비스 시작 시 자동 활성화 */
+  /** Auto-enable on service start */
   enabled: boolean;
-  /** Worker/Reviewer 페어 모드 사용 */
+  /** Use Worker/Reviewer pair mode */
   pairMode: boolean;
-  /** 실행 스케줄 (cron 표현식) */
+  /** Execution schedule (cron expression) */
   schedule: string;
-  /** 페어 모드 최대 시도 횟수 */
+  /** Pair mode max attempts */
   maxAttempts: number;
-  /** 허용된 프로젝트 경로 */
+  /** Allowed project paths */
   allowedProjects: string[];
-  /** 모델 설정 (레거시) */
+  /** Model configuration (legacy) */
   models?: ModelConfig;
-  /** Worker 타임아웃 (ms), 0 = 무제한 (레거시) */
+  /** Worker timeout (ms), 0 = unlimited (legacy) */
   workerTimeoutMs?: number;
-  /** Reviewer 타임아웃 (ms), 0 = 무제한 (레거시) */
+  /** Reviewer timeout (ms), 0 = unlimited (legacy) */
   reviewerTimeoutMs?: number;
-  /** 동시 실행 가능한 최대 태스크 수 */
+  /** Max concurrent tasks */
   maxConcurrentTasks?: number;
-  /** 기본 역할 설정 */
+  /** Default role configuration */
   defaultRoles?: DefaultRolesConfig;
-  /** 프로젝트별 에이전트 설정 */
+  /** Per-project agent configuration */
   projectAgents?: ProjectAgentConfig[];
-  /** 작업 분해 설정 (Planner Agent) */
+  /** Task decomposition config (Planner Agent) */
   decomposition?: DecompositionConfig;
 };

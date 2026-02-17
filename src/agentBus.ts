@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Agent Message Bus
-// 에이전트 간 컨텍스트 공유 시스템
+// Inter-agent context sharing system
 // ============================================
 
 import { resolve } from 'path';
@@ -13,7 +13,7 @@ import { existsSync } from 'fs';
 // ============================================
 
 /**
- * 메시지 타입
+ * Message type
  */
 export type MessageType =
   | 'step_started'
@@ -27,20 +27,20 @@ export type MessageType =
   | 'response';
 
 /**
- * 에이전트 메시지
+ * Agent message
  */
 export interface AgentMessage {
   id: string;
   timestamp: number;
   type: MessageType;
-  sender: string;        // Step ID 또는 에이전트 ID
-  recipient?: string;    // 특정 수신자 (없으면 broadcast)
-  executionId: string;   // 워크플로우 실행 ID
+  sender: string;        // Step ID or agent ID
+  recipient?: string;    // Specific recipient (broadcast if absent)
+  executionId: string;   // Workflow execution ID
   payload: unknown;
 }
 
 /**
- * Step 완료 메시지 페이로드
+ * Step completed message payload
  */
 export interface StepCompletedPayload {
   stepId: string;
@@ -52,7 +52,7 @@ export interface StepCompletedPayload {
 }
 
 /**
- * 컨텍스트 업데이트 페이로드
+ * Context update payload
  */
 export interface ContextUpdatePayload {
   key: string;
@@ -61,7 +61,7 @@ export interface ContextUpdatePayload {
 }
 
 /**
- * 파일 변경 페이로드
+ * File changed payload
  */
 export interface FileChangedPayload {
   path: string;
@@ -70,23 +70,23 @@ export interface FileChangedPayload {
 }
 
 /**
- * 공유 컨텍스트
+ * Shared context
  */
 export interface SharedContext {
   executionId: string;
   workflowId: string;
   startedAt: number;
 
-  // Step 결과
+  // Step results
   stepOutputs: Record<string, string>;
 
-  // 변경된 파일 목록 (전체 워크플로우에서)
+  // Changed files list (across entire workflow)
   changedFiles: string[];
 
-  // 에러 로그
+  // Error log
   errors: Array<{ stepId: string; message: string; timestamp: number }>;
 
-  // 커스텀 데이터 (step 간 전달)
+  // Custom data (passed between steps)
   data: Record<string, unknown>;
 }
 
@@ -97,7 +97,7 @@ export interface SharedContext {
 const BUS_DIR = resolve(homedir(), '.claude-swarm/bus');
 
 /**
- * 메시지 버스 클래스
+ * Message bus class
  */
 export class AgentBus {
   private executionId: string;
@@ -114,12 +114,12 @@ export class AgentBus {
   }
 
   /**
-   * 버스 초기화
+   * Initialize bus
    */
   async init(workflowId: string): Promise<void> {
     await fs.mkdir(resolve(BUS_DIR, this.executionId, 'messages'), { recursive: true });
 
-    // 초기 컨텍스트 생성
+    // Create initial context
     const context: SharedContext = {
       executionId: this.executionId,
       workflowId,
@@ -135,7 +135,7 @@ export class AgentBus {
   }
 
   /**
-   * 메시지 발행
+   * Publish message
    */
   async publish(
     type: MessageType,
@@ -153,11 +153,11 @@ export class AgentBus {
       payload,
     };
 
-    // 메시지 저장
+    // Save message
     const messagePath = resolve(this.messagesPath, `${message.id}.json`);
     await fs.writeFile(messagePath, JSON.stringify(message, null, 2));
 
-    // 특수 메시지 처리
+    // Handle special message types
     if (type === 'step_completed') {
       await this.handleStepCompleted(payload as StepCompletedPayload);
     } else if (type === 'context_update') {
@@ -173,7 +173,7 @@ export class AgentBus {
   }
 
   /**
-   * Step 완료 처리
+   * Handle step completion
    */
   private async handleStepCompleted(payload: StepCompletedPayload): Promise<void> {
     const context = await this.getContext();
@@ -193,7 +193,7 @@ export class AgentBus {
   }
 
   /**
-   * 컨텍스트 업데이트 처리
+   * Handle context update
    */
   private async handleContextUpdate(payload: ContextUpdatePayload): Promise<void> {
     const context = await this.getContext();
@@ -218,7 +218,7 @@ export class AgentBus {
   }
 
   /**
-   * 파일 변경 처리
+   * Handle file change
    */
   private async handleFileChanged(payload: FileChangedPayload): Promise<void> {
     const context = await this.getContext();
@@ -232,7 +232,7 @@ export class AgentBus {
   }
 
   /**
-   * 에러 처리
+   * Handle error
    */
   private async handleError(stepId: string, message: string): Promise<void> {
     const context = await this.getContext();
@@ -248,7 +248,7 @@ export class AgentBus {
   }
 
   /**
-   * 컨텍스트 조회
+   * Get context
    */
   async getContext(): Promise<SharedContext | null> {
     try {
@@ -260,14 +260,14 @@ export class AgentBus {
   }
 
   /**
-   * 컨텍스트 저장
+   * Save context
    */
   private async saveContext(context: SharedContext): Promise<void> {
     await fs.writeFile(this.contextPath, JSON.stringify(context, null, 2));
   }
 
   /**
-   * 특정 Step의 출력 조회
+   * Get output from specific step
    */
   async getStepOutput(stepId: string): Promise<string | null> {
     const context = await this.getContext();
@@ -275,7 +275,7 @@ export class AgentBus {
   }
 
   /**
-   * 모든 변경 파일 조회
+   * Get all changed files
    */
   async getChangedFiles(): Promise<string[]> {
     const context = await this.getContext();
@@ -283,7 +283,7 @@ export class AgentBus {
   }
 
   /**
-   * 커스텀 데이터 조회
+   * Get custom data
    */
   async getData<T>(key: string): Promise<T | null> {
     const context = await this.getContext();
@@ -291,7 +291,7 @@ export class AgentBus {
   }
 
   /**
-   * 커스텀 데이터 설정
+   * Set custom data
    */
   async setData(key: string, value: unknown): Promise<void> {
     await this.publish('context_update', 'system', {
@@ -302,7 +302,7 @@ export class AgentBus {
   }
 
   /**
-   * 메시지 리스너 등록
+   * Register message listener
    */
   on(type: MessageType, callback: (msg: AgentMessage) => void): void {
     if (!this.listeners.has(type)) {
@@ -312,7 +312,7 @@ export class AgentBus {
   }
 
   /**
-   * 폴링 시작 (새 메시지 감지)
+   * Start polling (detect new messages)
    */
   startPolling(intervalMs: number = 1000): void {
     if (this.pollInterval) return;
@@ -323,7 +323,7 @@ export class AgentBus {
   }
 
   /**
-   * 폴링 중지
+   * Stop polling
    */
   stopPolling(): void {
     if (this.pollInterval) {
@@ -333,7 +333,7 @@ export class AgentBus {
   }
 
   /**
-   * 새 메시지 확인
+   * Check for new messages
    */
   private async checkNewMessages(): Promise<void> {
     try {
@@ -346,7 +346,7 @@ export class AgentBus {
         const content = await fs.readFile(resolve(this.messagesPath, file), 'utf-8');
         const message: AgentMessage = JSON.parse(content);
 
-        // 리스너 호출
+        // Invoke listeners
         const callbacks = this.listeners.get(message.type);
         if (callbacks) {
           for (const cb of callbacks) {
@@ -357,12 +357,12 @@ export class AgentBus {
         this.lastMessageId = file;
       }
     } catch {
-      // 무시
+      // Ignore
     }
   }
 
   /**
-   * 모든 메시지 조회
+   * Get all messages
    */
   async getAllMessages(): Promise<AgentMessage[]> {
     try {
@@ -381,7 +381,7 @@ export class AgentBus {
   }
 
   /**
-   * Step 컨텍스트 생성 (이전 step 결과 포함)
+   * Create step context (including previous step results)
    */
   async createStepContext(stepId: string, dependsOn?: string[]): Promise<string> {
     const context = await this.getContext();
@@ -395,27 +395,27 @@ export class AgentBus {
       '',
     ];
 
-    // 이전 step 결과
+    // Previous step results
     if (dependsOn && dependsOn.length > 0) {
       parts.push('### Previous Step Results');
       for (const depId of dependsOn) {
         const output = context.stepOutputs[depId];
         if (output) {
           parts.push(`\n#### ${depId}:`);
-          parts.push(output.slice(0, 2000));  // 너무 길면 자름
+          parts.push(output.slice(0, 2000));  // Truncate if too long
         }
       }
       parts.push('');
     }
 
-    // 변경된 파일
+    // Changed files
     if (context.changedFiles.length > 0) {
       parts.push('### Changed Files So Far');
       parts.push(context.changedFiles.map(f => `- ${f}`).join('\n'));
       parts.push('');
     }
 
-    // 에러 로그
+    // Error log
     if (context.errors.length > 0) {
       parts.push('### Previous Errors');
       for (const err of context.errors) {
@@ -428,11 +428,11 @@ export class AgentBus {
   }
 
   /**
-   * 버스 정리
+   * Clean up bus
    */
   async cleanup(): Promise<void> {
     this.stopPolling();
-    // 필요시 파일 정리
+    // Clean up files if needed
   }
 }
 
@@ -441,7 +441,7 @@ export class AgentBus {
 // ============================================
 
 /**
- * 새 버스 인스턴스 생성
+ * Create new bus instance
  */
 export function createBus(executionId?: string): AgentBus {
   const id = executionId || `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -449,7 +449,7 @@ export function createBus(executionId?: string): AgentBus {
 }
 
 /**
- * 기존 버스 연결
+ * Connect to existing bus
  */
 export async function connectToBus(executionId: string): Promise<AgentBus | null> {
   const contextPath = resolve(BUS_DIR, executionId, 'context.json');
@@ -460,7 +460,7 @@ export async function connectToBus(executionId: string): Promise<AgentBus | null
 }
 
 /**
- * 실행 중인 버스 목록
+ * List active buses
  */
 export async function listActiveBuses(): Promise<string[]> {
   try {

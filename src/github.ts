@@ -7,11 +7,12 @@ import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { getDateLocale } from './locale/index.js';
 
 const execAsync = promisify(exec);
 
 /**
- * 실패한 Workflow Run
+ * Failed Workflow Run
  */
 export type FailedRun = {
   id: number;
@@ -23,7 +24,7 @@ export type FailedRun = {
 };
 
 /**
- * GitHub 알림
+ * GitHub Notification
  */
 export type GitHubNotification = {
   id: string;
@@ -36,7 +37,7 @@ export type GitHubNotification = {
 };
 
 /**
- * 특정 레포의 실패한 workflow runs 조회
+ * Get failed workflow runs for a specific repo
  */
 export async function getFailedRuns(
   repo: string,
@@ -63,7 +64,7 @@ export async function getFailedRuns(
 }
 
 /**
- * 모든 등록된 레포의 실패한 runs 조회
+ * Get failed runs across all registered repos
  */
 export async function getAllFailedRuns(
   repos: string[],
@@ -78,7 +79,7 @@ export async function getAllFailedRuns(
 }
 
 /**
- * GitHub 알림 조회
+ * Get GitHub notifications
  */
 export async function getNotifications(
   limit: number = 10
@@ -108,7 +109,7 @@ export async function getNotifications(
 }
 
 /**
- * CI 관련 알림만 필터링
+ * Filter CI-related notifications only
  */
 export async function getCINotifications(): Promise<GitHubNotification[]> {
   const notifications = await getNotifications(50);
@@ -118,7 +119,7 @@ export async function getCINotifications(): Promise<GitHubNotification[]> {
 }
 
 /**
- * 특정 알림 읽음 처리
+ * Mark a specific notification as read
  */
 export async function markNotificationRead(threadId: string): Promise<void> {
   try {
@@ -129,7 +130,7 @@ export async function markNotificationRead(threadId: string): Promise<void> {
 }
 
 /**
- * Workflow run 상세 정보 조회
+ * Get workflow run details
  */
 export async function getRunDetails(
   repo: string,
@@ -147,7 +148,7 @@ export async function getRunDetails(
 }
 
 /**
- * Workflow run 로그 조회 (실패한 job만)
+ * Get workflow run logs (failed jobs only)
  */
 export async function getFailedJobLogs(
   repo: string,
@@ -165,7 +166,7 @@ export async function getFailedJobLogs(
 }
 
 /**
- * PR 체크 상태 조회
+ * Get PR check statuses
  */
 export async function getPRChecks(
   repo: string,
@@ -183,7 +184,7 @@ export async function getPRChecks(
 }
 
 /**
- * CI 실패 요약 생성
+ * Generate CI failure summary
  */
 export async function summarizeCIFailures(repos: string[]): Promise<string> {
   const failures = await getAllFailedRuns(repos, 3);
@@ -193,7 +194,7 @@ export async function summarizeCIFailures(repos: string[]): Promise<string> {
   }
 
   const summary = failures.map((f) => {
-    const time = new Date(f.createdAt).toLocaleString('ko-KR');
+    const time = new Date(f.createdAt).toLocaleString(getDateLocale());
     return `❌ **${f.repo}** - ${f.name}\n   브랜치: ${f.branch}\n   시간: ${time}`;
   });
 
@@ -201,7 +202,7 @@ export async function summarizeCIFailures(repos: string[]): Promise<string> {
 }
 
 /**
- * GitHub 알림 요약 생성
+ * Generate GitHub notification summary
  */
 export async function summarizeNotifications(): Promise<string> {
   const notifications = await getNotifications(10);
@@ -228,15 +229,15 @@ export async function summarizeNotifications(): Promise<string> {
 }
 
 // ============================================
-// CI State Monitoring (상태 기반)
+// CI State Monitoring (state-based)
 // ============================================
 
 const CI_STATE_PATH = resolve(homedir(), '.claude-swarm', 'ci-state.json');
 
-/** 레포별 상태 */
+/** Per-repo health status */
 export type RepoHealthStatus = 'healthy' | 'broken' | 'unknown';
 
-/** workflow+branch 단위 미해결 실패 */
+/** Active failure per workflow+branch */
 export type ActiveFailure = {
   workflow: string;
   branch: string;
@@ -245,7 +246,7 @@ export type ActiveFailure = {
   createdAt: string;
 };
 
-/** 레포 건강 상태 */
+/** Repo health state */
 export type RepoHealth = {
   repo: string;
   status: RepoHealthStatus;
@@ -255,13 +256,13 @@ export type RepoHealth = {
   lastChecked: string;
 };
 
-/** 전체 CI 상태 (파일 persist) */
+/** Overall CI state (persisted to file) */
 export type CIState = {
   repos: Record<string, RepoHealth>;
   updatedAt: string;
 };
 
-/** 상태 전환 */
+/** Health state transition */
 export type HealthTransition = {
   repo: string;
   from: RepoHealthStatus;
@@ -271,7 +272,7 @@ export type HealthTransition = {
   brokenSince?: string;
 };
 
-/** CI 상태 로드 */
+/** Load CI state */
 export async function loadCIState(): Promise<CIState> {
   try {
     const data = await readFile(CI_STATE_PATH, 'utf-8');
@@ -281,7 +282,7 @@ export async function loadCIState(): Promise<CIState> {
   }
 }
 
-/** CI 상태 저장 */
+/** Save CI state */
 export async function saveCIState(state: CIState): Promise<void> {
   await mkdir(resolve(homedir(), '.claude-swarm'), { recursive: true });
   state.updatedAt = new Date().toISOString();
@@ -289,10 +290,10 @@ export async function saveCIState(state: CIState): Promise<void> {
 }
 
 /**
- * 레포의 미해결 실패 조회
- * workflow+branch별 최신 run만 확인하여, 최신이 failure인 것만 반환.
- * maxAgeDays 이상 지난 실패는 무시 (폐기된 브랜치 필터).
- * 에러 시 null 반환 (상태 변경하지 않도록).
+ * Get active failures for a repo.
+ * Checks only the latest run per workflow+branch; returns only those with failure conclusion.
+ * Ignores failures older than maxAgeDays (stale branch filter).
+ * Returns null on error (to avoid state changes).
  */
 export async function getActiveFailures(repo: string, maxAgeDays: number = 30): Promise<ActiveFailure[] | null> {
   try {
@@ -302,7 +303,7 @@ export async function getActiveFailures(repo: string, maxAgeDays: number = 30): 
     const runs = JSON.parse(stdout);
     if (runs.length === 0) return [];
 
-    // workflow+branch별 최신 run만 (gh run list는 최신순 정렬)
+    // Keep only the latest run per workflow+branch (gh run list returns newest first)
     const latest = new Map<string, any>();
     for (const run of runs) {
       const key = `${run.name}::${run.headBranch}`;
@@ -315,7 +316,7 @@ export async function getActiveFailures(repo: string, maxAgeDays: number = 30): 
     const failures: ActiveFailure[] = [];
     for (const [, run] of latest) {
       if (run.conclusion === 'failure') {
-        // 폐기된 브랜치의 오래된 실패 무시
+        // Ignore old failures from stale branches
         const age = Date.now() - new Date(run.createdAt).getTime();
         if (age > maxAgeMs) continue;
         failures.push({
@@ -336,8 +337,8 @@ export async function getActiveFailures(repo: string, maxAgeDays: number = 30): 
 }
 
 /**
- * 레포 상태 체크 및 전환 감지
- * 에러 시 기존 상태 유지 (false positive 방지)
+ * Check repo health and detect state transitions.
+ * Preserves existing state on error (to prevent false positives).
  */
 export async function checkRepoHealth(
   repo: string,
@@ -348,7 +349,7 @@ export async function checkRepoHealth(
 
   const activeFailures = await getActiveFailures(repo);
 
-  // gh CLI 에러 → 기존 상태 유지
+  // gh CLI error -> preserve existing state
   if (activeFailures === null) {
     const fallback: RepoHealth = current ?? {
       repo,
@@ -393,7 +394,7 @@ export async function checkRepoHealth(
   return { health, transition };
 }
 
-/** 리마인더 필요 여부 (기본 24시간) */
+/** Check if a reminder is needed (default: 24 hours) */
 export function needsReminder(health: RepoHealth, intervalHours: number = 24): boolean {
   if (health.status !== 'broken') return false;
   if (!health.lastReminder) return true;
@@ -408,7 +409,7 @@ export function needsReminder(health: RepoHealth, intervalHours: number = 24): b
 // ============================================
 
 /**
- * PR 기본 정보
+ * PR basic info
  */
 export type PRInfo = {
   repo: string;
@@ -420,7 +421,7 @@ export type PRInfo = {
 };
 
 /**
- * PR 상세 정보
+ * PR detailed info
  */
 export type PRDetails = PRInfo & {
   body: string;
@@ -431,7 +432,7 @@ export type PRDetails = PRInfo & {
 };
 
 /**
- * 특정 레포의 open PR 목록 조회
+ * Get open PR list for a specific repo
  */
 export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
   try {
@@ -454,7 +455,7 @@ export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
 }
 
 /**
- * PR 상세 정보 조회 (view + diff + checks)
+ * Get PR details (view + diff + checks)
  */
 export async function getPRContext(repo: string, prNumber: number): Promise<PRDetails | null> {
   try {
@@ -494,7 +495,7 @@ export async function getPRContext(repo: string, prNumber: number): Promise<PRDe
 }
 
 /**
- * PR에 코멘트 작성 (stdin 파이프로 전달하여 쉘 이스케이프 회피)
+ * Post a comment on a PR (piped via stdin to avoid shell escaping)
  */
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
   try {
@@ -517,24 +518,24 @@ export async function commentOnPR(repo: string, prNumber: number, body: string):
 }
 
 /**
- * PR 브랜치의 최근 실패 run 로그 조회
+ * Get recent failed run logs for a PR branch
  */
 export async function getPRFailedLogs(repo: string, prNumber: number): Promise<string> {
   try {
-    // PR의 head branch 가져오기
+    // Get the PR's head branch
     const { stdout: prInfo } = await execAsync(
       `gh pr view ${prNumber} -R ${repo} --json headRefName`
     );
     const { headRefName } = JSON.parse(prInfo);
 
-    // 해당 브랜치의 최근 실패 run 조회
+    // Get the most recent failed run for this branch
     const { stdout: runsStr } = await execAsync(
       `gh run list -R ${repo} -b ${headRefName} -s failure --json databaseId -L 1`
     );
     const runs = JSON.parse(runsStr);
     if (runs.length === 0) return '';
 
-    // 실패 로그 조회
+    // Get failed logs
     const { stdout: logs } = await execAsync(
       `gh run view ${runs[0].databaseId} -R ${repo} --log-failed 2>/dev/null | tail -150`
     );

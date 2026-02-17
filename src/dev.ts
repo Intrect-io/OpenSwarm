@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 
 /**
- * 알려진 저장소 목록 (별칭 -> 경로)
+ * Known repository list (alias -> path)
  */
 const KNOWN_REPOS: Record<string, string> = {
   // Tools
@@ -17,14 +17,14 @@ const KNOWN_REPOS: Record<string, string> = {
   pykiwoom: '~/dev/tools/pykiwoom',
   'pykiwoom-rest': '~/dev/tools/pykiwoom-rest',
 
-  // Projects - 필요에 따라 추가
+  // Projects - add as needed
   'claude-swarm': '~/dev/claude-swarm',
   stonks: '~/dev/STONKS',
   stockapi: '~/dev/StockAPI',
 };
 
 /**
- * 활성 dev 작업 추적
+ * Active dev task tracking
  */
 type DevTask = {
   repo: string;
@@ -39,7 +39,7 @@ type DevTask = {
 const activeTasks: Map<string, DevTask> = new Map();
 
 /**
- * 경로 확장 (~/ 처리)
+ * Expand path (~/ handling)
  */
 function expandPath(p: string): string {
   if (p.startsWith('~/')) {
@@ -49,25 +49,25 @@ function expandPath(p: string): string {
 }
 
 /**
- * 저장소 경로 해석
- * - 별칭 (pykis) -> 알려진 경로
- * - 상대경로 (tools/pykis) -> ~/dev/ 아래
- * - 절대경로 (~/ 또는 /) -> 그대로
+ * Resolve repository path
+ * - Alias (pykis) -> known path
+ * - Relative path (tools/pykis) -> under ~/dev/
+ * - Absolute path (~/ or /) -> as-is
  */
 export function resolveRepoPath(repo: string): string | null {
-  // 1. 알려진 별칭 확인
+  // 1. Check known aliases
   if (KNOWN_REPOS[repo.toLowerCase()]) {
     const path = expandPath(KNOWN_REPOS[repo.toLowerCase()]);
     return existsSync(path) ? path : null;
   }
 
-  // 2. ~/ 또는 / 시작 (절대 경로)
+  // 2. Starts with ~/ or / (absolute path)
   if (repo.startsWith('~/') || repo.startsWith('/')) {
     const path = expandPath(repo);
     return existsSync(path) ? path : null;
   }
 
-  // 3. 상대 경로 (~/dev/ 아래로 가정)
+  // 3. Relative path (assumed under ~/dev/)
   const devPath = expandPath(`~/dev/${repo}`);
   if (existsSync(devPath)) {
     return devPath;
@@ -77,7 +77,7 @@ export function resolveRepoPath(repo: string): string | null {
 }
 
 /**
- * 알려진 저장소 목록 반환
+ * Return known repository list
  */
 export function listKnownRepos(): { alias: string; path: string; exists: boolean }[] {
   return Object.entries(KNOWN_REPOS).map(([alias, path]) => ({
@@ -88,7 +88,7 @@ export function listKnownRepos(): { alias: string; path: string; exists: boolean
 }
 
 /**
- * ~/dev 폴더 내 저장소 스캔
+ * Scan repositories in ~/dev folder
  */
 export function scanDevRepos(): string[] {
   const devDir = expandPath('~/dev');
@@ -111,8 +111,8 @@ export function scanDevRepos(): string[] {
 }
 
 /**
- * Dev 작업 실행
- * @param bypassTimeWindow - true면 시간 제한 무시 (수동 요청 시 사용)
+ * Execute a dev task
+ * @param bypassTimeWindow - if true, bypass time restrictions (for manual requests)
  */
 export async function runDevTask(
   repo: string,
@@ -122,7 +122,7 @@ export async function runDevTask(
   onComplete?: (output: string, exitCode: number | null) => void,
   bypassTimeWindow = false,
 ): Promise<{ taskId: string; path: string } | { error: string }> {
-  // 시간 윈도우 체크 (수동 요청이 아닌 경우만)
+  // Check time window (only for non-manual requests)
   if (!bypassTimeWindow) {
     const timeCheck = checkWorkAllowed();
     if (!timeCheck.allowed) {
@@ -138,7 +138,7 @@ export async function runDevTask(
     return { error: `저장소를 찾을 수 없습니다: ${repo}` };
   }
 
-  // 동일 저장소에 이미 실행 중인 작업이 있는지 확인
+  // Check if a task is already running for the same repo
   const existingTask = Array.from(activeTasks.values()).find(t => t.path === path);
   if (existingTask) {
     return { error: `${repo}에 이미 실행 중인 작업이 있습니다 (id: ${existingTask.repo})` };
@@ -146,7 +146,7 @@ export async function runDevTask(
 
   const taskId = `${repo}-${Date.now()}`;
 
-  // Claude CLI 실행 (자율 실행을 위해 권한 우회)
+  // Run Claude CLI (bypass permissions for autonomous execution)
   const claudeProcess = spawn('claude', [
     '-p', task,
     '--output-format', 'text',
@@ -169,22 +169,22 @@ export async function runDevTask(
 
   activeTasks.set(taskId, devTask);
 
-  // stdout 수집
+  // Collect stdout
   claudeProcess.stdout?.on('data', (data: Buffer) => {
     const chunk = data.toString();
     devTask.output += chunk;
     onProgress?.(chunk);
   });
 
-  // stderr 수집
+  // Collect stderr
   claudeProcess.stderr?.on('data', (data: Buffer) => {
     const chunk = data.toString();
     devTask.output += chunk;
   });
 
-  // 완료 처리
+  // Handle completion
   claudeProcess.on('close', (code) => {
-    // 리포트 파일 생성
+    // Generate report file
     const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
     generateReport(devTask, code, duration);
 
@@ -192,7 +192,7 @@ export async function runDevTask(
     activeTasks.delete(taskId);
   });
 
-  // 에러 처리
+  // Handle errors
   claudeProcess.on('error', (err) => {
     devTask.output += `\nError: ${err.message}`;
     onComplete?.(devTask.output, -1);
@@ -203,7 +203,7 @@ export async function runDevTask(
 }
 
 /**
- * 활성 작업 목록
+ * List active tasks
  */
 export function getActiveTasks(): { taskId: string; repo: string; path: string; startedAt: number; requestedBy: string }[] {
   return Array.from(activeTasks.entries()).map(([taskId, task]) => ({
@@ -216,7 +216,7 @@ export function getActiveTasks(): { taskId: string; repo: string; path: string; 
 }
 
 /**
- * 작업 취소
+ * Cancel a task
  */
 export function cancelTask(taskId: string): boolean {
   const task = activeTasks.get(taskId);
@@ -228,25 +228,25 @@ export function cancelTask(taskId: string): boolean {
 }
 
 /**
- * 알려진 저장소 추가 (런타임)
+ * Add a known repository (at runtime)
  */
 export function addKnownRepo(alias: string, path: string): void {
   KNOWN_REPOS[alias.toLowerCase()] = path;
 }
 
 /**
- * 작업 리포트 생성
+ * Generate task report
  */
 function generateReport(task: DevTask, exitCode: number | null, durationSec: number): void {
   const now = new Date();
   const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
   const timeStr = now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
 
-  // 리포트 파일 경로 (저장소 내 reports/ 디렉토리)
+  // Report file path (reports/ directory inside the repo)
   const reportsDir = resolve(task.path, 'reports');
   const reportFile = resolve(reportsDir, `${dateStr}-report.md`);
 
-  // reports 디렉토리 생성
+  // Create reports directory
   try {
     if (!existsSync(reportsDir)) {
       mkdirSync(reportsDir, { recursive: true });
@@ -256,16 +256,16 @@ function generateReport(task: DevTask, exitCode: number | null, durationSec: num
     return;
   }
 
-  // 출력 요약 (너무 길면 잘라냄)
+  // Output summary (truncate if too long)
   const outputSummary = task.output.length > 3000
     ? task.output.slice(-3000) + '\n\n...(truncated)'
     : task.output;
 
-  // 상태 이모지
+  // Status emoji
   const statusEmoji = exitCode === 0 ? '✅' : exitCode === null ? '⚠️' : '❌';
   const statusText = exitCode === 0 ? '성공' : exitCode === null ? '중단됨' : `실패 (code: ${exitCode})`;
 
-  // 리포트 내용
+  // Report content
   const reportEntry = `
 ---
 
@@ -292,7 +292,7 @@ ${outputSummary.trim() || '(출력 없음)'}
 
 `;
 
-  // 파일이 존재하면 append, 없으면 헤더와 함께 생성
+  // Append if file exists, otherwise create with header
   try {
     if (existsSync(reportFile)) {
       appendFileSync(reportFile, reportEntry, 'utf-8');
@@ -312,7 +312,7 @@ ${outputSummary.trim() || '(출력 없음)'}
 }
 
 /**
- * 시간 포맷팅
+ * Format duration
  */
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}초`;
@@ -325,7 +325,7 @@ function formatDuration(seconds: number): string {
 }
 
 /**
- * 현재 작업 가능 상태 조회
+ * Get current work availability status
  */
 export function getWorkStatus(): { canWork: boolean; summary: string } {
   const timeCheck = checkWorkAllowed();

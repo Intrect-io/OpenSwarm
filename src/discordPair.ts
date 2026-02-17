@@ -22,6 +22,7 @@ import * as pairWebhook from './pairWebhook.js';
 import {
   pairModeConfig,
 } from './discordCore.js';
+import { t, getDateLocale } from './locale/index.js';
 
 /**
  * !pair 명령어 핸들러
@@ -71,15 +72,7 @@ export async function handlePair(msg: Message, args: string[]): Promise<void> {
   }
 
   // 도움말
-  await msg.reply(
-    '**👥 Worker/Reviewer 페어 명령어:**\n' +
-    '`!pair` - 현재 페어 세션 상태\n' +
-    '`!pair start [taskId]` - 페어 세션 시작\n' +
-    '`!pair run <taskId> [project]` - 직접 페어 실행\n' +
-    '`!pair stop [sessionId]` - 세션 중지\n' +
-    '`!pair history [n]` - 최근 n개 히스토리\n' +
-    '`!pair stats` - 통계 조회'
-  );
+  await msg.reply(t('discord.pair.helpText'));
 }
 
 /**
@@ -91,7 +84,7 @@ async function handlePairStats(msg: Message): Promise<void> {
     const daily = await pairMetrics.getDailyMetrics(7);
 
     const embed = new EmbedBuilder()
-      .setTitle('📊 페어 모드 통계')
+      .setTitle(t('discord.pair.stats.title'))
       .setColor(0x5865F2)
       .setTimestamp();
 
@@ -100,28 +93,28 @@ async function handlePairStats(msg: Message): Promise<void> {
       {
         name: '📈 전체 통계',
         value: [
-          `**총 세션:** ${summary.totalSessions}개`,
-          `**성공률:** ${summary.successRate}%`,
-          `**첫 시도 성공률:** ${summary.firstAttemptSuccessRate}%`,
+          t('discord.pair.stats.totalSessions', { n: summary.totalSessions }),
+          t('discord.pair.stats.successRate', { n: summary.successRate }),
+          t('discord.pair.stats.firstAttemptRate', { n: summary.firstAttemptSuccessRate }),
         ].join('\n'),
         inline: true,
       },
       {
         name: '📋 결과 분포',
         value: [
-          `✅ 승인: ${summary.approved}`,
-          `❌ 거부: ${summary.rejected}`,
-          `💥 실패: ${summary.failed}`,
-          `🚫 취소: ${summary.cancelled}`,
+          `✅ ${t('discord.pair.stats.approved', { n: summary.approved })}`,
+          `❌ ${t('discord.pair.stats.rejected', { n: summary.rejected })}`,
+          `💥 ${t('discord.pair.stats.failed', { n: summary.failed })}`,
+          `🚫 ${t('discord.pair.stats.cancelled', { n: summary.cancelled })}`,
         ].join('\n'),
         inline: true,
       },
       {
         name: '⏱️ 평균 지표',
         value: [
-          `**시도 횟수:** ${summary.avgAttempts}회`,
-          `**소요 시간:** ${formatDuration(summary.avgDurationMs)}`,
-          `**변경 파일:** ${summary.avgFilesChanged}개`,
+          t('discord.pair.stats.avgAttempts', { n: summary.avgAttempts }),
+          t('discord.pair.stats.avgDuration', { duration: formatDuration(summary.avgDurationMs) }),
+          t('discord.pair.stats.avgFiles', { n: summary.avgFilesChanged }),
         ].join('\n'),
         inline: true,
       }
@@ -135,15 +128,15 @@ async function handlePairStats(msg: Message): Promise<void> {
       });
 
       embed.addFields({
-        name: '📅 일별 통계 (최근 7일)',
-        value: dailyLines.join('\n') || '(데이터 없음)',
+        name: t('discord.pair.stats.dailyTitle'),
+        value: dailyLines.join('\n') || t('discord.pair.stats.noData'),
         inline: false,
       });
     }
 
     await msg.reply({ embeds: [embed] });
   } catch (err) {
-    await msg.reply(`❌ 통계 조회 실패: ${err instanceof Error ? err.message : String(err)}`);
+    await msg.reply(`❌ ${t('discord.errors.statsQueryFailed', { error: err instanceof Error ? err.message : String(err) })}`);
   }
 }
 
@@ -152,9 +145,9 @@ async function handlePairStats(msg: Message): Promise<void> {
  */
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${Math.round(ms / 1000)}초`;
-  if (ms < 3600000) return `${Math.round(ms / 60000)}분`;
-  return `${Math.round(ms / 3600000)}시간`;
+  if (ms < 60000) return t('common.duration.seconds', { n: Math.round(ms / 1000) });
+  if (ms < 3600000) return t('common.duration.minutes', { n: Math.round(ms / 60000) });
+  return t('common.duration.hours', { n: Math.round(ms / 3600000) });
 }
 
 /**
@@ -164,12 +157,12 @@ async function handlePairStatus(msg: Message): Promise<void> {
   const sessions = agentPair.getActiveSessions();
 
   if (sessions.length === 0) {
-    await msg.reply('👥 활성 페어 세션이 없습니다.\n`!pair start` 로 시작하세요.');
+    await msg.reply(t('discord.pair.noActiveSessions'));
     return;
   }
 
   const embed = new EmbedBuilder()
-    .setTitle('👥 활성 페어 세션')
+    .setTitle(t('discord.pair.activeSessionsTitle'))
     .setColor(0x00AE86)
     .setTimestamp();
 
@@ -196,7 +189,7 @@ async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
     try {
       task = await linear.getIssue(taskId);
     } catch {
-      await msg.reply(`❌ 이슈를 찾을 수 없습니다: \`${taskId}\``);
+      await msg.reply(`❌ ${t('discord.errors.issueNotFound', { id: taskId || '' })}`);
       return;
     }
   } else {
@@ -204,12 +197,12 @@ async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
     try {
       const issues = await linear.getMyIssues();
       if (issues.length === 0) {
-        await msg.reply('❌ 대기 중인 이슈가 없습니다.');
+        await msg.reply(`❌ ${t('discord.pair.noPendingIssues')}`);
         return;
       }
       task = issues[0];
     } catch (err) {
-      await msg.reply(`❌ Linear 조회 실패: ${err instanceof Error ? err.message : String(err)}`);
+      await msg.reply(`❌ ${t('discord.errors.linearFetchFailed', { error: err instanceof Error ? err.message : String(err) })}`);
       return;
     }
   }
@@ -232,7 +225,7 @@ async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
  */
 async function handlePairRun(msg: Message, taskId: string, project: string): Promise<void> {
   if (!taskId) {
-    await msg.reply('사용법: `!pair run <taskId> [project]`');
+    await msg.reply(t('discord.pair.usage'));
     return;
   }
 
@@ -291,14 +284,14 @@ async function startPairSession(
 
     agentPair.setSessionThreadId(session.id, thread.id);
   } catch (err) {
-    await msg.reply(`❌ 스레드 생성 실패: ${err instanceof Error ? err.message : String(err)}`);
+    await msg.reply(`❌ ${t('discord.errors.threadCreateFailed', { error: err instanceof Error ? err.message : String(err) })}`);
     agentPair.cancelSession(session.id);
     return;
   }
 
   // 3. 시작 메시지
   const startEmbed = new EmbedBuilder()
-    .setTitle(`📋 페어 작업 시작: ${options.taskTitle.slice(0, 80)}`)
+    .setTitle(`📋 ${t('discord.pair.taskStartTitle', { title: options.taskTitle.slice(0, 80) })}`)
     .setColor(0x00AE86)
     .addFields(
       { name: 'Session ID', value: session.id, inline: true },
@@ -308,17 +301,17 @@ async function startPairSession(
     .setTimestamp();
 
   await thread.send({ embeds: [startEmbed] });
-  agentPair.addMessage(session.id, 'system', '페어 세션이 시작되었습니다.');
+  agentPair.addMessage(session.id, 'system', t('discord.pair.sessionStartMsg'));
 
   // 4. Worker/Reviewer 루프 시작 (비동기)
   runPairLoop(session.id, thread).catch((err) => {
     console.error('[Pair] Loop error:', err);
-    thread.send(`❌ 페어 루프 오류: ${err instanceof Error ? err.message : String(err)}`);
+    thread.send(`❌ ${t('discord.pair.loopError', { error: err instanceof Error ? err.message : String(err) })}`);
     agentPair.updateSessionStatus(session.id, 'failed');
   });
 
   // 5. 메인 채널에 알림
-  await msg.reply(`👥 페어 세션 시작됨: ${thread}`);
+  await msg.reply(`👥 ${t('discord.pair.sessionStarted', { thread: String(thread) })}`);
 }
 
 /**
@@ -344,13 +337,13 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
 
     // 취소 체크
     if (session.status === 'cancelled') {
-      await thread.send('🚫 세션이 취소되었습니다.');
+      await thread.send(`🚫 ${t('discord.pair.sessionCancelled')}`);
       return;
     }
 
     // === Worker 실행 ===
     agentPair.updateSessionStatus(sessionId, 'working');
-    await thread.send(`🔨 **[Worker]** 작업 시작... (시도 ${session.worker.attempts + 1}/${session.worker.maxAttempts})`);
+    await thread.send(t('discord.pair.workerStarting', { attempt: session.worker.attempts + 1, max: session.worker.maxAttempts }));
 
     const previousFeedback = session.reviewer.feedback
       ? reviewer.buildRevisionPrompt(session.reviewer.feedback)
@@ -362,22 +355,26 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       projectPath: session.projectPath,
       previousFeedback,
       timeoutMs: 300000, // 5분
+      issueIdentifier: session.taskId,
     });
 
     lastWorkerResult = workerResult;
     agentPair.saveWorkerResult(sessionId, workerResult);
-    await thread.send(worker.formatWorkReport(workerResult));
+    await thread.send(worker.formatWorkReport(workerResult, {
+      issueIdentifier: session.taskId,
+      projectPath: session.projectPath,
+    }));
 
     // Worker 실패 시 재시도 또는 종료
     if (!workerResult.success) {
       if (!agentPair.canRetry(sessionId)) {
         agentPair.updateSessionStatus(sessionId, 'failed');
-        await thread.send('❌ **[System]** 최대 시도 횟수 초과. 작업 실패.');
+        await thread.send(t('discord.pair.maxAttemptsExceeded'));
 
         // Linear에 실패 기록
         try {
           await linear.logPairFailed(session.taskId, sessionId, 'max_attempts',
-            `Worker 작업 실패 후 최대 시도 횟수(${session.worker.maxAttempts}회) 초과`);
+            `Worker failed after max attempts (${session.worker.maxAttempts}) exceeded`);
         } catch (err) {
           console.error('[Pair] Linear logPairFailed failed:', err);
         }
@@ -391,7 +388,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
 
     // === Reviewer 실행 ===
     agentPair.updateSessionStatus(sessionId, 'reviewing');
-    await thread.send('🔍 **[Reviewer]** 리뷰 시작...');
+    await thread.send(t('discord.pair.reviewerStarting'));
 
     // Linear에 리뷰 시작 기록
     try {
@@ -414,7 +411,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
     // === 결정 처리 ===
     if (reviewResult.decision === 'approve') {
       agentPair.updateSessionStatus(sessionId, 'approved');
-      await thread.send('✅ **[System]** 작업이 승인되었습니다!');
+      await thread.send(t('discord.pair.workApproved'));
 
       // Linear에 완료 기록
       try {
@@ -435,12 +432,12 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
 
     if (reviewResult.decision === 'reject') {
       agentPair.updateSessionStatus(sessionId, 'rejected');
-      await thread.send('❌ **[System]** 작업이 거부되었습니다. 수동 개입이 필요합니다.');
+      await thread.send(t('discord.pair.workRejected'));
 
       // Linear에 거부 기록
       try {
         await linear.logPairFailed(session.taskId, sessionId, 'rejected',
-          `피드백: ${reviewResult.feedback}\n문제점: ${reviewResult.issues?.join(', ') || '없음'}`);
+          `Feedback: ${reviewResult.feedback}\nIssues: ${reviewResult.issues?.join(', ') || 'none'}`);
       } catch (err) {
         console.error('[Pair] Linear logPairFailed failed:', err);
       }
@@ -453,11 +450,11 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
     // revise: 다음 루프에서 Worker가 수정
     if (!agentPair.canRetry(sessionId)) {
       agentPair.updateSessionStatus(sessionId, 'failed');
-      await thread.send('❌ **[System]** 최대 시도 횟수 초과. 수정 실패.');
+      await thread.send(t('discord.pair.maxAttemptsEnd'));
 
       try {
         await linear.logPairFailed(session.taskId, sessionId, 'max_attempts',
-          `최대 시도 횟수(${session.worker.maxAttempts}회) 초과`);
+          `Max attempts (${session.worker.maxAttempts}) exceeded`);
       } catch (err) {
         console.error('[Pair] Linear logPairFailed failed:', err);
       }
@@ -475,18 +472,18 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
     }
 
     agentPair.updateSessionStatus(sessionId, 'revising');
-    await thread.send('🔄 **[System]** 수정이 필요합니다. Worker가 재작업합니다...');
+    await thread.send(t('discord.pair.revisionNeeded'));
   }
 
   // 최대 시도 초과
   session = agentPair.getPairSession(sessionId);
   if (session) {
     agentPair.updateSessionStatus(sessionId, 'failed');
-    await thread.send('❌ **[System]** 최대 시도 횟수 초과. 작업 종료.');
+    await thread.send(t('discord.pair.maxAttemptsEnd'));
 
     try {
       await linear.logPairFailed(session.taskId, sessionId, 'max_attempts',
-        `최대 시도 횟수(${session.worker.maxAttempts}회) 초과`);
+        `Max attempts (${session.worker.maxAttempts}) exceeded`);
     } catch (err) {
       console.error('[Pair] Linear logPairFailed failed:', err);
     }
@@ -507,8 +504,8 @@ async function sendFinalSummary(
   const durationMs = finishedAt - session.startedAt;
   const duration = Math.round(durationMs / 1000);
   const durationStr = duration < 60
-    ? `${duration}초`
-    : `${Math.floor(duration / 60)}분 ${duration % 60}초`;
+    ? t('common.duration.seconds', { n: duration })
+    : `${Math.floor(duration / 60)}m ${duration % 60}s`;
 
   // 메트릭 기록
   try {
@@ -549,17 +546,17 @@ async function sendFinalSummary(
 
   // 결과별 색상 및 이모지
   const config = {
-    approved: { color: 0x00FF00, emoji: '✅', title: '작업 완료' },
-    rejected: { color: 0xFF0000, emoji: '❌', title: '작업 거부됨' },
-    failed: { color: 0xFF6600, emoji: '💥', title: '작업 실패' },
-    cancelled: { color: 0x808080, emoji: '🚫', title: '작업 취소됨' },
+    approved: { color: 0x00FF00, emoji: '✅', title: t('discord.pair.summary.completed') },
+    rejected: { color: 0xFF0000, emoji: '❌', title: t('discord.pair.summary.rejected') },
+    failed: { color: 0xFF6600, emoji: '💥', title: t('discord.pair.summary.failed') },
+    cancelled: { color: 0x808080, emoji: '🚫', title: t('discord.pair.summary.cancelled') },
   }[result];
 
   // 변경된 파일 목록
   const filesChanged = session.worker.result?.filesChanged || [];
   const filesStr = filesChanged.length > 0
     ? filesChanged.slice(0, 10).map(f => `\`${f}\``).join(', ')
-    : '없음';
+    : t('discord.pair.summary.noFiles');
 
   // 실행된 명령어 (미사용이지만 향후 확장용)
   const _commands = session.worker.result?.commands || [];
@@ -569,12 +566,12 @@ async function sendFinalSummary(
     .setTitle(`${config.emoji} ${config.title}: ${session.taskTitle.slice(0, 60)}`)
     .setColor(config.color)
     .addFields(
-      { name: '📊 통계', value: [
-        `**시도 횟수:** ${session.worker.attempts}/${session.worker.maxAttempts}`,
-        `**소요 시간:** ${durationStr}`,
-        `**변경 파일:** ${filesChanged.length}개`,
+      { name: t('discord.pair.summary.statsLabel'), value: [
+        t('discord.pair.summary.attempts', { n: session.worker.attempts, max: session.worker.maxAttempts }),
+        t('discord.pair.summary.duration', { duration: durationStr }),
+        t('discord.pair.summary.filesChanged', { n: filesChanged.length }),
       ].join('\n'), inline: false },
-      { name: '📁 변경된 파일', value: filesStr.slice(0, 1000) || '없음', inline: false },
+      { name: t('discord.pair.summary.filesLabel'), value: filesStr.slice(0, 1000) || t('discord.pair.summary.noFiles'), inline: false },
     )
     .setFooter({ text: `Session: ${session.id} | Task: ${session.taskId}` })
     .setTimestamp();
@@ -583,10 +580,10 @@ async function sendFinalSummary(
   if (session.reviewer.feedback) {
     const feedback = session.reviewer.feedback;
     const feedbackStr = [
-      `**결정:** ${feedback.decision.toUpperCase()}`,
-      `**피드백:** ${feedback.feedback.slice(0, 200)}`,
+      t('discord.pair.summary.decisionLabel', { decision: feedback.decision.toUpperCase() }),
+      t('discord.pair.summary.feedbackLabel', { feedback: feedback.feedback.slice(0, 200) }),
     ].join('\n');
-    embed.addFields({ name: '🔍 Reviewer 피드백', value: feedbackStr, inline: false });
+    embed.addFields({ name: t('discord.pair.summary.reviewerFeedback'), value: feedbackStr, inline: false });
   }
 
   await thread.send({ embeds: [embed] });
@@ -595,10 +592,10 @@ async function sendFinalSummary(
   if (session.messages.length > 0) {
     const discussionSummary = formatDiscussionSummary(session);
     if (discussionSummary.length <= 2000) {
-      await thread.send(`📜 **토론 요약**\n${discussionSummary}`);
+      await thread.send(`📜 ${t('discord.pair.summary.discussionSummary', { count: session.messages.length })}\n${discussionSummary}`);
     } else {
       // 너무 길면 분할
-      await thread.send(`📜 **토론 요약** (${session.messages.length}개 메시지)`);
+      await thread.send(`📜 ${t('discord.pair.summary.discussionSummary', { count: session.messages.length })}`);
       await thread.send(`\`\`\`\n${discussionSummary.slice(0, 1900)}\n...\n\`\`\``);
     }
   }
@@ -610,7 +607,7 @@ async function sendFinalSummary(
 function formatDiscussionSummary(session: agentPair.PairSession): string {
   return session.messages.map((msg, _idx) => {
     const roleEmoji = { worker: '🔨', reviewer: '🔍', system: '⚙️' }[msg.role];
-    const time = new Date(msg.timestamp).toLocaleTimeString('ko-KR', {
+    const time = new Date(msg.timestamp).toLocaleTimeString(getDateLocale(), {
       hour: '2-digit',
       minute: '2-digit',
     });
@@ -626,7 +623,7 @@ async function handlePairStop(msg: Message, sessionId?: string): Promise<void> {
   const sessions = agentPair.getActiveSessions();
 
   if (sessions.length === 0) {
-    await msg.reply('활성 페어 세션이 없습니다.');
+    await msg.reply(t('discord.pair.noActiveSessions'));
     return;
   }
 
@@ -635,9 +632,9 @@ async function handlePairStop(msg: Message, sessionId?: string): Promise<void> {
   const success = agentPair.cancelSession(targetId);
 
   if (success) {
-    await msg.reply(`🚫 페어 세션 취소됨: \`${targetId}\``);
+    await msg.reply(`🚫 ${t('discord.pair.cancelledMsg', { id: targetId })}`);
   } else {
-    await msg.reply(`❌ 세션을 찾을 수 없거나 이미 종료됨: \`${targetId}\``);
+    await msg.reply(`❌ ${t('discord.pair.cancelNotFound', { id: targetId })}`);
   }
 }
 
@@ -648,12 +645,12 @@ async function handlePairHistory(msg: Message, limit: number): Promise<void> {
   const history = agentPair.getSessionHistory(limit);
 
   if (history.length === 0) {
-    await msg.reply('📚 페어 세션 히스토리가 없습니다.');
+    await msg.reply(t('discord.pair.noHistory'));
     return;
   }
 
   const embed = new EmbedBuilder()
-    .setTitle('📚 페어 세션 히스토리')
+    .setTitle(t('discord.pair.historyTitle'))
     .setColor(0x9b59b6)
     .setTimestamp();
 

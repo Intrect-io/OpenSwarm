@@ -9,30 +9,30 @@ import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
 import { resolve } from 'path';
 import { homedir } from 'os';
 
-// 메모리 저장 경로
+// Memory storage path
 const MEMORY_DIR = resolve(homedir(), '.claude-swarm/memory');
 
-// Xenova 임베딩 설정 (로컬 실행, 외부 의존 없음)
-const EMBEDDING_MODEL = 'Xenova/multilingual-e5-base';  // 768차원, 다국어 지원
+// Xenova embedding config (runs locally, no external dependencies)
+const EMBEDDING_MODEL = 'Xenova/multilingual-e5-base';  // 768 dimensions, multilingual
 export const EMBEDDING_DIM = 768;
 
-// Xenova 파이프라인 싱글톤 (Promise 기반 초기화로 race condition 방지)
+// Xenova pipeline singleton (Promise-based init to prevent race conditions)
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let pipelineInitPromise: Promise<FeatureExtractionPipeline> | null = null;
 let pipelineInitFailed = false;
 let pipelineInitError: Error | null = null;
 
-// TTL 설정 (밀리초)
-const TTL_JOURNAL = 14 * 24 * 60 * 60 * 1000; // 14일
-const TTL_REPOMAP = 30 * 24 * 60 * 60 * 1000; // 30일
+// TTL settings (milliseconds)
+const TTL_JOURNAL = 14 * 24 * 60 * 60 * 1000; // 14 days
+const TTL_REPOMAP = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-// 영구 보관 sentinel (year 9999) - null 대신 사용 (LanceDB 스키마 추론 호환)
+// Permanent retention sentinel (year 9999) - used instead of null (LanceDB schema inference compat)
 export const PERMANENT_EXPIRY = new Date('9999-12-31T23:59:59Z').getTime();
 
 /**
- * LanceDB createTable 전 레코드 정규화
- * - 타입 추론 에러 방지 (특히 expiresAt)
- * - BigInt → Number 변환, undefined → 기본값
+ * Normalize records before LanceDB createTable
+ * - Prevents type inference errors (especially expiresAt)
+ * - Converts BigInt to Number, undefined to defaults
  */
 export function normalizeRecords(records: any[]): CognitiveMemoryRecord[] {
   const now = Date.now();
@@ -88,13 +88,13 @@ export interface CognitiveMemoryRecord {
   vector: number[];
 
   // PRD Mandatory Fields
-  importance: number;           // 0-1, 추론 영향도
-  confidence: number;           // 0-1, 확신도
+  importance: number;           // 0-1, impact on reasoning
+  confidence: number;           // 0-1, certainty level
   createdAt: number;
   lastUpdated: number;
   lastAccessed: number;
   revisionCount: number;
-  decay: number;                // 0-1, 망각 정도
+  decay: number;                // 0-1, degree of forgetting
 
   // PRD Extensions
   stability: StabilityLevel;
@@ -110,7 +110,7 @@ export interface CognitiveMemoryRecord {
   expiresAt: number;
 }
 
-// 레거시 호환용 별칭 (export하여 사용 가능)
+// Legacy compatibility alias (exported for use)
 export interface MemoryRecord extends CognitiveMemoryRecord {}
 
 // ==============================================
@@ -132,7 +132,7 @@ const LEGACY_IMPORTANCE: Record<LegacyMemoryType, number> = {
   journal: 0.4,     // temporary insight
 };
 
-// 검색 결과 인터페이스 (PRD Enhanced)
+// Search result interface (PRD Enhanced)
 export interface MemorySearchResult {
   id: string;
   type: MemoryType;
@@ -154,18 +154,18 @@ export interface MemorySearchResult {
   similarityScore: number;    // raw semantic similarity
 }
 
-// 검색 옵션
+// Search options
 export interface SearchOptions {
-  types?: MemoryType[];           // 타입 필터 (whitelist)
-  repo?: string;                  // 저장소 필터
-  minSimilarity?: number;         // 최소 유사도 (기본 0.5)
-  minTrust?: number;              // 최소 신뢰도 (기본 0.3)
-  minFreshness?: number;          // 최소 신선도 (기본 0)
-  limit?: number;                 // 최대 결과 수
-  includeExpired?: boolean;       // 만료된 항목 포함 여부
+  types?: MemoryType[];           // type filter (whitelist)
+  repo?: string;                  // repository filter
+  minSimilarity?: number;         // minimum similarity (default 0.5)
+  minTrust?: number;              // minimum trust (default 0.3)
+  minFreshness?: number;          // minimum freshness (default 0)
+  limit?: number;                 // maximum result count
+  includeExpired?: boolean;       // whether to include expired items
 }
 
-// 검색 결과 (에러와 empty 구분)
+// Search result (distinguishes errors from empty results)
 export interface SearchResult {
   success: boolean;
   memories: MemorySearchResult[];
@@ -173,35 +173,35 @@ export interface SearchResult {
   errorCode?: 'DB_INIT_FAILED' | 'EMBEDDING_FAILED' | 'QUERY_FAILED' | 'UNKNOWN';
 }
 
-// 싱글톤 연결
+// Singleton connection
 let db: Connection | null = null;
 let table: Table | null = null;
 
-// 싱글톤 접근자 (memoryOps용)
+// Singleton accessors (for memoryOps)
 export function getDb(): Connection | null { return db; }
 export function getTable(): Table | null { return table; }
 export function setTable(t: Table | null): void { table = t; }
 
 /**
- * 임베딩 파이프라인 초기화 (Promise 기반, race condition 방지)
+ * Initialize embedding pipeline (Promise-based, prevents race conditions)
  */
 async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
-  // 이미 초기화됨
+  // Already initialized
   if (embeddingPipeline) {
     return embeddingPipeline;
   }
 
-  // 이전에 초기화 실패했으면 같은 에러 반환
+  // If previously failed, return the same error
   if (pipelineInitFailed && pipelineInitError) {
     throw pipelineInitError;
   }
 
-  // 초기화 중이면 기존 Promise 대기 (race condition 방지)
+  // If initializing, wait for existing Promise (prevents race conditions)
   if (pipelineInitPromise) {
     return pipelineInitPromise;
   }
 
-  // 새로 초기화 시작
+  // Start new initialization
   pipelineInitPromise = (async () => {
     try {
       console.log('[Memory] Loading embedding model (first time may take a while)...');
@@ -214,7 +214,7 @@ async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
     } catch (error) {
       pipelineInitFailed = true;
       pipelineInitError = error instanceof Error ? error : new Error(String(error));
-      pipelineInitPromise = null;  // 다음 시도에서 재시도 가능하도록
+      pipelineInitPromise = null;  // Allow retry on next attempt
       console.error('[Memory] CRITICAL: Embedding model load failed:', error);
       throw pipelineInitError;
     }
@@ -224,15 +224,15 @@ async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 }
 
 /**
- * Xenova/transformers로 임베딩 생성 (로컬, 외부 의존 없음)
- * @throws Error - 임베딩 생성 실패 시 (zero vector fallback 제거됨)
+ * Generate embeddings via Xenova/transformers (local, no external dependencies)
+ * @throws Error - on embedding generation failure (zero vector fallback removed)
  */
 export async function getEmbedding(text: string): Promise<number[]> {
-  // 파이프라인 초기화 (실패 시 throw)
+  // Initialize pipeline (throws on failure)
   const pipe = await initEmbeddingPipeline();
 
-  // E5 모델은 "query: " 또는 "passage: " 접두사 권장
-  const input = `query: ${text.slice(0, 512)}`;  // 토큰 제한
+  // E5 model recommends "query: " or "passage: " prefix
+  const input = `query: ${text.slice(0, 512)}`;  // Token limit
   const result = await pipe(input, {
     pooling: 'mean',
     normalize: true,
@@ -241,7 +241,7 @@ export async function getEmbedding(text: string): Promise<number[]> {
   // Float32Array → number[]
   const vector = Array.from(result.data as Float32Array);
 
-  // 유효성 검증: zero vector면 에러
+  // Validation: error if zero vector
   const vectorSum = vector.reduce((a, b) => Math.abs(a) + Math.abs(b), 0);
   if (vectorSum < 0.001) {
     throw new Error('Generated embedding is a zero vector (invalid)');
@@ -255,8 +255,8 @@ export async function getEmbedding(text: string): Promise<number[]> {
 // ==============================================
 
 /**
- * Distillation Quality Test (PRD 핵심)
- * "이 메모리가 사라지면 미래 추론 성능이 저하되는가?"
+ * Distillation Quality Test (PRD core)
+ * "Would future reasoning performance degrade if this memory disappeared?"
  */
 interface DistillationResult {
   shouldStore: boolean;
@@ -266,15 +266,15 @@ interface DistillationResult {
   reason: string;
 }
 
-// 저장 금지 패턴 (PRD: NEVER store)
+// Rejection patterns (PRD: NEVER store)
 const REJECTION_PATTERNS = [
-  /^(안녕|ㅎㅇ|ㅋㅋ|ㅎㅎ|오케이|넵|확인|감사)/,          // 잡담
-  /^(좋아|싫어|화나|슬퍼)/,                              // 일회성 감정
-  /(어떻게 생각|뭐가 나을까|선택해|골라)/,              // 컨텍스트 의존 질문
-  /^(test|테스트|asdf|qwer)/i,                           // 테스트 데이터
+  /^(안녕|ㅎㅇ|ㅋㅋ|ㅎㅎ|오케이|넵|확인|감사)/,          // Chit-chat
+  /^(좋아|싫어|화나|슬퍼)/,                              // Ephemeral emotions
+  /(어떻게 생각|뭐가 나을까|선택해|골라)/,              // Context-dependent questions
+  /^(test|테스트|asdf|qwer)/i,                           // Test data
 ];
 
-// 저장 대상 패턴 (PRD: Extract ONLY if)
+// Extraction target patterns (PRD: Extract ONLY if)
 const EXTRACTION_PATTERNS: { pattern: RegExp; type: CognitiveMemoryType; baseImportance: number }[] = [
   // Constraints (highest priority)
   { pattern: /(절대|반드시|금지|필수|MUST|NEVER|ALWAYS)/i, type: 'constraint', baseImportance: 0.9 },
@@ -298,16 +298,16 @@ const EXTRACTION_PATTERNS: { pattern: RegExp; type: CognitiveMemoryType; baseImp
 ];
 
 /**
- * Semantic Distillation: 저장할 가치가 있는지 평가
+ * Semantic Distillation: evaluate whether content is worth storing
  */
 export function distillContent(content: string, context?: {
-  isRepeated?: boolean;      // 반복 등장 여부
-  isVerified?: boolean;      // 실전 검증 여부
-  source?: string;           // 출처 (conversation, code, external)
+  isRepeated?: boolean;      // Whether it appeared repeatedly
+  isVerified?: boolean;      // Whether verified in practice
+  source?: string;           // Source (conversation, code, external)
 }): DistillationResult {
   const normalizedContent = content.trim().toLowerCase();
 
-  // 1. 거부 패턴 체크
+  // 1. Check rejection patterns
   for (const pattern of REJECTION_PATTERNS) {
     if (pattern.test(normalizedContent)) {
       return {
@@ -320,7 +320,7 @@ export function distillContent(content: string, context?: {
     }
   }
 
-  // 2. 최소 길이 체크 (너무 짧은 건 보통 노이즈)
+  // 2. Minimum length check (too short is usually noise)
   if (content.length < 20) {
     return {
       shouldStore: false,
@@ -331,19 +331,19 @@ export function distillContent(content: string, context?: {
     };
   }
 
-  // 3. 추출 패턴 매칭
+  // 3. Extraction pattern matching
   for (const { pattern, type, baseImportance } of EXTRACTION_PATTERNS) {
     if (pattern.test(content)) {
       let importance = baseImportance;
       let confidence = 0.7;
 
-      // 조정: 반복 등장 시 importance 증가
+      // Adjustment: increase importance on repeated appearance
       if (context?.isRepeated) {
         importance = Math.min(1, importance + 0.1);
         confidence = Math.min(1, confidence + 0.1);
       }
 
-      // 조정: 검증됨 시 confidence 증가
+      // Adjustment: increase confidence when verified
       if (context?.isVerified) {
         confidence = Math.min(1, confidence + 0.15);
       }
@@ -358,7 +358,7 @@ export function distillContent(content: string, context?: {
     }
   }
 
-  // 4. 기본값: 길고 의미있어 보이면 belief로 저장 (낮은 importance)
+  // 4. Default: store as belief if long enough and seems meaningful (low importance)
   if (content.length > 100) {
     return {
       shouldStore: true,
@@ -369,7 +369,7 @@ export function distillContent(content: string, context?: {
     };
   }
 
-  // 5. 저장 안 함
+  // 5. Do not store
   return {
     shouldStore: false,
     type: 'belief',
@@ -395,22 +395,22 @@ export function calculateImportance(
   let importance = (BASE_IMPORTANCE[type as CognitiveMemoryType] ??
                    LEGACY_IMPORTANCE[type as LegacyMemoryType] ?? 0.5);
 
-  // Increase: 반복 등장
+  // Increase: repeated appearance
   if (options?.isRepeated) {
     importance = Math.min(1, importance + 0.1);
   }
 
-  // Increase: 실전 검증
+  // Increase: verified in practice
   if (options?.isVerified) {
     importance = Math.min(1, importance + 0.1);
   }
 
-  // Decrease: 오래됨 (30일 이상이면 -0.1)
+  // Decrease: aged (subtract 0.1 if older than 30 days)
   if (options?.age && options.age > 30 * 24 * 60 * 60 * 1000) {
     importance = Math.max(0.3, importance - 0.1);
   }
 
-  // Decrease: 모순 발생
+  // Decrease: contradiction detected
   if (options?.hasContradiction) {
     importance = Math.max(0.2, importance - 0.2);
   }
@@ -424,17 +424,17 @@ export function calculateImportance(
 export function calculateStability(revisionCount: number, age: number): StabilityLevel {
   const ageInDays = age / (24 * 60 * 60 * 1000);
 
-  // 오래됐는데 수정 없으면 high
+  // Old with no revisions = high
   if (ageInDays > 7 && revisionCount === 0) return 'high';
 
-  // 최근 만들어졌거나 수정 많으면 low
+  // Recently created or frequently revised = low
   if (ageInDays < 1 || revisionCount > 3) return 'low';
 
   return 'medium';
 }
 
 /**
- * 데이터베이스 초기화
+ * Initialize database
  */
 export async function initDatabase(): Promise<void> {
   if (db && table) return;
@@ -455,7 +455,7 @@ export async function initDatabase(): Promise<void> {
       table = await db.openTable('devmemory');
       console.log('[Memory] Loaded legacy devmemory table');
     } else {
-      // 새 테이블 생성 (v2.0 schema)
+      // Create new table (v2.0 schema)
       const now = Date.now();
       const initialRecord: CognitiveMemoryRecord = {
         id: 'init',
@@ -496,7 +496,7 @@ export async function initDatabase(): Promise<void> {
 }
 
 /**
- * 신선도 계산 (0-1, 최근일수록 높음)
+ * Calculate freshness (0-1, higher for more recent)
  */
 export function calculateFreshness(createdAt: number, halfLifeDays: number = 7): number {
   const ageMs = Date.now() - createdAt;
@@ -505,7 +505,7 @@ export function calculateFreshness(createdAt: number, halfLifeDays: number = 7):
 }
 
 /**
- * 메모리 저장 (PRD v2.0 with Distillation)
+ * Save memory (PRD v2.0 with Distillation)
  */
 export async function saveMemory(
   type: MemoryType,
@@ -519,7 +519,7 @@ export async function saveMemory(
     // PRD v2.0 options
     importance?: number;
     confidence?: number;
-    skipDistillation?: boolean;   // 강제 저장 (distillation bypass)
+    skipDistillation?: boolean;   // Force save (bypass distillation)
     isRepeated?: boolean;
     isVerified?: boolean;
     derivedFrom?: string;
@@ -540,7 +540,7 @@ export async function saveMemory(
       return null;
     }
 
-    // Distillation이 제안한 type이 더 적절하면 사용
+    // Use distillation-suggested type if more appropriate
     if (distillation.type !== type && isCognitiveType(distillation.type)) {
       console.log(`[Memory] Type adjusted by distillation: ${type} → ${distillation.type}`);
       type = distillation.type;
@@ -550,7 +550,7 @@ export async function saveMemory(
   const now = Date.now();
   const id = `${type}-${repo}-${now}`;
 
-  // 타입별 기본 TTL 설정
+  // Default TTL by type
   let expiresAt: number = PERMANENT_EXPIRY;
   if (type === 'journal') {
     expiresAt = now + (options?.ttlDays ? options.ttlDays * 24 * 60 * 60 * 1000 : TTL_JOURNAL);
@@ -581,7 +581,7 @@ export async function saveMemory(
     decay: 0,
 
     // PRD Extensions
-    stability: 'low',  // 새로 생성된 건 low
+    stability: 'low',  // Newly created starts as low
     contradicts: '[]',
     supports: '[]',
     derivedFrom: options?.derivedFrom || 'unknown',
@@ -607,7 +607,7 @@ function isCognitiveType(type: MemoryType): type is CognitiveMemoryType {
 }
 
 /**
- * Cognitive Memory 직접 저장 (PRD Schema용)
+ * Save cognitive memory directly (for PRD Schema)
  */
 export async function saveCognitiveMemory(
   type: CognitiveMemoryType,
@@ -661,7 +661,7 @@ export async function saveCognitiveMemory(
 }
 
 /**
- * 설계 결정 기록 (ADR 스타일)
+ * Record design decision (ADR style)
  */
 export async function recordDecision(
   repo: string,
@@ -682,7 +682,7 @@ export async function recordDecision(
 }
 
 /**
- * 저장소 맵 업데이트
+ * Update repository map
  */
 export async function updateRepoMap(
   repo: string,
@@ -702,7 +702,7 @@ export async function updateRepoMap(
 }
 
 /**
- * 작업 일지 기록
+ * Log work entry
  */
 export async function logWork(
   repo: string,
@@ -718,13 +718,13 @@ export async function logWork(
     metadata: { filesChanged, issueRef, timestamp: new Date().toISOString() },
     ttlDays: 14,
     skipDistillation: true,
-    derivedFrom: issueRef,  // channelId 저장용
+    derivedFrom: issueRef,  // Used to store channelId
   });
   return id!;
 }
 
 /**
- * 팩트 기록 (버전, 환경 등)
+ * Record a fact (versions, environments, etc.)
  */
 export async function recordFact(
   repo: string,
@@ -745,7 +745,7 @@ export async function recordFact(
 // ==============================================
 
 /**
- * PRD Hybrid Score 계산
+ * PRD Hybrid Score calculation
  * final_score = 0.55*similarity + 0.20*importance + 0.15*recency + 0.10*frequency
  */
 function calculateHybridScore(
@@ -763,8 +763,8 @@ function calculateHybridScore(
 }
 
 /**
- * 메모리 검색 (PRD Hybrid Retrieval) - Safe 버전
- * 에러와 empty 결과를 구분할 수 있음
+ * Search memory (PRD Hybrid Retrieval) - Safe version
+ * Distinguishes between errors and empty results
  */
 export async function searchMemorySafe(
   query: string,
@@ -869,8 +869,8 @@ export async function searchMemorySafe(
 }
 
 /**
- * 메모리 검색 (PRD Hybrid Retrieval) - 레거시 호환
- * @deprecated searchMemorySafe 사용 권장
+ * Search memory (PRD Hybrid Retrieval) - Legacy compatible
+ * @deprecated Use searchMemorySafe instead
  */
 export async function searchMemory(
   query: string,

@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Git-based Rollback System
-// 워크플로우 실패 시 자동 복구
+// Automatic recovery on workflow failure
 // ============================================
 
 import { exec } from 'child_process';
@@ -16,7 +16,7 @@ const execAsync = promisify(exec);
 // ============================================
 
 /**
- * 체크포인트 정보
+ * Checkpoint information
  */
 export interface Checkpoint {
   id: string;
@@ -30,7 +30,7 @@ export interface Checkpoint {
 }
 
 /**
- * 롤백 결과
+ * Rollback result
  */
 export interface RollbackResult {
   success: boolean;
@@ -41,7 +41,7 @@ export interface RollbackResult {
 }
 
 /**
- * 롤백 전략
+ * Rollback strategy
  */
 export type RollbackStrategy = 'reset_hard' | 'reset_soft' | 'stash' | 'checkout_files';
 
@@ -52,7 +52,7 @@ export type RollbackStrategy = 'reset_hard' | 'reset_soft' | 'stash' | 'checkout
 const CHECKPOINT_DIR = resolve(homedir(), '.claude-swarm/checkpoints');
 
 /**
- * 체크포인트 저장
+ * Save checkpoint
  */
 async function saveCheckpoint(checkpoint: Checkpoint): Promise<void> {
   await fs.mkdir(CHECKPOINT_DIR, { recursive: true });
@@ -61,7 +61,7 @@ async function saveCheckpoint(checkpoint: Checkpoint): Promise<void> {
 }
 
 /**
- * 체크포인트 로드
+ * Load checkpoint
  */
 async function loadCheckpoint(checkpointId: string): Promise<Checkpoint | null> {
   try {
@@ -74,7 +74,7 @@ async function loadCheckpoint(checkpointId: string): Promise<Checkpoint | null> 
 }
 
 /**
- * 실행 ID로 체크포인트 찾기
+ * Find checkpoint by execution ID
  */
 export async function findCheckpointByExecution(executionId: string): Promise<Checkpoint | null> {
   try {
@@ -99,7 +99,7 @@ export async function findCheckpointByExecution(executionId: string): Promise<Ch
 // ============================================
 
 /**
- * Git 명령 실행 헬퍼
+ * Git command execution helper
  */
 async function gitExec(projectPath: string, command: string): Promise<{ stdout: string; stderr: string }> {
   const expandedPath = projectPath.replace('~', homedir());
@@ -111,7 +111,7 @@ async function gitExec(projectPath: string, command: string): Promise<{ stdout: 
 }
 
 /**
- * 현재 commit hash 가져오기
+ * Get current commit hash
  */
 async function getCurrentCommit(projectPath: string): Promise<string> {
   const { stdout } = await gitExec(projectPath, 'rev-parse HEAD');
@@ -119,7 +119,7 @@ async function getCurrentCommit(projectPath: string): Promise<string> {
 }
 
 /**
- * 현재 브랜치 이름 가져오기
+ * Get current branch name
  */
 async function getCurrentBranch(projectPath: string): Promise<string> {
   const { stdout } = await gitExec(projectPath, 'branch --show-current');
@@ -127,7 +127,7 @@ async function getCurrentBranch(projectPath: string): Promise<string> {
 }
 
 /**
- * 변경사항 있는지 확인
+ * Check if there are uncommitted changes
  */
 async function hasChanges(projectPath: string): Promise<boolean> {
   try {
@@ -139,7 +139,7 @@ async function hasChanges(projectPath: string): Promise<boolean> {
 }
 
 /**
- * 변경된 파일 목록
+ * Get list of changed files
  */
 async function getChangedFiles(projectPath: string): Promise<string[]> {
   try {
@@ -158,7 +158,7 @@ async function getChangedFiles(projectPath: string): Promise<string[]> {
 // ============================================
 
 /**
- * 워크플로우 시작 전 체크포인트 생성
+ * Create checkpoint before workflow starts
  */
 export async function createCheckpoint(
   executionId: string,
@@ -172,7 +172,7 @@ export async function createCheckpoint(
   const branchName = await getCurrentBranch(expandedPath);
   let stashId: string | undefined;
 
-  // 변경사항이 있으면 stash
+  // Stash if there are changes
   if (await hasChanges(expandedPath)) {
     const changedFiles = await getChangedFiles(expandedPath);
     console.log(`[Rollback] Stashing ${changedFiles.length} changed files`);
@@ -180,7 +180,7 @@ export async function createCheckpoint(
     const stashMessage = `claude-swarm-checkpoint-${executionId}`;
     await gitExec(expandedPath, `stash push -m "${stashMessage}" --include-untracked`);
 
-    // Stash ID 찾기
+    // Find Stash ID
     const { stdout } = await gitExec(expandedPath, 'stash list');
     const stashLine = stdout.split('\n').find(line => line.includes(stashMessage));
     if (stashLine) {
@@ -210,7 +210,7 @@ export async function createCheckpoint(
 // ============================================
 
 /**
- * 체크포인트로 롤백
+ * Rollback to checkpoint
  */
 export async function rollbackToCheckpoint(
   checkpointId: string,
@@ -231,7 +231,7 @@ export async function rollbackToCheckpoint(
 }
 
 /**
- * 실행 ID로 롤백
+ * Rollback by execution ID
  */
 export async function rollbackExecution(
   executionId: string,
@@ -252,7 +252,7 @@ export async function rollbackExecution(
 }
 
 /**
- * 실제 롤백 수행
+ * Perform actual rollback
  */
 async function rollback(
   checkpoint: Checkpoint,
@@ -265,10 +265,10 @@ async function rollback(
   try {
     switch (strategy) {
       case 'reset_hard':
-        // 모든 변경사항 버리고 체크포인트로 복원
+        // Discard all changes and restore to checkpoint
         await gitExec(checkpoint.projectPath, `reset --hard ${checkpoint.commitHash}`);
 
-        // Stash가 있었으면 복원
+        // Restore stash if it existed
         if (checkpoint.stashId) {
           try {
             await gitExec(checkpoint.projectPath, `stash pop ${checkpoint.stashId}`);
@@ -285,7 +285,7 @@ async function rollback(
         };
 
       case 'reset_soft':
-        // 변경사항은 staged 상태로 유지
+        // Keep changes in staged state
         await gitExec(checkpoint.projectPath, `reset --soft ${checkpoint.commitHash}`);
 
         return {
@@ -296,14 +296,14 @@ async function rollback(
         };
 
       case 'stash':
-        // 현재 변경사항 stash하고 체크포인트로
+        // Stash current changes and go to checkpoint
         if (await hasChanges(checkpoint.projectPath)) {
           const stashMsg = `rollback-preserve-${Date.now()}`;
           await gitExec(checkpoint.projectPath, `stash push -m "${stashMsg}" --include-untracked`);
         }
         await gitExec(checkpoint.projectPath, `checkout ${checkpoint.commitHash}`);
 
-        // 원래 stash 복원
+        // Restore original stash
         if (checkpoint.stashId) {
           try {
             await gitExec(checkpoint.projectPath, `stash pop ${checkpoint.stashId}`);
@@ -320,7 +320,7 @@ async function rollback(
         };
 
       case 'checkout_files':
-        // 파일만 체크포인트 상태로 (commit은 유지)
+        // Restore files to checkpoint state (keep commits)
         await gitExec(checkpoint.projectPath, `checkout ${checkpoint.commitHash} -- .`);
 
         return {
@@ -350,7 +350,7 @@ async function rollback(
 // ============================================
 
 /**
- * 오래된 체크포인트 정리
+ * Clean up old checkpoints
  */
 export async function cleanupOldCheckpoints(maxAgeDays: number = 7): Promise<number> {
   try {
@@ -384,7 +384,7 @@ export async function cleanupOldCheckpoints(maxAgeDays: number = 7): Promise<num
 }
 
 /**
- * 체크포인트 목록
+ * List checkpoints
  */
 export async function listCheckpoints(): Promise<Checkpoint[]> {
   try {
@@ -410,7 +410,7 @@ export async function listCheckpoints(): Promise<Checkpoint[]> {
 // ============================================
 
 /**
- * 현재 git 상태 요약
+ * Get current git status summary
  */
 export async function getGitStatus(projectPath: string): Promise<{
   branch: string;

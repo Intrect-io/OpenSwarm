@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Tester Agent
-// 테스트 실행 에이전트 (Claude CLI 기반)
+// Test execution agent (Claude CLI based)
 // ============================================
 
 import { spawn } from 'node:child_process';
@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 
 /**
- * ~ 경로를 홈 디렉토리로 확장
+ * Expand ~ path to home directory
  */
 function expandPath(p: string): string {
   if (p.startsWith('~/')) {
@@ -47,7 +47,7 @@ export interface TesterResult {
 // ============================================
 
 /**
- * Tester 프롬프트 생성
+ * Build Tester prompt
  */
 function buildTesterPrompt(options: TesterOptions): string {
   const workerReport = `
@@ -112,21 +112,21 @@ ${workerReport}
 // ============================================
 
 /**
- * Tester 에이전트 실행
+ * Run Tester agent
  */
 export async function runTester(options: TesterOptions): Promise<TesterResult> {
   const prompt = buildTesterPrompt(options);
   const promptFile = `/tmp/tester-prompt-${Date.now()}.txt`;
 
   try {
-    // 프롬프트 저장
+    // Save prompt
     await fs.writeFile(promptFile, prompt);
 
-    // Claude CLI 실행
+    // Run Claude CLI
     const cwd = expandPath(options.projectPath);
     const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
 
-    // 결과 파싱
+    // Parse result
     return parseTesterOutput(output);
   } catch (error) {
     return {
@@ -137,22 +137,22 @@ export async function runTester(options: TesterOptions): Promise<TesterResult> {
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    // 임시 파일 정리
+    // Clean up temp file
     try {
       await fs.unlink(promptFile);
     } catch {
-      // 무시
+      // Ignore
     }
   }
 }
 
 /**
- * Claude CLI 실행
+ * Run Claude CLI
  */
 async function runClaudeCli(
   promptFile: string,
   cwd: string,
-  timeoutMs: number = 300000, // 5분 기본
+  timeoutMs: number = 300000, // 5 min default
   model?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -177,7 +177,7 @@ async function runClaudeCli(
       stderr += data.toString();
     });
 
-    // 타임아웃 설정 (0 이하면 무제한)
+    // Set timeout (unlimited if <= 0)
     let timer: NodeJS.Timeout | null = null;
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
@@ -206,11 +206,11 @@ async function runClaudeCli(
 }
 
 /**
- * Tester 출력 파싱
+ * Parse Tester output
  */
 function parseTesterOutput(output: string): TesterResult {
   try {
-    // Claude JSON 배열에서 result 추출
+    // Extract result from Claude JSON array
     const match = output.match(/\[[\s\S]*\]/);
     if (!match) {
       return extractFromText(output);
@@ -230,7 +230,7 @@ function parseTesterOutput(output: string): TesterResult {
       return extractFromText(output);
     }
 
-    // 결과에서 JSON 블록 추출
+    // Extract JSON block from result
     return extractResultJson(resultText) || extractFromText(resultText);
   } catch (error) {
     console.error('[Tester] Parse error:', error);
@@ -239,13 +239,13 @@ function parseTesterOutput(output: string): TesterResult {
 }
 
 /**
- * 결과에서 JSON 블록 추출
+ * Extract JSON block from result
  */
 function extractResultJson(text: string): TesterResult | null {
-  // ```json ... ``` 블록 찾기
+  // Find ```json ... ``` block
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (!jsonMatch) {
-    // 일반 JSON 객체 찾기
+    // Find plain JSON object
     const objMatch = text.match(/\{\s*"success"\s*:/);
     if (!objMatch) return null;
 
@@ -281,7 +281,7 @@ function extractResultJson(text: string): TesterResult | null {
 }
 
 /**
- * 결과 정규화
+ * Normalize result
  */
 function normalizeResult(parsed: any, output: string): TesterResult {
   return {
@@ -297,32 +297,32 @@ function normalizeResult(parsed: any, output: string): TesterResult {
 }
 
 /**
- * 텍스트에서 결과 추출 (JSON 파싱 실패 시)
+ * Extract result from text (when JSON parsing fails)
  */
 function extractFromText(text: string): TesterResult {
-  // 성공 여부 추정
+  // Estimate success
   const hasError = /error|fail|exception|cannot/i.test(text);
   const hasSuccess = /pass|success|completed|all tests/i.test(text);
 
-  // 테스트 통계 추출
+  // Extract test statistics
   let testsPassed = 0;
   let testsFailed = 0;
 
-  // 일반적인 테스트 결과 패턴
+  // Common test result patterns
   const passMatch = text.match(/(\d+)\s*(?:passed|pass|passing)/i);
   const failMatch = text.match(/(\d+)\s*(?:failed|fail|failing)/i);
 
   if (passMatch) testsPassed = parseInt(passMatch[1], 10);
   if (failMatch) testsFailed = parseInt(failMatch[1], 10);
 
-  // 커버리지 추출
+  // Extract coverage
   let coverage: number | undefined;
   const coverageMatch = text.match(/(?:coverage|cov)[:\s]*(\d+(?:\.\d+)?)\s*%/i);
   if (coverageMatch) {
     coverage = parseFloat(coverageMatch[1]);
   }
 
-  // 실패한 테스트 추출
+  // Extract failed tests
   const failedTests: string[] = [];
   const failedPattern = /(?:FAILED|FAIL)\s+([^\s]+(?:::[\w_]+)?)/gi;
   const failedMatches = text.matchAll(failedPattern);
@@ -344,7 +344,7 @@ function extractFromText(text: string): TesterResult {
 }
 
 /**
- * 에러 메시지 추출
+ * Extract error message
  */
 function extractErrorMessage(text: string): string {
   const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
@@ -365,7 +365,7 @@ function extractErrorMessage(text: string): string {
 // ============================================
 
 /**
- * Tester 결과를 Discord 메시지로 포맷
+ * Format Tester result as Discord message
  */
 export function formatTestReport(result: TesterResult): string {
   const statusEmoji = result.success ? '✅' : '❌';
@@ -406,7 +406,7 @@ export function formatTestReport(result: TesterResult): string {
 }
 
 /**
- * Tester 결과를 Worker 피드백으로 변환
+ * Convert Tester result to Worker feedback
  */
 export function buildTestFixPrompt(result: TesterResult): string {
   const lines: string[] = [];

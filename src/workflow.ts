@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - DAG Workflow Engine
-// 에이전트 작업 의존성 관리 및 실행
+// Agent task dependency management and execution
 // ============================================
 
 import { resolve } from 'path';
@@ -13,85 +13,85 @@ import * as yaml from 'yaml';
 // ============================================
 
 /**
- * 실패 시 처리 전략
+ * Failure handling strategy
  */
 export type FailureStrategy = 'rollback' | 'retry' | 'skip' | 'abort' | 'notify';
 
 /**
- * Step 실행 상태
+ * Step execution status
  */
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 
 /**
- * 워크플로우 Step 정의
+ * Workflow step definition
  */
 export interface WorkflowStep {
-  /** Step 고유 ID */
+  /** Step unique ID */
   id: string;
 
-  /** Step 이름 (표시용) */
+  /** Step name (for display) */
   name: string;
 
-  /** 실행할 프롬프트 또는 명령 */
+  /** Prompt or command to execute */
   prompt: string;
 
-  /** 의존하는 Step ID 목록 */
+  /** Dependent step ID list */
   dependsOn?: string[];
 
-  /** 실패 시 전략 (기본: abort) */
+  /** Failure strategy (default: abort) */
   onFailure?: FailureStrategy;
 
-  /** 재시도 횟수 (retry 전략 시) */
+  /** Retry count (for retry strategy) */
   retryCount?: number;
 
-  /** 타임아웃 (초) */
+  /** Timeout (seconds) */
   timeout?: number;
 
-  /** 조건부 실행 (이전 step 결과 기반) */
+  /** Conditional execution (based on previous step results) */
   condition?: string;
 
-  /** Step별 환경 변수 */
+  /** Per-step environment variables */
   env?: Record<string, string>;
 }
 
 /**
- * 워크플로우 정의
+ * Workflow definition
  */
 export interface WorkflowConfig {
-  /** 워크플로우 고유 ID */
+  /** Workflow unique ID */
   id: string;
 
-  /** 워크플로우 이름 */
+  /** Workflow name */
   name: string;
 
-  /** 설명 */
+  /** Description */
   description?: string;
 
-  /** 대상 프로젝트 경로 */
+  /** Target project path */
   projectPath: string;
 
-  /** Step 목록 */
+  /** Step list */
   steps: WorkflowStep[];
 
-  /** 전역 실패 전략 */
+  /** Global failure strategy */
   onFailure?: FailureStrategy;
 
-  /** 트리거 조건 */
+  /** Trigger conditions */
   trigger?: {
-    /** cron 표현식 */
+    /** Cron expression */
     schedule?: string;
-    /** Linear 이슈 상태 변경 시 */
+    /** On Linear issue status change */
     onIssueStatus?: string[];
-    /** 수동 실행만 */
+    /** Manual execution only */
     manual?: boolean;
   };
 
-  /** Linear 이슈 연동 */
+  /** Linear issue integration */
   linearIssue?: string;
 }
 
 /**
- * Step 실행 결과
+ * Step execution result
  */
 export interface StepResult {
   stepId: string;
@@ -104,7 +104,7 @@ export interface StepResult {
 }
 
 /**
- * 워크플로우 실행 상태
+ * Workflow execution state
  */
 export interface WorkflowExecution {
   workflowId: string;
@@ -122,21 +122,21 @@ export interface WorkflowExecution {
 
 /**
  * Topological Sort (Kahn's Algorithm)
- * 의존성 순서대로 Step 정렬
+ * Sort steps in dependency order
  */
 export function topologicalSort(steps: WorkflowStep[]): WorkflowStep[] {
   const graph = new Map<string, Set<string>>();
   const inDegree = new Map<string, number>();
   const stepMap = new Map<string, WorkflowStep>();
 
-  // 그래프 초기화
+  // Initialize graph
   for (const step of steps) {
     stepMap.set(step.id, step);
     graph.set(step.id, new Set());
     inDegree.set(step.id, 0);
   }
 
-  // 간선 추가 (의존성)
+  // Add edges (dependencies)
   for (const step of steps) {
     if (step.dependsOn) {
       for (const dep of step.dependsOn) {
@@ -153,7 +153,7 @@ export function topologicalSort(steps: WorkflowStep[]): WorkflowStep[] {
   const queue: string[] = [];
   const result: WorkflowStep[] = [];
 
-  // 진입 차수 0인 노드 큐에 추가
+  // Add nodes with in-degree 0 to queue
   for (const [id, degree] of inDegree) {
     if (degree === 0) {
       queue.push(id);
@@ -172,7 +172,7 @@ export function topologicalSort(steps: WorkflowStep[]): WorkflowStep[] {
     }
   }
 
-  // 순환 감지
+  // Cycle detection
   if (result.length !== steps.length) {
     throw new Error('Workflow contains circular dependencies');
   }
@@ -181,17 +181,17 @@ export function topologicalSort(steps: WorkflowStep[]): WorkflowStep[] {
 }
 
 /**
- * 현재 실행 가능한 Step 찾기 (의존성 모두 완료된 것)
+ * Find currently executable steps (all dependencies completed)
  */
 export function getExecutableSteps(
   steps: WorkflowStep[],
   results: Record<string, StepResult>
 ): WorkflowStep[] {
   return steps.filter(step => {
-    // 이미 실행됨
+    // Already executed
     if (results[step.id]) return false;
 
-    // 의존성 확인
+    // Check dependencies
     if (step.dependsOn) {
       for (const depId of step.dependsOn) {
         const depResult = results[depId];
@@ -206,7 +206,7 @@ export function getExecutableSteps(
 }
 
 /**
- * 병렬 실행 가능한 Step 그룹 찾기
+ * Find parallelizable step groups
  */
 export function getParallelGroups(steps: WorkflowStep[]): WorkflowStep[][] {
   const sorted = topologicalSort(steps);
@@ -219,7 +219,7 @@ export function getParallelGroups(steps: WorkflowStep[]): WorkflowStep[][] {
     for (const step of sorted) {
       if (completed.has(step.id)) continue;
 
-      // 의존성 모두 완료됨?
+      // All dependencies completed?
       const depsCompleted = !step.dependsOn ||
         step.dependsOn.every(dep => completed.has(dep));
 
@@ -245,7 +245,7 @@ const WORKFLOW_DIR = resolve(homedir(), '.claude-swarm/workflows');
 const EXECUTION_DIR = resolve(homedir(), '.claude-swarm/executions');
 
 /**
- * 워크플로우 저장
+ * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
@@ -255,7 +255,7 @@ export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
 }
 
 /**
- * 워크플로우 로드
+ * Load workflow
  */
 export async function loadWorkflow(workflowId: string): Promise<WorkflowConfig | null> {
   try {
@@ -268,7 +268,7 @@ export async function loadWorkflow(workflowId: string): Promise<WorkflowConfig |
 }
 
 /**
- * 모든 워크플로우 목록
+ * List all workflows
  */
 export async function listWorkflows(): Promise<WorkflowConfig[]> {
   try {
@@ -290,7 +290,7 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 }
 
 /**
- * 실행 상태 저장
+ * Save execution state
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
@@ -299,7 +299,7 @@ export async function saveExecution(execution: WorkflowExecution): Promise<void>
 }
 
 /**
- * 실행 상태 로드
+ * Load execution state
  */
 export async function loadExecution(executionId: string): Promise<WorkflowExecution | null> {
   try {
@@ -316,7 +316,7 @@ export async function loadExecution(executionId: string): Promise<WorkflowExecut
 // ============================================
 
 /**
- * CI 파이프라인 템플릿
+ * CI pipeline template
  */
 export function createCIPipelineTemplate(projectPath: string): WorkflowConfig {
   return {
@@ -358,7 +358,7 @@ export function createCIPipelineTemplate(projectPath: string): WorkflowConfig {
 }
 
 /**
- * 코드 리뷰 파이프라인 템플릿
+ * Code review pipeline template
  */
 export function createReviewPipelineTemplate(projectPath: string, prNumber: string): WorkflowConfig {
   return {
@@ -382,7 +382,7 @@ export function createReviewPipelineTemplate(projectPath: string, prNumber: stri
         id: 'tests',
         name: 'Test Coverage',
         prompt: `Check if PR #${prNumber} has adequate test coverage. Suggest missing tests.`,
-        dependsOn: ['security', 'quality'],  // 병렬 후 실행
+        dependsOn: ['security', 'quality'],  // Execute after parallel steps
       },
       {
         id: 'summary',
@@ -399,19 +399,19 @@ export function createReviewPipelineTemplate(projectPath: string, prNumber: stri
 // ============================================
 
 /**
- * 워크플로우 유효성 검사
+ * Validate workflow
  */
 export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
-  // 기본 필드 검사
+  // Basic field validation
   if (!workflow.id) errors.push('Workflow ID is required');
   if (!workflow.name) errors.push('Workflow name is required');
   if (!workflow.steps || workflow.steps.length === 0) {
     errors.push('Workflow must have at least one step');
   }
 
-  // Step 검사
+  // Step validation
   const stepIds = new Set<string>();
   for (const step of workflow.steps || []) {
     if (!step.id) {
@@ -428,7 +428,7 @@ export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; er
       errors.push(`Step "${step.id}" must have a prompt`);
     }
 
-    // 의존성 검사
+    // Dependency validation
     if (step.dependsOn) {
       for (const dep of step.dependsOn) {
         if (!stepIds.has(dep) && !workflow.steps.some(s => s.id === dep)) {
@@ -438,7 +438,7 @@ export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; er
     }
   }
 
-  // 순환 의존성 검사
+  // Circular dependency check
   if (workflow.steps && workflow.steps.length > 0) {
     try {
       topologicalSort(workflow.steps);

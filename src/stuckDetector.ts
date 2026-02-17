@@ -1,13 +1,13 @@
 // ============================================
 // Claude Swarm - Stuck Detector
-// OpenHands 스타일 무한 루프 감지
+// OpenHands-style infinite loop detection
 // ============================================
 
 export interface StuckThresholds {
-  sameOutputRepeat: number;    // 같은 출력 반복 임계값
-  sameErrorRepeat: number;     // 같은 에러 반복 임계값
-  revisionLoop: number;        // REVISE 반복 임계값
-  monologue: number;           // 연속 에이전트 메시지 임계값
+  sameOutputRepeat: number;    // Same output repeat threshold
+  sameErrorRepeat: number;     // Same error repeat threshold
+  revisionLoop: number;        // REVISE loop threshold
+  monologue: number;           // Consecutive agent message threshold
 }
 
 export interface HistoryEntry {
@@ -44,12 +44,12 @@ export class StuckDetector {
   }
 
   /**
-   * 히스토리에 엔트리 추가
+   * Add entry to history
    */
   addEntry(entry: HistoryEntry): void {
     this.history.push(entry);
 
-    // 최근 20개만 유지
+    // Keep only the last 20 entries
     if (this.history.length > 20) {
       this.history = this.history.slice(-20);
     }
@@ -63,19 +63,19 @@ export class StuckDetector {
       return { isStuck: false };
     }
 
-    // 1. 같은 에러 반복 감지
+    // 1. Detect same error loop
     const errorLoop = this.detectErrorLoop();
     if (errorLoop.isStuck) return errorLoop;
 
-    // 2. REVISE 무한 루프 감지
+    // 2. Detect REVISE infinite loop
     const revisionLoop = this.detectRevisionLoop();
     if (revisionLoop.isStuck) return revisionLoop;
 
-    // 3. 같은 출력 반복 감지
+    // 3. Detect same output repeat
     const outputRepeat = this.detectOutputRepeat();
     if (outputRepeat.isStuck) return outputRepeat;
 
-    // 4. Worker 모놀로그 감지 (Reviewer 없이 계속 실행)
+    // 4. Detect Worker monologue (continuous execution without Reviewer)
     const monologue = this.detectMonologue();
     if (monologue.isStuck) return monologue;
 
@@ -83,7 +83,7 @@ export class StuckDetector {
   }
 
   /**
-   * 같은 에러 반복 감지
+   * Detect same error loop
    */
   private detectErrorLoop(): StuckResult {
     const recentErrors = this.history
@@ -94,7 +94,7 @@ export class StuckDetector {
       return { isStuck: false };
     }
 
-    // 모든 에러가 같은지 확인 (처음 100자 비교)
+    // Check if all errors are the same (compare first 100 chars)
     const firstError = recentErrors[0].error?.slice(0, 100);
     const allSame = recentErrors.every(e =>
       e.error?.slice(0, 100) === firstError
@@ -112,7 +112,7 @@ export class StuckDetector {
   }
 
   /**
-   * REVISE 무한 루프 감지
+   * Detect REVISE infinite loop
    */
   private detectRevisionLoop(): StuckResult {
     const recentReviews = this.history
@@ -123,7 +123,7 @@ export class StuckDetector {
       return { isStuck: false };
     }
 
-    // 모두 REVISE인지 확인
+    // Check if all are REVISE
     const allRevise = recentReviews.every(e =>
       e.decision?.toUpperCase() === 'REVISE' ||
       e.decision?.toUpperCase() === 'REVISION_NEEDED' ||
@@ -142,7 +142,7 @@ export class StuckDetector {
   }
 
   /**
-   * 같은 출력 반복 감지
+   * Detect same output repeat
    */
   private detectOutputRepeat(): StuckResult {
     const recentOutputs = this.history
@@ -153,7 +153,7 @@ export class StuckDetector {
       return { isStuck: false };
     }
 
-    // 출력 해시 비교 (처음 500자)
+    // Compare output hash (first 500 chars)
     const firstHash = this.hashOutput(recentOutputs[0].output!);
     const allSame = recentOutputs.every(e =>
       this.hashOutput(e.output!) === firstHash
@@ -171,7 +171,7 @@ export class StuckDetector {
   }
 
   /**
-   * 모놀로그 감지 (한 스테이지만 계속 실행)
+   * Detect monologue (single stage executing repeatedly)
    */
   private detectMonologue(): StuckResult {
     const recent = this.history.slice(-this.thresholds.monologue);
@@ -180,7 +180,7 @@ export class StuckDetector {
       return { isStuck: false };
     }
 
-    // 모두 같은 스테이지인지 확인
+    // Check if all are the same stage
     const firstStage = recent[0].stage;
     const allSameStage = recent.every(e => e.stage === firstStage);
 
@@ -196,7 +196,7 @@ export class StuckDetector {
   }
 
   /**
-   * 출력 해시 (간단한 비교용)
+   * Output hash (for simple comparison)
    */
   private hashOutput(output: string): string {
     const normalized = output.slice(0, 500).toLowerCase().replace(/\s+/g, ' ');
@@ -210,14 +210,14 @@ export class StuckDetector {
   }
 
   /**
-   * 히스토리 초기화
+   * Reset history
    */
   reset(): void {
     this.history = [];
   }
 
   /**
-   * 현재 히스토리 조회
+   * Get current history
    */
   getHistory(): HistoryEntry[] {
     return [...this.history];
@@ -225,7 +225,7 @@ export class StuckDetector {
 }
 
 /**
- * 글로벌 인스턴스 (세션별로 생성해도 됨)
+ * Create detector instance (can be created per session)
  */
 export function createStuckDetector(
   thresholds?: Partial<StuckThresholds>

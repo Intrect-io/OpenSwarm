@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Workflow Executor
-// DAG 기반 워크플로우 실행 엔진
+// DAG-based workflow execution engine
 // ============================================
 
 import { resolve } from 'path';
@@ -28,17 +28,17 @@ import { checkWorkAllowed } from './timeWindow.js';
 // ============================================
 
 export interface ExecutorOptions {
-  /** 병렬 실행 활성화 */
+  /** Enable parallel execution */
   parallel?: boolean;
-  /** 시간 제한 체크 */
+  /** Time window check */
   checkTimeWindow?: boolean;
-  /** 롤백 활성화 */
+  /** Enable rollback */
   enableRollback?: boolean;
-  /** 실행 타임아웃 (초) */
+  /** Execution timeout (seconds) */
   timeout?: number;
-  /** Dry run (실제 실행 안 함) */
+  /** Dry run (no actual execution) */
   dryRun?: boolean;
-  /** 시작 step (특정 step부터 시작) */
+  /** Start step (start from a specific step) */
   startFrom?: string;
 }
 
@@ -68,7 +68,7 @@ export class WorkflowExecutor {
       parallel: true,
       checkTimeWindow: true,
       enableRollback: true,
-      timeout: 3600,  // 1시간
+      timeout: 3600,  // 1 hour
       dryRun: false,
       ...options,
     };
@@ -87,7 +87,7 @@ export class WorkflowExecutor {
   }
 
   /**
-   * 워크플로우 실행
+   * Execute workflow
    */
   async execute(): Promise<ExecutorResult> {
     console.log(`[Executor] Starting workflow: ${this.workflow.name}`);
@@ -96,7 +96,7 @@ export class WorkflowExecutor {
     const startTime = Date.now();
 
     try {
-      // 시간 윈도우 체크
+      // Time window check
       if (this.options.checkTimeWindow) {
         const timeCheck = checkWorkAllowed();
         if (!timeCheck.allowed) {
@@ -106,10 +106,10 @@ export class WorkflowExecutor {
         }
       }
 
-      // 버스 초기화
+      // Initialize bus
       await this.bus.init(this.workflow.id);
 
-      // 체크포인트 생성
+      // Create checkpoint
       if (this.options.enableRollback) {
         this.checkpoint = await createCheckpoint(
           this.execution.executionId,
@@ -126,14 +126,14 @@ export class WorkflowExecutor {
         return this.createResult(true, startTime);
       }
 
-      // 실행
+      // Execute
       if (this.options.parallel) {
         await this.executeParallel();
       } else {
         await this.executeSequential();
       }
 
-      // 성공 체크
+      // Success check
       const allCompleted = Object.values(this.execution.stepResults)
         .every(r => r.status === 'completed' || r.status === 'skipped');
 
@@ -153,7 +153,7 @@ export class WorkflowExecutor {
       console.error('[Executor] Workflow failed:', error.message);
       this.execution.status = 'failed';
 
-      // 롤백 시도
+      // Attempt rollback
       let rollbackPerformed = false;
       if (this.options.enableRollback && this.checkpoint) {
         const shouldRollback = this.workflow.onFailure === 'rollback';
@@ -167,7 +167,7 @@ export class WorkflowExecutor {
       return this.createResult(false, startTime, undefined, rollbackPerformed);
 
     } finally {
-      // 실행 상태 저장
+      // Save execution state
       this.execution.completedAt = Date.now();
       await saveExecution(this.execution);
       await this.bus.cleanup();
@@ -175,14 +175,14 @@ export class WorkflowExecutor {
   }
 
   /**
-   * 순차 실행
+   * Sequential execution
    */
   private async executeSequential(): Promise<void> {
     const sortedSteps = topologicalSort(this.workflow.steps);
     let startFound = !this.options.startFrom;
 
     for (const step of sortedSteps) {
-      // startFrom 처리
+      // Handle startFrom
       if (!startFound) {
         if (step.id === this.options.startFrom) {
           startFound = true;
@@ -206,26 +206,26 @@ export class WorkflowExecutor {
         } else if (strategy === 'rollback') {
           throw new Error(`Step "${step.id}" failed, triggering rollback`);
         }
-        // skip, notify: 계속 진행
+        // skip, notify: continue execution
       }
     }
   }
 
   /**
-   * 병렬 실행
+   * Parallel execution
    */
   private async executeParallel(): Promise<void> {
     const groups = getParallelGroups(this.workflow.steps);
     let startFound = !this.options.startFrom;
 
     for (const group of groups) {
-      // startFrom 처리
+      // Handle startFrom
       if (!startFound) {
         const hasStart = group.some(s => s.id === this.options.startFrom);
         if (hasStart) {
           startFound = true;
         } else {
-          // 그룹 전체 스킵
+          // Skip entire group
           for (const step of group) {
             this.execution.stepResults[step.id] = {
               stepId: step.id,
@@ -240,12 +240,12 @@ export class WorkflowExecutor {
 
       console.log(`[Executor] Running parallel group: ${group.map(s => s.id).join(', ')}`);
 
-      // 그룹 내 step 병렬 실행
+      // Execute steps in group in parallel
       const results = await Promise.all(
         group.map(step => this.executeStep(step))
       );
 
-      // 실패 체크
+      // Failure check
       const failed = results.find(r => r.status === 'failed');
       if (failed) {
         const failedStep = group.find(s => s.id === failed.stepId);
@@ -259,7 +259,7 @@ export class WorkflowExecutor {
   }
 
   /**
-   * 단일 Step 실행
+   * Execute single step
    */
   private async executeStep(step: WorkflowStep): Promise<StepResult> {
     console.log(`[Executor] Running step: ${step.name} (${step.id})`);
@@ -271,7 +271,7 @@ export class WorkflowExecutor {
     };
     this.execution.stepResults[step.id] = result;
 
-    // 조건 체크
+    // Condition check
     if (step.condition) {
       const conditionMet = await this.evaluateCondition(step.condition);
       if (!conditionMet) {
@@ -283,21 +283,21 @@ export class WorkflowExecutor {
     }
 
     try {
-      // 이전 step 컨텍스트 생성
+      // Create previous step context
       const context = await this.bus.createStepContext(step.id, step.dependsOn);
 
-      // 프롬프트 조합
+      // Build prompt
       const fullPrompt = this.buildPrompt(step, context);
 
-      // Claude 실행
+      // Run Claude
       const output = await this.runClaude(step, fullPrompt);
 
-      // 결과 저장
+      // Save result
       result.status = 'completed';
       result.output = output;
       result.completedAt = Date.now();
 
-      // 버스에 완료 알림
+      // Notify bus of completion
       await this.bus.publish('step_completed', step.id, {
         stepId: step.id,
         success: true,
@@ -316,7 +316,7 @@ export class WorkflowExecutor {
       await this.bus.publish('error', step.id, error.message);
       console.error(`[Executor] Step "${step.id}" failed: ${error.message}`);
 
-      // 재시도
+      // Retry
       if (step.onFailure === 'retry' && step.retryCount) {
         for (let i = 0; i < step.retryCount; i++) {
           console.log(`[Executor] Retrying step "${step.id}" (${i + 1}/${step.retryCount})`);
@@ -342,28 +342,28 @@ export class WorkflowExecutor {
   }
 
   /**
-   * 프롬프트 생성
+   * Build prompt
    */
   private buildPrompt(step: WorkflowStep, context: string): string {
     const parts: string[] = [];
 
-    // 워크플로우 정보
+    // Workflow info
     parts.push(`# Workflow: ${this.workflow.name}`);
     parts.push(`## Step: ${step.name}`);
     parts.push('');
 
-    // 컨텍스트
+    // Context
     if (context) {
       parts.push(context);
       parts.push('');
     }
 
-    // 실제 프롬프트
+    // Actual prompt
     parts.push('## Task');
     parts.push(step.prompt);
     parts.push('');
 
-    // 지침
+    // Guidelines
     parts.push('## Guidelines');
     parts.push('- Complete the task described above');
     parts.push('- Report any errors or issues encountered');
@@ -373,25 +373,25 @@ export class WorkflowExecutor {
   }
 
   /**
-   * Claude 실행
+   * Run Claude
    */
   private async runClaude(step: WorkflowStep, prompt: string): Promise<string> {
     const expandedPath = this.workflow.projectPath.replace('~', homedir());
     const promptFile = resolve(EXECUTION_DIR, `prompt-${step.id}-${Date.now()}.txt`);
 
-    // 프롬프트 파일 저장
+    // Save prompt file
     await fs.mkdir(EXECUTION_DIR, { recursive: true });
     await fs.writeFile(promptFile, prompt);
 
-    // Tmux pane 준비
+    // Prepare tmux pane
     const paneTarget = await this.getOrCreatePane(step.id);
 
-    // Claude 실행 명령
+    // Claude execution command
     const command = `bash -c 'cd "${expandedPath}" && claude -p "$(cat ${promptFile})" --dangerously-skip-permissions 2>&1 | tee /tmp/claude-step-${step.id}.log'`;
 
     await tmux.sendKeysToPane(paneTarget, command);
 
-    // 완료 대기 (간단한 폴링)
+    // Wait for completion (simple polling)
     const timeout = (step.timeout || this.options.timeout || 3600) * 1000;
     const startTime = Date.now();
     const logFile = `/tmp/claude-step-${step.id}.log`;
@@ -399,18 +399,18 @@ export class WorkflowExecutor {
     while (Date.now() - startTime < timeout) {
       await this.sleep(5000);
 
-      // 로그 파일 확인
+      // Check log file
       try {
         const log = await fs.readFile(logFile, 'utf-8');
-        // Claude 완료 시그널 체크 (프롬프트 복귀 등)
+        // Check Claude completion signal (prompt return, etc.)
         if (log.includes('claude-swarm') || log.includes('$')) {
-          // 간단한 휴리스틱 - 실제로는 더 정교한 완료 감지 필요
+          // Simple heuristic - needs more sophisticated completion detection
           if (log.length > 100) {
             return log;
           }
         }
       } catch {
-        // 파일 아직 없음
+        // File not yet created
       }
     }
 
@@ -418,21 +418,21 @@ export class WorkflowExecutor {
   }
 
   /**
-   * Tmux pane 생성/조회
+   * Create or retrieve tmux pane
    */
   private async getOrCreatePane(_stepId: string): Promise<string> {
-    // 세션 존재 확인
+    // Check if session exists
     const sessionExists = await tmux.sessionExists(this.tmuxSession);
 
     if (!sessionExists) {
       await tmux.createSession(this.tmuxSession, this.workflow.projectPath);
     }
 
-    // Step용 pane 생성 (각 step마다 새 pane)
+    // Create pane for step (new pane per step)
     const panes = await tmux.listPanes(this.tmuxSession);
     const paneIndex = panes.length;
 
-    // 첫 번째가 아니면 새 pane 생성
+    // Create new pane if not the first one
     if (paneIndex > 0) {
       await tmux.createPane(this.tmuxSession, this.workflow.projectPath);
     }
@@ -441,11 +441,11 @@ export class WorkflowExecutor {
   }
 
   /**
-   * 조건 평가
+   * Evaluate condition
    */
   private async evaluateCondition(condition: string): Promise<boolean> {
-    // 간단한 조건 평가 (확장 가능)
-    // 예: "step.lint.success", "context.changedFiles.length > 0"
+    // Simple condition evaluation (extensible)
+    // e.g.: "step.lint.success", "context.changedFiles.length > 0"
 
     if (condition.startsWith('step.')) {
       const parts = condition.split('.');
@@ -459,12 +459,12 @@ export class WorkflowExecutor {
       if (prop === 'failed') return result.status === 'failed';
     }
 
-    // 기본값: true
+    // Default: true
     return true;
   }
 
   /**
-   * 실행 계획 출력 (dry run)
+   * Show execution plan (dry run)
    */
   private showExecutionPlan(): void {
     const groups = getParallelGroups(this.workflow.steps);
@@ -493,7 +493,7 @@ export class WorkflowExecutor {
   }
 
   /**
-   * 결과 생성
+   * Create result
    */
   private createResult(
     success: boolean,
@@ -523,7 +523,7 @@ export class WorkflowExecutor {
 // ============================================
 
 /**
- * 워크플로우 실행 (간편 함수)
+ * Run workflow (convenience function)
  */
 export async function runWorkflow(
   workflowId: string,
@@ -539,7 +539,7 @@ export async function runWorkflow(
 }
 
 /**
- * 워크플로우 설정으로 직접 실행
+ * Run workflow directly from config
  */
 export async function runWorkflowConfig(
   workflow: WorkflowConfig,
@@ -550,14 +550,14 @@ export async function runWorkflowConfig(
 }
 
 /**
- * 실행 상태 조회
+ * Get execution status
  */
 export async function getExecutionStatus(executionId: string): Promise<WorkflowExecution | null> {
   return loadExecution(executionId);
 }
 
 /**
- * 최근 실행 목록
+ * List recent executions
  */
 export async function listRecentExecutions(limit: number = 10): Promise<WorkflowExecution[]> {
   try {

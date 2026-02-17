@@ -4,6 +4,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { getChatHistory } from './discord.js';
+import { getDateLocale } from './locale/index.js';
 
 let server: ReturnType<typeof createServer> | null = null;
 
@@ -126,7 +127,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
           <div class="chat-entry">
             <div class="chat-meta">
               <span class="chat-user">\${entry.user}</span>
-              <span>\${new Date(entry.timestamp).toLocaleString('ko-KR')}</span>
+              <span>\${new Date(entry.timestamp).toLocaleString(getDateLocale())}</span>
             </div>
             <div class="chat-message">\${escapeHtml(entry.message)}</div>
             <div class="chat-response">\${escapeHtml(entry.response)}</div>
@@ -151,10 +152,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 </html>`;
 
 /**
- * 웹 서버 시작
+ * Start the web server
  */
 export async function startWebServer(port: number = 3847): Promise<void> {
-  // 이미 실행 중이면 스킵
+  // Skip if already running
   if (server) {
     console.log('Web interface already running, skipping...');
     return;
@@ -185,7 +186,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       if (err.code === 'EADDRINUSE') {
         console.warn(`Port ${port} is already in use, skipping web server...`);
         server = null;
-        resolve(); // 에러를 무시하고 계속 진행
+        resolve(); // Ignore error and continue
       } else {
         reject(err);
       }
@@ -199,7 +200,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 }
 
 /**
- * 웹 서버 종료
+ * Stop the web server
  */
 export async function stopWebServer(): Promise<void> {
   if (server) {

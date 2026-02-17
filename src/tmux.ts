@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 const execAsync = promisify(exec);
 
 /**
- * tmux 세션 목록 조회
+ * List tmux sessions
  */
 export async function listSessions(): Promise<string[]> {
   try {
@@ -20,7 +20,7 @@ export async function listSessions(): Promise<string[]> {
 }
 
 /**
- * tmux 세션 존재 여부 확인
+ * Check if tmux session exists
  */
 export async function sessionExists(sessionName: string): Promise<boolean> {
   const sessions = await listSessions();
@@ -28,10 +28,10 @@ export async function sessionExists(sessionName: string): Promise<boolean> {
 }
 
 /**
- * tmux 세션에 명령 전송
+ * Send keys to tmux session
  */
 export async function sendKeys(sessionName: string, message: string): Promise<void> {
-  // 특수 문자 이스케이프
+  // Escape special characters
   const escaped = message
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
@@ -42,7 +42,7 @@ export async function sendKeys(sessionName: string, message: string): Promise<vo
 }
 
 /**
- * tmux 세션 출력 캡처
+ * Capture tmux session output
  */
 export async function capturePane(
   sessionName: string,
@@ -60,7 +60,7 @@ export async function capturePane(
 }
 
 /**
- * Claude Code에 heartbeat 메시지 전송
+ * Send heartbeat message to Claude Code
  */
 export async function sendHeartbeat(sessionName: string): Promise<void> {
   const message = `HEARTBEAT.md 체크리스트에 따라 작업 진행. Linear 이슈 확인하고 진행상황 업데이트해줘.`;
@@ -68,14 +68,14 @@ export async function sendHeartbeat(sessionName: string): Promise<void> {
 }
 
 /**
- * Claude Code에 특정 작업 지시
+ * Send specific task to Claude Code
  */
 export async function sendTask(sessionName: string, task: string): Promise<void> {
   await sendKeys(sessionName, task);
 }
 
 /**
- * 세션 출력에서 중요 이벤트 파싱
+ * Parse important events from session output
  */
 export function parseEvents(output: string): {
   type: 'completed' | 'failed' | 'blocked' | 'commit' | null;
@@ -83,7 +83,7 @@ export function parseEvents(output: string): {
 }[] {
   const events: ReturnType<typeof parseEvents> = [];
 
-  // TODO 완료 감지
+  // Detect TODO completion
   if (output.includes('✓') || output.includes('[x]') || output.includes('completed')) {
     const match = output.match(/(?:completed|done|finished):\s*(.+)/i);
     events.push({
@@ -92,7 +92,7 @@ export function parseEvents(output: string): {
     });
   }
 
-  // 빌드/테스트 실패 감지
+  // Detect build/test failure
   if (output.includes('Build failed') || output.includes('error TS')) {
     events.push({ type: 'failed', detail: 'Build failed' });
   }
@@ -100,7 +100,7 @@ export function parseEvents(output: string): {
     events.push({ type: 'failed', detail: 'Tests failed' });
   }
 
-  // 막힘 감지
+  // Detect blocked/stuck state
   if (output.includes('BLOCKED') || output.includes('막힘') || output.includes('stuck')) {
     const match = output.match(/(?:BLOCKED|막힘|stuck):\s*(.+)/i);
     events.push({
@@ -109,7 +109,7 @@ export function parseEvents(output: string): {
     });
   }
 
-  // 커밋 감지
+  // Detect git commit
   const commitMatch = output.match(/git commit.*-m\s*["'](.+?)["']/);
   if (commitMatch) {
     events.push({ type: 'commit', detail: commitMatch[1] });
@@ -119,7 +119,7 @@ export function parseEvents(output: string): {
 }
 
 /**
- * 새 tmux 세션 생성 (Claude Code 실행)
+ * Create new tmux session (with Claude Code)
  */
 export async function createSession(
   sessionName: string,
@@ -131,14 +131,14 @@ export async function createSession(
 }
 
 /**
- * tmux 세션 종료
+ * Kill tmux session
  */
 export async function killSession(sessionName: string): Promise<void> {
   await execAsync(`tmux kill-session -t "${sessionName}"`);
 }
 
 /**
- * tmux 명령 직접 실행
+ * Execute tmux command directly
  */
 export async function execCommand(command: string): Promise<string> {
   try {
@@ -151,7 +151,7 @@ export async function execCommand(command: string): Promise<string> {
 }
 
 /**
- * 세션의 pane 개수 조회
+ * Get pane count for session
  */
 export async function getPaneCount(sessionName: string): Promise<number> {
   try {
@@ -165,10 +165,10 @@ export async function getPaneCount(sessionName: string): Promise<number> {
 }
 
 /**
- * 특정 pane에 명령 전송
+ * Send keys to specific pane
  */
 export async function sendKeysToPane(paneTarget: string, message: string): Promise<void> {
-  // 특수 문자 이스케이프
+  // Escape special characters
   const escaped = message
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
@@ -179,7 +179,7 @@ export async function sendKeysToPane(paneTarget: string, message: string): Promi
 }
 
 /**
- * 특정 pane의 출력 캡처
+ * Capture output from specific pane
  */
 export async function capturePaneOutput(
   paneTarget: string,
@@ -197,7 +197,7 @@ export async function capturePaneOutput(
 }
 
 /**
- * pane 목록 조회 (세션:윈도우.pane 형식)
+ * List panes (session:window.pane format)
  */
 export async function listPanes(sessionName: string): Promise<string[]> {
   try {
@@ -211,7 +211,7 @@ export async function listPanes(sessionName: string): Promise<string[]> {
 }
 
 /**
- * 새 pane 생성 (특정 디렉토리에서)
+ * Create new pane (in specified directory)
  */
 export async function createPane(
   sessionName: string,
@@ -220,7 +220,7 @@ export async function createPane(
 ): Promise<number> {
   const expandedDir = workingDir.replace('~', process.env.HOME || '');
 
-  // 새 pane 분할
+  // Split new pane
   if (command) {
     await execAsync(
       `tmux split-window -t "${sessionName}" -v -c "${expandedDir}" "${command}"`
@@ -231,22 +231,22 @@ export async function createPane(
     );
   }
 
-  // 레이아웃 정리
+  // Arrange layout
   await execAsync(`tmux select-layout -t "${sessionName}" tiled`);
 
-  // 새로 생성된 pane 인덱스 반환
+  // Return newly created pane index
   return (await getPaneCount(sessionName)) - 1;
 }
 
 /**
- * pane 종료
+ * Kill pane
  */
 export async function killPane(paneTarget: string): Promise<void> {
   await execAsync(`tmux kill-pane -t "${paneTarget}"`);
 }
 
 /**
- * 세션의 활성 윈도우 인덱스 조회
+ * Get active window index for session
  */
 export async function getActiveWindowIndex(sessionName: string): Promise<number> {
   try {
@@ -255,7 +255,7 @@ export async function getActiveWindowIndex(sessionName: string): Promise<number>
     );
     return parseInt(stdout.trim(), 10) || 0;
   } catch {
-    // 실패 시 첫 번째 윈도우 인덱스 시도
+    // On failure, try first window index
     try {
       const { stdout } = await execAsync(
         `tmux list-windows -t "${sessionName}" -F "#{window_index}" | head -1`

@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
 // ============================================
 // Claude Swarm - Interactive Chat CLI
-// CLI 에이전트 command center용 대화 인터페이스
-// Backend: claude -p (Claude Code OAuth 인증)
+// Interactive chat interface for CLI agent command center
+// Backend: claude -p (Claude Code OAuth auth)
 // ============================================
 
 import * as readline from 'node:readline/promises';
@@ -87,7 +87,7 @@ async function callClaude(
             capturedSessionId = event.session_id;
           }
 
-          // assistant 응답
+          // Assistant response
           if (event.type === 'assistant' && event.message?.content) {
             if (!headerPrinted) {
               process.stdout.write(`\n${GREEN}${BOLD}assistant${RESET} `);
@@ -101,7 +101,7 @@ async function callClaude(
             }
           }
 
-          // 결과
+          // Result
           if (event.type === 'result') {
             cost = event.total_cost_usd;
             if (event.session_id) {
@@ -109,13 +109,13 @@ async function callClaude(
             }
           }
         } catch {
-          // 파싱 실패 무시
+          // Ignore parse failures
         }
       }
     });
 
     proc.stderr.on('data', () => {
-      // hook 출력 등 무시
+      // Ignore hook output etc.
     });
 
     proc.on('close', (code) => {
@@ -283,7 +283,7 @@ async function handleCommand(
         opus: 'claude-opus-4-6',
       };
       session.model = aliases[newModel] || newModel;
-      // 모델 변경 시 claude 세션 리셋
+      // Reset claude session on model change
       session.claudeSessionId = undefined;
       console.log(`${GREEN}Model: ${session.model}${RESET}`);
       return 'handled';
@@ -325,7 +325,7 @@ ${BOLD}Multiline:${RESET}  ${CYAN}"""${RESET} 시작 → ${CYAN}"""${RESET} 종�
 // ============================================
 
 async function main(): Promise<void> {
-  // claude CLI 존재 확인
+  // Check if claude CLI exists
   try {
     const { execSync } = await import('node:child_process');
     execSync('which claude', { stdio: 'pipe' });
@@ -335,7 +335,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 세션 초기화
+  // Initialize session
   const loadArg = process.argv[2];
   let session: Session;
 
@@ -363,7 +363,7 @@ async function main(): Promise<void> {
     };
   }
 
-  // 헤더
+  // Header
   const shortModel = session.model.replace('claude-', '').replace(/-\d{8}$/, '');
   console.log(`${BOLD}╔════════════════════════════════════╗${RESET}`);
   console.log(`${BOLD}║${RESET}  Swarm Chat  ${DIM}${shortModel}${RESET}`);
@@ -387,7 +387,7 @@ async function main(): Promise<void> {
     const trimmed = input.trim();
     if (!trimmed) continue;
 
-    // 멀티라인
+    // Multiline
     if (trimmed === '"""' || trimmed === "'''") {
       const delim = trimmed;
       const lines: string[] = [];
@@ -403,7 +403,7 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // 명령
+    // Commands
     if (trimmed.startsWith('/')) {
       if (await handleCommand(trimmed, session) === 'exit') break;
       continue;

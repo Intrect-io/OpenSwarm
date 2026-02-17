@@ -1,11 +1,13 @@
 // ============================================
 // Claude Swarm - Time Window Management
-// 에이전트 작업 시간 제한 모듈
+// Agent work time restriction module
 // ============================================
 
+import { t } from './locale/index.js';
+
 /**
- * 시간 범위 정의
- * format: "HH:MM" (24시간 형식, KST 기준)
+ * Time range definition
+ * format: "HH:MM" (24-hour format, KST)
  */
 export interface TimeRange {
   start: string; // "HH:MM"
@@ -13,46 +15,46 @@ export interface TimeRange {
 }
 
 /**
- * 시간 윈도우 설정
+ * Time window configuration
  */
 export interface TimeWindowConfig {
-  /** 시간 제한 활성화 여부 */
+  /** Whether time restrictions are enabled */
   enabled: boolean;
 
-  /** 허용된 작업 시간대 (OR 조건) */
+  /** Allowed work time ranges (OR condition) */
   allowedWindows: TimeRange[];
 
-  /** 차단된 시간대 (장중 등) - allowedWindows보다 우선 */
+  /** Blocked time ranges (e.g. market hours) - takes priority over allowedWindows */
   blockedWindows: TimeRange[];
 
-  /** 특정 요일만 제한 (0=일, 1=월, ..., 6=토) */
+  /** Restricted days only (0=Sun, 1=Mon, ..., 6=Sat) */
   restrictedDays?: number[];
 
-  /** 타임존 (기본: Asia/Seoul) */
+  /** Timezone (default: Asia/Seoul) */
   timezone?: string;
 }
 
 /**
- * 기본 설정: 새벽 시간만 허용, 장중 차단
+ * Default config: allow only off-hours, block during market hours
  */
 export const DEFAULT_TIME_WINDOW: TimeWindowConfig = {
   enabled: true,
-  // 새벽/야간 작업 허용: 18:30 ~ 08:00
+  // Allow evening/night work: 18:30 ~ 08:00
   allowedWindows: [
     { start: '18:30', end: '23:59' },
     { start: '00:00', end: '08:00' },
   ],
-  // 장중 시간 명시적 차단 (08:30 ~ 18:00)
+  // Explicitly block market hours (08:30 ~ 18:00)
   blockedWindows: [
     { start: '08:30', end: '18:00' },
   ],
-  // 주중만 제한 (월~금)
+  // Restrict weekdays only (Mon-Fri)
   restrictedDays: [1, 2, 3, 4, 5],
   timezone: 'Asia/Seoul',
 };
 
 /**
- * 시간 문자열을 분 단위로 변환
+ * Convert time string to minutes
  * "09:30" -> 570
  */
 function timeToMinutes(time: string): number {
@@ -61,13 +63,13 @@ function timeToMinutes(time: string): number {
 }
 
 /**
- * 현재 시간이 특정 범위 내에 있는지 확인
+ * Check if current time is within a specific range
  */
 function isInTimeRange(currentMinutes: number, range: TimeRange): boolean {
   const start = timeToMinutes(range.start);
   const end = timeToMinutes(range.end);
 
-  // 자정을 넘는 경우 (예: 22:00 ~ 06:00)
+  // Handle midnight crossing (e.g. 22:00 ~ 06:00)
   if (start > end) {
     return currentMinutes >= start || currentMinutes <= end;
   }
@@ -76,12 +78,12 @@ function isInTimeRange(currentMinutes: number, range: TimeRange): boolean {
 }
 
 /**
- * 현재 KST 시간 가져오기
+ * Get current KST time
  */
 function _getKSTTime(): Date {
   const now = new Date();
-  // UTC를 KST로 변환 (UTC+9)
-  const kstOffset = 9 * 60; // 분 단위
+  // Convert UTC to KST (UTC+9)
+  const kstOffset = 9 * 60; // in minutes
   const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
   const kstMinutes = (utcMinutes + kstOffset) % (24 * 60);
 
@@ -92,7 +94,7 @@ function _getKSTTime(): Date {
 }
 
 /**
- * 현재 시간에 작업이 허용되는지 확인
+ * Check if work is allowed at the current time
  */
 export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
   allowed: boolean;
@@ -100,11 +102,11 @@ export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
   currentTime: string;
   nextAllowedTime?: string;
 } {
-  // 비활성화면 항상 허용
+  // Always allow if disabled
   if (!config.enabled) {
     return {
       allowed: true,
-      reason: '시간 제한 비활성화',
+      reason: t('timeWindow.disabled'),
       currentTime: formatCurrentTime(),
     };
   }
@@ -114,61 +116,61 @@ export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
   const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
   const kstMinutes = (utcMinutes + kstOffset) % (24 * 60);
 
-  // 요일 계산 (KST 기준)
-  // 요일 계산 (KST 기준)
+  // Calculate day of week (KST-based)
+  // Calculate day of week (KST-based)
   const kstDay = (now.getUTCDay() + (utcMinutes + kstOffset >= 24 * 60 ? 1 : 0)) % 7;
 
   const currentTimeStr = `${String(Math.floor(kstMinutes / 60)).padStart(2, '0')}:${String(kstMinutes % 60).padStart(2, '0')}`;
 
-  // 요일 제한 확인
+  // Check day-of-week restrictions
   if (config.restrictedDays && config.restrictedDays.length > 0) {
     if (!config.restrictedDays.includes(kstDay)) {
       return {
         allowed: true,
-        reason: '주말/제한 없는 요일',
+        reason: t('timeWindow.weekendOrUnrestricted'),
         currentTime: currentTimeStr,
       };
     }
   }
 
-  // 차단 시간대 확인 (최우선)
+  // Check blocked time ranges (highest priority)
   for (const blocked of config.blockedWindows) {
     if (isInTimeRange(kstMinutes, blocked)) {
       return {
         allowed: false,
-        reason: `차단 시간대 (${blocked.start} ~ ${blocked.end})`,
+        reason: t('timeWindow.blockedWindow', { start: blocked.start, end: blocked.end }),
         currentTime: currentTimeStr,
         nextAllowedTime: blocked.end,
       };
     }
   }
 
-  // 허용 시간대 확인
+  // Check allowed time ranges
   for (const allowed of config.allowedWindows) {
     if (isInTimeRange(kstMinutes, allowed)) {
       return {
         allowed: true,
-        reason: `허용 시간대 (${allowed.start} ~ ${allowed.end})`,
+        reason: t('timeWindow.allowedWindow', { start: allowed.start, end: allowed.end }),
         currentTime: currentTimeStr,
       };
     }
   }
 
-  // 어떤 허용 시간대에도 속하지 않음
+  // Not in any allowed time range
   const nextWindow = findNextAllowedWindow(kstMinutes, config.allowedWindows);
   return {
     allowed: false,
-    reason: '허용 시간대 외',
+    reason: t('timeWindow.outsideAllowed'),
     currentTime: currentTimeStr,
     nextAllowedTime: nextWindow,
   };
 }
 
 /**
- * 다음 허용 시간대 찾기
+ * Find next allowed time window
  */
 function findNextAllowedWindow(currentMinutes: number, windows: TimeRange[]): string | undefined {
-  // 현재 시간 이후의 가장 가까운 시작 시간 찾기
+  // Find the nearest start time after current time
   let nearestStart: number | null = null;
 
   for (const window of windows) {
@@ -181,11 +183,11 @@ function findNextAllowedWindow(currentMinutes: number, windows: TimeRange[]): st
     }
   }
 
-  // 오늘 이후 시작 시간이 없으면 내일 첫 윈도우
+  // If no start time after today, use tomorrow's first window
   if (nearestStart === null && windows.length > 0) {
     nearestStart = timeToMinutes(windows[0].start);
-    // "내일"을 표시하기 위해 +24시간 (표시용)
-    return `내일 ${windows[0].start}`;
+    // Indicate "tomorrow" with +24h (display only)
+    return t('timeWindow.tomorrowAt', { time: windows[0].start });
   }
 
   if (nearestStart !== null) {
@@ -196,7 +198,7 @@ function findNextAllowedWindow(currentMinutes: number, windows: TimeRange[]): st
 }
 
 /**
- * 현재 시간 포맷
+ * Format current time
  */
 function formatCurrentTime(): string {
   const now = new Date();
@@ -208,7 +210,7 @@ function formatCurrentTime(): string {
 }
 
 /**
- * 현재 시장 상태 반환
+ * Get current market status
  */
 export function getMarketStatus(): {
   status: 'pre_market' | 'regular' | 'post_market' | 'closed';
@@ -220,55 +222,55 @@ export function getMarketStatus(): {
   const [hours, minutes] = time.split(':').map(Number);
   const totalMinutes = hours * 60 + minutes;
 
-  // 장전 시간외: 08:30 ~ 09:00
+  // Pre-market hours: 08:30 ~ 09:00
   if (totalMinutes >= 510 && totalMinutes < 540) {
     return {
       status: 'pre_market',
-      description: '장전 시간외 (08:30~09:00)',
+      description: t('timeWindow.marketStatus.preMarket'),
       canWork: false,
     };
   }
 
-  // 정규장: 09:00 ~ 15:30
+  // Regular market hours: 09:00 ~ 15:30
   if (totalMinutes >= 540 && totalMinutes < 930) {
     return {
       status: 'regular',
-      description: '정규장 (09:00~15:30)',
+      description: t('timeWindow.marketStatus.regular'),
       canWork: false,
     };
   }
 
-  // 장후 시간외: 15:40 ~ 18:00
+  // Post-market hours: 15:40 ~ 18:00
   if (totalMinutes >= 940 && totalMinutes < 1080) {
     return {
       status: 'post_market',
-      description: '장후 시간외 (15:40~18:00)',
+      description: t('timeWindow.marketStatus.postMarket'),
       canWork: false,
     };
   }
 
-  // 폐장
+  // Market closed
   return {
     status: 'closed',
-    description: '폐장 (작업 가능)',
+    description: t('timeWindow.marketStatus.closed'),
     canWork: true,
   };
 }
 
 /**
- * 작업 전 시간 확인 (가드 함수)
- * 차단 시 에러 throw
+ * Pre-work time check (guard function)
+ * Throws error if blocked
  */
 export function assertWorkAllowed(taskName?: string): void {
   const result = isWorkAllowed();
 
   if (!result.allowed) {
     const msg = taskName
-      ? `[TimeWindow] "${taskName}" 작업 차단: ${result.reason} (현재: ${result.currentTime})`
-      : `[TimeWindow] 작업 차단: ${result.reason} (현재: ${result.currentTime})`;
+      ? t('timeWindow.taskBlocked', { task: taskName, reason: result.reason, time: result.currentTime })
+      : t('timeWindow.taskBlockedNoName', { reason: result.reason, time: result.currentTime });
 
     const nextTime = result.nextAllowedTime
-      ? ` 다음 허용 시간: ${result.nextAllowedTime}`
+      ? t('timeWindow.nextAllowedTime', { time: result.nextAllowedTime })
       : '';
 
     throw new Error(msg + nextTime);
@@ -276,23 +278,23 @@ export function assertWorkAllowed(taskName?: string): void {
 }
 
 /**
- * 시간 윈도우 상태 요약 (디스코드 보고용)
+ * Time window status summary (for Discord reporting)
  */
 export function getTimeWindowSummary(): string {
   const work = isWorkAllowed();
   const market = getMarketStatus();
 
   const icon = work.allowed ? '🟢' : '🔴';
-  const status = work.allowed ? '작업 가능' : '작업 차단';
+  const status = work.allowed ? t('timeWindow.workAllowed') : t('timeWindow.workBlocked');
 
   return `${icon} **${status}**
-현재: ${work.currentTime}
-상태: ${market.description}
-${!work.allowed && work.nextAllowedTime ? `다음 허용: ${work.nextAllowedTime}` : ''}`.trim();
+${t('timeWindow.currentTime', { time: work.currentTime })}
+${t('timeWindow.status', { description: market.description })}
+${!work.allowed && work.nextAllowedTime ? t('timeWindow.nextAllowed', { time: work.nextAllowedTime }) : ''}`.trim();
 }
 
 /**
- * 설정을 외부에서 업데이트할 수 있도록
+ * Allow external configuration updates
  */
 let currentConfig: TimeWindowConfig = { ...DEFAULT_TIME_WINDOW };
 
@@ -305,7 +307,7 @@ export function getTimeWindowConfig(): TimeWindowConfig {
 }
 
 /**
- * isWorkAllowed를 현재 설정으로 실행
+ * Run isWorkAllowed with current configuration
  */
 export function checkWorkAllowed(): ReturnType<typeof isWorkAllowed> {
   return isWorkAllowed(currentConfig);

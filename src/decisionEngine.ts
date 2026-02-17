@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Decision Engine
-// 자율 행동 범위 제한 및 작업 결정
+// Autonomous action scope control and task decision
 // ============================================
 
 import { resolve } from 'path';
@@ -22,12 +22,12 @@ import { saveCognitiveMemory } from './memory.js';
 // ============================================
 
 /**
- * 작업 소스
+ * Task source
  */
 export type TaskSource = 'linear' | 'local' | 'discovered' | 'github_pr';
 
 /**
- * Linear 프로젝트 정보 (간략)
+ * Linear project info (summary)
  */
 export interface LinearProject {
   id: string;
@@ -35,7 +35,7 @@ export interface LinearProject {
 }
 
 /**
- * 작업 아이템
+ * Task item
  */
 export interface TaskItem {
   id: string;
@@ -43,18 +43,18 @@ export interface TaskItem {
   title: string;
   description?: string;
   priority: number;        // 1=Urgent, 2=High, 3=Normal, 4=Low
-  projectPath?: string;    // 로컬 파일시스템 경로
-  linearProject?: LinearProject;  // Linear 프로젝트 정보
+  projectPath?: string;    // Local filesystem path
+  linearProject?: LinearProject;  // Linear project info
   issueId?: string;        // Linear issue ID
-  issueIdentifier?: string; // Linear issue identifier (예: LIN-123)
-  workflowId?: string;     // 매핑된 워크플로우
+  issueIdentifier?: string; // Linear issue identifier (e.g., LIN-123)
+  workflowId?: string;     // Mapped workflow
   createdAt: number;
   dueDate?: number;
-  blockedBy?: string[];    // 다른 task IDs
+  blockedBy?: string[];    // Other task IDs
 }
 
 /**
- * 결정 결과
+ * Decision result
  */
 export interface DecisionResult {
   action: 'execute' | 'skip' | 'defer' | 'add_to_backlog';
@@ -64,7 +64,7 @@ export interface DecisionResult {
 }
 
 /**
- * 복수 태스크 결정 결과 (병렬 처리용)
+ * Multiple task decision result (for parallel processing)
  */
 export interface DecisionResultMultiple {
   action: 'execute' | 'skip' | 'defer';
@@ -74,33 +74,33 @@ export interface DecisionResultMultiple {
 }
 
 /**
- * 발견된 작업 (Backlog 추가용)
+ * Discovered task (for backlog addition)
  */
 export interface DiscoveredTask {
   title: string;
   description: string;
-  source: string;          // 어디서 발견했는지
+  source: string;          // Where it was discovered
   suggestedPriority: number;
   projectPath?: string;
 }
 
 /**
- * Decision Engine 설정
+ * Decision Engine configuration
  */
 export interface DecisionEngineConfig {
-  /** 허용된 프로젝트 경로 목록 */
+  /** Allowed project path list */
   allowedProjects: string[];
 
-  /** Linear 팀 ID */
+  /** Linear team ID */
   linearTeamId?: string;
 
-  /** 자동 실행 허용 */
+  /** Allow auto-execution */
   autoExecute: boolean;
 
-  /** 최대 연속 작업 수 */
+  /** Maximum consecutive tasks */
   maxConsecutiveTasks: number;
 
-  /** 작업 간 쿨다운 (초) */
+  /** Cooldown between tasks (seconds) */
   cooldownSeconds: number;
 
   /** Dry run 모드 */
@@ -116,9 +116,9 @@ const DISCOVERED_TASKS_FILE = resolve(homedir(), '.claude-swarm/discovered-tasks
 
 const DEFAULT_CONFIG: DecisionEngineConfig = {
   allowedProjects: [],
-  autoExecute: false,       // 기본은 수동 승인
+  autoExecute: false,       // Default is manual approval
   maxConsecutiveTasks: 3,
-  cooldownSeconds: 300,     // 5분
+  cooldownSeconds: 300,     // 5 minutes
   dryRun: false,
 };
 
@@ -171,7 +171,7 @@ export class DecisionEngine {
   }
 
   /**
-   * 초기화
+   * Initialize
    */
   async init(): Promise<void> {
     this.state = await loadState();
@@ -179,12 +179,12 @@ export class DecisionEngine {
   }
 
   /**
-   * Heartbeat 실행 - 메인 진입점
+   * Heartbeat execution - main entry point
    */
   async heartbeat(tasks: TaskItem[]): Promise<DecisionResult> {
     console.log('[DecisionEngine] Heartbeat triggered');
 
-    // 1. 시간 윈도우 체크
+    // 1. Time window check
     const timeCheck = checkWorkAllowed();
     if (!timeCheck.allowed) {
       return {
@@ -193,7 +193,7 @@ export class DecisionEngine {
       };
     }
 
-    // 2. 쿨다운 체크
+    // 2. Cooldown check
     const now = Date.now();
     const timeSinceLastRun = (now - this.state.lastRunAt) / 1000;
     if (timeSinceLastRun < this.config.cooldownSeconds) {
@@ -203,7 +203,7 @@ export class DecisionEngine {
       };
     }
 
-    // 3. 연속 작업 제한 체크
+    // 3. Consecutive task limit check
     if (this.state.consecutiveTasksRun >= this.config.maxConsecutiveTasks) {
       console.log('[DecisionEngine] Max consecutive tasks reached, resetting');
       this.state.consecutiveTasksRun = 0;
@@ -214,7 +214,7 @@ export class DecisionEngine {
       };
     }
 
-    // 4. 작업 가능한 태스크 필터링
+    // 4. Filter executable tasks
     const executableTasks = this.filterExecutableTasks(tasks);
     if (executableTasks.length === 0) {
       return {
@@ -223,11 +223,11 @@ export class DecisionEngine {
       };
     }
 
-    // 5. 우선순위 정렬
+    // 5. Priority sorting
     const sorted = this.prioritizeTasks(executableTasks);
     const selectedTask = sorted[0];
 
-    // 6. 범위 검증 (CRITICAL)
+    // 6. Scope validation (CRITICAL)
     const scopeCheck = this.validateScope(selectedTask);
     if (!scopeCheck.valid) {
       return {
@@ -236,7 +236,7 @@ export class DecisionEngine {
       };
     }
 
-    // 7. 워크플로우 매핑
+    // 7. Workflow mapping
     console.log(`[DecisionEngine] Mapping task to workflow: ${selectedTask.id}`);
     const workflow = await this.taskToWorkflow(selectedTask);
     console.log(`[DecisionEngine] Workflow mapped: ${workflow ? 'yes' : 'no'}`);
@@ -248,7 +248,7 @@ export class DecisionEngine {
       };
     }
 
-    // 8. 결정 반환
+    // 8. Return decision
     console.log(`[DecisionEngine] Returning decision: autoExecute=${this.config.autoExecute}`);
     return {
       action: this.config.autoExecute ? 'execute' : 'defer',
@@ -261,10 +261,10 @@ export class DecisionEngine {
   }
 
   /**
-   * Heartbeat 실행 - 복수 태스크 반환 (병렬 처리용)
-   * @param tasks - 후보 태스크 목록
-   * @param maxTasks - 최대 반환 태스크 수
-   * @param excludeProjects - 제외할 프로젝트 경로 (이미 실행 중인 프로젝트)
+   * Heartbeat execution - returns multiple tasks (for parallel processing)
+   * @param tasks - Candidate task list
+   * @param maxTasks - Maximum number of tasks to return
+   * @param excludeProjects - Project paths to exclude (already running projects)
    */
   async heartbeatMultiple(
     tasks: TaskItem[],
@@ -273,7 +273,7 @@ export class DecisionEngine {
   ): Promise<DecisionResultMultiple> {
     console.log(`[DecisionEngine] Heartbeat multiple triggered (max: ${maxTasks})`);
 
-    // 1. 시간 윈도우 체크
+    // 1. Time window check
     const timeCheck = checkWorkAllowed();
     if (!timeCheck.allowed) {
       return {
@@ -284,7 +284,7 @@ export class DecisionEngine {
       };
     }
 
-    // 2. 쿨다운 체크
+    // 2. Cooldown check
     const now = Date.now();
     const timeSinceLastRun = (now - this.state.lastRunAt) / 1000;
     if (timeSinceLastRun < this.config.cooldownSeconds) {
@@ -296,7 +296,7 @@ export class DecisionEngine {
       };
     }
 
-    // 3. 연속 작업 제한 체크
+    // 3. Consecutive task limit check
     if (this.state.consecutiveTasksRun >= this.config.maxConsecutiveTasks) {
       console.log('[DecisionEngine] Max consecutive tasks reached, resetting');
       this.state.consecutiveTasksRun = 0;
@@ -309,7 +309,7 @@ export class DecisionEngine {
       };
     }
 
-    // 4. 작업 가능한 태스크 필터링
+    // 4. Filter executable tasks
     const executableTasks = this.filterExecutableTasks(tasks);
     if (executableTasks.length === 0) {
       return {
@@ -320,10 +320,10 @@ export class DecisionEngine {
       };
     }
 
-    // 5. 우선순위 정렬
+    // 5. Priority sorting
     const sorted = this.prioritizeTasks(executableTasks);
 
-    // 6. 복수 태스크 선택 (프로젝트별 1개, 최대 maxTasks개)
+    // 6. Select multiple tasks (1 per project, max maxTasks)
     const selectedTasks: Array<{ task: TaskItem; workflow: WorkflowConfig }> = [];
     const usedProjects = new Set<string>(excludeProjects);
     let skippedCount = 0;
@@ -331,21 +331,21 @@ export class DecisionEngine {
     for (const task of sorted) {
       if (selectedTasks.length >= maxTasks) break;
 
-      // 프로젝트 경로 확인 (같은 프로젝트 중복 방지)
+      // Check project path (prevent same project duplication)
       const projectPath = task.projectPath || task.linearProject?.name || 'unknown';
       if (usedProjects.has(projectPath)) {
         skippedCount++;
         continue;
       }
 
-      // 범위 검증
+      // Scope validation
       const scopeCheck = this.validateScope(task);
       if (!scopeCheck.valid) {
         skippedCount++;
         continue;
       }
 
-      // 워크플로우 매핑
+      // Workflow mapping
       const workflow = await this.taskToWorkflow(task);
       if (!workflow) {
         skippedCount++;
@@ -377,25 +377,25 @@ export class DecisionEngine {
   }
 
   /**
-   * 작업 실행
+   * Execute task
    */
   async executeTask(task: TaskItem, workflow: WorkflowConfig): Promise<ExecutorResult> {
     console.log(`[DecisionEngine] Executing task: ${task.title}`);
 
-    // 상태 업데이트
+    // Update state
     this.state.lastRunAt = Date.now();
     this.state.consecutiveTasksRun++;
     this.state.lastTaskId = task.id;
     await saveState(this.state);
 
-    // 워크플로우 실행
+    // Execute workflow
     const result = await runWorkflowConfig(workflow, {
       enableRollback: true,
       checkTimeWindow: true,
       dryRun: this.config.dryRun,
     });
 
-    // 결과 기록
+    // Record result
     if (result.success) {
       this.state.totalTasksCompleted++;
       try {
@@ -408,7 +408,7 @@ export class DecisionEngine {
       }
     } else {
       this.state.totalTasksFailed++;
-      this.state.consecutiveTasksRun = 0; // 실패 시 리셋
+      this.state.consecutiveTasksRun = 0; // Reset on failure
       try {
         await saveCognitiveMemory('belief',
           `Task "${task.title}" failed: ${result.failedStep || 'unknown reason'}`,
@@ -424,11 +424,11 @@ export class DecisionEngine {
   }
 
   /**
-   * 실행 가능한 태스크 필터링
+   * Filter executable tasks
    */
   private filterExecutableTasks(tasks: TaskItem[]): TaskItem[] {
     return tasks.filter(task => {
-      // 허용된 프로젝트인지 확인
+      // Check if project is allowed
       if (task.projectPath && this.config.allowedProjects.length > 0) {
         const allowed = this.config.allowedProjects.some(p =>
           task.projectPath!.includes(p) || p.includes(task.projectPath!)
@@ -436,10 +436,10 @@ export class DecisionEngine {
         if (!allowed) return false;
       }
 
-      // 차단된 작업인지 확인
+      // Check if task is blocked
       if (task.blockedBy && task.blockedBy.length > 0) {
-        // blockedBy에 있는 작업이 모두 완료되었는지 확인 필요
-        // 현재는 간단히 blocked 있으면 제외
+        // Need to check if all blockedBy tasks are completed
+        // Currently simply exclude if blocked
         return false;
       }
 
@@ -448,32 +448,32 @@ export class DecisionEngine {
   }
 
   /**
-   * 우선순위 정렬
+   * Priority sorting
    */
   private prioritizeTasks(tasks: TaskItem[]): TaskItem[] {
     return [...tasks].sort((a, b) => {
-      // 1. Priority (낮을수록 높은 우선순위)
+      // 1. Priority (lower value = higher priority)
       if (a.priority !== b.priority) {
         return a.priority - b.priority;
       }
 
-      // 2. Due date (빠를수록 높은 우선순위)
+      // 2. Due date (earlier = higher priority)
       if (a.dueDate && b.dueDate) {
         return a.dueDate - b.dueDate;
       }
       if (a.dueDate) return -1;
       if (b.dueDate) return 1;
 
-      // 3. Created at (오래된 것 먼저)
+      // 3. Created at (older first)
       return a.createdAt - b.createdAt;
     });
   }
 
   /**
-   * 범위 검증 (CRITICAL - Scope Creep 방지)
+   * Scope validation (CRITICAL - prevent scope creep)
    */
   private validateScope(task: TaskItem): { valid: boolean; reason?: string } {
-    // 1. Backlog에서 온 작업만 허용
+    // 1. Only allow tasks from backlog
     if (task.source !== 'linear' && task.source !== 'local') {
       return {
         valid: false,
@@ -481,7 +481,7 @@ export class DecisionEngine {
       };
     }
 
-    // 2. 명시적 issue ID 또는 workflow ID 필요
+    // 2. Require explicit issue ID or workflow ID
     if (!task.issueId && !task.workflowId) {
       return {
         valid: false,
@@ -489,7 +489,7 @@ export class DecisionEngine {
       };
     }
 
-    // 3. 프로젝트 경로 검증
+    // 3. Project path validation
     if (task.projectPath) {
       const expanded = task.projectPath.replace('~', homedir());
       if (this.config.allowedProjects.length > 0) {
@@ -510,15 +510,15 @@ export class DecisionEngine {
   }
 
   /**
-   * Task를 Workflow로 변환 (자동 파싱 포함)
+   * Convert Task to Workflow (includes auto-parsing)
    */
   private async taskToWorkflow(task: TaskItem): Promise<WorkflowConfig | null> {
-    // 1. 명시적 workflow ID가 있으면 로드
+    // 1. Load if explicit workflow ID exists
     if (task.workflowId) {
       return loadWorkflow(task.workflowId);
     }
 
-    // 2. 기존 워크플로우 중 매칭되는 것 찾기
+    // 2. Find matching workflow among existing ones
     const workflows = await listWorkflows();
     const matching = workflows.find(w =>
       w.projectPath === task.projectPath ||
@@ -526,7 +526,7 @@ export class DecisionEngine {
     );
     if (matching) return matching;
 
-    // 3. 이미 파싱된 결과가 있으면 사용
+    // 3. Use cached parsed result if available
     if (task.issueId) {
       const existingParsed = await loadParsedTask(task.issueId);
       if (existingParsed) {
@@ -535,7 +535,7 @@ export class DecisionEngine {
       }
     }
 
-    // 4. 이슈 자동 파싱하여 워크플로우 생성
+    // 4. Auto-parse issue to generate workflow
     if (task.title && task.issueId) {
       console.log(`[DecisionEngine] Auto-parsing task: ${task.title}`);
       const parsed = parseTask({
@@ -545,10 +545,10 @@ export class DecisionEngine {
         projectPath: task.projectPath,
       });
 
-      // 파싱 결과 저장
+      // Save parsed result
       await saveParsedTask(parsed);
 
-      // 복잡한 작업이면 경고 로그
+      // Log warning if complex task
       if (parsed.analysis.requiresHumanReview) {
         console.log(`[DecisionEngine] ⚠️ Complex task detected (${parsed.analysis.complexity})`);
         console.log(`[DecisionEngine] Risks: ${parsed.analysis.risks.join(', ') || 'none'}`);
@@ -562,7 +562,7 @@ export class DecisionEngine {
       return parsed.workflow;
     }
 
-    // 5. 폴백: 기본 CI 파이프라인
+    // 5. Fallback: default CI pipeline
     if (task.projectPath) {
       return createCIPipelineTemplate(task.projectPath);
     }
@@ -571,7 +571,7 @@ export class DecisionEngine {
   }
 
   /**
-   * 파싱 결과 요약 가져오기 (Linear 코멘트용)
+   * Get parsed task summary (for Linear comments)
    */
   async getTaskParseSummary(issueId: string): Promise<string | null> {
     const parsed = await loadParsedTask(issueId);
@@ -580,12 +580,12 @@ export class DecisionEngine {
   }
 
   /**
-   * 발견된 작업을 Backlog에 추가 (실행하지 않음)
+   * Add discovered task to backlog (does not execute)
    */
   async addToBacklog(discovered: DiscoveredTask): Promise<void> {
     console.log(`[DecisionEngine] Adding to backlog: ${discovered.title}`);
 
-    // 로컬 파일에 저장 (나중에 Linear로 동기화)
+    // Save to local file (sync to Linear later)
     let discoveredTasks: DiscoveredTask[] = [];
     try {
       const content = await fs.readFile(DISCOVERED_TASKS_FILE, 'utf-8');
@@ -600,7 +600,7 @@ export class DecisionEngine {
 
     await fs.writeFile(DISCOVERED_TASKS_FILE, JSON.stringify(discoveredTasks, null, 2));
 
-    // 메모리에도 기록
+    // Also record in memory
     try {
       await saveCognitiveMemory('belief',
         `Discovered potential task: "${discovered.title}" from ${discovered.source}`,
@@ -612,7 +612,7 @@ export class DecisionEngine {
   }
 
   /**
-   * 발견된 작업 목록 조회
+   * Get discovered task list
    */
   async getDiscoveredTasks(): Promise<DiscoveredTask[]> {
     try {
@@ -624,7 +624,7 @@ export class DecisionEngine {
   }
 
   /**
-   * 통계 조회
+   * Get statistics
    */
   getStats(): {
     totalCompleted: number;
@@ -648,7 +648,7 @@ export class DecisionEngine {
 let engineInstance: DecisionEngine | null = null;
 
 /**
- * Decision Engine 인스턴스 가져오기
+ * Get Decision Engine instance
  */
 export function getDecisionEngine(config?: Partial<DecisionEngineConfig>): DecisionEngine {
   if (!engineInstance || config) {
@@ -658,7 +658,7 @@ export function getDecisionEngine(config?: Partial<DecisionEngineConfig>): Decis
 }
 
 /**
- * Heartbeat 실행 (간편 함수)
+ * Run heartbeat (convenience function)
  */
 export async function runHeartbeat(
   tasks: TaskItem[],
@@ -670,7 +670,7 @@ export async function runHeartbeat(
 }
 
 /**
- * Linear 이슈를 TaskItem으로 변환
+ * Convert Linear issue to TaskItem
  */
 export function linearIssueToTask(issue: {
   id: string;

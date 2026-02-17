@@ -1,13 +1,13 @@
 // ============================================
 // Claude Swarm - Git Tracker
-// Aider 스타일 Git diff 기반 파일 변경 추적
+// Aider-style Git diff-based file change tracking
 // ============================================
 
 import { spawn } from 'node:child_process';
 
 /**
- * Git diff로 변경된 파일 목록 추출
- * Worker JSON 파싱에 의존하지 않고 실제 변경 파일 추적
+ * Extract changed file list via git diff
+ * Track actual changed files without relying on Worker JSON parsing
  */
 export async function getChangedFiles(
   projectPath: string,
@@ -20,7 +20,7 @@ export async function getChangedFiles(
 
     const output = await runGitCommand(projectPath, args);
 
-    // staged 파일도 포함
+    // Include staged files
     const stagedOutput = await runGitCommand(projectPath, ['diff', '--name-only', '--cached']);
 
     const files = new Set<string>();
@@ -36,11 +36,11 @@ export async function getChangedFiles(
 }
 
 /**
- * 작업 전 스냅샷 저장 (stash 또는 commit hash)
+ * Save pre-work snapshot (stash or commit hash)
  */
 export async function takeSnapshot(projectPath: string): Promise<string> {
   try {
-    // 현재 HEAD commit hash 반환
+    // Return current HEAD commit hash
     const output = await runGitCommand(projectPath, ['rev-parse', 'HEAD']);
     return output.trim();
   } catch (error) {
@@ -50,7 +50,7 @@ export async function takeSnapshot(projectPath: string): Promise<string> {
 }
 
 /**
- * 스냅샷 이후 변경된 파일 목록
+ * Get files changed since snapshot
  */
 export async function getChangedFilesSinceSnapshot(
   projectPath: string,
@@ -59,12 +59,12 @@ export async function getChangedFilesSinceSnapshot(
   if (!snapshotHash) return [];
 
   try {
-    // committed 변경
+    // Committed changes
     const committedOutput = await runGitCommand(projectPath, [
       'diff', '--name-only', snapshotHash, 'HEAD'
     ]);
 
-    // uncommitted 변경 (staged + unstaged)
+    // Uncommitted changes (staged + unstaged)
     const uncommittedOutput = await runGitCommand(projectPath, [
       'diff', '--name-only'
     ]);
@@ -120,7 +120,7 @@ export async function autoCommit(
 }
 
 /**
- * Git 명령 실행 유틸리티
+ * Git command execution utility
  */
 function runGitCommand(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -145,7 +145,7 @@ function runGitCommand(cwd: string, args: string[]): Promise<string> {
 }
 
 /**
- * 프로젝트가 git 저장소인지 확인
+ * Check if project is a git repository
  */
 export async function isGitRepo(projectPath: string): Promise<boolean> {
   try {

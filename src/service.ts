@@ -16,6 +16,7 @@ import * as scheduler from './scheduler.js';
 import * as web from './web.js';
 import * as autonomous from './autonomousRunner.js';
 import { PRProcessor } from './prProcessor.js';
+import { initLocale, t } from './locale/index.js';
 
 let state: ServiceState = {
   running: false,
@@ -28,32 +29,35 @@ let githubCheckTimer: NodeJS.Timeout | null = null;
 let prProcessor: PRProcessor | null = null;
 
 /**
- * 서비스 시작
+ * Start the service
  */
 export async function startService(config: SwarmConfig): Promise<void> {
   console.log('Starting Claude Swarm service...');
 
-  // Linear 초기화
+  // Locale initialization
+  initLocale(config.language);
+
+  // Linear initialization
   console.log('🔗 Initializing Linear client...');
   linear.initLinear(config.linearApiKey, config.linearTeamId);
   console.log('✅ Linear client connected');
 
-  // Discord 초기화
+  // Discord initialization
   console.log('🤖 Connecting Discord bot...');
   await discord.initDiscord(config.discordToken, config.discordChannelId);
   console.log('✅ Discord bot connected successfully');
 
-  // 웹 인터페이스 시작
+  // Start web interface
   console.log('🌐 Starting web interface...');
   await web.startWebServer(3847);
   console.log('✅ Web interface ready');
 
-  // GitHub 레포 설정
+  // GitHub repo configuration
   githubRepos = config.githubRepos ?? [];
 
-  // GitHub CI 모니터링 시작
+  // Start GitHub CI monitoring
   if (githubRepos.length > 0) {
-    const checkInterval = config.githubCheckInterval ?? 5 * 60 * 1000; // 기본 5분
+    const checkInterval = config.githubCheckInterval ?? 5 * 60 * 1000; // default 5 minutes
     console.log(`📊 Starting GitHub CI monitoring for ${githubRepos.length} repos...`);
     startGitHubMonitoring(checkInterval);
     console.log(`✅ GitHub monitoring active (interval: ${Math.floor(checkInterval/1000/60)}min)`);
@@ -61,7 +65,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     console.log('⚠️ No GitHub repos configured - CI monitoring disabled');
   }
 
-  // Discord 콜백 설정
+  // Discord callback setup
   discord.setCallbacks({
     onPause: pauseAgent,
     onResume: resumeAgent,
@@ -69,7 +73,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     getRepos: () => githubRepos,
   });
 
-  // Pair 모드 설정
+  // Pair mode configuration
   if (config.pairMode) {
     discord.setPairModeConfig({
       webhookUrl: config.pairMode.webhookUrl,
@@ -80,7 +84,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     console.log(`Pair mode configured (maxAttempts: ${config.pairMode.maxAttempts})`);
   }
 
-  // 에이전트 상태 초기화
+  // Initialize agent states
   for (const agent of config.agents) {
     if (!agent.enabled) continue;
 
@@ -90,7 +94,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     });
   }
 
-  // 타이머 시작
+  // Start timers
   for (const agent of config.agents) {
     if (!agent.enabled) continue;
     startAgentTimer(agent);
@@ -99,25 +103,25 @@ export async function startService(config: SwarmConfig): Promise<void> {
   state.running = true;
   state.startedAt = Date.now();
 
-  // 스케줄러 시작
+  // Start scheduler
   await scheduler.startAllSchedules();
   const schedules = await scheduler.listSchedules();
   console.log(`Scheduler started with ${schedules.length} schedules`);
 
   console.log('');
   console.log('🎉 ════════════════════════════════════════');
-  console.log('🎉  Claude Swarm 서비스 시작 완료!');
-  console.log(`🎉  ├─ 에이전트: ${config.agents.length}개`);
-  console.log(`🎉  ├─ GitHub 레포: ${githubRepos.length}개`);
-  console.log(`🎉  └─ 기본 heartbeat: ${Math.floor(config.defaultHeartbeatInterval/1000/60)}분`);
+  console.log(`🎉  ${t('service.startComplete')}`);
+  console.log(`🎉  ├─ ${t('service.agentCount', { n: config.agents.length })}`);
+  console.log(`🎉  ├─ ${t('service.repoCount', { n: githubRepos.length })}`);
+  console.log(`🎉  └─ ${t('service.heartbeatInterval', { n: Math.floor(config.defaultHeartbeatInterval/1000/60) })}`);
   console.log('🎉 ════════════════════════════════════════');
   console.log('');
 
-  // 자율 모드 자동 시작
+  // Auto-start autonomous mode
   if (config.autonomous?.enabled) {
     console.log('[Service] Autonomous mode auto-start enabled');
 
-    // Linear fetcher 등록
+    // Register Linear fetcher
     autonomous.setLinearFetcher(async () => {
       const issues = await linear.getMyIssues();
       const { linearIssueToTask } = await import('./decisionEngine.js');
@@ -135,7 +139,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     });
     console.log('[Service] Linear fetcher registered');
 
-    // Discord reporter 등록 (기본 채널로)
+    // Register Discord reporter (to default channel)
     autonomous.setDiscordReporter(async (content: any) => {
       await discord.sendToChannel(content);
     });
@@ -153,16 +157,17 @@ export async function startService(config: SwarmConfig): Promise<void> {
       pairMaxAttempts: config.autonomous.maxAttempts,
       workerModel: config.autonomous.models?.worker,
       reviewerModel: config.autonomous.models?.reviewer,
-      workerTimeoutMs: config.autonomous.workerTimeoutMs || 0, // 0 = 무제한
-      reviewerTimeoutMs: config.autonomous.reviewerTimeoutMs || 0, // 0 = 무제한
-      triggerNow: true,  // 시작 시 즉시 실행
+      workerTimeoutMs: config.autonomous.workerTimeoutMs || 0, // 0 = unlimited
+      reviewerTimeoutMs: config.autonomous.reviewerTimeoutMs || 0, // 0 = unlimited
+      triggerNow: true,  // Execute immediately on start
       maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
       defaultRoles: config.autonomous.defaultRoles,
       projectAgents: config.autonomous.projectAgents,
-      // 작업 분해 (Planner) 설정
+      // Task decomposition (Planner) configuration
       enableDecomposition: config.autonomous.decomposition?.enabled ?? false,
       decompositionThresholdMinutes: config.autonomous.decomposition?.thresholdMinutes ?? 30,
       plannerModel: config.autonomous.decomposition?.plannerModel,
+      plannerTimeoutMs: config.autonomous.decomposition?.plannerTimeoutMs,
     });
     const modelInfo = config.autonomous.models
       ? `, Worker: ${config.autonomous.models.worker || 'default'}, Reviewer: ${config.autonomous.models.reviewer || 'default'}`
@@ -170,7 +175,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
     console.log(`[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`);
   }
 
-  // PR Auto-Improvement 시작
+  // Start PR Auto-Improvement
   if (config.prProcessor?.enabled && githubRepos.length > 0) {
     prProcessor = new PRProcessor({
       repos: githubRepos,
@@ -183,31 +188,35 @@ export async function startService(config: SwarmConfig): Promise<void> {
     console.log(`[Service] PR Processor started (schedule: ${config.prProcessor.schedule}, repos: ${githubRepos.length})`);
   }
 
-  // 시작 알림
+  // Startup notification
   const autoStatus = config.autonomous?.enabled
-    ? `, 자율모드 활성 (${config.autonomous.pairMode ? 'Pair' : 'Solo'})`
+    ? t('service.autoModeActive', { mode: config.autonomous.pairMode ? 'Pair' : 'Solo' })
     : '';
   await discord.reportEvent({
     type: 'issue_started',
     session: 'swarm',
-    message: `Claude Swarm 시작됨. ${config.agents.length}개 에이전트, ${schedules.length}개 스케줄 활성화${autoStatus}.`,
+    message: t('service.startedMessage', {
+      agents: config.agents.length,
+      schedules: schedules.length,
+      autoStatus,
+    }),
     timestamp: Date.now(),
   });
 }
 
 /**
- * 에이전트 타이머 시작
+ * Start agent timer
  */
 function startAgentTimer(agent: AgentSession): void {
   console.log(`Starting timer for ${agent.name} (interval: ${agent.heartbeatInterval}ms)`);
 
-  // 기존 타이머 정리
+  // Clean up existing timer
   const existingTimer = state.timers.get(agent.name);
   if (existingTimer) {
     clearInterval(existingTimer);
   }
 
-  // 새 타이머 설정
+  // Set up new timer
   const timer = setInterval(() => {
     void runHeartbeat(agent).catch((err) => {
       console.error(`Heartbeat error for ${agent.name}:`, err);
@@ -216,20 +225,20 @@ function startAgentTimer(agent: AgentSession): void {
 
   state.timers.set(agent.name, timer);
 
-  // 즉시 한 번 실행
+  // Run once immediately
   void runHeartbeat(agent).catch((err) => {
     console.error(`Initial heartbeat error for ${agent.name}:`, err);
   });
 }
 
 /**
- * Heartbeat 실행
+ * Run heartbeat
  */
 async function runHeartbeat(agent: AgentSession): Promise<void> {
   const status = state.agents.get(agent.name);
   if (!status) return;
 
-  // 일시 중지 상태면 스킵
+  // Skip if paused
   if (status.state === 'paused') {
     console.log(`[${agent.name}] Skipping heartbeat (paused)`);
     return;
@@ -237,7 +246,7 @@ async function runHeartbeat(agent: AgentSession): Promise<void> {
 
   console.log(`[${agent.name}] Running heartbeat...`);
 
-  // 세션 존재 확인 및 생성
+  // Check session existence and create if needed
   const exists = await tmux.sessionExists(agent.name);
   if (!exists) {
     console.log(`[${agent.name}] Creating new tmux session...`);
@@ -250,11 +259,11 @@ async function runHeartbeat(agent: AgentSession): Promise<void> {
     }
   }
 
-  // Linear에서 현재 작업 중인 이슈 확인
+  // Check in-progress issues from Linear
   const inProgress = await linear.getInProgressIssues(agent.linearLabel ?? agent.name);
 
   if (inProgress.length > 0) {
-    // 기존 이슈 이어서 작업
+    // Continue working on existing issue
     const issue = inProgress[0];
     status.currentIssue = {
       id: issue.id,
@@ -263,15 +272,15 @@ async function runHeartbeat(agent: AgentSession): Promise<void> {
     };
     status.state = 'working';
 
-    // Claude에게 이어서 작업 지시
+    // Instruct Claude to continue working
     const context = buildIssueContext(issue);
     await tmux.sendTask(agent.name, context);
   } else {
-    // Backlog에서 새 이슈 가져오기
+    // Fetch new issue from backlog
     const nextIssue = await linear.getNextBacklogIssue(agent.linearLabel ?? agent.name);
 
     if (nextIssue) {
-      // 새 이슈 시작
+      // Start new issue
       await linear.logWorkStart(nextIssue.id, agent.name);
 
       status.currentIssue = {
@@ -281,20 +290,20 @@ async function runHeartbeat(agent: AgentSession): Promise<void> {
       };
       status.state = 'working';
 
-      // Discord 알림
+      // Discord notification
       await discord.reportEvent({
         type: 'issue_started',
         session: agent.name,
-        message: `이슈 시작: ${nextIssue.identifier} ${nextIssue.title}`,
+        message: t('service.events.issueStarted', { id: nextIssue.identifier, title: nextIssue.title }),
         issueId: nextIssue.identifier,
         timestamp: Date.now(),
       });
 
-      // Claude에게 작업 지시
+      // Instruct Claude to work on task
       const context = buildIssueContext(nextIssue);
       await tmux.sendTask(agent.name, context);
     } else {
-      // 할 일 없음 → 유지보수 체크만
+      // Nothing to do - maintenance check only
       status.state = 'idle';
       await tmux.sendHeartbeat(agent.name);
     }
@@ -302,14 +311,14 @@ async function runHeartbeat(agent: AgentSession): Promise<void> {
 
   status.lastHeartbeat = Date.now();
 
-  // 결과 확인 및 보고 (10초 후)
+  // Check and report results (after 10 seconds)
   setTimeout(async () => {
     await checkAndReport(agent);
   }, 10000);
 }
 
 /**
- * 이슈 컨텍스트 빌드
+ * Build issue context
  */
 function buildIssueContext(issue: {
   identifier: string;
@@ -322,26 +331,25 @@ function buildIssueContext(issue: {
     .map((c) => `[${c.createdAt}]\n${c.body}`)
     .join('\n\n---\n\n');
 
+  const noDesc = t('common.fallback.noDescription');
   return `
-Linear 이슈 작업 계속:
+${t('service.issueContext.continueWork')}
 
-이슈: ${issue.identifier} - ${issue.title}
+${t('service.issueContext.issue', { id: issue.identifier, title: issue.title })}
 
-설명:
-${issue.description ?? '(없음)'}
+${t('service.issueContext.description')}
+${issue.description ?? noDesc}
 
-최근 진행 상황:
-${recentComments || '(없음)'}
+${t('service.issueContext.recentProgress')}
+${recentComments || noDesc}
 
 ---
-위 컨텍스트를 바탕으로 작업을 계속해줘.
-진행상황이 있으면 알려주고, 완료되면 "DONE: <요약>"으로 알려줘.
-막히면 "BLOCKED: <이유>"로 알려줘.
+${t('service.issueContext.instructions')}
 `;
 }
 
 /**
- * 결과 확인 및 보고
+ * Check results and report
  */
 async function checkAndReport(agent: AgentSession): Promise<void> {
   const status = state.agents.get(agent.name);
@@ -361,7 +369,7 @@ async function checkAndReport(agent: AgentSession): Promise<void> {
           await discord.reportEvent({
             type: 'issue_completed',
             session: agent.name,
-            message: `이슈 완료: ${status.currentIssue.identifier} ${event.detail ?? ''}`,
+            message: t('service.events.issueCompleted', { id: status.currentIssue.identifier, detail: event.detail ?? '' }),
             issueId: status.currentIssue.identifier,
             timestamp: Date.now(),
           });
@@ -378,7 +386,7 @@ async function checkAndReport(agent: AgentSession): Promise<void> {
           await discord.reportEvent({
             type: 'issue_blocked',
             session: agent.name,
-            message: `이슈 막힘: ${status.currentIssue.identifier}\n이유: ${event.detail}`,
+            message: t('service.events.issueBlocked', { id: status.currentIssue.identifier, reason: event.detail ?? '' }),
             issueId: status.currentIssue.identifier,
             timestamp: Date.now(),
           });
@@ -400,7 +408,7 @@ async function checkAndReport(agent: AgentSession): Promise<void> {
         await discord.reportEvent({
           type: 'commit',
           session: agent.name,
-          message: `커밋: ${event.detail}`,
+          message: t('service.events.commit', { detail: event.detail ?? '' }),
           timestamp: Date.now(),
         });
         break;
@@ -411,7 +419,7 @@ async function checkAndReport(agent: AgentSession): Promise<void> {
 }
 
 /**
- * 에이전트 일시 중지
+ * Pause agent
  */
 export function pauseAgent(name: string): void {
   const status = state.agents.get(name);
@@ -422,7 +430,7 @@ export function pauseAgent(name: string): void {
 }
 
 /**
- * 에이전트 재개
+ * Resume agent
  */
 export function resumeAgent(name: string): void {
   const status = state.agents.get(name);
@@ -433,7 +441,7 @@ export function resumeAgent(name: string): void {
 }
 
 /**
- * 에이전트 상태 조회
+ * Get agent statuses
  */
 export function getAgentStatuses(name?: string): AgentStatus[] {
   if (name) {
@@ -444,32 +452,32 @@ export function getAgentStatuses(name?: string): AgentStatus[] {
 }
 
 /**
- * GitHub CI 모니터링 시작
+ * Start GitHub CI monitoring
  */
 function startGitHubMonitoring(interval: number): void {
-  // 기존 타이머 정리
+  // Clean up existing timer
   if (githubCheckTimer) {
     clearInterval(githubCheckTimer);
   }
 
-  // 새 타이머 설정
+  // Set up new timer
   githubCheckTimer = setInterval(() => {
     void checkGitHubCI().catch((err) => {
       console.error('GitHub CI check error:', err);
     });
   }, interval);
 
-  // 즉시 한 번 실행
+  // Run once immediately
   void checkGitHubCI().catch((err) => {
     console.error('Initial GitHub CI check error:', err);
   });
 }
 
 /**
- * GitHub CI 상태 체크 (상태 기반)
- * - 레포별 healthy/broken 상태를 파일로 persist
- * - 상태 전환 시 Discord 알림 (실패 감지, 복구)
- * - broken 상태 지속 시 24시간마다 리마인더
+ * Check GitHub CI status (state-based)
+ * - Persist healthy/broken state per repo to file
+ * - Discord notification on state transitions (failure detected, recovery)
+ * - Reminder every 24 hours while broken state persists
  */
 async function checkGitHubCI(): Promise<void> {
   if (githubRepos.length === 0) return;
@@ -492,7 +500,7 @@ async function checkGitHubCI(): Promise<void> {
         await discord.reportEvent({
           type: 'ci_failed',
           session: 'github',
-          message: `**${repo}** CI 실패 감지\n${failureList}`,
+          message: t('service.events.ciFailDetected', { repo, failures: failureList }),
           timestamp: Date.now(),
           url: health.activeFailures[0]?.url,
         });
@@ -501,19 +509,19 @@ async function checkGitHubCI(): Promise<void> {
       } else if (transition.to === 'healthy' && transition.from === 'broken') {
         const duration = transition.brokenSince
           ? formatDuration(Date.now() - new Date(transition.brokenSince).getTime())
-          : '알 수 없음';
+          : t('common.fallback.unknown');
 
         console.log(`[GitHub] CI recovered: ${repo} (after ${duration})`);
         await discord.reportEvent({
           type: 'ci_recovered' as any,
           session: 'github',
-          message: `**${repo}** CI 복구됨 (${duration} 만에)`,
+          message: t('service.events.ciRecovered', { repo, duration }),
           timestamp: Date.now(),
         });
       }
     }
 
-    // broken 상태 지속 중 + 리마인더 주기 도래
+    // Broken state persists + reminder interval reached
     if (health.status === 'broken' && !transition && github.needsReminder(health)) {
       const days = health.brokenSince
         ? Math.floor((Date.now() - new Date(health.brokenSince).getTime()) / (1000 * 60 * 60 * 24))
@@ -527,7 +535,7 @@ async function checkGitHubCI(): Promise<void> {
       await discord.reportEvent({
         type: 'ci_failed',
         session: 'github',
-        message: `**${repo}** CI 여전히 실패 중 (${days}일째)\n${failureList}`,
+        message: t('service.events.ciStillFailing', { repo, days, failures: failureList }),
         timestamp: Date.now(),
         url: health.activeFailures[0]?.url,
       });
@@ -542,47 +550,47 @@ async function checkGitHubCI(): Promise<void> {
 
 function formatDuration(ms: number): string {
   const hours = Math.floor(ms / (1000 * 60 * 60));
-  if (hours < 24) return `${hours}시간`;
+  if (hours < 24) return t('common.duration.hours', { n: hours });
   const days = Math.floor(hours / 24);
-  return `${days}일`;
+  return t('common.duration.days', { n: days });
 }
 
 /**
- * 서비스 중지
+ * Stop the service
  */
 export async function stopService(): Promise<void> {
   console.log('Stopping Claude Swarm service...');
 
-  // GitHub 모니터링 타이머 정리
+  // Clean up GitHub monitoring timer
   if (githubCheckTimer) {
     clearInterval(githubCheckTimer);
     githubCheckTimer = null;
     console.log('GitHub monitoring stopped');
   }
 
-  // 에이전트 타이머 정리
+  // Clean up agent timers
   for (const [name, timer] of state.timers) {
     clearInterval(timer);
     console.log(`Timer stopped for ${name}`);
   }
   state.timers.clear();
 
-  // PR Processor 중지
+  // Stop PR Processor
   if (prProcessor) {
     prProcessor.stop();
     prProcessor = null;
     console.log('PR Processor stopped');
   }
 
-  // 스케줄러 중지
+  // Stop scheduler
   scheduler.stopAllSchedules();
   console.log('Scheduler stopped');
 
-  // 웹 서버 중지
+  // Stop web server
   await web.stopWebServer();
   console.log('Web server stopped');
 
-  // Discord 종료
+  // Shutdown Discord
   await discord.stopDiscord();
 
   state.running = false;

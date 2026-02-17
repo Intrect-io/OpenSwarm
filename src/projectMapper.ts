@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Project Mapper
-// Linear 프로젝트 ↔ 로컬 경로 자동 매핑
+// Linear project to local path auto-mapping
 // ============================================
 
 import { readdir, stat } from 'fs/promises';
@@ -15,7 +15,7 @@ export interface ProjectMapping {
   linearProjectId: string;
   linearProjectName: string;
   localPath: string;
-  confidence: number; // 0-1, 매칭 신뢰도
+  confidence: number; // 0-1, matching confidence
   lastVerified: number;
 }
 
@@ -34,19 +34,19 @@ export interface LocalProject {
 const mappingCache: Map<string, ProjectMapping> = new Map();
 const localProjectsCache: LocalProject[] = [];
 let lastScanTime = 0;
-const CACHE_TTL = 5 * 60 * 1000; // 5분
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // ============================================
 // Local Project Discovery
 // ============================================
 
 /**
- * 로컬 프로젝트 디렉토리 스캔
+ * Scan local project directories
  */
 export async function scanLocalProjects(basePaths: string[]): Promise<LocalProject[]> {
   const now = Date.now();
 
-  // 캐시 유효하면 반환
+  // Return if cache is valid
   if (localProjectsCache.length > 0 && now - lastScanTime < CACHE_TTL) {
     return localProjectsCache;
   }
@@ -61,7 +61,7 @@ export async function scanLocalProjects(basePaths: string[]): Promise<LocalProje
 
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        if (entry.name.startsWith('.')) continue; // 숨김 디렉토리 제외
+        if (entry.name.startsWith('.')) continue; // Exclude hidden directories
 
         const projectPath = join(expandedPath, entry.name);
         const project = await analyzeProject(projectPath);
@@ -70,7 +70,7 @@ export async function scanLocalProjects(basePaths: string[]): Promise<LocalProje
           projects.push(project);
         }
 
-        // 1단계 하위 디렉토리도 검색 (~/dev/tools/pykis 같은 경우)
+        // Also search one level of subdirectories (e.g., ~/dev/tools/pykis)
         try {
           const subEntries = await readdir(projectPath, { withFileTypes: true });
           for (const subEntry of subEntries) {
@@ -84,7 +84,7 @@ export async function scanLocalProjects(basePaths: string[]): Promise<LocalProje
             }
           }
         } catch {
-          // 하위 디렉토리 접근 실패 무시
+          // Ignore subdirectory access failure
         }
       }
     } catch (err) {
@@ -92,7 +92,7 @@ export async function scanLocalProjects(basePaths: string[]): Promise<LocalProje
     }
   }
 
-  // 캐시 업데이트
+  // Update cache
   localProjectsCache.length = 0;
   localProjectsCache.push(...projects);
   lastScanTime = now;
@@ -102,7 +102,7 @@ export async function scanLocalProjects(basePaths: string[]): Promise<LocalProje
 }
 
 /**
- * 프로젝트 디렉토리 분석
+ * Analyze project directory
  */
 async function analyzeProject(path: string): Promise<LocalProject | null> {
   try {
@@ -112,7 +112,7 @@ async function analyzeProject(path: string): Promise<LocalProject | null> {
       fileExists(join(path, 'pyproject.toml')),
     ]);
 
-    // git 또는 패키지 파일이 있어야 프로젝트로 인정
+    // Must have git or package file to be considered a project
     if (!hasGit && !hasPackageJson && !hasPyproject) {
       return null;
     }
@@ -134,7 +134,7 @@ async function analyzeProject(path: string): Promise<LocalProject | null> {
 // ============================================
 
 /**
- * Linear 프로젝트명과 로컬 프로젝트 매칭
+ * Match Linear project name to local project
  */
 export function findBestMatch(
   linearProjectName: string,
@@ -158,7 +158,7 @@ export function findBestMatch(
     }
   }
 
-  // 최소 신뢰도 0.5 이상이어야 매칭
+  // Minimum confidence of 0.5 required for matching
   if (bestMatch && bestScore >= 0.5) {
     return { project: bestMatch, confidence: bestScore };
   }
@@ -167,7 +167,7 @@ export function findBestMatch(
 }
 
 /**
- * 문자열 정규화 (소문자, 특수문자 제거)
+ * Normalize string (lowercase, remove special characters)
  */
 function normalize(str: string): string {
   return str
@@ -177,19 +177,19 @@ function normalize(str: string): string {
 }
 
 /**
- * 문자열 유사도 계산 (0-1)
+ * Calculate string similarity (0-1)
  */
 function calculateSimilarity(a: string, b: string): number {
-  // 정확히 일치
+  // Exact match
   if (a === b) return 1.0;
 
-  // 포함 관계
+  // Containment relationship
   if (a.includes(b) || b.includes(a)) {
     const ratio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
     return 0.7 + (ratio * 0.3);
   }
 
-  // Levenshtein distance 기반 유사도
+  // Levenshtein distance-based similarity
   const maxLen = Math.max(a.length, b.length);
   if (maxLen === 0) return 1.0;
 
@@ -198,7 +198,7 @@ function calculateSimilarity(a: string, b: string): number {
 }
 
 /**
- * Levenshtein 거리 계산
+ * Calculate Levenshtein distance
  */
 function levenshteinDistance(a: string, b: string): number {
   const matrix: number[][] = [];
@@ -232,28 +232,28 @@ function levenshteinDistance(a: string, b: string): number {
 // ============================================
 
 /**
- * Linear 프로젝트 → 로컬 경로 매핑
+ * Map Linear project to local path
  */
 export async function mapLinearProject(
   linearProjectId: string,
   linearProjectName: string,
   basePaths: string[]
 ): Promise<string | null> {
-  // 캐시 확인
+  // Check cache
   const cached = mappingCache.get(linearProjectId);
   if (cached && Date.now() - cached.lastVerified < CACHE_TTL) {
     console.log(`[ProjectMapper] Cache hit: ${linearProjectName} → ${cached.localPath}`);
     return cached.localPath;
   }
 
-  // 로컬 프로젝트 스캔
+  // Scan local projects
   const localProjects = await scanLocalProjects(basePaths);
 
-  // 매칭 시도
+  // Attempt matching
   const match = findBestMatch(linearProjectName, localProjects);
 
   if (match) {
-    // 캐시 저장
+    // Save to cache
     const mapping: ProjectMapping = {
       linearProjectId,
       linearProjectName,
@@ -272,14 +272,14 @@ export async function mapLinearProject(
 }
 
 /**
- * 모든 매핑 조회
+ * Get all mappings
  */
 export function getAllMappings(): ProjectMapping[] {
   return Array.from(mappingCache.values());
 }
 
 /**
- * 매핑 캐시 초기화
+ * Clear mapping cache
  */
 export function clearMappingCache(): void {
   mappingCache.clear();
@@ -312,7 +312,7 @@ async function fileExists(path: string): Promise<boolean> {
 // ============================================
 
 /**
- * 프로젝트 매퍼 상태 출력
+ * Get project mapper status
  */
 export function getMapperStatus(): string {
   const mappings = getAllMappings();

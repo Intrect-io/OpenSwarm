@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Worker Agent
-// 작업 수행 에이전트 (Claude CLI 기반)
+// Task execution agent (Claude CLI based)
 // ============================================
 
 import { spawn } from 'node:child_process';
@@ -8,9 +8,10 @@ import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 import * as gitTracker from './gitTracker.js';
+import { t, getPrompts } from './locale/index.js';
 
 /**
- * ~ 경로를 홈 디렉토리로 확장
+ * Expand ~ path to home directory
  */
 function expandPath(p: string): string {
   if (p.startsWith('~/')) {
@@ -27,9 +28,11 @@ export interface WorkerOptions {
   taskTitle: string;
   taskDescription: string;
   projectPath: string;
-  previousFeedback?: string;   // Reviewer의 이전 피드백 (수정 시)
+  previousFeedback?: string;   // Previous feedback from Reviewer (for revisions)
   timeoutMs?: number;
-  model?: string;              // Claude 모델 (기본: claude-sonnet-4-20250514)
+  model?: string;              // Claude model (default: claude-sonnet-4-20250514)
+  issueIdentifier?: string;    // Linear issue ID (e.g., INT-123)
+  projectName?: string;        // Linear project name
 }
 
 // ============================================
@@ -37,67 +40,14 @@ export interface WorkerOptions {
 // ============================================
 
 /**
- * Worker 프롬프트 생성
+ * Build Worker prompt using locale templates
  */
 function buildWorkerPrompt(options: WorkerOptions): string {
-  const feedbackSection = options.previousFeedback
-    ? `\n## Previous Feedback (수정 필요)
-${options.previousFeedback}
-
-위 피드백을 반영하여 수정하라.
-`
-    : '';
-
-  return `# Worker Agent
-
-## Task
-- **Title:** ${options.taskTitle}
-- **Description:** ${options.taskDescription}
-${feedbackSection}
-## Instructions
-1. 작업을 수행하고 결과를 보고하라
-2. 변경한 파일 목록을 명시하라
-3. 실행한 명령어를 기록하라
-4. 불확실한 부분이 있으면 명시하라
-5. 코드 품질과 테스트를 고려하라
-
-## 금지 사항 (CRITICAL)
-- rm -rf, git reset --hard 등 파괴적 명령 금지
-- 환경 설정 파일(.env, .bashrc 등) 수정 금지
-- 시스템 레벨 변경 금지
-
-## Output Format (CRITICAL - 반드시 이 형식으로 마지막에 출력)
-작업 완료 후 반드시 다음 JSON 형식으로 결과를 출력하라:
-
-\`\`\`json
-{
-  "success": true,
-  "summary": "내가 수행한 작업 요약 (1-2문장, Reviewer 피드백 복사 금지)",
-  "filesChanged": ["실제로 Edit/Write한 파일의 전체 경로"],
-  "commands": ["실행한 Bash 명령어 목록"]
-}
-\`\`\`
-
-**IMPORTANT:**
-- **summary**: 내가 직접 수행한 작업을 설명 (예: "API 응답 캐싱 추가", "DB 쿼리 최적화")
-  - ❌ Reviewer 피드백을 복사하지 마라
-  - ❌ "작업 완료 요약" 같은 제목 넣지 마라
-- **filesChanged**: Edit/Write 도구로 실제 변경한 파일의 **전체 경로** 목록
-  - ❌ 빈 배열 금지 (파일을 변경했다면 반드시 기록)
-  - ❌ 읽기만 한 파일 제외
-- **commands**: Bash로 실행한 명령어 (npm run build, pytest 등)
-
-실패 시:
-\`\`\`json
-{
-  "success": false,
-  "summary": "실패 이유 (구체적으로)",
-  "filesChanged": [],
-  "commands": [],
-  "error": "상세 에러 메시지"
-}
-\`\`\`
-`;
+  return getPrompts().buildWorkerPrompt({
+    taskTitle: options.taskTitle,
+    taskDescription: options.taskDescription,
+    previousFeedback: options.previousFeedback,
+  });
 }
 
 // ============================================
@@ -105,15 +55,15 @@ ${feedbackSection}
 // ============================================
 
 /**
- * Worker 에이전트 실행
- * Git 기반 파일 변경 추적 통합 (Aider 스타일)
+ * Run Worker agent
+ * Integrates Git-based file change tracking (Aider style)
  */
 export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   const prompt = buildWorkerPrompt(options);
   const promptFile = `/tmp/worker-prompt-${Date.now()}.txt`;
   const cwd = expandPath(options.projectPath);
 
-  // Git 스냅샷 (작업 전 상태)
+  // Git snapshot (pre-work state)
   let snapshotHash = '';
   const isGitRepo = await gitTracker.isGitRepo(cwd);
   if (isGitRepo) {
@@ -122,23 +72,23 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   }
 
   try {
-    // 프롬프트 저장
+    // Save prompt
     await fs.writeFile(promptFile, prompt);
 
-    // Claude CLI 실행
+    // Run Claude CLI
     const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
 
-    // 결과 파싱 (LLM 출력에서)
+    // Parse result (from LLM output)
     const parsedResult = parseWorkerOutput(output);
 
-    // Git diff로 실제 변경된 파일 추출 (LLM 보고와 별개로)
+    // Extract actually changed files via Git diff (independent of LLM report)
     if (isGitRepo && snapshotHash) {
       const gitChangedFiles = await gitTracker.getChangedFilesSinceSnapshot(cwd, snapshotHash);
 
       if (gitChangedFiles.length > 0) {
         console.log(`[Worker] Git detected changes: ${gitChangedFiles.join(', ')}`);
 
-        // LLM이 보고한 것과 병합 (Git 결과 우선)
+        // Merge with LLM-reported files (Git results take priority)
         const mergedFiles = new Set([
           ...gitChangedFiles,
           ...parsedResult.filesChanged,
@@ -153,29 +103,29 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   } catch (error) {
     return {
       success: false,
-      summary: 'Worker 실행 실패',
+      summary: 'Worker execution failed',
       filesChanged: [],
       commands: [],
       output: '',
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    // 임시 파일 정리
+    // Clean up temp files
     try {
       await fs.unlink(promptFile);
     } catch {
-      // 무시
+      // Ignore
     }
   }
 }
 
 /**
- * Claude CLI 실행
+ * Run Claude CLI
  */
 async function runClaudeCli(
   promptFile: string,
   cwd: string,
-  timeoutMs: number = 300000, // 5분 기본
+  timeoutMs: number = 300000, // 5 min default
   model?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -200,7 +150,7 @@ async function runClaudeCli(
       stderr += data.toString();
     });
 
-    // 타임아웃 설정 (0 이하면 무제한)
+    // Timeout setup (unlimited if <= 0)
     let timer: NodeJS.Timeout | null = null;
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
@@ -229,11 +179,11 @@ async function runClaudeCli(
 }
 
 /**
- * Worker 출력 파싱
+ * Parse Worker output
  */
 function parseWorkerOutput(output: string): WorkerResult {
   try {
-    // Claude JSON 배열에서 result 추출
+    // Extract result from Claude JSON array
     const match = output.match(/\[[\s\S]*\]/);
     if (!match) {
       return extractFromText(output);
@@ -253,7 +203,7 @@ function parseWorkerOutput(output: string): WorkerResult {
       return extractFromText(output);
     }
 
-    // 결과에서 JSON 블록 추출
+    // Extract JSON block from result
     return extractResultJson(resultText) || extractFromText(resultText);
   } catch (error) {
     console.error('[Worker] Parse error:', error);
@@ -262,13 +212,13 @@ function parseWorkerOutput(output: string): WorkerResult {
 }
 
 /**
- * 결과에서 JSON 블록 추출
+ * Extract JSON block from result
  */
 function extractResultJson(text: string): WorkerResult | null {
-  // ```json ... ``` 블록 찾기
+  // Find ```json ... ``` block
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (!jsonMatch) {
-    // 일반 JSON 객체 찾기
+    // Find plain JSON object
     const objMatch = text.match(/\{\s*"success"\s*:/);
     if (!objMatch) return null;
 
@@ -291,7 +241,7 @@ function extractResultJson(text: string): WorkerResult | null {
       const parsed = JSON.parse(text.slice(startIdx, endIdx));
       return {
         success: Boolean(parsed.success),
-        summary: parsed.summary || '(요약 없음)',
+        summary: parsed.summary || t('common.fallback.noSummary'),
         filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
         commands: Array.isArray(parsed.commands) ? parsed.commands : [],
         output: text,
@@ -318,14 +268,14 @@ function extractResultJson(text: string): WorkerResult | null {
 }
 
 /**
- * 텍스트에서 결과 추출 (JSON 파싱 실패 시)
+ * Extract result from text (fallback when JSON parsing fails)
  */
 function extractFromText(text: string): WorkerResult {
-  // 성공 여부 추정
+  // Estimate success/failure
   const hasError = /error|fail|exception|cannot/i.test(text);
   const hasSuccess = /success|completed|done|finished/i.test(text);
 
-  // 파일 변경 추출
+  // Extract file changes
   const filePatterns = [
     /(?:changed?|modified?|created?|updated?):\s*(.+\.(?:ts|js|py|json|yaml|yml|md))/gi,
     /(?:src|lib|test|tests)\/[\w/\-.]+\.(?:ts|js|py)/gi,
@@ -342,7 +292,7 @@ function extractFromText(text: string): WorkerResult {
     }
   }
 
-  // 명령어 추출
+  // Extract commands
   const cmdPattern = /(?:`|\$)\s*((?:npm|pnpm|yarn|git|python|pytest|tsc|eslint)\s+[^\n`]+)/gi;
   const commands: string[] = [];
   const cmdMatches = text.matchAll(cmdPattern);
@@ -363,19 +313,19 @@ function extractFromText(text: string): WorkerResult {
 }
 
 /**
- * 텍스트에서 요약 추출
+ * Extract summary from text
  */
 function extractSummary(text: string): string {
-  // 첫 번째 의미있는 문장 추출
+  // Extract first meaningful sentence
   const lines = text.split('\n').filter((l) => l.trim().length > 10);
-  if (lines.length === 0) return '(요약 없음)';
+  if (lines.length === 0) return t('common.fallback.noSummary');
 
   const summary = lines[0].trim();
   return summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
 }
 
 /**
- * 에러 메시지 추출
+ * Extract error message
  */
 function extractErrorMessage(text: string): string {
   const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
@@ -396,31 +346,51 @@ function extractErrorMessage(text: string): string {
 // ============================================
 
 /**
- * Worker 결과를 Discord 메시지로 포맷
+ * Format Worker result as a Discord message
  */
-export function formatWorkReport(result: WorkerResult): string {
-  const statusEmoji = result.success ? '✅' : '❌';
+export function formatWorkReport(result: WorkerResult, context?: {
+  issueIdentifier?: string;
+  projectName?: string;
+  projectPath?: string;
+}): string {
   const lines: string[] = [];
 
-  lines.push(`${statusEmoji} **Worker 작업 ${result.success ? '완료' : '실패'}**`);
+  // Project/issue context header
+  if (context?.projectName || context?.issueIdentifier || context?.projectPath) {
+    const parts: string[] = [];
+    // projectName fallback: extract from projectPath if not provided
+    const displayName = context.projectName
+      || (context.projectPath ? context.projectPath.split('/').pop() || '' : '');
+    if (displayName) parts.push(`📁 ${displayName}`);
+    if (context.issueIdentifier) parts.push(`🔖 ${context.issueIdentifier}`);
+    if (context.projectPath) parts.push(`\`${context.projectPath.split('/').slice(-2).join('/')}\``);
+    if (parts.length > 0) {
+      lines.push(parts.join(' | '));
+      lines.push('');
+    }
+  }
+
+  lines.push(result.success
+    ? t('agents.worker.report.completed')
+    : t('agents.worker.report.failed'));
   lines.push('');
-  lines.push(`**요약:** ${result.summary}`);
+  lines.push(t('agents.worker.report.summary', { text: result.summary }));
 
   if (result.filesChanged.length > 0) {
     const files = result.filesChanged;
     const fileList = files.length <= 15
       ? files.join(', ')
-      : `${files.slice(0, 15).join(', ')} (+${files.length - 15}개 더)`;
-    lines.push(`**변경 파일 (${files.length}):** ${fileList}`);
+      : `${files.slice(0, 15).join(', ')} ${t('common.moreItems', { n: files.length - 15 })}`;
+    lines.push(t('agents.worker.report.filesChanged', { count: files.length, list: fileList }));
   }
 
   if (result.commands.length > 0) {
     const cmdList = result.commands.slice(0, 5).map((c) => `\`${c}\``).join(', ');
-    lines.push(`**실행 명령:** ${cmdList}`);
+    lines.push(t('agents.worker.report.commands', { list: cmdList }));
   }
 
   if (result.error) {
-    lines.push(`**에러:** ${result.error}`);
+    lines.push(t('agents.worker.report.error', { text: result.error }));
   }
 
   return lines.join('\n');

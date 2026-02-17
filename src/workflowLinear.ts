@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Linear Workflow Integration
-// 워크플로우 Step을 Linear 이슈로 연동
+// Sync workflow steps with Linear issues
 // ============================================
 
 import {
@@ -16,15 +16,15 @@ import {
 // ============================================
 
 export interface LinearWorkflowOptions {
-  /** 부모 이슈 ID (워크플로우 전체를 추적) */
+  /** Parent issue ID (tracks entire workflow) */
   parentIssueId?: string;
-  /** 팀 ID */
+  /** Team ID */
   teamId: string;
-  /** 프로젝트 ID (선택) */
+  /** Project ID (optional) */
   projectId?: string;
-  /** Step별 이슈 생성 여부 */
+  /** Whether to create issues per step */
   createStepIssues?: boolean;
-  /** 라벨 ID 목록 */
+  /** Label ID list */
   labelIds?: string[];
 }
 
@@ -47,15 +47,15 @@ export interface WorkflowLinearSync {
 // ============================================
 
 /**
- * Note: 이 모듈은 Linear MCP 서버가 연결되어 있을 때 사용합니다.
- * MCP 함수들은 Claude Code 런타임에서 자동으로 사용 가능합니다.
+ * Note: This module is used when a Linear MCP server is connected.
+ * MCP functions are automatically available in the Claude Code runtime.
  *
- * 실제 연동은 Discord 명령어나 Claude 프롬프트에서 수행됩니다.
- * 이 모듈은 워크플로우와 Linear 이슈 간의 매핑 정보를 관리합니다.
+ * Actual integration is performed via Discord commands or Claude prompts.
+ * This module manages the mapping between workflows and Linear issues.
  */
 
 /**
- * 워크플로우를 Linear 이슈 구조로 변환
+ * Convert workflow to Linear issue structure
  */
 export function workflowToLinearStructure(
   workflow: WorkflowConfig,
@@ -72,12 +72,12 @@ export function workflowToLinearStructure(
     stepId: string;
     title: string;
     description: string;
-    blockedBy: string[];  // step IDs (나중에 issue IDs로 변환)
+    blockedBy: string[];  // step IDs (converted to issue IDs later)
   }>;
 } {
   const sortedSteps = topologicalSort(workflow.steps);
 
-  // 부모 이슈 (워크플로우 전체)
+  // Parent issue (entire workflow)
   const parentIssue = {
     title: `[Workflow] ${workflow.name}`,
     description: buildWorkflowDescription(workflow),
@@ -86,7 +86,7 @@ export function workflowToLinearStructure(
     labelIds: options.labelIds,
   };
 
-  // Step별 이슈
+  // Per-step issues
   const stepIssues = sortedSteps.map(step => ({
     stepId: step.id,
     title: `[${workflow.id}] ${step.name}`,
@@ -98,7 +98,7 @@ export function workflowToLinearStructure(
 }
 
 /**
- * 워크플로우 설명 생성
+ * Generate workflow description
  */
 function buildWorkflowDescription(workflow: WorkflowConfig): string {
   const parts: string[] = [];
@@ -130,7 +130,7 @@ function buildWorkflowDescription(workflow: WorkflowConfig): string {
 }
 
 /**
- * Step 설명 생성
+ * Generate step description
  */
 function buildStepDescription(step: WorkflowStep, workflow: WorkflowConfig): string {
   const parts: string[] = [];
@@ -167,7 +167,7 @@ function buildStepDescription(step: WorkflowStep, workflow: WorkflowConfig): str
 }
 
 /**
- * Step 결과를 Linear 코멘트로 변환
+ * Convert step result to Linear comment
  */
 export function stepResultToComment(result: StepResult): string {
   const parts: string[] = [];
@@ -195,7 +195,7 @@ export function stepResultToComment(result: StepResult): string {
   if (result.output) {
     parts.push('### Output');
     parts.push('```');
-    parts.push(result.output.slice(0, 3000));  // Linear 코멘트 길이 제한
+    parts.push(result.output.slice(0, 3000));  // Linear comment length limit
     if (result.output.length > 3000) {
       parts.push('... (truncated)');
     }
@@ -218,7 +218,7 @@ export function stepResultToComment(result: StepResult): string {
 }
 
 /**
- * Step 상태를 Linear 상태로 매핑
+ * Map step status to Linear state
  */
 export function stepStatusToLinearState(status: StepResult['status']): string {
   const mapping: Record<typeof status, string> = {
@@ -232,7 +232,7 @@ export function stepStatusToLinearState(status: StepResult['status']): string {
 }
 
 /**
- * 워크플로우 실행 요약 생성 (프로젝트 업데이트용)
+ * Create workflow execution summary (for project updates)
  */
 export function createExecutionSummary(execution: WorkflowExecution): {
   body: string;
@@ -243,7 +243,7 @@ export function createExecutionSummary(execution: WorkflowExecution): {
   const failed = results.filter(r => r.status === 'failed').length;
   const total = results.length;
 
-  // Health 결정
+  // Determine health
   let health: 'onTrack' | 'atRisk' | 'offTrack';
   if (failed > 0) {
     health = 'offTrack';
@@ -253,7 +253,7 @@ export function createExecutionSummary(execution: WorkflowExecution): {
     health = 'onTrack';
   }
 
-  // 요약 생성
+  // Generate summary
   const parts: string[] = [];
 
   parts.push(`## Workflow Execution: ${execution.workflowId}`);
@@ -299,7 +299,7 @@ export function createExecutionSummary(execution: WorkflowExecution): {
 // ============================================
 
 /**
- * Linear 이슈 생성 명령 템플릿 (MCP용)
+ * Linear issue creation command template (for MCP)
  */
 export function getCreateIssueCommand(
   title: string,
@@ -330,7 +330,7 @@ export function getCreateIssueCommand(
 }
 
 /**
- * Linear 이슈 상태 업데이트 명령 템플릿
+ * Linear issue status update command template
  */
 export function getUpdateIssueCommand(
   issueId: string,
@@ -349,7 +349,7 @@ export function getUpdateIssueCommand(
 }
 
 /**
- * Linear 코멘트 생성 명령 템플릿
+ * Linear comment creation command template
  */
 export function getCreateCommentCommand(
   issueId: string,
@@ -368,7 +368,7 @@ export function getCreateCommentCommand(
 }
 
 /**
- * Linear 프로젝트 업데이트 명령 템플릿
+ * Linear project update command template
  */
 export function getCreateProjectUpdateCommand(
   projectId: string,

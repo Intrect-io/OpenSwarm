@@ -67,7 +67,7 @@ describe('reviewer', () => {
       const formatted = formatReviewFeedback(result);
 
       expect(formatted).toContain('All good!');
-      expect(formatted).not.toContain('문제점:');
+      expect(formatted).not.toContain('**Issues:**');
     });
   });
 
@@ -88,7 +88,7 @@ describe('reviewer', () => {
       expect(prompt).toContain('Issue 1');
       expect(prompt).toContain('Issue 2');
       expect(prompt).toContain('Suggestion A');
-      expect(prompt).toContain('피드백을 반영');
+      expect(prompt).toContain('Apply the above feedback');
     });
 
     it('should handle empty issues and suggestions', () => {
@@ -102,8 +102,8 @@ describe('reviewer', () => {
       const prompt = buildRevisionPrompt(result);
 
       expect(prompt).toContain('Minor fixes needed');
-      expect(prompt).not.toContain('해결해야 할 문제점');
-      expect(prompt).not.toContain('개선 제안');
+      expect(prompt).not.toContain('Issues to resolve');
+      expect(prompt).not.toContain('Suggestions');
     });
 
     it('should number issues and suggestions', () => {

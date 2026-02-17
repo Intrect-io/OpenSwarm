@@ -1,25 +1,26 @@
 /**
- * Codex - 세션 기록 및 요약 시스템
+ * Codex - Session recording and summary system
  *
- * 구조:
+ * Structure:
  * codex/
- * ├── index.md                    # 전체 목록
- * ├── 2026-02/                    # 월별 폴더
- * │   ├── 05-pykis-ci-fix.md     # 요약본
+ * ├── index.md                    # Full listing
+ * ├── 2026-02/                    # Monthly folders
+ * │   ├── 05-pykis-ci-fix.md     # Summary
  * │   └── 05-us-stock-engine.md
- * └── .sessions/                  # 상세 기록 (숨김)
+ * └── .sessions/                  # Detailed records (hidden)
  *     └── 05-2050-pykis-ci-fix.md
  */
 
 import { promises as fs } from 'fs';
 import { resolve, basename, join } from 'path';
+import { getDateLocale } from './locale/index.js';
 import { homedir } from 'os';
 
-// Codex 저장 경로
+// Codex storage path
 const CODEX_DIR = resolve(homedir(), '.claude-swarm/codex');
 
 /**
- * 세션 메타데이터
+ * Session metadata
  */
 export interface CodexSession {
   id: string;
@@ -36,7 +37,7 @@ export interface CodexSession {
 }
 
 /**
- * 세션 중 실행된 명령
+ * Command executed during a session
  */
 export interface SessionCommand {
   tool: string;
@@ -46,13 +47,13 @@ export interface SessionCommand {
 }
 
 /**
- * Codex 초기화 - 디렉토리 구조 생성
+ * Initialize Codex - create directory structure
  */
 export async function initCodex(): Promise<void> {
   await fs.mkdir(CODEX_DIR, { recursive: true });
   await fs.mkdir(join(CODEX_DIR, '.sessions'), { recursive: true });
 
-  // index.md가 없으면 생성
+  // Create index.md if it doesn't exist
   const indexPath = join(CODEX_DIR, 'index.md');
   try {
     await fs.access(indexPath);
@@ -78,7 +79,7 @@ _마지막 업데이트: ${new Date().toISOString()}_
 }
 
 /**
- * 날짜 기반 경로 생성
+ * Generate date-based paths
  */
 function getDatePaths(date: Date): { monthDir: string; prefix: string } {
   const year = date.getFullYear();
@@ -93,7 +94,7 @@ function getDatePaths(date: Date): { monthDir: string; prefix: string } {
 }
 
 /**
- * 슬러그 생성 (파일명용)
+ * Generate a slug (for filenames)
  */
 function slugify(text: string): string {
   return text
@@ -106,7 +107,7 @@ function slugify(text: string): string {
 }
 
 /**
- * 소요 시간 포맷
+ * Format elapsed duration
  */
 function formatDuration(startMs: number, endMs: number): string {
   const diffMs = endMs - startMs;
@@ -118,7 +119,7 @@ function formatDuration(startMs: number, endMs: number): string {
 }
 
 /**
- * 결과 이모지
+ * Result emoji
  */
 function resultEmoji(result: CodexSession['result']): string {
   switch (result) {
@@ -134,7 +135,7 @@ function resultEmoji(result: CodexSession['result']): string {
 }
 
 /**
- * 요약본 생성
+ * Generate summary document
  */
 function generateSummary(session: CodexSession, detailPath: string): string {
   const date = new Date(session.startedAt);
@@ -184,7 +185,7 @@ function generateSummary(session: CodexSession, detailPath: string): string {
 }
 
 /**
- * 상세 기록 생성
+ * Generate detailed record
  */
 function generateDetail(session: CodexSession, rawLog?: string): string {
   const date = new Date(session.startedAt);
@@ -199,7 +200,7 @@ function generateDetail(session: CodexSession, rawLog?: string): string {
 
   let md = `# ${session.title} - 상세 기록
 > 시작: ${dateStr}
-> 종료: ${session.endedAt ? new Date(session.endedAt).toLocaleString('ko-KR') : '진행 중'}
+> 종료: ${session.endedAt ? new Date(session.endedAt).toLocaleString(getDateLocale()) : '진행 중'}
 
 ## 세션 정보
 - **ID**: ${session.id}
@@ -248,7 +249,7 @@ function generateDetail(session: CodexSession, rawLog?: string): string {
 }
 
 /**
- * 세션 저장
+ * Save a session
  */
 export async function saveSession(
   session: CodexSession,
@@ -260,35 +261,35 @@ export async function saveSession(
   const { monthDir, prefix } = getDatePaths(date);
   const slug = slugify(session.title);
 
-  // 월별 디렉토리 생성
+  // Create monthly directory
   const monthPath = join(CODEX_DIR, monthDir);
   await fs.mkdir(monthPath, { recursive: true });
 
-  // 파일 경로
+  // File paths
   const summaryFilename = `${prefix.split('-')[0]}-${slug}.md`;
   const detailFilename = `${prefix}-${slug}.md`;
 
   const summaryPath = join(monthPath, summaryFilename);
   const detailPath = join(CODEX_DIR, '.sessions', detailFilename);
 
-  // 상세 기록 먼저 저장
+  // Save detailed record first
   const detailContent = generateDetail(session, rawLog);
   await fs.writeFile(detailPath, detailContent, 'utf-8');
   console.log(`[Codex] Saved detail: ${detailPath}`);
 
-  // 요약본 저장
+  // Save summary
   const summaryContent = generateSummary(session, detailPath);
   await fs.writeFile(summaryPath, summaryContent, 'utf-8');
   console.log(`[Codex] Saved summary: ${summaryPath}`);
 
-  // index.md 업데이트
+  // Update index.md
   await updateIndex(session, summaryPath);
 
   return { summaryPath, detailPath };
 }
 
 /**
- * index.md 업데이트
+ * Update index.md
  */
 async function updateIndex(session: CodexSession, summaryPath: string): Promise<void> {
   const indexPath = join(CODEX_DIR, 'index.md');
@@ -305,7 +306,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
 
   const newEntry = `- ${resultEmoji(session.result)} [${session.title}](${relativePath}) - ${dateStr}${session.repo ? ` \`${session.repo}\`` : ''}`;
 
-  // "최근 세션" 섹션 업데이트
+  // Update the "recent sessions" section
   const recentHeader = '## 최근 세션';
   const recentIdx = content.indexOf(recentHeader);
   if (recentIdx !== -1) {
@@ -315,7 +316,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
     const beforeSection = content.slice(0, recentIdx + recentHeader.length);
     const afterSection = sectionEnd !== -1 ? content.slice(sectionEnd) : '';
 
-    // 기존 항목 가져오기 (최대 20개 유지)
+    // Get existing entries (keep max 20)
     const existingSection = content.slice(recentIdx + recentHeader.length, sectionEnd !== -1 ? sectionEnd : undefined);
     const existingEntries = existingSection
       .split('\n')
@@ -327,7 +328,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
     content = beforeSection + newSection + afterSection;
   }
 
-  // 마지막 업데이트 시간 갱신
+  // Update last-updated timestamp
   content = content.replace(
     /_마지막 업데이트:.*_/,
     `_마지막 업데이트: ${new Date().toISOString()}_`
@@ -338,7 +339,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
 }
 
 /**
- * 세션 빌더 - 점진적으로 세션 구성
+ * Session builder - incrementally construct a session
  */
 export class SessionBuilder {
   private session: CodexSession;
@@ -412,7 +413,7 @@ export class SessionBuilder {
 }
 
 /**
- * 빠른 세션 저장 (단순 케이스용)
+ * Quick session save (for simple cases)
  */
 export async function quickSave(options: {
   title: string;
@@ -436,7 +437,7 @@ export async function quickSave(options: {
 }
 
 /**
- * 최근 세션 목록 가져오기
+ * Get recent session list
  */
 export async function getRecentSessions(limit: number = 10): Promise<string[]> {
   await initCodex();
@@ -458,7 +459,7 @@ export async function getRecentSessions(limit: number = 10): Promise<string[]> {
 }
 
 /**
- * Codex 디렉토리 경로 반환
+ * Return the Codex directory path
  */
 export function getCodexPath(): string {
   return CODEX_DIR;

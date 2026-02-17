@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Pair Mode Webhook Notifications
-// 완료/실패 시 외부 Webhook으로 알림 전송
+// Send notifications to external Webhooks on completion/failure
 // ============================================
 
 import type { PairSession } from './agentPair.js';
@@ -45,7 +45,7 @@ export interface WebhookResult {
 // ============================================
 
 /**
- * Webhook URL 유효성 검사
+ * Validate Webhook URL
  */
 export function isValidWebhookUrl(url: string | undefined): url is string {
   if (!url) return false;
@@ -58,7 +58,7 @@ export function isValidWebhookUrl(url: string | undefined): url is string {
 }
 
 /**
- * 페어 세션 시작 알림
+ * Notify pair session started
  */
 export async function notifyPairStarted(
   webhookUrl: string,
@@ -82,7 +82,7 @@ export async function notifyPairStarted(
 }
 
 /**
- * 페어 세션 승인 알림
+ * Notify pair session approved
  */
 export async function notifyPairApproved(
   webhookUrl: string,
@@ -116,7 +116,7 @@ export async function notifyPairApproved(
 }
 
 /**
- * 페어 세션 거부 알림
+ * Notify pair session rejected
  */
 export async function notifyPairRejected(
   webhookUrl: string,
@@ -150,7 +150,7 @@ export async function notifyPairRejected(
 }
 
 /**
- * 페어 세션 실패 알림
+ * Notify pair session failed
  */
 export async function notifyPairFailed(
   webhookUrl: string,
@@ -186,7 +186,7 @@ export async function notifyPairFailed(
 }
 
 /**
- * 페어 세션 취소 알림
+ * Notify pair session cancelled
  */
 export async function notifyPairCancelled(
   webhookUrl: string,
@@ -212,7 +212,7 @@ export async function notifyPairCancelled(
 }
 
 /**
- * Webhook 전송 (공통)
+ * Send Webhook (common)
  */
 async function sendWebhook(url: string, payload: WebhookPayload): Promise<WebhookResult> {
   try {
@@ -246,7 +246,7 @@ async function sendWebhook(url: string, payload: WebhookPayload): Promise<Webhoo
 }
 
 /**
- * Discord Webhook 형식으로 전송 (Embed 포함)
+ * Send as Discord Webhook format (with Embed)
  */
 export async function sendDiscordWebhook(
   webhookUrl: string,
@@ -277,7 +277,7 @@ export async function sendDiscordWebhook(
     timestamp: new Date().toISOString(),
   };
 
-  // Worker 결과 추가
+  // Add Worker result
   if (session.worker.result) {
     embed.fields.push({
       name: 'Worker Summary',
@@ -286,7 +286,7 @@ export async function sendDiscordWebhook(
     });
   }
 
-  // Reviewer 피드백 추가
+  // Add Reviewer feedback
   if (session.reviewer.feedback) {
     embed.fields.push({
       name: `Reviewer: ${session.reviewer.feedback.decision}`,

@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Runner Execution Helpers
-// AutonomousRunner에서 추출된 실행/보고/통합 로직
+// Execution/reporting/integration logic extracted from AutonomousRunner
 // ============================================
 
 import { EmbedBuilder } from 'discord.js';
@@ -16,6 +16,7 @@ import * as reviewerAgent from './reviewer.js';
 import * as projectMapper from './projectMapper.js';
 import * as linear from './linear.js';
 import * as planner from './planner.js';
+import { t } from './locale/index.js';
 
 // ============================================
 // Discord Reporter
@@ -82,6 +83,7 @@ export async function fetchLinearTasks(): Promise<TaskItem[]> {
 export interface ExecutionContext {
   allowedProjects: string[];
   plannerModel?: string;
+  plannerTimeoutMs?: number;
   pairMaxAttempts?: number;
   enableDecomposition?: boolean;
   decompositionThresholdMinutes?: number;
@@ -166,11 +168,11 @@ export async function decomposeTask(
 ): Promise<boolean> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
-  await ctx.reportToDiscord(`📋 **작업 분해 시작**\n` +
-    `작업: ${task.title}\n` +
-    `예상 시간: ${planner.estimateTaskDuration(task)}분 (>${targetMinutes}분)\n` +
-    `Planner가 sub-tasks로 분해 중...`
-  );
+  await ctx.reportToDiscord(t('runner.decomposition.starting', {
+    title: task.title,
+    estimated: String(planner.estimateTaskDuration(task)),
+    threshold: String(targetMinutes),
+  }));
 
   const result = await planner.runPlanner({
     taskTitle: task.title,
@@ -179,7 +181,7 @@ export async function decomposeTask(
     projectName: task.linearProject?.name,
     targetMinutes,
     model: ctx.plannerModel ?? 'claude-sonnet-4-20250514',
-    timeoutMs: 300000,
+    timeoutMs: ctx.plannerTimeoutMs ?? 600000,
   });
 
   await ctx.reportToDiscord(planner.formatPlannerResult(result));
@@ -203,12 +205,12 @@ export async function decomposeTask(
 
   for (const subTask of result.subTasks) {
     const depsStr = subTask.dependencies?.length
-      ? `\n\n**선행 작업:** ${subTask.dependencies.join(', ')}`
+      ? `\n\n${t('runner.decomposition.prerequisite', { deps: subTask.dependencies.join(', ') })}`
       : '';
 
     const subDescription = `${subTask.description}\n\n` +
-      `**예상 시간:** ${subTask.estimatedMinutes}분${depsStr}\n\n` +
-      `---\n_Planner에 의해 "${task.title}"에서 자동 분해됨_`;
+      `${t('runner.decomposition.estimatedTime', { n: String(subTask.estimatedMinutes) })}${depsStr}\n\n` +
+      t('runner.decomposition.autoDecomposed', { parentTitle: task.title });
 
     const subResult = await linear.createSubIssue(
       task.issueId,
@@ -250,11 +252,12 @@ export async function decomposeTask(
     .map((s, i) => `${i + 1}. ${s.identifier}: ${s.title}`)
     .join('\n');
 
-  await ctx.reportToDiscord(`✅ **작업 분해 완료**\n\n` +
-    `원본: ${task.issueIdentifier || task.issueId}\n` +
-    `생성된 sub-issues (${createdSubIssues.length}개):\n${subIssueList}\n\n` +
-    `총 예상 시간: ${result.totalEstimatedMinutes}분`
-  );
+  await ctx.reportToDiscord(t('runner.decomposition.completed', {
+    original: task.issueIdentifier || task.issueId || '',
+    count: String(createdSubIssues.length),
+    list: subIssueList,
+    totalMinutes: String(result.totalEstimatedMinutes),
+  }));
 
   console.log(`[AutonomousRunner] Decomposition complete: ${createdSubIssues.length} sub-issues created`);
   return true;
@@ -290,7 +293,16 @@ export async function executePipeline(
           stages: [],
         };
       }
-      console.log('[AutonomousRunner] Decomposition skipped, executing original task');
+      // Decomposition was needed but failed — do NOT attempt the oversized task directly
+      console.log('[AutonomousRunner] Decomposition failed for oversized task, skipping execution');
+      return {
+        success: false,
+        sessionId: `decomp-failed-${Date.now()}`,
+        iterations: 0,
+        totalDuration: 0,
+        finalStatus: 'failed' as any,
+        stages: [],
+      };
     }
   }
 
@@ -301,22 +313,34 @@ export async function executePipeline(
     console.log(`[Pipeline] Stage started: ${stage}`);
   });
 
+  const taskReportCtx = {
+    issueIdentifier: task.issueIdentifier || task.issueId,
+    projectName: task.linearProject?.name,
+    projectPath,
+  };
+
   pipeline.on('stage:complete', async ({ stage, result }) => {
     console.log(`[Pipeline] Stage completed: ${stage}, success=${result.success}`);
-    await reportStageResult(stage, result, ctx.reportToDiscord);
+    await reportStageResult(stage, result, ctx.reportToDiscord, taskReportCtx);
   });
 
   pipeline.on('revision:start', ({ stage }) => {
-    void ctx.reportToDiscord(`🔄 수정이 필요합니다. ${stage} 피드백으로 Worker가 재작업합니다...`);
+    void ctx.reportToDiscord(t('runner.pipeline.revisionNeeded', { stage }));
   });
 
   const stages = getEnabledStages(roles);
+  const issueRef = task.issueIdentifier || task.issueId || '';
+  const projectDisplay = task.linearProject?.name
+    ? `📁 ${task.linearProject.name} (${projectPath.split('/').slice(-2).join('/')})`
+    : projectPath.split('/').slice(-2).join('/');
+
   const startEmbed = new EmbedBuilder()
-    .setTitle('🚀 파이프라인 시작')
+    .setTitle(t('runner.pipeline.starting'))
     .setColor(0x00AE86)
     .addFields(
-      { name: '작업', value: task.title, inline: false },
-      { name: 'Project', value: projectPath.split('/').slice(-2).join('/'), inline: true },
+      { name: t('runner.result.taskLabel'), value: task.title, inline: false },
+      { name: 'Project', value: projectDisplay, inline: true },
+      ...(issueRef ? [{ name: 'Issue', value: issueRef, inline: true }] : []),
       { name: 'Stages', value: stages.join(' → '), inline: true },
     )
     .setTimestamp();
@@ -324,7 +348,13 @@ export async function executePipeline(
   await ctx.reportToDiscord(startEmbed);
 
   if (task.issueId) {
-    await linear.updateIssueState(task.issueId, 'In Progress');
+    try {
+      await linear.logPairStart(task.issueId, `pipeline-${Date.now()}`, projectPath);
+    } catch (err) {
+      console.error('[Pipeline] Linear logPairStart failed:', err);
+      // Continue pipeline even if this fails
+      await linear.updateIssueState(task.issueId, 'In Progress');
+    }
   }
 
   return pipeline.run(task, projectPath);
@@ -347,10 +377,11 @@ async function reportStageResult(
   stage: PipelineStage,
   result: any,
   reportFn: (message: string | EmbedBuilder) => Promise<void>,
+  taskCtx?: { issueIdentifier?: string; projectName?: string; projectPath?: string },
 ): Promise<void> {
   switch (stage) {
     case 'worker':
-      await reportFn(workerAgent.formatWorkReport(result.result));
+      await reportFn(workerAgent.formatWorkReport(result.result, taskCtx));
       break;
     case 'reviewer':
       await reportFn(reviewerAgent.formatReviewFeedback(result.result));
@@ -380,15 +411,15 @@ export async function requestApproval(
   const issueRef = decision.task.issueIdentifier || decision.task.issueId || 'N/A';
 
   const embed = new EmbedBuilder()
-    .setTitle('⏳ 승인 대기')
+    .setTitle(t('runner.approval.title'))
     .setColor(0xFFA500)
-    .setDescription(`다음 작업을 실행할까요?\n\n${projectInfo}**${decision.task.title}**`)
+    .setDescription(t('runner.approval.question', { project: projectInfo, title: decision.task.title }))
     .addFields(
       { name: 'Issue', value: issueRef, inline: true },
       { name: 'Priority', value: `P${decision.task.priority}`, inline: true },
-      { name: '사유', value: decision.reason, inline: false },
+      { name: t('runner.approval.reason'), value: decision.reason, inline: false },
     )
-    .setFooter({ text: '!approve 또는 !reject 로 응답' })
+    .setFooter({ text: t('runner.approval.footer') })
     .setTimestamp();
 
   await reportFn(embed);
@@ -417,12 +448,12 @@ export async function reportExecutionResult(
 
   if (result.success) {
     const embed = new EmbedBuilder()
-      .setTitle('✅ 작업 완료')
+      .setTitle(t('runner.result.taskCompleted'))
       .setColor(0x00FF00)
       .addFields(
-        { name: '작업', value: taskDisplay, inline: false },
-        { name: '소요 시간', value: `${duration}s`, inline: true },
-        { name: '완료 Step', value: `${completedCount}/${stepCount}`, inline: true },
+        { name: t('runner.result.taskLabel'), value: taskDisplay, inline: false },
+        { name: t('runner.result.duration'), value: `${duration}s`, inline: true },
+        { name: t('runner.result.completedSteps'), value: `${completedCount}/${stepCount}`, inline: true },
       )
       .setTimestamp();
 
@@ -438,12 +469,12 @@ export async function reportExecutionResult(
     }
   } else {
     const embed = new EmbedBuilder()
-      .setTitle('❌ 작업 실패')
+      .setTitle(t('runner.result.taskFailed'))
       .setColor(0xFF0000)
       .addFields(
-        { name: '작업', value: taskDisplay, inline: false },
-        { name: '실패 Step', value: result.failedStep || 'Unknown', inline: true },
-        { name: 'Rollback', value: result.rollbackPerformed ? '✅' : '❌', inline: true },
+        { name: t('runner.result.taskLabel'), value: taskDisplay, inline: false },
+        { name: t('runner.result.failedStep'), value: result.failedStep || 'Unknown', inline: true },
+        { name: t('runner.result.rollback'), value: result.rollbackPerformed ? '✅' : '❌', inline: true },
       )
       .setTimestamp();
 

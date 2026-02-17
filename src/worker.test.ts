@@ -19,8 +19,7 @@ describe('worker', () => {
 
       const formatted = formatWorkReport(result);
 
-      expect(formatted).toContain('✅');
-      expect(formatted).toContain('완료');
+      expect(formatted).toContain('Worker Task Completed');
       expect(formatted).toContain('Added new API endpoint');
       expect(formatted).toContain('src/api.ts');
       expect(formatted).toContain('npm test');
@@ -38,8 +37,7 @@ describe('worker', () => {
 
       const formatted = formatWorkReport(result);
 
-      expect(formatted).toContain('❌');
-      expect(formatted).toContain('실패');
+      expect(formatted).toContain('Worker Task Failed');
       expect(formatted).toContain('Build failed');
       expect(formatted).toContain('TypeScript compilation error');
     });
@@ -55,7 +53,7 @@ describe('worker', () => {
 
       const formatted = formatWorkReport(result);
 
-      expect(formatted).toContain('✅');
+      expect(formatted).toContain('Worker Task Completed');
       expect(formatted).toContain('No changes needed');
       // Should not crash with empty arrays
       expect(formatted).not.toContain('undefined');

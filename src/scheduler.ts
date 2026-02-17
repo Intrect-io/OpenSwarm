@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Dynamic Scheduler
-// spawn 기반 실행 (tmux 불필요)
+// Spawn-based execution (no tmux required)
 // ============================================
 
 import { Cron } from 'croner';
@@ -9,25 +9,26 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import { checkWorkAllowed } from './timeWindow.js';
+import { t, getDateLocale } from './locale/index.js';
 
-// 스케줄 저장 경로
+// Schedule storage path
 const SCHEDULE_DIR = resolve(homedir(), '.claude-swarm');
 const SCHEDULE_FILE = resolve(SCHEDULE_DIR, 'schedules.json');
 
-// 스케줄 작업 인터페이스
+// Scheduled job interface
 export interface ScheduledJob {
   id: string;
   name: string;
   projectPath: string;
   prompt: string;
-  schedule: string; // cron 표현식 또는 interval (예: "30m", "1h", "0 9 * * *")
+  schedule: string; // cron expression or interval (e.g. "30m", "1h", "0 9 * * *")
   enabled: boolean;
   createdAt: number;
   lastRun?: number;
-  createdBy?: string; // Discord 사용자
+  createdBy?: string; // Discord user
 }
 
-// 실행 결과 인터페이스
+// Job result interface
 export interface JobResult {
   jobId: string;
   success: boolean;
@@ -37,29 +38,29 @@ export interface JobResult {
   finishedAt: number;
 }
 
-// 실행 중인 cron 작업
+// Active cron jobs
 const activeJobs: Map<string, Cron> = new Map();
 
-// 실행 중인 프로세스 (동시 실행 방지용)
+// Running processes (to prevent concurrent execution)
 const runningProcesses: Map<string, ReturnType<typeof spawn>> = new Map();
 
-// 최근 실행 결과 (보고용)
+// Recent results (for reporting)
 const recentResults: JobResult[] = [];
 const MAX_RESULTS = 50;
 
-// 결과 리스너 (Discord 보고 등)
+// Result listener (Discord reporting, etc.)
 type ResultListener = (result: JobResult) => void;
 let resultListener: ResultListener | null = null;
 
 /**
- * 결과 리스너 등록
+ * Register result listener
  */
 export function setResultListener(listener: ResultListener): void {
   resultListener = listener;
 }
 
 /**
- * 스케줄 파일 로드
+ * Load schedule file
  */
 async function loadSchedules(): Promise<ScheduledJob[]> {
   try {
@@ -72,7 +73,7 @@ async function loadSchedules(): Promise<ScheduledJob[]> {
 }
 
 /**
- * 스케줄 파일 저장
+ * Save schedule file
  */
 async function saveSchedules(schedules: ScheduledJob[]): Promise<void> {
   await fs.mkdir(SCHEDULE_DIR, { recursive: true });
@@ -80,7 +81,7 @@ async function saveSchedules(schedules: ScheduledJob[]): Promise<void> {
 }
 
 /**
- * interval 문자열을 cron 표현식으로 변환
+ * Convert interval string to cron expression
  */
 function intervalToCron(interval: string): string {
   const match = interval.match(/^(\d+)(m|h|d)$/);
@@ -103,7 +104,7 @@ function intervalToCron(interval: string): string {
 }
 
 /**
- * Claude CLI를 spawn으로 실행
+ * Run Claude CLI via spawn
  */
 async function runClaudeCli(
   projectPath: string,
@@ -113,7 +114,7 @@ async function runClaudeCli(
   return new Promise((resolve) => {
     const expandedPath = projectPath.replace('~', homedir());
 
-    // 프롬프트 파일 저장
+    // Save prompt to file
     const promptFile = `${SCHEDULE_DIR}/prompt-${jobId}.txt`;
     fs.writeFile(promptFile, prompt).then(() => {
       const cmd = 'bash';
@@ -145,7 +146,7 @@ async function runClaudeCli(
       proc.on('close', (code) => {
         runningProcesses.delete(jobId);
 
-        // stream-json 출력에서 result 추출
+        // Extract result from stream-json output
         let resultText = stdout;
         try {
           const lines = stdout.split('\n').filter(Boolean);
@@ -155,12 +156,12 @@ async function runClaudeCli(
             resultText = parsed.result || stdout;
           }
         } catch {
-          // 파싱 실패시 원본 사용
+          // Use original on parse failure
         }
 
         resolve({
           success: code === 0,
-          output: resultText.slice(0, 2000), // 최대 2000자
+          output: resultText.slice(0, 2000), // max 2000 chars
           error: stderr || undefined,
         });
       });
@@ -178,21 +179,21 @@ async function runClaudeCli(
 }
 
 /**
- * 스케줄 작업 실행
+ * Run scheduled job
  */
 async function runScheduledJob(job: ScheduledJob): Promise<void> {
-  // 시간 윈도우 체크
+  // Check time window
   const timeCheck = checkWorkAllowed();
   if (!timeCheck.allowed) {
     console.log(
-      `[Scheduler] Job "${job.name}" 스킵: ${timeCheck.reason} (현재: ${timeCheck.currentTime})`
+      `[Scheduler] Job "${job.name}" skipped: ${timeCheck.reason} (current: ${timeCheck.currentTime})`
     );
     return;
   }
 
-  // 이미 실행 중인지 체크
+  // Check if already running
   if (runningProcesses.has(job.id)) {
-    console.log(`[Scheduler] Job "${job.name}" 이미 실행 중, 스킵`);
+    console.log(`[Scheduler] Job "${job.name}" already running, skipping`);
     return;
   }
 
@@ -215,18 +216,18 @@ async function runScheduledJob(job: ScheduledJob): Promise<void> {
       finishedAt: Date.now(),
     };
 
-    // 결과 저장
+    // Save result
     recentResults.unshift(result);
     if (recentResults.length > MAX_RESULTS) {
       recentResults.pop();
     }
 
-    // 리스너에게 알림
+    // Notify listener
     if (resultListener) {
       resultListener(result);
     }
 
-    // 마지막 실행 시간 업데이트
+    // Update last run time
     const schedules = await loadSchedules();
     const updated = schedules.map((s) =>
       s.id === job.id ? { ...s, lastRun: Date.now() } : s
@@ -234,15 +235,15 @@ async function runScheduledJob(job: ScheduledJob): Promise<void> {
     await saveSchedules(updated);
 
     console.log(
-      `[Scheduler] Job ${job.name} ${success ? '완료' : '실패'} (${Math.round((result.finishedAt - startedAt) / 1000)}s)`
+      `[Scheduler] Job ${job.name} ${success ? 'completed' : 'failed'} (${Math.round((result.finishedAt - startedAt) / 1000)}s)`
     );
   } catch (err) {
-    console.error(`[Scheduler] Job ${job.name} 에러:`, err);
+    console.error(`[Scheduler] Job ${job.name} error:`, err);
   }
 }
 
 /**
- * 스케줄 작업 등록
+ * Add a scheduled job
  */
 export async function addSchedule(
   name: string,
@@ -253,7 +254,7 @@ export async function addSchedule(
 ): Promise<ScheduledJob> {
   const schedules = await loadSchedules();
 
-  // 중복 체크
+  // Check for duplicates
   const existing = schedules.find((s) => s.name === name);
   if (existing) {
     throw new Error(`Schedule "${name}" already exists`);
@@ -273,7 +274,7 @@ export async function addSchedule(
   schedules.push(job);
   await saveSchedules(schedules);
 
-  // cron 작업 시작
+  // Start cron job
   await startCronJob(job);
 
   console.log(`[Scheduler] Added schedule: ${name} (${schedule})`);
@@ -281,7 +282,7 @@ export async function addSchedule(
 }
 
 /**
- * 스케줄 작업 삭제
+ * Remove a scheduled job
  */
 export async function removeSchedule(nameOrId: string): Promise<boolean> {
   const schedules = await loadSchedules();
@@ -293,21 +294,21 @@ export async function removeSchedule(nameOrId: string): Promise<boolean> {
 
   const job = schedules[index];
 
-  // cron 작업 중지
+  // Stop cron job
   const cron = activeJobs.get(job.id);
   if (cron) {
     cron.stop();
     activeJobs.delete(job.id);
   }
 
-  // 실행 중인 프로세스 종료
+  // Kill running process
   const proc = runningProcesses.get(job.id);
   if (proc) {
     proc.kill('SIGTERM');
     runningProcesses.delete(job.id);
   }
 
-  // 저장
+  // Save
   schedules.splice(index, 1);
   await saveSchedules(schedules);
 
@@ -316,7 +317,7 @@ export async function removeSchedule(nameOrId: string): Promise<boolean> {
 }
 
 /**
- * 스케줄 작업 일시 중지/재개
+ * Toggle schedule pause/resume
  */
 export async function toggleSchedule(
   nameOrId: string
@@ -329,7 +330,7 @@ export async function toggleSchedule(
   job.enabled = !job.enabled;
   await saveSchedules(schedules);
 
-  // cron 작업 토글
+  // Toggle cron job
   const cron = activeJobs.get(job.id);
   if (job.enabled && !cron) {
     await startCronJob(job);
@@ -345,7 +346,7 @@ export async function toggleSchedule(
 }
 
 /**
- * cron 작업 시작
+ * Start cron job
  */
 async function startCronJob(job: ScheduledJob): Promise<void> {
   if (!job.enabled) return;
@@ -367,7 +368,7 @@ async function startCronJob(job: ScheduledJob): Promise<void> {
 }
 
 /**
- * 모든 스케줄 로드 및 시작
+ * Load and start all schedules
  */
 export async function startAllSchedules(): Promise<void> {
   const schedules = await loadSchedules();
@@ -381,7 +382,7 @@ export async function startAllSchedules(): Promise<void> {
 }
 
 /**
- * 모든 스케줄 중지
+ * Stop all schedules
  */
 export function stopAllSchedules(): void {
   for (const [id, cron] of activeJobs) {
@@ -390,7 +391,7 @@ export function stopAllSchedules(): void {
   }
   activeJobs.clear();
 
-  // 실행 중인 프로세스도 종료
+  // Also kill running processes
   for (const [id, proc] of runningProcesses) {
     proc.kill('SIGTERM');
     console.log(`[Scheduler] Killed process: ${id}`);
@@ -399,14 +400,14 @@ export function stopAllSchedules(): void {
 }
 
 /**
- * 스케줄 목록 조회
+ * List all schedules
  */
 export async function listSchedules(): Promise<ScheduledJob[]> {
   return loadSchedules();
 }
 
 /**
- * 즉시 실행
+ * Run immediately
  */
 export async function runNow(
   nameOrId: string,
@@ -418,7 +419,7 @@ export async function runNow(
   if (!job) return false;
 
   if (bypassTimeWindow) {
-    console.log(`[Scheduler] Running job: ${job.name} (시간 제한 우회)`);
+    console.log(`[Scheduler] Running job: ${job.name} (bypassing time window)`);
     const { success } = await runClaudeCli(job.projectPath, job.prompt, job.id);
 
     const updatedSchedules = await loadSchedules();
@@ -434,40 +435,40 @@ export async function runNow(
 }
 
 /**
- * 최근 실행 결과 조회
+ * Get recent results
  */
 export function getRecentResults(limit = 10): JobResult[] {
   return recentResults.slice(0, limit);
 }
 
 /**
- * 실행 중인 작업 목록
+ * Get running jobs
  */
 export function getRunningJobs(): string[] {
   return Array.from(runningProcesses.keys());
 }
 
 /**
- * 스케줄 목록 포맷팅
+ * Format schedule list
  */
 export function formatScheduleList(schedules: ScheduledJob[]): string {
   if (schedules.length === 0) {
-    return '등록된 스케줄이 없습니다.';
+    return t('service.scheduler.noSchedules');
   }
 
   return schedules
     .map((s, i) => {
       const status = s.enabled ? '✅' : '⏸️';
       const lastRun = s.lastRun
-        ? new Date(s.lastRun).toLocaleString('ko-KR')
-        : '없음';
-      return `${i + 1}. ${status} **${s.name}**\n   📁 ${s.projectPath}\n   ⏰ ${s.schedule} | 마지막: ${lastRun}`;
+        ? new Date(s.lastRun).toLocaleString(getDateLocale())
+        : t('common.fallback.none');
+      return `${i + 1}. ${status} **${s.name}**\n   📁 ${s.projectPath}\n   ⏰ ${s.schedule} | ${t('service.scheduler.lastRunLabel', { time: lastRun })}`;
     })
     .join('\n\n');
 }
 
 /**
- * 자연어에서 스케줄 정보 파싱
+ * Parse schedule info from natural language
  */
 export function parseScheduleFromNaturalLanguage(
   text: string
@@ -484,13 +485,13 @@ export function parseScheduleFromNaturalLanguage(
     prompt?: string;
   } = {};
 
-  // 프로젝트 이름 추출
+  // Extract project name
   const nameMatch = text.match(/["']([^"']+)["']|^(\S+)/);
   if (nameMatch) {
     result.name = nameMatch[1] || nameMatch[2];
   }
 
-  // 주기 추출
+  // Extract interval
   const intervalMatch = text.match(/(\d+)\s*(분|시간|일|min|hour|h|m|d)/i);
   if (intervalMatch) {
     const [, num, unit] = intervalMatch;
@@ -507,7 +508,7 @@ export function parseScheduleFromNaturalLanguage(
     result.schedule = `${num}${unitMap[unit.toLowerCase()] || 'm'}`;
   }
 
-  // 매일/매주 등
+  // Daily/weekly etc.
   if (text.includes('매일') || text.includes('daily')) {
     result.schedule = '0 9 * * *';
   }

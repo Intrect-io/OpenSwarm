@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Agent Pair Session Management
-// Worker/Reviewer 페어 세션 관리
+// Worker/Reviewer pair session management
 // ============================================
 
 import { randomUUID } from 'node:crypto';
@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 // ============================================
 
 /**
- * Worker 실행 결과
+ * Worker execution result
  */
 export interface WorkerResult {
   success: boolean;
@@ -22,12 +22,12 @@ export interface WorkerResult {
 }
 
 /**
- * Reviewer 결정
+ * Reviewer decision
  */
 export type ReviewDecision = 'approve' | 'revise' | 'reject';
 
 /**
- * Reviewer 결과
+ * Reviewer result
  */
 export interface ReviewResult {
   decision: ReviewDecision;
@@ -37,7 +37,7 @@ export interface ReviewResult {
 }
 
 /**
- * 페어 메시지
+ * Pair message
  */
 export interface PairMessage {
   role: 'worker' | 'reviewer' | 'system';
@@ -46,20 +46,20 @@ export interface PairMessage {
 }
 
 /**
- * 페어 세션 상태
+ * Pair session status
  */
 export type PairSessionStatus =
-  | 'pending'      // 시작 전
-  | 'working'      // Worker 작업 중
-  | 'reviewing'    // Reviewer 검토 중
-  | 'revising'     // Worker 수정 중
-  | 'approved'     // 승인됨
-  | 'rejected'     // 거부됨
-  | 'failed'       // 실패
-  | 'cancelled';   // 취소됨
+  | 'pending'      // Not started
+  | 'working'      // Worker in progress
+  | 'reviewing'    // Reviewer in progress
+  | 'revising'     // Worker revising
+  | 'approved'     // Approved
+  | 'rejected'     // Rejected
+  | 'failed'       // Failed
+  | 'cancelled';   // Cancelled
 
 /**
- * 페어 세션
+ * Pair session
  */
 export interface PairSession {
   id: string;
@@ -69,7 +69,7 @@ export interface PairSession {
   projectPath: string;
   threadId?: string;          // Discord thread ID
   webhookUrl?: string;        // Webhook URL for notifications
-  models?: PairModelConfig;   // 모델 설정
+  models?: PairModelConfig;   // Model configuration
   status: PairSessionStatus;
   worker: {
     result?: WorkerResult;
@@ -85,7 +85,7 @@ export interface PairSession {
 }
 
 /**
- * 모델 설정
+ * Model configuration
  */
 export interface PairModelConfig {
   worker?: string;
@@ -93,7 +93,7 @@ export interface PairModelConfig {
 }
 
 /**
- * 페어 세션 생성 옵션
+ * Pair session creation options
  */
 export interface CreatePairSessionOptions {
   taskId: string;
@@ -111,7 +111,7 @@ export interface CreatePairSessionOptions {
 
 const sessions = new Map<string, PairSession>();
 
-// 최근 완료된 세션 (히스토리용)
+// Recently completed sessions (for history)
 const completedSessions: PairSession[] = [];
 const MAX_HISTORY = 50;
 
@@ -120,7 +120,7 @@ const MAX_HISTORY = 50;
 // ============================================
 
 /**
- * 새 페어 세션 생성
+ * Create a new pair session
  */
 export function createPairSession(options: CreatePairSessionOptions): PairSession {
   const session: PairSession = {
@@ -146,14 +146,14 @@ export function createPairSession(options: CreatePairSessionOptions): PairSessio
 }
 
 /**
- * 세션 조회
+ * Get session by ID
  */
 export function getPairSession(sessionId: string): PairSession | undefined {
   return sessions.get(sessionId);
 }
 
 /**
- * 활성 세션 목록
+ * List active sessions
  */
 export function getActiveSessions(): PairSession[] {
   return Array.from(sessions.values()).filter(
@@ -162,7 +162,7 @@ export function getActiveSessions(): PairSession[] {
 }
 
 /**
- * 세션 상태 업데이트
+ * Update session status
  */
 export function updateSessionStatus(
   sessionId: string,
@@ -173,7 +173,7 @@ export function updateSessionStatus(
 
   session.status = status;
 
-  // 완료 상태면 종료 시간 기록
+  // Record finish time for completed states
   if (['approved', 'rejected', 'failed', 'cancelled'].includes(status)) {
     session.finishedAt = Date.now();
     archiveSession(session);
@@ -183,7 +183,7 @@ export function updateSessionStatus(
 }
 
 /**
- * Discord 스레드 ID 설정
+ * Set Discord thread ID
  */
 export function setSessionThreadId(
   sessionId: string,
@@ -197,7 +197,7 @@ export function setSessionThreadId(
 }
 
 /**
- * Worker 결과 저장
+ * Save Worker result
  */
 export function saveWorkerResult(
   sessionId: string,
@@ -214,7 +214,7 @@ export function saveWorkerResult(
 }
 
 /**
- * Reviewer 결과 저장
+ * Save Reviewer result
  */
 export function saveReviewerResult(
   sessionId: string,
@@ -230,7 +230,7 @@ export function saveReviewerResult(
 }
 
 /**
- * 메시지 추가
+ * Add message
  */
 export function addMessage(
   sessionId: string,
@@ -248,14 +248,14 @@ export function addMessage(
 }
 
 /**
- * 세션 취소
+ * Cancel session
  */
 export function cancelSession(sessionId: string): boolean {
   const session = sessions.get(sessionId);
   if (!session) return false;
 
   if (['approved', 'rejected', 'failed', 'cancelled'].includes(session.status)) {
-    return false; // 이미 종료됨
+    return false; // Already terminated
   }
 
   updateSessionStatus(sessionId, 'cancelled');
@@ -264,7 +264,7 @@ export function cancelSession(sessionId: string): boolean {
 }
 
 /**
- * Worker가 더 시도할 수 있는지 확인
+ * Check if Worker can retry
  */
 export function canRetry(sessionId: string): boolean {
   const session = sessions.get(sessionId);
@@ -274,7 +274,7 @@ export function canRetry(sessionId: string): boolean {
 }
 
 /**
- * 세션 아카이브
+ * Archive session
  */
 function archiveSession(session: PairSession): void {
   completedSessions.unshift(session);
@@ -285,14 +285,14 @@ function archiveSession(session: PairSession): void {
 }
 
 /**
- * 히스토리 조회
+ * Get session history
  */
 export function getSessionHistory(limit: number = 10): PairSession[] {
   return completedSessions.slice(0, limit);
 }
 
 /**
- * 모든 세션 초기화 (테스트용)
+ * Clear all sessions (for testing)
  */
 export function clearAllSessions(): void {
   sessions.clear();
@@ -304,7 +304,7 @@ export function clearAllSessions(): void {
 // ============================================
 
 /**
- * Worker 메시지 포맷
+ * Format Worker message
  */
 function formatWorkerMessage(result: WorkerResult): string {
   const lines: string[] = [];
@@ -327,7 +327,7 @@ function formatWorkerMessage(result: WorkerResult): string {
 }
 
 /**
- * Reviewer 메시지 포맷
+ * Format Reviewer message
  */
 function formatReviewerMessage(result: ReviewResult): string {
   const decisionEmoji = {
@@ -352,7 +352,7 @@ function formatReviewerMessage(result: ReviewResult): string {
 }
 
 /**
- * 세션 상태 요약
+ * Format session status summary
  */
 export function formatSessionSummary(session: PairSession): string {
   const statusEmoji = {
@@ -379,7 +379,7 @@ export function formatSessionSummary(session: PairSession): string {
 }
 
 /**
- * 전체 토론 내역 포맷
+ * Format full discussion history
  */
 export function formatDiscussion(session: PairSession): string {
   if (session.messages.length === 0) {

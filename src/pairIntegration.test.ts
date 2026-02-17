@@ -452,9 +452,9 @@ describe('Pair Mode Integration Tests', () => {
       const summary = await pairMetrics.getSummary();
       const formatted = pairMetrics.formatMetricsSummary(summary);
 
-      expect(formatted).toContain('페어 모드 통계');
-      expect(formatted).toContain('총 세션');
-      expect(formatted).toContain('성공률');
+      expect(formatted).toContain('Pair Mode Statistics');
+      expect(formatted).toContain('Total sessions');
+      expect(formatted).toContain('Success rate');
     });
 
     it('should format daily metrics', async () => {
@@ -474,7 +474,7 @@ describe('Pair Mode Integration Tests', () => {
       const daily = await pairMetrics.getDailyMetrics(7);
       const formatted = pairMetrics.formatDailyMetrics(daily);
 
-      expect(formatted).toContain('일별 통계');
+      expect(formatted).toContain('Daily Statistics');
     });
   });
 });

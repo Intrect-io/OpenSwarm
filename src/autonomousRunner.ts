@@ -25,6 +25,7 @@ import type { DefaultRolesConfig, ProjectAgentConfig } from './types.js';
 import * as planner from './planner.js';
 import * as execution from './runnerExecution.js';
 import { reportToDiscord, fetchLinearTasks } from './runnerExecution.js';
+import { t } from './locale/index.js';
 
 // Re-export integration setters (used by service.ts)
 export { setDiscordReporter, setLinearFetcher } from './runnerExecution.js';
@@ -34,68 +35,71 @@ export { setDiscordReporter, setLinearFetcher } from './runnerExecution.js';
 // ============================================
 
 export interface AutonomousConfig {
-  /** Linear 팀 ID */
+  /** Linear team ID */
   linearTeamId: string;
 
-  /** 허용된 프로젝트 경로 */
+  /** Allowed project paths */
   allowedProjects: string[];
 
-  /** Heartbeat 간격 (cron 또는 interval) */
+  /** Heartbeat interval (cron or interval) */
   heartbeatSchedule: string;
 
-  /** 자동 실행 (false면 승인 필요) */
+  /** Auto-execute (if false, approval required) */
   autoExecute: boolean;
 
-  /** Discord 채널 ID (보고용) */
+  /** Discord channel ID (for reporting) */
   discordChannelId?: string;
 
-  /** 최대 연속 작업 수 */
+  /** Max consecutive tasks */
   maxConsecutiveTasks: number;
 
-  /** 작업 간 쿨다운 (초) */
+  /** Cooldown between tasks (seconds) */
   cooldownSeconds: number;
 
-  /** Dry run 모드 */
+  /** Dry run mode */
   dryRun: boolean;
 
-  /** Worker/Reviewer 페어 모드 */
+  /** Worker/Reviewer pair mode */
   pairMode?: boolean;
 
-  /** 페어 모드 최대 시도 횟수 */
+  /** Pair mode max attempts */
   pairMaxAttempts?: number;
 
-  /** Worker 모델 (레거시) */
+  /** Worker model (legacy) */
   workerModel?: string;
 
-  /** Reviewer 모델 (레거시) */
+  /** Reviewer model (legacy) */
   reviewerModel?: string;
 
-  /** Worker 타임아웃 (ms) (레거시) */
+  /** Worker timeout (ms) (legacy) */
   workerTimeoutMs?: number;
 
-  /** Reviewer 타임아웃 (ms) (레거시) */
+  /** Reviewer timeout (ms) (legacy) */
   reviewerTimeoutMs?: number;
 
-  /** 시작 시 즉시 실행 */
+  /** Trigger immediately on start */
   triggerNow?: boolean;
 
-  /** 동시 실행 가능한 최대 태스크 수 */
+  /** Max concurrent tasks */
   maxConcurrentTasks?: number;
 
-  /** 기본 역할 설정 */
+  /** Default role configuration */
   defaultRoles?: DefaultRolesConfig;
 
-  /** 프로젝트별 에이전트 설정 */
+  /** Per-project agent configuration */
   projectAgents?: ProjectAgentConfig[];
 
-  /** 작업 분해 활성화 */
+  /** Enable task decomposition */
   enableDecomposition?: boolean;
 
-  /** 작업 분해 기준 시간 (분, 기본 30분) */
+  /** Task decomposition threshold (minutes, default 30) */
   decompositionThresholdMinutes?: number;
 
-  /** Planner 모델 */
+  /** Planner model */
   plannerModel?: string;
+
+  /** Planner timeout (ms, default 600000 = 10min) */
+  plannerTimeoutMs?: number;
 }
 
 export interface RunnerState {
@@ -125,6 +129,26 @@ export class AutonomousRunner {
     consecutiveErrors: 0,
   };
 
+  // Track completed/failed task IDs to prevent re-selection
+  private completedTaskIds = new Set<string>();
+  private failedTaskCounts = new Map<string, number>();
+  private static readonly MAX_RETRY_COUNT = 2;
+
+  // Rate limiting: max 1 issue per hour
+  private lastTaskStartedAt = 0;
+  private static readonly RATE_LIMIT_MS = 60 * 60 * 1000; // 1 hour
+
+  /**
+   * Format task project/issue context string
+   */
+  private formatTaskContext(task: TaskItem): string {
+    const parts: string[] = [];
+    if (task.linearProject?.name) parts.push(`[${task.linearProject.name}]`);
+    if (task.issueIdentifier) parts.push(task.issueIdentifier);
+    else if (task.issueId) parts.push(task.issueId.slice(0, 8));
+    return parts.length > 0 ? parts.join(' ') : '';
+  }
+
   constructor(config: AutonomousConfig) {
     this.config = config;
     this.engine = getDecisionEngine({
@@ -136,29 +160,43 @@ export class AutonomousRunner {
       dryRun: config.dryRun,
     });
 
-    // TaskScheduler 초기화
+    // Initialize TaskScheduler
     this.scheduler = initScheduler({
       maxConcurrent: config.maxConcurrentTasks ?? 1,
       allowSameProjectConcurrent: false,
     });
 
-    // 스케줄러 이벤트 핸들링
+    // Set up scheduler event handling
     this.setupSchedulerEvents();
   }
 
   /**
-   * 스케줄러 이벤트 설정
+   * Set up scheduler events
    */
   private setupSchedulerEvents(): void {
     this.scheduler.on('started', async (running) => {
-      console.log(`[Scheduler] Task started: ${running.task.title}`);
+      const taskCtx = this.formatTaskContext(running.task);
+      console.log(`[Scheduler] Task started: ${taskCtx} ${running.task.title}`);
+      this.lastTaskStartedAt = Date.now();
     });
 
     this.scheduler.on('completed', async ({ task, result }) => {
-      console.log(`[Scheduler] Task completed: ${task.title}`);
+      const taskCtx = this.formatTaskContext(task);
+      console.log(`[Scheduler] Task completed: ${taskCtx} ${task.title}`);
       await reportToDiscord(formatPipelineResult(result));
 
-      // 성공 시 Linear 이슈를 Done으로 업데이트
+      // Track as completed to prevent re-selection
+      if (task.issueId) {
+        this.completedTaskIds.add(task.issueId);
+      }
+
+      // Skip Linear state update for decomposed tasks (sub-issues handle themselves)
+      if (result.finalStatus === 'decomposed') {
+        console.log(`[Scheduler] Task decomposed into sub-issues, skipping Done state`);
+        return;
+      }
+
+      // On success, update Linear issue to Done
       if (result.success && task.issueId) {
         try {
           await linear.logPairComplete(task.issueId, result.sessionId, {
@@ -183,40 +221,79 @@ export class AutonomousRunner {
     });
 
     this.scheduler.on('failed', async ({ task, result }) => {
-      console.log(`[Scheduler] Task failed: ${task.title}`);
+      const taskCtx = this.formatTaskContext(task);
+      console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
       await reportToDiscord(formatPipelineResult(result));
 
-      // rejected 상태면 Blocked로 변경
+      // If rejected, change to Blocked immediately
       if (task.issueId && result.finalStatus === 'rejected') {
+        this.completedTaskIds.add(task.issueId); // Prevent re-selection
         try {
           await linear.logBlocked(task.issueId, 'autonomous-runner',
-            `리뷰 거부됨: ${result.reviewResult?.feedback || '상세 정보 없음'}`
+            t('runner.reviewRejected', { feedback: result.reviewResult?.feedback || t('common.fallback.noDescription') })
           );
           console.log(`[Scheduler] Issue ${task.issueId} marked as Blocked (rejected)`);
         } catch (err) {
           console.error(`[Scheduler] Failed to update issue state:`, err);
         }
+        return;
       }
-      // failed인 경우 In Progress 유지 (다음 heartbeat에서 재시도)
+
+      // Track failure count — block after MAX_RETRY_COUNT failures
+      if (task.issueId) {
+        const count = (this.failedTaskCounts.get(task.issueId) ?? 0) + 1;
+        this.failedTaskCounts.set(task.issueId, count);
+        console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx}`);
+
+        if (count >= AutonomousRunner.MAX_RETRY_COUNT) {
+          this.completedTaskIds.add(task.issueId); // Prevent re-selection
+          try {
+            await linear.logBlocked(task.issueId, 'autonomous-runner',
+              `Autonomous execution failed ${count} times. Moving to Blocked for manual review.`
+            );
+            console.log(`[Scheduler] Issue ${task.issueId} marked as Blocked (max retries exceeded)`);
+          } catch (err) {
+            console.error(`[Scheduler] Failed to update issue state:`, err);
+          }
+        }
+      }
     });
 
     this.scheduler.on('error', async ({ task, error }) => {
-      console.error(`[Scheduler] Task error: ${task.title}`, error);
-      await reportToDiscord(`❌ **파이프라인 에러**: ${task.title}\n\`\`\`${error.message}\`\`\``);
+      const taskCtx = this.formatTaskContext(task);
+      console.error(`[Scheduler] Task error: ${taskCtx} ${task.title}`, error);
+      await reportToDiscord(t('runner.pipelineError', { title: `${taskCtx} ${task.title}`, error: error.message }));
     });
 
     this.scheduler.on('slotFreed', () => {
-      // 슬롯이 비면 다음 태스크 자동 실행
+      // Auto-execute next task when slot becomes available
       void this.runAvailableTasks();
     });
   }
 
   /**
-   * 사용 가능한 슬롯에 태스크 실행
+   * Filter out tasks already completed or exceeding retry limit
+   */
+  private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
+    return tasks.filter(task => {
+      const id = task.issueId || task.id;
+      if (this.completedTaskIds.has(id)) {
+        return false;
+      }
+      const failCount = this.failedTaskCounts.get(id) ?? 0;
+      if (failCount >= AutonomousRunner.MAX_RETRY_COUNT) {
+        return false;
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Execute tasks in available slots
    */
   private async runAvailableTasks(): Promise<void> {
     if (!this.config.pairMode || !this.config.maxConcurrentTasks) {
-      return; // 병렬 처리 비활성화
+      return; // Parallel processing disabled
     }
 
     await this.scheduler.runAvailable(async (task, projectPath) => {
@@ -225,16 +302,16 @@ export class AutonomousRunner {
   }
 
   /**
-   * 프로젝트별 역할 설정 가져오기
+   * Get role configuration for a project
    */
   private getRolesForProject(projectPath: string): DefaultRolesConfig | undefined {
-    // 프로젝트별 설정 찾기
+    // Find per-project configuration
     const projectConfig = this.config.projectAgents?.find(
       pa => projectPath.includes(pa.projectPath.replace('~', ''))
     );
 
     if (!projectConfig?.roles && !this.config.defaultRoles) {
-      // 레거시 설정에서 변환
+      // Convert from legacy configuration
       return {
         worker: {
           enabled: true,
@@ -249,7 +326,7 @@ export class AutonomousRunner {
       };
     }
 
-    // 프로젝트별 오버라이드 적용
+    // Apply per-project overrides
     const base = this.config.defaultRoles || {
       worker: { enabled: true, model: 'claude-sonnet-4-20250514', timeoutMs: 0 },
       reviewer: { enabled: true, model: 'claude-3-5-haiku-20241022', timeoutMs: 0 },
@@ -259,7 +336,7 @@ export class AutonomousRunner {
       return base;
     }
 
-    // 오버라이드 병합
+    // Merge overrides
     return {
       worker: { ...base.worker, ...projectConfig.roles.worker },
       reviewer: { ...base.reviewer, ...projectConfig.roles.reviewer },
@@ -273,7 +350,7 @@ export class AutonomousRunner {
   }
 
   /**
-   * Runner 시작
+   * Start the runner
    */
   async start(): Promise<void> {
     if (this.state.isRunning) {
@@ -283,7 +360,7 @@ export class AutonomousRunner {
 
     await this.engine.init();
 
-    // Cron job 설정
+    // Set up cron job
     this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
       await this.heartbeat();
     });
@@ -291,21 +368,21 @@ export class AutonomousRunner {
     this.state.isRunning = true;
     console.log(`[AutonomousRunner] Started with schedule: ${this.config.heartbeatSchedule}`);
 
-    await reportToDiscord(`🤖 **자율 실행 모드 시작**\n` +
+    await reportToDiscord(`🤖 ${t('runner.modeStarted')}\n` +
       `Schedule: \`${this.config.heartbeatSchedule}\`\n` +
-      `Auto-execute: ${this.config.autoExecute ? '✅' : '❌ (승인 필요)'}\n` +
+      `Auto-execute: ${this.config.autoExecute ? '✅' : '❌'}\n` +
       `Projects: ${this.config.allowedProjects.join(', ')}`
     );
 
-    // 즉시 실행 옵션
+    // Immediate execution option
     if (this.config.triggerNow) {
       console.log('[AutonomousRunner] Triggering immediate heartbeat in 10s...');
-      setTimeout(() => void this.heartbeat(), 10000); // 10초 후 실행 (Discord/Linear 연결 대기)
+      setTimeout(() => void this.heartbeat(), 10000); // Run after 10s (wait for Discord/Linear connection)
     }
   }
 
   /**
-   * Runner 중지
+   * Stop the runner
    */
   stop(): void {
     if (this.cronJob) {
@@ -317,21 +394,31 @@ export class AutonomousRunner {
   }
 
   /**
-   * Heartbeat 실행
+   * Execute heartbeat
    */
   async heartbeat(): Promise<void> {
     console.log('[AutonomousRunner] Heartbeat triggered');
     this.state.lastHeartbeat = Date.now();
 
     try {
-      // 1. 시간 윈도우 체크
+      // 1. Check time window
       const timeCheck = checkWorkAllowed();
       if (!timeCheck.allowed) {
         console.log(`[AutonomousRunner] Blocked: ${timeCheck.reason}`);
         return;
       }
 
-      // 2. Linear에서 작업 가져오기
+      // 1.5. Rate limit: max 1 issue per hour
+      if (this.lastTaskStartedAt > 0) {
+        const elapsed = Date.now() - this.lastTaskStartedAt;
+        if (elapsed < AutonomousRunner.RATE_LIMIT_MS) {
+          const remainMin = Math.ceil((AutonomousRunner.RATE_LIMIT_MS - elapsed) / 60000);
+          console.log(`[AutonomousRunner] Rate limited: last task started ${Math.floor(elapsed / 60000)}min ago, next allowed in ${remainMin}min`);
+          return;
+        }
+      }
+
+      // 2. Fetch tasks from Linear
       const tasks = await fetchLinearTasks();
       if (tasks.length === 0) {
         console.log('[AutonomousRunner] No tasks in backlog');
@@ -340,19 +427,29 @@ export class AutonomousRunner {
 
       console.log(`[AutonomousRunner] Found ${tasks.length} tasks`);
 
-      // 병렬 처리 모드
+      // Filter out completed and over-retried tasks
+      const filteredTasks = this.filterAlreadyProcessed(tasks);
+      if (filteredTasks.length === 0) {
+        console.log('[AutonomousRunner] All tasks already completed or max retries exceeded');
+        return;
+      }
+      if (filteredTasks.length !== tasks.length) {
+        console.log(`[AutonomousRunner] Filtered: ${tasks.length} → ${filteredTasks.length} (skipped ${tasks.length - filteredTasks.length} completed/failed)`);
+      }
+
+      // Parallel processing mode
       if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1 && this.config.pairMode) {
-        await this.heartbeatParallel(tasks);
+        await this.heartbeatParallel(filteredTasks);
         return;
       }
 
-      // 3. Decision Engine 실행 (단일 태스크)
+      // 3. Run Decision Engine (single task)
       console.log('[AutonomousRunner] Calling DecisionEngine.heartbeat...');
-      const decision = await this.engine.heartbeat(tasks);
+      const decision = await this.engine.heartbeat(filteredTasks);
       console.log(`[AutonomousRunner] Decision: action=${decision.action}, reason=${decision.reason}`);
       this.state.lastDecision = decision;
 
-      // 4. 결정에 따른 처리
+      // 4. Handle decision
       console.log('[AutonomousRunner] Calling handleDecision...');
       await this.handleDecision(decision);
       console.log('[AutonomousRunner] handleDecision completed');
@@ -364,15 +461,13 @@ export class AutonomousRunner {
       console.error('[AutonomousRunner] Heartbeat error:', error.message);
 
       if (this.state.consecutiveErrors >= 3) {
-        await reportToDiscord(`⚠️ **자율 실행 오류** (연속 ${this.state.consecutiveErrors}회)\n` +
-          `\`\`\`${error.message}\`\`\``
-        );
+        await reportToDiscord(t('runner.consecutiveErrors', { count: this.state.consecutiveErrors, error: error.message }));
       }
     }
   }
 
   /**
-   * 병렬 처리 Heartbeat (DecisionEngine.heartbeatMultiple 사용)
+   * Parallel processing heartbeat (uses DecisionEngine.heartbeatMultiple)
    */
   private async heartbeatParallel(tasks: TaskItem[]): Promise<void> {
     console.log(`[AutonomousRunner] Parallel heartbeat: ${tasks.length} tasks`);
@@ -383,13 +478,16 @@ export class AutonomousRunner {
       return;
     }
 
-    // 이미 실행 중인 프로젝트 목록 가져오기
+    // Get list of already running projects
     const busyProjects = this.scheduler.getBusyProjects();
 
-    // DecisionEngine에서 검증된 태스크 목록 가져오기
+    // Rate limit: only allow 1 task per heartbeat cycle
+    const maxSlots = 1;
+
+    // Get validated task list from DecisionEngine
     const decision = await this.engine.heartbeatMultiple(
       tasks,
-      availableSlots,
+      maxSlots,
       busyProjects
     );
 
@@ -398,23 +496,23 @@ export class AutonomousRunner {
       return;
     }
 
-    // 검증된 태스크들을 큐에 추가
+    // Add validated tasks to queue
     let enqueuedCount = 0;
     for (const { task } of decision.tasks) {
-      // 이미 큐에 있거나 실행 중이면 스킵
+      // Skip if already queued or running
       if (this.scheduler.isTaskQueued(task.id) || this.scheduler.isTaskRunning(task.id)) {
         continue;
       }
 
       const projectPath = await this.resolveProjectPath(task);
 
-      // 프로젝트 경로 매핑 실패 시 스킵
+      // Skip if project path mapping failed
       if (!projectPath) {
         console.error(`[AutonomousRunner] Skipping task "${task.title}" - project path not resolved`);
         continue;
       }
 
-      // 프로젝트가 이미 작업 중이면 스킵 (이중 체크)
+      // Skip if project is already busy (double check)
       if (this.scheduler.isProjectBusy(projectPath)) {
         console.log(`[AutonomousRunner] Project busy: ${projectPath}`);
         continue;
@@ -426,12 +524,12 @@ export class AutonomousRunner {
 
     console.log(`[AutonomousRunner] Enqueued ${enqueuedCount} tasks (skipped: ${decision.skippedCount})`);
 
-    // 태스크 실행
+    // Execute tasks
     await this.runAvailableTasks();
   }
 
   /**
-   * 결정 처리
+   * Handle decision
    */
   private async handleDecision(decision: DecisionResult): Promise<void> {
     console.log(`[AutonomousRunner] handleDecision: action=${decision.action}`);
@@ -463,11 +561,11 @@ export class AutonomousRunner {
   }
 
   /**
-   * 작업 실행
+   * Execute task
    */
   private async executeTask(task: TaskItem, workflow: any): Promise<void> {
     console.log(`[AutonomousRunner] executeTask called, pairMode=${this.config.pairMode}`);
-    // 페어 모드면 페어 실행
+    // If pair mode, use pair execution
     if (this.config.pairMode) {
       console.log('[AutonomousRunner] Calling executeTaskPairMode...');
       await this.executeTaskPairMode(task);
@@ -475,17 +573,17 @@ export class AutonomousRunner {
       return;
     }
 
-    // 시작 보고
+    // Report start
     const projectInfo = task.linearProject?.name
       ? `📁 **${task.linearProject.name}**\n`
       : '';
     const issueRef = task.issueIdentifier || task.issueId || 'N/A';
 
     const startEmbed = new EmbedBuilder()
-      .setTitle('🚀 작업 시작')
+      .setTitle(t('runner.taskStarting'))
       .setColor(0x00AE86)
       .addFields(
-        { name: '작업', value: `${projectInfo}${task.title}`, inline: false },
+        { name: t('runner.result.taskLabel'), value: `${projectInfo}${task.title}`, inline: false },
         { name: 'Issue', value: issueRef, inline: true },
         { name: 'Priority', value: `P${task.priority}`, inline: true },
         { name: 'Steps', value: `${workflow.steps?.length || '?'}`, inline: true },
@@ -494,44 +592,44 @@ export class AutonomousRunner {
 
     await reportToDiscord(startEmbed);
 
-    // 파싱 결과가 있으면 표시
+    // Display parsed result if available
     if (task.issueId) {
       const parsed = await loadParsedTask(task.issueId);
       if (parsed) {
         const summary = formatParsedTaskSummary(parsed);
-        await reportToDiscord(`📋 **분석 결과**\n${summary.slice(0, 1500)}`);
+        await reportToDiscord(`${t('runner.analysisResult')}\n${summary.slice(0, 1500)}`);
       }
     }
 
-    // 실행
+    // Execute
     const result = await this.engine.executeTask(task, workflow);
     this.state.lastExecution = result;
 
-    // 결과 보고
+    // Report results
     await this.reportExecutionResult(task, result);
   }
 
   /**
-   * 페어 모드로 작업 실행 (Worker/Reviewer 루프)
-   * 레거시 방식 - 병렬 처리 없이 단일 태스크만 처리
+   * Execute task in pair mode (Worker/Reviewer loop)
+   * Legacy mode - processes single task without parallel execution
    */
   private async executeTaskPairMode(task: TaskItem): Promise<void> {
     console.log('[AutonomousRunner] executeTaskPairMode started');
 
-    // 프로젝트 경로 자동 탐색
+    // Auto-resolve project path
     const projectPath = await this.resolveProjectPath(task);
 
-    // 프로젝트 경로 매핑 실패 시 에러
+    // Error if project path mapping failed
     if (!projectPath) {
       const errorMsg = `Failed to resolve project path for "${task.linearProject?.name || task.title}"`;
       console.error(`[AutonomousRunner] ${errorMsg}`);
-      await reportToDiscord(`❌ **프로젝트 매핑 실패**: ${task.title}\n프로젝트: ${task.linearProject?.name || 'unknown'}`);
+      await reportToDiscord(t('runner.projectMappingFailed', { title: task.title, project: task.linearProject?.name || 'unknown' }));
       return;
     }
 
     console.log(`[AutonomousRunner] projectPath: ${projectPath}`);
 
-    // 작업 분해 체크 (enableDecomposition 설정 시)
+    // Check task decomposition (when enableDecomposition is set)
     if (this.config.enableDecomposition) {
       const threshold = this.config.decompositionThresholdMinutes ?? 30;
       const needsDecomp = planner.needsDecomposition(task, threshold);
@@ -540,30 +638,30 @@ export class AutonomousRunner {
         console.log(`[AutonomousRunner] Task "${task.title}" needs decomposition (>${threshold}min estimated)`);
         const decomposed = await this.decomposeTask(task, projectPath, threshold);
         if (decomposed) {
-          // 분해 성공 - sub-tasks가 큐에 추가됨, 원본 태스크는 실행하지 않음
+          // Decomposition succeeded - sub-tasks added to queue, skip original task
           return;
         }
-        // 분해 실패 - 원본 태스크 그대로 실행
+        // Decomposition failed - execute original task as-is
         console.log('[AutonomousRunner] Decomposition failed, executing original task');
       }
     }
 
-    // 병렬 처리 모드면 스케줄러 사용
+    // Use scheduler for parallel processing mode
     if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1) {
       this.scheduler.enqueue(task, projectPath);
       await this.runAvailableTasks();
       return;
     }
 
-    // 단일 실행 (레거시)
+    // Single execution (legacy)
     const result = await this.executePipeline(task, projectPath);
     await reportToDiscord(formatPipelineResult(result));
 
-    // Linear 이슈 상태 업데이트
+    // Update Linear issue state
     if (task.issueId) {
       try {
         if (result.success) {
-          // 성공 시 Done으로 이동
+          // On success, move to Done
           await linear.logPairComplete(task.issueId, result.sessionId, {
             attempts: result.iterations,
             duration: Math.floor(result.totalDuration / 1000),
@@ -580,13 +678,13 @@ export class AutonomousRunner {
             console.warn(`[AutonomousRunner] Memory save failed (non-critical):`, memErr);
           }
         } else if (result.finalStatus === 'rejected') {
-          // 리뷰 거부 시 Blocked로 변경
+          // Change to Blocked on review rejection
           await linear.logBlocked(task.issueId, 'autonomous-runner',
-            `리뷰 거부됨: ${result.reviewResult?.feedback || '상세 정보 없음'}`
+            t('runner.reviewRejected', { feedback: result.reviewResult?.feedback || t('common.fallback.noDescription') })
           );
           console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Blocked (rejected)`);
         }
-        // failed인 경우 In Progress 유지 (다음 heartbeat에서 재시도)
+        // If failed, keep In Progress (retry on next heartbeat)
       } catch (err) {
         console.error(`[AutonomousRunner] Failed to update issue state:`, err);
       }
@@ -601,6 +699,7 @@ export class AutonomousRunner {
     return {
       allowedProjects: this.config.allowedProjects,
       plannerModel: this.config.plannerModel,
+      plannerTimeoutMs: this.config.plannerTimeoutMs,
       pairMaxAttempts: this.config.pairMaxAttempts,
       enableDecomposition: this.config.enableDecomposition,
       decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
@@ -630,7 +729,7 @@ export class AutonomousRunner {
   }
 
   /**
-   * 수동 승인
+   * Manual approval
    */
   async approve(): Promise<boolean> {
     if (!this.state.pendingApproval) {
@@ -640,7 +739,7 @@ export class AutonomousRunner {
     const task = this.state.pendingApproval;
     this.state.pendingApproval = undefined;
 
-    // Decision Engine에서 워크플로우 가져오기
+    // Get workflow from Decision Engine
     const decision = await this.engine.heartbeat([task]);
     if (decision.workflow && decision.task) {
       await this.executeTask(decision.task, decision.workflow);
@@ -651,7 +750,7 @@ export class AutonomousRunner {
   }
 
   /**
-   * 수동 거부
+   * Manual rejection
    */
   reject(): boolean {
     if (!this.state.pendingApproval) {
@@ -663,21 +762,21 @@ export class AutonomousRunner {
   }
 
   /**
-   * 즉시 실행 (수동 트리거)
+   * Run now (manual trigger)
    */
   async runNow(): Promise<void> {
     await this.heartbeat();
   }
 
   /**
-   * 상태 조회
+   * Get state
    */
   getState(): RunnerState {
     return { ...this.state };
   }
 
   /**
-   * 통계 조회
+   * Get statistics
    */
   getStats(): {
     isRunning: boolean;
@@ -696,28 +795,28 @@ export class AutonomousRunner {
   }
 
   /**
-   * 스케줄러 일시 정지
+   * Pause scheduler
    */
   pauseScheduler(): void {
     this.scheduler.pause();
   }
 
   /**
-   * 스케줄러 재개
+   * Resume scheduler
    */
   resumeScheduler(): void {
     this.scheduler.resume();
   }
 
   /**
-   * 대기 중인 태스크 목록
+   * Get queued tasks
    */
   getQueuedTasks() {
     return this.scheduler.getQueuedTasks();
   }
 
   /**
-   * 실행 중인 태스크 목록
+   * Get running tasks
    */
   getRunningTasks() {
     return this.scheduler.getRunningTasks();
@@ -729,7 +828,7 @@ export class AutonomousRunner {
 // ============================================
 
 /**
- * Runner 인스턴스 가져오기
+ * Get runner instance
  */
 export function getRunner(config?: AutonomousConfig): AutonomousRunner {
   if (!runnerInstance && config) {
@@ -742,7 +841,7 @@ export function getRunner(config?: AutonomousConfig): AutonomousRunner {
 }
 
 /**
- * Runner 시작 (간편 함수)
+ * Start runner (convenience function)
  */
 export async function startAutonomous(config: AutonomousConfig): Promise<AutonomousRunner> {
   const runner = getRunner(config);
@@ -751,7 +850,7 @@ export async function startAutonomous(config: AutonomousConfig): Promise<Autonom
 }
 
 /**
- * Runner 중지 (간편 함수)
+ * Stop runner (convenience function)
  */
 export function stopAutonomous(): void {
   if (runnerInstance) {

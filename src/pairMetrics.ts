@@ -1,11 +1,12 @@
 // ============================================
 // Claude Swarm - Pair Mode Metrics
-// 성공률, 평균 시도 횟수, 소요 시간 추적
+// Success rate, average attempts, and duration tracking
 // ============================================
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
+import { t } from './locale/index.js';
 
 // ============================================
 // Types
@@ -30,16 +31,16 @@ export interface PairMetricsSummary {
   rejected: number;
   failed: number;
   cancelled: number;
-  successRate: number;         // 승인된 비율 (%)
-  avgAttempts: number;         // 평균 시도 횟수
-  avgDurationMs: number;       // 평균 소요 시간 (ms)
-  avgFilesChanged: number;     // 평균 변경 파일 수
-  firstAttemptSuccessRate: number; // 첫 시도 성공률 (%)
+  successRate: number;         // Approval rate (%)
+  avgAttempts: number;         // Average attempt count
+  avgDurationMs: number;       // Average duration (ms)
+  avgFilesChanged: number;     // Average files changed
+  firstAttemptSuccessRate: number; // First attempt success rate (%)
   lastUpdated: number;
 }
 
 export interface DailyMetrics {
-  date: string;                // YYYY-MM-DD
+  date: string;                // YYYY-MM-DD format
   sessions: number;
   approved: number;
   rejected: number;
@@ -56,24 +57,24 @@ const METRICS_DIR = path.join(homedir(), '.claude-swarm', 'metrics');
 const RECORDS_FILE = path.join(METRICS_DIR, 'pair-records.json');
 const SUMMARY_FILE = path.join(METRICS_DIR, 'pair-summary.json');
 
-// 메모리 캐시
+// In-memory cache
 let recordsCache: PairSessionRecord[] = [];
 let summaryCache: PairMetricsSummary | null = null;
 let initialized = false;
 
 /**
- * 메트릭 디렉토리 초기화
+ * Ensure metrics directory exists
  */
 async function ensureDir(): Promise<void> {
   try {
     await fs.mkdir(METRICS_DIR, { recursive: true });
   } catch {
-    // 이미 존재
+    // Already exists
   }
 }
 
 /**
- * 레코드 로드
+ * Load records
  */
 async function loadRecords(): Promise<PairSessionRecord[]> {
   if (!initialized) {
@@ -90,7 +91,7 @@ async function loadRecords(): Promise<PairSessionRecord[]> {
 }
 
 /**
- * 레코드 저장
+ * Save records
  */
 async function saveRecords(): Promise<void> {
   await ensureDir();
@@ -98,7 +99,7 @@ async function saveRecords(): Promise<void> {
 }
 
 /**
- * 요약 저장
+ * Save summary
  */
 async function saveSummary(): Promise<void> {
   if (summaryCache) {
@@ -111,17 +112,17 @@ async function saveSummary(): Promise<void> {
 // ============================================
 
 /**
- * 세션 결과 기록
+ * Record session result
  */
 export async function recordSession(record: PairSessionRecord): Promise<void> {
   await loadRecords();
 
-  // 중복 방지
+  // Prevent duplicates
   const exists = recordsCache.some(r => r.sessionId === record.sessionId);
   if (!exists) {
     recordsCache.push(record);
 
-    // 최근 1000개만 유지
+    // Keep only the last 1000 records
     if (recordsCache.length > 1000) {
       recordsCache = recordsCache.slice(-1000);
     }
@@ -132,7 +133,7 @@ export async function recordSession(record: PairSessionRecord): Promise<void> {
 }
 
 /**
- * 요약 통계 업데이트
+ * Update summary statistics
  */
 async function updateSummary(): Promise<void> {
   const records = await loadRecords();
@@ -185,7 +186,7 @@ async function updateSummary(): Promise<void> {
 }
 
 /**
- * 요약 통계 조회
+ * Get summary statistics
  */
 export async function getSummary(): Promise<PairMetricsSummary> {
   if (!summaryCache) {
@@ -196,7 +197,7 @@ export async function getSummary(): Promise<PairMetricsSummary> {
 }
 
 /**
- * 최근 N개 세션 조회
+ * Get recent N sessions
  */
 export async function getRecentSessions(limit: number = 10): Promise<PairSessionRecord[]> {
   const records = await loadRecords();
@@ -204,14 +205,14 @@ export async function getRecentSessions(limit: number = 10): Promise<PairSession
 }
 
 /**
- * 일별 메트릭 조회
+ * Get daily metrics
  */
 export async function getDailyMetrics(days: number = 7): Promise<DailyMetrics[]> {
   const records = await loadRecords();
   const now = Date.now();
   const cutoff = now - (days * 24 * 60 * 60 * 1000);
 
-  // 날짜별로 그룹화
+  // Group by date
   const byDate = new Map<string, PairSessionRecord[]>();
 
   for (const record of records) {
@@ -224,7 +225,7 @@ export async function getDailyMetrics(days: number = 7): Promise<DailyMetrics[]>
     }
   }
 
-  // 일별 메트릭 계산
+  // Calculate daily metrics
   const result: DailyMetrics[] = [];
 
   for (const [date, dayRecords] of byDate) {
@@ -245,58 +246,58 @@ export async function getDailyMetrics(days: number = 7): Promise<DailyMetrics[]>
     });
   }
 
-  // 날짜순 정렬
+  // Sort by date
   return result.sort((a, b) => a.date.localeCompare(b.date));
 }
 
 /**
- * 메트릭 포맷팅 (Discord용)
+ * Format metrics (for Discord)
  */
 export function formatMetricsSummary(summary: PairMetricsSummary): string {
   const avgDurationStr = summary.avgDurationMs < 60000
-    ? `${Math.round(summary.avgDurationMs / 1000)}초`
-    : `${Math.round(summary.avgDurationMs / 60000)}분`;
+    ? t('common.duration.seconds', { n: Math.round(summary.avgDurationMs / 1000) })
+    : t('common.duration.minutes', { n: Math.round(summary.avgDurationMs / 60000) });
 
   return [
-    '📊 **페어 모드 통계**',
+    `📊 **${t('discord.pair.stats.title')}**`,
     '',
-    `**총 세션:** ${summary.totalSessions}개`,
-    `**성공률:** ${summary.successRate}% (${summary.approved}/${summary.totalSessions})`,
-    `**첫 시도 성공률:** ${summary.firstAttemptSuccessRate}%`,
+    t('discord.pair.stats.totalSessions', { n: summary.totalSessions }),
+    `${t('discord.pair.stats.successRate', { n: summary.successRate })} (${summary.approved}/${summary.totalSessions})`,
+    t('discord.pair.stats.firstAttemptRate', { n: summary.firstAttemptSuccessRate }),
     '',
-    `✅ 승인: ${summary.approved}`,
-    `❌ 거부: ${summary.rejected}`,
-    `💥 실패: ${summary.failed}`,
-    `🚫 취소: ${summary.cancelled}`,
+    `✅ ${t('discord.pair.stats.approved', { n: summary.approved })}`,
+    `❌ ${t('discord.pair.stats.rejected', { n: summary.rejected })}`,
+    `💥 ${t('discord.pair.stats.failed', { n: summary.failed })}`,
+    `🚫 ${t('discord.pair.stats.cancelled', { n: summary.cancelled })}`,
     '',
-    `**평균 시도:** ${summary.avgAttempts}회`,
-    `**평균 소요 시간:** ${avgDurationStr}`,
-    `**평균 변경 파일:** ${summary.avgFilesChanged}개`,
+    t('discord.pair.stats.avgAttempts', { n: summary.avgAttempts }),
+    t('discord.pair.stats.avgDuration', { duration: avgDurationStr }),
+    t('discord.pair.stats.avgFiles', { n: summary.avgFilesChanged }),
   ].join('\n');
 }
 
 /**
- * 일별 메트릭 포맷팅
+ * Format daily metrics
  */
 export function formatDailyMetrics(metrics: DailyMetrics[]): string {
   if (metrics.length === 0) {
-    return '(최근 7일간 데이터 없음)';
+    return t('discord.pair.stats.noData');
   }
 
-  const lines = ['📅 **일별 통계**', ''];
+  const lines = [`📅 **${t('discord.pair.stats.dailyTitle')}**`, ''];
 
   for (const day of metrics) {
     const successRate = day.sessions > 0
       ? Math.round((day.approved / day.sessions) * 100)
       : 0;
-    lines.push(`**${day.date}**: ${day.sessions}개 (✅${day.approved} ❌${day.rejected} 💥${day.failed}) - ${successRate}%`);
+    lines.push(`**${day.date}**: ${day.sessions} (✅${day.approved} ❌${day.rejected} 💥${day.failed}) - ${successRate}%`);
   }
 
   return lines.join('\n');
 }
 
 /**
- * 메트릭 초기화 (테스트용)
+ * Reset metrics (for testing)
  */
 export async function resetMetrics(): Promise<void> {
   recordsCache = [];

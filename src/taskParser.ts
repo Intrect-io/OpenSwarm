@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Task Parser
-// Linear 이슈를 분석하여 실행 가능한 서브태스크로 분해
+// Analyze Linear issues and decompose into executable subtasks
 // ============================================
 
 import { resolve } from 'path';
@@ -13,17 +13,17 @@ import { WorkflowConfig, WorkflowStep } from './workflow.js';
 // ============================================
 
 /**
- * 파싱된 태스크 구조
+ * Parsed task structure
  */
 export interface ParsedTask {
-  /** 원본 이슈 정보 */
+  /** Original issue info */
   original: {
     id: string;
     title: string;
     description: string;
   };
 
-  /** 분석 결과 */
+  /** Analysis result */
   analysis: {
     type: TaskType;
     complexity: 'simple' | 'medium' | 'complex';
@@ -32,18 +32,18 @@ export interface ParsedTask {
     risks: string[];
   };
 
-  /** 분해된 서브태스크 */
+  /** Decomposed subtasks */
   subtasks: Subtask[];
 
-  /** 생성된 워크플로우 */
+  /** Generated workflow */
   workflow: WorkflowConfig;
 
-  /** 파싱 타임스탬프 */
+  /** Parsing timestamp */
   parsedAt: number;
 }
 
 /**
- * 태스크 타입
+ * Task type
  */
 export type TaskType =
   | 'bug_fix'
@@ -56,7 +56,7 @@ export type TaskType =
   | 'unknown';
 
 /**
- * 서브태스크
+ * Subtask
  */
 export interface Subtask {
   id: string;
@@ -119,7 +119,7 @@ const TYPE_PATTERNS: { type: TaskType; patterns: RegExp[] }[] = [
 ];
 
 /**
- * 태스크 타입 감지
+ * Detect task type
  */
 function detectTaskType(title: string, description: string): TaskType {
   const text = `${title} ${description}`.toLowerCase();
@@ -140,7 +140,7 @@ function detectTaskType(title: string, description: string): TaskType {
 // ============================================
 
 /**
- * 복잡도 분석
+ * Complexity analysis
  */
 function analyzeComplexity(title: string, description: string): {
   complexity: 'simple' | 'medium' | 'complex';
@@ -150,7 +150,7 @@ function analyzeComplexity(title: string, description: string): {
   const text = `${title} ${description}`;
   const risks: string[] = [];
 
-  // 길이 기반 초기 판단
+  // Initial estimate based on length
   let complexity: 'simple' | 'medium' | 'complex' = 'simple';
   let estimatedSteps = 2;
 
@@ -163,7 +163,7 @@ function analyzeComplexity(title: string, description: string): {
     estimatedSteps = 6;
   }
 
-  // 키워드 기반 조정
+  // Keyword-based adjustment
   const complexityIndicators = [
     { pattern: /여러|multiple|다수|많은/i, add: 1 },
     { pattern: /전체|all|모든|entire/i, add: 2 },
@@ -182,7 +182,7 @@ function analyzeComplexity(title: string, description: string): {
     }
   }
 
-  // 최종 복잡도 결정
+  // Final complexity determination
   if (estimatedSteps >= 6) complexity = 'complex';
   else if (estimatedSteps >= 4) complexity = 'medium';
 
@@ -194,7 +194,7 @@ function analyzeComplexity(title: string, description: string): {
 // ============================================
 
 /**
- * 서브태스크 템플릿
+ * Subtask templates
  */
 const SUBTASK_TEMPLATES: Record<TaskType, Subtask[]> = {
   bug_fix: [
@@ -463,7 +463,7 @@ const SUBTASK_TEMPLATES: Record<TaskType, Subtask[]> = {
 };
 
 /**
- * 서브태스크 생성
+ * Generate subtasks
  */
 function generateSubtasks(
   type: TaskType,
@@ -475,12 +475,12 @@ function generateSubtasks(
   const subtasks: Subtask[] = [];
 
   for (const template of templates) {
-    // 간단한 작업이면 optional 스킵
+    // Skip optional subtasks for simple tasks
     if (complexity === 'simple' && template.optional) {
       continue;
     }
 
-    // 컨텍스트 추가
+    // Add context
     const contextualPrompt = `
 ## 원본 이슈
 **제목:** ${title}
@@ -509,7 +509,7 @@ ${template.prompt}
 // ============================================
 
 /**
- * Linear 이슈를 파싱하여 실행 가능한 구조로 변환
+ * Parse Linear issue into executable structure
  */
 export function parseTask(issue: {
   id: string;
@@ -519,19 +519,19 @@ export function parseTask(issue: {
 }): ParsedTask {
   const description = issue.description || '';
 
-  // 1. 타입 감지
+  // 1. Detect type
   const type = detectTaskType(issue.title, description);
 
-  // 2. 복잡도 분석
+  // 2. Analyze complexity
   const { complexity, estimatedSteps, risks } = analyzeComplexity(issue.title, description);
 
-  // 3. 서브태스크 생성
+  // 3. Generate subtasks
   const subtasks = generateSubtasks(type, issue.title, description, complexity);
 
-  // 4. 워크플로우 생성
+  // 4. Generate workflow
   const workflow = subtasksToWorkflow(issue, subtasks);
 
-  // 5. 결과 조합
+  // 5. Assemble result
   return {
     original: {
       id: issue.id,
@@ -552,7 +552,7 @@ export function parseTask(issue: {
 }
 
 /**
- * 서브태스크를 워크플로우로 변환
+ * Convert subtasks to workflow
  */
 function subtasksToWorkflow(
   issue: { id: string; title: string; projectPath?: string },
@@ -584,7 +584,7 @@ function subtasksToWorkflow(
 const PARSED_TASKS_DIR = resolve(homedir(), '.claude-swarm/parsed-tasks');
 
 /**
- * 파싱 결과 저장
+ * Save parsed result
  */
 export async function saveParsedTask(parsed: ParsedTask): Promise<void> {
   await fs.mkdir(PARSED_TASKS_DIR, { recursive: true });
@@ -593,7 +593,7 @@ export async function saveParsedTask(parsed: ParsedTask): Promise<void> {
 }
 
 /**
- * 파싱 결과 로드
+ * Load parsed result
  */
 export async function loadParsedTask(issueId: string): Promise<ParsedTask | null> {
   try {
@@ -610,7 +610,7 @@ export async function loadParsedTask(issueId: string): Promise<ParsedTask | null
 // ============================================
 
 /**
- * 파싱 결과 요약 생성 (Linear 코멘트용)
+ * Generate parsed task summary (for Linear comments)
  */
 export function formatParsedTaskSummary(parsed: ParsedTask): string {
   const parts: string[] = [];

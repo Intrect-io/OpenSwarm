@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Task Scheduler
-// 병렬 태스크 스케줄링 및 실행 관리
+// Parallel task scheduling and execution management
 // ============================================
 
 import { EventEmitter } from 'node:events';
@@ -26,9 +26,9 @@ export interface RunningTask {
 }
 
 export interface SchedulerConfig {
-  /** 동시 실행 가능한 최대 태스크 수 */
+  /** Maximum number of concurrent tasks */
   maxConcurrent: number;
-  /** 같은 프로젝트 동시 실행 허용 */
+  /** Allow concurrent execution on same project */
   allowSameProjectConcurrent?: boolean;
 }
 
@@ -65,10 +65,10 @@ export class TaskScheduler extends EventEmitter {
   // ============================================
 
   /**
-   * 태스크를 큐에 추가
+   * Add task to queue
    */
   enqueue(task: TaskItem, projectPath: string): void {
-    // 중복 체크
+    // Duplicate check
     if (this.isTaskQueued(task.id) || this.isTaskRunning(task.id)) {
       console.log(`[Scheduler] Task ${task.id} already in queue/running, skipping`);
       return;
@@ -81,7 +81,7 @@ export class TaskScheduler extends EventEmitter {
       priority: task.priority,
     };
 
-    // 우선순위에 따라 삽입
+    // Insert by priority
     const insertIdx = this.taskQueue.findIndex(
       (t) => t.priority > queuedTask.priority
     );
@@ -97,21 +97,21 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 태스크가 큐에 있는지 확인
+   * Check if task is in queue
    */
   isTaskQueued(taskId: string): boolean {
     return this.taskQueue.some((t) => t.task.id === taskId);
   }
 
   /**
-   * 태스크가 실행 중인지 확인
+   * Check if task is running
    */
   isTaskRunning(taskId: string): boolean {
     return this.runningTasks.has(taskId);
   }
 
   /**
-   * 큐에서 태스크 제거
+   * Remove task from queue
    */
   dequeue(taskId: string): boolean {
     const idx = this.taskQueue.findIndex((t) => t.task.id === taskId);
@@ -122,7 +122,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 큐 비우기
+   * Clear queue
    */
   clearQueue(): void {
     this.taskQueue = [];
@@ -134,21 +134,21 @@ export class TaskScheduler extends EventEmitter {
   // ============================================
 
   /**
-   * 사용 가능한 슬롯이 있는지 확인
+   * Check if available slots exist
    */
   hasAvailableSlot(): boolean {
     return this.runningTasks.size < this.config.maxConcurrent;
   }
 
   /**
-   * 사용 가능한 슬롯 수
+   * Number of available slots
    */
   getAvailableSlots(): number {
     return Math.max(0, this.config.maxConcurrent - this.runningTasks.size);
   }
 
   /**
-   * 프로젝트가 현재 작업 중인지 확인
+   * Check if project is currently busy
    */
   isProjectBusy(projectPath: string): boolean {
     if (this.config.allowSameProjectConcurrent) {
@@ -164,7 +164,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 현재 작업 중인 프로젝트 목록 반환
+   * Return list of currently busy projects
    */
   getBusyProjects(): string[] {
     if (this.config.allowSameProjectConcurrent) {
@@ -183,7 +183,7 @@ export class TaskScheduler extends EventEmitter {
   // ============================================
 
   /**
-   * 다음 실행 가능한 태스크 가져오기
+   * Get next executable task
    */
   getNextExecutable(): QueuedTask | null {
     if (this.paused || !this.hasAvailableSlot()) {
@@ -193,12 +193,12 @@ export class TaskScheduler extends EventEmitter {
     for (let i = 0; i < this.taskQueue.length; i++) {
       const queued = this.taskQueue[i];
 
-      // 프로젝트 중복 체크
+      // Project duplication check
       if (this.isProjectBusy(queued.projectPath)) {
         continue;
       }
 
-      // 실행 가능
+      // Executable
       this.taskQueue.splice(i, 1);
       return queued;
     }
@@ -207,7 +207,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 태스크 실행 시작
+   * Start task execution
    */
   startTask(
     task: TaskItem,
@@ -225,7 +225,7 @@ export class TaskScheduler extends EventEmitter {
     console.log(`[Scheduler] Started task: ${task.title}`);
     this.emit('started', runningTask);
 
-    // 완료 처리
+    // Completion handling
     runningTask.promise
       .then((result) => {
         this.handleTaskComplete(task.id, result);
@@ -236,7 +236,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 태스크 완료 처리
+   * Handle task completion
    */
   private handleTaskComplete(taskId: string, result: PipelineResult): void {
     const running = this.runningTasks.get(taskId);
@@ -254,12 +254,12 @@ export class TaskScheduler extends EventEmitter {
       this.emit('failed', { task: running.task, result });
     }
 
-    // 다음 태스크 실행 트리거
+    // Trigger next task execution
     this.emit('slotFreed');
   }
 
   /**
-   * 태스크 에러 처리
+   * Handle task error
    */
   private handleTaskError(taskId: string, error: Error): void {
     const running = this.runningTasks.get(taskId);
@@ -274,8 +274,8 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 큐에서 실행 가능한 모든 태스크 실행
-   * @param executor 태스크 실행 함수
+   * Execute all available tasks from queue
+   * @param executor Task execution function
    */
   async runAvailable(
     executor: (task: TaskItem, projectPath: string) => Promise<PipelineResult>
@@ -296,7 +296,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 모든 실행 중인 태스크 완료 대기
+   * Wait for all running tasks to complete
    */
   async waitAll(): Promise<PipelineResult[]> {
     const promises = Array.from(this.runningTasks.values()).map((r) => r.promise);
@@ -308,7 +308,7 @@ export class TaskScheduler extends EventEmitter {
   // ============================================
 
   /**
-   * 스케줄러 일시 정지
+   * Pause scheduler
    */
   pause(): void {
     this.paused = true;
@@ -317,7 +317,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 스케줄러 재개
+   * Resume scheduler
    */
   resume(): void {
     this.paused = false;
@@ -326,7 +326,7 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 일시 정지 상태인지 확인
+   * Check if scheduler is paused
    */
   isPaused(): boolean {
     return this.paused;
@@ -337,7 +337,7 @@ export class TaskScheduler extends EventEmitter {
   // ============================================
 
   /**
-   * 현재 상태 조회
+   * Get current stats
    */
   getStats(): SchedulerStats {
     const byProject = new Map<string, number>();
@@ -357,21 +357,21 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * 큐에 있는 태스크 목록
+   * Get list of queued tasks
    */
   getQueuedTasks(): QueuedTask[] {
     return [...this.taskQueue];
   }
 
   /**
-   * 실행 중인 태스크 목록
+   * Get list of running tasks
    */
   getRunningTasks(): RunningTask[] {
     return Array.from(this.runningTasks.values());
   }
 
   /**
-   * 설정 업데이트
+   * Update configuration
    */
   updateConfig(config: Partial<SchedulerConfig>): void {
     this.config = { ...this.config, ...config };
@@ -386,7 +386,7 @@ export class TaskScheduler extends EventEmitter {
 let schedulerInstance: TaskScheduler | null = null;
 
 /**
- * 스케줄러 인스턴스 가져오기
+ * Get scheduler instance
  */
 export function getScheduler(config?: SchedulerConfig): TaskScheduler {
   if (!schedulerInstance && config) {
@@ -399,7 +399,7 @@ export function getScheduler(config?: SchedulerConfig): TaskScheduler {
 }
 
 /**
- * 스케줄러 초기화
+ * Initialize scheduler
  */
 export function initScheduler(config: SchedulerConfig): TaskScheduler {
   schedulerInstance = new TaskScheduler(config);
@@ -407,7 +407,7 @@ export function initScheduler(config: SchedulerConfig): TaskScheduler {
 }
 
 /**
- * 스케줄러 리셋 (테스트용)
+ * Reset scheduler (for testing)
  */
 export function resetScheduler(): void {
   schedulerInstance = null;

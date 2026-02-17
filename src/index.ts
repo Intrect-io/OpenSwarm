@@ -13,10 +13,10 @@ async function main(): Promise<void> {
   console.log('╚════════════════════════════════════════╝');
   console.log('');
 
-  // 설정 로드
+  // Load configuration
   const config = loadConfig();
 
-  // 설정 검증
+  // Validate configuration
   const validation = validateConfig(config);
   if (!validation.valid) {
     console.error('Configuration errors:');
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   console.log(`  - Default heartbeat: ${config.defaultHeartbeatInterval / 60000}min`);
   console.log('');
 
-  // 시그널 핸들러
+  // Signal handlers
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\nReceived ${signal}, shutting down...`);
     await stopService();
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  // 서비스 시작
+  // Start service
   try {
     await startService(config);
     console.log('');

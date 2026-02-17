@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Documenter Agent
-// 문서화 에이전트 (Claude CLI 기반)
+// Documentation agent (Claude CLI based)
 // ============================================
 
 import { spawn } from 'node:child_process';
@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 
 /**
- * ~ 경로를 홈 디렉토리로 확장
+ * Expand ~ path to home directory
  */
 function expandPath(p: string): string {
   if (p.startsWith('~/')) {
@@ -45,7 +45,7 @@ export interface DocumenterResult {
 // ============================================
 
 /**
- * Documenter 프롬프트 생성
+ * Build Documenter prompt
  */
 function buildDocumenterPrompt(options: DocumenterOptions): string {
   const workerReport = `
@@ -118,21 +118,21 @@ ${workerReport}
 // ============================================
 
 /**
- * Documenter 에이전트 실행
+ * Run Documenter agent
  */
 export async function runDocumenter(options: DocumenterOptions): Promise<DocumenterResult> {
   const prompt = buildDocumenterPrompt(options);
   const promptFile = `/tmp/documenter-prompt-${Date.now()}.txt`;
 
   try {
-    // 프롬프트 저장
+    // Save prompt
     await fs.writeFile(promptFile, prompt);
 
-    // Claude CLI 실행
+    // Run Claude CLI
     const cwd = expandPath(options.projectPath);
     const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
 
-    // 결과 파싱
+    // Parse result
     return parseDocumenterOutput(output);
   } catch (error) {
     return {
@@ -143,22 +143,22 @@ export async function runDocumenter(options: DocumenterOptions): Promise<Documen
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    // 임시 파일 정리
+    // Clean up temp file
     try {
       await fs.unlink(promptFile);
     } catch {
-      // 무시
+      // Ignore
     }
   }
 }
 
 /**
- * Claude CLI 실행
+ * Run Claude CLI
  */
 async function runClaudeCli(
   promptFile: string,
   cwd: string,
-  timeoutMs: number = 120000, // 2분 기본 (문서화는 빠름)
+  timeoutMs: number = 120000, // 2 min default (docs are fast)
   model?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -183,7 +183,7 @@ async function runClaudeCli(
       stderr += data.toString();
     });
 
-    // 타임아웃 설정 (0 이하면 무제한)
+    // Set timeout (unlimited if <= 0)
     let timer: NodeJS.Timeout | null = null;
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
@@ -212,11 +212,11 @@ async function runClaudeCli(
 }
 
 /**
- * Documenter 출력 파싱
+ * Parse Documenter output
  */
 function parseDocumenterOutput(output: string): DocumenterResult {
   try {
-    // Claude JSON 배열에서 result 추출
+    // Extract result from Claude JSON array
     const match = output.match(/\[[\s\S]*\]/);
     if (!match) {
       return extractFromText(output);
@@ -236,7 +236,7 @@ function parseDocumenterOutput(output: string): DocumenterResult {
       return extractFromText(output);
     }
 
-    // 결과에서 JSON 블록 추출
+    // Extract JSON block from result
     return extractResultJson(resultText) || extractFromText(resultText);
   } catch (error) {
     console.error('[Documenter] Parse error:', error);
@@ -245,13 +245,13 @@ function parseDocumenterOutput(output: string): DocumenterResult {
 }
 
 /**
- * 결과에서 JSON 블록 추출
+ * Extract JSON block from result
  */
 function extractResultJson(text: string): DocumenterResult | null {
-  // ```json ... ``` 블록 찾기
+  // Find ```json ... ``` block
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (!jsonMatch) {
-    // 일반 JSON 객체 찾기
+    // Find plain JSON object
     const objMatch = text.match(/\{\s*"success"\s*:/);
     if (!objMatch) return null;
 
@@ -287,7 +287,7 @@ function extractResultJson(text: string): DocumenterResult | null {
 }
 
 /**
- * 결과 정규화
+ * Normalize result
  */
 function normalizeResult(parsed: any): DocumenterResult {
   return {
@@ -301,14 +301,14 @@ function normalizeResult(parsed: any): DocumenterResult {
 }
 
 /**
- * 텍스트에서 결과 추출 (JSON 파싱 실패 시)
+ * Extract result from text (when JSON parsing fails)
  */
 function extractFromText(text: string): DocumenterResult {
-  // 성공 여부 추정
+  // Estimate success
   const hasError = /error|fail|exception|cannot/i.test(text);
   const hasSuccess = /success|completed|updated|documented/i.test(text);
 
-  // 업데이트된 파일 추출
+  // Extract updated files
   const updatedFiles: string[] = [];
   const filePatterns = [
     /(?:updated?|modified?|created?|wrote?):\s*(.+\.(?:md|rst|txt))/gi,
@@ -325,7 +325,7 @@ function extractFromText(text: string): DocumenterResult {
     }
   }
 
-  // Changelog 엔트리 추출
+  // Extract changelog entry
   let changelogEntry: string | undefined;
   const changelogMatch = text.match(/(?:changelog|변경\s*로그)[\s:]*([^\n]+)/i);
   if (changelogMatch) {
@@ -343,7 +343,7 @@ function extractFromText(text: string): DocumenterResult {
 }
 
 /**
- * 요약 추출
+ * Extract summary
  */
 function extractSummary(text: string): string {
   const lines = text.split('\n').filter((l) => l.trim().length > 10);
@@ -354,7 +354,7 @@ function extractSummary(text: string): string {
 }
 
 /**
- * 에러 메시지 추출
+ * Extract error message
  */
 function extractErrorMessage(text: string): string {
   const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
@@ -375,7 +375,7 @@ function extractErrorMessage(text: string): string {
 // ============================================
 
 /**
- * Documenter 결과를 Discord 메시지로 포맷
+ * Format Documenter result as Discord message
  */
 export function formatDocReport(result: DocumenterResult): string {
   const statusEmoji = result.success ? '📝' : '❌';

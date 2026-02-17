@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - PR Auto-Improvement Processor
-// Open PR 자동 개선 (Worker-Reviewer 반복 루프)
+// Open PR auto-improvement (Worker-Reviewer iteration loop)
 // ============================================
 
 import { Cron } from 'croner';
@@ -73,7 +73,7 @@ export class PRProcessor {
   }
 
   /**
-   * 스케줄 시작
+   * Start schedule
    */
   start(): void {
     console.log(`[PRProcessor] Starting (schedule: ${this.config.schedule})`);
@@ -82,7 +82,7 @@ export class PRProcessor {
       await this.processPRs();
     });
 
-    // 30초 후 초기 실행
+    // Initial run after 30 seconds
     setTimeout(() => {
       void this.processPRs().catch((err) => {
         console.error('[PRProcessor] Initial run error:', err);
@@ -91,7 +91,7 @@ export class PRProcessor {
   }
 
   /**
-   * 스케줄 중지
+   * Stop schedule
    */
   stop(): void {
     if (this.cronJob) {
@@ -102,7 +102,7 @@ export class PRProcessor {
   }
 
   /**
-   * 모든 레포의 open PR 처리
+   * Process open PRs across all repos
    */
   async processPRs(): Promise<void> {
     if (this.processing) {
@@ -125,7 +125,7 @@ export class PRProcessor {
         for (const pr of prs) {
           const key = `${repo}#${pr.number}`;
 
-          // 쿨다운 체크
+          // Cooldown check
           const existing = state.prs[key];
           if (existing?.lastProcessed) {
             const hoursSince =
@@ -136,7 +136,7 @@ export class PRProcessor {
             }
           }
 
-          // CI 체크 상태 확인 — 실패한 PR만 처리
+          // Check CI status — only process PRs with failures
           const { getPRChecks } = await import('./github.js');
           const checks = await getPRChecks(repo, pr.number);
           const hasFailure = checks.some(
@@ -147,14 +147,14 @@ export class PRProcessor {
             continue;
           }
 
-          // 프로젝트 경로 매핑
+          // Map repo to local project path
           const projectPath = this.mapRepoToProject(repo);
           if (!projectPath) {
             console.log(`[PRProcessor] ${key}: no local project found, skipping`);
             continue;
           }
 
-          // TaskScheduler 동시성 체크
+          // TaskScheduler concurrency check
           try {
             const scheduler = getScheduler();
             if (scheduler.isProjectBusy(projectPath)) {
@@ -163,13 +163,13 @@ export class PRProcessor {
             }
             if (!scheduler.hasAvailableSlot()) {
               console.log(`[PRProcessor] ${key}: no available slots`);
-              break; // 슬롯 없으면 전체 중단
+              break; // No available slots, stop entirely
             }
           } catch {
-            // Scheduler 미초기화 시 무시하고 진행
+            // Ignore if scheduler not initialized
           }
 
-          // PR 처리
+          // Process PR
           state.prs[key] = {
             repo,
             prNumber: pr.number,
@@ -192,7 +192,7 @@ export class PRProcessor {
   }
 
   /**
-   * 단일 PR 처리
+   * Process a single PR
    */
   private async processPR(
     pr: PRInfo,
@@ -202,7 +202,7 @@ export class PRProcessor {
   ): Promise<void> {
     console.log(`[PRProcessor] Processing ${key}: "${pr.title}"`);
 
-    // 현재 브랜치 저장 (복원용)
+    // Save current branch (for restoration)
     let originalBranch = 'main';
     try {
       const { stdout } = await execAsync(
@@ -210,11 +210,11 @@ export class PRProcessor {
       );
       originalBranch = stdout.trim();
     } catch {
-      // 실패 시 main 사용
+      // Fall back to main on failure
     }
 
     try {
-      // 1. PR 상세 컨텍스트 조회
+      // 1. Fetch detailed PR context
       const details = await getPRContext(pr.repo, pr.number);
       if (!details) {
         state.prs[key].status = 'failed';
@@ -222,12 +222,12 @@ export class PRProcessor {
         return;
       }
 
-      // 2. git fetch + checkout PR 브랜치
+      // 2. git fetch + checkout PR branch
       await execAsync(
         `git -C ${projectPath} fetch origin ${pr.branch} && git -C ${projectPath} checkout ${pr.branch}`
       );
 
-      // 3. TaskItem 구성
+      // 3. Build TaskItem
       const diffSnippet = details.diff.slice(0, 5000);
       const failedChecksList = details.failedChecks
         ?.map((c) => `- ${c.name}: ${c.conclusion}`)
@@ -266,7 +266,7 @@ export class PRProcessor {
         createdAt: Date.now(),
       };
 
-      // 4. 파이프라인 실행
+      // 4. Run pipeline
       const pipeline = createPipelineFromConfig(
         this.config.roles,
         this.config.maxIterations
@@ -275,12 +275,12 @@ export class PRProcessor {
 
       state.prs[key].iterations = result.iterations;
 
-      // 5. 결과 처리
+      // 5. Handle results
       if (result.success) {
         // git push
         await execAsync(`git -C ${projectPath} push origin ${pr.branch}`);
 
-        // PR 코멘트
+        // PR comment
         const summary = result.workerResult?.summary || 'CI issues fixed';
         const filesChanged = result.workerResult?.filesChanged?.join(', ') || 'N/A';
         await commentOnPR(
@@ -296,7 +296,7 @@ export class PRProcessor {
           ].join('\n')
         );
 
-        // Discord 보고
+        // Report to Discord
         await reportEvent({
           type: 'pr_improved',
           session: 'pr-processor',
@@ -309,7 +309,7 @@ export class PRProcessor {
         console.log(`[PRProcessor] ${key}: SUCCESS`);
 
       } else {
-        // 실패 시 PR 코멘트
+        // Comment on PR for failure
         const reason = result.reviewResult?.feedback
           || result.workerResult?.error
           || 'Pipeline failed after max iterations';
@@ -325,7 +325,7 @@ export class PRProcessor {
           ].join('\n')
         );
 
-        // Discord 보고
+        // Report to Discord
         await reportEvent({
           type: 'pr_failed',
           session: 'pr-processor',
@@ -346,7 +346,7 @@ export class PRProcessor {
       state.prs[key].lastError = errorMsg;
 
     } finally {
-      // 브랜치 복원
+      // Restore branch
       try {
         await execAsync(`git -C ${projectPath} checkout ${originalBranch}`);
       } catch (restoreErr) {
@@ -356,7 +356,7 @@ export class PRProcessor {
   }
 
   /**
-   * 레포 → 로컬 프로젝트 경로 매핑
+   * Map repo to local project path
    */
   private mapRepoToProject(repo: string): string | null {
     // "Intrect-io/STONKS" → "STONKS"

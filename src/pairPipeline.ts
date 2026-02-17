@@ -1,6 +1,6 @@
 // ============================================
 // Claude Swarm - Pair Pipeline
-// Worker → Reviewer → Tester → Documenter 파이프라인
+// Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 
 import { EventEmitter } from 'node:events';
@@ -22,15 +22,15 @@ import { StuckDetector, createStuckDetector } from './stuckDetector.js';
 // ============================================
 
 export interface PipelineConfig {
-  /** 활성화된 스테이지 목록 (순서대로 실행) */
+  /** List of active stages (executed in order) */
   stages: PipelineStage[];
-  /** 테스트 실패 시 계속 진행 여부 */
+  /** Whether to continue on test failure */
   continueOnTestFail?: boolean;
-  /** 변경 없으면 Documenter 스킵 */
+  /** Skip Documenter if no changes */
   skipDocumenterIfNoChange?: boolean;
-  /** 전체 iteration 최대 횟수 (Worker → Reviewer → Tester 한 사이클) */
+  /** Max total iterations (one cycle = Worker → Reviewer → Tester) */
   maxIterations?: number;
-  /** 역할별 설정 */
+  /** Per-role configuration */
   roles?: {
     worker?: RoleConfig;
     reviewer?: RoleConfig;
@@ -52,12 +52,19 @@ export interface PipelineResult {
   stages: StageResult[];
   finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled';
   totalDuration: number;
-  /** 완료된 전체 iteration 횟수 */
+  /** Total number of completed iterations */
   iterations: number;
   workerResult?: WorkerResult;
   reviewResult?: ReviewResult;
   testerResult?: TesterResult;
   documenterResult?: DocumenterResult;
+  /** Task context (for reporting) */
+  taskContext?: {
+    issueIdentifier?: string;
+    projectName?: string;
+    projectPath?: string;
+    taskTitle?: string;
+  };
 }
 
 export interface PipelineContext {
@@ -65,7 +72,7 @@ export interface PipelineContext {
   projectPath: string;
   session: PairSession;
   config: PipelineConfig;
-  /** 현재 iteration 번호 (1-based) */
+  /** Current iteration number (1-based) */
   currentIteration: number;
   workerResult?: WorkerResult;
   reviewResult?: ReviewResult;
@@ -103,7 +110,7 @@ export class PairPipeline extends EventEmitter {
       maxIterations: 3,
       ...config,
     };
-    // Stuck detector 초기화
+    // Initialize stuck detector
     this.stuckDetector = createStuckDetector({
       sameErrorRepeat: 2,
       revisionLoop: 4,
@@ -115,20 +122,20 @@ export class PairPipeline extends EventEmitter {
   // ============================================
 
   /**
-   * 파이프라인 실행
+   * Run pipeline
    *
-   * 1 iteration = Worker → Reviewer → Tester 전체 통과
-   * 어느 단계에서 실패해도 Worker로 돌아감 (maxIterations까지)
+   * 1 iteration = full pass through Worker → Reviewer → Tester
+   * On failure at any stage, returns to Worker (up to maxIterations)
    */
   async run(task: TaskItem, projectPath: string): Promise<PipelineResult> {
     const startTime = Date.now();
     const stages: StageResult[] = [];
     const maxIterations = this.config.maxIterations ?? 3;
 
-    // Stuck detector 리셋 (새 파이프라인 실행)
+    // Reset stuck detector (new pipeline run)
     this.stuckDetector.reset();
 
-    // 세션 생성
+    // Create session
     const session = agentPair.createPairSession({
       taskId: task.issueIdentifier || task.issueId || task.id,
       taskTitle: task.title,
@@ -150,14 +157,14 @@ export class PairPipeline extends EventEmitter {
     };
 
     try {
-      // 전체 iteration 루프: Worker → Reviewer → Tester
+      // Full iteration loop: Worker → Reviewer → Tester
       const iterationResult = await this.runFullIterationLoop(context, stages);
 
       if (!iterationResult.success) {
         return this.buildResult(context, stages, startTime);
       }
 
-      // 전체 통과 후 Documenter 실행
+      // Run Documenter after all stages pass
       if (this.hasStage('documenter') && context.workerResult?.success) {
         if (
           this.config.skipDocumenterIfNoChange &&
@@ -167,11 +174,11 @@ export class PairPipeline extends EventEmitter {
         } else {
           const documenterResult = await this.runStage('documenter', context);
           stages.push(documenterResult);
-          // Documenter 실패는 전체 실패로 처리하지 않음
+          // Documenter failure does not cause overall failure
         }
       }
 
-      // 성공
+      // Success
       agentPair.updateSessionStatus(session.id, 'approved');
       return this.buildResult(context, stages, startTime);
 
@@ -189,6 +196,12 @@ export class PairPipeline extends EventEmitter {
         reviewResult: context.reviewResult,
         testerResult: context.testerResult,
         documenterResult: context.documenterResult,
+        taskContext: {
+          issueIdentifier: context.task.issueIdentifier || context.task.issueId,
+          projectName: context.task.linearProject?.name,
+          projectPath: context.projectPath,
+          taskTitle: context.task.title,
+        },
       };
     }
   }
@@ -198,14 +211,14 @@ export class PairPipeline extends EventEmitter {
   // ============================================
 
   /**
-   * 스테이지가 활성화되어 있는지 확인
+   * Check if a stage is enabled
    */
   private hasStage(stage: PipelineStage): boolean {
     return this.config.stages.includes(stage);
   }
 
   /**
-   * 단일 스테이지 실행
+   * Run a single stage
    */
   private async runStage(
     stage: PipelineStage,
@@ -229,6 +242,8 @@ export class PairPipeline extends EventEmitter {
               : undefined,
             timeoutMs: this.config.roles?.worker?.timeoutMs ?? 0,
             model: this.config.roles?.worker?.model,
+            issueIdentifier: context.task.issueIdentifier || context.task.issueId,
+            projectName: context.task.linearProject?.name,
           });
           agentPair.saveWorkerResult(context.session.id, result as WorkerResult);
           context.workerResult = result as WorkerResult;
@@ -312,7 +327,7 @@ export class PairPipeline extends EventEmitter {
   }
 
   /**
-   * 스테이지 성공 여부 판단
+   * Determine stage success
    */
   private isStageSuccess(
     stage: PipelineStage,
@@ -341,11 +356,11 @@ export class PairPipeline extends EventEmitter {
   // ============================================
 
   /**
-   * 전체 iteration 루프
+   * Full iteration loop
    *
-   * 1 iteration = Worker → Reviewer → Tester 전체 통과
-   * 어느 단계에서 실패(revise)해도 다음 iteration으로 Worker부터 재시작
-   * reject는 즉시 종료
+   * 1 iteration = full pass through Worker → Reviewer → Tester
+   * On failure (revise) at any stage, restart from Worker in next iteration
+   * reject = immediate termination
    */
   private async runFullIterationLoop(
     context: PipelineContext,
@@ -356,7 +371,7 @@ export class PairPipeline extends EventEmitter {
     const hasReviewer = this.hasStage('reviewer');
     const hasTester = this.hasStage('tester');
 
-    // Worker 없으면 의미 없음
+    // No point without a worker
     if (!hasWorker) {
       console.log('[Pipeline] No worker stage configured');
       return { success: false };
@@ -365,7 +380,7 @@ export class PairPipeline extends EventEmitter {
     while (context.currentIteration < maxIterations) {
       context.currentIteration++;
 
-      // Stuck 감지 체크 (iteration 시작 전)
+      // Stuck detection check (before iteration starts)
       const stuckCheck = this.stuckDetector.check();
       if (stuckCheck.isStuck) {
         console.error(`[Pipeline] STUCK DETECTED: ${stuckCheck.reason}`);
@@ -392,7 +407,7 @@ export class PairPipeline extends EventEmitter {
       const workerResult = await this.runStage('worker', context);
       stages.push(workerResult);
 
-      // Stuck detector에 Worker 결과 기록
+      // Record Worker result in stuck detector
       this.stuckDetector.addEntry({
         stage: 'worker',
         success: workerResult.success,
@@ -408,7 +423,7 @@ export class PairPipeline extends EventEmitter {
           stage: 'worker',
           context,
         });
-        continue; // 다음 iteration
+        continue; // Next iteration
       }
 
       // ========== REVIEWER ==========
@@ -419,7 +434,7 @@ export class PairPipeline extends EventEmitter {
 
         const decision = (reviewerResult.result as ReviewResult).decision;
 
-        // Stuck detector에 Reviewer 결과 기록
+        // Record Reviewer result in stuck detector
         this.stuckDetector.addEntry({
           stage: 'reviewer',
           success: reviewerResult.success,
@@ -429,14 +444,14 @@ export class PairPipeline extends EventEmitter {
         });
 
         if (decision === 'reject') {
-          // reject = 즉시 종료
+          // reject = terminate immediately
           console.log('[Pipeline] Reviewer rejected');
           agentPair.updateSessionStatus(context.session.id, 'rejected');
           return { success: false };
         }
 
         if (decision === 'revise') {
-          // revise = 다음 iteration
+          // revise = next iteration
           console.log('[Pipeline] Reviewer requested revision');
           this.emit('iteration:fail', {
             iteration: context.currentIteration,
@@ -447,7 +462,7 @@ export class PairPipeline extends EventEmitter {
           continue;
         }
 
-        // approve → Tester로 진행
+        // approve → proceed to Tester
       }
 
       // ========== TESTER ==========
@@ -456,7 +471,7 @@ export class PairPipeline extends EventEmitter {
         stages.push(testerResult);
 
         if (!testerResult.success && !this.config.continueOnTestFail) {
-          // 테스트 실패 → 피드백 설정 후 다음 iteration
+          // Test failed → set feedback then next iteration
           console.log('[Pipeline] Tester failed, retrying...');
 
           if (context.testerResult) {
@@ -478,7 +493,7 @@ export class PairPipeline extends EventEmitter {
         }
       }
 
-      // ========== 전체 통과 ==========
+      // ========== ALL PASSED ==========
       console.log(`[Pipeline] Iteration ${context.currentIteration} completed successfully`);
       this.emit('iteration:complete', {
         iteration: context.currentIteration,
@@ -487,7 +502,7 @@ export class PairPipeline extends EventEmitter {
       return { success: true };
     }
 
-    // maxIterations 초과
+    // maxIterations exceeded
     console.log(`[Pipeline] Max iterations (${maxIterations}) exceeded`);
     agentPair.updateSessionStatus(context.session.id, 'failed');
     return { success: false };
@@ -498,7 +513,7 @@ export class PairPipeline extends EventEmitter {
   // ============================================
 
   /**
-   * 파이프라인 결과 생성
+   * Build pipeline result
    */
   private buildResult(
     context: PipelineContext,
@@ -520,6 +535,12 @@ export class PairPipeline extends EventEmitter {
       reviewResult: context.reviewResult,
       testerResult: context.testerResult,
       documenterResult: context.documenterResult,
+      taskContext: {
+        issueIdentifier: context.task.issueIdentifier || context.task.issueId,
+        projectName: context.task.linearProject?.name,
+        projectPath: context.projectPath,
+        taskTitle: context.task.title,
+      },
     };
 
     if (success) {
@@ -537,7 +558,7 @@ export class PairPipeline extends EventEmitter {
 // ============================================
 
 /**
- * 기본 파이프라인 생성 (Worker + Reviewer)
+ * Create default pipeline (Worker + Reviewer)
  */
 export function createDefaultPipeline(maxIterations = 3): PairPipeline {
   return new PairPipeline({
@@ -547,7 +568,7 @@ export function createDefaultPipeline(maxIterations = 3): PairPipeline {
 }
 
 /**
- * 전체 파이프라인 생성 (Worker + Reviewer + Tester + Documenter)
+ * Create full pipeline (Worker + Reviewer + Tester + Documenter)
  */
 export function createFullPipeline(
   config?: Partial<PipelineConfig>
@@ -562,7 +583,7 @@ export function createFullPipeline(
 }
 
 /**
- * 설정 기반 파이프라인 생성
+ * Create pipeline from configuration
  */
 export function createPipelineFromConfig(
   roles: PipelineConfig['roles'],
@@ -595,7 +616,7 @@ export function createPipelineFromConfig(
 // ============================================
 
 /**
- * 파이프라인 결과를 Discord 메시지로 포맷
+ * Format pipeline result as a Discord message
  */
 export function formatPipelineResult(result: PipelineResult): string {
   const statusEmoji = {
@@ -606,6 +627,25 @@ export function formatPipelineResult(result: PipelineResult): string {
   }[result.finalStatus];
 
   const lines: string[] = [];
+
+  // Task context header
+  if (result.taskContext) {
+    const ctx = result.taskContext;
+    const parts: string[] = [];
+    // projectName fallback: extract from projectPath if not provided
+    const displayName = ctx.projectName
+      || (ctx.projectPath ? ctx.projectPath.split('/').pop() || '' : '');
+    if (displayName) parts.push(`📁 ${displayName}`);
+    if (ctx.issueIdentifier) parts.push(`🔖 ${ctx.issueIdentifier}`);
+    if (ctx.projectPath) parts.push(`\`${ctx.projectPath.split('/').slice(-2).join('/')}\``);
+    if (parts.length > 0) {
+      lines.push(parts.join(' | '));
+    }
+    if (ctx.taskTitle) {
+      lines.push(`📋 ${ctx.taskTitle}`);
+    }
+    lines.push('');
+  }
 
   lines.push(`${statusEmoji} **파이프라인 ${result.finalStatus.toUpperCase()}**`);
   lines.push('');
