@@ -9,6 +9,7 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import { checkWorkAllowed } from '../support/timeWindow.js';
+import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { t, getDateLocale } from '../locale/index.js';
 
 // Schedule storage path
@@ -145,6 +146,12 @@ async function runClaudeCli(
 
       proc.on('close', (code) => {
         runningProcesses.delete(jobId);
+
+        // Extract cost from stream-json output
+        const costInfo = extractCostFromStreamJson(stdout);
+        if (costInfo) {
+          console.log(`[Scheduler] Job ${jobId} cost: ${formatCost(costInfo)}`);
+        }
 
         // Extract result from stream-json output
         let resultText = stdout;

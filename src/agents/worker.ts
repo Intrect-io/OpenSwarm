@@ -8,6 +8,7 @@ import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 import * as gitTracker from '../support/gitTracker.js';
+import { extractCostFromJson, formatCost } from '../support/costTracker.js';
 import { t, getPrompts } from '../locale/index.js';
 
 /**
@@ -189,10 +190,18 @@ async function runClaudeCli(
  */
 function parseWorkerOutput(output: string): WorkerResult {
   try {
+    // Extract cost info
+    const costInfo = extractCostFromJson(output);
+    if (costInfo) {
+      console.log(`[Worker] Cost: ${formatCost(costInfo)}`);
+    }
+
     // Extract result from Claude JSON array
     const match = output.match(/\[[\s\S]*\]/);
     if (!match) {
-      return extractFromText(output);
+      const result = extractFromText(output);
+      result.costInfo = costInfo;
+      return result;
     }
 
     const arr = JSON.parse(match[0]);
@@ -206,11 +215,15 @@ function parseWorkerOutput(output: string): WorkerResult {
     }
 
     if (!resultText) {
-      return extractFromText(output);
+      const result = extractFromText(output);
+      result.costInfo = costInfo;
+      return result;
     }
 
     // Extract JSON block from result
-    return extractResultJson(resultText) || extractFromText(resultText);
+    const result = extractResultJson(resultText) || extractFromText(resultText);
+    result.costInfo = costInfo;
+    return result;
   } catch (error) {
     console.error('[Worker] Parse error:', error);
     return extractFromText(output);

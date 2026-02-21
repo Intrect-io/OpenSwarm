@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { type CostInfo, extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { t, getPrompts } from '../locale/index.js';
 
 // ============================================
@@ -41,6 +42,7 @@ export interface PlannerResult {
   subTasks: SubTask[];
   totalEstimatedMinutes: number;
   error?: string;
+  costInfo?: CostInfo;
 }
 
 // ============================================
@@ -73,7 +75,14 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
       options.onLog
     );
 
-    return parsePlannerOutput(output, options.taskTitle);
+    const costInfo = extractCostFromStreamJson(output);
+    if (costInfo) {
+      console.log(`[Planner] Cost: ${formatCost(costInfo)}`);
+    }
+
+    const result = parsePlannerOutput(output, options.taskTitle);
+    result.costInfo = costInfo;
+    return result;
   } catch (error) {
     return {
       success: false,
@@ -102,7 +111,7 @@ async function runClaudeCli(
   return new Promise<string>((resolve, reject) => {
     const proc = spawn(
       'claude',
-      ['--output-format', 'text', '--max-turns', '1', '-p', prompt],
+      ['--output-format', 'stream-json', '--max-turns', '1', '-p', prompt],
       {
         shell: false,
         cwd: '/tmp',   // Neutral dir — no project .claude/ settings loaded
@@ -116,7 +125,20 @@ async function runClaudeCli(
       const text = chunk.toString();
       output += text;
       if (onLog) {
-        text.split('\n').filter((l: string) => l.trim()).forEach((l: string) => onLog(l));
+        // Stream assistant text lines to dashboard
+        for (const line of text.split('\n').filter((l: string) => l.trim())) {
+          try {
+            const event = JSON.parse(line);
+            if (event.type === 'assistant' && event.message?.content) {
+              for (const block of event.message.content) {
+                if (block.type === 'text') onLog(block.text);
+              }
+            }
+          } catch {
+            // Not a JSON line, pass through
+            onLog(line);
+          }
+        }
       }
     });
 

@@ -9,6 +9,7 @@ import type { WorkerResult, ReviewResult, PairSession } from './agentPair.js';
 import type { TesterResult } from './tester.js';
 import type { DocumenterResult } from './documenter.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
+import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
 
 import { broadcastEvent } from '../core/eventHub.js';
 import * as agentPair from './agentPair.js';
@@ -68,6 +69,8 @@ export interface PipelineResult {
   };
   /** PR URL (worktree mode에서 자동 생성된 PR) */
   prUrl?: string;
+  /** Total cost across all stages */
+  totalCost?: CostInfo;
 }
 
 export interface PipelineContext {
@@ -536,6 +539,19 @@ export class PairPipeline extends EventEmitter {
     const finalStatus = session?.status as PipelineResult['finalStatus'] || 'failed';
     const success = finalStatus === 'approved';
 
+    // Aggregate costs from all stages
+    const stageCosts: (CostInfo | undefined)[] = [];
+    if (context.workerResult?.costInfo) stageCosts.push(context.workerResult.costInfo);
+    if (context.reviewResult?.costInfo) stageCosts.push(context.reviewResult.costInfo);
+    if (context.testerResult?.costInfo) stageCosts.push(context.testerResult.costInfo);
+    if (context.documenterResult?.costInfo) stageCosts.push(context.documenterResult.costInfo);
+    const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
+
+    if (totalCost) {
+      console.log(`[Pipeline] Total cost: ${formatCost(totalCost)}`);
+      broadcastEvent({ type: 'task:cost', data: { taskId: context.task.id, cost: totalCost } });
+    }
+
     const result: PipelineResult = {
       success,
       sessionId: context.session.id,
@@ -553,6 +569,7 @@ export class PairPipeline extends EventEmitter {
         projectPath: context.projectPath,
         taskTitle: context.task.title,
       },
+      totalCost,
     };
 
     if (success) {
@@ -664,6 +681,10 @@ export function formatPipelineResult(result: PipelineResult): string {
   lines.push(`**세션:** \`${result.sessionId}\``);
   lines.push(`**Iterations:** ${result.iterations}`);
   lines.push(`**소요 시간:** ${(result.totalDuration / 1000).toFixed(1)}s`);
+
+  if (result.totalCost) {
+    lines.push(`**Cost:** $${result.totalCost.costUsd.toFixed(4)} (${formatCost(result.totalCost)})`);
+  }
 
   lines.push('');
   lines.push('**스테이지:**');

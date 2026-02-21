@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
+import { extractCostFromStreamJson, formatCost } from './costTracker.js';
 
 /**
  * Known repository list (alias -> path)
@@ -149,7 +150,7 @@ export async function runDevTask(
   // Run Claude CLI (bypass permissions for autonomous execution)
   const claudeProcess = spawn('claude', [
     '-p', task,
-    '--output-format', 'text',
+    '--output-format', 'stream-json',
     '--permission-mode', 'bypassPermissions'
   ], {
     cwd: path,
@@ -184,11 +185,28 @@ export async function runDevTask(
 
   // Handle completion
   claudeProcess.on('close', (code) => {
+    // Extract cost from stream-json output
+    const costInfo = extractCostFromStreamJson(devTask.output);
+    if (costInfo) {
+      console.log(`[Dev] ${repo} cost: ${formatCost(costInfo)}`);
+    }
+
+    // Extract result text from stream-json for output
+    let resultText = devTask.output;
+    try {
+      const lines = devTask.output.split('\n').filter(Boolean);
+      const resultLine = lines.find((l) => l.includes('"type":"result"'));
+      if (resultLine) {
+        const parsed = JSON.parse(resultLine);
+        if (parsed.result) resultText = parsed.result;
+      }
+    } catch { /* use original */ }
+
     // Generate report file
     const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
     generateReport(devTask, code, duration);
 
-    onComplete?.(devTask.output, code);
+    onComplete?.(resultText, code);
     activeTasks.delete(taskId);
   });
 

@@ -5,6 +5,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
+import type { CostInfo } from '../support/costTracker.js';
 
 // ============================================
 // Types
@@ -27,6 +28,7 @@ export type HubEvent =
   | { type: 'pipeline:iteration'; data: { taskId: string; iteration: number } }
   | { type: 'log'; data: { taskId: string; stage: string; line: string } }
   | { type: 'project:toggled'; data: { projectPath: string; enabled: boolean } }
+  | { type: 'task:cost'; data: { taskId: string; cost: CostInfo } }
   | { type: 'chat:user'; data: { text: string; ts: number } }
   | { type: 'chat:agent'; data: { text: string; ts: number } }
   | { type: 'heartbeat' };

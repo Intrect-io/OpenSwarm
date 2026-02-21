@@ -331,6 +331,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="stat"><span class="stat-label">SSE</span><span class="stat-val cyan" id="stat-sse">-</span></div>
     <span class="stat-divider">│</span>
     <div class="stat"><span class="stat-label">UPTIME</span><span class="stat-val" id="stat-uptime">-</span></div>
+    <span class="stat-divider">│</span>
+    <div class="stat"><span class="stat-label">COST</span><span class="stat-val cyan" id="stat-cost">$0.00</span></div>
   </div>
 
   <!-- MAIN GRID -->
@@ -419,6 +421,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     let logLines = [];
     let stageRows = [];
     let chatBusy = false;
+    let totalCostUsd = 0;
     const taskProjectMap = new Map();
     // taskId → { title, issueIdentifier } for pipeline display
     const taskTitleMap = new Map();
@@ -465,6 +468,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         case "project:toggled": {
           const p = projects.find(x => x.path === ev.data.projectPath);
           if (p) { p.enabled = ev.data.enabled; renderProjects(); }
+          break;
+        }
+        case "task:cost": {
+          totalCostUsd += ev.data.cost?.costUsd ?? 0;
+          document.getElementById("stat-cost").textContent = "$" + totalCostUsd.toFixed(2);
           break;
         }
         case "chat:agent": appendChatMsg("agent", ev.data.text, null, ev.data.ts); break;

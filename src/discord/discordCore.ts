@@ -17,6 +17,7 @@ import {
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import type { SwarmEvent, AgentStatus } from '../core/types.js';
+import { extractCostFromJson, formatCost } from '../support/costTracker.js';
 import * as memory from '../memory/index.js';
 import { t, getPrompts, getDateLocale } from '../locale/index.js';
 
@@ -750,6 +751,12 @@ const DESTRUCTIVE_PATTERNS = [
  */
 function parseClaudeJson(output: string): { result: string; toolCalls: string[] } {
   const toolCalls: string[] = [];
+
+  // Extract cost
+  const costInfo = extractCostFromJson(output);
+  if (costInfo) {
+    console.log(`[Discord] Claude cost: ${formatCost(costInfo)}`);
+  }
 
   try {
     const match = output.match(/\[[\s\S]*\]/);

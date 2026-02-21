@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent } from '../core/eventHub.js';
+import { extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { scanLocalProjects } from './projectMapper.js';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
 import { DASHBOARD_HTML } from './dashboardHtml.js';
@@ -306,14 +307,30 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         const response = await new Promise<string>((resolve) => {
           const proc = spawn(
             'claude',
-            ['--output-format', 'text', '-p', contextPrompt],
+            ['--output-format', 'stream-json', '-p', contextPrompt],
             { shell: false, cwd: process.cwd(), env: process.env, stdio: ['ignore', 'pipe', 'pipe'] }
           );
           let out = '';
           proc.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
-          proc.on('close', () => resolve(out.trim() || '[No response]'));
+          proc.on('close', () => {
+            // Extract cost
+            const costInfo = extractCostFromStreamJson(out);
+            if (costInfo) {
+              console.log(`[Web Chat] Cost: ${formatCost(costInfo)}`);
+            }
+            // Extract result text from stream-json
+            let resultText = '';
+            for (const line of out.split('\n').filter(Boolean)) {
+              try {
+                const event = JSON.parse(line);
+                if (event.type === 'result' && event.result) {
+                  resultText = event.result;
+                }
+              } catch { /* ignore */ }
+            }
+            resolve(resultText.trim() || out.trim() || '[No response]');
+          });
           proc.on('error', (e: Error) => resolve(`[Error: ${e.message}]`));
-          // 복잡한 질문은 시간이 걸릴 수 있으므로 3분으로 확장
           setTimeout(() => { proc.kill(); resolve('[Response timeout — try a shorter question]'); }, 180000);
         });
 

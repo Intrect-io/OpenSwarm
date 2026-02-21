@@ -4,6 +4,7 @@
 // ============================================
 
 import { randomUUID } from 'node:crypto';
+import type { CostInfo } from '../support/costTracker.js';
 
 // ============================================
 // Types
@@ -19,6 +20,7 @@ export interface WorkerResult {
   commands: string[];
   output: string;
   error?: string;
+  costInfo?: CostInfo;
 }
 
 /**
@@ -34,6 +36,7 @@ export interface ReviewResult {
   feedback: string;
   issues?: string[];
   suggestions?: string[];
+  costInfo?: CostInfo;
 }
 
 /**

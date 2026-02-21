@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
+import { type CostInfo, extractCostFromJson, formatCost } from '../support/costTracker.js';
 
 /**
  * Expand ~ path to home directory
@@ -38,6 +39,7 @@ export interface DocumenterResult {
   apiDocsUpdated: boolean;
   summary: string;
   error?: string;
+  costInfo?: CostInfo;
 }
 
 // ============================================
@@ -216,10 +218,17 @@ async function runClaudeCli(
  */
 function parseDocumenterOutput(output: string): DocumenterResult {
   try {
+    const costInfo = extractCostFromJson(output);
+    if (costInfo) {
+      console.log(`[Documenter] Cost: ${formatCost(costInfo)}`);
+    }
+
     // Extract result from Claude JSON array
     const match = output.match(/\[[\s\S]*\]/);
     if (!match) {
-      return extractFromText(output);
+      const result = extractFromText(output);
+      result.costInfo = costInfo;
+      return result;
     }
 
     const arr = JSON.parse(match[0]);
@@ -233,11 +242,15 @@ function parseDocumenterOutput(output: string): DocumenterResult {
     }
 
     if (!resultText) {
-      return extractFromText(output);
+      const result = extractFromText(output);
+      result.costInfo = costInfo;
+      return result;
     }
 
     // Extract JSON block from result
-    return extractResultJson(resultText) || extractFromText(resultText);
+    const result = extractResultJson(resultText) || extractFromText(resultText);
+    result.costInfo = costInfo;
+    return result;
   } catch (error) {
     console.error('[Documenter] Parse error:', error);
     return extractFromText(output);
