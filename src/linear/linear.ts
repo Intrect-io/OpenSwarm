@@ -186,8 +186,8 @@ export async function getMyIssues(
 
   const filter: any = {
     team: { id: { eq: teamId } },
-    // Fetch Todo + Backlog: Todo = ready to execute, Backlog = display only (not auto-executed)
-    state: { name: { in: ['Todo', 'Backlog'] } },
+    // Fetch Todo + In Progress + Backlog: executable = Todo/In Progress, Backlog = display only
+    state: { name: { in: ['Todo', 'In Progress', 'Backlog'] } },
   };
 
   // Add label filter if agentLabel is provided
@@ -197,7 +197,7 @@ export async function getMyIssues(
 
   const issues = await linear.issues({
     filter,
-    first: 50,
+    first: 100,
   });
 
   const result: LinearIssueInfo[] = [];
