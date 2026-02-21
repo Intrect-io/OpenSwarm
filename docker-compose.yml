@@ -16,6 +16,7 @@ services:
       - TZ=Asia/Seoul
       - HOME=/home/claude
       - PROJECT_PATH=/app
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
 
     # Load environment from file
     env_file:
@@ -23,7 +24,7 @@ services:
 
     # Port mapping
     ports:
-      - "3002:3000"
+      - "3002:3847"
 
     # Volume mounts
     volumes:
@@ -35,6 +36,9 @@ services:
       - claude-swarm-data:/app/data:rw
       # Config file (if exists)
       - ./config.yaml:/app/config.yaml:ro
+      # Claude CLI auth and git config
+      - ~/.claude:/home/claude/.claude:ro
+      - ~/.gitconfig:/home/claude/.gitconfig:ro
 
     # Resource limits
     deploy:
@@ -48,7 +52,7 @@ services:
 
     # Health check
     healthcheck:
-      test: ["CMD", "node", "-e", "process.exit(0)"]
+      test: ["CMD", "curl", "-f", "http://localhost:3847/api/stats"]
       interval: 30s
       timeout: 10s
       retries: 3

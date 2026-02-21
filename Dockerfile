@@ -42,7 +42,7 @@ RUN apt-get update && \
         ca-certificates \
         curl \
         gnupg \
-        tmux \
+        git \
         && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -58,6 +58,10 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Install Claude CLI
+RUN npm install -g @anthropic-ai/claude-code && \
+    npm cache clean --force
+
 # Create app user for security
 RUN groupadd --gid 1001 nodejs && \
     useradd --uid 1001 --gid nodejs --shell /bin/bash --create-home claude
@@ -72,8 +76,8 @@ RUN npm ci --omit=dev --include=optional && \
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
 
-# Copy Docker-specific configuration
-COPY config-docker.yaml ./config.yaml
+# Copy configuration (use config.yaml from project root)
+COPY config.yaml ./config.yaml
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/config /app/logs /app/data /home/claude/dev && \
@@ -84,12 +88,12 @@ RUN mkdir -p /app/config /app/logs /app/data /home/claude/dev && \
 # Switch to non-root user
 USER claude
 
-# Expose port
-EXPOSE 3000
+# Expose web dashboard port
+EXPOSE 3847
 
-# Health check
+# Health check via web API
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD node -e "process.exit(0)" || exit 1
+    CMD curl -f http://localhost:3847/api/stats || exit 1
 
 # Use dumb-init for proper signal handling
 ENTRYPOINT ["dumb-init", "--"]
