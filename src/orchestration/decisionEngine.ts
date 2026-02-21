@@ -380,7 +380,7 @@ export class DecisionEngine {
   /**
    * Execute task
    */
-  async executeTask(task: TaskItem, workflow: WorkflowConfig): Promise<ExecutorResult> {
+  async executeTask(task: TaskItem, _workflow: WorkflowConfig): Promise<ExecutorResult> {
     console.log(`[DecisionEngine] Executing task: ${task.title}`);
 
     // Update state
