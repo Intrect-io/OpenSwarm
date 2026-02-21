@@ -3,10 +3,8 @@
 // Decompose large issues into 30-min sub-tasks
 // ============================================
 
-import fs from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { writeFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { type CostInfo, extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { t, getPrompts } from '../locale/index.js';
@@ -362,17 +360,6 @@ export function estimateTaskDuration(task: TaskItem): number {
 export function needsDecomposition(task: TaskItem, maxMinutes: number = 30): boolean {
   const estimated = estimateTaskDuration(task);
   return estimated > maxMinutes;
-}
-
-// ============================================
-// Utilities
-// ============================================
-
-function expandPath(p: string): string {
-  if (p.startsWith('~/')) {
-    return p.replace('~', homedir());
-  }
-  return p;
 }
 
 // ============================================

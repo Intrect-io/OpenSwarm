@@ -84,7 +84,7 @@ export async function handleList(msg: Message): Promise<void> {
 /**
  * !run <session> "<task>" - (deprecated) tmux 작업 실행 → !dev 안내
  */
-export async function handleRun(msg: Message, args: string[]): Promise<void> {
+export async function handleRun(msg: Message, _args: string[]): Promise<void> {
   await msg.reply('tmux mode has been removed. Use `!dev <repo> "<task>"` instead.');
 }
 
@@ -129,7 +129,7 @@ export async function handleIssues(msg: Message, _sessionName?: string): Promise
 /**
  * !log <session> [lines] - (deprecated) tmux 로그 → 대시보드 안내
  */
-export async function handleLog(msg: Message, sessionName: string, lines: number): Promise<void> {
+export async function handleLog(msg: Message, _sessionName: string, _lines: number): Promise<void> {
   await msg.reply('tmux mode has been removed. Use web dashboard at /dashboard for logs.');
 }
 

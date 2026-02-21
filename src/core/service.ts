@@ -4,7 +4,6 @@
 
 import type {
   SwarmConfig,
-  AgentSession,
   AgentStatus,
   ServiceState,
 } from './types.js';
