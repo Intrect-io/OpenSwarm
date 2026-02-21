@@ -20,8 +20,8 @@ export interface SwarmStats {
 
 export type HubEvent =
   | { type: 'stats'; data: SwarmStats }
-  | { type: 'task:queued'; data: { taskId: string; title: string; projectPath: string } }
-  | { type: 'task:started'; data: { taskId: string; title: string } }
+  | { type: 'task:queued'; data: { taskId: string; title: string; projectPath: string; issueIdentifier?: string } }
+  | { type: 'task:started'; data: { taskId: string; title: string; issueIdentifier?: string } }
   | { type: 'task:completed'; data: { taskId: string; success: boolean; duration: number } }
   | { type: 'pipeline:stage'; data: { taskId: string; stage: string; status: 'start' | 'complete' | 'fail' } }
   | { type: 'pipeline:iteration'; data: { taskId: string; iteration: number } }

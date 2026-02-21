@@ -229,15 +229,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .sdot.complete { background: var(--green); }
     .sdot.fail   { background: var(--red); }
     .sname { color: var(--white); min-width: 70px; }
-    .stask { color: var(--dim); font-size: 10px; }
-    .sstatus { margin-left: auto; font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; }
+    .stask { color: var(--cyan); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sstatus { margin-left: auto; font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
 
     /* ===== LOG ===== */
     .log-area { font-size: 11px; line-height: 1.6; }
-    .log-line { padding: 1px 0; border-bottom: 1px solid var(--border2); display: flex; gap: 4px; }
-    .ltag { color: var(--green-lo); min-width: 44px; flex-shrink: 0; }
-    .lstage { color: var(--cyan); min-width: 50px; flex-shrink: 0; font-size: 10px; }
-    .ltext { color: var(--dim); word-break: break-all; }
+    .log-line { padding: 2px 0; border-bottom: 1px solid var(--border2); display: flex; gap: 4px; align-items: flex-start; }
+    .ltag { color: var(--green-lo); min-width: 44px; flex-shrink: 0; padding-top: 1px; }
+    .lstage { color: var(--cyan); min-width: 55px; flex-shrink: 0; font-size: 10px; padding-top: 1px; }
+    .ltext { color: var(--dim); word-break: break-word; white-space: pre-wrap; flex: 1; min-width: 0; }
 
     /* ===== CHAT ===== */
     .chat-col { display: flex; flex-direction: column; height: 100%; }
@@ -420,6 +420,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     let stageRows = [];
     let chatBusy = false;
     const taskProjectMap = new Map();
+    // taskId → { title, issueIdentifier } for pipeline display
+    const taskTitleMap = new Map();
 
     // ---- SSE ----
     function connectSSE() {
@@ -441,10 +443,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         case "stats": updateStats(ev.data); break;
         case "task:queued":
           taskProjectMap.set(ev.data.taskId, ev.data.projectPath);
+          taskTitleMap.set(ev.data.taskId, { title: ev.data.title, issueIdentifier: ev.data.issueIdentifier });
           updateProjectTask(ev.data.projectPath, ev.data.taskId, ev.data.title, ev.data.priority, "queued");
           break;
         case "task:started": {
           const p = taskProjectMap.get(ev.data.taskId);
+          if (ev.data.title) taskTitleMap.set(ev.data.taskId, { title: ev.data.title, issueIdentifier: ev.data.issueIdentifier });
           if (p) updateProjectTask(p, ev.data.taskId, ev.data.title, null, "running");
           break;
         }
@@ -649,12 +653,22 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       if (!stageRows.length) { el.innerHTML = "<div class=\\"empty\\">no pipeline events</div>"; return; }
       if (cnt) cnt.textContent = stageRows.length + "/" + MAX_STAGE;
       el.innerHTML = stageRows.slice().reverse().map(r => {
-        const shortId = r.taskId ? r.taskId.slice(0, 8) : "";
+        const info = r.taskId ? taskTitleMap.get(r.taskId) : null;
+        let taskLabel = "";
+        if (info) {
+          // issueIdentifier 있으면 우선 표시, 없으면 title 앞 25자
+          taskLabel = info.issueIdentifier
+            ? info.issueIdentifier + (info.title ? " " + info.title.slice(0, 22) : "")
+            : (info.title ? info.title.slice(0, 30) : "");
+        } else if (r.taskId) {
+          // fallback: 짧은 해시
+          taskLabel = r.taskId.slice(0, 8);
+        }
         return (
           "<div class=\\"stage-row\\">" +
           "<div class=\\"sdot " + (r.status || "") + "\\"></div>" +
           "<div class=\\"sname\\">" + escapeHtml(r.stage) + "</div>" +
-          "<div class=\\"stask\\">" + escapeHtml(shortId) + "</div>" +
+          "<div class=\\"stask\\" title=\\"" + escapeAttr(r.taskId || "") + "\\">" + escapeHtml(taskLabel) + "</div>" +
           "<div class=\\"sstatus\\">" + (r.status || "") + "</div>" +
           "</div>"
         );
@@ -674,13 +688,20 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       if (!logLines.length) { el.innerHTML = "<div class=\\"empty\\">no log output</div>"; if (cnt) cnt.textContent = ""; return; }
       if (cnt) cnt.textContent = logLines.length + "/" + MAX_LOG;
       const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 50;
-      el.innerHTML = logLines.map(l =>
-        "<div class=\\"log-line\\">" +
-        "<span class=\\"ltag\\">[" + escapeHtml((l.taskId || "").slice(0, 6)) + "]</span>" +
-        "<span class=\\"lstage\\">" + escapeHtml(l.stage || "") + "</span>" +
-        "<span class=\\"ltext\\">" + escapeHtml(l.line || "") + "</span>" +
-        "</div>"
-      ).join("");
+      el.innerHTML = logLines.map(l => {
+        // taskId가 UUID면 issueIdentifier 조회, 아니면 그대로
+        const info = l.taskId ? taskTitleMap.get(l.taskId) : null;
+        const tag = info?.issueIdentifier
+          ? info.issueIdentifier
+          : (l.taskId || "").slice(0, 8);
+        return (
+          "<div class=\\"log-line\\">" +
+          "<span class=\\"ltag\\" title=\\"" + escapeAttr(l.taskId || "") + "\\">[" + escapeHtml(tag) + "]</span>" +
+          "<span class=\\"lstage\\">" + escapeHtml(l.stage || "") + "</span>" +
+          "<span class=\\"ltext\\">" + escapeHtml(l.line || "") + "</span>" +
+          "</div>"
+        );
+      }).join("");
       if (atBottom) el.scrollTop = el.scrollHeight;
     }
 

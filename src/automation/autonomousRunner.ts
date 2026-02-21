@@ -4,9 +4,7 @@
 // ============================================
 
 import { Cron } from 'croner';
-import { basename, join } from 'node:path';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { loadTaskState, saveTaskState, buildProjectsInfo, type TaskState, type ProjectInfo } from './runnerState.js';
 import {
   DecisionEngine,
   DecisionResult,
@@ -31,6 +29,7 @@ import { reportToDiscord, fetchLinearTasks } from './runnerExecution.js';
 import { t } from '../locale/index.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import type { SwarmStats } from '../core/eventHub.js'; // eslint-disable-line @typescript-eslint/no-unused-vars
+import { pruneWorktrees } from '../support/worktreeManager.js';
 
 // Re-export integration setters (used by service.ts)
 export { setDiscordReporter, setLinearFetcher } from './runnerExecution.js';
@@ -40,81 +39,32 @@ export { setDiscordReporter, setLinearFetcher } from './runnerExecution.js';
 // ============================================
 
 export interface AutonomousConfig {
-  /** Linear team ID */
   linearTeamId: string;
-
-  /** Allowed project paths */
   allowedProjects: string[];
-
-  /** Heartbeat interval (cron or interval) */
   heartbeatSchedule: string;
-
-  /** Auto-execute (if false, approval required) */
   autoExecute: boolean;
-
-  /** Discord channel ID (for reporting) */
   discordChannelId?: string;
-
-  /** Max consecutive tasks */
   maxConsecutiveTasks: number;
-
-  /** Cooldown between tasks (seconds) */
   cooldownSeconds: number;
-
-  /** Dry run mode */
   dryRun: boolean;
-
-  /** Worker/Reviewer pair mode */
   pairMode?: boolean;
-
-  /** Pair mode max attempts */
   pairMaxAttempts?: number;
-
-  /** Worker model (legacy) */
   workerModel?: string;
-
-  /** Reviewer model (legacy) */
   reviewerModel?: string;
-
-  /** Worker timeout (ms) (legacy) */
   workerTimeoutMs?: number;
-
-  /** Reviewer timeout (ms) (legacy) */
   reviewerTimeoutMs?: number;
-
-  /** Trigger immediately on start */
   triggerNow?: boolean;
-
-  /** Max concurrent tasks */
   maxConcurrentTasks?: number;
-
-  /** Default role configuration */
   defaultRoles?: DefaultRolesConfig;
-
-  /** Per-project agent configuration */
   projectAgents?: ProjectAgentConfig[];
-
-  /** Enable task decomposition */
   enableDecomposition?: boolean;
-
-  /** Task decomposition threshold (minutes, default 30) */
   decompositionThresholdMinutes?: number;
-
-  /** Planner model */
   plannerModel?: string;
-
-  /** Planner timeout (ms, default 600000 = 10min) */
   plannerTimeoutMs?: number;
+  worktreeMode?: boolean;
 }
 
-export interface ProjectInfo {
-  path: string;
-  name: string;
-  enabled: boolean;
-  running: { id: string; title: string; priority: number }[];
-  queued: { id: string; title: string; priority: number }[];
-  pending: { id: string; title: string; priority: number; issueIdentifier?: string }[];
-}
+export type { ProjectInfo } from './runnerState.js';
 
 export interface RunnerState {
   isRunning: boolean;
@@ -157,48 +107,21 @@ export class AutonomousRunner {
   private completedTaskIds = new Set<string>();
   private failedTaskCounts = new Map<string, number>();
   private static readonly MAX_RETRY_COUNT = 2;
-  private static readonly TASK_STATE_FILE = join(homedir(), '.claude', 'claude-swarm-task-state.json');
 
   // Rate limiting: max 1 issue per hour
   private lastTaskStartedAt = 0;
   private static readonly RATE_LIMIT_MS = 60 * 60 * 1000; // 1 hour
 
-  /**
-   * Load persisted task state (completedTaskIds + failedTaskCounts) from disk
-   */
-  private loadTaskState(): void {
-    try {
-      if (!existsSync(AutonomousRunner.TASK_STATE_FILE)) return;
-      const raw = readFileSync(AutonomousRunner.TASK_STATE_FILE, 'utf8');
-      const data = JSON.parse(raw) as { completed?: string[]; failed?: Record<string, number> };
-      if (Array.isArray(data.completed)) {
-        for (const id of data.completed) this.completedTaskIds.add(id);
-      }
-      if (data.failed && typeof data.failed === 'object') {
-        for (const [id, count] of Object.entries(data.failed)) {
-          this.failedTaskCounts.set(id, count as number);
-        }
-      }
-      console.log(`[AutonomousRunner] Loaded task state: ${this.completedTaskIds.size} completed, ${this.failedTaskCounts.size} failed`);
-    } catch (err) {
-      console.warn('[AutonomousRunner] Failed to load task state:', err);
-    }
+  private get taskStateRef(): TaskState {
+    return { completedTaskIds: this.completedTaskIds, failedTaskCounts: this.failedTaskCounts };
   }
 
-  /**
-   * Persist task state (completedTaskIds + failedTaskCounts) to disk
-   */
+  private loadTaskState(): void {
+    loadTaskState(this.taskStateRef);
+  }
+
   private saveTaskState(): void {
-    try {
-      const data = {
-        completed: Array.from(this.completedTaskIds),
-        failed: Object.fromEntries(this.failedTaskCounts),
-        updatedAt: new Date().toISOString(),
-      };
-      writeFileSync(AutonomousRunner.TASK_STATE_FILE, JSON.stringify(data, null, 2), 'utf8');
-    } catch (err) {
-      console.warn('[AutonomousRunner] Failed to save task state:', err);
-    }
+    saveTaskState(this.taskStateRef);
   }
 
   /**
@@ -228,6 +151,7 @@ export class AutonomousRunner {
     this.scheduler = initScheduler({
       maxConcurrent: config.maxConcurrentTasks ?? 1,
       allowSameProjectConcurrent: false,
+      worktreeMode: config.worktreeMode ?? false,
     });
 
     // Set up scheduler event handling
@@ -242,7 +166,7 @@ export class AutonomousRunner {
       const taskCtx = this.formatTaskContext(running.task);
       console.log(`[Scheduler] Task started: ${taskCtx} ${running.task.title}`);
       this.lastTaskStartedAt = Date.now();
-      broadcastEvent({ type: 'task:started', data: { taskId: running.task.id, title: running.task.title } });
+      broadcastEvent({ type: 'task:started', data: { taskId: running.task.id, title: running.task.title, issueIdentifier: running.task.issueIdentifier } });
     });
 
     this.scheduler.on('completed', async ({ task, result }) => {
@@ -433,6 +357,14 @@ export class AutonomousRunner {
 
     await this.engine.init();
 
+    // worktree 모드: 시작 시 dangling worktrees 정리
+    if (this.config.worktreeMode) {
+      for (const projectPath of this.config.allowedProjects) {
+        const resolvedPath = projectPath.replace('~', process.env.HOME || '');
+        pruneWorktrees(resolvedPath).catch(() => {});
+      }
+    }
+
     // Set up cron job
     this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
       await this.heartbeat();
@@ -481,6 +413,11 @@ export class AutonomousRunner {
     };
   }
 
+  /** 대시보드 LIVE LOG에 시스템 메시지 전송 */
+  private syslog(line: string): void {
+    broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'heartbeat', line } });
+  }
+
   /**
    * Execute heartbeat
    */
@@ -489,43 +426,47 @@ export class AutonomousRunner {
     this.state.lastHeartbeat = Date.now();
     broadcastEvent({ type: 'stats', data: this.buildStats() });
     broadcastEvent({ type: 'heartbeat' });
+    this.syslog('▶ Heartbeat started');
 
     try {
       // 1. Check time window
       const timeCheck = checkWorkAllowed();
       if (!timeCheck.allowed) {
         console.log(`[AutonomousRunner] Blocked: ${timeCheck.reason}`);
+        this.syslog(`⛔ Time window blocked: ${timeCheck.reason}`);
         return;
       }
+      this.syslog('✓ Time window: allowed');
 
       // 1.5. Rate limit: max 1 issue per hour
       if (this.lastTaskStartedAt > 0) {
         const elapsed = Date.now() - this.lastTaskStartedAt;
         if (elapsed < AutonomousRunner.RATE_LIMIT_MS) {
           const remainMin = Math.ceil((AutonomousRunner.RATE_LIMIT_MS - elapsed) / 60000);
-          console.log(`[AutonomousRunner] Rate limited: last task started ${Math.floor(elapsed / 60000)}min ago, next allowed in ${remainMin}min`);
+          this.syslog(`⏳ Rate limited: next task in ${remainMin}min`);
           return;
         }
       }
 
       // 2. Fetch tasks from Linear
+      this.syslog('⟳ Fetching tasks from Linear...');
       const tasks = await fetchLinearTasks();
       if (tasks.length === 0) {
-        console.log('[AutonomousRunner] No tasks in backlog');
+        this.syslog('— No tasks in backlog');
         return;
       }
 
-      this.lastFetchedTasks = tasks; // Store for dashboard
-      console.log(`[AutonomousRunner] Found ${tasks.length} tasks`);
+      this.lastFetchedTasks = tasks;
+      this.syslog(`✓ Found ${tasks.length} tasks from Linear`);
 
       // Filter out completed and over-retried tasks
       const filteredTasks = this.filterAlreadyProcessed(tasks);
       if (filteredTasks.length === 0) {
-        console.log('[AutonomousRunner] All tasks already completed or max retries exceeded');
+        this.syslog('— All tasks already completed or max retries exceeded');
         return;
       }
       if (filteredTasks.length !== tasks.length) {
-        console.log(`[AutonomousRunner] Filtered: ${tasks.length} → ${filteredTasks.length} (skipped ${tasks.length - filteredTasks.length} completed/failed)`);
+        this.syslog(`  Filtered: ${tasks.length} → ${filteredTasks.length} (skipped ${tasks.length - filteredTasks.length} completed/failed)`);
       }
 
       // Parallel processing mode
@@ -535,21 +476,19 @@ export class AutonomousRunner {
       }
 
       // 3. Run Decision Engine (single task)
-      console.log('[AutonomousRunner] Calling DecisionEngine.heartbeat...');
+      this.syslog('⟳ Running Decision Engine...');
       const decision = await this.engine.heartbeat(filteredTasks);
-      console.log(`[AutonomousRunner] Decision: action=${decision.action}, reason=${decision.reason}`);
+      this.syslog(`→ Decision: ${decision.action} — ${decision.reason}`);
       this.state.lastDecision = decision;
 
       // 4. Handle decision
-      console.log('[AutonomousRunner] Calling handleDecision...');
       await this.handleDecision(decision);
-      console.log('[AutonomousRunner] handleDecision completed');
-
       this.state.consecutiveErrors = 0;
 
     } catch (error: any) {
       this.state.consecutiveErrors++;
       console.error('[AutonomousRunner] Heartbeat error:', error.message);
+      this.syslog(`✗ Heartbeat error: ${error.message}`);
 
       if (this.state.consecutiveErrors >= 3) {
         await reportToDiscord(t('runner.consecutiveErrors', { count: this.state.consecutiveErrors, error: error.message }));
@@ -561,11 +500,12 @@ export class AutonomousRunner {
    * Parallel processing heartbeat (uses DecisionEngine.heartbeatMultiple)
    */
   private async heartbeatParallel(tasks: TaskItem[]): Promise<void> {
-    console.log(`[AutonomousRunner] Parallel heartbeat: ${tasks.length} tasks`);
-
     const availableSlots = this.scheduler.getAvailableSlots();
+    const runningCount = this.scheduler.getStats().running;
+    this.syslog(`  Parallel mode | slots: ${availableSlots} free / ${this.config.maxConcurrentTasks} max | running: ${runningCount}`);
+
     if (availableSlots === 0) {
-      console.log('[AutonomousRunner] No available slots');
+      this.syslog(`⏳ All slots busy (${runningCount} tasks running), waiting...`);
       return;
     }
 
@@ -588,16 +528,18 @@ export class AutonomousRunner {
         const cachedPath = this.projectPathCache.get(projName)
           ?? this.projectPathCache.get(projName.toLowerCase())
           ?? this.projectPathCache.get(projName.replace(/-/g, ' '));
+        // If path is cached: only allow if explicitly enabled; otherwise block
         return cachedPath ? this.enabledProjects.has(cachedPath) : false;
       });
       if (tasksForEngine.length === 0) {
-        console.log('[AutonomousRunner] No enabled tasks to execute');
+        this.syslog(`⚠ No enabled tasks (${executableTasks.length} executable, ${tasks.length - executableTasks.length} backlog — enable a project first)`);
         return;
       }
-      console.log(`[AutonomousRunner] Filtered to ${tasksForEngine.length} enabled tasks (${executableTasks.length} executable, ${tasks.length - executableTasks.length} backlog)`);
+      this.syslog(`  Tasks: ${tasksForEngine.length} enabled-or-uncached / ${executableTasks.length} executable / ${tasks.length} total`);
     }
 
     // Get validated task list from DecisionEngine
+    this.syslog('⟳ Decision Engine evaluating tasks...');
     const decision = await this.engine.heartbeatMultiple(
       tasksForEngine,
       maxSlots,
@@ -605,7 +547,7 @@ export class AutonomousRunner {
     );
 
     if (decision.action === 'skip' || decision.action === 'defer') {
-      console.log(`[AutonomousRunner] Decision: ${decision.action} - ${decision.reason}`);
+      this.syslog(`→ Decision: ${decision.action} — ${decision.reason}`);
       return;
     }
 
@@ -614,6 +556,7 @@ export class AutonomousRunner {
     for (const { task } of decision.tasks) {
       // Skip if already queued or running
       if (this.scheduler.isTaskQueued(task.id) || this.scheduler.isTaskRunning(task.id)) {
+        this.syslog(`  Skip (already queued/running): ${task.issueIdentifier || task.id.slice(0, 8)} ${task.title}`);
         continue;
       }
 
@@ -621,7 +564,7 @@ export class AutonomousRunner {
 
       // Skip if project path mapping failed
       if (!projectPath) {
-        console.error(`[AutonomousRunner] Skipping task "${task.title}" - project path not resolved`);
+        this.syslog(`✗ Cannot resolve project path for "${task.linearProject?.name || task.title}" — skipping`);
         continue;
       }
 
@@ -632,18 +575,19 @@ export class AutonomousRunner {
 
       // Skip if project is already busy (double check)
       if (this.scheduler.isProjectBusy(projectPath)) {
-        console.log(`[AutonomousRunner] Project busy: ${projectPath}`);
+        this.syslog(`  Project busy: ${projectPath}`);
         continue;
       }
 
       // Skip if project is not in enabled list (allow-list; empty = nothing runs)
       if (this.enabledProjects.size > 0 && !this.enabledProjects.has(projectPath)) {
-        console.log(`[AutonomousRunner] Project not enabled: ${projectPath}`);
+        this.syslog(`  Project not enabled: ${projectPath}`);
         continue;
       }
 
       this.scheduler.enqueue(task, projectPath);
-      broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath } });
+      broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
+      this.syslog(`✓ Queued: ${task.issueIdentifier || ''} ${task.title} → ${projectPath.split('/').slice(-2).join('/')}`);
       enqueuedCount++;
 
       // Claim the task immediately: set Linear to 'In Progress' so restarts don't re-queue it
@@ -655,7 +599,11 @@ export class AutonomousRunner {
       }
     }
 
-    console.log(`[AutonomousRunner] Enqueued ${enqueuedCount} tasks (skipped: ${decision.skippedCount})`);
+    if (enqueuedCount === 0 && decision.skippedCount > 0) {
+      this.syslog(`— No new tasks queued (skipped: ${decision.skippedCount})`);
+    } else {
+      this.syslog(`✓ Enqueued ${enqueuedCount} task(s) | skipped: ${decision.skippedCount}`);
+    }
 
     // Execute tasks
     await this.runAvailableTasks();
@@ -793,7 +741,7 @@ export class AutonomousRunner {
     // Use scheduler for parallel processing mode
     if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1) {
       this.scheduler.enqueue(task, projectPath);
-      broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath } });
+      broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
       await this.runAvailableTasks();
       return;
     }
@@ -850,6 +798,7 @@ export class AutonomousRunner {
       decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
       getRolesForProject: (p) => this.getRolesForProject(p),
       reportToDiscord,
+      worktreeMode: this.config.worktreeMode ?? false,
     };
   }
 
@@ -913,23 +862,14 @@ export class AutonomousRunner {
     await this.heartbeat();
   }
 
-  /**
-   * Get state
-   */
   getState(): RunnerState {
     return { ...this.state };
   }
 
-  /**
-   * Get allowedProjects from config (search root paths for local project discovery)
-   */
   getAllowedProjects(): string[] {
     return this.config.allowedProjects ?? [];
   }
 
-  /**
-   * Get statistics
-   */
   getStats(): {
     isRunning: boolean;
     lastHeartbeat: number;
@@ -946,53 +886,22 @@ export class AutonomousRunner {
     };
   }
 
-  /**
-   * Pause scheduler
-   */
-  pauseScheduler(): void {
-    this.scheduler.pause();
-  }
+  pauseScheduler(): void { this.scheduler.pause(); }
+  resumeScheduler(): void { this.scheduler.resume(); }
+  getQueuedTasks() { return this.scheduler.getQueuedTasks(); }
+  getRunningTasks() { return this.scheduler.getRunningTasks(); }
 
-  /**
-   * Resume scheduler
-   */
-  resumeScheduler(): void {
-    this.scheduler.resume();
-  }
-
-  /**
-   * Get queued tasks
-   */
-  getQueuedTasks() {
-    return this.scheduler.getQueuedTasks();
-  }
-
-  /**
-   * Get running tasks
-   */
-  getRunningTasks() {
-    return this.scheduler.getRunningTasks();
-  }
-
-  /**
-   * Disable a project path (remove from allow-list)
-   */
   disableProject(projectPath: string): void {
     this.enabledProjects.delete(projectPath);
     console.log(`[AutonomousRunner] Project disabled: ${projectPath}`);
   }
 
-  /**
-   * Enable a project path (add to allow-list)
-   */
   enableProject(projectPath: string): void {
     this.enabledProjects.add(projectPath);
     console.log(`[AutonomousRunner] Project enabled: ${projectPath}`);
   }
 
-  /**
-   * Get all currently enabled project paths
-   */
+  /** Get all currently enabled project paths */
   getEnabledProjects(): string[] {
     return Array.from(this.enabledProjects);
   }
@@ -1012,84 +921,14 @@ export class AutonomousRunner {
     }
   }
 
-  /**
-   * Get project status list for dashboard.
-   * Groups Linear tasks by linearProject.name, using resolved paths from cache.
-   */
   getProjectsInfo(): ProjectInfo[] {
     const running = this.scheduler.getRunningTasks();
     const queued = this.scheduler.getQueuedTasks();
-
-    // Build project map from lastFetchedTasks grouped by linearProject.name
-    const projectMap = new Map<string, { name: string; path: string | null; tasks: TaskItem[] }>();
-
-    for (const task of this.lastFetchedTasks) {
-      const projName = task.linearProject?.name || '(unknown)';
-      if (!projectMap.has(projName)) {
-        projectMap.set(projName, {
-          name: projName,
-          path: this.projectPathCache.get(projName) ?? null,
-          tasks: [],
-        });
-      }
-      projectMap.get(projName)!.tasks.push(task);
-    }
-
-    // Also include projects currently running/queued even if not in lastFetchedTasks
+    // Update path cache from currently running tasks
     for (const r of running) {
-      const projName = r.task.linearProject?.name || '(unknown)';
-      if (!projectMap.has(projName)) {
-        projectMap.set(projName, { name: projName, path: r.projectPath, tasks: [] });
-      } else if (!projectMap.get(projName)!.path) {
-        projectMap.get(projName)!.path = r.projectPath;
-      }
-      if (r.task.linearProject?.name) {
-        this.projectPathCache.set(r.task.linearProject.name, r.projectPath);
-      }
+      if (r.task.linearProject?.name) this.projectPathCache.set(r.task.linearProject.name, r.projectPath);
     }
-    for (const q of queued) {
-      const projName = q.task.linearProject?.name || '(unknown)';
-      if (!projectMap.has(projName)) {
-        projectMap.set(projName, { name: projName, path: q.projectPath, tasks: [] });
-      } else if (!projectMap.get(projName)!.path) {
-        projectMap.get(projName)!.path = q.projectPath;
-      }
-    }
-
-    return Array.from(projectMap.values()).map(proj => {
-      const projectPath = proj.path ?? '';
-
-      const projectRunning = running
-        .filter(r => r.task.linearProject?.name === proj.name)
-        .map(r => ({ id: r.task.id, title: r.task.title, priority: r.task.priority }));
-
-      const projectQueued = queued
-        .filter(q => q.task.linearProject?.name === proj.name)
-        .map(q => ({ id: q.task.id, title: q.task.title, priority: q.task.priority }));
-
-      const activeIds = new Set([
-        ...running.map(r => r.task.issueId || r.task.id),
-        ...queued.map(q => q.task.issueId || q.task.id),
-      ]);
-
-      const projectPending = proj.tasks
-        .filter(t => !activeIds.has(t.issueId || t.id))
-        .map(t => ({
-          id: t.id,
-          title: t.title,
-          priority: t.priority,
-          issueIdentifier: t.issueIdentifier || t.issueId,
-        }));
-
-      return {
-        path: projectPath,
-        name: proj.name,
-        enabled: Boolean(projectPath) && this.enabledProjects.has(projectPath),
-        running: projectRunning,
-        queued: projectQueued,
-        pending: projectPending,
-      };
-    });
+    return buildProjectsInfo(this.lastFetchedTasks, running, queued, this.projectPathCache, this.enabledProjects);
   }
 }
 
