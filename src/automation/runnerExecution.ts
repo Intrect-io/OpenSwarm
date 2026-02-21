@@ -5,7 +5,7 @@
 
 import { EmbedBuilder } from 'discord.js';
 import type { TaskItem, DecisionResult } from '../orchestration/decisionEngine.js';
-import type { ExecutorResult } from '../orchestration/workflowExecutor.js';
+import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, PipelineStage } from '../core/types.js';
 import { createPipelineFromConfig } from '../agents/pairPipeline.js';

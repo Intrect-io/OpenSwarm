@@ -116,6 +116,17 @@ export interface WorkflowExecution {
   checkpoint?: string;  // git commit hash for rollback
 }
 
+/**
+ * Executor result (formerly in workflowExecutor.ts)
+ */
+export interface ExecutorResult {
+  execution: WorkflowExecution;
+  success: boolean;
+  failedStep?: string;
+  rollbackPerformed?: boolean;
+  duration: number;
+}
+
 // ============================================
 // DAG Utilities
 // ============================================

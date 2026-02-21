@@ -53,8 +53,8 @@ export const ko: LocaleMessages = {
       stateLabel: '상태: {{state}}',
     },
     list: {
-      noSessions: '활성 tmux 세션이 없습니다.',
-      activeSessions: '**활성 tmux 세션:**',
+      noSessions: '활성 세션이 없습니다.',
+      activeSessions: '**활성 세션:**',
     },
     run: {
       usage: '사용법: !run <session> "<task>"',
@@ -233,7 +233,7 @@ export const ko: LocaleMessages = {
 
 **에이전트 관리**
 \`!status [session]\` - 에이전트 상태 확인
-\`!list\` - 활성 tmux 세션
+\`!list\` - 세션 목록 (deprecated)
 \`!run <session> "<task>"\` - 특정 작업 실행
 \`!pause <session>\` - 자율 작업 일시 중지
 \`!resume <session>\` - 자율 작업 재개

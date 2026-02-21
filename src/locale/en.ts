@@ -53,8 +53,8 @@ export const en: LocaleMessages = {
       stateLabel: 'State: {{state}}',
     },
     list: {
-      noSessions: 'No active tmux sessions.',
-      activeSessions: '**Active tmux sessions:**',
+      noSessions: 'No active sessions.',
+      activeSessions: '**Active sessions:**',
     },
     run: {
       usage: 'Usage: !run <session> "<task>"',
@@ -233,7 +233,7 @@ export const en: LocaleMessages = {
 
 **Agent Management**
 \`!status [session]\` - Check agent status
-\`!list\` - Active tmux sessions
+\`!list\` - Session list (deprecated)
 \`!run <session> "<task>"\` - Run specific task
 \`!pause <session>\` - Pause autonomous work
 \`!resume <session>\` - Resume autonomous work

@@ -9,7 +9,6 @@ import {
   Message,
   EmbedBuilder,
 } from 'discord.js';
-import * as tmux from '../support/tmux.js';
 import * as linear from '../linear/index.js';
 import * as github from '../github/index.js';
 import * as dev from '../support/dev.js';
@@ -76,47 +75,17 @@ export async function handleStatus(msg: Message, sessionName?: string): Promise<
 }
 
 /**
- * !list - 모든 세션 목록
+ * !list - (deprecated) tmux 세션 목록 → 대시보드 안내
  */
 export async function handleList(msg: Message): Promise<void> {
-  const sessions = await tmux.listSessions();
-
-  if (sessions.length === 0) {
-    await msg.reply(t('discord.list.noSessions'));
-    return;
-  }
-
-  await msg.reply(`${t('discord.list.activeSessions')}\n${sessions.map(s => `- ${s}`).join('\n')}`);
+  await msg.reply('Use web dashboard at /dashboard for session management. tmux mode has been removed.');
 }
 
 /**
- * !run <session> "<task>" - 작업 실행
+ * !run <session> "<task>" - (deprecated) tmux 작업 실행 → !dev 안내
  */
 export async function handleRun(msg: Message, args: string[]): Promise<void> {
-  const sessionName = args[0];
-  const taskMatch = msg.content.match(/!run \w+ "(.+)"/);
-  const task = taskMatch?.[1];
-
-  if (!sessionName || !task) {
-    await msg.reply(t('discord.run.usage'));
-    return;
-  }
-
-  const exists = await tmux.sessionExists(sessionName);
-  if (!exists) {
-    await msg.reply(t('discord.run.sessionNotExist', { name: sessionName }));
-    return;
-  }
-
-  await tmux.sendTask(sessionName, task);
-  await msg.reply(t('discord.run.taskSent', { session: sessionName, task }));
-
-  // 결과 캡처 (5초 후)
-  setTimeout(async () => {
-    const output = await tmux.capturePane(sessionName, 20);
-    const truncated = output.length > 1500 ? output.slice(-1500) + '...' : output;
-    await msg.reply(`${t('discord.run.output', { session: sessionName })}\n\`\`\`\n${truncated}\n\`\`\``);
-  }, 5000);
+  await msg.reply('tmux mode has been removed. Use `!dev <repo> "<task>"` instead.');
 }
 
 /**
@@ -158,24 +127,10 @@ export async function handleIssues(msg: Message, _sessionName?: string): Promise
 }
 
 /**
- * !log <session> [lines] - 최근 출력 확인
+ * !log <session> [lines] - (deprecated) tmux 로그 → 대시보드 안내
  */
 export async function handleLog(msg: Message, sessionName: string, lines: number): Promise<void> {
-  if (!sessionName) {
-    await msg.reply(t('discord.log.usage'));
-    return;
-  }
-
-  const exists = await tmux.sessionExists(sessionName);
-  if (!exists) {
-    await msg.reply(t('discord.log.sessionNotExist', { name: sessionName }));
-    return;
-  }
-
-  const output = await tmux.capturePane(sessionName, lines);
-  const truncated = output.length > 1800 ? output.slice(-1800) + '\n...(truncated)' : output;
-
-  await msg.reply(`${t('discord.log.recentLines', { session: sessionName, lines })}\n\`\`\`\n${truncated}\n\`\`\``);
+  await msg.reply('tmux mode has been removed. Use web dashboard at /dashboard for logs.');
 }
 
 /**

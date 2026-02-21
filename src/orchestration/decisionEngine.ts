@@ -8,12 +8,12 @@ import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import {
   WorkflowConfig,
+  ExecutorResult,
   loadWorkflow,
   listWorkflows,
   createCIPipelineTemplate,
 } from './workflow.js';
 import { parseTask, saveParsedTask, loadParsedTask, formatParsedTaskSummary } from './taskParser.js';
-import { runWorkflowConfig, ExecutorResult } from './workflowExecutor.js';
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { saveCognitiveMemory } from '../memory/index.js';
 
@@ -389,39 +389,8 @@ export class DecisionEngine {
     this.state.lastTaskId = task.id;
     await saveState(this.state);
 
-    // Execute workflow
-    const result = await runWorkflowConfig(workflow, {
-      enableRollback: true,
-      checkTimeWindow: true,
-      dryRun: this.config.dryRun,
-    });
-
-    // Record result
-    if (result.success) {
-      this.state.totalTasksCompleted++;
-      try {
-        await saveCognitiveMemory('strategy',
-          `Task "${task.title}" completed successfully with workflow "${workflow.name}"`,
-          { confidence: 0.8, derivedFrom: task.id }
-        );
-      } catch (memErr) {
-        console.warn(`[DecisionEngine] Memory save failed (non-critical):`, memErr);
-      }
-    } else {
-      this.state.totalTasksFailed++;
-      this.state.consecutiveTasksRun = 0; // Reset on failure
-      try {
-        await saveCognitiveMemory('belief',
-          `Task "${task.title}" failed: ${result.failedStep || 'unknown reason'}`,
-          { confidence: 0.6, derivedFrom: task.id }
-        );
-      } catch (memErr) {
-        console.warn(`[DecisionEngine] Memory save failed (non-critical):`, memErr);
-      }
-    }
-    await saveState(this.state);
-
-    return result;
+    // Legacy tmux-based workflow executor removed — use pair pipeline instead
+    throw new Error('Legacy workflow executor has been removed. Use pair mode (pairMode: true) for task execution.');
   }
 
   /**

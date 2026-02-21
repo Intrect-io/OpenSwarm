@@ -11,7 +11,7 @@ import {
   TaskItem,
   getDecisionEngine,
 } from '../orchestration/decisionEngine.js';
-import type { ExecutorResult } from '../orchestration/workflowExecutor.js';
+import type { ExecutorResult } from '../orchestration/workflow.js';
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { formatParsedTaskSummary, loadParsedTask } from '../orchestration/taskParser.js';
 import { saveCognitiveMemory } from '../memory/index.js';
