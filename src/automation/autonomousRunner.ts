@@ -289,17 +289,26 @@ export class AutonomousRunner {
   }
 
   private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
-    return tasks.filter(task => {
+    let recovered = 0;
+    const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
-      if (this.completedTaskIds.has(id)) {
-        return false;
+      // Todo 상태인 이슈가 completed/failed 목록에 있으면 복원
+      // (사용자 또는 시스템이 의도적으로 Todo로 되돌린 것이므로 재시도)
+      if (task.linearState === 'Todo' && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
+        this.completedTaskIds.delete(id);
+        this.failedTaskCounts.delete(id);
+        recovered++;
+        return true;
       }
-      const failCount = this.failedTaskCounts.get(id) ?? 0;
-      if (failCount >= AutonomousRunner.MAX_RETRY_COUNT) {
-        return false;
-      }
+      if (this.completedTaskIds.has(id)) return false;
+      if ((this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT) return false;
       return true;
     });
+    if (recovered > 0) {
+      this.saveTaskState();
+      this.syslog(`♻ Recovered ${recovered} Todo issues from completed/failed list`);
+    }
+    return filtered;
   }
 
   /** Schedule next heartbeat (debounced 5s) */
