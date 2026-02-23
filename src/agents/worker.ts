@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Worker Agent
+// OpenSwarm - Worker Agent
 // Task execution agent (Claude CLI based)
 // ============================================
 
@@ -8,8 +8,9 @@ import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 import * as gitTracker from '../support/gitTracker.js';
-import { extractCostFromJson, formatCost } from '../support/costTracker.js';
+import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { t, getPrompts } from '../locale/index.js';
+import { parseCliStreamChunk, extractResultFromStreamJson } from './cliStreamParser.js';
 
 /**
  * Expand ~ path to home directory
@@ -133,7 +134,7 @@ async function runClaudeCli(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const modelFlag = model ? ` --model ${model}` : '';
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format json --permission-mode bypassPermissions${modelFlag}`;
+    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format stream-json --permission-mode bypassPermissions${modelFlag}`;
 
     const proc = spawn(cmd, {
       shell: true,
@@ -144,12 +145,13 @@ async function runClaudeCli(
 
     let stdout = '';
     let stderr = '';
+    let streamBuffer = '';
 
     proc.stdout?.on('data', (data: Buffer) => {
       const text = data.toString();
       stdout += text;
       if (onLog) {
-        text.split('\n').filter(l => l.trim()).forEach(l => onLog(l));
+        streamBuffer = parseCliStreamChunk(text, onLog, streamBuffer);
       }
     });
 
@@ -190,30 +192,14 @@ async function runClaudeCli(
  */
 function parseWorkerOutput(output: string): WorkerResult {
   try {
-    // Extract cost info
-    const costInfo = extractCostFromJson(output);
+    // Extract cost info (NDJSON 형태)
+    const costInfo = extractCostFromStreamJson(output);
     if (costInfo) {
       console.log(`[Worker] Cost: ${formatCost(costInfo)}`);
     }
 
-    // Extract result from Claude JSON array
-    const match = output.match(/\[[\s\S]*\]/);
-    if (!match) {
-      const result = extractFromText(output);
-      result.costInfo = costInfo;
-      return result;
-    }
-
-    const arr = JSON.parse(match[0]);
-    let resultText = '';
-
-    for (const item of arr) {
-      if (item.type === 'result' && item.result) {
-        resultText = item.result;
-        break;
-      }
-    }
-
+    // NDJSON에서 result 항목 추출
+    const resultText = extractResultFromStreamJson(output);
     if (!resultText) {
       const result = extractFromText(output);
       result.costInfo = costInfo;

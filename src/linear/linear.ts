@@ -1,10 +1,11 @@
 // ============================================
-// Claude Swarm - Linear Integration
+// OpenSwarm - Linear Integration
 // ============================================
 
 import { LinearClient } from '@linear/sdk';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
 import { getDateLocale } from '../locale/index.js';
+import { setLinearClient } from './projectUpdater.js';
 
 /**
  * Extract project info from an issue
@@ -65,6 +66,7 @@ export function getDailyIssueCount(): number {
 export function initLinear(apiKey: string, team: string): void {
   client = new LinearClient({ apiKey });
   teamId = team;
+  setLinearClient(client);
 }
 
 /**
@@ -176,63 +178,131 @@ export async function getNextBacklogIssue(
 }
 
 /**
+ * Options for getMyIssues
+ */
+export interface GetMyIssuesOptions {
+  agentLabel?: string;
+  /**
+   * Slim mode: skip N+1 queries for comments/labels/project.
+   * Returns only core fields (id, identifier, title, description, priority, state, project).
+   * Use for heartbeat/decision engine where full details aren't needed.
+   */
+  slim?: boolean;
+  /** Timeout in ms (default: 30000) */
+  timeoutMs?: number;
+}
+
+/**
  * Get assigned active issues
  * (Todo, In Progress, Review states - excludes Backlog)
  */
 export async function getMyIssues(
-  agentLabel?: string
+  agentLabelOrOptions?: string | GetMyIssuesOptions
 ): Promise<LinearIssueInfo[]> {
+  const opts: GetMyIssuesOptions = typeof agentLabelOrOptions === 'string'
+    ? { agentLabel: agentLabelOrOptions }
+    : agentLabelOrOptions ?? {};
+
+  const { agentLabel, slim = false, timeoutMs = 30000 } = opts;
   const linear = getClient();
 
-  const filter: any = {
+  const baseFilter: any = {
     team: { id: { eq: teamId } },
-    // Fetch Todo + In Progress + Backlog: executable = Todo/In Progress, Backlog = display only
-    state: { name: { in: ['Todo', 'In Progress', 'Backlog'] } },
   };
 
   // Add label filter if agentLabel is provided
   if (agentLabel) {
-    filter.labels = { name: { eq: agentLabel } };
+    baseFilter.labels = { name: { eq: agentLabel } };
   }
 
-  const issues = await linear.issues({
-    filter,
-    first: 100,
-  });
+  // Wrap with timeout
+  const fetchIssues = async (): Promise<LinearIssueInfo[]> => {
+    // Fetch executable issues first (Todo/In Progress), then Backlog for dashboard
+    // This prevents Backlog from filling up the result and pushing executable issues off-page
+    const executableFilter = { ...baseFilter, state: { name: { in: ['Todo', 'In Progress'] } } };
+    const backlogFilter = { ...baseFilter, state: { name: { in: ['Backlog'] } } };
 
-  const result: LinearIssueInfo[] = [];
-
-  for (const issue of issues.nodes) {
-    const [comments, labels, project] = await Promise.all([
-      issue.comments(),
-      issue.labels(),
-      getProjectInfo(issue),
+    const [executableIssues, backlogIssues] = await Promise.all([
+      linear.issues({ filter: executableFilter, first: 50 }),
+      linear.issues({ filter: backlogFilter, first: 50 }),
     ]);
 
-    result.push({
-      id: issue.id,
-      identifier: issue.identifier,
-      title: issue.title,
-      description: issue.description ?? undefined,
-      state: (await issue.state)?.name ?? 'Unknown',
-      priority: issue.priority,
-      labels: labels.nodes.map((l) => l.name),
-      comments: comments.nodes.map((c) => ({
-        id: c.id,
-        body: c.body,
-        createdAt: c.createdAt.toISOString(),
-        user: undefined,
-      })),
-      project,
-    });
-  }
+    const issues = {
+      nodes: [...executableIssues.nodes, ...backlogIssues.nodes],
+    };
 
-  // Sort by priority
-  return result.sort((a, b) => {
-    const pa = a.priority === 0 ? 999 : a.priority;
-    const pb = b.priority === 0 ? 999 : b.priority;
-    return pa - pb;
-  });
+    const result: LinearIssueInfo[] = [];
+
+    if (slim) {
+      // Slim mode: batch resolve state and project, skip comments/labels
+      // Process in batches of 10 to limit concurrent API calls
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < issues.nodes.length; i += BATCH_SIZE) {
+        const batch = issues.nodes.slice(i, i + BATCH_SIZE);
+        const resolved = await Promise.all(
+          batch.map(async (issue) => {
+            const [state, project] = await Promise.all([
+              issue.state,
+              getProjectInfo(issue),
+            ]);
+            return {
+              id: issue.id,
+              identifier: issue.identifier,
+              title: issue.title,
+              description: issue.description ?? undefined,
+              state: state?.name ?? 'Unknown',
+              priority: issue.priority,
+              labels: [],
+              comments: [],
+              project,
+            } as LinearIssueInfo;
+          })
+        );
+        result.push(...resolved);
+      }
+    } else {
+      // Full mode: load all details (comments, labels, project)
+      for (const issue of issues.nodes) {
+        const [comments, labels, project] = await Promise.all([
+          issue.comments(),
+          issue.labels(),
+          getProjectInfo(issue),
+        ]);
+
+        result.push({
+          id: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          description: issue.description ?? undefined,
+          state: (await issue.state)?.name ?? 'Unknown',
+          priority: issue.priority,
+          labels: labels.nodes.map((l) => l.name),
+          comments: comments.nodes.map((c) => ({
+            id: c.id,
+            body: c.body,
+            createdAt: c.createdAt.toISOString(),
+            user: undefined,
+          })),
+          project,
+        });
+      }
+    }
+
+    // Sort by priority
+    return result.sort((a, b) => {
+      const pa = a.priority === 0 ? 999 : a.priority;
+      const pb = b.priority === 0 ? 999 : b.priority;
+      return pa - pb;
+    });
+  };
+
+  // Apply timeout
+  return Promise.race([
+    fetchIssues(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`getMyIssues timed out after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
 }
 
 /**
@@ -299,31 +369,39 @@ export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssue
  */
 export async function updateIssueState(
   issueId: string,
-  stateName: 'In Progress' | 'In Review' | 'Done' | 'Blocked' | 'Backlog' | 'Todo'
+  stateName: 'In Progress' | 'In Review' | 'Done' | 'Backlog' | 'Todo',
+  retries = 2
 ): Promise<void> {
   const linear = getClient();
 
-  try {
-    // Get team workflow states
-    const team = await linear.team(teamId);
-    const states = await team.states();
-    const targetState = states.nodes.find((s) =>
-      s.name.toLowerCase().includes(stateName.toLowerCase())
-    );
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      // Get team workflow states
+      const team = await linear.team(teamId);
+      const states = await team.states();
+      const targetState = states.nodes.find((s) =>
+        s.name.toLowerCase().includes(stateName.toLowerCase())
+      );
 
-    if (!targetState) {
-      console.error(`State "${stateName}" not found in team workflow`);
+      if (!targetState) {
+        console.error(`[Linear] State "${stateName}" not found in team workflow`);
+        return;
+      }
+
+      await linear.updateIssue(issueId, {
+        stateId: targetState.id,
+      });
+
+      console.log(`[Linear] Issue ${issueId} state changed to ${stateName}`);
       return;
+    } catch (error) {
+      console.error(`[Linear] Failed to update issue state (attempt ${attempt + 1}/${retries + 1}):`, error);
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      }
     }
-
-    await linear.updateIssue(issueId, {
-      stateId: targetState.id,
-    });
-
-    console.log(`[Linear] Issue ${issueId} state changed to ${stateName}`);
-  } catch (error) {
-    console.error(`[Linear] Failed to update issue state:`, error);
   }
+  console.error(`[Linear] All ${retries + 1} attempts to update issue ${issueId} to "${stateName}" failed`);
 }
 
 /**
@@ -415,7 +493,8 @@ export async function logBlocked(
 시간: ${timestamp}`;
 
   await addComment(issueId, body);
-  await updateIssueState(issueId, 'Blocked');
+  // Use 'Todo' instead of 'Blocked' (Blocked state may not exist in team workflow)
+  await updateIssueState(issueId, 'Todo');
 }
 
 // ============================================

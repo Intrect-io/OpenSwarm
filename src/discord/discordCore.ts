@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Discord Bot Core
+// OpenSwarm - Discord Bot Core
 //
 // Entry point, shared state, history, config,
 // events, and message routing.
@@ -155,14 +155,14 @@ const PROJECT_PATTERNS = [
   // Linear 이슈 ID에서 프로젝트 추출 (예: INT-123, STONKS-456)
   /\b([A-Z]{2,10})-\d+\b/g,
   // 명시적 프로젝트 언급
-  /\b(STONKS|VELA|PyKIS|pykis|pykiwoom|HIVE|claude-swarm)\b/gi,
+  /\b(STONKS|VELA|PyKIS|pykis|pykiwoom|HIVE|OpenSwarm)\b/gi,
   // "~~ 프로젝트" 패턴
   /(\w+)\s*프로젝트/gi,
 ];
 
 // 이슈 접두사 → 프로젝트명 매핑 (Linear 이슈 ID 기반)
 const ISSUE_PREFIX_MAP: Record<string, string> = {
-  'INT': 'claude-swarm',  // HIVE 프로젝트
+  'INT': 'OpenSwarm',  // HIVE 프로젝트
   'STONKS': 'STONKS',
   'VELA': 'VELA',
   'PYKIS': 'pykis',
@@ -580,7 +580,7 @@ export async function sendToThread(threadId: string, content: string | EmbedBuil
 // ============================================
 
 // 대화 내역 저장 경로
-const CHAT_HISTORY_FILE = '/tmp/claude-swarm-chat-history.json';
+const CHAT_HISTORY_FILE = '/tmp/openswarm-chat-history.json';
 
 /**
  * 일반 대화 처리 (OpenClaw-style history management)

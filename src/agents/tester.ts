@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Tester Agent
+// OpenSwarm - Tester Agent
 // Test execution agent (Claude CLI based)
 // ============================================
 
@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
-import { type CostInfo, extractCostFromJson, formatCost } from '../support/costTracker.js';
+import { type CostInfo, extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 
 /**
  * Expand ~ path to home directory
@@ -159,7 +159,7 @@ async function runClaudeCli(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const modelFlag = model ? ` --model ${model}` : '';
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format json --permission-mode bypassPermissions${modelFlag}`;
+    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format stream-json --permission-mode bypassPermissions${modelFlag}`;
 
     const proc = spawn(cmd, {
       shell: true,
@@ -212,27 +212,21 @@ async function runClaudeCli(
  */
 function parseTesterOutput(output: string): TesterResult {
   try {
-    const costInfo = extractCostFromJson(output);
+    const costInfo = extractCostFromStreamJson(output);
     if (costInfo) {
       console.log(`[Tester] Cost: ${formatCost(costInfo)}`);
     }
 
-    // Extract result from Claude JSON array
-    const match = output.match(/\[[\s\S]*\]/);
-    if (!match) {
-      const result = extractFromText(output);
-      result.costInfo = costInfo;
-      return result;
-    }
-
-    const arr = JSON.parse(match[0]);
+    // NDJSON에서 result 항목 추출
     let resultText = '';
-
-    for (const item of arr) {
-      if (item.type === 'result' && item.result) {
-        resultText = item.result;
-        break;
-      }
+    for (const line of output.split('\n')) {
+      try {
+        const event = JSON.parse(line.trim());
+        if (event.type === 'result' && event.result) {
+          resultText = event.result;
+          break;
+        }
+      } catch { /* skip non-JSON lines */ }
     }
 
     if (!resultText) {

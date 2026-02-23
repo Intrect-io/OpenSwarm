@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Task Scheduler
+// OpenSwarm - Task Scheduler
 // Parallel task scheduling and execution management
 // ============================================
 

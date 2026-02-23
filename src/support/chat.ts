@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 // ============================================
-// Claude Swarm - Interactive Chat CLI
+// OpenSwarm - Interactive Chat CLI
 // Interactive chat interface for CLI agent command center
 // Backend: claude -p (Claude Code OAuth auth)
 // ============================================
@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 // Constants
 // ============================================
 
-const CHAT_DIR = resolve(homedir(), '.claude-swarm', 'chat');
+const CHAT_DIR = resolve(homedir(), '.openswarm', 'chat');
 const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
 
 // ANSI
@@ -203,8 +203,9 @@ async function chat(session: Session, userMessage: string): Promise<void> {
     }
 
     await saveSession(session);
-  } catch (err: any) {
-    console.error(`${RED}Error: ${err.message || err}${RESET}\n`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${RED}Error: ${msg}${RESET}\n`);
     session.messages.pop();
   }
 }

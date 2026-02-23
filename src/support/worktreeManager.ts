@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Git Worktree Manager
+// OpenSwarm - Git Worktree Manager
 // 이슈별 독립 worktree 생성/정리 및 PR 자동화
 // ============================================
 
@@ -50,14 +50,14 @@ export async function createWorktree(
 
   // 기존 worktree 정리 (재시도 케이스)
   if (existsSync(worktreePath)) {
-    await execAsync(`git -C "${repoPath}" worktree remove --force "${worktreePath}"`).catch(() => {});
+    await execAsync(`git -C "${repoPath}" worktree remove --force "${worktreePath}"`).catch((e) => console.warn(`[Worktree] Failed to remove existing worktree: ${worktreePath}`, e));
     rmSync(worktreePath, { recursive: true, force: true });
   }
 
   // 브랜치 존재 여부 확인
   const branchExists = await execAsync(`git -C "${repoPath}" branch --list "${branchName}"`)
     .then(({ stdout }) => stdout.trim().length > 0)
-    .catch(() => false);
+    .catch((e) => { console.warn(`[Worktree] Branch check failed for ${branchName}:`, e); return false; });
 
   const createCmd = branchExists
     ? `git -C "${repoPath}" worktree add "${worktreePath}" "${branchName}"`
@@ -85,7 +85,7 @@ export async function commitAndCreatePR(
     const commitMsg = [
       `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
       '',
-      '🤖 Generated with Claude Swarm (VEGA)',
+      '🤖 Generated with OpenSwarm (VEGA)',
       '',
       'Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>',
     ].join('\n');
@@ -98,7 +98,7 @@ export async function commitAndCreatePR(
   // 이미 PR이 존재하면 URL만 반환
   const { stdout: existing } = await execAsync(
     `gh pr list --head "${branchName}" --state open --json url --jq '.[0].url'`
-  ).catch(() => ({ stdout: '' }));
+  ).catch((e) => { console.warn(`[Worktree] PR list check failed for ${branchName}:`, e); return { stdout: '' }; });
 
   if (existing.trim()) {
     console.log(`[Worktree] PR already exists: ${existing.trim()}`);
@@ -114,7 +114,7 @@ export async function commitAndCreatePR(
     `Closes ${issueIdentifier}`,
     '',
     '---',
-    '🤖 Generated with [Claude Swarm (VEGA)](https://github.com/Intrect-io/claude-swarm)',
+    '🤖 Generated with [OpenSwarm (VEGA)](https://github.com/Intrect-io/OpenSwarm)',
   ].join('\n');
 
   const { stdout: prUrl } = await execAsync(
@@ -140,6 +140,6 @@ export async function removeWorktree(info: WorktreeInfo): Promise<void> {
 
 /** 서비스 시작 시 dangling worktree 정리 */
 export async function pruneWorktrees(repoPath: string): Promise<void> {
-  await execAsync(`git -C "${repoPath}" worktree prune`).catch(() => {});
+  await execAsync(`git -C "${repoPath}" worktree prune`).catch((e) => console.warn(`[Worktree] Prune failed for ${repoPath}:`, e));
   console.log(`[Worktree] Pruned stale worktrees for: ${repoPath}`);
 }

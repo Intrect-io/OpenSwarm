@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Event Hub
+// OpenSwarm - Event Hub
 // Global singleton EventEmitter + SSE client management
 // ============================================
 

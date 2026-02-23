@@ -1,4 +1,4 @@
-// Claude Swarm - Autonomous Runner
+// OpenSwarm - Autonomous Runner
 // Heartbeat → Decision → Execution → Report
 import { Cron } from 'croner';
 import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, type TaskState, type ProjectInfo, type PipelineHistoryEntry } from './runnerState.js';
@@ -937,7 +937,7 @@ export class AutonomousRunner {
     if (!this.projectPathCache.has(name)) {
       this.projectPathCache.set(name, projectPath);
     }
-    // Also register capitalized variant to handle "claude-swarm" ↔ "Claude-swarm" mismatch
+    // Also register capitalized variant to handle "openswarm" ↔ "Openswarm" mismatch
     const capitalized = name.charAt(0).toUpperCase() + name.slice(1);
     if (capitalized !== name && !this.projectPathCache.has(capitalized)) {
       this.projectPathCache.set(capitalized, projectPath);

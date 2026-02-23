@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Pair Mode Metrics
+// OpenSwarm - Pair Mode Metrics
 // Success rate, average attempts, and duration tracking
 // ============================================
 
@@ -53,7 +53,7 @@ export interface DailyMetrics {
 // Storage
 // ============================================
 
-const METRICS_DIR = path.join(homedir(), '.claude-swarm', 'metrics');
+const METRICS_DIR = path.join(homedir(), '.openswarm', 'metrics');
 const RECORDS_FILE = path.join(METRICS_DIR, 'pair-records.json');
 const SUMMARY_FILE = path.join(METRICS_DIR, 'pair-summary.json');
 

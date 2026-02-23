@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Planner Agent
+// OpenSwarm - Planner Agent
 // Decompose large issues into 30-min sub-tasks
 // ============================================
 
@@ -94,6 +94,35 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
 }
 
 /**
+ * Convert planner JSON output to human-readable log line.
+ * Handles both the final JSON result and intermediate text.
+ */
+function humanizePlannerOutput(text: string): string {
+  const trimmed = text.trim();
+
+  // Try to parse as planner result JSON
+  try {
+    const obj = JSON.parse(trimmed);
+    if (typeof obj === 'object' && obj !== null && 'needsDecomposition' in obj) {
+      if (!obj.needsDecomposition) {
+        const reason = obj.reason ? `: ${obj.reason.slice(0, 120)}` : '';
+        return `✓ 분해 불필요 (예상 ${obj.totalEstimatedMinutes || '?'}분)${reason}`;
+      }
+      const tasks = (obj.subTasks || []) as Array<{ title?: string; estimatedMinutes?: number }>;
+      const taskList = tasks.map((t, i) => `  ${i + 1}. ${t.title || '?'} (~${t.estimatedMinutes || '?'}분)`).join('\n');
+      return `🔀 ${tasks.length}개 서브태스크로 분해 (총 ${obj.totalEstimatedMinutes || '?'}분)\n${taskList}`;
+    }
+  } catch {
+    // Not JSON — return as-is
+  }
+
+  // Strip markdown code fences
+  if (trimmed.startsWith('```')) return '';
+
+  return trimmed;
+}
+
+/**
  * Run Claude CLI from /tmp to avoid project-specific MCP servers and hooks.
  * STONKS has session-start.sh + playwright/pykis/linear MCP servers that
  * cause >10min startup when claude runs from the project directory.
@@ -129,12 +158,18 @@ async function runClaudeCli(
             const event = JSON.parse(line);
             if (event.type === 'assistant' && event.message?.content) {
               for (const block of event.message.content) {
-                if (block.type === 'text') onLog(block.text);
+                if (block.type === 'text') {
+                  // Convert planner JSON result to human-readable summary
+                  const humanized = humanizePlannerOutput(block.text);
+                  onLog(humanized);
+                }
               }
             }
           } catch {
-            // Not a JSON line, pass through
-            onLog(line);
+            // Not a JSON line — skip raw stream noise (tool calls, etc)
+            if (!line.startsWith('{') && !line.startsWith('[')) {
+              onLog(line);
+            }
           }
         }
       }

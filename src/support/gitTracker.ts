@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Git Tracker
+// OpenSwarm - Git Tracker
 // Aider-style Git diff-based file change tracking
 // ============================================
 

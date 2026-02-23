@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Project Mapper
+// OpenSwarm - Project Mapper
 // Linear project to local path auto-mapping
 // ============================================
 

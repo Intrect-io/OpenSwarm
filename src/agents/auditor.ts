@@ -1,6 +1,6 @@
 // ============================================
-// OpenSwarm - Documenter Agent
-// Documentation agent (Claude CLI based)
+// OpenSwarm - Auditor Agent
+// /audit 스킬 기반 BS 탐지 에이전트
 // ============================================
 
 import { spawn } from 'node:child_process';
@@ -9,9 +9,6 @@ import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 import { type CostInfo, extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 
-/**
- * Expand ~ path to home directory
- */
 function expandPath(p: string): string {
   if (p.startsWith('~/')) {
     return p.replace('~', homedir());
@@ -23,7 +20,7 @@ function expandPath(p: string): string {
 // Types
 // ============================================
 
-export interface DocumenterOptions {
+export interface AuditorOptions {
   taskTitle: string;
   taskDescription: string;
   workerResult: WorkerResult;
@@ -32,11 +29,13 @@ export interface DocumenterOptions {
   model?: string;
 }
 
-export interface DocumenterResult {
+export interface AuditorResult {
   success: boolean;
-  updatedFiles: string[];
-  changelogEntry?: string;
-  apiDocsUpdated: boolean;
+  bsScore?: number;
+  criticalCount: number;
+  warningCount: number;
+  minorCount: number;
+  issues: string[];
   summary: string;
   error?: string;
   costInfo?: CostInfo;
@@ -46,10 +45,7 @@ export interface DocumenterResult {
 // Prompts
 // ============================================
 
-/**
- * Build Documenter prompt
- */
-function buildDocumenterPrompt(options: DocumenterOptions): string {
+function buildAuditorPrompt(options: AuditorOptions): string {
   const workerReport = `
 - **Success:** ${options.workerResult.success}
 - **Summary:** ${options.workerResult.summary}
@@ -57,48 +53,27 @@ function buildDocumenterPrompt(options: DocumenterOptions): string {
 - **Commands:** ${options.workerResult.commands.join(', ') || '(none)'}
 `;
 
-  return `# Documenter Agent
+  return `/audit
 
-## Original Task
-- **Title:** ${options.taskTitle}
+## 작업 컨텍스트
+- **Task:** ${options.taskTitle}
 - **Description:** ${options.taskDescription}
 
 ## Worker's Changes
 ${workerReport}
 
-## Instructions
-1. 변경된 코드에 대한 문서화를 수행하라
-2. CHANGELOG.md가 있으면 새 엔트리 추가
-3. 새 함수/클래스에 JSDoc/docstring 추가
-4. README 업데이트가 필요하면 수행
-5. API 문서가 있으면 업데이트
-
-## Documentation Rules
-- 기존 문서 스타일을 따르라
-- 변경 내용을 명확하게 기술하라
-- 코드 예제를 포함하라 (필요시)
-- 불필요한 문서는 추가하지 마라
-
-## Output Format (IMPORTANT - 반드시 이 형식으로 마지막에 출력)
-문서화 완료 후 반드시 다음 JSON 형식으로 결과를 출력하라:
+위 작업에서 변경된 파일을 중심으로 감사를 수행하라.
+감사 완료 후 반드시 다음 JSON 형식으로 결과를 출력하라:
 
 \`\`\`json
 {
   "success": true,
-  "updatedFiles": ["CHANGELOG.md", "src/module.ts"],
-  "changelogEntry": "- feat: 새로운 기능 추가",
-  "apiDocsUpdated": false,
-  "summary": "문서화 요약 (1-2문장)"
-}
-\`\`\`
-
-문서화할 내용이 없는 경우:
-\`\`\`json
-{
-  "success": true,
-  "updatedFiles": [],
-  "apiDocsUpdated": false,
-  "summary": "문서화가 필요하지 않음 (사소한 변경)"
+  "bsScore": 2.1,
+  "criticalCount": 0,
+  "warningCount": 3,
+  "minorCount": 5,
+  "issues": ["src/foo.ts:42 - unused import"],
+  "summary": "BS 지수 2.1/5.0, CRITICAL 이슈 없음"
 }
 \`\`\`
 
@@ -106,46 +81,41 @@ ${workerReport}
 \`\`\`json
 {
   "success": false,
-  "updatedFiles": [],
-  "apiDocsUpdated": false,
-  "summary": "문서화 실패",
-  "error": "상세 에러 메시지"
+  "bsScore": 7.5,
+  "criticalCount": 3,
+  "warningCount": 5,
+  "minorCount": 2,
+  "issues": ["CRITICAL: src/bar.ts:10 - 하드코딩된 시크릿"],
+  "summary": "BS 지수 7.5/5.0 - CRITICAL 이슈 발견"
 }
 \`\`\`
 `;
 }
 
 // ============================================
-// Documenter Execution
+// Auditor Execution
 // ============================================
 
-/**
- * Run Documenter agent
- */
-export async function runDocumenter(options: DocumenterOptions): Promise<DocumenterResult> {
-  const prompt = buildDocumenterPrompt(options);
-  const promptFile = `/tmp/documenter-prompt-${Date.now()}.txt`;
+export async function runAuditor(options: AuditorOptions): Promise<AuditorResult> {
+  const prompt = buildAuditorPrompt(options);
+  const promptFile = `/tmp/auditor-prompt-${Date.now()}.txt`;
 
   try {
-    // Save prompt
     await fs.writeFile(promptFile, prompt);
-
-    // Run Claude CLI
     const cwd = expandPath(options.projectPath);
     const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
-
-    // Parse result
-    return parseDocumenterOutput(output);
+    return parseAuditorOutput(output);
   } catch (error) {
     return {
       success: false,
-      updatedFiles: [],
-      apiDocsUpdated: false,
-      summary: 'Documenter 실행 실패',
+      criticalCount: 0,
+      warningCount: 0,
+      minorCount: 0,
+      issues: [],
+      summary: 'Auditor 실행 실패',
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    // Clean up temp file
     try {
       await fs.unlink(promptFile);
     } catch {
@@ -154,13 +124,10 @@ export async function runDocumenter(options: DocumenterOptions): Promise<Documen
   }
 }
 
-/**
- * Run Claude CLI
- */
 async function runClaudeCli(
   promptFile: string,
   cwd: string,
-  timeoutMs: number = 120000, // 2 min default (docs are fast)
+  timeoutMs: number = 300000,
   model?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -185,42 +152,40 @@ async function runClaudeCli(
       stderr += data.toString();
     });
 
-    // Set timeout (unlimited if <= 0)
     let timer: NodeJS.Timeout | null = null;
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
         proc.kill('SIGKILL');
-        reject(new Error(`Documenter timeout after ${timeoutMs}ms`));
+        reject(new Error(`Auditor timeout after ${timeoutMs}ms`));
       }, timeoutMs);
     }
 
     proc.on('close', (code) => {
       if (timer) clearTimeout(timer);
-
       if (code !== 0 && code !== null) {
-        console.error('[Documenter] CLI error:', stderr.slice(0, 500));
+        console.error('[Auditor] CLI error:', stderr.slice(0, 500));
         reject(new Error(`Claude CLI failed with code ${code}`));
         return;
       }
-
       resolve(stdout);
     });
 
     proc.on('error', (err) => {
       if (timer) clearTimeout(timer);
-      reject(new Error(`Documenter spawn error: ${err.message}`));
+      reject(new Error(`Auditor spawn error: ${err.message}`));
     });
   });
 }
 
-/**
- * Parse Documenter output
- */
-function parseDocumenterOutput(output: string): DocumenterResult {
+// ============================================
+// Output Parsing
+// ============================================
+
+function parseAuditorOutput(output: string): AuditorResult {
   try {
     const costInfo = extractCostFromStreamJson(output);
     if (costInfo) {
-      console.log(`[Documenter] Cost: ${formatCost(costInfo)}`);
+      console.log(`[Auditor] Cost: ${formatCost(costInfo)}`);
     }
 
     // NDJSON에서 result 항목 추출
@@ -241,24 +206,18 @@ function parseDocumenterOutput(output: string): DocumenterResult {
       return result;
     }
 
-    // Extract JSON block from result
     const result = extractResultJson(resultText) || extractFromText(resultText);
     result.costInfo = costInfo;
     return result;
   } catch (error) {
-    console.error('[Documenter] Parse error:', error);
+    console.error('[Auditor] Parse error:', error);
     return extractFromText(output);
   }
 }
 
-/**
- * Extract JSON block from result
- */
-function extractResultJson(text: string): DocumenterResult | null {
-  // Find ```json ... ``` block
+function extractResultJson(text: string): AuditorResult | null {
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (!jsonMatch) {
-    // Find plain JSON object
     const objMatch = text.match(/\{\s*"success"\s*:/);
     if (!objMatch) return null;
 
@@ -293,87 +252,65 @@ function extractResultJson(text: string): DocumenterResult | null {
   }
 }
 
-/**
- * Normalize result
- */
-function normalizeResult(parsed: any): DocumenterResult {
+function normalizeResult(parsed: any): AuditorResult {
+  const bsScore = typeof parsed.bsScore === 'number' ? parsed.bsScore : undefined;
   return {
-    success: Boolean(parsed.success),
-    updatedFiles: Array.isArray(parsed.updatedFiles) ? parsed.updatedFiles : [],
-    changelogEntry: parsed.changelogEntry,
-    apiDocsUpdated: Boolean(parsed.apiDocsUpdated),
+    success: bsScore !== undefined ? bsScore < 5.0 : Boolean(parsed.success),
+    bsScore,
+    criticalCount: typeof parsed.criticalCount === 'number' ? parsed.criticalCount : 0,
+    warningCount: typeof parsed.warningCount === 'number' ? parsed.warningCount : 0,
+    minorCount: typeof parsed.minorCount === 'number' ? parsed.minorCount : 0,
+    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
     summary: parsed.summary || '(요약 없음)',
     error: parsed.error,
   };
 }
 
-/**
- * Extract result from text (when JSON parsing fails)
- */
-function extractFromText(text: string): DocumenterResult {
-  // Estimate success
-  const hasError = /error|fail|exception|cannot/i.test(text);
-  const hasSuccess = /success|completed|updated|documented/i.test(text);
+function extractFromText(text: string): AuditorResult {
+  const hasError = /error|fail|exception|critical/i.test(text);
+  const hasSuccess = /success|pass|clean|no issues/i.test(text);
 
-  // Extract updated files
-  const updatedFiles: string[] = [];
-  const filePatterns = [
-    /(?:updated?|modified?|created?|wrote?):\s*(.+\.(?:md|rst|txt))/gi,
-    /(?:CHANGELOG|README|docs?)\/[\w/\-.]+/gi,
-  ];
-
-  for (const pattern of filePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      const file = m[1] || m[0];
-      if (!updatedFiles.includes(file)) {
-        updatedFiles.push(file);
-      }
-    }
+  // BS score 추출
+  let bsScore: number | undefined;
+  const bsMatch = text.match(/(?:bs|bullshit)\s*(?:지수|score|index)[:\s]*(\d+(?:\.\d+)?)/i);
+  if (bsMatch) {
+    bsScore = parseFloat(bsMatch[1]);
   }
 
-  // Extract changelog entry
-  let changelogEntry: string | undefined;
-  const changelogMatch = text.match(/(?:changelog|변경\s*로그)[\s:]*([^\n]+)/i);
-  if (changelogMatch) {
-    changelogEntry = changelogMatch[1].trim();
+  // 이슈 추출
+  const issues: string[] = [];
+  const issuePattern = /(?:CRITICAL|WARNING|MINOR|issue)[:\s]+([^\n]+)/gi;
+  const issueMatches = text.matchAll(issuePattern);
+  for (const m of issueMatches) {
+    if (!issues.includes(m[1].trim())) {
+      issues.push(m[1].trim());
+    }
   }
 
   return {
     success: !hasError || hasSuccess,
-    updatedFiles: updatedFiles.slice(0, 10),
-    changelogEntry,
-    apiDocsUpdated: /api\s*doc/i.test(text),
+    bsScore,
+    criticalCount: 0,
+    warningCount: 0,
+    minorCount: 0,
+    issues: issues.slice(0, 20),
     summary: extractSummary(text),
     error: hasError ? extractErrorMessage(text) : undefined,
   };
 }
 
-/**
- * Extract summary
- */
 function extractSummary(text: string): string {
   const lines = text.split('\n').filter((l) => l.trim().length > 10);
   if (lines.length === 0) return '(요약 없음)';
-
   const summary = lines[0].trim();
   return summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
 }
 
-/**
- * Extract error message
- */
 function extractErrorMessage(text: string): string {
   const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
-  if (errorMatch) {
-    return errorMatch[1].slice(0, 200);
-  }
-
+  if (errorMatch) return errorMatch[1].slice(0, 200);
   const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
-  if (lines.length > 0) {
-    return lines[0].slice(0, 200);
-  }
-
+  if (lines.length > 0) return lines[0].slice(0, 200);
   return 'Unknown error';
 }
 
@@ -381,29 +318,29 @@ function extractErrorMessage(text: string): string {
 // Formatting
 // ============================================
 
-/**
- * Format Documenter result as Discord message
- */
-export function formatDocReport(result: DocumenterResult): string {
-  const statusEmoji = result.success ? '📝' : '❌';
+export function formatAuditReport(result: AuditorResult): string {
+  const statusEmoji = result.success ? '🔍' : '🚨';
   const lines: string[] = [];
 
-  lines.push(`${statusEmoji} **Documenter 결과: ${result.success ? '완료' : '실패'}**`);
+  lines.push(`${statusEmoji} **Auditor 결과: ${result.success ? 'PASS' : 'FAIL'}**`);
   lines.push('');
+
+  if (result.bsScore !== undefined) {
+    lines.push(`**BS 지수:** ${result.bsScore.toFixed(1)}/5.0`);
+  }
+
+  lines.push(`**Critical:** ${result.criticalCount} | **Warning:** ${result.warningCount} | **Minor:** ${result.minorCount}`);
   lines.push(`**요약:** ${result.summary}`);
 
-  if (result.updatedFiles.length > 0) {
-    lines.push(`**업데이트된 파일:** ${result.updatedFiles.join(', ')}`);
-  } else {
-    lines.push('**업데이트된 파일:** (없음)');
-  }
-
-  if (result.changelogEntry) {
-    lines.push(`**Changelog:** ${result.changelogEntry}`);
-  }
-
-  if (result.apiDocsUpdated) {
-    lines.push('**API 문서:** ✅ 업데이트됨');
+  if (result.issues.length > 0) {
+    lines.push('');
+    lines.push('**발견된 이슈:**');
+    for (const issue of result.issues.slice(0, 5)) {
+      lines.push(`  - ${issue}`);
+    }
+    if (result.issues.length > 5) {
+      lines.push(`  - ... 외 ${result.issues.length - 5}개`);
+    }
   }
 
   if (result.error) {

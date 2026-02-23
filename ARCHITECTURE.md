@@ -1,10 +1,10 @@
-# Claude Swarm Architecture
+# OpenSwarm Architecture
 
 > Autonomous CI/CD Pipeline Agent Framework by Intrect
 
 ## Overview
 
-Claude Swarm은 Linear 이슈를 자동으로 처리하는 자율 에이전트 오케스트레이터로, Worker/Reviewer 페어 파이프라인을 통해 코드 변경을 수행하고, Discord로 모니터링하며, LanceDB 기반 장기 메모리를 유지한다.
+OpenSwarm은 Linear 이슈를 자동으로 처리하는 자율 에이전트 오케스트레이터로, Worker/Reviewer 페어 파이프라인을 통해 코드 변경을 수행하고, Discord로 모니터링하며, LanceDB 기반 장기 메모리를 유지한다.
 
 ```
                         ┌──────────────────────────┐
@@ -338,19 +338,19 @@ Zod 스키마로 환경변수 치환(`${VAR}`) + 유효성 검증 수행.
 **현재 구현:**
 1. `projectMapper.ts`: ~/dev 하위 스캔 + Levenshtein fuzzy matching (≥0.5)
 2. `autonomousRunner.ts:resolveProjectPath()`: mapper → 직접경로 → 소문자 경로 순서로 시도
-3. `discord.ts`: 하드코딩된 `ISSUE_PREFIX_MAP` (`INT→claude-swarm`, `STONKS→STONKS` 등)
+3. `discordCore.ts`: 하드코딩된 `ISSUE_PREFIX_MAP` (`INT→OpenSwarm`, `STONKS→STONKS` 등)
 
 **문제점:**
 - `projectMapper`와 `discord.ts`의 매핑 로직이 이중화됨 (두 곳에서 별도 관리)
-- `ISSUE_PREFIX_MAP`이 discord.ts에 하드코딩되어 확장 시 코드 수정 필요
+- `ISSUE_PREFIX_MAP`이 discordCore.ts에 하드코딩되어 확장 시 코드 수정 필요
 - `projectMapper`의 Levenshtein 0.5 임계값이 너무 낮아 오매핑 가능성 존재
-- `config.yaml`의 `allowedProjects`가 `~/dev/claude-swarm` 하나뿐 → 멀티프로젝트 시 누락
+- `config.yaml`의 `allowedProjects`가 `~/dev/OpenSwarm` 하나뿐 → 멀티프로젝트 시 누락
 - `projectAgents` 설정에 `linearProjectId`가 있지만 실제 매핑 로직에서 활용되지 않음
 
 **권장 개선:**
 - `config.yaml`에 명시적 매핑 테이블 추가: `{ linearProjectName: localPath }`
 - `projectMapper`를 설정 기반으로 전환 (fuzzy matching은 fallback으로만)
-- `discord.ts`의 하드코딩 매핑 제거, 공통 모듈로 통합
+- `discordCore.ts`의 하드코딩 매핑 제거, 공통 모듈로 통합
 
 ### ISSUE-2: 에이전트 보고(Reporting) 누수
 
@@ -399,7 +399,7 @@ Zod 스키마로 환경변수 치환(`${VAR}`) + 유효성 검증 수행.
 ## File Structure
 
 ```
-claude-swarm/
+OpenSwarm/
 ├── src/
 │   ├── index.ts              # Entry point
 │   ├── core/                 # core/service.ts, config.ts, types.ts

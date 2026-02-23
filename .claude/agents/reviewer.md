@@ -11,7 +11,7 @@ model: sonnet
 
 ## 프로젝트 컨텍스트
 
-- **프로젝트**: claude-swarm
+- **프로젝트**: OpenSwarm
 - **기술 스택**: TypeScript, Node.js
 - **빌드**: `npm run typecheck`, `npm run build`
 - **테스트**: (미구현)

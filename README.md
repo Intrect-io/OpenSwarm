@@ -1,4 +1,4 @@
-# Claude Swarm 🤖
+# OpenSwarm 🤖
 
 > Autonomous Claude Code agents orchestrator with Discord control and Linear memory
 
@@ -13,7 +13,7 @@
 └─────────────────────────────────────────────────────────────┘
                           ↑ ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                   Claude Swarm                               │
+│                    OpenSwarm                                   │
 │  ┌─────────┐    ┌──────────┐    ┌──────────────┐           │
 │  │  Timer  │───→│  Linear  │←──→│   Discord    │           │
 │  │(heartbeat)   │   SDK    │    │   Bot        │           │
@@ -35,7 +35,7 @@
 ## 설치
 
 ```bash
-cd ~/dev/claude-swarm
+cd ~/dev/OpenSwarm
 pnpm install
 ```
 

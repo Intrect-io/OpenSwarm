@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Edit Parser
+// OpenSwarm - Edit Parser
 // Aider-style SEARCH/REPLACE block parsing
 // ============================================
 

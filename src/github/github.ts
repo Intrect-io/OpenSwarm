@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - GitHub Integration (via gh CLI)
+// OpenSwarm - GitHub Integration (via gh CLI)
 // ============================================
 
 import { exec } from 'node:child_process';
@@ -232,7 +232,7 @@ export async function summarizeNotifications(): Promise<string> {
 // CI State Monitoring (state-based)
 // ============================================
 
-const CI_STATE_PATH = resolve(homedir(), '.claude-swarm', 'ci-state.json');
+const CI_STATE_PATH = resolve(homedir(), '.openswarm', 'ci-state.json');
 
 /** Per-repo health status */
 export type RepoHealthStatus = 'healthy' | 'broken' | 'unknown';
@@ -284,7 +284,7 @@ export async function loadCIState(): Promise<CIState> {
 
 /** Save CI state */
 export async function saveCIState(state: CIState): Promise<void> {
-  await mkdir(resolve(homedir(), '.claude-swarm'), { recursive: true });
+  await mkdir(resolve(homedir(), '.openswarm'), { recursive: true });
   state.updatedAt = new Date().toISOString();
   await writeFile(CI_STATE_PATH, JSON.stringify(state, null, 2));
 }
@@ -461,7 +461,7 @@ export async function getPRContext(repo: string, prNumber: number): Promise<PRDe
   try {
     const [viewResult, diffResult, checks] = await Promise.all([
       execAsync(`gh pr view ${prNumber} -R ${repo} --json title,headRefName,createdAt,url,body,author`),
-      execAsync(`gh pr diff ${prNumber} -R ${repo}`).catch(() => ({ stdout: '' })),
+      execAsync(`gh pr diff ${prNumber} -R ${repo}`).catch((e) => { console.warn(`[GitHub] PR diff fetch failed for ${repo}#${prNumber}:`, e); return { stdout: '' }; }),
       getPRChecks(repo, prNumber),
     ]);
 

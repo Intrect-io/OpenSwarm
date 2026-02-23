@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Linear Workflow Integration
+// OpenSwarm - Linear Workflow Integration
 // Sync workflow steps with Linear issues
 // ============================================
 
@@ -124,7 +124,7 @@ function buildWorkflowDescription(workflow: WorkflowConfig): string {
   parts.push('');
 
   parts.push('---');
-  parts.push('_Managed by Claude Swarm Workflow Engine_');
+  parts.push('_Managed by OpenSwarm Workflow Engine_');
 
   return parts.join('\n');
 }

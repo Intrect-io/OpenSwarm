@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - English Locale Messages
+// OpenSwarm - English Locale Messages
 // ============================================
 
 import { LocaleMessages } from './types.js';
@@ -46,7 +46,7 @@ export const en: LocaleMessages = {
       startFailed: 'Start failed: {{error}}',
     },
     status: {
-      title: 'Claude Swarm Status',
+      title: 'OpenSwarm Status',
       noAgents: 'No active agents.',
       noIssueAssigned: 'No issue assigned',
       lastHeartbeat: 'Last heartbeat: {{time}}',
@@ -241,7 +241,7 @@ export const en: LocaleMessages = {
         noFiles: 'none',
       },
     },
-    help: `**Claude Swarm Commands**
+    help: `**OpenSwarm Commands**
 
 **Dev Tasks** (dispatch Claude)
 \`!dev <repo> "<task>"\` - Run dev task on repository
@@ -351,11 +351,11 @@ export const en: LocaleMessages = {
 
   // ── Service ─────────────────────────────
   service: {
-    startComplete: 'Claude Swarm service started!',
+    startComplete: 'OpenSwarm service started!',
     agentCount: 'Agents: {{n}}',
     repoCount: 'GitHub repos: {{n}}',
     heartbeatInterval: 'Default heartbeat: {{n}} min',
-    startedMessage: 'Claude Swarm started. {{agents}} agents, {{schedules}} schedules active{{autoStatus}}.',
+    startedMessage: 'OpenSwarm started. {{agents}} agents, {{schedules}} schedules active{{autoStatus}}.',
     autoModeActive: ', autonomous mode active ({{mode}})',
     scheduler: {
       noSchedules: 'No schedules registered.',

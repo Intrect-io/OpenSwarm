@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Git-based Rollback System
+// OpenSwarm - Git-based Rollback System
 // Automatic recovery on workflow failure
 // ============================================
 
@@ -49,7 +49,7 @@ export type RollbackStrategy = 'reset_hard' | 'reset_soft' | 'stash' | 'checkout
 // Checkpoint Storage
 // ============================================
 
-const CHECKPOINT_DIR = resolve(homedir(), '.claude-swarm/checkpoints');
+const CHECKPOINT_DIR = resolve(homedir(), '.openswarm/checkpoints');
 
 /**
  * Save checkpoint
@@ -105,8 +105,10 @@ async function gitExec(projectPath: string, command: string): Promise<{ stdout: 
   const expandedPath = projectPath.replace('~', homedir());
   try {
     return await execAsync(`git ${command}`, { cwd: expandedPath });
-  } catch (error: any) {
-    throw new Error(`Git command failed: git ${command}\n${error.stderr || error.message}`);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const stderr = (error as { stderr?: string })?.stderr;
+    throw new Error(`Git command failed: git ${command}\n${stderr || detail}`);
   }
 }
 
@@ -177,7 +179,7 @@ export async function createCheckpoint(
     const changedFiles = await getChangedFiles(expandedPath);
     console.log(`[Rollback] Stashing ${changedFiles.length} changed files`);
 
-    const stashMessage = `claude-swarm-checkpoint-${executionId}`;
+    const stashMessage = `openswarm-checkpoint-${executionId}`;
     await gitExec(expandedPath, `stash push -m "${stashMessage}" --include-untracked`);
 
     // Find Stash ID
@@ -220,7 +222,7 @@ export async function rollbackToCheckpoint(
   if (!checkpoint) {
     return {
       success: false,
-      checkpoint: null as any,
+      checkpoint: null!,
       action: 'reset',
       message: 'Checkpoint not found',
       error: `Checkpoint ${checkpointId} does not exist`,
@@ -241,7 +243,7 @@ export async function rollbackExecution(
   if (!checkpoint) {
     return {
       success: false,
-      checkpoint: null as any,
+      checkpoint: null!,
       action: 'reset',
       message: 'Checkpoint not found for execution',
       error: `No checkpoint found for execution ${executionId}`,
@@ -333,14 +335,15 @@ async function rollback(
       default:
         throw new Error(`Unknown rollback strategy: ${strategy}`);
     }
-  } catch (error: any) {
-    console.error('[Rollback] Failed:', error.message);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[Rollback] Failed:', msg);
     return {
       success: false,
       checkpoint,
       action: 'reset',
       message: 'Rollback failed',
-      error: error.message,
+      error: msg,
     };
   }
 }

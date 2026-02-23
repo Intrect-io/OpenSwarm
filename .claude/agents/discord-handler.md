@@ -11,7 +11,7 @@ Discord 봇 기능 개발 전문가입니다.
 
 ## 프로젝트 컨텍스트
 
-- **프로젝트**: claude-swarm
+- **프로젝트**: OpenSwarm
 - **기술 스택**: TypeScript, discord.js
 - **주요 파일**: `src/discord.ts`
 - **관련 타입**: `src/types.ts` (SwarmEvent 등)

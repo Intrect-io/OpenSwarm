@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 // ============================================
-// Claude Swarm - Entry Point
+// OpenSwarm - Entry Point
 // ============================================
+
+// IPv6 ETIMEDOUT 방지: 외부 API(Linear SDK 등)에서 IPv6 우선 시도 → 타임아웃 문제 해결
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
 
 import { loadConfig, validateConfig } from './core/config.js';
 import { startService, stopService } from './core/service.js';
 
 async function main(): Promise<void> {
   console.log('╔════════════════════════════════════════╗');
-  console.log('║         🤖 Claude Swarm v0.1.0         ║');
+  console.log('║         🤖 OpenSwarm v0.1.0         ║');
   console.log('║   Autonomous Claude Code Orchestrator  ║');
   console.log('╚════════════════════════════════════════╝');
   console.log('');
@@ -47,7 +51,7 @@ async function main(): Promise<void> {
   try {
     await startService(config);
     console.log('');
-    console.log('Claude Swarm is running. Press Ctrl+C to stop.');
+    console.log('OpenSwarm is running. Press Ctrl+C to stop.');
   } catch (err) {
     console.error('Failed to start service:', err);
     process.exit(1);

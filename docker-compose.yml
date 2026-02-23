@@ -1,11 +1,11 @@
 services:
-  claude-swarm:
+  openswarm:
     build:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: claude-swarm:latest
-    container_name: claude-swarm
+    image: openswarm:latest
+    container_name: openswarm
     restart: unless-stopped
 
     # Environment variables
@@ -33,7 +33,7 @@ services:
       # Logs directory (read-write)
       - ./logs:/app/logs:rw
       # Data persistence
-      - claude-swarm-data:/app/data:rw
+      - openswarm-data:/app/data:rw
       # Config file (if exists)
       - ./config.yaml:/app/config.yaml:ro
       # Claude CLI auth and git config
@@ -67,7 +67,7 @@ services:
 
     # Network
     networks:
-      - claude-swarm-network
+      - openswarm-network
 
     # Security options
     security_opt:
@@ -78,12 +78,12 @@ services:
 
 # Named volumes
 volumes:
-  claude-swarm-data:
+  openswarm-data:
     driver: local
 
 # Networks
 networks:
-  claude-swarm-network:
+  openswarm-network:
     driver: bridge
     ipam:
       config:

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Task Parser
+// OpenSwarm - Task Parser
 // Analyze Linear issues and decompose into executable subtasks
 // ============================================
 
@@ -187,6 +187,39 @@ function analyzeComplexity(title: string, description: string): {
   else if (estimatedSteps >= 4) complexity = 'medium';
 
   return { complexity, estimatedSteps, risks };
+}
+
+/**
+ * Knowledge graph 기반 복잡도 보정
+ */
+function adjustComplexityWithGraph(
+  base: ReturnType<typeof analyzeComplexity>,
+  impactScope?: 'small' | 'medium' | 'large',
+  affectedModuleCount?: number,
+): ReturnType<typeof analyzeComplexity> {
+  if (!impactScope && !affectedModuleCount) return base;
+
+  const result = { ...base, risks: [...base.risks] };
+
+  // impact scope에 따른 보정
+  if (impactScope === 'large') {
+    result.estimatedSteps += 2;
+    result.risks.push('Knowledge graph: 영향 범위 넓음 (large scope)');
+  } else if (impactScope === 'medium') {
+    result.estimatedSteps += 1;
+  }
+
+  // 영향받는 모듈 수에 따른 보정
+  if (affectedModuleCount && affectedModuleCount > 5) {
+    result.estimatedSteps += 1;
+    result.risks.push(`Knowledge graph: ${affectedModuleCount}개 모듈 영향`);
+  }
+
+  // 재평가
+  if (result.estimatedSteps >= 6) result.complexity = 'complex';
+  else if (result.estimatedSteps >= 4) result.complexity = 'medium';
+
+  return result;
 }
 
 // ============================================
@@ -516,14 +549,19 @@ export function parseTask(issue: {
   title: string;
   description?: string;
   projectPath?: string;
+  impactScope?: 'small' | 'medium' | 'large';
+  affectedModuleCount?: number;
 }): ParsedTask {
   const description = issue.description || '';
 
   // 1. Detect type
   const type = detectTaskType(issue.title, description);
 
-  // 2. Analyze complexity
-  const { complexity, estimatedSteps, risks } = analyzeComplexity(issue.title, description);
+  // 2. Analyze complexity (with graph-based adjustment)
+  const baseComplexity = analyzeComplexity(issue.title, description);
+  const { complexity, estimatedSteps, risks } = adjustComplexityWithGraph(
+    baseComplexity, issue.impactScope, issue.affectedModuleCount,
+  );
 
   // 3. Generate subtasks
   const subtasks = generateSubtasks(type, issue.title, description, complexity);
@@ -581,7 +619,7 @@ function subtasksToWorkflow(
 // Parsing Result Storage
 // ============================================
 
-const PARSED_TASKS_DIR = resolve(homedir(), '.claude-swarm/parsed-tasks');
+const PARSED_TASKS_DIR = resolve(homedir(), '.openswarm/parsed-tasks');
 
 /**
  * Save parsed result
@@ -643,7 +681,7 @@ export function formatParsedTaskSummary(parsed: ParsedTask): string {
 
   parts.push('');
   parts.push('---');
-  parts.push('_Claude Swarm Task Parser_');
+  parts.push('_OpenSwarm Task Parser_');
 
   return parts.join('\n');
 }

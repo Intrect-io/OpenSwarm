@@ -6,7 +6,7 @@ import { connect } from '@lancedb/lancedb';
 import { resolve } from 'path';
 import { homedir } from 'os';
 
-const MEMORY_DIR = resolve(homedir(), '.claude-swarm/memory');
+const MEMORY_DIR = resolve(homedir(), '.openswarm/memory');
 
 async function deleteFailedBeliefs() {
   console.log('[Delete] Connecting to LanceDB at:', MEMORY_DIR);

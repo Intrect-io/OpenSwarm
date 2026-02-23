@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - DAG Workflow Engine
+// OpenSwarm - DAG Workflow Engine
 // Agent task dependency management and execution
 // ============================================
 
@@ -252,8 +252,8 @@ export function getParallelGroups(steps: WorkflowStep[]): WorkflowStep[][] {
 // Workflow Storage
 // ============================================
 
-const WORKFLOW_DIR = resolve(homedir(), '.claude-swarm/workflows');
-const EXECUTION_DIR = resolve(homedir(), '.claude-swarm/executions');
+const WORKFLOW_DIR = resolve(homedir(), '.openswarm/workflows');
+const EXECUTION_DIR = resolve(homedir(), '.openswarm/executions');
 
 /**
  * Save workflow

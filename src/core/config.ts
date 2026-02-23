@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Configuration
+// OpenSwarm - Configuration
 // ============================================
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -477,7 +477,7 @@ export function createAgentSession(
  * Generate a sample configuration file
  */
 export function generateSampleConfig(): string {
-  return `# Claude Swarm Configuration
+  return `# OpenSwarm Configuration
 # 환경변수는 \${VAR_NAME} 또는 \${VAR_NAME:-default} 형식으로 사용
 
 discord:
