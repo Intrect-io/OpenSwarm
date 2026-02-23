@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Pair Mode Webhook Notifications
+// OpenSwarm - Pair Mode Webhook Notifications
 // Send notifications to external Webhooks on completion/failure
 // ============================================
 
@@ -220,7 +220,7 @@ async function sendWebhook(url: string, payload: WebhookPayload): Promise<Webhoo
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'Claude-Swarm/1.0',
+        'User-Agent': 'OpenSwarm/1.0',
       },
       body: JSON.stringify(payload),
     });

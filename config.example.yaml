@@ -1,4 +1,4 @@
-# Claude Swarm Configuration
+# OpenSwarm Configuration
 # 환경변수는 ${VAR_NAME} 또는 ${VAR_NAME:-default} 형식으로 사용
 # 이 파일을 config.yaml로 복사하여 사용하세요
 
@@ -13,13 +13,13 @@ linear:
 
 github:
   repos:
-    - unohee/claude-swarm  # owner/repo 형식
+    - unohee/OpenSwarm  # owner/repo 형식
   checkInterval: 300000  # 5분 (ms)
 
 # 에이전트 목록
 agents:
   - name: main
-    projectPath: ~/dev/claude-swarm
+    projectPath: ~/dev/OpenSwarm
     heartbeatInterval: 1800000  # 30분 (ms)
     linearLabel: main  # Linear 이슈 필터용 라벨
     enabled: true
@@ -37,7 +37,7 @@ autonomous:
   maxConcurrentTasks: 4  # 동시 실행 태스크 수
 
   allowedProjects:
-    - ~/dev/claude-swarm
+    - ~/dev/OpenSwarm
 
   # 작업 분해 설정 (Planner Agent)
   decomposition:

@@ -11,7 +11,7 @@ model: sonnet
 
 ## 프로젝트 컨텍스트
 
-- **프로젝트**: claude-swarm
+- **프로젝트**: OpenSwarm
 - **디렉토리**: `templates/`
 - **문서**: `docs/automation/`
 

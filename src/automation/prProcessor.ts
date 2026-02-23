@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - PR Auto-Improvement Processor
+// OpenSwarm - PR Auto-Improvement Processor
 // Open PR auto-improvement (Worker-Reviewer iteration loop)
 // ============================================
 
@@ -57,7 +57,7 @@ type PRState = {
 // Constants
 // ============================================
 
-const PR_STATE_PATH = resolve(homedir(), '.claude-swarm', 'pr-state.json');
+const PR_STATE_PATH = resolve(homedir(), '.openswarm', 'pr-state.json');
 
 // ============================================
 // PR Processor
@@ -386,7 +386,7 @@ export class PRProcessor {
   }
 
   private async saveState(state: PRState): Promise<void> {
-    await mkdir(resolve(homedir(), '.claude-swarm'), { recursive: true });
+    await mkdir(resolve(homedir(), '.openswarm'), { recursive: true });
     state.updatedAt = new Date().toISOString();
     await writeFile(PR_STATE_PATH, JSON.stringify(state, null, 2));
   }

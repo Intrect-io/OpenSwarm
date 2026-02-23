@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Pair Pipeline
+// OpenSwarm - Pair Pipeline
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 
@@ -8,6 +8,8 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { WorkerResult, ReviewResult, PairSession } from './agentPair.js';
 import type { TesterResult } from './tester.js';
 import type { DocumenterResult } from './documenter.js';
+import type { AuditorResult } from './auditor.js';
+import type { SkillDocumenterResult } from './skillDocumenter.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
 import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
 
@@ -17,6 +19,8 @@ import * as workerAgent from './worker.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
 import * as documenterAgent from './documenter.js';
+import * as auditorAgent from './auditor.js';
+import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
 
 // ============================================
@@ -38,13 +42,15 @@ export interface PipelineConfig {
     reviewer?: RoleConfig;
     tester?: RoleConfig;
     documenter?: RoleConfig;
+    auditor?: RoleConfig;
+    'skill-documenter'?: RoleConfig;
   };
 }
 
 export interface StageResult {
   stage: PipelineStage;
   success: boolean;
-  result: WorkerResult | ReviewResult | TesterResult | DocumenterResult;
+  result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult | { success: false; error: string };
   duration: number;
 }
 
@@ -52,7 +58,7 @@ export interface PipelineResult {
   success: boolean;
   sessionId: string;
   stages: StageResult[];
-  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled';
+  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed';
   totalDuration: number;
   /** Total number of completed iterations */
   iterations: number;
@@ -60,6 +66,8 @@ export interface PipelineResult {
   reviewResult?: ReviewResult;
   testerResult?: TesterResult;
   documenterResult?: DocumenterResult;
+  auditorResult?: AuditorResult;
+  skillDocumenterResult?: SkillDocumenterResult;
   /** Task context (for reporting) */
   taskContext?: {
     issueIdentifier?: string;
@@ -84,6 +92,8 @@ export interface PipelineContext {
   reviewResult?: ReviewResult;
   testerResult?: TesterResult;
   documenterResult?: DocumenterResult;
+  auditorResult?: AuditorResult;
+  skillDocumenterResult?: SkillDocumenterResult;
 }
 
 // ============================================
@@ -184,6 +194,20 @@ export class PairPipeline extends EventEmitter {
         }
       }
 
+      // Auditor (post-success, non-blocking)
+      if (this.hasStage('auditor') && context.workerResult?.success) {
+        const auditorResult = await this.runStage('auditor', context);
+        stages.push(auditorResult);
+        // Auditor 실패는 전체 성공에 영향 없음
+      }
+
+      // Skill Documenter (post-success, non-blocking)
+      if (this.hasStage('skill-documenter') && context.workerResult?.success) {
+        const sdResult = await this.runStage('skill-documenter', context);
+        stages.push(sdResult);
+        // Skill Documenter 실패는 전체 성공에 영향 없음
+      }
+
       // Success
       agentPair.updateSessionStatus(session.id, 'approved');
       return this.buildResult(context, stages, startTime);
@@ -228,14 +252,15 @@ export class PairPipeline extends EventEmitter {
    */
   private async runStage(
     stage: PipelineStage,
-    context: PipelineContext
+    context: PipelineContext,
+    overrides?: { model?: string }
   ): Promise<StageResult> {
     const startTime = Date.now();
     this.emit('stage:start', { stage, context });
     broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'start' } });
 
     try {
-      let result: WorkerResult | ReviewResult | TesterResult | DocumenterResult;
+      let result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult;
 
       switch (stage) {
         case 'worker': {
@@ -251,7 +276,7 @@ export class PairPipeline extends EventEmitter {
               ? reviewerAgent.buildRevisionPrompt(context.reviewResult)
               : undefined,
             timeoutMs: this.config.roles?.worker?.timeoutMs ?? 0,
-            model: this.config.roles?.worker?.model,
+            model: overrides?.model ?? this.config.roles?.worker?.model,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
@@ -308,6 +333,36 @@ export class PairPipeline extends EventEmitter {
           context.documenterResult = result as DocumenterResult;
           break;
 
+        case 'auditor':
+          if (!context.workerResult) {
+            throw new Error('Worker result required for auditor');
+          }
+          result = await auditorAgent.runAuditor({
+            taskTitle: context.task.title,
+            taskDescription: context.task.description || '',
+            workerResult: context.workerResult,
+            projectPath: context.projectPath,
+            timeoutMs: this.config.roles?.auditor?.timeoutMs ?? 0,
+            model: this.config.roles?.auditor?.model,
+          });
+          context.auditorResult = result as AuditorResult;
+          break;
+
+        case 'skill-documenter':
+          if (!context.workerResult) {
+            throw new Error('Worker result required for skill-documenter');
+          }
+          result = await skillDocumenterAgent.runSkillDocumenter({
+            taskTitle: context.task.title,
+            taskDescription: context.task.description || '',
+            workerResult: context.workerResult,
+            projectPath: context.projectPath,
+            timeoutMs: this.config.roles?.['skill-documenter']?.timeoutMs ?? 0,
+            model: this.config.roles?.['skill-documenter']?.model,
+          });
+          context.skillDocumenterResult = result as SkillDocumenterResult;
+          break;
+
         default:
           throw new Error(`Unknown stage: ${stage}`);
       }
@@ -320,7 +375,14 @@ export class PairPipeline extends EventEmitter {
       };
 
       this.emit('stage:complete', { stage, result: stageResult, context });
-      broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'complete' } });
+      const costInfo = (result as { costInfo?: CostInfo }).costInfo;
+      broadcastEvent({ type: 'pipeline:stage', data: {
+        taskId: context.task.id, stage, status: 'complete',
+        model: costInfo?.model,
+        inputTokens: costInfo?.inputTokens,
+        outputTokens: costInfo?.outputTokens,
+        costUsd: costInfo?.costUsd,
+      } });
       return stageResult;
 
     } catch (error) {
@@ -330,7 +392,7 @@ export class PairPipeline extends EventEmitter {
         result: {
           success: false,
           error: error instanceof Error ? error.message : String(error),
-        } as any,
+        },
         duration: Date.now() - startTime,
       };
 
@@ -345,7 +407,7 @@ export class PairPipeline extends EventEmitter {
    */
   private isStageSuccess(
     stage: PipelineStage,
-    result: WorkerResult | ReviewResult | TesterResult | DocumenterResult
+    result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult
   ): boolean {
     switch (stage) {
       case 'worker':
@@ -359,6 +421,12 @@ export class PairPipeline extends EventEmitter {
 
       case 'documenter':
         return (result as DocumenterResult).success;
+
+      case 'auditor':
+        return (result as AuditorResult).success;
+
+      case 'skill-documenter':
+        return (result as SkillDocumenterResult).success;
 
       default:
         return false;
@@ -417,9 +485,24 @@ export class PairPipeline extends EventEmitter {
 
       console.log(`[Pipeline] Iteration ${context.currentIteration}/${maxIterations}`);
 
-      // ========== WORKER ==========
+      // ========== WORKER (with escalation) ==========
+      const workerCfg = this.config.roles?.worker;
+      const escalateThreshold = workerCfg?.escalateAfterIteration ?? 3;
+      const shouldEscalate = context.currentIteration >= escalateThreshold && !!workerCfg?.escalateModel;
+      const workerOverrides = shouldEscalate ? { model: workerCfg!.escalateModel! } : undefined;
+
+      if (shouldEscalate) {
+        console.log(`[Pipeline] Escalating worker model → ${workerCfg!.escalateModel} (iteration ${context.currentIteration})`);
+        broadcastEvent({ type: 'pipeline:escalation', data: {
+          taskId: context.task.id,
+          iteration: context.currentIteration,
+          fromModel: workerCfg?.model,
+          toModel: workerCfg!.escalateModel!,
+        } });
+      }
+
       agentPair.updateSessionStatus(context.session.id, 'working');
-      const workerResult = await this.runStage('worker', context);
+      const workerResult = await this.runStage('worker', context, workerOverrides);
       stages.push(workerResult);
 
       // Record Worker result in stuck detector
@@ -535,8 +618,11 @@ export class PairPipeline extends EventEmitter {
     stages: StageResult[],
     startTime: number
   ): PipelineResult {
-    const session = agentPair.getPairSession(context.session.id);
-    const finalStatus = session?.status as PipelineResult['finalStatus'] || 'failed';
+    // Use context.session directly — do NOT re-fetch from store.
+    // updateSessionStatus('approved') archives the session (deletes from Map),
+    // so getPairSession() would return undefined → finalStatus = 'failed'.
+    const session = context.session;
+    const finalStatus = session.status as PipelineResult['finalStatus'] || 'failed';
     const success = finalStatus === 'approved';
 
     // Aggregate costs from all stages
@@ -545,6 +631,8 @@ export class PairPipeline extends EventEmitter {
     if (context.reviewResult?.costInfo) stageCosts.push(context.reviewResult.costInfo);
     if (context.testerResult?.costInfo) stageCosts.push(context.testerResult.costInfo);
     if (context.documenterResult?.costInfo) stageCosts.push(context.documenterResult.costInfo);
+    if (context.auditorResult?.costInfo) stageCosts.push(context.auditorResult.costInfo);
+    if (context.skillDocumenterResult?.costInfo) stageCosts.push(context.skillDocumenterResult.costInfo);
     const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
 
     if (totalCost) {
@@ -563,6 +651,8 @@ export class PairPipeline extends EventEmitter {
       reviewResult: context.reviewResult,
       testerResult: context.testerResult,
       documenterResult: context.documenterResult,
+      auditorResult: context.auditorResult,
+      skillDocumenterResult: context.skillDocumenterResult,
       taskContext: {
         issueIdentifier: context.task.issueIdentifier || context.task.issueId,
         projectName: context.task.linearProject?.name,
@@ -632,6 +722,12 @@ export function createPipelineFromConfig(
   if (roles?.documenter?.enabled) {
     stages.push('documenter');
   }
+  if (roles?.auditor?.enabled) {
+    stages.push('auditor');
+  }
+  if (roles?.['skill-documenter']?.enabled) {
+    stages.push('skill-documenter');
+  }
 
   return new PairPipeline({
     stages,
@@ -653,6 +749,7 @@ export function formatPipelineResult(result: PipelineResult): string {
     rejected: '❌',
     failed: '💥',
     cancelled: '🚫',
+    decomposed: '🔀',
   }[result.finalStatus];
 
   const lines: string[] = [];

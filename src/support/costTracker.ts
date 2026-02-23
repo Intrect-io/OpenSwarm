@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Cost Tracker
+// OpenSwarm - Cost Tracker
 // Common cost extraction utilities for Claude CLI output
 // ============================================
 

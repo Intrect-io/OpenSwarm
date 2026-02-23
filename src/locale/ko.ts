@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Korean Locale Messages
+// OpenSwarm - Korean Locale Messages
 // ============================================
 
 import { LocaleMessages } from './types.js';
@@ -46,7 +46,7 @@ export const ko: LocaleMessages = {
       startFailed: '시작 실패: {{error}}',
     },
     status: {
-      title: '🤖 Claude Swarm 상태',
+      title: '🤖 OpenSwarm 상태',
       noAgents: '활성 에이전트가 없습니다.',
       noIssueAssigned: '📋 할당된 이슈 없음',
       lastHeartbeat: '🕐 마지막 heartbeat: {{time}}',
@@ -241,7 +241,7 @@ export const ko: LocaleMessages = {
         noFiles: '없음',
       },
     },
-    help: `**Claude Swarm 명령어**
+    help: `**OpenSwarm 명령어**
 
 **Dev 작업** (Claude 디스패치)
 \`!dev <repo> "<task>"\` - 저장소에서 dev 작업 실행
@@ -351,11 +351,11 @@ export const ko: LocaleMessages = {
 
   // ── Service ─────────────────────────────
   service: {
-    startComplete: 'Claude Swarm 서비스 시작 완료!',
+    startComplete: 'OpenSwarm 서비스 시작 완료!',
     agentCount: '에이전트: {{n}}개',
     repoCount: 'GitHub 레포: {{n}}개',
     heartbeatInterval: '기본 heartbeat: {{n}}분',
-    startedMessage: 'Claude Swarm 시작됨. {{agents}}개 에이전트, {{schedules}}개 스케줄 활성화{{autoStatus}}.',
+    startedMessage: 'OpenSwarm 시작됨. {{agents}}개 에이전트, {{schedules}}개 스케줄 활성화{{autoStatus}}.',
     autoModeActive: ', 자율모드 활성 ({{mode}})',
     scheduler: {
       noSchedules: '등록된 스케줄이 없습니다.',

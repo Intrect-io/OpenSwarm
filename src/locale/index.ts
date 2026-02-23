@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Locale Module
+// OpenSwarm - Locale Module
 // t() helper, initLocale(), getPrompts(), getDateLocale()
 // ============================================
 

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Agent Pair Session Management
+// OpenSwarm - Agent Pair Session Management
 // Worker/Reviewer pair session management
 // ============================================
 

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Time Window Management
+// OpenSwarm - Time Window Management
 // Agent work time restriction module
 // ============================================
 

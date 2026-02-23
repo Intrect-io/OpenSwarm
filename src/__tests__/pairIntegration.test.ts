@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Pair Mode Integration Tests
+// OpenSwarm - Pair Mode Integration Tests
 // Worker/Reviewer 페어 전체 플로우 테스트
 // ============================================
 

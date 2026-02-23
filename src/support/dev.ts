@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Development Task Execution
+// OpenSwarm - Development Task Execution
 // ============================================
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -19,7 +19,7 @@ const KNOWN_REPOS: Record<string, string> = {
   'pykiwoom-rest': '~/dev/tools/pykiwoom-rest',
 
   // Projects - add as needed
-  'claude-swarm': '~/dev/claude-swarm',
+  'OpenSwarm': '~/dev/OpenSwarm',
   stonks: '~/dev/STONKS',
   stockapi: '~/dev/StockAPI',
 };
@@ -317,7 +317,7 @@ ${outputSummary.trim() || '(출력 없음)'}
     } else {
       const header = `# ${dateStr} 작업 리포트
 
-> 이 파일은 Claude Swarm에 의해 자동 생성됩니다.
+> 이 파일은 OpenSwarm에 의해 자동 생성됩니다.
 > 저장소: \`${task.path}\`
 
 `;

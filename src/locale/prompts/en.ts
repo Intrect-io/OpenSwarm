@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - English Prompt Templates
+// OpenSwarm - English Prompt Templates
 // ============================================
 
 import type { PromptTemplates } from '../types.js';

@@ -7,11 +7,11 @@ model: sonnet
 
 # Service Architect Agent
 
-Claude Swarm 서비스 아키텍처 전문가입니다.
+OpenSwarm 서비스 아키텍처 전문가입니다.
 
 ## 프로젝트 컨텍스트
 
-- **프로젝트**: claude-swarm
+- **프로젝트**: OpenSwarm
 - **기술 스택**: TypeScript, Node.js
 - **주요 파일**: `src/service.ts`, `src/tmux.ts`
 - **관련 타입**: `src/types.ts` (SwarmConfig, ServiceState, AgentSession)

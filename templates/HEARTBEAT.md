@@ -1,6 +1,6 @@
 # HEARTBEAT.md
 
-> 이 파일은 Claude Swarm 에이전트가 자율 작업 시 따르는 체크리스트입니다.
+> 이 파일은 OpenSwarm 에이전트가 자율 작업 시 따르는 체크리스트입니다.
 > 각 프로젝트 루트에 복사해서 사용하세요.
 
 ## 자율 개발 흐름
@@ -44,11 +44,11 @@ pnpm test  # 또는 프로젝트에 맞는 테스트 명령
 **완료 시:**
 - 변경사항 git commit
 - "DONE: <요약>" 출력
-- (Swarm이 자동으로 Linear 이슈 완료 처리)
+- (OpenSwarm이 자동으로 Linear 이슈 완료 처리)
 
 **막힘 시:**
 - "BLOCKED: <이유>" 출력
-- (Swarm이 자동으로 Linear에 Blocked 처리 + Discord 알림)
+- (OpenSwarm이 자동으로 Linear에 Blocked 처리 + Discord 알림)
 
 ### 6. Git 정리
 
@@ -60,7 +60,7 @@ pnpm test  # 또는 프로젝트에 맞는 테스트 명령
 
 ## 보고 형식
 
-Swarm이 자동 파싱하는 키워드:
+OpenSwarm이 자동 파싱하는 키워드:
 
 ```
 DONE: <완료 요약>        → 이슈 완료 처리

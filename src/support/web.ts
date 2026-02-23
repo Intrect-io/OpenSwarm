@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Web Interface
+// OpenSwarm - Web Interface
 // ============================================
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -24,7 +24,7 @@ let runnerRef: AutonomousRunner | undefined;
 // ============================================
 // Pinned + enabled repos persistence
 // ============================================
-const REPOS_FILE = join(homedir(), '.claude', 'claude-swarm-repos.json');
+const REPOS_FILE = join(homedir(), '.claude', 'openswarm-repos.json');
 
 interface ReposConfig {
   pinned: string[];    // user-added repos (shown in dashboard)
@@ -315,7 +315,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           : '';
 
         const contextPrompt = [
-          'You are VEGA, an autonomous code development supervisor powered by Claude Swarm.',
+          'You are VEGA, an autonomous code development supervisor powered by OpenSwarm.',
           'You manage a fleet of Claude Code agents that autonomously work on Linear issues.',
           '',
           'Current system status:',
@@ -361,15 +361,25 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             }
             // Extract result text from stream-json
             let resultText = '';
+            const assistantTexts: string[] = [];
             for (const line of out.split('\n').filter(Boolean)) {
               try {
                 const event = JSON.parse(line);
                 if (event.type === 'result' && event.result) {
                   resultText = event.result;
                 }
+                // assistant 메시지에서 text 블록 수집 (result가 비어있을 때 fallback용)
+                if (event.type === 'assistant' && event.message?.content) {
+                  for (const block of event.message.content) {
+                    if (block.type === 'text' && block.text?.trim()) {
+                      assistantTexts.push(block.text.trim());
+                    }
+                  }
+                }
               } catch { /* ignore */ }
             }
-            resolve(resultText.trim() || out.trim() || '[No response]');
+            // result가 있으면 사용, 없으면 assistant text 결합, 둘 다 없으면 에러 메시지
+            resolve(resultText.trim() || assistantTexts.join('\n\n') || '[No response]');
           });
           proc.on('error', (e: Error) => resolve(`[Error: ${e.message}]`));
           setTimeout(() => { proc.kill(); resolve('[Response timeout — try a shorter question]'); }, 180000);
@@ -386,7 +396,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/status' && req.method === 'GET') {
         try {
           const result = await new Promise<string>((resolve) => {
-            execFile('systemctl', ['--user', 'is-active', 'claude-swarm'], (_err, stdout) => {
+            execFile('systemctl', ['--user', 'is-active', 'openswarm'], (_err, stdout) => {
               resolve(stdout.trim());
             });
           });
@@ -401,7 +411,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/stop' && req.method === 'POST') {
         try {
           await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'stop', 'claude-swarm'], (err) => {
+            execFile('systemctl', ['--user', 'stop', 'openswarm'], (err) => {
               if (err) reject(err); else resolve();
             });
           });
@@ -416,7 +426,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/restart' && req.method === 'POST') {
         try {
           await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'restart', 'claude-swarm'], (err) => {
+            execFile('systemctl', ['--user', 'restart', 'openswarm'], (err) => {
               if (err) reject(err); else resolve();
             });
           });

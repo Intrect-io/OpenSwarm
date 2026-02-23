@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Long-Running Task Monitor
+// OpenSwarm - Long-Running Task Monitor
 // 외부 장기 작업(RunPod 학습, 배치 처리 등) 상태 추적
 // ============================================
 
@@ -19,7 +19,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 // Constants
 // ============================================
 
-const PERSIST_FILE = join(homedir(), '.claude', 'claude-swarm-monitors.json');
+const PERSIST_FILE = join(homedir(), '.claude', 'openswarm-monitors.json');
 const CHECK_TIMEOUT_MS = 30_000; // 개별 체크 명령어 타임아웃 30초
 
 // ============================================

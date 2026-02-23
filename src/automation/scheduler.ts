@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Dynamic Scheduler
+// OpenSwarm - Dynamic Scheduler
 // Spawn-based execution (no tmux required)
 // ============================================
 
@@ -13,7 +13,7 @@ import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js
 import { t, getDateLocale } from '../locale/index.js';
 
 // Schedule storage path
-const SCHEDULE_DIR = resolve(homedir(), '.claude-swarm');
+const SCHEDULE_DIR = resolve(homedir(), '.openswarm');
 const SCHEDULE_FILE = resolve(SCHEDULE_DIR, 'schedules.json');
 
 // Scheduled job interface

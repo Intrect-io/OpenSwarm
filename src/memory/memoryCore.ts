@@ -10,7 +10,7 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 
 // Memory storage path
-const MEMORY_DIR = resolve(homedir(), '.claude-swarm/memory');
+const MEMORY_DIR = resolve(homedir(), '.openswarm/memory');
 
 // Xenova embedding config (runs locally, no external dependencies)
 const EMBEDDING_MODEL = 'Xenova/multilingual-e5-base';  // 768 dimensions, multilingual
@@ -832,7 +832,7 @@ export async function searchMemorySafe(
       .sort((a, b) => b.hybridScore - a.hybridScore)
       .slice(0, limit);
 
-    updateAccessTime(scored.map(s => s.record.id)).catch(() => {});
+    updateAccessTime(scored.map(s => s.record.id)).catch((e) => console.warn('[Memory] Failed to update access time:', e));
 
     const formatted: MemorySearchResult[] = scored.map(({ record: r, similarity, recency, importance, hybridScore }) => ({
       id: r.id,

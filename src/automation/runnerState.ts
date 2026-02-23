@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Runner State Utilities
+// OpenSwarm - Runner State Utilities
 // Task state persistence + project info query
 // ============================================
 
@@ -8,7 +8,18 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
-export const TASK_STATE_FILE = join(homedir(), '.claude', 'claude-swarm-task-state.json');
+/** Check if a resolved path matches or is under any enabled project path */
+export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
+  if (enabledProjects.has(resolvedPath)) return true;
+  for (const enabled of enabledProjects) {
+    if (resolvedPath.startsWith(enabled + '/')) return true;
+  }
+  return false;
+}
+
+export const TASK_STATE_FILE = join(homedir(), '.claude', 'openswarm-task-state.json');
+export const PIPELINE_HISTORY_FILE = join(homedir(), '.claude', 'openswarm-pipeline-history.json');
+const MAX_PIPELINE_HISTORY = 100;
 
 export interface TaskState {
   completedTaskIds: Set<string>;
@@ -45,6 +56,62 @@ export function saveTaskState(state: TaskState): void {
   } catch (err) {
     console.warn('[AutonomousRunner] Failed to save task state:', err);
   }
+}
+
+// ============================================
+// Pipeline History (persistent, time-ordered)
+// ============================================
+
+export interface PipelineHistoryEntry {
+  sessionId: string;
+  issueIdentifier?: string;
+  issueId?: string;
+  taskTitle: string;
+  projectName?: string;
+  projectPath?: string;
+  success: boolean;
+  finalStatus: string;
+  iterations: number;
+  totalDuration: number;
+  stages: { stage: string; success: boolean; duration: number }[];
+  cost?: { costUsd: number; inputTokens: number; outputTokens: number };
+  prUrl?: string;
+  completedAt: string; // ISO-8601
+}
+
+// In-memory cache (loaded once at startup, appended per completion)
+let pipelineHistory: PipelineHistoryEntry[] | null = null;
+
+function ensureHistoryLoaded(): PipelineHistoryEntry[] {
+  if (pipelineHistory !== null) return pipelineHistory;
+  try {
+    if (existsSync(PIPELINE_HISTORY_FILE)) {
+      const raw = readFileSync(PIPELINE_HISTORY_FILE, 'utf8');
+      pipelineHistory = JSON.parse(raw) as PipelineHistoryEntry[];
+    } else {
+      pipelineHistory = [];
+    }
+  } catch {
+    pipelineHistory = [];
+  }
+  return pipelineHistory;
+}
+
+export function appendPipelineHistory(entry: PipelineHistoryEntry): void {
+  const history = ensureHistoryLoaded();
+  history.unshift(entry); // newest first
+  if (history.length > MAX_PIPELINE_HISTORY) {
+    history.length = MAX_PIPELINE_HISTORY;
+  }
+  try {
+    writeFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[PipelineHistory] Failed to save:', err);
+  }
+}
+
+export function getPipelineHistory(limit = 50): PipelineHistoryEntry[] {
+  return ensureHistoryLoaded().slice(0, limit);
 }
 
 // ============================================
@@ -107,12 +174,12 @@ export function buildProjectsInfo(
     return {
       path: projectPath,
       name: proj.name,
-      enabled: Boolean(projectPath) && enabledProjects.has(projectPath),
+      enabled: Boolean(projectPath) && isPathEnabled(projectPath, enabledProjects),
       running: running.filter(r => r.task.linearProject?.name === proj.name)
         .map(r => ({ id: r.task.id, title: r.task.title, priority: r.task.priority })),
       queued: queued.filter(q => q.task.linearProject?.name === proj.name)
         .map(q => ({ id: q.task.id, title: q.task.title, priority: q.task.priority })),
-      pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id))
+      pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id) && t.linearState !== 'Backlog')
         .map(t => ({ id: t.id, title: t.title, priority: t.priority, issueIdentifier: t.issueIdentifier || t.issueId })),
     };
   });

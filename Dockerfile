@@ -1,4 +1,4 @@
-# Multi-stage build for Claude Swarm
+# Multi-stage build for OpenSwarm
 # Stage 1: Builder (using Alpine for smaller image)
 FROM node:22-alpine AS builder
 
@@ -81,7 +81,7 @@ COPY config.yaml ./config.yaml
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/config /app/logs /app/data /home/claude/dev && \
-    ln -sf /app /home/claude/dev/claude-swarm && \
+    ln -sf /app /home/claude/dev/openswarm && \
     chown -R claude:nodejs /app && \
     chown -R claude:nodejs /home/claude
 

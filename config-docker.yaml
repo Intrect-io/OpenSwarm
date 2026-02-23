@@ -1,4 +1,4 @@
-# Claude Swarm Docker Configuration
+# OpenSwarm Docker Configuration
 # Docker 컨테이너 환경용 설정 파일
 
 # 시간 제한 비활성화 (테스트용)
@@ -24,7 +24,7 @@ github:
 # 에이전트 목록 - Docker 컨테이너 경로 사용
 agents:
   - name: main
-    projectPath: /home/claude/dev/claude-swarm  # Docker 컨테이너 내부 경로
+    projectPath: /home/claude/dev/OpenSwarm  # Docker 컨테이너 내부 경로
     heartbeatInterval: 1800000  # 30분 (ms)
     linearLabel: main  # Linear 이슈 필터용 라벨
     enabled: true
@@ -37,17 +37,17 @@ defaultHeartbeatInterval: 1800000  # 30분
 autonomous:
   enabled: true
   pairMode: true
-  schedule: "*/30 * * * *"  # 30분마다
+  schedule: "*/15 * * * *"  # 15분마다
   maxAttempts: 3
-  maxConcurrentTasks: 3  # 동시 3개 태스크
+  maxConcurrentTasks: 4  # 동시 4개 태스크
 
   allowedProjects:
-    - /home/claude/dev/claude-swarm  # Docker 컨테이너 내부 경로
+    - /home/claude/dev/OpenSwarm  # Docker 컨테이너 내부 경로
 
   # 레거시 설정 (하위 호환용)
   models:
     worker: claude-sonnet-4-20250514
-    reviewer: claude-3-5-haiku-20241022
+    reviewer: claude-haiku-4-5-20251001
   workerTimeoutMs: 0      # 0 = 무제한
   reviewerTimeoutMs: 0    # 0 = 무제한
 
@@ -55,24 +55,34 @@ autonomous:
   defaultRoles:
     worker:
       enabled: true
-      model: claude-sonnet-4-20250514
+      model: claude-haiku-4-5-20251001        # 기본: Haiku (저비용)
+      escalateModel: claude-sonnet-4-20250514  # 실패 시: Sonnet
+      escalateAfterIteration: 3                # 3번째 이터레이션부터 에스컬레이션
       timeoutMs: 1800000  # 30분
     reviewer:
       enabled: true
-      model: claude-3-5-haiku-20241022
+      model: claude-haiku-4-5-20251001
       timeoutMs: 600000   # 10분
     tester:
       enabled: true
-      model: claude-3-5-haiku-20241022
+      model: claude-haiku-4-5-20251001
       timeoutMs: 300000   # 5분
     documenter:
       enabled: false  # 기본 비활성
-      model: claude-3-5-haiku-20241022
+      model: claude-haiku-4-5-20251001
+      timeoutMs: 120000   # 2분
+    auditor:
+      enabled: true
+      model: claude-haiku-4-5-20251001
+      timeoutMs: 300000   # 5분
+    skill-documenter:
+      enabled: true
+      model: claude-haiku-4-5-20251001
       timeoutMs: 120000   # 2분
 
   # 프로젝트별 설정 오버라이드
   projectAgents:
-    - projectPath: /home/claude/dev/claude-swarm  # Docker 컨테이너 내부 경로
+    - projectPath: /home/claude/dev/OpenSwarm  # Docker 컨테이너 내부 경로
       roles:
         tester:
           enabled: true

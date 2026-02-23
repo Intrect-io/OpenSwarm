@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Runner Execution Helpers
+// OpenSwarm - Runner Execution Helpers
 // Execution/reporting/integration logic extracted from AutonomousRunner
 // ============================================
 
@@ -175,7 +175,7 @@ export async function decomposeTask(
   task: TaskItem,
   projectPath: string,
   targetMinutes: number,
-): Promise<boolean> {
+): Promise<boolean | 'no-decomp'> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
   const taskId = task.issueId || task.id;
@@ -220,7 +220,7 @@ export async function decomposeTask(
 
   if (!result.needsDecomposition || result.subTasks.length === 0) {
     console.log('[AutonomousRunner] Planner determined no decomposition needed');
-    return false;
+    return 'no-decomp';
   }
 
   if (!task.issueId) {
@@ -316,26 +316,32 @@ export async function executePipeline(
       console.log(`[AutonomousRunner] Task "${task.title}" may need decomposition (estimated ${estimated}min > ${threshold}min)`);
 
       const decomposed = await decomposeTask(ctx, task, projectPath, threshold);
-      if (decomposed) {
+      if (decomposed === true) {
+        // Successfully decomposed into sub-issues
         return {
           success: true,
           sessionId: `decomposed-${Date.now()}`,
           iterations: 0,
           totalDuration: 0,
-          finalStatus: 'decomposed' as any,
+          finalStatus: 'decomposed',
           stages: [],
         };
       }
-      // Decomposition was needed but failed — do NOT attempt the oversized task directly
-      console.log('[AutonomousRunner] Decomposition failed for oversized task, skipping execution');
-      return {
-        success: false,
-        sessionId: `decomp-failed-${Date.now()}`,
-        iterations: 0,
-        totalDuration: 0,
-        finalStatus: 'failed' as any,
-        stages: [],
-      };
+      if (decomposed === 'no-decomp') {
+        // Planner says task is smaller than threshold — proceed with direct execution
+        console.log('[AutonomousRunner] Planner says task fits in threshold, executing directly');
+      } else {
+        // Decomposition actually failed (planner error, API error, etc.)
+        console.log('[AutonomousRunner] Decomposition failed for oversized task, skipping execution');
+        return {
+          success: false,
+          sessionId: `decomp-failed-${Date.now()}`,
+          iterations: 0,
+          totalDuration: 0,
+          finalStatus: 'failed',
+          stages: [],
+        };
+      }
     }
   }
 

@@ -17,7 +17,7 @@ import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
 
 // Codex storage path
-const CODEX_DIR = resolve(homedir(), '.claude-swarm/codex');
+const CODEX_DIR = resolve(homedir(), '.openswarm/codex');
 
 /**
  * Session metadata

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Discord Command Handlers
+// OpenSwarm - Discord Command Handlers
 //
 // All command handlers (!status, !dev, etc.)
 // ============================================
@@ -854,7 +854,7 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
       console.log(`[Auto] Starting with pairMode: ${hasPairFlag}`);
       await autonomous.startAutonomous({
         linearTeamId: process.env.LINEAR_TEAM_ID || '',
-        allowedProjects: ['~/dev/claude-swarm', '~/dev/tools/pykis', '~/dev'],
+        allowedProjects: ['~/dev/OpenSwarm', '~/dev/tools/pykis', '~/dev'],
         heartbeatSchedule: schedule,
         autoExecute: true, // 자동 실행 (승인 불필요)
         maxConsecutiveTasks: 3,

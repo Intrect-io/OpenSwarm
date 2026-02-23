@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Decision Engine
+// OpenSwarm - Decision Engine
 // Autonomous action scope control and task decision
 // ============================================
 
@@ -16,6 +16,8 @@ import {
 import { parseTask, saveParsedTask, loadParsedTask, formatParsedTaskSummary } from './taskParser.js';
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { saveCognitiveMemory } from '../memory/index.js';
+import { analyzeIssue, toProjectSlug } from '../knowledge/index.js';
+import type { ImpactAnalysis } from '../knowledge/index.js';
 
 // ============================================
 // Types
@@ -52,6 +54,7 @@ export interface TaskItem {
   createdAt: number;
   dueDate?: number;
   blockedBy?: string[];    // Other task IDs
+  impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
 }
 
 /**
@@ -112,8 +115,8 @@ export interface DecisionEngineConfig {
 // Constants
 // ============================================
 
-const ENGINE_STATE_FILE = resolve(homedir(), '.claude-swarm/decision-engine-state.json');
-const DISCOVERED_TASKS_FILE = resolve(homedir(), '.claude-swarm/discovered-tasks.json');
+const ENGINE_STATE_FILE = resolve(homedir(), '.openswarm/decision-engine-state.json');
+const DISCOVERED_TASKS_FILE = resolve(homedir(), '.openswarm/discovered-tasks.json');
 
 const DEFAULT_CONFIG: DecisionEngineConfig = {
   allowedProjects: [],
@@ -150,7 +153,7 @@ async function loadState(): Promise<EngineState> {
 }
 
 async function saveState(state: EngineState): Promise<void> {
-  await fs.mkdir(resolve(homedir(), '.claude-swarm'), { recursive: true });
+  await fs.mkdir(resolve(homedir(), '.openswarm'), { recursive: true });
   await fs.writeFile(ENGINE_STATE_FILE, JSON.stringify(state, null, 2));
 }
 
@@ -508,11 +511,29 @@ export class DecisionEngine {
     // 4. Auto-parse issue to generate workflow
     if (task.title && task.issueId) {
       console.log(`[DecisionEngine] Auto-parsing task: ${task.title}`);
+
+      // Impact analysis (knowledge graph) — non-blocking, best-effort
+      if (task.projectPath) {
+        try {
+          const impact = await analyzeIssue(task.projectPath, task.title, task.description);
+          if (impact) {
+            task.impactAnalysis = impact;
+            console.log(`[DecisionEngine] Impact: scope=${impact.estimatedScope}, direct=${impact.directModules.length}, deps=${impact.dependentModules.length}, tests=${impact.testFiles.length}`);
+          }
+        } catch (err) {
+          console.warn(`[DecisionEngine] Impact analysis failed (non-critical):`, err);
+        }
+      }
+
       const parsed = parseTask({
         id: task.issueId,
         title: task.title,
         description: task.description,
         projectPath: task.projectPath,
+        impactScope: task.impactAnalysis?.estimatedScope,
+        affectedModuleCount: task.impactAnalysis
+          ? task.impactAnalysis.directModules.length + task.impactAnalysis.dependentModules.length
+          : undefined,
       });
 
       // Save parsed result

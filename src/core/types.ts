@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Type Definitions
+// OpenSwarm - Type Definitions
 // ============================================
 
 /**

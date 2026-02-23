@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Discord Pair System
+// OpenSwarm - Discord Pair System
 //
 // Worker/Reviewer pair session management.
 // ============================================
@@ -195,7 +195,7 @@ async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
   } else {
     // 첫 번째 대기 중 이슈 선택
     try {
-      const issues = await linear.getMyIssues();
+      const issues = await linear.getMyIssues({ slim: true, timeoutMs: 30000 });
       if (issues.length === 0) {
         await msg.reply(`❌ ${t('discord.pair.noPendingIssues')}`);
         return;

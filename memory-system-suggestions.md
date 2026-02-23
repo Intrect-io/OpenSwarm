@@ -1,7 +1,7 @@
-PRD — Persistent Cognitive Memory for Claude-Swarm
+PRD — Persistent Cognitive Memory for OpenSwarm
 0. Document Status
 
-Owner: Swarm Runtime
+Owner: OpenSwarm Runtime
 
 Priority: Critical (architecture-defining)
 
@@ -9,7 +9,7 @@ Risk Level: High leverage / High failure cost
 
 1. Objective
 
-Claude-Swarm이 세션 기반 에이전트 → 지속적 인지 상태를 가진 시스템으로 전환되도록
+OpenSwarm이 세션 기반 에이전트 → 지속적 인지 상태를 가진 시스템으로 전환되도록
 장기 메모리 계층(Persistent Cognitive Memory Layer)을 설계한다.
 
 이 프로젝트의 목적은 단순 retrieval 향상이 아니다.
@@ -192,7 +192,7 @@ Top-K
 
 9. Memory Revision Loop (VERY CRITICAL)
 
-Swarm 지능을 결정하는 핵심 모듈.
+OpenSwarm 지능을 결정하는 핵심 모듈.
 
 Example Evolution
 
@@ -319,7 +319,7 @@ Phase 2 — Hybrid Retrieval
 
 Phase 3 — Revision Loop
 
-→ 여기서 swarm이 “생각하는 시스템”으로 변함.
+→ 여기서 OpenSwarm이 "생각하는 시스템"으로 변함.
 
 Phase 4 — Background Cognition
 

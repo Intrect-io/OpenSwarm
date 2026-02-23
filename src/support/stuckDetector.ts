@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Stuck Detector
+// OpenSwarm - Stuck Detector
 // OpenHands-style infinite loop detection
 // ============================================
 

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Main Service
+// OpenSwarm - Main Service
 // ============================================
 
 import type {
@@ -31,7 +31,7 @@ let prProcessor: PRProcessor | null = null;
  * Start the service
  */
 export async function startService(config: SwarmConfig): Promise<void> {
-  console.log('Starting Claude Swarm service...');
+  console.log('Starting OpenSwarm service...');
 
   // Locale initialization
   initLocale(config.language);
@@ -350,7 +350,7 @@ function formatDuration(ms: number): string {
  * Stop the service
  */
 export async function stopService(): Promise<void> {
-  console.log('Stopping Claude Swarm service...');
+  console.log('Stopping OpenSwarm service...');
 
   // Clean up GitHub monitoring timer
   if (githubCheckTimer) {

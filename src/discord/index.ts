@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Discord Bot
+// OpenSwarm - Discord Bot
 //
 // Barrel re-export: preserves existing import paths
 // - discordCore.ts: init, router, history, config, events, messenger

@@ -1,4 +1,4 @@
-# 🐛 Claude Swarm End-to-End 테스트 버그 수정 보고서
+# 🐛 OpenSwarm End-to-End 테스트 버그 수정 보고서
 
 ## 📋 테스트 결과 요약
 
@@ -22,13 +22,13 @@
 ## 🔧 수정한 버그
 
 ### 1. GitHub 레포 설정 오류
-**문제**: config.yaml에 존재하지 않는 `unohee/claude-swarm` 레포가 설정됨
+**문제**: config.yaml에 존재하지 않는 `unohee/OpenSwarm` 레포가 설정됨
 **증상**: GitHub API에서 404 Not Found 오류 발생
 **해결**: 실제 존재하는 레포로 변경
 ```yaml
 # Before
 repos:
-  - unohee/claude-swarm
+  - unohee/OpenSwarm
 
 # After
 repos:
@@ -107,4 +107,4 @@ repos:
 
 ---
 
-**결론**: Claude Swarm은 완전한 end-to-end 테스트를 통과했으며, 모든 핵심 기능이 안정적으로 동작합니다. 환경변수 설정 후 즉시 운영 환경에 배포 가능합니다.
+**결론**: OpenSwarm은 완전한 end-to-end 테스트를 통과했으며, 모든 핵심 기능이 안정적으로 동작합니다. 환경변수 설정 후 즉시 운영 환경에 배포 가능합니다.

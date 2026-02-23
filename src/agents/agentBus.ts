@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Agent Message Bus
+// OpenSwarm - Agent Message Bus
 // Inter-agent context sharing system
 // ============================================
 
@@ -94,7 +94,7 @@ export interface SharedContext {
 // Bus Implementation (File-based)
 // ============================================
 
-const BUS_DIR = resolve(homedir(), '.claude-swarm/bus');
+const BUS_DIR = resolve(homedir(), '.openswarm/bus');
 
 /**
  * Message bus class
