@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Locale Type Definitions
+// OpenSwarm - Locale Type Definitions
 // ============================================
 
 /**
@@ -73,7 +73,27 @@ export interface LocaleMessages {
       resumed: string;               // {{name}}
     };
     issues: {
-      notImplemented: string;
+      title: string;
+      myIssues: string;
+      sessionIssues: string;             // {{session}}
+      noIssues: string;
+      stateLabel: string;                // {{state}}
+      priorityLabel: string;             // {{priority}}
+      projectLabel: string;              // {{project}}
+      labelsLabel: string;               // {{labels}}
+      commentsCount: string;             // {{count}}
+      page: string;                      // {{current}}, {{total}}
+      usage: string;
+      fetchError: string;                // {{error}}
+    };
+    issue: {
+      title: string;
+      notFound: string;                  // {{id}}
+      fetchError: string;                // {{error}}
+      noDescription: string;
+      noComments: string;
+      commentAuthor: string;             // {{author}}
+      commentDate: string;               // {{date}}
     };
     log: {
       usage: string;

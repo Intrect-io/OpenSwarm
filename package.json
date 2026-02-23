@@ -1,5 +1,5 @@
 {
-  "name": "claude-swarm",
+  "name": "openswarm",
   "version": "0.1.0",
   "description": "Autonomous Claude Code agents orchestrator with Discord control and Linear memory",
   "type": "module",
@@ -10,7 +10,7 @@
     "prestart": "pkill -f 'dist/index.js' 2>/dev/null || true",
     "build": "tsc",
     "start": "node --env-file=.env dist/index.js",
-    "stop": "pkill -f 'node --env-file=.env.*claude-swarm' 2>/dev/null || echo 'No process running'",
+    "stop": "pkill -f 'node --env-file=.env.*openswarm' 2>/dev/null || echo 'No process running'",
     "lint": "oxlint src/",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",

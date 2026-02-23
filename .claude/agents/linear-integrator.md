@@ -11,7 +11,7 @@ Linear 프로젝트 관리 시스템 연동 전문가입니다.
 
 ## 프로젝트 컨텍스트
 
-- **프로젝트**: claude-swarm
+- **프로젝트**: OpenSwarm
 - **기술 스택**: TypeScript, @linear/sdk
 - **주요 파일**: `src/linear.ts`
 - **관련 타입**: `src/types.ts` (LinearIssueInfo, LinearComment)

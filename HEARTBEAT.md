@@ -1,4 +1,4 @@
-# Claude Swarm Heartbeat 체크리스트
+# OpenSwarm Heartbeat 체크리스트
 
 ## 🔍 시스템 상태 점검
 

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - English Locale Messages
+// OpenSwarm - English Locale Messages
 // ============================================
 
 import { LocaleMessages } from './types.js';
@@ -46,15 +46,15 @@ export const en: LocaleMessages = {
       startFailed: 'Start failed: {{error}}',
     },
     status: {
-      title: 'Claude Swarm Status',
+      title: 'OpenSwarm Status',
       noAgents: 'No active agents.',
       noIssueAssigned: 'No issue assigned',
       lastHeartbeat: 'Last heartbeat: {{time}}',
       stateLabel: 'State: {{state}}',
     },
     list: {
-      noSessions: 'No active tmux sessions.',
-      activeSessions: '**Active tmux sessions:**',
+      noSessions: 'No active sessions.',
+      activeSessions: '**Active sessions:**',
     },
     run: {
       usage: 'Usage: !run <session> "<task>"',
@@ -71,7 +71,27 @@ export const en: LocaleMessages = {
       resumed: '**{{name}}** autonomous work resumed',
     },
     issues: {
-      notImplemented: 'Linear issue query coming soon',
+      title: 'Linear Issues',
+      myIssues: 'My Issues',
+      sessionIssues: '**{{session}}** Issues',
+      noIssues: 'No issues found.',
+      stateLabel: 'State: {{state}}',
+      priorityLabel: 'Priority: {{priority}}',
+      projectLabel: 'Project: {{project}}',
+      labelsLabel: 'Labels: {{labels}}',
+      commentsCount: '{{count}} comment(s)',
+      page: 'Page {{current}}/{{total}}',
+      usage: 'Usage: `!issues` or `!issues <session>`\n`!issue <ID>` - Show issue details (e.g., `!issue LIN-123`)',
+      fetchError: 'Failed to fetch issues: {{error}}',
+    },
+    issue: {
+      title: 'Issue Details',
+      notFound: 'Issue not found: `{{id}}`',
+      fetchError: 'Failed to fetch issue: {{error}}',
+      noDescription: '(no description)',
+      noComments: 'No comments',
+      commentAuthor: 'Author: {{author}}',
+      commentDate: 'Date: {{date}}',
     },
     log: {
       usage: 'Usage: !log <session> [lines]',
@@ -221,7 +241,7 @@ export const en: LocaleMessages = {
         noFiles: 'none',
       },
     },
-    help: `**Claude Swarm Commands**
+    help: `**OpenSwarm Commands**
 
 **Dev Tasks** (dispatch Claude)
 \`!dev <repo> "<task>"\` - Run dev task on repository
@@ -233,7 +253,7 @@ export const en: LocaleMessages = {
 
 **Agent Management**
 \`!status [session]\` - Check agent status
-\`!list\` - Active tmux sessions
+\`!list\` - Session list (deprecated)
 \`!run <session> "<task>"\` - Run specific task
 \`!pause <session>\` - Pause autonomous work
 \`!resume <session>\` - Resume autonomous work
@@ -331,11 +351,11 @@ export const en: LocaleMessages = {
 
   // ── Service ─────────────────────────────
   service: {
-    startComplete: 'Claude Swarm service started!',
+    startComplete: 'OpenSwarm service started!',
     agentCount: 'Agents: {{n}}',
     repoCount: 'GitHub repos: {{n}}',
     heartbeatInterval: 'Default heartbeat: {{n}} min',
-    startedMessage: 'Claude Swarm started. {{agents}} agents, {{schedules}} schedules active{{autoStatus}}.',
+    startedMessage: 'OpenSwarm started. {{agents}} agents, {{schedules}} schedules active{{autoStatus}}.',
     autoModeActive: ', autonomous mode active ({{mode}})',
     scheduler: {
       noSchedules: 'No schedules registered.',

@@ -1,4 +1,4 @@
-# Claude Swarm Configuration
+# OpenSwarm Configuration
 # 환경변수는 ${VAR_NAME} 또는 ${VAR_NAME:-default} 형식으로 사용
 # 이 파일을 config.yaml로 복사하여 사용하세요
 
@@ -13,13 +13,13 @@ linear:
 
 github:
   repos:
-    - unohee/claude-swarm  # owner/repo 형식
+    - unohee/OpenSwarm  # owner/repo 형식
   checkInterval: 300000  # 5분 (ms)
 
 # 에이전트 목록
 agents:
   - name: main
-    projectPath: ~/dev/claude-swarm
+    projectPath: ~/dev/OpenSwarm
     heartbeatInterval: 1800000  # 30분 (ms)
     linearLabel: main  # Linear 이슈 필터용 라벨
     enabled: true
@@ -32,12 +32,12 @@ defaultHeartbeatInterval: 1800000  # 30분
 autonomous:
   enabled: true
   pairMode: true
-  schedule: "*/30 * * * *"  # 30분마다
+  schedule: "*/15 * * * *"  # 15분마다
   maxAttempts: 3
-  maxConcurrentTasks: 1  # 동시 실행 태스크 수
+  maxConcurrentTasks: 4  # 동시 실행 태스크 수
 
   allowedProjects:
-    - ~/dev/claude-swarm
+    - ~/dev/OpenSwarm
 
   # 작업 분해 설정 (Planner Agent)
   decomposition:
@@ -49,16 +49,40 @@ autonomous:
   defaultRoles:
     worker:
       enabled: true
-      model: claude-sonnet-4-20250514
+      model: claude-haiku-4-5-20251001        # 기본: Haiku (저비용)
+      escalateModel: claude-sonnet-4-20250514  # 실패 시: Sonnet
+      escalateAfterIteration: 3                # 3번째 이터레이션부터 에스컬레이션
       timeoutMs: 1800000  # 30분
     reviewer:
       enabled: true
-      model: claude-3-5-haiku-20241022
+      model: claude-haiku-4-5-20251001
       timeoutMs: 600000   # 10분
     tester:
       enabled: false
     documenter:
       enabled: false
+    auditor:
+      enabled: false
+      model: claude-haiku-4-5-20251001
+      timeoutMs: 300000   # 5분
+    skill-documenter:
+      enabled: false
+      model: claude-haiku-4-5-20251001
+      timeoutMs: 120000   # 2분
+
+# 장기 작업 모니터링 (RunPod 학습, 배치 처리 등)
+# monitors:
+#   - id: runpod-training
+#     name: "LSTM 모델 학습"
+#     issueId: INT-456
+#     checkCommand: 'ssh runpod "tail -1 /workspace/train.log"'
+#     completionCheck:
+#       type: output-regex
+#       successPattern: "Training finished"
+#       failurePattern: "Error|FAILED"
+#     checkInterval: 2         # 2 heartbeat마다
+#     maxDurationHours: 24
+#     notify: true
 
 # PR Auto-Improvement
 prProcessor:

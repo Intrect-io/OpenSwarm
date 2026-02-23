@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Korean Locale Messages
+// OpenSwarm - Korean Locale Messages
 // ============================================
 
 import { LocaleMessages } from './types.js';
@@ -46,15 +46,15 @@ export const ko: LocaleMessages = {
       startFailed: '시작 실패: {{error}}',
     },
     status: {
-      title: '🤖 Claude Swarm 상태',
+      title: '🤖 OpenSwarm 상태',
       noAgents: '활성 에이전트가 없습니다.',
       noIssueAssigned: '📋 할당된 이슈 없음',
       lastHeartbeat: '🕐 마지막 heartbeat: {{time}}',
       stateLabel: '상태: {{state}}',
     },
     list: {
-      noSessions: '활성 tmux 세션이 없습니다.',
-      activeSessions: '**활성 tmux 세션:**',
+      noSessions: '활성 세션이 없습니다.',
+      activeSessions: '**활성 세션:**',
     },
     run: {
       usage: '사용법: !run <session> "<task>"',
@@ -71,7 +71,27 @@ export const ko: LocaleMessages = {
       resumed: '▶️ **{{name}}** 자율 작업 재개',
     },
     issues: {
-      notImplemented: 'Linear 이슈 조회 기능 구현 예정',
+      title: '📋 Linear 이슈',
+      myIssues: '내 이슈',
+      sessionIssues: '**{{session}}** 이슈',
+      noIssues: '이슈가 없습니다.',
+      stateLabel: '상태: {{state}}',
+      priorityLabel: '우선순위: {{priority}}',
+      projectLabel: '프로젝트: {{project}}',
+      labelsLabel: '라벨: {{labels}}',
+      commentsCount: '댓글 {{count}}개',
+      page: '페이지 {{current}}/{{total}}',
+      usage: '사용법: `!issues` 또는 `!issues <session>`\n`!issue <ID>` - 이슈 상세 조회 (예: `!issue LIN-123`)',
+      fetchError: 'Linear 이슈 조회 실패: {{error}}',
+    },
+    issue: {
+      title: '📋 이슈 상세',
+      notFound: '이슈를 찾을 수 없습니다: `{{id}}`',
+      fetchError: '이슈 조회 실패: {{error}}',
+      noDescription: '(설명 없음)',
+      noComments: '댓글 없음',
+      commentAuthor: '작성자: {{author}}',
+      commentDate: '작성일: {{date}}',
     },
     log: {
       usage: '사용법: !log <session> [lines]',
@@ -221,7 +241,7 @@ export const ko: LocaleMessages = {
         noFiles: '없음',
       },
     },
-    help: `**Claude Swarm 명령어**
+    help: `**OpenSwarm 명령어**
 
 **Dev 작업** (Claude 디스패치)
 \`!dev <repo> "<task>"\` - 저장소에서 dev 작업 실행
@@ -233,7 +253,7 @@ export const ko: LocaleMessages = {
 
 **에이전트 관리**
 \`!status [session]\` - 에이전트 상태 확인
-\`!list\` - 활성 tmux 세션
+\`!list\` - 세션 목록 (deprecated)
 \`!run <session> "<task>"\` - 특정 작업 실행
 \`!pause <session>\` - 자율 작업 일시 중지
 \`!resume <session>\` - 자율 작업 재개
@@ -331,11 +351,11 @@ export const ko: LocaleMessages = {
 
   // ── Service ─────────────────────────────
   service: {
-    startComplete: 'Claude Swarm 서비스 시작 완료!',
+    startComplete: 'OpenSwarm 서비스 시작 완료!',
     agentCount: '에이전트: {{n}}개',
     repoCount: 'GitHub 레포: {{n}}개',
     heartbeatInterval: '기본 heartbeat: {{n}}분',
-    startedMessage: 'Claude Swarm 시작됨. {{agents}}개 에이전트, {{schedules}}개 스케줄 활성화{{autoStatus}}.',
+    startedMessage: 'OpenSwarm 시작됨. {{agents}}개 에이전트, {{schedules}}개 스케줄 활성화{{autoStatus}}.',
     autoModeActive: ', 자율모드 활성 ({{mode}})',
     scheduler: {
       noSchedules: '등록된 스케줄이 없습니다.',

@@ -1,5 +1,5 @@
 // ============================================
-// Claude Swarm - Korean Prompt Templates
+// OpenSwarm - Korean Prompt Templates
 // (Preserved verbatim from original codebase)
 // ============================================
 
