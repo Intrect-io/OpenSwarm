@@ -178,15 +178,22 @@ export class PRProcessor {
             }
           }
 
-          // Check CI status — only process PRs with failures
-          const { getPRChecks } = await import('../github/index.js');
-          const checks = await getPRChecks(repo, pr.number);
-          const hasFailure = checks.some(
-            (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
-          );
-          if (!hasFailure && checks.length > 0) {
-            console.log(`[PRProcessor] ${key}: CI passing, skipping`);
-            continue;
+          // Check for merge conflicts first (always handle conflicts)
+          const hasConflicts = await checkPRConflicts(repo, pr.number);
+
+          // If no conflicts, check CI status — only process PRs with failures
+          if (!hasConflicts) {
+            const { getPRChecks } = await import('../github/index.js');
+            const checks = await getPRChecks(repo, pr.number);
+            const hasFailure = checks.some(
+              (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
+            );
+            if (!hasFailure && checks.length > 0) {
+              console.log(`[PRProcessor] ${key}: no conflicts and CI passing, skipping`);
+              continue;
+            }
+          } else {
+            console.log(`[PRProcessor] ${key}: merge conflicts detected, will attempt resolution`);
           }
 
           // Map repo to local project path
