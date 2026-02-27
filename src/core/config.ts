@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
 import YAML from 'yaml';
-import type { SwarmConfig, AgentSession, LongRunningMonitorConfig } from './types.js';
+import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResolverConfig } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 
 // ============================================
@@ -147,6 +147,14 @@ const DecompositionConfigSchema = z.object({
   enabled: z.boolean().default(false),
   /** Decomposition threshold (minutes) - tasks exceeding this estimate are decomposed */
   thresholdMinutes: z.number().min(10).max(120).default(30),
+  /** Max decomposition depth (default: 2) - prevents infinite nesting */
+  maxDepth: z.number().min(1).max(5).default(2).optional(),
+  /** Max children per task (default: 5) - prevents issue explosion */
+  maxChildrenPerTask: z.number().min(1).max(20).default(5).optional(),
+  /** Daily issue creation limit (default: 20) - prevents runaway creation */
+  dailyLimit: z.number().min(1).max(100).default(20).optional(),
+  /** Auto-move to backlog if too complex or failing (default: true) */
+  autoBacklog: z.boolean().default(true).optional(),
   /** Planner model */
   plannerModel: z.string().default('claude-sonnet-4-20250514'),
   /** Planner timeout (ms) - default 600000 (10min) */
@@ -178,6 +186,8 @@ const AutonomousConfigSchema = z.object({
   projectAgents: z.array(ProjectAgentConfigSchema).optional(),
   /** Task decomposition configuration (Planner Agent) */
   decomposition: DecompositionConfigSchema,
+  /** Git worktree mode: each task runs in isolated worktree */
+  worktreeMode: z.boolean().default(false),
 }).optional();
 
 // Long-Running Monitor schemas
@@ -199,11 +209,21 @@ const LongRunningMonitorConfigSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+const ConflictResolverConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  ownershipMode: z.enum(['auto', 'all']).default('auto'),
+  maxResolutionAttempts: z.number().min(1).max(10).default(3),
+  cascadeCheck: z.boolean().default(true),
+  workerModel: z.string().optional(),
+  workerTimeoutMs: z.number().min(0).optional(),
+}).optional();
+
 const PRProcessorConfigSchema = z.object({
   enabled: z.boolean().default(false),
   schedule: z.string().default('*/15 * * * *'),
   cooldownHours: z.number().default(6),
   maxIterations: z.number().min(1).max(10).default(3),
+  conflictResolver: ConflictResolverConfigSchema,
 }).optional();
 
 const RawConfigSchema = z.object({
@@ -365,15 +385,21 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       decomposition: raw.autonomous.decomposition ? {
         enabled: raw.autonomous.decomposition.enabled,
         thresholdMinutes: raw.autonomous.decomposition.thresholdMinutes,
+        maxDepth: raw.autonomous.decomposition.maxDepth ?? 2,
+        maxChildrenPerTask: raw.autonomous.decomposition.maxChildrenPerTask ?? 5,
+        dailyLimit: raw.autonomous.decomposition.dailyLimit ?? 20,
+        autoBacklog: raw.autonomous.decomposition.autoBacklog ?? true,
         plannerModel: raw.autonomous.decomposition.plannerModel,
         plannerTimeoutMs: raw.autonomous.decomposition.plannerTimeoutMs,
       } : undefined,
+      worktreeMode: raw.autonomous.worktreeMode,
     } : undefined,
     prProcessor: raw.prProcessor ? {
       enabled: raw.prProcessor.enabled,
       schedule: raw.prProcessor.schedule,
       cooldownHours: raw.prProcessor.cooldownHours,
       maxIterations: raw.prProcessor.maxIterations,
+      conflictResolver: raw.prProcessor.conflictResolver as ConflictResolverConfig | undefined,
     } : undefined,
     monitors: raw.monitors as LongRunningMonitorConfig[] | undefined,
   };

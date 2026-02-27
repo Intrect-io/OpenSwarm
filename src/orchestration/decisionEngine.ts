@@ -16,7 +16,7 @@ import {
 import { parseTask, saveParsedTask, loadParsedTask, formatParsedTaskSummary } from './taskParser.js';
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { saveCognitiveMemory } from '../memory/index.js';
-import { analyzeIssue, toProjectSlug } from '../knowledge/index.js';
+import { analyzeIssue } from '../knowledge/index.js';
 import type { ImpactAnalysis } from '../knowledge/index.js';
 
 // ============================================
@@ -50,6 +50,7 @@ export interface TaskItem {
   issueId?: string;        // Linear issue ID
   issueIdentifier?: string; // Linear issue identifier (e.g., LIN-123)
   linearState?: string;    // Linear issue state (e.g., 'Todo', 'Backlog', 'In Progress')
+  parentId?: string;       // Parent issue ID (for decomposed sub-tasks)
   workflowId?: string;     // Mapped workflow
   createdAt: number;
   dueDate?: number;
@@ -268,12 +269,12 @@ export class DecisionEngine {
    * Heartbeat execution - returns multiple tasks (for parallel processing)
    * @param tasks - Candidate task list
    * @param maxTasks - Maximum number of tasks to return
-   * @param excludeProjects - Project paths to exclude (already running projects)
+   * @param _excludeProjects - Project paths to exclude (already running projects)
    */
   async heartbeatMultiple(
     tasks: TaskItem[],
     maxTasks: number = 3,
-    excludeProjects: string[] = []
+    _excludeProjects: string[] = []
   ): Promise<DecisionResultMultiple> {
     console.log(`[DecisionEngine] Heartbeat multiple triggered (max: ${maxTasks})`);
 
@@ -327,20 +328,12 @@ export class DecisionEngine {
     // 5. Priority sorting
     const sorted = this.prioritizeTasks(executableTasks);
 
-    // 6. Select multiple tasks (1 per project, max maxTasks)
+    // 6. Select multiple tasks (max maxTasks, blocker-based filtering only)
     const selectedTasks: Array<{ task: TaskItem; workflow: WorkflowConfig }> = [];
-    const usedProjects = new Set<string>(excludeProjects);
     let skippedCount = 0;
 
     for (const task of sorted) {
       if (selectedTasks.length >= maxTasks) break;
-
-      // Check project path (prevent same project duplication)
-      const projectPath = task.projectPath || task.linearProject?.name || 'unknown';
-      if (usedProjects.has(projectPath)) {
-        skippedCount++;
-        continue;
-      }
 
       // Scope validation
       const scopeCheck = this.validateScope(task);
@@ -357,7 +350,6 @@ export class DecisionEngine {
       }
 
       selectedTasks.push({ task, workflow });
-      usedProjects.add(projectPath);
     }
 
     if (selectedTasks.length === 0) {
@@ -394,6 +386,13 @@ export class DecisionEngine {
 
     // Legacy tmux-based workflow executor removed — use pair pipeline instead
     throw new Error('Legacy workflow executor has been removed. Use pair mode (pairMode: true) for task execution.');
+  }
+
+  /**
+   * Update allowed projects at runtime
+   */
+  updateAllowedProjects(paths: string[]): void {
+    this.config.allowedProjects = paths;
   }
 
   /**

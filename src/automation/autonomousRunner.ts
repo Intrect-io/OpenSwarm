@@ -1,7 +1,7 @@
 // OpenSwarm - Autonomous Runner
 // Heartbeat → Decision → Execution → Report
 import { Cron } from 'croner';
-import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, getRejectionCount, incrementRejection, clearRejection, isRejectionLimitReached, type TaskState, type ProjectInfo, type PipelineHistoryEntry } from './runnerState.js';
+import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, incrementRejection, clearRejection, isRejectionLimitReached, type TaskState, type ProjectInfo, type PipelineHistoryEntry } from './runnerState.js';
 import {
   DecisionEngine,
   DecisionResult,
@@ -18,7 +18,6 @@ import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler } from '../orchestration/taskScheduler.js';
 import {
   PipelineResult,
-  formatPipelineResult,
   formatPipelineResultEmbed,
 } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, ProjectAgentConfig } from '../core/types.js';
@@ -57,6 +56,7 @@ export interface AutonomousConfig {
   decompositionThresholdMinutes?: number;
   plannerModel?: string;
   plannerTimeoutMs?: number;
+  decomposition?: import('../core/types.js').DecompositionConfig;
   worktreeMode?: boolean;
 }
 
@@ -868,6 +868,10 @@ export class AutonomousRunner {
       pairMaxAttempts: this.config.pairMaxAttempts,
       enableDecomposition: this.config.enableDecomposition,
       decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
+      decompositionMaxDepth: this.config.decomposition?.maxDepth ?? 2,
+      decompositionMaxChildren: this.config.decomposition?.maxChildrenPerTask ?? 5,
+      decompositionDailyLimit: this.config.decomposition?.dailyLimit ?? 20,
+      decompositionAutoBacklog: this.config.decomposition?.autoBacklog ?? true,
       getRolesForProject: (p) => this.getRolesForProject(p),
       reportToDiscord,
       worktreeMode: this.config.worktreeMode ?? false,

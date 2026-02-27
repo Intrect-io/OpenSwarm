@@ -20,6 +20,7 @@ export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>
 export const TASK_STATE_FILE = join(homedir(), '.claude', 'openswarm-task-state.json');
 export const PIPELINE_HISTORY_FILE = join(homedir(), '.claude', 'openswarm-pipeline-history.json');
 export const REJECTION_STATE_FILE = join(homedir(), '.claude', 'openswarm-rejection-state.json');
+export const DECOMPOSITION_STATE_FILE = join(homedir(), '.claude', 'openswarm-decomposition-state.json');
 const MAX_PIPELINE_HISTORY = 100;
 const MAX_REJECTION_ATTEMPTS = 3;
 
@@ -166,6 +167,127 @@ export function clearRejection(issueId: string): void {
 
 export function isRejectionLimitReached(issueId: string): boolean {
   return getRejectionCount(issueId) >= MAX_REJECTION_ATTEMPTS;
+}
+
+// ============================================
+// Decomposition State (track parent-child relationships and daily limits)
+// ============================================
+
+export interface DecompositionEntry {
+  issueId: string;
+  parentId?: string; // Parent issue ID (if this is a sub-issue)
+  depth: number; // 0 = root, 1 = child, 2 = grandchild, etc.
+  childrenCount: number; // Number of sub-issues created from this issue
+  createdAt: string; // ISO-8601
+}
+
+export interface DecompositionState {
+  decompositions: Record<string, DecompositionEntry>;
+  dailyCreationCount: number;
+  dailyCreationDate: string; // YYYY-MM-DD
+  updatedAt: string;
+}
+
+// In-memory cache
+let decompositionState: DecompositionState | null = null;
+
+function ensureDecompositionStateLoaded(): DecompositionState {
+  if (decompositionState !== null) return decompositionState;
+  try {
+    if (existsSync(DECOMPOSITION_STATE_FILE)) {
+      const raw = readFileSync(DECOMPOSITION_STATE_FILE, 'utf8');
+      decompositionState = JSON.parse(raw) as DecompositionState;
+      // Reset daily counter if date changed
+      const today = new Date().toISOString().split('T')[0];
+      if (decompositionState.dailyCreationDate !== today) {
+        decompositionState.dailyCreationCount = 0;
+        decompositionState.dailyCreationDate = today;
+      }
+    } else {
+      const today = new Date().toISOString().split('T')[0];
+      decompositionState = {
+        decompositions: {},
+        dailyCreationCount: 0,
+        dailyCreationDate: today,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  } catch {
+    const today = new Date().toISOString().split('T')[0];
+    decompositionState = {
+      decompositions: {},
+      dailyCreationCount: 0,
+      dailyCreationDate: today,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return decompositionState;
+}
+
+export function getDecompositionDepth(issueId: string): number {
+  const state = ensureDecompositionStateLoaded();
+  return state.decompositions[issueId]?.depth || 0;
+}
+
+export function getChildrenCount(issueId: string): number {
+  const state = ensureDecompositionStateLoaded();
+  return state.decompositions[issueId]?.childrenCount || 0;
+}
+
+export function getDailyCreationCount(): number {
+  const state = ensureDecompositionStateLoaded();
+  return state.dailyCreationCount;
+}
+
+export function canCreateMoreIssues(dailyLimit: number): boolean {
+  return getDailyCreationCount() < dailyLimit;
+}
+
+export function registerDecomposition(
+  issueId: string,
+  parentId: string | undefined,
+  childrenIds: string[]
+): void {
+  const state = ensureDecompositionStateLoaded();
+
+  // Calculate depth
+  const parentDepth = parentId ? (state.decompositions[parentId]?.depth || 0) : 0;
+  const depth = parentDepth + 1;
+
+  // Update parent's children count
+  if (parentId) {
+    const parentEntry = state.decompositions[parentId] || {
+      issueId: parentId,
+      parentId: undefined,
+      depth: parentDepth,
+      childrenCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+    parentEntry.childrenCount += childrenIds.length;
+    state.decompositions[parentId] = parentEntry;
+  }
+
+  // Register children
+  for (const childId of childrenIds) {
+    state.decompositions[childId] = {
+      issueId: childId,
+      parentId,
+      depth,
+      childrenCount: 0,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  // Increment daily count
+  state.dailyCreationCount += childrenIds.length;
+  state.updatedAt = new Date().toISOString();
+
+  // Persist to disk
+  try {
+    writeFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[DecompositionState] Failed to save:', err);
+  }
 }
 
 // ============================================

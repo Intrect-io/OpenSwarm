@@ -79,7 +79,7 @@ export type LinearComment = {
  * Discord event (for reporting)
  */
 export type SwarmEvent = {
-  type: 'issue_started' | 'issue_completed' | 'issue_blocked' | 'build_failed' | 'test_failed' | 'commit' | 'error' | 'ci_failed' | 'ci_recovered' | 'github_notification' | 'pr_improved' | 'pr_failed';
+  type: 'issue_started' | 'issue_completed' | 'issue_blocked' | 'build_failed' | 'test_failed' | 'commit' | 'error' | 'ci_failed' | 'ci_recovered' | 'github_notification' | 'pr_improved' | 'pr_failed' | 'pr_conflict_detected' | 'pr_conflict_resolving' | 'pr_conflict_resolved' | 'pr_conflict_failed';
   session: string;
   message: string;
   issueId?: string;
@@ -135,6 +135,32 @@ export type PRProcessorConfig = {
   cooldownHours: number;
   /** Worker-Reviewer max iteration count */
   maxIterations: number;
+  /** Max retry attempts per PR (default: 3) */
+  maxRetries?: number;
+  /** CI completion timeout (ms) (default: 600000 = 10min) */
+  ciTimeoutMs?: number;
+  /** CI polling interval (ms) (default: 30000 = 30s) */
+  ciPollIntervalMs?: number;
+  /** Conflict resolver config */
+  conflictResolver?: ConflictResolverConfig;
+};
+
+/**
+ * Conflict resolver config
+ */
+export type ConflictResolverConfig = {
+  /** Enable conflict auto-resolution */
+  enabled: boolean;
+  /** Ownership mode: 'auto' = bot PRs only, 'all' = all PRs */
+  ownershipMode: 'auto' | 'all';
+  /** Max resolution attempts per PR (default: 3) */
+  maxResolutionAttempts: number;
+  /** Check stacked PRs after resolving one (default: true) */
+  cascadeCheck: boolean;
+  /** Worker model for conflict resolution */
+  workerModel?: string;
+  /** Worker timeout (ms) */
+  workerTimeoutMs?: number;
 };
 
 /**
@@ -259,6 +285,14 @@ export type DecompositionConfig = {
   enabled: boolean;
   /** Decomposition threshold (minutes) - tasks exceeding this estimate are decomposed */
   thresholdMinutes: number;
+  /** Max decomposition depth (default: 2) - prevents infinite nesting */
+  maxDepth?: number;
+  /** Max children per task (default: 5) - prevents issue explosion */
+  maxChildrenPerTask?: number;
+  /** Daily issue creation limit (default: 20) - prevents runaway creation */
+  dailyLimit?: number;
+  /** Auto-move to backlog if too complex or failing (default: true) */
+  autoBacklog?: boolean;
   /** Planner model */
   plannerModel: string;
   /** Planner timeout (ms) - default 600000 (10min) */

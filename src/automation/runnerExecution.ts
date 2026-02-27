@@ -25,6 +25,13 @@ import {
   removeWorktree,
 } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
+import {
+  getDecompositionDepth,
+  getChildrenCount,
+  getDailyCreationCount,
+  canCreateMoreIssues,
+  registerDecomposition,
+} from './runnerState.js';
 
 // ============================================
 // Discord Reporter
@@ -48,7 +55,12 @@ export async function reportToDiscord(message: string | EmbedBuilder): Promise<v
 
   try {
     if (typeof message === 'string') {
-      await discordSend(message);
+      // Convert plain text to Embed for consistent Discord UI
+      const embed = new EmbedBuilder()
+        .setDescription(message)
+        .setColor(0x00ff41) // OpenSwarm green
+        .setTimestamp();
+      await discordSend({ embeds: [embed] });
     } else {
       await discordSend({ embeds: [message] });
     }
@@ -95,10 +107,16 @@ export interface ExecutionContext {
   pairMaxAttempts?: number;
   enableDecomposition?: boolean;
   decompositionThresholdMinutes?: number;
+  decompositionMaxDepth?: number;
+  decompositionMaxChildren?: number;
+  decompositionDailyLimit?: number;
+  decompositionAutoBacklog?: boolean;
   getRolesForProject: (projectPath: string) => DefaultRolesConfig | undefined;
   reportToDiscord: (message: string | EmbedBuilder) => Promise<void>;
   /** Git worktree mode: work in an isolated worktree per issue, auto-create PR */
   worktreeMode?: boolean;
+  /** Trigger immediate heartbeat (called after decomposition to pick up new sub-issues) */
+  scheduleNextHeartbeat?: () => void;
 }
 
 // ============================================
@@ -179,6 +197,79 @@ export async function decomposeTask(
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
   const taskId = task.issueId || task.id;
+  const maxDepth = ctx.decompositionMaxDepth ?? 2;
+  const maxChildren = ctx.decompositionMaxChildren ?? 5;
+  const dailyLimit = ctx.decompositionDailyLimit ?? 20;
+  const autoBacklog = ctx.decompositionAutoBacklog ?? true;
+
+  // ============================================
+  // Pre-checks: Depth, Children, Daily Limit
+  // ============================================
+
+  // Check decomposition depth limit
+  if (task.issueId) {
+    const currentDepth = getDecompositionDepth(task.issueId);
+    if (currentDepth >= maxDepth) {
+      console.log(`[AutonomousRunner] Decomposition depth limit reached: ${currentDepth}/${maxDepth}`);
+      if (autoBacklog && task.issueId) {
+        try {
+          await linear.updateIssueState(task.issueId, 'Backlog');
+          await linear.addComment(task.issueId,
+            `⚠️ **Auto-moved to Backlog**\n\n` +
+            `Reason: Decomposition depth limit reached (${currentDepth}/${maxDepth})\n\n` +
+            `This task has been nested too deeply. Please review and simplify the task structure, ` +
+            `or handle it manually.`
+          );
+          console.log(`[AutonomousRunner] Task moved to backlog (depth limit)`);
+        } catch (err) {
+          console.error(`[AutonomousRunner] Failed to move to backlog:`, err);
+        }
+      }
+      return false;
+    }
+
+    // Check children count limit
+    const childrenCount = getChildrenCount(task.issueId);
+    if (childrenCount >= maxChildren) {
+      console.log(`[AutonomousRunner] Children count limit reached: ${childrenCount}/${maxChildren}`);
+      if (autoBacklog) {
+        try {
+          await linear.updateIssueState(task.issueId, 'Backlog');
+          await linear.addComment(task.issueId,
+            `⚠️ **Auto-moved to Backlog**\n\n` +
+            `Reason: Too many sub-issues already created (${childrenCount}/${maxChildren})\n\n` +
+            `This task has generated too many sub-issues. Please review the decomposition strategy, ` +
+            `or handle it manually.`
+          );
+          console.log(`[AutonomousRunner] Task moved to backlog (children limit)`);
+        } catch (err) {
+          console.error(`[AutonomousRunner] Failed to move to backlog:`, err);
+        }
+      }
+      return false;
+    }
+  }
+
+  // Check daily creation limit
+  if (!canCreateMoreIssues(dailyLimit)) {
+    const currentCount = getDailyCreationCount();
+    console.log(`[AutonomousRunner] Daily issue creation limit reached: ${currentCount}/${dailyLimit}`);
+    if (autoBacklog && task.issueId) {
+      try {
+        await linear.updateIssueState(task.issueId, 'Backlog');
+        await linear.addComment(task.issueId,
+          `⚠️ **Auto-moved to Backlog**\n\n` +
+          `Reason: Daily issue creation limit reached (${currentCount}/${dailyLimit})\n\n` +
+          `The system has created too many issues today. This task will be reconsidered tomorrow.`
+        );
+        console.log(`[AutonomousRunner] Task moved to backlog (daily limit)`);
+      } catch (err) {
+        console.error(`[AutonomousRunner] Failed to move to backlog:`, err);
+      }
+    }
+    return false;
+  }
+
   broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'start' } });
 
   await ctx.reportToDiscord(t('runner.decomposition.starting', {
@@ -270,6 +361,14 @@ export async function decomposeTask(
     return false;
   }
 
+  // Register decomposition in tracking (for limits)
+  registerDecomposition(
+    task.issueId,
+    task.parentId, // Parent ID if this task is also a sub-issue
+    createdSubIssues.map(s => s.id)
+  );
+  console.log(`[AutonomousRunner] Registered decomposition: parent=${task.issueId}, children=${createdSubIssues.length}, daily=${getDailyCreationCount()}/${dailyLimit}`);
+
   await linear.markAsDecomposed(
     task.issueId,
     createdSubIssues.length,
@@ -293,6 +392,24 @@ export async function decomposeTask(
     broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `↳ ${s.identifier}: ${s.title}` } });
   }
   console.log(`[AutonomousRunner] Decomposition complete: ${createdSubIssues.length} sub-issues created`);
+
+  // Move all sub-issues to Todo state so they can be picked up immediately
+  console.log('[AutonomousRunner] Moving sub-issues to Todo state...');
+  for (const subIssue of createdSubIssues) {
+    try {
+      await linear.updateIssueState(subIssue.id, 'Todo');
+      console.log(`[AutonomousRunner] Moved ${subIssue.identifier} to Todo`);
+    } catch (err) {
+      console.warn(`[AutonomousRunner] Failed to move ${subIssue.identifier} to Todo:`, err);
+    }
+  }
+
+  // Trigger immediate heartbeat to pick up newly created sub-issues
+  if (ctx.scheduleNextHeartbeat) {
+    console.log('[AutonomousRunner] Scheduling immediate heartbeat to process sub-issues...');
+    ctx.scheduleNextHeartbeat();
+  }
+
   return true;
 }
 
