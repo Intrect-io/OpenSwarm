@@ -19,7 +19,9 @@ export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>
 
 export const TASK_STATE_FILE = join(homedir(), '.claude', 'openswarm-task-state.json');
 export const PIPELINE_HISTORY_FILE = join(homedir(), '.claude', 'openswarm-pipeline-history.json');
+export const REJECTION_STATE_FILE = join(homedir(), '.claude', 'openswarm-rejection-state.json');
 const MAX_PIPELINE_HISTORY = 100;
+const MAX_REJECTION_ATTEMPTS = 3;
 
 export interface TaskState {
   completedTaskIds: Set<string>;
@@ -76,8 +78,99 @@ export interface PipelineHistoryEntry {
   stages: { stage: string; success: boolean; duration: number }[];
   cost?: { costUsd: number; inputTokens: number; outputTokens: number };
   prUrl?: string;
+  reviewerFeedback?: string; // Reviewer rejection reason (for debugging)
   completedAt: string; // ISO-8601
 }
+
+// ============================================
+// Rejection State (track reviewer rejections per issue)
+// ============================================
+
+export interface RejectionEntry {
+  issueId: string;
+  count: number;
+  lastRejection: string; // ISO-8601
+  reasons: string[]; // Last N rejection reasons
+}
+
+export interface RejectionState {
+  rejections: Record<string, RejectionEntry>;
+  updatedAt: string;
+}
+
+// In-memory cache
+let rejectionState: RejectionState | null = null;
+
+function ensureRejectionStateLoaded(): RejectionState {
+  if (rejectionState !== null) return rejectionState;
+  try {
+    if (existsSync(REJECTION_STATE_FILE)) {
+      const raw = readFileSync(REJECTION_STATE_FILE, 'utf8');
+      rejectionState = JSON.parse(raw) as RejectionState;
+    } else {
+      rejectionState = { rejections: {}, updatedAt: new Date().toISOString() };
+    }
+  } catch {
+    rejectionState = { rejections: {}, updatedAt: new Date().toISOString() };
+  }
+  return rejectionState;
+}
+
+export function getRejectionCount(issueId: string): number {
+  const state = ensureRejectionStateLoaded();
+  return state.rejections[issueId]?.count || 0;
+}
+
+export function incrementRejection(issueId: string, reason: string): number {
+  const state = ensureRejectionStateLoaded();
+  const entry = state.rejections[issueId] || {
+    issueId,
+    count: 0,
+    lastRejection: new Date().toISOString(),
+    reasons: [],
+  };
+
+  entry.count++;
+  entry.lastRejection = new Date().toISOString();
+  entry.reasons.push(reason);
+
+  // Keep only last 5 reasons
+  if (entry.reasons.length > 5) {
+    entry.reasons = entry.reasons.slice(-5);
+  }
+
+  state.rejections[issueId] = entry;
+  state.updatedAt = new Date().toISOString();
+
+  // Persist to disk
+  try {
+    writeFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[RejectionState] Failed to save:', err);
+  }
+
+  return entry.count;
+}
+
+export function clearRejection(issueId: string): void {
+  const state = ensureRejectionStateLoaded();
+  delete state.rejections[issueId];
+  state.updatedAt = new Date().toISOString();
+
+  try {
+    writeFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[RejectionState] Failed to save:', err);
+  }
+}
+
+export function isRejectionLimitReached(issueId: string): boolean {
+  return getRejectionCount(issueId) >= MAX_REJECTION_ATTEMPTS;
+}
+
+// ============================================
+// Pipeline History (persistent, time-ordered)
+// ============================================
 
 // In-memory cache (loaded once at startup, appended per completion)
 let pipelineHistory: PipelineHistoryEntry[] | null = null;
@@ -124,7 +217,7 @@ export interface ProjectInfo {
   enabled: boolean;
   running: { id: string; title: string; priority: number }[];
   queued: { id: string; title: string; priority: number }[];
-  pending: { id: string; title: string; priority: number; issueIdentifier?: string }[];
+  pending: { id: string; title: string; priority: number; issueIdentifier?: string; linearState?: string }[];
 }
 
 type RunningEntry = { task: TaskItem; projectPath: string };
@@ -179,8 +272,8 @@ export function buildProjectsInfo(
         .map(r => ({ id: r.task.id, title: r.task.title, priority: r.task.priority })),
       queued: queued.filter(q => q.task.linearProject?.name === proj.name)
         .map(q => ({ id: q.task.id, title: q.task.title, priority: q.task.priority })),
-      pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id) && t.linearState !== 'Backlog')
-        .map(t => ({ id: t.id, title: t.title, priority: t.priority, issueIdentifier: t.issueIdentifier || t.issueId })),
+      pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id))
+        .map(t => ({ id: t.id, title: t.title, priority: t.priority, issueIdentifier: t.issueIdentifier || t.issueId, linearState: t.linearState })),
     };
   });
 }

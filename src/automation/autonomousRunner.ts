@@ -1,7 +1,7 @@
 // OpenSwarm - Autonomous Runner
 // Heartbeat → Decision → Execution → Report
 import { Cron } from 'croner';
-import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, type TaskState, type ProjectInfo, type PipelineHistoryEntry } from './runnerState.js';
+import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, getRejectionCount, incrementRejection, clearRejection, isRejectionLimitReached, type TaskState, type ProjectInfo, type PipelineHistoryEntry } from './runnerState.js';
 import {
   DecisionEngine,
   DecisionResult,
@@ -19,6 +19,7 @@ import { TaskScheduler, initScheduler } from '../orchestration/taskScheduler.js'
 import {
   PipelineResult,
   formatPipelineResult,
+  formatPipelineResultEmbed,
 } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, ProjectAgentConfig } from '../core/types.js';
 import * as planner from '../support/planner.js';
@@ -83,6 +84,9 @@ export class AutonomousRunner {
     lastHeartbeat: 0,
     consecutiveErrors: 0,
   };
+
+  // Heartbeat concurrency guard
+  private _heartbeatRunning = false;
 
   // Explicitly enabled project paths (allow-list; empty = nothing runs)
   private enabledProjects = new Set<string>();
@@ -165,11 +169,12 @@ export class AutonomousRunner {
       console.log(`[Scheduler] Task completed: ${taskCtx} ${task.title}`);
       broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: result.success, duration: result.totalDuration } });
       this.recordPipelineHistory(task, result);
-      await reportToDiscord(formatPipelineResult(result));
+      await reportToDiscord(formatPipelineResultEmbed(result));
 
       // Track as completed to prevent re-selection (persist to disk)
       if (task.issueId) {
         this.completedTaskIds.add(task.issueId);
+        clearRejection(task.issueId); // Clear rejection count on success
         this.saveTaskState();
       }
 
@@ -187,6 +192,16 @@ export class AutonomousRunner {
             attempts: result.iterations,
             duration: Math.floor(result.totalDuration / 1000),
             filesChanged: result.workerResult?.filesChanged || [],
+            workerSummary: result.workerResult?.summary,
+            workerCommands: result.workerResult?.commands,
+            reviewerFeedback: result.reviewResult?.feedback,
+            reviewerDecision: result.reviewResult?.decision,
+            testResults: result.testerResult ? {
+              passed: result.testerResult.testsPassed,
+              failed: result.testerResult.testsFailed,
+              coverage: result.testerResult.coverage,
+              failedTests: result.testerResult.failedTests,
+            } : undefined,
           });
           console.log(`[Scheduler] Issue ${task.issueId} marked as Done`);
         } catch (err) {
@@ -222,21 +237,45 @@ export class AutonomousRunner {
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
       broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: false, duration: result.totalDuration } });
       this.recordPipelineHistory(task, result);
-      await reportToDiscord(formatPipelineResult(result));
+      await reportToDiscord(formatPipelineResultEmbed(result));
 
-      // If rejected, change to Blocked immediately
+      // If rejected, track rejection count and block after max attempts
       if (task.issueId && result.finalStatus === 'rejected') {
-        this.completedTaskIds.add(task.issueId); // Prevent re-selection
-        this.saveTaskState();
-        try {
-          await linear.logBlocked(task.issueId, 'autonomous-runner',
-            t('runner.reviewRejected', { feedback: result.reviewResult?.feedback || t('common.fallback.noDescription') })
-          );
-          console.log(`[Scheduler] Issue ${task.issueId} marked as Todo (blocked) (rejected)`);
-        } catch (err) {
-          console.error(`[Scheduler] Failed to update issue state:`, err);
+        const feedback = result.reviewResult?.feedback || 'No feedback provided';
+        const rejectionCount = incrementRejection(task.issueId, feedback);
+
+        console.log(`[Scheduler] Task rejected (${rejectionCount}/3): ${taskCtx} ${task.title}`);
+        console.log(`[Scheduler] Rejection reason: ${feedback}`);
+
+        if (isRejectionLimitReached(task.issueId)) {
+          // Max rejections reached - permanently block
+          this.completedTaskIds.add(task.issueId); // Prevent re-selection
+          this.saveTaskState();
+
+          try {
+            await linear.logBlocked(task.issueId, 'autonomous-runner',
+              `⚠️ **Max rejection limit reached (${rejectionCount} attempts)**\n\n` +
+              `This task has been rejected ${rejectionCount} times by the reviewer and requires manual intervention.\n\n` +
+              `**Latest rejection reason:**\n${feedback}\n\n` +
+              `**Action required:** Please review the task requirements and code manually, or adjust the task scope.`
+            );
+            console.log(`[Scheduler] Issue ${task.issueId} permanently blocked (max rejections reached)`);
+          } catch (err) {
+            console.error(`[Scheduler] Failed to update issue state:`, err);
+          }
+          return;
+        } else {
+          // Not max yet - temporary block, will retry later
+          try {
+            await linear.logBlocked(task.issueId, 'autonomous-runner',
+              t('runner.reviewRejected', { feedback }) + `\n\n**Rejection count:** ${rejectionCount}/3 - Will retry automatically.`
+            );
+            console.log(`[Scheduler] Issue ${task.issueId} marked as Todo (blocked) (rejected ${rejectionCount}/3)`);
+          } catch (err) {
+            console.error(`[Scheduler] Failed to update issue state:`, err);
+          }
+          return;
         }
-        return;
       }
 
       // Track failure count — block after MAX_RETRY_COUNT failures
@@ -290,13 +329,21 @@ export class AutonomousRunner {
 
   private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
     let recovered = 0;
+    const recoverableStates = new Set(['Todo', 'In Progress', 'In Review']);
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
-      // Recover issues in Todo state from completed/failed list
-      // (user or system intentionally moved back to Todo, so retry)
-      if (task.linearState === 'Todo' && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
+
+      // Check rejection limit first
+      if (isRejectionLimitReached(id)) {
+        return false; // Skip tasks that hit max rejection limit
+      }
+
+      // Recover issues in active states from completed/failed list
+      // (user or system intentionally moved back to active, so retry)
+      if (recoverableStates.has(task.linearState || '') && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
+        clearRejection(id); // Clear rejection count on recovery
         recovered++;
         return true;
       }
@@ -306,7 +353,7 @@ export class AutonomousRunner {
     });
     if (recovered > 0) {
       this.saveTaskState();
-      this.syslog(`♻ Recovered ${recovered} Todo issues from completed/failed list`);
+      this.syslog(`♻ Recovered ${recovered} Todo issues from completed/failed/rejected list`);
     }
     return filtered;
   }
@@ -458,6 +505,12 @@ export class AutonomousRunner {
   }
 
   async heartbeat(): Promise<void> {
+    if (this._heartbeatRunning) {
+      console.log('[AutonomousRunner] Heartbeat already running, skipping');
+      return;
+    }
+    this._heartbeatRunning = true;
+
     console.log('[AutonomousRunner] Heartbeat triggered');
     this.state.lastHeartbeat = Date.now();
     broadcastEvent({ type: 'stats', data: this.buildStats() });
@@ -530,6 +583,8 @@ export class AutonomousRunner {
       if (this.state.consecutiveErrors >= 3) {
         await reportToDiscord(t('runner.consecutiveErrors', { count: this.state.consecutiveErrors, error: msg }));
       }
+    } finally {
+      this._heartbeatRunning = false;
     }
   }
 
@@ -543,11 +598,8 @@ export class AutonomousRunner {
       return;
     }
 
-    // Get list of already running projects
-    const busyProjects = this.scheduler.getBusyProjects();
-
-    // Allow up to 2 new tasks per heartbeat cycle to ramp up smoothly
-    const maxSlots = Math.min(2, availableSlots);
+    // Fill all available slots (worktree mode isolates each task)
+    const maxSlots = availableSlots;
 
     // Pre-filter tasks to enabled projects only (before DecisionEngine selection)
     // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.
@@ -586,7 +638,7 @@ export class AutonomousRunner {
     const decision = await this.engine.heartbeatMultiple(
       tasksForEngine,
       maxSlots,
-      busyProjects
+      [] // No project exclusion — worktree mode isolates each task
     );
 
     if (decision.action === 'skip' || decision.action === 'defer') {
@@ -762,7 +814,7 @@ export class AutonomousRunner {
 
     // Single execution (legacy)
     const result = await this.executePipeline(task, projectPath);
-    await reportToDiscord(formatPipelineResult(result));
+    await reportToDiscord(formatPipelineResultEmbed(result));
 
     // Update Linear issue state
     if (task.issueId) {
@@ -773,6 +825,16 @@ export class AutonomousRunner {
             attempts: result.iterations,
             duration: Math.floor(result.totalDuration / 1000),
             filesChanged: result.workerResult?.filesChanged || [],
+            workerSummary: result.workerResult?.summary,
+            workerCommands: result.workerResult?.commands,
+            reviewerFeedback: result.reviewResult?.feedback,
+            reviewerDecision: result.reviewResult?.decision,
+            testResults: result.testerResult ? {
+              passed: result.testerResult.testsPassed,
+              failed: result.testerResult.testsFailed,
+              coverage: result.testerResult.coverage,
+              failedTests: result.testerResult.failedTests,
+            } : undefined,
           });
           console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Done`);
 
@@ -809,6 +871,7 @@ export class AutonomousRunner {
       getRolesForProject: (p) => this.getRolesForProject(p),
       reportToDiscord,
       worktreeMode: this.config.worktreeMode ?? false,
+      scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
     };
   }
 
@@ -871,6 +934,11 @@ export class AutonomousRunner {
     return this.config.allowedProjects ?? [];
   }
 
+  updateAllowedProjects(paths: string[]): void {
+    this.config.allowedProjects = paths;
+    this.engine.updateAllowedProjects(paths);
+  }
+
   getStats(): {
     isRunning: boolean;
     lastHeartbeat: number;
@@ -912,6 +980,7 @@ export class AutonomousRunner {
         outputTokens: result.totalCost.outputTokens,
       } : undefined,
       prUrl: result.prUrl,
+      reviewerFeedback: result.reviewResult?.feedback, // Save reviewer rejection reason
       completedAt: new Date().toISOString(),
     };
     appendPipelineHistory(entry);
