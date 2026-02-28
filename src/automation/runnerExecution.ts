@@ -117,6 +117,8 @@ export interface ExecutionContext {
   worktreeMode?: boolean;
   /** Trigger immediate heartbeat (called after decomposition to pick up new sub-issues) */
   scheduleNextHeartbeat?: () => void;
+  /** Pipeline guards configuration */
+  guards?: Partial<import('../core/types.js').PipelineGuardsConfig>;
 }
 
 // ============================================
@@ -488,7 +490,7 @@ export async function executePipeline(
 
   try {
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
-    const pipeline = createPipelineFromConfig(roles, ctx.pairMaxAttempts ?? 3);
+    const pipeline = createPipelineFromConfig(roles, ctx.pairMaxAttempts ?? 3, ctx.guards);
 
     pipeline.on('stage:start', ({ stage }) => {
       console.log(`[Pipeline] Stage started: ${stage}`);
@@ -507,6 +509,33 @@ export async function executePipeline(
 
     pipeline.on('revision:start', ({ stage }) => {
       void ctx.reportToDiscord(t('runner.pipeline.revisionNeeded', { stage }));
+    });
+
+    // HALT event: low confidence → report to Linear + Discord
+    pipeline.on('halt', async ({ confidence, haltReason, sessionId, iteration }) => {
+      console.warn(`[Pipeline] HALT event: confidence=${confidence}%, reason=${haltReason}`);
+
+      // Report to Linear
+      if (task.issueId && ctx.guards?.haltToLinear) {
+        try {
+          await linear.logHalt(task.issueId, sessionId, confidence, iteration, haltReason);
+        } catch (err) {
+          console.error('[Pipeline] Linear logHalt failed:', err);
+        }
+      }
+
+      // Report to Discord
+      const haltEmbed = new EmbedBuilder()
+        .setTitle('⚠️ HALT - Low Confidence')
+        .setColor(0xFFA500)
+        .addFields(
+          { name: 'Task', value: task.title, inline: false },
+          { name: 'Confidence', value: `${confidence}%`, inline: true },
+          { name: 'Iteration', value: `#${iteration}`, inline: true },
+          { name: 'Reason', value: haltReason || 'Low confidence score', inline: false },
+        )
+        .setTimestamp();
+      await ctx.reportToDiscord(haltEmbed);
     });
 
     const stages = getEnabledStages(roles);

@@ -1,14 +1,14 @@
 // OpenSwarm - Autonomous Runner
 // Heartbeat → Decision → Execution → Report
 import { Cron } from 'croner';
-import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, incrementRejection, clearRejection, isRejectionLimitReached, type TaskState, type ProjectInfo, type PipelineHistoryEntry } from './runnerState.js';
+import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, incrementRejection, clearRejection, isRejectionLimitReached, type TaskState, type ProjectInfo } from './runnerState.js';
 import {
   DecisionEngine,
   DecisionResult,
   TaskItem,
   getDecisionEngine,
 } from '../orchestration/decisionEngine.js';
-import type { ExecutorResult } from '../orchestration/workflow.js';
+// ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { formatParsedTaskSummary, loadParsedTask } from '../orchestration/taskParser.js';
 import { saveCognitiveMemory } from '../memory/index.js';
@@ -20,7 +20,7 @@ import {
   PipelineResult,
   formatPipelineResultEmbed,
 } from '../agents/pairPipeline.js';
-import type { DefaultRolesConfig, ProjectAgentConfig } from '../core/types.js';
+import type { DefaultRolesConfig } from '../core/types.js';
 import * as planner from '../support/planner.js';
 import * as execution from './runnerExecution.js';
 import { reportToDiscord, fetchLinearTasks } from './runnerExecution.js';
@@ -29,48 +29,12 @@ import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { pruneWorktrees } from '../support/worktreeManager.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
+import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 
-// Re-export integration setters (used by service.ts)
+// Re-export types and integration setters (used by service.ts)
 export { setDiscordReporter, setLinearFetcher } from './runnerExecution.js';
-
-export interface AutonomousConfig {
-  linearTeamId: string;
-  allowedProjects: string[];
-  heartbeatSchedule: string;
-  autoExecute: boolean;
-  discordChannelId?: string;
-  maxConsecutiveTasks: number;
-  cooldownSeconds: number;
-  dryRun: boolean;
-  pairMode?: boolean;
-  pairMaxAttempts?: number;
-  workerModel?: string;
-  reviewerModel?: string;
-  workerTimeoutMs?: number;
-  reviewerTimeoutMs?: number;
-  triggerNow?: boolean;
-  maxConcurrentTasks?: number;
-  defaultRoles?: DefaultRolesConfig;
-  projectAgents?: ProjectAgentConfig[];
-  enableDecomposition?: boolean;
-  decompositionThresholdMinutes?: number;
-  plannerModel?: string;
-  plannerTimeoutMs?: number;
-  decomposition?: import('../core/types.js').DecompositionConfig;
-  worktreeMode?: boolean;
-}
-
+export type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export type { ProjectInfo } from './runnerState.js';
-
-export interface RunnerState {
-  isRunning: boolean;
-  lastHeartbeat: number;
-  lastDecision?: DecisionResult;
-  lastExecution?: ExecutorResult;
-  pendingApproval?: TaskItem;
-  consecutiveErrors: number;
-  startedAt?: number;
-}
 
 let runnerInstance: AutonomousRunner | null = null;
 
@@ -112,7 +76,6 @@ export class AutonomousRunner {
   private completedTaskIds = new Set<string>();
   private failedTaskCounts = new Map<string, number>();
   private static readonly MAX_RETRY_COUNT = 2;
-
 
   private get taskStateRef(): TaskState {
     return { completedTaskIds: this.completedTaskIds, failedTaskCounts: this.failedTaskCounts };
@@ -758,7 +721,7 @@ export class AutonomousRunner {
     this.state.lastExecution = result;
 
     // Report results
-    await this.reportExecutionResult(task, result);
+    await execution.reportExecutionResult(task, result, reportToDiscord);
   }
 
   /** Execute task in pair mode (legacy single-task) */
@@ -876,6 +839,7 @@ export class AutonomousRunner {
       reportToDiscord,
       worktreeMode: this.config.worktreeMode ?? false,
       scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
+      guards: this.config.guards,
     };
   }
 
@@ -893,10 +857,6 @@ export class AutonomousRunner {
 
   private async requestApproval(decision: DecisionResult): Promise<void> {
     return execution.requestApproval(decision, reportToDiscord);
-  }
-
-  private async reportExecutionResult(task: TaskItem, result: ExecutorResult): Promise<void> {
-    return execution.reportExecutionResult(task, result, reportToDiscord);
   }
 
   async approve(): Promise<boolean> {
@@ -943,20 +903,10 @@ export class AutonomousRunner {
     this.engine.updateAllowedProjects(paths);
   }
 
-  getStats(): {
-    isRunning: boolean;
-    lastHeartbeat: number;
-    engineStats: ReturnType<DecisionEngine['getStats']>;
-    pendingApproval: boolean;
-    schedulerStats: ReturnType<TaskScheduler['getStats']>;
-  } {
-    return {
-      isRunning: this.state.isRunning,
-      lastHeartbeat: this.state.lastHeartbeat,
-      engineStats: this.engine.getStats(),
-      pendingApproval: !!this.state.pendingApproval,
-      schedulerStats: this.scheduler.getStats(),
-    };
+  getStats() {
+    return { isRunning: this.state.isRunning, lastHeartbeat: this.state.lastHeartbeat,
+      engineStats: this.engine.getStats(), pendingApproval: !!this.state.pendingApproval,
+      schedulerStats: this.scheduler.getStats() };
   }
 
   pauseScheduler(): void { this.scheduler.pause(); }
@@ -966,28 +916,18 @@ export class AutonomousRunner {
   getPipelineHistory(limit = 50) { return getPipelineHistory(limit); }
 
   private recordPipelineHistory(task: TaskItem, result: PipelineResult): void {
-    const entry: PipelineHistoryEntry = {
-      sessionId: result.sessionId,
-      issueIdentifier: task.issueIdentifier || task.issueId,
-      issueId: task.issueId,
-      taskTitle: task.title,
-      projectName: task.linearProject?.name,
-      projectPath: result.taskContext?.projectPath,
-      success: result.success,
-      finalStatus: result.finalStatus,
-      iterations: result.iterations,
+    appendPipelineHistory({
+      sessionId: result.sessionId, issueIdentifier: task.issueIdentifier || task.issueId,
+      issueId: task.issueId, taskTitle: task.title, projectName: task.linearProject?.name,
+      projectPath: result.taskContext?.projectPath, success: result.success,
+      finalStatus: result.finalStatus, iterations: result.iterations,
       totalDuration: result.totalDuration,
       stages: result.stages.map(s => ({ stage: s.stage, success: s.success, duration: s.duration })),
-      cost: result.totalCost ? {
-        costUsd: result.totalCost.costUsd,
-        inputTokens: result.totalCost.inputTokens,
-        outputTokens: result.totalCost.outputTokens,
-      } : undefined,
-      prUrl: result.prUrl,
-      reviewerFeedback: result.reviewResult?.feedback, // Save reviewer rejection reason
+      cost: result.totalCost ? { costUsd: result.totalCost.costUsd,
+        inputTokens: result.totalCost.inputTokens, outputTokens: result.totalCost.outputTokens } : undefined,
+      prUrl: result.prUrl, reviewerFeedback: result.reviewResult?.feedback,
       completedAt: new Date().toISOString(),
-    };
-    appendPipelineHistory(entry);
+    });
   }
 
   disableProject(projectPath: string): void {

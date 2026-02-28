@@ -217,9 +217,9 @@ export async function getMyIssues(
 
   // Wrap with timeout
   const fetchIssues = async (): Promise<LinearIssueInfo[]> => {
-    // Fetch executable issues first (Todo/In Progress), then Backlog for dashboard
+    // Fetch executable issues first (Todo/In Progress/In Review), then Backlog for dashboard
     // This prevents Backlog from filling up the result and pushing executable issues off-page
-    const executableFilter = { ...baseFilter, state: { name: { in: ['Todo', 'In Progress'] } } };
+    const executableFilter = { ...baseFilter, state: { name: { in: ['Todo', 'In Progress', 'In Review'] } } };
     const backlogFilter = { ...baseFilter, state: { name: { in: ['Backlog'] } } };
 
     const [executableIssues, backlogIssues] = await Promise.all([
@@ -419,22 +419,18 @@ export async function addComment(
   });
 }
 
-/**
- * Log work start comment for an agent
- */
-export async function logWorkStart(
-  issueId: string,
-  sessionName: string
+/** Log a HALT event (low confidence) as a comment on a Linear issue */
+export async function logHalt(
+  issueId: string, sessionId: string, confidence: number, iteration: number, reason: string,
 ): Promise<void> {
-  const timestamp = new Date().toISOString();
-  const body = `🤖 **[${sessionName}] Work Started**
+  await addComment(issueId,
+    `⚠️ **[Automation] HALT - Low Confidence**\n\nSession: \`${sessionId}\` | Confidence: ${confidence}% | Attempt: #${iteration}\nReason: ${reason}\n\n**Action Required:** Review task requirements / provide context / break into sub-tasks\n\n---\n_Auto-generated_`);
+}
 
-Time: ${timestamp}
-
----
-_Auto-generated_`;
-
-  await addComment(issueId, body);
+/** Log work start comment for an agent */
+export async function logWorkStart(issueId: string, sessionName: string): Promise<void> {
+  await addComment(issueId,
+    `🤖 **[${sessionName}] Work Started**\n\nTime: ${new Date().toISOString()}\n\n---\n_Auto-generated_`);
   await updateIssueState(issueId, 'In Progress');
 }
 
@@ -586,6 +582,17 @@ export async function logPairComplete(
     attempts: number;
     duration: number;
     filesChanged: string[];
+    workerSummary?: string;
+    workerCommands?: string[];
+    reviewerFeedback?: string;
+    reviewerDecision?: string;
+    testResults?: {
+      passed: number;
+      failed: number;
+      coverage?: number;
+      failedTests?: string[];
+    };
+    remainingWork?: string;
   }
 ): Promise<void> {
   const timestamp = new Date().toLocaleString(getDateLocale());
@@ -597,21 +604,84 @@ export async function logPairComplete(
     ? stats.filesChanged.slice(0, 10).map(f => `- \`${f}\``).join('\n')
     : '(none)';
 
-  const body = `✅ **[Pair Session] Work Complete**
+  // Build sections
+  const sections = [];
+
+  // Worker section
+  if (stats.workerSummary) {
+    sections.push(`## 🔨 Worker Report
+
+**What was done:**
+${stats.workerSummary}`);
+
+    if (stats.workerCommands && stats.workerCommands.length > 0) {
+      const cmdStr = stats.workerCommands.slice(0, 5).map(c => `- \`${c}\``).join('\n');
+      sections.push(`**Commands executed:**
+${cmdStr}`);
+    }
+  }
+
+  // Reviewer section
+  if (stats.reviewerFeedback) {
+    sections.push(`## ✅ Reviewer Report
+
+**Decision:** ${stats.reviewerDecision || 'APPROVE'}
+
+**Feedback:**
+${stats.reviewerFeedback}`);
+  }
+
+  // Tester section
+  if (stats.testResults) {
+    const { passed, failed, coverage, failedTests } = stats.testResults;
+    const totalTests = passed + failed;
+    const passRate = totalTests > 0 ? ((passed / totalTests) * 100).toFixed(1) : '0';
+
+    let testSection = `## 🧪 Test Results
+
+- ✅ Passed: ${passed}/${totalTests} (${passRate}%)`;
+
+    if (coverage !== undefined) {
+      testSection += `\n- 📊 Coverage: ${coverage.toFixed(1)}%`;
+    }
+
+    if (failed > 0 && failedTests && failedTests.length > 0) {
+      const failedStr = failedTests.slice(0, 3).map(t => `- ❌ ${t}`).join('\n');
+      testSection += `\n\n**Failed tests:**\n${failedStr}`;
+      if (failedTests.length > 3) {
+        testSection += `\n- ... and ${failedTests.length - 3} more`;
+      }
+    }
+
+    sections.push(testSection);
+  }
+
+  // Remaining work section
+  if (stats.remainingWork) {
+    sections.push(`## 📋 Remaining Work
+
+${stats.remainingWork}`);
+  }
+
+  const body = `✅ **[Automation] Task Complete**
 
 🆔 Session: \`${sessionId}\`
 ⏰ Completed: ${timestamp}
 
-**📊 Stats:**
-- Attempts: ${stats.attempts}
-- Duration: ${durationStr}
-- Files changed: ${stats.filesChanged.length}
+**📊 Summary:**
+- 🔄 Iterations: ${stats.attempts}
+- ⏱️ Duration: ${durationStr}
+- 📁 Files changed: ${stats.filesChanged.length}
 
 **Changed files:**
 ${filesStr}
 
 ---
-_Worker/Reviewer pair review approved_`;
+
+${sections.join('\n\n---\n\n')}
+
+---
+_Automated by Worker/Reviewer/Tester pipeline_`;
 
   await addComment(issueId, body);
   await updateIssueState(issueId, 'Done');

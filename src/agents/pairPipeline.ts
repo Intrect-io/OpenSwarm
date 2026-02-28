@@ -10,11 +10,13 @@ import type { TesterResult } from './tester.js';
 import type { DocumenterResult } from './documenter.js';
 import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
-import type { PipelineStage, RoleConfig } from '../core/types.js';
+import type { PipelineStage, RoleConfig, PipelineGuardsConfig } from '../core/types.js';
 import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
 
 import { broadcastEvent } from '../core/eventHub.js';
+import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
+import { runGuards, type GuardsRunResult } from './pipelineGuards.js';
 import * as workerAgent from './worker.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
@@ -45,6 +47,8 @@ export interface PipelineConfig {
     auditor?: RoleConfig;
     'skill-documenter'?: RoleConfig;
   };
+  /** Pipeline guards configuration */
+  guards?: Partial<PipelineGuardsConfig>;
 }
 
 export interface StageResult {
@@ -52,6 +56,10 @@ export interface StageResult {
   success: boolean;
   result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult | { success: false; error: string };
   duration: number;
+  /** Stage start time (epoch ms) */
+  startedAt: number;
+  /** Stage completion time (epoch ms) */
+  completedAt: number;
 }
 
 export interface PipelineResult {
@@ -94,6 +102,7 @@ export interface PipelineContext {
   documenterResult?: DocumenterResult;
   auditorResult?: AuditorResult;
   skillDocumenterResult?: SkillDocumenterResult;
+  guardsResult?: GuardsRunResult;
 }
 
 // ============================================
@@ -108,7 +117,8 @@ export type PipelineEventType =
   | 'iteration:complete'
   | 'iteration:fail'
   | 'pipeline:complete'
-  | 'pipeline:fail';
+  | 'pipeline:fail'
+  | 'halt';
 
 // ============================================
 // Pair Pipeline
@@ -256,8 +266,9 @@ export class PairPipeline extends EventEmitter {
     overrides?: { model?: string }
   ): Promise<StageResult> {
     const startTime = Date.now();
+    const stageModel = overrides?.model ?? this.config.roles?.[stage]?.model;
     this.emit('stage:start', { stage, context });
-    broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'start' } });
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'start', model: stageModel } });
 
     try {
       let result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult;
@@ -268,21 +279,46 @@ export class PairPipeline extends EventEmitter {
           const taskId = context.task.id;
           const onLog = (line: string) =>
             broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line } });
+
+          // Check if fresh context should be used (after N failures)
+          const useFreshContext = agentPair.shouldUseFreshContext(context.session.id);
+          if (useFreshContext) {
+            console.log('[Pipeline] Using fresh context for worker (retry with clean slate)');
+            agentPair.consumeFreshContext(context.session.id);
+            onLog('🔄 Using fresh context (previous attempts failed)');
+          }
+
           result = await workerAgent.runWorker({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
             projectPath: context.projectPath,
-            previousFeedback: context.reviewResult
-              ? reviewerAgent.buildRevisionPrompt(context.reviewResult)
-              : undefined,
+            previousFeedback: useFreshContext
+              ? undefined // Fresh context: no previous feedback
+              : (context.reviewResult
+                  ? reviewerAgent.buildRevisionPrompt(context.reviewResult)
+                  : undefined),
             timeoutMs: this.config.roles?.worker?.timeoutMs ?? 0,
             model: overrides?.model ?? this.config.roles?.worker?.model,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
+            processContext: { taskId: context.task.id, stage: 'worker' },
           });
           agentPair.saveWorkerResult(context.session.id, result as WorkerResult);
           context.workerResult = result as WorkerResult;
+
+          // Track confidence and check for degradation
+          const attempt = context.session.worker.attempts;
+          agentPair.updateConfidenceTracker(context.session.id, result as WorkerResult, attempt);
+
+          // Check if confidence intervention is needed
+          if (agentPair.needsConfidenceIntervention(context.session.id)) {
+            console.warn('[Pipeline] Confidence intervention needed - early review triggered');
+            const summary = agentPair.getConfidenceSummary(context.session.id);
+            this.emit('log', { line: `⚠️ Low confidence detected: ${summary}` });
+            // Continue to review, but reviewer should be aware of low confidence
+          }
+
           break;
         }
 
@@ -291,14 +327,43 @@ export class PairPipeline extends EventEmitter {
           if (!context.workerResult) {
             throw new Error('Worker result required for reviewer');
           }
-          result = await reviewerAgent.runReviewer({
+
+          // Fast pre-check with Haiku (30-40% cost savings)
+          console.log('[Pipeline] Running fast pre-check (Haiku)...');
+          const preCheck = await reviewerAgent.runPreCheck({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
             workerResult: context.workerResult,
             projectPath: context.projectPath,
-            timeoutMs: this.config.roles?.reviewer?.timeoutMs ?? 0,
-            model: this.config.roles?.reviewer?.model,
+            timeoutMs: 30000,
+            processContext: { taskId: context.task.id, stage: 'pre-check' },
           });
+
+          console.log(`[Pipeline] Pre-check result: passed=${preCheck.passed}, confidence=${preCheck.confidence}, issues=${preCheck.issues.length}`);
+
+          // If pre-check fails, reject immediately without expensive Sonnet review
+          if (!preCheck.passed) {
+            console.log('[Pipeline] Pre-check failed, rejecting without full review');
+            result = {
+              decision: 'reject',
+              feedback: `Pre-check failed: ${preCheck.issues.join('; ')}`,
+              issues: preCheck.issues,
+              suggestions: ['Fix the basic issues and retry'],
+            };
+          } else {
+            // Pre-check passed, proceed with full Sonnet review
+            console.log('[Pipeline] Pre-check passed, proceeding to full review (Sonnet)...');
+            result = await reviewerAgent.runReviewer({
+              taskTitle: context.task.title,
+              taskDescription: context.task.description || '',
+              workerResult: context.workerResult,
+              projectPath: context.projectPath,
+              timeoutMs: this.config.roles?.reviewer?.timeoutMs ?? 0,
+              model: this.config.roles?.reviewer?.model,
+              processContext: { taskId: context.task.id, stage: 'reviewer' },
+            });
+          }
+
           agentPair.saveReviewerResult(context.session.id, result as ReviewResult);
           context.reviewResult = result as ReviewResult;
           break;
@@ -367,13 +432,17 @@ export class PairPipeline extends EventEmitter {
           throw new Error(`Unknown stage: ${stage}`);
       }
 
+      const completedAt = Date.now();
       const stageResult: StageResult = {
         stage,
         success: this.isStageSuccess(stage, result),
         result,
-        duration: Date.now() - startTime,
+        duration: completedAt - startTime,
+        startedAt: startTime,
+        completedAt,
       };
 
+      console.log(`[Pipeline] ${stage} completed at ${formatTimestamp(completedAt)} (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:complete', { stage, result: stageResult, context });
       const costInfo = (result as { costInfo?: CostInfo }).costInfo;
       broadcastEvent({ type: 'pipeline:stage', data: {
@@ -386,6 +455,7 @@ export class PairPipeline extends EventEmitter {
       return stageResult;
 
     } catch (error) {
+      const completedAt = Date.now();
       const stageResult: StageResult = {
         stage,
         success: false,
@@ -393,9 +463,12 @@ export class PairPipeline extends EventEmitter {
           success: false,
           error: error instanceof Error ? error.message : String(error),
         },
-        duration: Date.now() - startTime,
+        duration: completedAt - startTime,
+        startedAt: startTime,
+        completedAt,
       };
 
+      console.log(`[Pipeline] ${stage} failed at ${formatTimestamp(completedAt)} (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:fail', { stage, result: stageResult, context, error });
       broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'fail' } });
       return stageResult;
@@ -516,12 +589,86 @@ export class PairPipeline extends EventEmitter {
 
       if (!workerResult.success) {
         console.log('[Pipeline] Worker failed, retrying...');
+        agentPair.trackFailure(context.session.id); // Track for fresh context decision
         this.emit('iteration:fail', {
           iteration: context.currentIteration,
           stage: 'worker',
           context,
         });
         continue; // Next iteration
+      }
+
+      // ========== PIPELINE GUARDS (post-worker, pre-reviewer) ==========
+      if (this.config.guards && context.workerResult) {
+        console.log('[Pipeline] Running pipeline guards...');
+        const guardsResult = await runGuards(
+          context.workerResult,
+          context.projectPath,
+          this.config.guards,
+        );
+        context.guardsResult = guardsResult;
+
+        if (!guardsResult.allPassed) {
+          // Blocking guard failed → inject revise, skip reviewer
+          console.log(`[Pipeline] Blocking guard failed: ${guardsResult.combinedIssues.join('; ')}`);
+          context.reviewResult = {
+            decision: 'revise',
+            feedback: `Pipeline guard failed: ${guardsResult.combinedIssues.join('; ')}`,
+            issues: guardsResult.combinedIssues,
+            suggestions: ['Fix the issues flagged by quality guards'],
+          };
+          agentPair.trackFailure(context.session.id);
+          this.emit('iteration:fail', {
+            iteration: context.currentIteration,
+            stage: 'worker',
+            context,
+          });
+          agentPair.updateSessionStatus(context.session.id, 'revising');
+          continue;
+        }
+
+        // Log non-blocking guard warnings
+        const warnings = guardsResult.results.filter(r => !r.passed && !r.blocking);
+        if (warnings.length > 0) {
+          console.log(`[Pipeline] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
+          this.emit('log', {
+            line: `⚠️ Guard warnings: ${warnings.flatMap(w => w.issues).join('; ')}`,
+          });
+        }
+      }
+
+      // ========== HALT CHECK (confidence too low) ==========
+      if (context.workerResult) {
+        const confidence = agentPair.calculateConfidence(context.workerResult);
+        if (confidence < CONFIDENCE_THRESHOLDS.HALT) {
+          const haltReason = context.workerResult.haltReason
+            || `Low confidence: ${confidence}%`;
+          console.warn(`[Pipeline] HALT triggered: confidence=${confidence}%, reason=${haltReason}`);
+
+          this.emit('halt', {
+            confidence,
+            haltReason,
+            sessionId: context.session.id,
+            iteration: context.currentIteration,
+            context,
+          });
+
+          // Inject revise to retry
+          context.reviewResult = {
+            decision: 'revise',
+            feedback: `[HALT] Confidence too low (${confidence}%). ${haltReason}`,
+            issues: [haltReason],
+            suggestions: ['Review task requirements', 'Provide additional context', 'Break into sub-tasks'],
+          };
+          agentPair.trackFailure(context.session.id);
+          this.emit('iteration:fail', {
+            iteration: context.currentIteration,
+            stage: 'worker',
+            context,
+          });
+          agentPair.updateSessionStatus(context.session.id, 'revising');
+          continue;
+        }
       }
 
       // ========== REVIEWER ==========
@@ -551,6 +698,7 @@ export class PairPipeline extends EventEmitter {
         if (decision === 'revise') {
           // revise = next iteration
           console.log('[Pipeline] Reviewer requested revision');
+          agentPair.trackFailure(context.session.id); // Track for fresh context decision
           this.emit('iteration:fail', {
             iteration: context.currentIteration,
             stage: 'reviewer',
@@ -561,6 +709,7 @@ export class PairPipeline extends EventEmitter {
         }
 
         // approve → proceed to Tester
+        agentPair.resetFailureStreak(context.session.id); // Reset on approval
       }
 
       // ========== TESTER ==========
@@ -571,6 +720,7 @@ export class PairPipeline extends EventEmitter {
         if (!testerResult.success && !this.config.continueOnTestFail) {
           // Test failed → set feedback then next iteration
           console.log('[Pipeline] Tester failed, retrying...');
+          agentPair.trackFailure(context.session.id); // Track for fresh context decision
 
           if (context.testerResult) {
             context.reviewResult = {
@@ -706,7 +856,8 @@ export function createFullPipeline(
  */
 export function createPipelineFromConfig(
   roles: PipelineConfig['roles'],
-  maxIterations = 3
+  maxIterations = 3,
+  guards?: Partial<PipelineGuardsConfig>,
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -733,63 +884,19 @@ export function createPipelineFromConfig(
     stages,
     maxIterations,
     roles,
+    guards,
   });
 }
 
 // ============================================
-// Formatting
+// Helpers
 // ============================================
 
-/**
- * Format pipeline result as a Discord message
- */
-export function formatPipelineResult(result: PipelineResult): string {
-  const statusEmoji = {
-    approved: '✅',
-    rejected: '❌',
-    failed: '💥',
-    cancelled: '🚫',
-    decomposed: '🔀',
-  }[result.finalStatus];
-
-  const lines: string[] = [];
-
-  // Task context header
-  if (result.taskContext) {
-    const ctx = result.taskContext;
-    const parts: string[] = [];
-    // projectName fallback: extract from projectPath if not provided
-    const displayName = ctx.projectName
-      || (ctx.projectPath ? ctx.projectPath.split('/').pop() || '' : '');
-    if (displayName) parts.push(`📁 ${displayName}`);
-    if (ctx.issueIdentifier) parts.push(`🔖 ${ctx.issueIdentifier}`);
-    if (ctx.projectPath) parts.push(`\`${ctx.projectPath.split('/').slice(-2).join('/')}\``);
-    if (parts.length > 0) {
-      lines.push(parts.join(' | '));
-    }
-    if (ctx.taskTitle) {
-      lines.push(`📋 ${ctx.taskTitle}`);
-    }
-    lines.push('');
-  }
-
-  lines.push(`${statusEmoji} **Pipeline ${result.finalStatus.toUpperCase()}**`);
-  lines.push('');
-  lines.push(`**Session:** \`${result.sessionId}\``);
-  lines.push(`**Iterations:** ${result.iterations}`);
-  lines.push(`**Duration:** ${(result.totalDuration / 1000).toFixed(1)}s`);
-
-  if (result.totalCost) {
-    lines.push(`**Cost:** $${result.totalCost.costUsd.toFixed(4)} (${formatCost(result.totalCost)})`);
-  }
-
-  lines.push('');
-  lines.push('**Stages:**');
-  for (const stage of result.stages) {
-    const emoji = stage.success ? '✅' : '❌';
-    const duration = (stage.duration / 1000).toFixed(1);
-    lines.push(`  ${emoji} ${stage.stage} (${duration}s)`);
-  }
-
-  return lines.join('\n');
+/** Format epoch ms to HH:MM:SS local time string */
+function formatTimestamp(epochMs: number): string {
+  const d = new Date(epochMs);
+  return d.toLocaleTimeString('en-GB', { hour12: false }); // HH:MM:SS
 }
+
+// Re-export formatting functions (extracted to pipelineFormat.ts)
+export { formatPipelineResult, formatPipelineResultEmbed } from './pipelineFormat.js';

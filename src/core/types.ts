@@ -344,6 +344,18 @@ export type LongRunningMonitor = LongRunningMonitorConfig & {
   lastExitCode?: number;
 };
 
+/**
+ * Pipeline guards configuration
+ */
+export interface PipelineGuardsConfig {
+  qualityGate: boolean;
+  fakeDataGuard: boolean;
+  conventionalCommits: boolean;
+  branchValidation: boolean;
+  uncertaintyDetection: boolean;
+  haltToLinear: boolean;
+}
+
 export type AutonomousStartupConfig = {
   /** Auto-enable on service start */
   enabled: boolean;
@@ -371,4 +383,6 @@ export type AutonomousStartupConfig = {
   decomposition?: DecompositionConfig;
   /** Git worktree mode: work in independent worktree per issue and auto-create PR */
   worktreeMode?: boolean;
+  /** Pipeline guards configuration */
+  guards?: Partial<PipelineGuardsConfig>;
 };

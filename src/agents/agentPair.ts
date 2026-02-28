@@ -11,6 +11,23 @@ import type { CostInfo } from '../support/costTracker.js';
 // ============================================
 
 /**
+ * Confidence level for execution results (legacy)
+ * 0 = failed, 1 = low, 2 = medium, 3 = high
+ */
+export type ConfidenceLevel = 0 | 1 | 2 | 3;
+
+/**
+ * Confidence as a 0-100 percentage
+ */
+export type ConfidencePercent = number;
+
+export const CONFIDENCE_THRESHOLDS = {
+  PROCEED: 80,   // >= 80%: approve-eligible
+  CAUTIOUS: 60,  // 60-79%: run extra validation
+  HALT: 60,      // < 60%: halt → Linear comment + revise
+} as const;
+
+/**
  * Worker execution result
  */
 export interface WorkerResult {
@@ -20,7 +37,26 @@ export interface WorkerResult {
   commands: string[];
   output: string;
   error?: string;
+  confidence?: ConfidenceLevel; // Legacy quality/reliability of the result
+  confidencePercent?: number;   // Agent self-reported 0-100
+  haltReason?: string;          // Why the agent halted
+  uncertaintySignals?: string[]; // Detected uncertainty phrases
   costInfo?: CostInfo;
+}
+
+/**
+ * Confidence tracking for detecting degradation
+ */
+export interface ConfidenceTracker {
+  history: Array<{
+    attempt: number;
+    confidence: ConfidencePercent;
+    timestamp: number;
+    action: string;
+    haltTriggered?: boolean;
+  }>;
+  streakCount: number; // Consecutive low confidence count
+  lastConfidence: ConfidencePercent;
 }
 
 /**
@@ -78,11 +114,15 @@ export interface PairSession {
     result?: WorkerResult;
     attempts: number;
     maxAttempts: number;
+    freshContextAfter?: number; // Use fresh context after N failures (default: 2)
+    failureStreak: number; // Consecutive failures
+    useFreshContext?: boolean; // Flag to use fresh context on next attempt
   };
   reviewer: {
     feedback?: ReviewResult;
   };
   messages: PairMessage[];
+  confidenceTracker?: ConfidenceTracker; // Track confidence degradation
   startedAt: number;
   finishedAt?: number;
 }
@@ -138,6 +178,9 @@ export function createPairSession(options: CreatePairSessionOptions): PairSessio
     worker: {
       attempts: 0,
       maxAttempts: options.maxAttempts ?? 3,
+      freshContextAfter: 2, // Use fresh context after 2 failures
+      failureStreak: 0,
+      useFreshContext: false,
     },
     reviewer: {},
     messages: [],
@@ -404,4 +447,214 @@ export function formatDiscussion(session: PairSession): string {
       return `[${time}] ${roleEmoji} **${msg.role.toUpperCase()}**\n${msg.content}`;
     })
     .join('\n\n---\n\n');
+}
+
+// ============================================
+// Confidence Tracking
+// ============================================
+
+/** Expanded uncertainty word list (from CLAUDE.md behavioral rules) */
+const UNCERTAINTY_WORDS = [
+  'maybe', 'might', 'possibly', 'not sure', 'unclear',
+  'probably', 'perhaps', 'workaround', 'hack', 'temporary fix',
+  'not certain', 'could be', 'i think', 'i believe', 'assuming',
+  'seems like', 'appears to', 'not tested', 'untested',
+];
+
+/**
+ * Calculate confidence as a 0-100 percentage based on worker result
+ */
+export function calculateConfidence(result: WorkerResult): ConfidencePercent {
+  // If agent self-reported a percent, use it (clamped)
+  if (typeof result.confidencePercent === 'number') {
+    return Math.max(0, Math.min(100, result.confidencePercent));
+  }
+
+  // If legacy ConfidenceLevel exists, map to percent
+  if (result.confidence !== undefined) {
+    return [0, 33, 66, 100][result.confidence] ?? 0;
+  }
+
+  // Auto-calculate based on heuristics
+  if (!result.success || result.error) {
+    return 0;
+  }
+
+  let score = 100;
+
+  // No files changed → might be incomplete
+  if (result.filesChanged.length === 0) {
+    score -= 25;
+  }
+
+  // Very short output → might be incomplete
+  if (result.output.length < 100) {
+    score -= 20;
+  }
+
+  // Uncertainty words in summary + first 2000 chars of output
+  const textToScan = (result.summary + ' ' + result.output.slice(0, 2000)).toLowerCase();
+  for (const word of UNCERTAINTY_WORDS) {
+    if (textToScan.includes(word)) {
+      score -= 15;
+    }
+  }
+
+  // Explicit halt reason
+  if (result.haltReason) {
+    score -= 30;
+  }
+
+  return Math.max(0, Math.min(100, score));
+}
+
+/**
+ * Update confidence tracker with new result
+ */
+export function updateConfidenceTracker(
+  sessionId: string,
+  result: WorkerResult,
+  attempt: number
+): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  const confidence = calculateConfidence(result);
+
+  if (!session.confidenceTracker) {
+    session.confidenceTracker = {
+      history: [],
+      streakCount: 0,
+      lastConfidence: confidence,
+    };
+  }
+
+  const tracker = session.confidenceTracker;
+  const haltTriggered = confidence < CONFIDENCE_THRESHOLDS.HALT;
+
+  // Add to history
+  tracker.history.push({
+    attempt,
+    confidence,
+    timestamp: Date.now(),
+    action: result.summary.slice(0, 100),
+    haltTriggered,
+  });
+
+  // Update streak count
+  if (confidence < CONFIDENCE_THRESHOLDS.HALT) {
+    tracker.streakCount += 1;
+  } else {
+    tracker.streakCount = 0; // Reset on good confidence
+  }
+
+  tracker.lastConfidence = confidence;
+
+  console.log(`[ConfidenceTracker] Session ${sessionId}: confidence=${confidence}%, streak=${tracker.streakCount}${haltTriggered ? ' [HALT]' : ''}`);
+}
+
+/**
+ * Check if confidence has degraded significantly
+ * Returns true if intervention is needed
+ */
+export function needsConfidenceIntervention(sessionId: string): boolean {
+  const session = sessions.get(sessionId);
+  if (!session?.confidenceTracker) return false;
+
+  const tracker = session.confidenceTracker;
+
+  // Trigger on 3+ consecutive low confidence results
+  if (tracker.streakCount >= 3) {
+    console.warn(`[ConfidenceTracker] Session ${sessionId}: Low confidence streak detected (${tracker.streakCount})`);
+    return true;
+  }
+
+  // Trigger on confidence drop from PROCEED to below HALT
+  if (tracker.history.length >= 2) {
+    const recent = tracker.history.slice(-2);
+    if (recent[0].confidence >= CONFIDENCE_THRESHOLDS.PROCEED && recent[1].confidence < CONFIDENCE_THRESHOLDS.HALT) {
+      console.warn(`[ConfidenceTracker] Session ${sessionId}: Sudden confidence drop (${recent[0].confidence}%→${recent[1].confidence}%)`);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Get confidence summary for reporting
+ */
+export function getConfidenceSummary(sessionId: string): string {
+  const session = sessions.get(sessionId);
+  if (!session?.confidenceTracker) {
+    return 'No confidence data';
+  }
+
+  const tracker = session.confidenceTracker;
+  const avgConfidence = tracker.history.length > 0
+    ? tracker.history.reduce((sum, h) => sum + h.confidence, 0) / tracker.history.length
+    : 0;
+
+  return [
+    `Last: ${tracker.lastConfidence}%`,
+    `Average: ${Math.round(avgConfidence)}%`,
+    `Low streak: ${tracker.streakCount}`,
+    `History: ${tracker.history.map(h => `${h.confidence}%`).join('→')}`,
+  ].join(' | ');
+}
+
+// ============================================
+// Fresh Context Retry Strategy
+// ============================================
+
+/**
+ * Track failure and decide if fresh context is needed
+ * Call this when worker/reviewer iteration fails
+ */
+export function trackFailure(sessionId: string): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  session.worker.failureStreak += 1;
+
+  console.log(`[FreshContext] Session ${sessionId}: failure streak = ${session.worker.failureStreak}`);
+
+  // Check if fresh context threshold reached
+  const threshold = session.worker.freshContextAfter ?? 2;
+  if (session.worker.failureStreak >= threshold) {
+    session.worker.useFreshContext = true;
+    console.log(`[FreshContext] Session ${sessionId}: Fresh context triggered after ${session.worker.failureStreak} failures`);
+  }
+}
+
+/**
+ * Reset failure streak on success
+ */
+export function resetFailureStreak(sessionId: string): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  session.worker.failureStreak = 0;
+  session.worker.useFreshContext = false;
+}
+
+/**
+ * Check if fresh context should be used
+ */
+export function shouldUseFreshContext(sessionId: string): boolean {
+  const session = sessions.get(sessionId);
+  if (!session) return false;
+
+  return session.worker.useFreshContext ?? false;
+}
+
+/**
+ * Mark that fresh context was consumed (reset flag)
+ */
+export function consumeFreshContext(sessionId: string): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  session.worker.useFreshContext = false;
+  // Don't reset failure streak - keep tracking
 }

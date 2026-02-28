@@ -171,6 +171,8 @@ export async function startService(config: SwarmConfig): Promise<void> {
       plannerTimeoutMs: config.autonomous.decomposition?.plannerTimeoutMs,
       // Git worktree mode
       worktreeMode: config.autonomous.worktreeMode ?? false,
+      // Pipeline guards
+      guards: config.autonomous.guards,
     });
     web.setWebRunner(runnerInstance);
     const modelInfo = config.autonomous.models
