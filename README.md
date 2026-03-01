@@ -4,6 +4,52 @@
 
 OpenSwarm orchestrates multiple Claude Code instances as autonomous agents. It picks up Linear issues, runs Worker/Reviewer pair pipelines to produce code changes, reports progress to Discord, and retains long-term memory via LanceDB vector embeddings.
 
+## 📸 Demo
+
+### Web Dashboard (Port 3847)
+Real-time monitoring dashboard featuring:
+- **Repository Status**: Track multiple repos with branch info, commit counts, and health indicators
+- **Pipeline Events**: Live feed of worker/reviewer actions, test results, and documentation updates
+- **PR Processor**: Monitor automated PR improvement cycles and conflict resolution
+- **Agent Chat**: Interactive communication with the orchestrator
+- **Metrics**: Running tasks, queue depth, completion count, uptime, and cumulative cost
+
+### CLI Chat Interface
+Interactive chat interface for direct agent communication:
+
+```bash
+$ openswarm chat
+
+╔════════════════════════════════════╗
+║  Swarm Chat  sonnet-4-5           ║
+╚════════════════════════════════════╝
+demo | /help | Ctrl+D exit
+
+you What are the main components of OpenSwarm?
+
+assistant OpenSwarm has 9 main architectural layers:
+
+1. **Core** (`src/core/`) - Configuration, service lifecycle, types, and event hub
+2. **Agents** (`src/agents/`) - Worker, reviewer, tester, documenter agents
+3. **Orchestration** (`src/orchestration/`) - Decision engine, task scheduler
+4. **Automation** (`src/automation/`) - Autonomous runner, PR processor
+5. **Memory** (`src/memory/`) - LanceDB vector store with Xenova embeddings
+6. **Knowledge** (`src/knowledge/`) - Code analysis and dependency mapping
+7. **Discord** (`src/discord/`) - Bot commands and event handlers
+8. **Linear** (`src/linear/`) - Issue tracking integration
+9. **Support** (`src/support/`) - Web dashboard, chat, rollback utilities
+
+The system uses a Worker/Reviewer pair pipeline with automatic retries,
+cognitive memory for long-term learning, and Discord for control and monitoring.
+($0.0023)
+
+you /model haiku
+Model: claude-haiku-4-5-20251001
+
+you /save openswarm-overview
+Saved: openswarm-overview
+```
+
 ## Architecture
 
 ```
@@ -120,6 +166,27 @@ autonomous:
 
 ## Usage
 
+### CLI Commands
+
+```bash
+# Start interactive chat with Claude
+openswarm chat [session-name]
+
+# Run a single task (no config needed)
+openswarm run "Fix the login bug" --path ~/my-project
+
+# Initialize configuration
+openswarm init
+
+# Validate configuration
+openswarm validate
+
+# Start the full daemon
+openswarm start
+```
+
+### Running the Service
+
 ```bash
 # Development
 npm run dev
@@ -133,6 +200,30 @@ nohup npm start > openswarm.log 2>&1 &
 
 # Docker
 docker compose up -d
+```
+
+### Shell Helper (optional)
+
+Add to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+openswarm() {
+  case "$1" in
+    start)
+      cd /path/to/OpenSwarm && nohup npm start > ~/.openswarm/log 2>&1 &
+      echo "✅ Started (PID: $!)"
+      ;;
+    stop)
+      pkill -f "openswarm" && echo "✅ Stopped"
+      ;;
+    status)
+      pgrep -f "openswarm" && echo "✅ Running" || echo "❌ Stopped"
+      ;;
+    chat)
+      cd /path/to/OpenSwarm && node --import=tsx src/cli.ts chat "${@:2}"
+      ;;
+  esac
+}
 ```
 
 ## Project Structure
