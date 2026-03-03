@@ -1,27 +1,17 @@
 #!/usr/bin/env tsx
-// ============================================
+
 // OpenSwarm - Rich TUI Chat Interface
 // Claude Code style tabbed interface with real-time updates
-// ============================================
-
 import blessed from 'blessed';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-
-// ============================================
 // Constants
-// ============================================
-
 const CHAT_DIR = resolve(homedir(), '.openswarm', 'chat');
 const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
-
-// ============================================
 // Types
-// ============================================
-
 type Message = { role: 'user' | 'assistant'; content: string; cost?: number };
 
 type Session = {
@@ -47,11 +37,7 @@ type AppState = {
     totalRequests: number;
   };
 };
-
-// ============================================
 // Session Management
-// ============================================
-
 async function ensureChatDir(): Promise<void> {
   await mkdir(CHAT_DIR, { recursive: true });
 }
@@ -80,16 +66,12 @@ function generateSessionId(): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
 }
-
-// ============================================
 // Claude CLI Backend
-// ============================================
-
 async function callClaude(
   prompt: string,
   model: string,
   sessionId: string | undefined,
-  onStream: (text: string) => void,
+  onStream: (text: string, isThinking: boolean) => void,
 ): Promise<{ response: string; sessionId: string; cost: number; tokens: number }> {
   return new Promise((resolve, reject) => {
     const args = [
@@ -111,6 +93,7 @@ async function callClaude(
     let capturedSessionId = sessionId || '';
     let cost = 0;
     let tokens = 0;
+    let lastStreamTime = Date.now();
 
     proc.stdout.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
@@ -131,7 +114,8 @@ async function callClaude(
             for (const block of event.message.content) {
               if (block.type === 'text' && block.text) {
                 fullResponse += block.text;
-                onStream(block.text);
+                onStream(block.text, false);
+                lastStreamTime = Date.now();
               }
             }
           }
@@ -170,11 +154,7 @@ async function callClaude(
     proc.stdin.end();
   });
 }
-
-// ============================================
 // Warhammer 40k Loading Messages
-// ============================================
-
 const LOADING_MESSAGES = [
   'Initializing cogitator arrays',
   'Querying data-vault archives',
@@ -194,11 +174,7 @@ const LOADING_MESSAGES = [
 ];
 
 const SPINNER_FRAMES = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
-
-// ============================================
 // UI Components - Claude Code Style
-// ============================================
-
 function createUI() {
   const screen = blessed.screen({
     smartCSR: true,
@@ -413,11 +389,7 @@ function createUI() {
     helpBar,
   };
 }
-
-// ============================================
 // Tab Management
-// ============================================
-
 function updateTabBar(ui: ReturnType<typeof createUI>, currentTab: number) {
   const tabs = [
     { key: '1', name: 'Chat', icon: '💬' },
@@ -468,11 +440,7 @@ function switchTab(state: AppState, ui: ReturnType<typeof createUI>, tabIndex: n
   updateTabBar(ui, tabIndex);
   ui.screen.render();
 }
-
-// ============================================
 // Data Loaders
-// ============================================
-
 async function loadProjectsData(box: blessed.Widgets.BoxElement) {
   try {
     const response = await fetch('http://127.0.0.1:3847/api/projects');
@@ -555,11 +523,7 @@ async function loadTasksData(box: blessed.Widgets.BoxElement) {
     box.setContent(`\n{center}{#ef4444-fg}Failed to load tasks{/}\n{#718096-fg}${err}{/}{/center}`);
   }
 }
-
-// ============================================
 // Loading Spinner (inline in chat)
-// ============================================
-
 function startSpinner(ui: ReturnType<typeof createUI>): { interval: NodeJS.Timeout; lineIndex: number } {
   let frameIndex = 0;
   const loadingMessage = LOADING_MESSAGES[Math.floor(Math.random() * LOADING_MESSAGES.length)];
@@ -589,11 +553,7 @@ function stopSpinner(
   ui.chatLog.deleteLine(spinnerData.lineIndex);
   ui.screen.render();
 }
-
-// ============================================
 // Chat Logic
-// ============================================
-
 async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, message: string) {
   if (!message.trim()) return;
 
@@ -631,7 +591,7 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
         }
 
         assistantContent += chunk;
-        // Throttle rendering for smoother streaming (30fps instead of 60fps)
+        // Throttle rendering for smoother streaming (30fps)
         const now = Date.now();
         if (now - lastRenderTime < 33) return;
         lastRenderTime = now;
@@ -642,10 +602,11 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
           ui.chatLog.deleteLine(contentStartLine);
         }
 
-        // Add updated content line by line (prevents line wrapping issues)
+        // Add updated content line by line with proper empty line handling
         const contentLines = assistantContent.split('\n');
         for (const line of contentLines) {
-          ui.chatLog.log(`  ${line}`);
+          // Always add line, even if empty (preserves paragraph breaks)
+          ui.chatLog.log(line ? `  ${line}` : '  ');
         }
 
         ui.chatLog.setScrollPerc(100);
@@ -674,10 +635,11 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
       ui.chatLog.deleteLine(contentStartLine);
     }
 
-    // Add final content line by line
+    // Add final content line by line with proper empty line handling
     const contentLines = result.response.split('\n');
     for (const line of contentLines) {
-      ui.chatLog.log(`  ${line}`);
+      // Always add line, even if empty (preserves paragraph breaks)
+      ui.chatLog.log(line ? `  ${line}` : '  ');
     }
 
     // Add cost info if available
@@ -707,11 +669,7 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
     ui.screen.render();
   }
 }
-
-// ============================================
 // Status Bar Update
-// ============================================
-
 function updateStatusBar(state: AppState, ui: ReturnType<typeof createUI>) {
   const modelShort = state.session.model.replace('claude-', '').replace(/-\d{8}$/, '');
   const cost = state.session.totalCost > 0 ? `$${state.session.totalCost.toFixed(4)}` : '$0.00';
@@ -732,11 +690,7 @@ function updateStatusBar(state: AppState, ui: ReturnType<typeof createUI>) {
 
   ui.statusBar.setContent(' ' + status);
 }
-
-// ============================================
 // Command Handler
-// ============================================
-
 async function handleCommand(
   cmd: string,
   state: AppState,
@@ -829,11 +783,7 @@ async function handleCommand(
 
   return false;
 }
-
-// ============================================
 // Main
-// ============================================
-
 export async function main(): Promise<void> {
   // Initialize session
   const loadArg = process.argv[2];
@@ -885,17 +835,26 @@ export async function main(): Promise<void> {
   updateStatusBar(state, ui);
   updateTabBar(ui, state.currentTab);
 
-  // Restore chat history - Claude Code style
+  // Restore chat history - Claude Code style with proper line breaks
   for (const msg of session.messages) {
     ui.chatLog.log('');
     if (msg.role === 'user') {
       ui.chatLog.log(`{#60a5fa-fg}{bold}▸ You{/bold}{/}`);
-      ui.chatLog.log(`  ${msg.content}`);
+      // Split multiline user messages
+      const userLines = msg.content.split('\n');
+      for (const line of userLines) {
+        ui.chatLog.log(line ? `  ${line}` : '  ');
+      }
     } else {
       ui.chatLog.log(`{#34d399-fg}{bold}▸ Assistant{/bold}{/}`);
-      const formatted = msg.content.split('\n').map(line => `  ${line}`).join('\n');
-      const costStr = msg.cost ? `\n  {#718096-fg}$${msg.cost.toFixed(4)}{/}` : '';
-      ui.chatLog.log(formatted + costStr);
+      // Split multiline assistant messages properly
+      const assistantLines = msg.content.split('\n');
+      for (const line of assistantLines) {
+        ui.chatLog.log(line ? `  ${line}` : '  ');
+      }
+      if (msg.cost) {
+        ui.chatLog.log(`  {#718096-fg}$${msg.cost.toFixed(4)}{/}`);
+      }
     }
   }
   if (session.messages.length > 0) {
