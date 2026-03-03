@@ -1,0 +1,52 @@
+┌────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ OpenSwarm │ 20260303-1340 │ sonnet-4-5 │ 6 messages │ $0.0142                                       │
+├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 💬 Chat   📁 Projects   ✓ Tasks   📝 Logs                                                         │
+├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                                    │
+│ ▸ You                                                                                              │
+│   What are the main features of OpenSwarm?                                                        │
+│                                                                                                    │
+│ ▸ Assistant                                                                                        │
+│   OpenSwarm is an autonomous AI agent orchestrator with several key features:                     │
+│                                                                                                    │
+│   1. **Autonomous Pipeline** - Cron-driven heartbeat fetches Linear issues and runs               │
+│      Worker/Reviewer pair loops automatically                                                     │
+│                                                                                                    │
+│   2. **Cognitive Memory** - LanceDB vector store with Xenova embeddings for long-term             │
+│      recall across sessions                                                                       │
+│                                                                                                    │
+│   3. **Discord Control** - Full command interface for monitoring and task dispatch                │
+│                                                                                                    │
+│   4. **PR Auto-Improvement** - Monitors open PRs, auto-fixes CI failures, and resolves            │
+│      merge conflicts                                                                              │
+│                                                                                                    │
+│   5. **Rich TUI Chat** - This interface you're using now, with tabs, streaming, and               │
+│      geek-themed loading messages                                                                 │
+│                                                                                                    │
+│   The system uses a Worker/Reviewer pair pipeline with automatic retries and                      │
+│   knowledge graph for smarter task execution.                                                     │
+│   2,847 tokens · $0.0068                                                                           │
+│                                                                                                    │
+│ ▸ You                                                                                              │
+│   Tell me more about the TUI interface                                                            │
+│                                                                                                    │
+│ ▸ Assistant                                                                                        │
+│   ⣽ Querying data-vault archives...                                                               │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+│                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Message                                                                                            │
+│ |                                                                                                  │
+│                                                                                                    │
+├────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Tab Switch  Enter Send  Esc Clear  Ctrl+C Clear/Exit  /help Commands                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────┘

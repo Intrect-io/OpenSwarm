@@ -20,6 +20,36 @@ Real-time supervisor dashboard with repository status, pipeline events, live log
 $ openswarm chat --tui
 ```
 
+![TUI Chat Interface](screenshots/tui-demo.txt)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│ OpenSwarm │ 20260303-1340 │ sonnet-4-5 │ 6 messages │ $0.0142                   │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ 💬 Chat   📁 Projects   ✓ Tasks   📝 Logs                                       │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                  │
+│ ▸ You                                                                            │
+│   What are the main features of OpenSwarm?                                      │
+│                                                                                  │
+│ ▸ Assistant                                                                      │
+│   OpenSwarm is an autonomous AI agent orchestrator...                           │
+│   2,847 tokens · $0.0068                                                         │
+│                                                                                  │
+│ ▸ You                                                                            │
+│   Tell me more about the TUI interface                                          │
+│                                                                                  │
+│ ▸ Assistant                                                                      │
+│   ⣽ Querying data-vault archives...                                             │
+│                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ Message                                                                          │
+│ |                                                                                │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│ Tab Switch  Enter Send  Esc Clear  Ctrl+C Clear/Exit  /help Commands            │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
 Features:
 - 🎨 **Dark theme** with Claude Code inspired color palette
 - 📊 **4 interactive tabs**: Chat, Projects, Tasks, Logs
