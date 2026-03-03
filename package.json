@@ -4,6 +4,9 @@
   "description": "Autonomous Claude Code agents orchestrator with Discord control and Linear memory",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "openswarm": "dist/cli.js"
+  },
   "scripts": {
     "predev": "pkill -f 'tsx src/index.ts' 2>/dev/null || true",
     "dev": "node --env-file=.env --import=tsx src/index.ts",
@@ -15,15 +18,19 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",
     "test:watch": "node --experimental-vm-modules node_modules/vitest/vitest.mjs",
-    "chat": "node --env-file=.env --import=tsx src/chat.ts",
+    "chat": "node --env-file=.env --import=tsx src/support/chat.ts",
+    "cli:dev": "node --env-file=.env --import=tsx src/cli.ts",
     "ci": "npm run lint && npm run typecheck && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.72.1",
     "@lancedb/lancedb": "^0.23.0",
     "@linear/sdk": "^19.0.0",
+    "@types/blessed": "^0.1.27",
     "@xenova/transformers": "^2.17.2",
     "apache-arrow": "^18.1.0",
+    "blessed": "^0.1.81",
+    "commander": "^12.1.0",
     "croner": "^8.0.0",
     "discord.js": "^14.14.1",
     "yaml": "^2.8.2",

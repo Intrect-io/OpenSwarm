@@ -361,7 +361,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           );
         const recentHistory = chatBuf.slice(-11, -1);
         const historyBlock = recentHistory.length > 0
-          ? recentHistory.map(m => (m.type === 'chat:user' ? 'User' : 'VEGA') + ': ' + m.data.text).join('\n\n')
+          ? recentHistory.map(m => (m.type === 'chat:user' ? 'User' : 'OpenSwarm') + ': ' + m.data.text).join('\n\n')
           : '';
 
         // 2. Long-term memory: semantic search (shared with Discord)
@@ -377,7 +377,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           : '';
 
         const contextPrompt = [
-          'You are VEGA, an autonomous code development supervisor powered by OpenSwarm.',
+          'You are OpenSwarm, an autonomous code development supervisor.',
           'You manage a fleet of Claude Code agents that autonomously work on Linear issues.',
           '',
           'Current system status:',
@@ -398,7 +398,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           'User: ' + message,
         ].join('\n');
 
-        const tmpFile = `/tmp/vega-chat-${Date.now()}.txt`;
+        const tmpFile = `/tmp/openswarm-chat-${Date.now()}.txt`;
         try {
           writeFileSync(tmpFile, contextPrompt);
         } catch {

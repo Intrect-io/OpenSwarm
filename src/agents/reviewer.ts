@@ -1,14 +1,13 @@
 // ============================================
 // OpenSwarm - Reviewer Agent
-// Code review agent (Claude CLI based)
+// Code review agent (CLI adapter based)
 // ============================================
 
-import { spawn } from 'node:child_process';
-import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
-import type { WorkerResult, ReviewResult, ReviewDecision } from './agentPair.js';
-import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
+import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
+import type { ProcessContext } from '../adapters/types.js';
+import { getAdapter, spawnCli } from '../adapters/index.js';
 
 /**
  * Expand ~ path to home directory
@@ -31,11 +30,59 @@ export interface ReviewerOptions {
   projectPath: string;
   timeoutMs?: number;
   model?: string;              // Claude model (default: claude-sonnet-4-20250514)
+  processContext?: ProcessContext;
+}
+
+export interface PreCheckResult {
+  passed: boolean;
+  issues: string[];
+  confidence: number; // 0-3: quality of the check
 }
 
 // ============================================
 // Prompts
 // ============================================
+
+/**
+ * Build Pre-Check prompt for fast validation (Haiku)
+ */
+function buildPreCheckPrompt(options: ReviewerOptions): string {
+  const files = options.workerResult.filesChanged;
+  const filesSummary = files.length <= 20
+    ? (files.join(', ') || '(none)')
+    : `${files.slice(0, 20).join(', ')} (+${files.length - 20} more)`;
+
+  return `You are a fast pre-check validator. Perform a quick validation of the Worker's output.
+
+## Task
+${options.taskTitle}
+
+## Worker Result
+- Success: ${options.workerResult.success}
+- Files Changed (${files.length}): ${filesSummary}
+- Summary: ${options.workerResult.summary}
+
+## Your Job (Fast Check Only)
+Check for OBVIOUS problems:
+1. **Syntax Errors**: Are there any clear syntax errors in the output?
+2. **Missing Files**: Did the worker claim to create/modify files that don't exist?
+3. **Incomplete Output**: Does the output look cut off or incomplete?
+4. **Basic Format Issues**: Are there obvious formatting problems?
+
+**DO NOT** perform deep logical review - that's for the next stage.
+
+## Response Format
+Respond in this EXACT format:
+
+PASSED: [yes/no]
+CONFIDENCE: [0-3]
+ISSUES:
+- [issue 1]
+- [issue 2]
+...
+
+Keep it brief. This is a fast filter, not a deep review.`;
+}
 
 /**
  * Build Reviewer prompt using locale templates
@@ -72,26 +119,85 @@ ${options.workerResult.output.slice(0, 2000)}${options.workerResult.output.lengt
 }
 
 // ============================================
+// Pre-Check Execution (Fast Validation with Haiku)
+// ============================================
+
+/**
+ * Run fast pre-check validation with Haiku model
+ * This is a cheap filter before expensive Sonnet review
+ * Expected to catch 30-40% of obvious issues, saving ~35% on review costs
+ */
+export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckResult> {
+  const prompt = buildPreCheckPrompt(options);
+  const cwd = expandPath(options.projectPath);
+  const adapter = getAdapter();
+
+  try {
+    // Use Haiku for fast validation
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: 30000, // 30 seconds max for pre-check
+      model: 'claude-haiku-4-5-20251001', // Fast model
+      processContext: options.processContext,
+    });
+
+    // Parse pre-check output
+    const lines = raw.stdout.split('\n');
+    const passedLine = lines.find((l: string) => l.startsWith('PASSED:'));
+    const confidenceLine = lines.find((l: string) => l.startsWith('CONFIDENCE:'));
+
+    const passed = passedLine?.includes('yes') ?? false;
+    const confidence = parseInt(confidenceLine?.split(':')[1]?.trim() || '1', 10);
+
+    const issueStart = lines.findIndex((l: string) => l.startsWith('ISSUES:'));
+    const issues = issueStart >= 0
+      ? lines.slice(issueStart + 1)
+          .filter((l: string) => l.trim().startsWith('-'))
+          .map((l: string) => l.replace(/^-\s*/, '').trim())
+          .filter(Boolean)
+      : [];
+
+    return {
+      passed,
+      issues,
+      confidence: Math.min(3, Math.max(0, confidence)),
+    };
+  } catch (error) {
+    // If pre-check fails, allow proceeding to full review
+    console.warn('[Reviewer] Pre-check failed, proceeding to full review:', error);
+    return {
+      passed: true, // Don't block on pre-check failure
+      issues: ['Pre-check timed out or failed'],
+      confidence: 0,
+    };
+  }
+}
+
+// ============================================
 // Reviewer Execution
 // ============================================
 
 /**
- * Run Reviewer agent
+ * Run Reviewer agent (full review with Sonnet)
  */
 export async function runReviewer(options: ReviewerOptions): Promise<ReviewResult> {
   const prompt = buildReviewerPrompt(options);
-  const promptFile = `/tmp/reviewer-prompt-${Date.now()}.txt`;
+  const cwd = expandPath(options.projectPath);
+  const adapter = getAdapter();
 
   try {
-    // Save prompt
-    await fs.writeFile(promptFile, prompt);
+    // Run CLI via adapter
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: options.timeoutMs ?? 180000, // 3 min default (review is faster)
+      model: options.model,
+      processContext: options.processContext,
+    });
 
-    // Run Claude CLI
-    const cwd = expandPath(options.projectPath);
-    const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model);
-
-    // Parse result
-    return parseReviewerOutput(output);
+    // Parse result via adapter
+    return adapter.parseReviewerOutput(raw);
   } catch (error) {
     return {
       decision: 'reject',
@@ -99,254 +205,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       issues: ['Error occurred during reviewer agent execution'],
       suggestions: ['Manual review required'],
     };
-  } finally {
-    // Clean up temp files
-    try {
-      await fs.unlink(promptFile);
-    } catch {
-      // Ignore
-    }
   }
-}
-
-/**
- * Run Claude CLI
- */
-async function runClaudeCli(
-  promptFile: string,
-  cwd: string,
-  timeoutMs: number = 180000, // 3 min default (review is faster than work)
-  model?: string
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const modelFlag = model ? ` --model ${model}` : '';
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format stream-json --permission-mode bypassPermissions${modelFlag}`;
-
-    const proc = spawn(cmd, {
-      shell: true,
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout?.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    // Timeout setup (unlimited if <= 0)
-    let timer: NodeJS.Timeout | null = null;
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`Reviewer timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-    }
-
-    proc.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-
-      if (code !== 0 && code !== null) {
-        console.error('[Reviewer] CLI error:', stderr.slice(0, 500));
-        reject(new Error(`Claude CLI failed with code ${code}`));
-        return;
-      }
-
-      resolve(stdout);
-    });
-
-    proc.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      reject(new Error(`Reviewer spawn error: ${err.message}`));
-    });
-  });
-}
-
-/**
- * Parse Reviewer output
- */
-function parseReviewerOutput(output: string): ReviewResult {
-  try {
-    // Extract cost info
-    const costInfo = extractCostFromStreamJson(output);
-    if (costInfo) {
-      console.log(`[Reviewer] Cost: ${formatCost(costInfo)}`);
-    }
-
-    // Extract result entry from NDJSON
-    let resultText = '';
-    for (const line of output.split('\n')) {
-      try {
-        const event = JSON.parse(line.trim());
-        if (event.type === 'result' && event.result) {
-          resultText = event.result;
-          break;
-        }
-      } catch { /* skip non-JSON lines */ }
-    }
-
-    if (!resultText) {
-      const result = extractFromText(output);
-      result.costInfo = costInfo;
-      return result;
-    }
-
-    // Extract JSON block from result
-    const result = extractResultJson(resultText) || extractFromText(resultText);
-    result.costInfo = costInfo;
-    return result;
-  } catch (error) {
-    console.error('[Reviewer] Parse error:', error);
-    return extractFromText(output);
-  }
-}
-
-/**
- * Extract JSON block from result
- */
-function extractResultJson(text: string): ReviewResult | null {
-  // Find ```json ... ``` block
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    // Find plain JSON object
-    const objMatch = text.match(/\{\s*"decision"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-
-    try {
-      const parsed = JSON.parse(text.slice(startIdx, endIdx));
-      return normalizeReviewResult(parsed);
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[1]);
-    return normalizeReviewResult(parsed);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Normalize parsed result
- */
-function normalizeReviewResult(parsed: any): ReviewResult {
-  // Validate decision
-  let decision: ReviewDecision = 'revise';
-  if (['approve', 'revise', 'reject'].includes(parsed.decision)) {
-    decision = parsed.decision as ReviewDecision;
-  } else if (parsed.decision) {
-    // Map similar strings
-    const normalized = parsed.decision.toLowerCase();
-    if (normalized.includes('approv') || normalized.includes('pass')) {
-      decision = 'approve';
-    } else if (normalized.includes('reject') || normalized.includes('fail')) {
-      decision = 'reject';
-    }
-  }
-
-  return {
-    decision,
-    feedback: parsed.feedback || t('common.fallback.noFeedback'),
-    issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
-  };
-}
-
-/**
- * Extract result from text (fallback when JSON parsing fails)
- */
-function extractFromText(text: string): ReviewResult {
-  // Estimate decision
-  let decision: ReviewDecision = 'revise';
-  const lowerText = text.toLowerCase();
-
-  if (lowerText.includes('approve') || lowerText.includes('lgtm')) {
-    decision = 'approve';
-  } else if (lowerText.includes('reject')) {
-    decision = 'reject';
-  } else if (lowerText.includes('revise') || lowerText.includes('improve')) {
-    decision = 'revise';
-  }
-
-  // Extract issues
-  const issues: string[] = [];
-  const issuePatterns = [
-    /(?:issue|problem|error):\s*(.+)/gi,
-    /(?:missing):\s*(.+)/gi,
-    /- (?:fix|resolve):\s*(.+)/gi,
-  ];
-
-  for (const pattern of issuePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      if (m[1] && !issues.includes(m[1].trim())) {
-        issues.push(m[1].trim().slice(0, 200));
-      }
-    }
-  }
-
-  // Extract suggestions
-  const suggestions: string[] = [];
-  const suggestionPatterns = [
-    /(?:suggest|recommend):\s*(.+)/gi,
-    /(?:consider):\s*(.+)/gi,
-    /(?:should):\s*(.+)/gi,
-  ];
-
-  for (const pattern of suggestionPatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      if (m[1] && !suggestions.includes(m[1].trim())) {
-        suggestions.push(m[1].trim().slice(0, 200));
-      }
-    }
-  }
-
-  return {
-    decision,
-    feedback: extractFeedback(text),
-    issues: issues.slice(0, 5),
-    suggestions: suggestions.slice(0, 5),
-  };
-}
-
-/**
- * Extract feedback
- */
-function extractFeedback(text: string): string {
-  // Extract first meaningful sentence
-  const lines = text.split('\n').filter((l) => {
-    const trimmed = l.trim();
-    return trimmed.length > 20 && !trimmed.startsWith('#') && !trimmed.startsWith('```');
-  });
-
-  if (lines.length === 0) return t('common.fallback.noFeedback');
-
-  const feedback = lines[0].trim();
-  return feedback.length > 300 ? feedback.slice(0, 300) + '...' : feedback;
 }
 
 // ============================================

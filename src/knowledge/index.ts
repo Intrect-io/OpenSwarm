@@ -21,6 +21,25 @@ export type { ModuleHealth, ReviewFocus } from './analyzer.js';
 export type { ImpactAnalysis, ProjectSummary } from './types.js';
 export type * from './types.js';
 
+// Repository knowledge management
+export {
+  linkIssueToModule,
+  unlinkIssueFromModule,
+  getModulesByIssue,
+  getIssuesByModule,
+  updateModuleState,
+  updateDevelopmentStage,
+  updateTechDebt,
+  updateModuleMetadata,
+  getModulesByState,
+  getModulesByStage,
+  getHighTechDebtModules,
+  getBlockedModules,
+  getUntestedModules,
+  generateProjectSummary,
+  saveGraphWithSummary,
+} from './repository.js';
+
 // ============================================
 // Singleton Cache
 // ============================================

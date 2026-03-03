@@ -28,18 +28,29 @@ import {
 import { t, getDateLocale } from '../locale/index.js';
 
 /**
+ * Helper: Reply with Embed for consistent Discord UI
+ */
+async function replyWithEmbed(msg: Message, content: string, color: number = 0x00ff41): Promise<void> {
+  const embed = new EmbedBuilder()
+    .setDescription(content)
+    .setColor(color)
+    .setTimestamp();
+  await msg.reply({ embeds: [embed] });
+}
+
+/**
  * !status [session] - Check status
  */
 export async function handleStatus(msg: Message, sessionName?: string): Promise<void> {
   if (!getAgentStatus) {
-    await msg.reply(t('discord.errors.serviceNotInitialized'));
+    await replyWithEmbed(msg, t('discord.errors.serviceNotInitialized'), 0xff0000);
     return;
   }
 
   const statuses = getAgentStatus(sessionName);
 
   if (statuses.length === 0) {
-    await msg.reply(sessionName ? t('discord.errors.sessionNotFound', { name: sessionName || '' }) : t('discord.status.noAgents'));
+    await replyWithEmbed(msg, sessionName ? t('discord.errors.sessionNotFound', { name: sessionName || '' }) : t('discord.status.noAgents'), 0xffaa00);
     return;
   }
 
@@ -78,14 +89,14 @@ export async function handleStatus(msg: Message, sessionName?: string): Promise<
  * !list - (deprecated) tmux session list -> dashboard redirect
  */
 export async function handleList(msg: Message): Promise<void> {
-  await msg.reply('Use web dashboard at /dashboard for session management. tmux mode has been removed.');
+  await replyWithEmbed(msg, 'Use web dashboard at /dashboard for session management. tmux mode has been removed.', 0xffaa00);
 }
 
 /**
  * !run <session> "<task>" - (deprecated) tmux task execution -> !dev redirect
  */
 export async function handleRun(msg: Message, _args: string[]): Promise<void> {
-  await msg.reply('tmux mode has been removed. Use `!dev <repo> "<task>"` instead.');
+  await replyWithEmbed(msg, 'tmux mode has been removed. Use `!dev <repo> "<task>"` instead.', 0xffaa00);
 }
 
 /**
@@ -93,13 +104,13 @@ export async function handleRun(msg: Message, _args: string[]): Promise<void> {
  */
 export async function handlePause(msg: Message, sessionName: string): Promise<void> {
   if (!sessionName) {
-    await msg.reply(t('discord.pause.usage'));
+    await replyWithEmbed(msg, t('discord.pause.usage'), 0xffaa00);
     return;
   }
 
   if (onPauseAgent) {
     onPauseAgent(sessionName);
-    await msg.reply(`⏸️ ${t('discord.pause.paused', { name: sessionName })}`);
+    await replyWithEmbed(msg, `⏸️ ${t('discord.pause.paused', { name: sessionName })}`);
   }
 }
 
@@ -108,13 +119,13 @@ export async function handlePause(msg: Message, sessionName: string): Promise<vo
  */
 export async function handleResume(msg: Message, sessionName: string): Promise<void> {
   if (!sessionName) {
-    await msg.reply(t('discord.resume.usage'));
+    await replyWithEmbed(msg, t('discord.resume.usage'), 0xffaa00);
     return;
   }
 
   if (onResumeAgent) {
     onResumeAgent(sessionName);
-    await msg.reply(`▶️ ${t('discord.resume.resumed', { name: sessionName })}`);
+    await replyWithEmbed(msg, `▶️ ${t('discord.resume.resumed', { name: sessionName })}`);
   }
 }
 
@@ -127,7 +138,7 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
     if (sessionName) {
       const status = getAgentStatus?.(sessionName);
       if (!status || status.length === 0) {
-        await msg.reply(t('discord.errors.sessionNotFound', { name: sessionName }));
+        await replyWithEmbed(msg, t('discord.errors.sessionNotFound', { name: sessionName }), 0xff0000);
         return;
       }
     }
@@ -136,7 +147,7 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
     const issues = await linear.getMyIssues(agentLabel ? { agentLabel, slim: true } : { slim: true });
 
     if (issues.length === 0) {
-      await msg.reply(t('discord.issues.noIssues'));
+      await replyWithEmbed(msg, t('discord.issues.noIssues'), 0xffaa00);
       return;
     }
 
@@ -230,7 +241,7 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    await msg.reply(t('discord.issues.fetchError', { error: errorMsg }));
+    await replyWithEmbed(msg, t('discord.issues.fetchError', { error: errorMsg }), 0xff0000);
   }
 }
 
@@ -240,14 +251,14 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
 export async function handleIssue(msg: Message, issueId: string): Promise<void> {
   try {
     if (!issueId) {
-      await msg.reply(t('discord.issues.usage'));
+      await replyWithEmbed(msg, t('discord.issues.usage'), 0xffaa00);
       return;
     }
 
     const issue = await linear.getIssue(issueId);
 
     if (!issue) {
-      await msg.reply(t('discord.issue.notFound', { id: issueId }));
+      await replyWithEmbed(msg, t('discord.issue.notFound', { id: issueId }), 0xff0000);
       return;
     }
 
@@ -342,7 +353,7 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
     await msg.reply({ embeds: [embed] });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    await msg.reply(t('discord.issue.fetchError', { error: errorMsg }));
+    await replyWithEmbed(msg, t('discord.issue.fetchError', { error: errorMsg }), 0xff0000);
   }
 }
 
@@ -350,7 +361,7 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
  * !log <session> [lines] - (deprecated) tmux logs -> dashboard redirect
  */
 export async function handleLog(msg: Message, _sessionName: string, _lines: number): Promise<void> {
-  await msg.reply('tmux mode has been removed. Use web dashboard at /dashboard for logs.');
+  await replyWithEmbed(msg, 'tmux mode has been removed. Use web dashboard at /dashboard for logs.', 0xffaa00);
 }
 
 /**
@@ -360,22 +371,22 @@ export async function handleCI(msg: Message): Promise<void> {
   const repos = getGithubRepos?.() ?? [];
 
   if (repos.length === 0) {
-    await msg.reply(t('discord.ci.noRepos'));
+    await replyWithEmbed(msg, t('discord.ci.noRepos'), 0xffaa00);
     return;
   }
 
-  await msg.reply(`🔍 ${t('discord.ci.checking')}`);
+  await replyWithEmbed(msg, `🔍 ${t('discord.ci.checking')}`);
   const summary = await github.summarizeCIFailures(repos);
-  await msg.reply(summary);
+  await replyWithEmbed(msg, summary);
 }
 
 /**
  * !notifications - Check GitHub notifications
  */
 export async function handleNotifications(msg: Message): Promise<void> {
-  await msg.reply(`🔍 ${t('discord.notifications.checking')}`);
+  await replyWithEmbed(msg, `🔍 ${t('discord.notifications.checking')}`);
   const summary = await github.summarizeNotifications();
-  await msg.reply(summary);
+  await replyWithEmbed(msg, summary);
 }
 
 /**
@@ -392,10 +403,10 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
   if (args[0] === 'scan') {
     const repos = dev.scanDevRepos();
     if (repos.length === 0) {
-      await msg.reply(t('discord.dev.noRepos'));
+      await replyWithEmbed(msg, t('discord.dev.noRepos'), 0xffaa00);
       return;
     }
-    await msg.reply(`${t('discord.dev.repoList')}\n${repos.map(r => `- ${r}`).join('\n')}`);
+    await replyWithEmbed(msg, `${t('discord.dev.repoList')}\n${repos.map(r => `- ${r}`).join('\n')}`);
     return;
   }
 
@@ -405,19 +416,19 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
   const task = taskMatch?.[1];
 
   if (!repo || !task) {
-    await msg.reply(t('discord.dev.usage'));
+    await replyWithEmbed(msg, t('discord.dev.usage'), 0xffaa00);
     return;
   }
 
   // Verify path
   const resolvedPath = dev.resolveRepoPath(repo);
   if (!resolvedPath) {
-    await msg.reply(t('discord.errors.repoNotFound', { repo }));
+    await replyWithEmbed(msg, t('discord.errors.repoNotFound', { repo }), 0xff0000);
     return;
   }
 
   // Task start notification
-  await msg.reply(`🚀 ${t('discord.dev.taskStarting', { repo, path: resolvedPath, task: task.slice(0, 100) + (task.length > 100 ? '...' : '') })}`);
+  await replyWithEmbed(msg, `🚀 ${t('discord.dev.taskStarting', { repo, path: resolvedPath, task: task.slice(0, 100) + (task.length > 100 ? '...' : '') })}`);
 
   // For collecting progress updates
   let progressChunks: string[] = [];

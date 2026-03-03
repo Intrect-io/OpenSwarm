@@ -1,10 +1,10 @@
-// Auto-generated: Dashboard HTML template for VEGA Supervisor
+// Auto-generated: Dashboard HTML template for OpenSwarm Supervisor
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VEGA :: Supervisor</title>
+  <title>OpenSwarm :: Supervisor</title>
   <style>
     :root {
       --bg:        #0a0c0a;
@@ -495,7 +495,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <body>
   <!-- HEADER -->
   <header>
-    <span class="hdr-logo">VEGA</span>
+    <span class="hdr-logo">OpenSwarm</span>
     <span class="hdr-fullname">: Vector-Encoded General Agent</span>
     <span class="hdr-sep">::</span>
     <span class="hdr-sub">SUPERVISOR</span>
@@ -634,7 +634,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <span class="chat-prompt">&gt;</span>
           <input
             class="chat-input" id="chat-input"
-            type="text" placeholder="message VEGA..."
+            type="text" placeholder="message OpenSwarm..."
             onkeydown="if(event.key==='Enter')sendChat()"
           >
           <button class="chat-send" id="chat-send" onclick="sendChat()">SEND</button>
@@ -1313,7 +1313,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       if (id) line.id = id;
       const prefix = role === "user"
         ? "<span class=\\"chat-prefix\\">YOU &gt;</span>"
-        : "<span class=\\"chat-prefix\\">VEGA&gt;</span>";
+        : "<span class=\\"chat-prefix\\">OpenSwarm&gt;</span>";
       const tsStr = ts ? "<span class=\\"chat-ts\\">" + fmtTime(ts) + "</span>" : "";
       line.innerHTML = prefix + " <span class=\\"chat-text\\">" + escapeHtml(text) + "</span>" + tsStr;
       container.appendChild(line);
@@ -1336,7 +1336,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       const thinkEl = document.createElement("div");
       thinkEl.id = thinkId;
       thinkEl.className = "chat-line chat-agent";
-      thinkEl.innerHTML = "<span class=\\"chat-prefix\\">VEGA&gt;</span> <span class=\\"chat-text chat-thinking\\">thinking...</span>";
+      thinkEl.innerHTML = "<span class=\\"chat-prefix\\">OpenSwarm&gt;</span> <span class=\\"chat-text chat-thinking\\">thinking...</span>";
       document.getElementById("chat-messages").appendChild(thinkEl);
       document.getElementById("chat-messages").scrollTop = 99999;
 

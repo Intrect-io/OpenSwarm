@@ -389,7 +389,7 @@ export interface LocaleMessages {
  * Prompt template functions for each agent role.
  */
 export interface PromptTemplates {
-  vegaSystem: string;
+  systemPrompt: string;
   buildWorkerPrompt: (opts: {
     taskTitle: string;
     taskDescription: string;

@@ -118,13 +118,21 @@ program
   .command('chat')
   .description('Start interactive chat CLI with Claude')
   .argument('[session]', 'Session name to load/create (optional)')
-  .action(async (session?: string) => {
+  .option('--tui', 'Enable rich TUI mode (default: simple readline)')
+  .action(async (session?: string, opts?: { tui?: boolean }) => {
     // Pass session argument via process.argv for chat.ts to pick up
     if (session) {
       process.argv = [process.argv[0], process.argv[1], session];
     }
-    // Dynamic import triggers the main() in chat.ts
-    await import('./support/chat.js');
+
+    // Use TUI mode if requested
+    if (opts?.tui) {
+      const { main } = await import('./support/chatTui.js');
+      await main();
+    } else {
+      // Legacy readline mode
+      await import('./support/chat.js');
+    }
   });
 
 // ============================================

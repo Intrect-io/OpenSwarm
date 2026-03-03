@@ -113,7 +113,7 @@ function formatHistoryEntry(entry: HistoryEntry): string {
 
   if (entry.response) {
     // Include full response (no truncation)
-    formatted += `\n[${time}] VEGA: ${entry.response}`;
+    formatted += `\n[${time}] OpenSwarm: ${entry.response}`;
   }
 
   return formatted;
@@ -218,9 +218,9 @@ export async function resolveProjectPath(hints: string[]): Promise<string | null
   return null;
 }
 
-// VEGA system prompt - loaded from locale
-export function getVegaSystemPrompt(): string {
-  return getPrompts().vegaSystem;
+// OpenSwarm system prompt - loaded from locale
+export function getSystemPrompt(): string {
+  return getPrompts().systemPrompt;
 }
 
 // Chat history type
@@ -335,6 +335,16 @@ async function handleMessage(msg: Message): Promise<void> {
   }
 
   if (!msg.content.startsWith('!')) return;
+
+  // Access control: fail-closed (deny if no allowed users configured)
+  if (ALLOWED_USER_IDS.length === 0) {
+    await msg.reply('⛔ Access denied: DISCORD_ALLOWED_USERS not configured.');
+    return;
+  }
+  if (!ALLOWED_USER_IDS.includes(msg.author.id)) {
+    await msg.reply('⛔ Access denied: unauthorized user.');
+    return;
+  }
 
   const [command, ...args] = msg.content.slice(1).split(' ');
 
@@ -468,6 +478,10 @@ export async function reportEvent(event: SwarmEvent): Promise<void> {
     error: '🔥',
     pr_improved: '🔧',
     pr_failed: '💔',
+    pr_conflict_detected: '⚡',
+    pr_conflict_resolving: '🔄',
+    pr_conflict_resolved: '✅',
+    pr_conflict_failed: '💥',
   }[event.type] ?? '📢';
 
   const embed = new EmbedBuilder()
@@ -576,7 +590,7 @@ export async function sendToThread(threadId: string, content: string | EmbedBuil
 }
 
 // ============================================
-// VEGA Chat Feature
+// OpenSwarm Chat Feature
 // ============================================
 
 // Chat history storage path
@@ -589,7 +603,7 @@ export async function handleChat(msg: Message): Promise<void> {
   const content = msg.content.trim();
   if (!content) return;
 
-  console.log(`[VEGA] Chat from ${msg.author.username}: ${content.slice(0, 50)}...`);
+  console.log(`[OpenSwarm] Chat from ${msg.author.username}: ${content.slice(0, 50)}...`);
 
   const channel = msg.channel as TextChannel;
   const channelId = msg.channel.id;
@@ -618,7 +632,7 @@ export async function handleChat(msg: Message): Promise<void> {
     const projectPath = await resolveProjectPath(projectHints);
 
     if (projectPath) {
-      console.log(`[VEGA] Project detected: ${projectPath}`);
+      console.log(`[OpenSwarm] Project detected: ${projectPath}`);
     }
 
     // 1. Build channel history context
@@ -634,7 +648,7 @@ export async function handleChat(msg: Message): Promise<void> {
     const memoryContext = memory.formatMemoryContext(memories);
 
     // 3. Build prompt
-    let prompt = getVegaSystemPrompt();
+    let prompt = getSystemPrompt();
 
     if (projectPath) {
       prompt += `\n\n## ${t('discord.chatContext')}\n- **${t('discord.projectContext', { path: projectPath })}**`;
@@ -646,7 +660,7 @@ export async function handleChat(msg: Message): Promise<void> {
       prompt += `\n\n${memoryContext}`;
     }
 
-    console.log(`[VEGA] History context: ${channelHistoryMap.get(channelId)?.length ?? 0} messages`);
+    console.log(`[OpenSwarm] History context: ${channelHistoryMap.get(channelId)?.length ?? 0} messages`);
 
     // Run Claude CLI
     const { result: response, toolCalls } = await runClaude(prompt, { cwd: projectPath || undefined });
@@ -675,17 +689,17 @@ export async function handleChat(msg: Message): Promise<void> {
     });
 
     await memory.saveConversation(channelId, msg.author.id, msg.author.username, content, response);
-    console.log(`[VEGA] Response sent (${response.length} chars)`);
+    console.log(`[OpenSwarm] Response sent (${response.length} chars)`);
 
   } catch (err) {
     if (typingInterval) clearInterval(typingInterval);
-    console.error('[VEGA] Error:', err);
+    console.error('[OpenSwarm] Error:', err);
     await msg.reply(t('discord.chatError'));
   }
 }
 
-// Currently running VEGA Claude process
-let currentVegaProcess: ReturnType<typeof spawn> | null = null;
+// Currently running OpenSwarm Claude process
+let currentClaudeProcess: ReturnType<typeof spawn> | null = null;
 
 /**
  * Run Claude CLI
@@ -694,29 +708,28 @@ async function runClaude(
   prompt: string,
   options?: { cwd?: string }
 ): Promise<{ result: string; toolCalls: string[] }> {
-  if (currentVegaProcess) {
+  if (currentClaudeProcess) {
     console.log('[Claude CLI] Killing previous process...');
-    currentVegaProcess.kill('SIGKILL');
-    currentVegaProcess = null;
+    currentClaudeProcess.kill('SIGKILL');
+    currentClaudeProcess = null;
   }
-
-  const promptFile = '/tmp/vega-prompt.txt';
-  await fs.writeFile(promptFile, prompt);
 
   const workingDir = options?.cwd || process.cwd();
 
   return new Promise((resolve, reject) => {
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format json --permission-mode bypassPermissions`;
-
     console.log(`[Claude CLI] Starting in ${workingDir}...`);
-    const proc = spawn(cmd, {
-      shell: true,
+    const proc = spawn('claude', [
+      '-p', prompt,
+      '--output-format', 'json',
+      '--permission-mode', 'bypassPermissions',
+    ], {
+      shell: false,
       cwd: workingDir,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    currentVegaProcess = proc;
+    currentClaudeProcess = proc;
 
     let stdout = '';
     let stderr = '';
@@ -725,7 +738,7 @@ async function runClaude(
     proc.stderr?.on('data', (data) => { stderr += data.toString(); });
 
     proc.on('close', (code) => {
-      currentVegaProcess = null;
+      currentClaudeProcess = null;
       if (code !== 0 && code !== null) {
         console.error('[Claude CLI] Error:', stderr.slice(0, 200));
         reject(new Error(`Claude CLI failed with code ${code}`));
@@ -735,7 +748,7 @@ async function runClaude(
     });
 
     proc.on('error', (err) => {
-      currentVegaProcess = null;
+      currentClaudeProcess = null;
       reject(new Error(`Claude CLI spawn error: ${err.message}`));
     });
   });
@@ -782,7 +795,7 @@ function parseClaudeJson(output: string): { result: string; toolCalls: string[] 
           for (const pattern of DESTRUCTIVE_PATTERNS) {
             if (pattern.test(item.input.command)) {
               toolSummary = `⛔ BLOCKED: ${cmd}`;
-              console.warn(`[VEGA] Destructive command detected: ${item.input.command}`);
+              console.warn(`[OpenSwarm] Destructive command detected: ${item.input.command}`);
               break;
             }
           }
@@ -858,7 +871,7 @@ async function saveChatHistory(entry: ChatEntry): Promise<void> {
 
     await fs.writeFile(CHAT_HISTORY_FILE, JSON.stringify(history, null, 2));
   } catch (err) {
-    console.error('[VEGA] Failed to save chat history:', err);
+    console.error('[OpenSwarm] Failed to save chat history:', err);
   }
 }
 

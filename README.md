@@ -13,10 +13,26 @@ OpenSwarm orchestrates multiple Claude Code instances as autonomous agents. It p
 Real-time supervisor dashboard with repository status, pipeline events, live logs, PR processor, and agent chat.
 
 ### CLI Chat Interface
-Interactive chat interface for direct agent communication:
+
+**Rich TUI Mode** (Claude Code inspired):
 
 ```bash
-$ openswarm chat
+$ openswarm chat --tui
+```
+
+Features:
+- 🎨 **Dark theme** with Claude Code inspired color palette
+- 📊 **4 interactive tabs**: Chat, Projects, Tasks, Logs
+- ⚡ **Real-time streaming** responses with inline spinner
+- 🔄 **Warhammer 40k themed** loading messages ("Querying data-vault archives...")
+- 💬 **Keyboard shortcuts**: Tab/Shift+Tab (switch tabs), Esc/Ctrl+C (clear input), Enter (send)
+- 💾 **Session management**: Auto-save, resume, model switching
+- 📈 **Status bar**: Session ID, model, message count, cumulative cost
+
+**Simple Mode** (readline based):
+
+```bash
+$ openswarm chat [session-name]
 
 ╔════════════════════════════════════╗
 ║  Swarm Chat  sonnet-4-5           ║
@@ -24,22 +40,7 @@ $ openswarm chat
 demo | /help | Ctrl+D exit
 
 you What are the main components of OpenSwarm?
-
-assistant OpenSwarm has 9 main architectural layers:
-
-1. **Core** (`src/core/`) - Configuration, service lifecycle, types, and event hub
-2. **Agents** (`src/agents/`) - Worker, reviewer, tester, documenter agents
-3. **Orchestration** (`src/orchestration/`) - Decision engine, task scheduler
-4. **Automation** (`src/automation/`) - Autonomous runner, PR processor
-5. **Memory** (`src/memory/`) - LanceDB vector store with Xenova embeddings
-6. **Knowledge** (`src/knowledge/`) - Code analysis and dependency mapping
-7. **Discord** (`src/discord/`) - Bot commands and event handlers
-8. **Linear** (`src/linear/`) - Issue tracking integration
-9. **Support** (`src/support/`) - Web dashboard, chat, rollback utilities
-
-The system uses a Worker/Reviewer pair pipeline with automatic retries,
-cognitive memory for long-term learning, and Discord for control and monitoring.
-($0.0023)
+assistant OpenSwarm has 9 main architectural layers... ($0.0023)
 
 you /model haiku
 Model: claude-haiku-4-5-20251001
@@ -47,6 +48,8 @@ Model: claude-haiku-4-5-20251001
 you /save openswarm-overview
 Saved: openswarm-overview
 ```
+
+**Commands**: `/clear`, `/model <name>`, `/save [name]`, `/help`
 
 ## Architecture
 
@@ -89,6 +92,7 @@ Saved: openswarm-overview
 - **Cognitive Memory** - LanceDB vector store with Xenova/multilingual-e5-base embeddings for long-term recall across sessions
 - **Knowledge Graph** - Static code analysis, dependency mapping, and impact analysis for smarter task execution
 - **Discord Control** - Full command interface for monitoring, task dispatch, scheduling, and pair session management
+- **Rich TUI Chat** - Claude Code inspired terminal interface with tabs, streaming responses, and geek-themed loading messages
 - **Dynamic Scheduling** - Cron-based job scheduler with Discord management commands
 - **PR Auto-Improvement** - Monitors open PRs, auto-fixes CI failures, auto-resolves merge conflicts, and retries until all checks pass (conflict detection, AI-powered conflict resolution, CI polling, configurable retry loop)
 - **Long-Running Monitors** - Track external processes (training jobs, batch tasks) and report completion
@@ -167,7 +171,10 @@ autonomous:
 ### CLI Commands
 
 ```bash
-# Start interactive chat with Claude
+# Interactive chat with Claude (TUI mode)
+openswarm chat --tui
+
+# Interactive chat (simple readline mode)
 openswarm chat [session-name]
 
 # Run a single task (no config needed)

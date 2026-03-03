@@ -2,14 +2,20 @@
 // OpenSwarm - GitHub Integration (via gh CLI)
 // ============================================
 
-import { exec } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { getDateLocale } from '../locale/index.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+/** Safe gh CLI execution (no shell interpolation) */
+async function ghExec(...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('gh', args);
+  return stdout;
+}
 
 /**
  * Failed Workflow Run
@@ -44,8 +50,9 @@ export async function getFailedRuns(
   limit: number = 5
 ): Promise<FailedRun[]> {
   try {
-    const { stdout } = await execAsync(
-      `gh run list -R ${repo} -s failure --json databaseId,name,headBranch,createdAt,url -L ${limit}`
+    const stdout = await ghExec(
+      'run', 'list', '-R', repo, '-s', 'failure',
+      '--json', 'databaseId,name,headBranch,createdAt,url', '-L', String(limit)
     );
 
     const runs = JSON.parse(stdout);
@@ -85,8 +92,9 @@ export async function getNotifications(
   limit: number = 10
 ): Promise<GitHubNotification[]> {
   try {
-    const { stdout } = await execAsync(
-      `gh api /notifications --jq '.[] | {id, reason, title: .subject.title, type: .subject.type, repo: .repository.full_name, updated: .updated_at, url: .subject.url}'`
+    const stdout = await ghExec(
+      'api', '/notifications', '--jq',
+      '.[] | {id, reason, title: .subject.title, type: .subject.type, repo: .repository.full_name, updated: .updated_at, url: .subject.url}'
     );
 
     const lines = stdout.trim().split('\n').filter(Boolean);
@@ -123,7 +131,7 @@ export async function getCINotifications(): Promise<GitHubNotification[]> {
  */
 export async function markNotificationRead(threadId: string): Promise<void> {
   try {
-    await execAsync(`gh api -X PATCH /notifications/threads/${threadId}`);
+    await ghExec('api', '-X', 'PATCH', `/notifications/threads/${threadId}`);
   } catch (err) {
     console.error(`Failed to mark notification ${threadId} as read:`, err);
   }
@@ -137,9 +145,7 @@ export async function getRunDetails(
   runId: number
 ): Promise<{ jobs: { name: string; conclusion: string; steps: any[] }[] } | null> {
   try {
-    const { stdout } = await execAsync(
-      `gh run view ${runId} -R ${repo} --json jobs`
-    );
+    const stdout = await ghExec('run', 'view', String(runId), '-R', repo, '--json', 'jobs');
     return JSON.parse(stdout);
   } catch (err) {
     console.error(`Failed to get run details for ${runId}:`, err);
@@ -155,10 +161,9 @@ export async function getFailedJobLogs(
   runId: number
 ): Promise<string> {
   try {
-    const { stdout } = await execAsync(
-      `gh run view ${runId} -R ${repo} --log-failed 2>/dev/null | tail -100`
-    );
-    return stdout;
+    const stdout = await ghExec('run', 'view', String(runId), '-R', repo, '--log-failed');
+    // Limit output to last 100 lines (replaces shell `tail -100`)
+    return stdout.split('\n').slice(-100).join('\n');
   } catch (err) {
     console.error(`Failed to get failed job logs for ${runId}:`, err);
     return '';
@@ -173,9 +178,7 @@ export async function getPRChecks(
   prNumber: number
 ): Promise<{ name: string; status: string; conclusion: string }[]> {
   try {
-    const { stdout } = await execAsync(
-      `gh pr checks ${prNumber} -R ${repo} --json name,state,conclusion`
-    );
+    const stdout = await ghExec('pr', 'checks', String(prNumber), '-R', repo, '--json', 'name,state,conclusion');
     return JSON.parse(stdout);
   } catch (err) {
     console.error(`Failed to get PR checks for ${repo}#${prNumber}:`, err);
@@ -297,9 +300,10 @@ export async function saveCIState(state: CIState): Promise<void> {
  */
 export async function getActiveFailures(repo: string, maxAgeDays: number = 30): Promise<ActiveFailure[] | null> {
   try {
-    const { stdout } = await execAsync(
-      `gh run list -R ${repo} --json databaseId,name,headBranch,createdAt,conclusion,url -L 20`
-    );
+    const { stdout } = await execFileAsync('gh', [
+      'run', 'list', '-R', repo,
+      '--json', 'databaseId,name,headBranch,createdAt,conclusion,url', '-L', '20'
+    ]);
     const runs = JSON.parse(stdout);
     if (runs.length === 0) return [];
 
@@ -418,6 +422,7 @@ export type PRInfo = {
   branch: string;
   createdAt: string;
   url: string;
+  author?: string;
 };
 
 /**
@@ -436,9 +441,10 @@ export type PRDetails = PRInfo & {
  */
 export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
   try {
-    const { stdout } = await execAsync(
-      `gh pr list -R ${repo} --state open --json number,title,headRefName,createdAt,url`
-    );
+    const { stdout } = await execFileAsync('gh', [
+      'pr', 'list', '-R', repo, '--state', 'open',
+      '--json', 'number,title,headRefName,createdAt,url,author'
+    ]);
     const prs = JSON.parse(stdout);
     return prs.map((pr: any) => ({
       repo,
@@ -447,6 +453,7 @@ export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
       branch: pr.headRefName,
       createdAt: pr.createdAt,
       url: pr.url,
+      author: pr.author?.login,
     }));
   } catch (err) {
     console.error(`[GitHub] Failed to get open PRs for ${repo}:`, err);
@@ -459,13 +466,13 @@ export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
  */
 export async function getPRContext(repo: string, prNumber: number): Promise<PRDetails | null> {
   try {
-    const [viewResult, diffResult, checks] = await Promise.all([
-      execAsync(`gh pr view ${prNumber} -R ${repo} --json title,headRefName,createdAt,url,body,author`),
-      execAsync(`gh pr diff ${prNumber} -R ${repo}`).catch((e) => { console.warn(`[GitHub] PR diff fetch failed for ${repo}#${prNumber}:`, e); return { stdout: '' }; }),
+    const [viewStdout, diffStdout, checks] = await Promise.all([
+      ghExec('pr', 'view', String(prNumber), '-R', repo, '--json', 'title,headRefName,createdAt,url,body,author'),
+      ghExec('pr', 'diff', String(prNumber), '-R', repo).catch((e) => { console.warn(`[GitHub] PR diff fetch failed for ${repo}#${prNumber}:`, e); return ''; }),
       getPRChecks(repo, prNumber),
     ]);
 
-    const view = JSON.parse(viewResult.stdout);
+    const view = JSON.parse(viewStdout);
     const failedChecks = checks.filter(
       (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
     );
@@ -484,7 +491,7 @@ export async function getPRContext(repo: string, prNumber: number): Promise<PRDe
       url: view.url,
       body: view.body || '',
       author: view.author?.login || 'unknown',
-      diff: diffResult.stdout,
+      diff: diffStdout,
       failedChecks: failedChecks.length > 0 ? failedChecks : undefined,
       failedLogs: failedLogs || undefined,
     };
@@ -499,9 +506,8 @@ export async function getPRContext(repo: string, prNumber: number): Promise<PRDe
  */
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
   try {
-    const { spawn: spawnCmd } = await import('node:child_process');
     await new Promise<void>((resolve, reject) => {
-      const proc = spawnCmd('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
+      const proc = spawn('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       proc.stdin.write(body);
@@ -523,25 +529,138 @@ export async function commentOnPR(repo: string, prNumber: number, body: string):
 export async function getPRFailedLogs(repo: string, prNumber: number): Promise<string> {
   try {
     // Get the PR's head branch
-    const { stdout: prInfo } = await execAsync(
-      `gh pr view ${prNumber} -R ${repo} --json headRefName`
-    );
+    const prInfo = await ghExec('pr', 'view', String(prNumber), '-R', repo, '--json', 'headRefName');
     const { headRefName } = JSON.parse(prInfo);
 
     // Get the most recent failed run for this branch
-    const { stdout: runsStr } = await execAsync(
-      `gh run list -R ${repo} -b ${headRefName} -s failure --json databaseId -L 1`
-    );
+    const runsStr = await ghExec('run', 'list', '-R', repo, '-b', headRefName, '-s', 'failure', '--json', 'databaseId', '-L', '1');
     const runs = JSON.parse(runsStr);
     if (runs.length === 0) return '';
 
-    // Get failed logs
-    const { stdout: logs } = await execAsync(
-      `gh run view ${runs[0].databaseId} -R ${repo} --log-failed 2>/dev/null | tail -150`
-    );
-    return logs;
+    // Get failed logs (limit to last 150 lines in JS instead of shell pipe)
+    const logs = await ghExec('run', 'view', String(runs[0].databaseId), '-R', repo, '--log-failed');
+    return logs.split('\n').slice(-150).join('\n');
   } catch (err) {
     console.error(`[GitHub] Failed to get PR failed logs for ${repo}#${prNumber}:`, err);
     return '';
+  }
+}
+
+/**
+ * Get the base branch of a PR
+ */
+export async function getPRBaseBranch(repo: string, prNumber: number): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('gh', [
+      'pr', 'view', String(prNumber), '-R', repo, '--json', 'baseRefName'
+    ]);
+    const { baseRefName } = JSON.parse(stdout);
+    return baseRefName || 'main';
+  } catch (err) {
+    console.error(`[GitHub] Failed to get base branch for ${repo}#${prNumber}:`, err);
+    return 'main';
+  }
+}
+
+// ============================================
+// PR Auto-Fix Support
+// ============================================
+
+/**
+ * Check if PR has merge conflicts
+ */
+export async function checkPRConflicts(repo: string, prNumber: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('gh', [
+      'pr', 'view', String(prNumber), '-R', repo, '--json', 'mergeable'
+    ]);
+    const { mergeable } = JSON.parse(stdout);
+    // mergeable can be: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
+    return mergeable === 'CONFLICTING';
+  } catch (err) {
+    console.error(`[GitHub] Failed to check PR conflicts for ${repo}#${prNumber}:`, err);
+    return false;
+  }
+}
+
+/**
+ * CI status result
+ */
+export type CIStatus =
+  | { status: 'pending' }
+  | { status: 'success' }
+  | { status: 'failure'; failedChecks: { name: string; conclusion: string }[] };
+
+/**
+ * Check current CI status for a PR
+ */
+export async function checkPRCIStatus(repo: string, prNumber: number): Promise<CIStatus> {
+  try {
+    const checks = await getPRChecks(repo, prNumber);
+
+    if (checks.length === 0) {
+      return { status: 'pending' };
+    }
+
+    const pending = checks.some(c => c.status === 'in_progress' || c.status === 'queued' || c.status === 'pending');
+    if (pending) {
+      return { status: 'pending' };
+    }
+
+    const failed = checks.filter(c => c.conclusion === 'failure' || c.conclusion === 'timed_out');
+    if (failed.length > 0) {
+      return {
+        status: 'failure',
+        failedChecks: failed.map(c => ({ name: c.name, conclusion: c.conclusion }))
+      };
+    }
+
+    return { status: 'success' };
+  } catch (err) {
+    console.error(`[GitHub] Failed to check PR CI status for ${repo}#${prNumber}:`, err);
+    return { status: 'pending' };
+  }
+}
+
+/**
+ * Wait for CI checks to complete (polling with timeout)
+ * @param repo Repository name (owner/repo)
+ * @param prNumber PR number
+ * @param options Polling options
+ * @returns Final CI status
+ */
+export async function waitForCICompletion(
+  repo: string,
+  prNumber: number,
+  options: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    onProgress?: (status: CIStatus, elapsed: number) => void;
+  } = {}
+): Promise<CIStatus> {
+  const timeoutMs = options.timeoutMs ?? 600_000; // 10 minutes default
+  const pollIntervalMs = options.pollIntervalMs ?? 30_000; // 30 seconds default
+  const startTime = Date.now();
+
+  while (true) {
+    const elapsed = Date.now() - startTime;
+
+    if (elapsed >= timeoutMs) {
+      console.log(`[GitHub] CI timeout for ${repo}#${prNumber} (${elapsed}ms)`);
+      return { status: 'pending' };
+    }
+
+    const status = await checkPRCIStatus(repo, prNumber);
+
+    if (options.onProgress) {
+      options.onProgress(status, elapsed);
+    }
+
+    if (status.status === 'success' || status.status === 'failure') {
+      return status;
+    }
+
+    // Wait before next poll
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
   }
 }

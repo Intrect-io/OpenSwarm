@@ -284,9 +284,14 @@ export class TaskScheduler extends EventEmitter {
   ): Promise<number> {
     let started = 0;
 
+    console.log(`[Scheduler] runAvailable: paused=${this.paused}, running=${this.runningTasks.size}/${this.config.maxConcurrent}, queue=${this.taskQueue.length}, worktreeMode=${this.config.worktreeMode}`);
+
     while (this.hasAvailableSlot()) {
       const next = this.getNextExecutable();
-      if (!next) break;
+      if (!next) {
+        console.log(`[Scheduler] runAvailable: no more executable tasks (queue=${this.taskQueue.length})`);
+        break;
+      }
 
       this.startTask(next.task, next.projectPath, () =>
         executor(next.task, next.projectPath)
@@ -294,6 +299,7 @@ export class TaskScheduler extends EventEmitter {
       started++;
     }
 
+    console.log(`[Scheduler] runAvailable: started ${started} tasks`);
     return started;
   }
 

@@ -19,6 +19,62 @@ export const LanguageSchema = z.enum(['typescript', 'python', 'other']);
 export type Language = z.infer<typeof LanguageSchema>;
 
 // ============================================
+// Module State & Development Stage
+// ============================================
+
+export const ModuleStateSchema = z.enum([
+  'stable',        // Production-ready, well-tested
+  'experimental',  // Under active development, API may change
+  'deprecated',    // Scheduled for removal
+  'legacy',        // Old code, needs refactoring
+  'planned',       // Not yet implemented
+]);
+export type ModuleState = z.infer<typeof ModuleStateSchema>;
+
+export const DevelopmentStageSchema = z.enum([
+  'planning',      // Design phase
+  'in_progress',   // Active development
+  'testing',       // QA/testing phase
+  'reviewing',     // Code review
+  'deployed',      // In production
+  'blocked',       // Blocked by dependencies or issues
+]);
+export type DevelopmentStage = z.infer<typeof DevelopmentStageSchema>;
+
+// ============================================
+// Issue Tracking
+// ============================================
+
+export const IssueReferenceSchema = z.object({
+  issueId: z.string(),           // Linear issue ID
+  issueIdentifier: z.string(),   // Human-readable identifier (e.g., "INT-123")
+  title: z.string(),
+  state: z.string(),             // Linear state (Todo, In Progress, Done, etc.)
+  priority: z.number().optional(), // 0-4 (0=none, 1=urgent, 4=low)
+  assigneeId: z.string().optional(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+});
+export type IssueReference = z.infer<typeof IssueReferenceSchema>;
+
+// ============================================
+// Module Metadata (Extended)
+// ============================================
+
+export const ModuleMetadataSchema = z.object({
+  state: ModuleStateSchema.optional(),
+  developmentStage: DevelopmentStageSchema.optional(),
+  relatedIssues: z.array(IssueReferenceSchema).optional(),  // Issues affecting this module
+  dependencies: z.array(z.string()).optional(),              // Module IDs this depends on
+  dependents: z.array(z.string()).optional(),                // Module IDs that depend on this
+  maintainer: z.string().optional(),                         // Primary owner/maintainer
+  lastReviewedAt: z.number().optional(),                     // Last code review timestamp
+  techDebt: z.number().optional(),                           // 0-10 scale (subjective)
+  notes: z.string().optional(),                              // Free-form notes
+});
+export type ModuleMetadata = z.infer<typeof ModuleMetadataSchema>;
+
+// ============================================
 // Module Metrics
 // ============================================
 
@@ -52,6 +108,7 @@ export const GraphNodeSchema = z.object({
   path: z.string(),          // Relative path from project root
   metrics: ModuleMetricsSchema.optional(),
   gitInfo: GitInfoSchema.optional(),
+  metadata: ModuleMetadataSchema.optional(),  // Extended metadata (state, stage, issues)
 });
 export type GraphNode = z.infer<typeof GraphNodeSchema>;
 
@@ -77,6 +134,14 @@ export const ProjectSummarySchema = z.object({
   hotModules: z.array(z.string()),         // Top 5 most changed modules in last 30 days
   untestedModules: z.array(z.string()),    // Modules without tests
   avgChurnScore: z.number(),
+
+  // Extended summary (state & issues)
+  stableModules: z.number().optional(),      // Count of stable modules
+  experimentalModules: z.number().optional(), // Count of experimental modules
+  deprecatedModules: z.number().optional(),   // Count of deprecated modules
+  activeIssues: z.number().optional(),        // Count of open issues
+  blockedModules: z.array(z.string()).optional(), // Modules in blocked state
+  highTechDebtModules: z.array(z.string()).optional(), // Modules with tech debt >= 7
 });
 export type ProjectSummary = z.infer<typeof ProjectSummarySchema>;
 

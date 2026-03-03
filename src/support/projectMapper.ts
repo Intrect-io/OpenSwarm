@@ -287,6 +287,14 @@ export function clearMappingCache(): void {
   lastScanTime = 0;
 }
 
+/**
+ * Invalidate local projects cache (force re-scan on next call)
+ */
+export function invalidateProjectCache(): void {
+  localProjectsCache.length = 0;
+  lastScanTime = 0;
+}
+
 // ============================================
 // Utilities
 // ============================================

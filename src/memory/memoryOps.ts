@@ -688,7 +688,7 @@ export async function saveConversation(
   response: string,
 ): Promise<void> {
   await logWork(
-    'discord',
+    'chat',  // Unified repo for both Discord and Dashboard
     `Chat with ${userName}`,
     `Q: ${content}\n\nA: ${response}`,
     undefined,
@@ -710,16 +710,16 @@ export async function getRecentConversations(
     const table = getTable();
     if (!table) return [];
 
-    // Filter by journal type + discord repo, then sort by createdAt descending
+    // Filter by journal type + chat repo, then sort by createdAt descending
     const results = await table
       .search(Array.from({ length: EMBEDDING_DIM }, () => 0))  // dummy vector for full scan
       .limit(1000)  // Sufficiently large number
       .toArray();
 
-    // Filter: journal + discord (channelId matching is loose for legacy data compat)
+    // Filter: journal + chat (channelId matching is loose for legacy data compat)
     const filtered = results
       .filter((r: any) => {
-        if (r.type !== 'journal' || r.repo !== 'discord') return false;
+        if (r.type !== 'journal' || (r.repo !== 'chat' && r.repo !== 'discord')) return false;  // Support legacy 'discord' repo
 
         // channelId matching: derivedFrom or metadata.issueRef
         if (!channelId) return true;  // All

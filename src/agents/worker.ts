@@ -1,16 +1,14 @@
 // ============================================
 // OpenSwarm - Worker Agent
-// Task execution agent (Claude CLI based)
+// Task execution agent (CLI adapter based)
 // ============================================
 
-import { spawn } from 'node:child_process';
-import fs from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
 import * as gitTracker from '../support/gitTracker.js';
-import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { t, getPrompts } from '../locale/index.js';
-import { parseCliStreamChunk, extractResultFromStreamJson } from './cliStreamParser.js';
+import type { ProcessContext } from '../adapters/types.js';
+import { getAdapter, spawnCli } from '../adapters/index.js';
 
 /**
  * Expand ~ path to home directory
@@ -36,6 +34,7 @@ export interface WorkerOptions {
   issueIdentifier?: string;    // Linear issue ID (e.g., INT-123)
   projectName?: string;        // Linear project name
   onLog?: (line: string) => void;  // Callback for stdout streaming
+  processContext?: ProcessContext;
 }
 
 // ============================================
@@ -63,8 +62,8 @@ function buildWorkerPrompt(options: WorkerOptions): string {
  */
 export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   const prompt = buildWorkerPrompt(options);
-  const promptFile = `/tmp/worker-prompt-${Date.now()}.txt`;
   const cwd = expandPath(options.projectPath);
+  const adapter = getAdapter();
 
   // Git snapshot (pre-work state)
   let snapshotHash = '';
@@ -75,14 +74,18 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   }
 
   try {
-    // Save prompt
-    await fs.writeFile(promptFile, prompt);
+    // Run CLI via adapter
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: options.timeoutMs,
+      model: options.model,
+      onLog: options.onLog,
+      processContext: options.processContext,
+    });
 
-    // Run Claude CLI
-    const output = await runClaudeCli(promptFile, cwd, options.timeoutMs, options.model, options.onLog);
-
-    // Parse result (from LLM output)
-    const parsedResult = parseWorkerOutput(output);
+    // Parse result via adapter
+    const parsedResult = adapter.parseWorkerOutput(raw);
 
     // Extract actually changed files via Git diff (independent of LLM report)
     if (isGitRepo && snapshotHash) {
@@ -112,238 +115,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       output: '',
       error: error instanceof Error ? error.message : String(error),
     };
-  } finally {
-    // Clean up temp files
-    try {
-      await fs.unlink(promptFile);
-    } catch {
-      // Ignore
-    }
   }
-}
-
-/**
- * Run Claude CLI
- */
-async function runClaudeCli(
-  promptFile: string,
-  cwd: string,
-  timeoutMs: number = 300000, // 5 min default
-  model?: string,
-  onLog?: (line: string) => void
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const modelFlag = model ? ` --model ${model}` : '';
-    const cmd = `echo "" | claude -p "$(cat ${promptFile})" --output-format stream-json --permission-mode bypassPermissions${modelFlag}`;
-
-    const proc = spawn(cmd, {
-      shell: true,
-      cwd,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let streamBuffer = '';
-
-    proc.stdout?.on('data', (data: Buffer) => {
-      const text = data.toString();
-      stdout += text;
-      if (onLog) {
-        streamBuffer = parseCliStreamChunk(text, onLog, streamBuffer);
-      }
-    });
-
-    proc.stderr?.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    // Timeout setup (unlimited if <= 0)
-    let timer: NodeJS.Timeout | null = null;
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`Worker timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-    }
-
-    proc.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-
-      if (code !== 0 && code !== null) {
-        console.error('[Worker] CLI error:', stderr.slice(0, 500));
-        reject(new Error(`Claude CLI failed with code ${code}`));
-        return;
-      }
-
-      resolve(stdout);
-    });
-
-    proc.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      reject(new Error(`Worker spawn error: ${err.message}`));
-    });
-  });
-}
-
-/**
- * Parse Worker output
- */
-function parseWorkerOutput(output: string): WorkerResult {
-  try {
-    // Extract cost info (NDJSON format)
-    const costInfo = extractCostFromStreamJson(output);
-    if (costInfo) {
-      console.log(`[Worker] Cost: ${formatCost(costInfo)}`);
-    }
-
-    // Extract result entry from NDJSON
-    const resultText = extractResultFromStreamJson(output);
-    if (!resultText) {
-      const result = extractFromText(output);
-      result.costInfo = costInfo;
-      return result;
-    }
-
-    // Extract JSON block from result
-    const result = extractResultJson(resultText) || extractFromText(resultText);
-    result.costInfo = costInfo;
-    return result;
-  } catch (error) {
-    console.error('[Worker] Parse error:', error);
-    return extractFromText(output);
-  }
-}
-
-/**
- * Extract JSON block from result
- */
-function extractResultJson(text: string): WorkerResult | null {
-  // Find ```json ... ``` block
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (!jsonMatch) {
-    // Find plain JSON object
-    const objMatch = text.match(/\{\s*"success"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
-
-    try {
-      const parsed = JSON.parse(text.slice(startIdx, endIdx));
-      return {
-        success: Boolean(parsed.success),
-        summary: parsed.summary || t('common.fallback.noSummary'),
-        filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
-        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-        output: text,
-        error: parsed.error,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const parsed = JSON.parse(jsonMatch[1]);
-    return {
-      success: Boolean(parsed.success),
-      summary: parsed.summary || '(no summary)',
-      filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
-      commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-      output: text,
-      error: parsed.error,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Extract result from text (fallback when JSON parsing fails)
- */
-function extractFromText(text: string): WorkerResult {
-  // Estimate success/failure
-  const hasError = /error|fail|exception|cannot/i.test(text);
-  const hasSuccess = /success|completed|done|finished/i.test(text);
-
-  // Extract file changes
-  const filePatterns = [
-    /(?:changed?|modified?|created?|updated?):\s*(.+\.(?:ts|js|py|json|yaml|yml|md))/gi,
-    /(?:src|lib|test|tests)\/[\w/\-.]+\.(?:ts|js|py)/gi,
-  ];
-
-  const filesChanged: string[] = [];
-  for (const pattern of filePatterns) {
-    const matches = text.matchAll(pattern);
-    for (const m of matches) {
-      const file = m[1] || m[0];
-      if (!filesChanged.includes(file)) {
-        filesChanged.push(file);
-      }
-    }
-  }
-
-  // Extract commands
-  const cmdPattern = /(?:`|\$)\s*((?:npm|pnpm|yarn|git|python|pytest|tsc|eslint)\s+[^\n`]+)/gi;
-  const commands: string[] = [];
-  const cmdMatches = text.matchAll(cmdPattern);
-  for (const m of cmdMatches) {
-    if (!commands.includes(m[1])) {
-      commands.push(m[1].trim());
-    }
-  }
-
-  return {
-    success: !hasError || hasSuccess,
-    summary: extractSummary(text),
-    filesChanged: filesChanged.slice(0, 10),
-    commands: commands.slice(0, 10),
-    output: text,
-    error: hasError ? extractErrorMessage(text) : undefined,
-  };
-}
-
-/**
- * Extract summary from text
- */
-function extractSummary(text: string): string {
-  // Extract first meaningful sentence
-  const lines = text.split('\n').filter((l) => l.trim().length > 10);
-  if (lines.length === 0) return t('common.fallback.noSummary');
-
-  const summary = lines[0].trim();
-  return summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
-}
-
-/**
- * Extract error message
- */
-function extractErrorMessage(text: string): string {
-  const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
-  if (errorMatch) {
-    return errorMatch[1].slice(0, 200);
-  }
-
-  const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
-  if (lines.length > 0) {
-    return lines[0].slice(0, 200);
-  }
-
-  return 'Unknown error';
 }
 
 // ============================================

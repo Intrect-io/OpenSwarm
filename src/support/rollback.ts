@@ -3,13 +3,13 @@
 // Automatic recovery on workflow failure
 // ============================================
 
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { resolve } from 'path';
-import { homedir } from 'os';
-import * as fs from 'fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import * as fs from 'node:fs/promises';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // ============================================
 // Types
@@ -99,16 +99,16 @@ export async function findCheckpointByExecution(executionId: string): Promise<Ch
 // ============================================
 
 /**
- * Git command execution helper
+ * Safe git command execution (no shell)
  */
-async function gitExec(projectPath: string, command: string): Promise<{ stdout: string; stderr: string }> {
+async function gitExec(projectPath: string, ...args: string[]): Promise<{ stdout: string; stderr: string }> {
   const expandedPath = projectPath.replace('~', homedir());
   try {
-    return await execAsync(`git ${command}`, { cwd: expandedPath });
+    return await execFileAsync('git', args, { cwd: expandedPath });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     const stderr = (error as { stderr?: string })?.stderr;
-    throw new Error(`Git command failed: git ${command}\n${stderr || detail}`);
+    throw new Error(`Git command failed: git ${args.join(' ')}\n${stderr || detail}`);
   }
 }
 
@@ -116,7 +116,7 @@ async function gitExec(projectPath: string, command: string): Promise<{ stdout: 
  * Get current commit hash
  */
 async function getCurrentCommit(projectPath: string): Promise<string> {
-  const { stdout } = await gitExec(projectPath, 'rev-parse HEAD');
+  const { stdout } = await gitExec(projectPath, 'rev-parse', 'HEAD');
   return stdout.trim();
 }
 
@@ -124,7 +124,7 @@ async function getCurrentCommit(projectPath: string): Promise<string> {
  * Get current branch name
  */
 async function getCurrentBranch(projectPath: string): Promise<string> {
-  const { stdout } = await gitExec(projectPath, 'branch --show-current');
+  const { stdout } = await gitExec(projectPath, 'branch', '--show-current');
   return stdout.trim() || 'HEAD';
 }
 
@@ -133,7 +133,7 @@ async function getCurrentBranch(projectPath: string): Promise<string> {
  */
 async function hasChanges(projectPath: string): Promise<boolean> {
   try {
-    const { stdout } = await gitExec(projectPath, 'status --porcelain');
+    const { stdout } = await gitExec(projectPath, 'status', '--porcelain');
     return stdout.trim().length > 0;
   } catch {
     return false;
@@ -145,7 +145,7 @@ async function hasChanges(projectPath: string): Promise<boolean> {
  */
 async function getChangedFiles(projectPath: string): Promise<string[]> {
   try {
-    const { stdout } = await gitExec(projectPath, 'status --porcelain');
+    const { stdout } = await gitExec(projectPath, 'status', '--porcelain');
     return stdout
       .split('\n')
       .filter(line => line.trim())
@@ -180,10 +180,10 @@ export async function createCheckpoint(
     console.log(`[Rollback] Stashing ${changedFiles.length} changed files`);
 
     const stashMessage = `openswarm-checkpoint-${executionId}`;
-    await gitExec(expandedPath, `stash push -m "${stashMessage}" --include-untracked`);
+    await gitExec(expandedPath, 'stash', 'push', '-m', stashMessage, '--include-untracked');
 
     // Find Stash ID
-    const { stdout } = await gitExec(expandedPath, 'stash list');
+    const { stdout } = await gitExec(expandedPath, 'stash', 'list');
     const stashLine = stdout.split('\n').find(line => line.includes(stashMessage));
     if (stashLine) {
       stashId = stashLine.match(/stash@\{(\d+)\}/)?.[0];
@@ -268,12 +268,12 @@ async function rollback(
     switch (strategy) {
       case 'reset_hard':
         // Discard all changes and restore to checkpoint
-        await gitExec(checkpoint.projectPath, `reset --hard ${checkpoint.commitHash}`);
+        await gitExec(checkpoint.projectPath, 'reset', '--hard', checkpoint.commitHash);
 
         // Restore stash if it existed
         if (checkpoint.stashId) {
           try {
-            await gitExec(checkpoint.projectPath, `stash pop ${checkpoint.stashId}`);
+            await gitExec(checkpoint.projectPath, 'stash', 'pop', checkpoint.stashId);
           } catch {
             console.log('[Rollback] Stash pop failed, may have conflicts');
           }
@@ -288,7 +288,7 @@ async function rollback(
 
       case 'reset_soft':
         // Keep changes in staged state
-        await gitExec(checkpoint.projectPath, `reset --soft ${checkpoint.commitHash}`);
+        await gitExec(checkpoint.projectPath, 'reset', '--soft', checkpoint.commitHash);
 
         return {
           success: true,
@@ -301,14 +301,14 @@ async function rollback(
         // Stash current changes and go to checkpoint
         if (await hasChanges(checkpoint.projectPath)) {
           const stashMsg = `rollback-preserve-${Date.now()}`;
-          await gitExec(checkpoint.projectPath, `stash push -m "${stashMsg}" --include-untracked`);
+          await gitExec(checkpoint.projectPath, 'stash', 'push', '-m', stashMsg, '--include-untracked');
         }
-        await gitExec(checkpoint.projectPath, `checkout ${checkpoint.commitHash}`);
+        await gitExec(checkpoint.projectPath, 'checkout', checkpoint.commitHash);
 
         // Restore original stash
         if (checkpoint.stashId) {
           try {
-            await gitExec(checkpoint.projectPath, `stash pop ${checkpoint.stashId}`);
+            await gitExec(checkpoint.projectPath, 'stash', 'pop', checkpoint.stashId);
           } catch {
             console.log('[Rollback] Original stash pop failed');
           }
@@ -323,7 +323,7 @@ async function rollback(
 
       case 'checkout_files':
         // Restore files to checkpoint state (keep commits)
-        await gitExec(checkpoint.projectPath, `checkout ${checkpoint.commitHash} -- .`);
+        await gitExec(checkpoint.projectPath, 'checkout', checkpoint.commitHash, '--', '.');
 
         return {
           success: true,
