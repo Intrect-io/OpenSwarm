@@ -328,53 +328,18 @@ export class PairPipeline extends EventEmitter {
             throw new Error('Worker result required for reviewer');
           }
 
-          // Fast pre-check with Haiku (30-40% cost savings)
-          console.log('[Pipeline] Running fast pre-check (Haiku)...');
-          const preCheck = await reviewerAgent.runPreCheck({
+          // Pre-check disabled - Haiku format compliance issues causing false rejections
+          // Proceed directly to full Sonnet review for reliability
+          console.log('[Pipeline] Running full review (Sonnet)...');
+          result = await reviewerAgent.runReviewer({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
             workerResult: context.workerResult,
             projectPath: context.projectPath,
-            timeoutMs: 30000,
-            processContext: { taskId: context.task.id, stage: 'pre-check' },
+            timeoutMs: this.config.roles?.reviewer?.timeoutMs ?? 0,
+            model: this.config.roles?.reviewer?.model,
+            processContext: { taskId: context.task.id, stage: 'reviewer' },
           });
-
-          console.log(`[Pipeline] Pre-check result: passed=${preCheck.passed}, confidence=${preCheck.confidence}, issues=${preCheck.issues.length}`);
-
-          // If pre-check fails with format parsing error, it's likely Haiku not following instructions
-          // Escalate to Sonnet review instead of immediate rejection
-          const isFormatError = !preCheck.passed &&
-            preCheck.issues.some(i => i.includes('did not provide') || i.includes('format parsing'));
-
-          if (!preCheck.passed && !isFormatError) {
-            // Pre-check failed with real issues, reject without full review
-            console.log('[Pipeline] Pre-check failed with specific issues, rejecting without full review');
-            const issueMsg = preCheck.issues.length > 0
-              ? preCheck.issues.join('; ')
-              : 'Unknown reason';
-            result = {
-              decision: 'reject',
-              feedback: `Pre-check failed: ${issueMsg}`,
-              issues: preCheck.issues,
-              suggestions: ['Fix the basic issues and retry'],
-            };
-          } else {
-            // Pre-check passed OR failed due to format error (Haiku issue) - proceed with Sonnet review
-            if (isFormatError) {
-              console.log('[Pipeline] Pre-check format error detected (Haiku issue), escalating to Sonnet review for accurate assessment');
-            } else {
-              console.log('[Pipeline] Pre-check passed, proceeding to full review (Sonnet)...');
-            }
-            result = await reviewerAgent.runReviewer({
-              taskTitle: context.task.title,
-              taskDescription: context.task.description || '',
-              workerResult: context.workerResult,
-              projectPath: context.projectPath,
-              timeoutMs: this.config.roles?.reviewer?.timeoutMs ?? 0,
-              model: this.config.roles?.reviewer?.model,
-              processContext: { taskId: context.task.id, stage: 'reviewer' },
-            });
-          }
 
           agentPair.saveReviewerResult(context.session.id, result as ReviewResult);
           context.reviewResult = result as ReviewResult;
