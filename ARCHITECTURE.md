@@ -72,6 +72,7 @@ src/
 ├── automation/             # Autonomous execution & scheduling
 │   ├── autonomousRunner.ts # Main autonomous loop (heartbeat→decide→execute)
 │   ├── runnerExecution.ts  # Execution helpers & pipeline delegation
+│   ├── runnerState.ts      # Task state, pipeline history, rejection tracking
 │   ├── scheduler.ts        # Cron-based dynamic scheduler
 │   └── prProcessor.ts      # PR auto-improvement pipeline
 │
@@ -89,11 +90,22 @@ src/
 │
 ├── linear/                 # Linear project management
 │   ├── index.ts            # Barrel re-export
-│   └── linear.ts           # Linear API client (issues, projects, state)
+│   ├── linear.ts           # Linear API client (issues, projects, state)
+│   └── projectUpdater.ts   # PO agent: project status updates & overview
 │
 ├── github/                 # GitHub CI/PR integration
 │   ├── index.ts            # Barrel re-export
 │   └── github.ts           # GitHub CLI wrapper (CI status, PRs)
+│
+├── knowledge/              # Code knowledge graph
+│   ├── index.ts            # Public API, singleton cache, scan throttle
+│   ├── graph.ts            # KnowledgeGraph data structure
+│   ├── scanner.ts          # Project scanning (full + incremental)
+│   ├── analyzer.ts         # Impact analysis, module health, review focus
+│   ├── store.ts            # Graph persistence (save/load/list)
+│   ├── gitInfo.ts          # Git churn & recent change enrichment
+│   ├── repository.ts       # Module state, tech debt, issue linking
+│   └── types.ts            # Zod schemas & TypeScript types
 │
 ├── support/                # Utility & support tools
 │   ├── chat.ts, dev.ts, editParser.ts, gitTracker.ts
@@ -142,7 +154,8 @@ index.ts
             ├→ support/projectMapper.ts (Linear project → local path fuzzy matching)
             ├→ support/planner.ts (Large task decomposition via Claude CLI)
             ├→ memory/ (Cognitive memory: LanceDB + Xenova embeddings)
-            └→ linear/ (Issue state + comment management)
+            ├→ linear/ (Issue state + comment management)
+            └→ linear/projectUpdater.ts (PO agent: metrics + knowledge graph → Linear updates)
 ```
 
 ---
@@ -405,11 +418,12 @@ OpenSwarm/
 │   ├── core/                 # core/service.ts, config.ts, types.ts
 │   ├── agents/               # worker, reviewer, tester, documenter, pairPipeline...
 │   ├── orchestration/        # decisionEngine, workflow, workflowExecutor, taskParser...
-│   ├── automation/           # autonomousRunner, runnerExecution, scheduler, prProcessor
+│   ├── automation/           # autonomousRunner, runnerState, runnerExecution, scheduler, prProcessor
 │   ├── memory/               # memoryCore, memoryOps, codex (LanceDB + Xenova)
 │   ├── discord/              # discordCore, discordHandlers, discordPair
-│   ├── linear/               # linear.ts (Linear SDK integration)
+│   ├── linear/               # linear.ts, projectUpdater.ts (Linear SDK + PO agent)
 │   ├── github/               # github.ts (CI monitoring via gh CLI)
+│   ├── knowledge/            # Knowledge graph: scanner, analyzer, store, repository
 │   ├── support/              # tmux, web, planner, projectMapper, timeWindow, ...
 │   ├── __tests__/            # vitest test files
 │   └── locale/               # i18n: en.ts, ko.ts, prompts/
@@ -432,7 +446,8 @@ OpenSwarm/
 
 | Commit | Description |
 |--------|-------------|
-| (current) | SRP-based src/ layer hierarchy refactoring (flat 49 files → 9 domain dirs) |
+| (current) | PO agent: projectUpdater rewrite with multi-signal health scoring + knowledge graph |
+| 8518cf3 | SRP-based src/ layer hierarchy refactoring (flat 49 files → 9 domain dirs) |
 | 48a35ea | TypeScript strict types + ESM import unification + locale i18n |
 | 40c340b | Discord/Memory module separation (barrel re-export) |
 | 38f8f71 | PR auto-improvement pipeline + interactive chat CLI |
@@ -444,4 +459,4 @@ OpenSwarm/
 
 ---
 
-*Last updated: 2026-02-17*
+*Last updated: 2026-03-03*

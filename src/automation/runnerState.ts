@@ -169,6 +169,11 @@ export function isRejectionLimitReached(issueId: string): boolean {
   return getRejectionCount(issueId) >= MAX_REJECTION_ATTEMPTS;
 }
 
+export function getAllRejectionEntries(): RejectionEntry[] {
+  const state = ensureRejectionStateLoaded();
+  return Object.values(state.rejections);
+}
+
 // ============================================
 // Decomposition State (track parent-child relationships and daily limits)
 // ============================================

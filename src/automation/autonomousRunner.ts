@@ -189,6 +189,7 @@ export class AutonomousRunner {
           duration: result.totalDuration,
           issueIdentifier: task.issueIdentifier,
           cost: result.totalCost?.costUsd,
+          projectPath: result.taskContext?.projectPath,
         }).catch(e => console.warn('[Scheduler] Project update failed:', e));
       }
 
@@ -272,6 +273,7 @@ export class AutonomousRunner {
           duration: result.totalDuration,
           issueIdentifier: task.issueIdentifier,
           cost: result.totalCost?.costUsd,
+          projectPath: result.taskContext?.projectPath,
         }).catch(e => console.warn('[Scheduler] Project update failed:', e));
       }
 
