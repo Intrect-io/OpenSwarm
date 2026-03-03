@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TraceCollector } from './traceCollector.js';
-import type { Trace, Span } from './traceCollector.js';
 
 describe('TraceCollector', () => {
   let collector: TraceCollector;
