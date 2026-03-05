@@ -17,6 +17,8 @@ import { PRProcessor } from '../automation/prProcessor.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
 import { initLocale, t } from '../locale/index.js';
 import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
+import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory/compaction.js';
+import { Cron } from 'croner';
 
 let state: ServiceState = {
   running: false,
@@ -27,6 +29,7 @@ let state: ServiceState = {
 let githubRepos: string[] = [];
 let githubCheckTimer: NodeJS.Timeout | null = null;
 let prProcessor: PRProcessor | null = null;
+let memoryCompactionJob: Cron | null = null;
 
 /**
  * Get PR Processor instance (for web dashboard)
@@ -213,6 +216,33 @@ export async function startService(config: SwarmConfig): Promise<void> {
     initMonitors(); // Restore only from persisted files
   }
 
+  // Memory compaction scheduler (daily at 2 AM)
+  console.log('[Service] Scheduling memory compaction (daily at 2 AM)...');
+  memoryCompactionJob = Cron('0 2 * * *', async () => {
+    console.log('[Compaction] Daily compaction triggered');
+
+    try {
+      // Clean up backup files first
+      await cleanupBackupFiles();
+
+      // Check if compaction is needed
+      const needed = await shouldCompact();
+      if (needed) {
+        const stats = await compactMemoryTable();
+        console.log(`[Compaction] Success: ${stats.before} → ${stats.after} records (-${stats.removed})`);
+
+        // Report compaction success (skip Discord notification for routine maintenance)
+        console.log(`[Compaction] Reported: ${stats.before} → ${stats.after} records`);
+      } else {
+        console.log('[Compaction] Skipped (not needed)');
+      }
+    } catch (error) {
+      console.error('[Compaction] Failed:', error);
+      // Error already logged above
+    }
+  });
+  console.log('[Service] Memory compaction scheduled');
+
   // Startup notification
   const autoStatus = config.autonomous?.enabled
     ? t('service.autoModeActive', { mode: config.autonomous.pairMode ? 'Pair' : 'Solo' })
@@ -377,6 +407,13 @@ export async function stopService(): Promise<void> {
     clearInterval(githubCheckTimer);
     githubCheckTimer = null;
     console.log('GitHub monitoring stopped');
+  }
+
+  // Stop memory compaction scheduler
+  if (memoryCompactionJob) {
+    memoryCompactionJob.stop();
+    memoryCompactionJob = null;
+    console.log('Memory compaction scheduler stopped');
   }
 
   // Clean up agent timers
