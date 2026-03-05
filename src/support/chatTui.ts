@@ -500,42 +500,135 @@ async function loadProjectsData(box: blessed.Widgets.BoxElement) {
 
 async function loadTasksData(box: blessed.Widgets.BoxElement) {
   try {
-    const response = await fetch('http://127.0.0.1:3847/api/tasks');
-    const { running, queued } = await response.json() as {
-      running: Array<{ id?: string; description?: string }>;
-      queued: Array<{ id?: string; description?: string }>;
+    const response = await fetch('http://127.0.0.1:3847/api/pipeline');
+    const { stages } = await response.json() as {
+      stages: Array<{
+        type: string;
+        data: {
+          taskId?: string;
+          stage?: string;
+          status?: 'start' | 'complete' | 'fail';
+          model?: string;
+          inputTokens?: number;
+          outputTokens?: number;
+          costUsd?: number;
+          title?: string;
+          issueIdentifier?: string;
+        };
+      }>;
     };
 
-    if (running.length === 0 && queued.length === 0) {
-      box.setContent('\n{center}{#718096-fg}No active tasks{/}{/center}');
+    if (stages.length === 0) {
+      box.setContent('\n{center}{#718096-fg}No pipeline events{/}{/center}');
       return;
     }
 
     const lines: string[] = [''];
 
-    if (running.length > 0) {
-      lines.push(`  {#34d399-fg}{bold}Running{/bold} {#718096-fg}(${running.length}){/}{/}`);
-      lines.push('');
-      for (const t of running) {
-        const desc = t.description || t.id || '{#718096-fg}(no description){/}';
-        lines.push(`    {#34d399-fg}▸{/} ${desc}`);
+    // Build task info map (taskId -> {title, issueIdentifier})
+    const taskInfo = new Map<string, { title?: string; issueIdentifier?: string }>();
+    for (const event of stages) {
+      if (event.type === 'task:started' && event.data.taskId) {
+        taskInfo.set(event.data.taskId, {
+          title: event.data.title,
+          issueIdentifier: event.data.issueIdentifier,
+        });
       }
-      lines.push('');
     }
 
-    if (queued.length > 0) {
-      lines.push(`  {#f59e0b-fg}{bold}Queued{/bold} {#718096-fg}(${queued.length}){/}{/}`);
-      lines.push('');
-      for (const t of queued) {
-        const desc = t.description || t.id || '{#718096-fg}(no description){/}';
-        lines.push(`    {#718096-fg}•{/} ${desc}`);
+    // Group by taskId and show most recent stages
+    const taskStages = new Map<string, typeof stages>();
+    for (const event of stages) {
+      if (event.type === 'pipeline:stage' && event.data.taskId) {
+        const tid = event.data.taskId;
+        if (!taskStages.has(tid)) taskStages.set(tid, []);
+        taskStages.get(tid)!.push(event);
       }
-      lines.push('');
+    }
+
+    // Flatten all stages with timestamps for sorting
+    const allStageEvents: Array<{
+      taskId: string;
+      stage: string;
+      status: string;
+      model?: string;
+      inputTokens?: number;
+      outputTokens?: number;
+      costUsd?: number;
+      timestamp: number;
+    }> = [];
+
+    for (const event of stages) {
+      if (event.type === 'pipeline:stage' && event.data.taskId && event.data.stage) {
+        allStageEvents.push({
+          taskId: event.data.taskId,
+          stage: event.data.stage,
+          status: event.data.status || '',
+          model: event.data.model,
+          inputTokens: event.data.inputTokens,
+          outputTokens: event.data.outputTokens,
+          costUsd: event.data.costUsd,
+          timestamp: Date.now(), // events are already ordered
+        });
+      }
+    }
+
+    if (allStageEvents.length === 0) {
+      box.setContent('\n{center}{#718096-fg}No active pipeline stages{/}{/center}');
+      return;
+    }
+
+    // Show most recent 15 stage events
+    const recentStages = allStageEvents.slice(-15).reverse();
+
+    lines.push(`  {#34d399-fg}{bold}Pipeline Events{/bold} {#718096-fg}(${recentStages.length} recent){/}{/}`);
+    lines.push('');
+    lines.push(`  {#718096-fg}${'TASK'.padEnd(12)} ${'STAGE'.padEnd(10)} ${'MODEL'.padEnd(12)} ${'TOKENS'.padEnd(15)} STATUS{/}`);
+    lines.push(`  {#444444-fg}${'─'.repeat(70)}{/}`);
+
+    for (const event of recentStages) {
+      const info = taskInfo.get(event.taskId);
+      const taskLabel = (info?.issueIdentifier || event.taskId.slice(0, 8)).padEnd(12).slice(0, 12);
+
+      let statusIcon = '○';
+      let statusColor = '#718096';
+      if (event.status === 'start') {
+        statusIcon = '◐';
+        statusColor = '#f59e0b';
+      } else if (event.status === 'complete') {
+        statusIcon = '●';
+        statusColor = '#34d399';
+      } else if (event.status === 'fail') {
+        statusIcon = '✗';
+        statusColor = '#ef4444';
+      }
+
+      let modelStr = '';
+      if (event.model) {
+        if (event.model.includes('sonnet-4-5')) modelStr = 'sonnet-4.5';
+        else if (event.model.includes('haiku-4-5')) modelStr = 'haiku-4.5';
+        else if (event.model.includes('opus-4')) modelStr = 'opus-4';
+        else modelStr = event.model.split('-').pop() || '';
+      }
+      modelStr = modelStr.padEnd(12).slice(0, 12);
+
+      const stageStr = (event.stage || '').padEnd(10).slice(0, 10);
+
+      let tokensStr = '';
+      if (event.inputTokens || event.outputTokens) {
+        const inK = event.inputTokens ? Math.round(event.inputTokens / 1000) : 0;
+        const outK = event.outputTokens ? Math.round(event.outputTokens / 1000) : 0;
+        tokensStr = `${inK}k/${outK}k`;
+        if (event.costUsd != null) tokensStr += ` $${event.costUsd.toFixed(2)}`;
+      }
+      tokensStr = tokensStr.padEnd(15).slice(0, 15);
+
+      lines.push(`  {#34d399-fg}${taskLabel}{/} {#718096-fg}${stageStr}{/} {#34d399-fg}${modelStr}{/} {#718096-fg}${tokensStr}{/} {${statusColor}-fg}${statusIcon} ${event.status}{/}`);
     }
 
     box.setContent(lines.join('\n'));
   } catch (err) {
-    box.setContent(`\n{center}{#ef4444-fg}Failed to load tasks{/}\n{#718096-fg}${err}{/}{/center}`);
+    box.setContent(`\n{center}{#ef4444-fg}Failed to load pipeline{/}\n{#718096-fg}${err}{/}{/center}`);
   }
 }
 // Loading Spinner (inline in chat)

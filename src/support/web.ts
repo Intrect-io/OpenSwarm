@@ -149,6 +149,12 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ running, queued }));
 
+      // ---- Pipeline GET (detailed pipeline stages) ----
+      } else if (url === '/api/pipeline') {
+        const stages = getStageBuffer();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ stages }));
+
       // ---- Projects GET (pinned + active projects) ----
       } else if (url === '/api/projects' && req.method === 'GET') {
         const enabledPaths = new Set(runnerRef?.getEnabledProjects() ?? []);
