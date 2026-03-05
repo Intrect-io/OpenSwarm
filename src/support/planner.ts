@@ -137,7 +137,7 @@ async function runClaudeCli(
   const tmpFile = `/tmp/planner-prompt-${Date.now()}.txt`;
   writeFileSync(tmpFile, prompt);
 
-  const args = ['--output-format', 'stream-json', '--max-turns', '1', '--disable-hooks'];
+  const args = ['--output-format', 'stream-json', '--max-turns', '1'];
   if (model) {
     args.push('--model', model);
   }
