@@ -355,7 +355,7 @@ export class AutonomousRunner {
       return {
         worker: {
           enabled: true,
-          model: this.config.workerModel || 'claude-sonnet-4-20250514',
+          model: this.config.workerModel || 'claude-sonnet-4-5-20250929',
           timeoutMs: this.config.workerTimeoutMs ?? 0,
         },
         reviewer: {
@@ -368,7 +368,7 @@ export class AutonomousRunner {
 
     // Apply per-project overrides
     const base = this.config.defaultRoles || {
-      worker: { enabled: true, model: 'claude-sonnet-4-20250514', timeoutMs: 0 },
+      worker: { enabled: true, model: 'claude-sonnet-4-5-20250929', timeoutMs: 0 },
       reviewer: { enabled: true, model: 'claude-haiku-4-5-20251001', timeoutMs: 0 },
     };
 

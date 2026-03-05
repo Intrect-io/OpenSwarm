@@ -29,7 +29,7 @@ export interface ReviewerOptions {
   workerResult: WorkerResult;
   projectPath: string;
   timeoutMs?: number;
-  model?: string;              // Claude model (default: claude-sonnet-4-20250514)
+  model?: string;              // Claude model (default: claude-sonnet-4-5-20250929)
   processContext?: ProcessContext;
 }
 

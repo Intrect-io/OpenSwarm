@@ -82,9 +82,9 @@ const PairModeConfigSchema = z.object({
 
 const ModelConfigSchema = z.object({
   /** Worker agent model */
-  worker: z.string().default('claude-sonnet-4-20250514'),
+  worker: z.string().default('claude-sonnet-4-5-20250929'),
   /** Reviewer agent model */
-  reviewer: z.string().default('claude-sonnet-4-20250514'),
+  reviewer: z.string().default('claude-sonnet-4-5-20250929'),
 }).optional();
 
 /** Per-role configuration schema */
@@ -107,7 +107,7 @@ const DefaultRolesConfigSchema = z.object({
     enabled: true,
     model: 'claude-haiku-4-5-20251001',
     timeoutMs: 0,
-    escalateModel: 'claude-sonnet-4-20250514',
+    escalateModel: 'claude-sonnet-4-5-20250929',
     escalateAfterIteration: 3,
   }),
   reviewer: RoleConfigSchema.default({
@@ -156,7 +156,7 @@ const DecompositionConfigSchema = z.object({
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog: z.boolean().default(true).optional(),
   /** Planner model */
-  plannerModel: z.string().default('claude-sonnet-4-20250514'),
+  plannerModel: z.string().default('claude-sonnet-4-5-20250929'),
   /** Planner timeout (ms) - default 600000 (10min) */
   plannerTimeoutMs: z.number().min(60000).default(600000),
 }).optional();

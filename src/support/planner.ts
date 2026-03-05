@@ -70,6 +70,7 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
     const output = await runClaudeCli(
       prompt,
       options.timeoutMs ?? 120000,  // 2 min timeout
+      options.model,
       options.onLog
     );
 
@@ -130,15 +131,22 @@ function humanizePlannerOutput(text: string): string {
 async function runClaudeCli(
   prompt: string,
   timeoutMs: number,
+  model?: string,
   onLog?: (line: string) => void
 ): Promise<string> {
   const tmpFile = `/tmp/planner-prompt-${Date.now()}.txt`;
   writeFileSync(tmpFile, prompt);
 
+  const args = ['--output-format', 'stream-json', '--max-turns', '1', '--disable-hooks'];
+  if (model) {
+    args.push('--model', model);
+  }
+  args.push('-p', prompt);
+
   return new Promise<string>((resolve, reject) => {
     const proc = spawn(
       'claude',
-      ['--output-format', 'stream-json', '--max-turns', '1', '-p', prompt],
+      args,
       {
         shell: false,
         cwd: '/tmp',   // Neutral dir — no project .claude/ settings loaded
@@ -148,6 +156,8 @@ async function runClaudeCli(
     );
 
     let output = '';
+    let stderrOutput = '';
+
     proc.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
       output += text;
@@ -175,6 +185,13 @@ async function runClaudeCli(
       }
     });
 
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrOutput += text;
+      // Log stderr in real-time for debugging
+      console.error('[Planner stderr]', text.slice(0, 500));
+    });
+
     const timer = setTimeout(() => {
       proc.kill('SIGTERM');
       reject(new Error(`Planner timeout after ${timeoutMs}ms`));
@@ -183,11 +200,30 @@ async function runClaudeCli(
     proc.on('close', (code: number | null) => {
       clearTimeout(timer);
       try { unlinkSync(tmpFile); } catch { /* ignore */ }
-      if (code === 0 || output.trim()) {
+
+      // Success: exit code 0, or non-zero but we got parseable output
+      if (code === 0) {
         resolve(output);
-      } else {
-        reject(new Error(`Claude CLI exited with code ${code}`));
+        return;
       }
+
+      // Non-zero exit: check if we got usable output anyway
+      if (output.trim()) {
+        console.warn(`[Planner] Non-zero exit (${code}) but got output, attempting to parse`);
+        if (stderrOutput.trim()) {
+          console.warn('[Planner] stderr:', stderrOutput.slice(0, 500));
+        }
+        resolve(output);
+        return;
+      }
+
+      // Complete failure: no output and non-zero exit
+      const errorMsg = stderrOutput.trim() || 'No error output captured';
+      const truncatedStderr = errorMsg.length > 1000 ? errorMsg.slice(0, 1000) + '... (truncated)' : errorMsg;
+      console.error('[Planner] Process exited with code', code);
+      console.error('[Planner] Full stderr:', errorMsg);
+      console.error('[Planner] stdout length:', output.length);
+      reject(new Error(`Claude CLI exited with code ${code}. stderr: ${truncatedStderr}`));
     });
 
     proc.on('error', (err: Error) => {
@@ -322,6 +358,10 @@ function extractFromText(text: string, originalTitle: string): PlannerResult {
       totalEstimatedMinutes: 30,
     };
   }
+
+  // Parse failure - log raw output for debugging
+  console.error('[Planner] Parse failed - raw output (first 1000 chars):');
+  console.error(text.slice(0, 1000));
 
   // Parse failure - assume decomposition needed by default
   return {

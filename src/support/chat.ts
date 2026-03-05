@@ -72,6 +72,7 @@ async function callClaude(
     let capturedSessionId = sessionId || '';
     let cost: number | undefined;
     let headerPrinted = false;
+    let stderrOutput = '';
 
     proc.stdout.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
@@ -114,8 +115,8 @@ async function callClaude(
       }
     });
 
-    proc.stderr.on('data', () => {
-      // Ignore hook output etc.
+    proc.stderr.on('data', (chunk: Buffer) => {
+      stderrOutput += chunk.toString();
     });
 
     proc.on('close', (code) => {
@@ -125,7 +126,8 @@ async function callClaude(
       process.stdout.write('\n\n');
 
       if (code !== 0 && fullResponse === '') {
-        reject(new Error(`claude exited with code ${code}`));
+        const errorMsg = stderrOutput.trim() || 'No error output captured';
+        reject(new Error(`claude exited with code ${code}. stderr: ${errorMsg}`));
       } else {
         resolve({
           response: fullResponse,

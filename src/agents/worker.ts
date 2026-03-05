@@ -30,7 +30,7 @@ export interface WorkerOptions {
   projectPath: string;
   previousFeedback?: string;   // Previous feedback from Reviewer (for revisions)
   timeoutMs?: number;
-  model?: string;              // Claude model (default: claude-sonnet-4-20250514)
+  model?: string;              // Claude model (default: claude-sonnet-4-5-20250929)
   issueIdentifier?: string;    // Linear issue ID (e.g., INT-123)
   projectName?: string;        // Linear project name
   onLog?: (line: string) => void;  // Callback for stdout streaming
