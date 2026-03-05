@@ -4,7 +4,9 @@
  * Barrel re-export: preserves existing import paths
  * - memoryCore.ts: types, embedding, distillation, DB, save, search
  * - memoryOps.ts: revision, formatting, background, stats, legacy
+ * - compaction.ts: memory table compaction and cleanup
  */
 export * from './codex.js';
 export * from './memoryCore.js';
 export * from './memoryOps.js';
+export * from './compaction.js';
