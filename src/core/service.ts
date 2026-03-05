@@ -16,6 +16,7 @@ import * as autonomous from '../automation/autonomousRunner.js';
 import { PRProcessor } from '../automation/prProcessor.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
 import { initLocale, t } from '../locale/index.js';
+import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
 
 let state: ServiceState = {
   running: false,
@@ -42,6 +43,11 @@ export async function startService(config: SwarmConfig): Promise<void> {
 
   // Locale initialization
   initLocale(config.language);
+
+  // Rate limiter initialization
+  console.log('⚡ Initializing rate limiters...');
+  initRateLimiters();
+  console.log('✅ Rate limiters ready');
 
   // Linear initialization
   console.log('🔗 Initializing Linear client...');
@@ -393,6 +399,10 @@ export async function stopService(): Promise<void> {
 
   // Stop web server
   await web.stopWebServer();
+
+  // Cleanup rate limiters
+  destroyRateLimiters();
+  console.log('Rate limiters destroyed');
   console.log('Web server stopped');
 
   // Shutdown Discord

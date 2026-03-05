@@ -6,6 +6,7 @@ import { LinearClient } from '@linear/sdk';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
 import { getDateLocale } from '../locale/index.js';
 import { setLinearClient } from './projectUpdater.js';
+import { withRateLimit } from '../support/rateLimiter.js';
 
 /**
  * Extract project info from an issue
@@ -92,11 +93,13 @@ export function getDailyIssueCount(): number {
 
 /**
  * Initialize the Linear client
+ * Rate limiting is applied at the function level in this file
  */
 export function initLinear(apiKey: string, team: string): void {
   client = new LinearClient({ apiKey });
   teamId = team;
   setLinearClient(client);
+  console.log('[Linear] Client initialized');
 }
 
 /**
@@ -125,13 +128,13 @@ export async function getInProgressIssues(
   console.log(`[Linear] Fetching in-progress issues for ${agentLabel}`);
   const linear = getClient();
 
-  const issues = await linear.issues({
+  const issues = await withRateLimit('linear', async () => linear.issues({
     filter: {
       team: { id: { eq: teamId } },
       state: { name: { in: ['In Progress', 'Started'] } },
       labels: { name: { eq: agentLabel } },
     },
-  });
+  }));
 
   const result: LinearIssueInfo[] = [];
 
@@ -190,14 +193,14 @@ export async function getNextBacklogIssue(
   console.log(`[Linear] Fetching backlog issues for ${agentLabel}`);
   const linear = getClient();
 
-  const issues = await linear.issues({
+  const issues = await withRateLimit('linear', async () => linear.issues({
     filter: {
       team: { id: { eq: teamId } },
       state: { name: { in: ['Backlog', 'Todo'] } },
       labels: { name: { eq: agentLabel } },
     },
     first: 10, // Fetch multiple and sort by priority
-  });
+  }));
 
   // Sort by priority (lower = higher priority: 1=Urgent, 4=Low, 0=None)
   const sorted = [...issues.nodes].sort((a, b) => {
@@ -302,8 +305,8 @@ export async function getMyIssues(
     const backlogFilter = { ...baseFilter, state: { name: { in: ['Backlog'] } } };
 
     const [executableIssues, backlogIssues] = await Promise.all([
-      linear.issues({ filter: executableFilter, first: 50 }),
-      linear.issues({ filter: backlogFilter, first: 50 }),
+      withRateLimit('linear', async () => linear.issues({ filter: executableFilter, first: 50 })),
+      withRateLimit('linear', async () => linear.issues({ filter: backlogFilter, first: 50 })),
     ]);
 
     const issues = {

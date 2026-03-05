@@ -10,6 +10,7 @@ import { spawn, execFile } from 'node:child_process';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent, getLogBuffer, getStageBuffer, getChatBuffer } from '../core/eventHub.js';
 import { extractCostFromStreamJson, formatCost } from './costTracker.js';
+import { getRateLimiterMetrics } from './rateLimiter.js';
 import { scanLocalProjects, invalidateProjectCache } from './projectMapper.js';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
 import { DASHBOARD_HTML } from './dashboardHtml.js';
@@ -154,6 +155,12 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         const stages = getStageBuffer();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ stages }));
+
+      // ---- Rate Limiter Metrics GET ----
+      } else if (url === '/api/rate-limits') {
+        const metrics = getRateLimiterMetrics();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(metrics));
 
       // ---- Projects GET (pinned + active projects) ----
       } else if (url === '/api/projects' && req.method === 'GET') {
