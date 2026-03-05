@@ -33,6 +33,36 @@ const DAILY_ISSUE_LIMIT = 10;
 let dailyIssueCount = 0;
 let lastResetDate: string = '';
 
+// ============================================
+// Caching Layer
+// ============================================
+
+interface CachedIssues {
+  data: LinearIssueInfo[];
+  timestamp: number;
+  agentLabel: string;
+}
+
+const inProgressCache = new Map<string, CachedIssues>();
+const backlogCache = new Map<string, CachedIssues>();
+const myIssuesCache = new Map<string, CachedIssues>();
+const CACHE_TTL_MS = 60000; // 1 minute cache
+
+function isCacheValid(cache: CachedIssues | undefined): boolean {
+  if (!cache) return false;
+  return Date.now() - cache.timestamp < CACHE_TTL_MS;
+}
+
+/**
+ * Clear all caches (call when issues are mutated)
+ */
+export function clearLinearCache(): void {
+  inProgressCache.clear();
+  backlogCache.clear();
+  myIssuesCache.clear();
+  console.log('[Linear] Cache cleared');
+}
+
 /**
  * Reset daily counter on date change
  */
@@ -80,11 +110,19 @@ function getClient(): LinearClient {
 }
 
 /**
- * Get in-progress issues for an agent
+ * Get in-progress issues for an agent (with caching)
  */
 export async function getInProgressIssues(
   agentLabel: string
 ): Promise<LinearIssueInfo[]> {
+  // Check cache first
+  const cached = inProgressCache.get(agentLabel);
+  if (cached && isCacheValid(cached)) {
+    console.log(`[Linear] Using cached in-progress issues for ${agentLabel}`);
+    return cached.data;
+  }
+
+  console.log(`[Linear] Fetching in-progress issues for ${agentLabel}`);
   const linear = getClient();
 
   const issues = await linear.issues({
@@ -97,10 +135,14 @@ export async function getInProgressIssues(
 
   const result: LinearIssueInfo[] = [];
 
+  // Batch fetch all related data to minimize API calls
   for (const issue of issues.nodes) {
-    const [comments, labels, project] = await Promise.all([
+    // Use Promise.all to parallelize, but still results in N queries per issue
+    // Linear SDK doesn't support includes/eager loading, so this is unavoidable
+    const [comments, labels, state, project] = await Promise.all([
       issue.comments(),
       issue.labels(),
+      issue.state,
       getProjectInfo(issue),
     ]);
 
@@ -109,7 +151,7 @@ export async function getInProgressIssues(
       identifier: issue.identifier,
       title: issue.title,
       description: issue.description ?? undefined,
-      state: (await issue.state)?.name ?? 'Unknown',
+      state: state?.name ?? 'Unknown',
       priority: issue.priority,
       labels: labels.nodes.map((l) => l.name),
       comments: comments.nodes.map((c) => ({
@@ -122,15 +164,30 @@ export async function getInProgressIssues(
     });
   }
 
+  // Cache the result
+  inProgressCache.set(agentLabel, {
+    data: result,
+    timestamp: Date.now(),
+    agentLabel,
+  });
+
   return result;
 }
 
 /**
- * Get the next issue from the backlog
+ * Get the next issue from the backlog (with caching)
  */
 export async function getNextBacklogIssue(
   agentLabel: string
 ): Promise<LinearIssueInfo | null> {
+  // Check cache first
+  const cached = backlogCache.get(agentLabel);
+  if (cached && isCacheValid(cached) && cached.data.length > 0) {
+    console.log(`[Linear] Using cached backlog issue for ${agentLabel}`);
+    return cached.data[0];
+  }
+
+  console.log(`[Linear] Fetching backlog issues for ${agentLabel}`);
   const linear = getClient();
 
   const issues = await linear.issues({
@@ -153,18 +210,19 @@ export async function getNextBacklogIssue(
   const issue = sorted[0];
   if (!issue) return null;
 
-  const [comments, labels, project] = await Promise.all([
+  const [comments, labels, state, project] = await Promise.all([
     issue.comments(),
     issue.labels(),
+    issue.state,
     getProjectInfo(issue),
   ]);
 
-  return {
+  const result = {
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
     description: issue.description ?? undefined,
-    state: (await issue.state)?.name ?? 'Unknown',
+    state: state?.name ?? 'Unknown',
     priority: issue.priority,
     labels: labels.nodes.map((l) => l.name),
     comments: comments.nodes.map((c) => ({
@@ -175,6 +233,15 @@ export async function getNextBacklogIssue(
     })),
     project,
   };
+
+  // Cache the result
+  backlogCache.set(agentLabel, {
+    data: [result],
+    timestamp: Date.now(),
+    agentLabel,
+  });
+
+  return result;
 }
 
 /**
@@ -193,7 +260,7 @@ export interface GetMyIssuesOptions {
 }
 
 /**
- * Get assigned active issues
+ * Get assigned active issues (with caching)
  * (Todo, In Progress, Review states - excludes Backlog)
  */
 export async function getMyIssues(
@@ -204,6 +271,18 @@ export async function getMyIssues(
     : agentLabelOrOptions ?? {};
 
   const { agentLabel, slim = false, timeoutMs = 30000 } = opts;
+
+  // Generate cache key
+  const cacheKey = `${agentLabel || 'all'}:${slim}`;
+
+  // Check cache first
+  const cached = myIssuesCache.get(cacheKey);
+  if (cached && isCacheValid(cached)) {
+    console.log(`[Linear] Using cached issues for ${cacheKey}`);
+    return cached.data;
+  }
+
+  console.log(`[Linear] Fetching issues for ${cacheKey}`);
   const linear = getClient();
 
   const baseFilter: any = {
@@ -297,12 +376,21 @@ export async function getMyIssues(
   };
 
   // Apply timeout
-  return Promise.race([
+  const result = await Promise.race([
     fetchIssues(),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`getMyIssues timed out after ${timeoutMs}ms`)), timeoutMs)
     ),
   ]);
+
+  // Cache the result
+  myIssuesCache.set(cacheKey, {
+    data: result,
+    timestamp: Date.now(),
+    agentLabel: agentLabel || 'all',
+  });
+
+  return result;
 }
 
 /**
@@ -391,6 +479,9 @@ export async function updateIssueState(
       await linear.updateIssue(issueId, {
         stateId: targetState.id,
       });
+
+      // Clear cache after mutation
+      clearLinearCache();
 
       console.log(`[Linear] Issue ${issueId} state changed to ${stateName}`);
       return;
@@ -761,6 +852,9 @@ export async function createIssue(
 
   // Increment counter
   dailyIssueCount++;
+
+  // Clear cache after mutation
+  clearLinearCache();
 
   return {
     id: issue.id,
