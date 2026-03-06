@@ -168,33 +168,66 @@ export class PRProcessor {
         for (const pr of prs) {
           const key = `${repo}#${pr.number}`;
 
-          // Cooldown check
-          const existing = state.prs[key];
-          if (existing?.lastProcessed) {
-            const hoursSince =
-              (Date.now() - new Date(existing.lastProcessed).getTime()) / (1000 * 60 * 60);
-            if (hoursSince < this.config.cooldownHours) {
-              console.log(`[PRProcessor] ${key}: cooldown (${hoursSince.toFixed(1)}h < ${this.config.cooldownHours}h)`);
-              continue;
-            }
-          }
-
           // Check for merge conflicts first (always handle conflicts)
           const hasConflicts = await checkPRConflicts(repo, pr.number);
 
-          // If no conflicts, check CI status — only process PRs with failures
-          if (!hasConflicts) {
+          // Check for review feedback (formal reviews with CHANGES_REQUESTED)
+          const { getPRReviews, getPRComments } = await import('../github/github.js');
+          const reviews = await getPRReviews(repo, pr.number);
+          const latestReviews = new Map<string, typeof reviews[0]>();
+          for (const review of reviews) {
+            const existing = latestReviews.get(review.author);
+            if (!existing || new Date(review.createdAt) > new Date(existing.createdAt)) {
+              latestReviews.set(review.author, review);
+            }
+          }
+          const hasFormalReviewFeedback = Array.from(latestReviews.values()).some(
+            r => r.state === 'CHANGES_REQUESTED'
+          );
+
+          // Also check PR comments for review feedback (from claude-review action)
+          const comments = await getPRComments(repo, pr.number);
+          const criticalKeywords = ['🔴', 'critical', '버그', 'bug', '수정 필요', 'must fix', '필수', 'required'];
+          const hasCommentFeedback = comments.some(c => {
+            const bodyLower = c.body.toLowerCase();
+            return (c.author === 'claude' || c.author.includes('claude')) &&
+                   criticalKeywords.some(keyword => bodyLower.includes(keyword.toLowerCase()));
+          });
+
+          const hasReviewFeedback = hasFormalReviewFeedback || hasCommentFeedback;
+
+          // Cooldown check (skip cooldown for conflicting PRs or PRs with review feedback)
+          if (!hasConflicts && !hasReviewFeedback) {
+            const existing = state.prs[key];
+            if (existing?.lastProcessed) {
+              const hoursSince =
+                (Date.now() - new Date(existing.lastProcessed).getTime()) / (1000 * 60 * 60);
+              if (hoursSince < this.config.cooldownHours) {
+                console.log(`[PRProcessor] ${key}: cooldown (${hoursSince.toFixed(1)}h < ${this.config.cooldownHours}h)`);
+                continue;
+              }
+            }
+          } else if (hasConflicts) {
+            console.log(`[PRProcessor] ${key}: merge conflicts detected (bypassing cooldown)`);
+          } else if (hasReviewFeedback) {
+            console.log(`[PRProcessor] ${key}: review feedback detected (bypassing cooldown)`);
+          }
+
+          // If no conflicts and no review feedback, check CI status — only process PRs with failures
+          if (!hasConflicts && !hasReviewFeedback) {
             const { getPRChecks } = await import('../github/index.js');
             const checks = await getPRChecks(repo, pr.number);
             const hasFailure = checks.some(
               (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
             );
             if (!hasFailure && checks.length > 0) {
-              console.log(`[PRProcessor] ${key}: no conflicts and CI passing, skipping`);
+              console.log(`[PRProcessor] ${key}: no conflicts, no review feedback, and CI passing, skipping`);
               continue;
             }
-          } else {
+          } else if (hasConflicts) {
             console.log(`[PRProcessor] ${key}: merge conflicts detected, will attempt resolution`);
+          } else if (hasReviewFeedback) {
+            console.log(`[PRProcessor] ${key}: review feedback detected, will address feedback`);
           }
 
           // Map repo to local project path
@@ -229,6 +262,22 @@ export class PRProcessor {
           };
           await this.saveState(state);
 
+          // If only review feedback (no conflicts, CI passing), handle review feedback directly
+          if (hasReviewFeedback && !hasConflicts) {
+            const { getPRChecks } = await import('../github/index.js');
+            const checks = await getPRChecks(repo, pr.number);
+            const hasFailure = checks.some(
+              (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
+            );
+            if (!hasFailure && checks.length > 0) {
+              // CI is passing, only need to handle review feedback
+              console.log(`[PRProcessor] ${key}: Handling review feedback only (CI passing)`);
+              await this.processReviewFeedback(pr, projectPath, state, key, 0);
+              continue;
+            }
+          }
+
+          // Otherwise, run full PR processing (handles conflicts, CI failures, then review feedback)
           await this.processPR(pr, projectPath, state, key);
         }
       }
@@ -340,6 +389,14 @@ export class PRProcessor {
 
       // 3. git fetch + checkout PR branch
       await gitExec(projectPath, 'fetch', 'origin', pr.branch);
+
+      // Stash local changes before checkout
+      try {
+        await gitExec(projectPath, 'stash', 'push', '-u', '-m', `PRProcessor auto-stash for ${key}`);
+      } catch {
+        // Ignore if nothing to stash
+      }
+
       await gitExec(projectPath, 'checkout', pr.branch);
 
       // 4. Auto-retry loop
@@ -455,6 +512,9 @@ export class PRProcessor {
             url: pr.url,
           });
 
+          // Process review feedback after CI success
+          await this.processReviewFeedback(pr, projectPath, state, key, totalIterations);
+
           state.prs[key].status = 'completed';
           state.prs[key].iterations = totalIterations;
           console.log(`[PRProcessor] ${key}: SUCCESS after ${retryCount} attempt(s)`);
@@ -512,6 +572,232 @@ export class PRProcessor {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} error:`, errorMsg);
+      state.prs[key].status = 'failed';
+      state.prs[key].lastError = errorMsg;
+
+    } finally {
+      // Restore branch
+      try {
+        await gitExec(projectPath, 'checkout', originalBranch);
+      } catch (restoreErr) {
+        console.error(`[PRProcessor] Failed to restore branch ${originalBranch}:`, restoreErr);
+      }
+    }
+  }
+
+  /**
+   * Process review feedback and iterate until all reviews are approved
+   */
+  private async processReviewFeedback(
+    pr: PRInfo,
+    projectPath: string,
+    state: PRState,
+    key: string,
+    totalIterations: number
+  ): Promise<void> {
+    const MAX_REVIEW_ITERATIONS = 5;
+    let reviewIteration = 0;
+
+    // Save current branch for restoration
+    let originalBranch = 'main';
+    try {
+      originalBranch = (await gitExec(projectPath, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
+    } catch {
+      // Fall back to main on failure
+    }
+
+    try {
+      // git fetch + checkout PR branch
+      await gitExec(projectPath, 'fetch', 'origin', pr.branch);
+
+      // Stash local changes before checkout
+      try {
+        await gitExec(projectPath, 'stash', 'push', '-u', '-m', `PRProcessor review feedback for ${key}`);
+      } catch {
+        // Ignore if nothing to stash
+      }
+
+      await gitExec(projectPath, 'checkout', pr.branch);
+
+    while (reviewIteration < MAX_REVIEW_ITERATIONS) {
+      reviewIteration++;
+      console.log(`[PRProcessor] ${key}: Checking review feedback (iteration ${reviewIteration}/${MAX_REVIEW_ITERATIONS})...`);
+
+      // Get PR reviews
+      const { getPRReviews, getPRReviewComments } = await import('../github/github.js');
+      const reviews = await getPRReviews(pr.repo, pr.number);
+
+      if (!reviews || reviews.length === 0) {
+        console.log(`[PRProcessor] ${key}: No reviews found`);
+        return;
+      }
+
+      // Find latest reviews per user (only consider latest review from each reviewer)
+      const latestReviews = new Map<string, typeof reviews[0]>();
+      for (const review of reviews) {
+        const existing = latestReviews.get(review.author);
+        if (!existing || new Date(review.createdAt) > new Date(existing.createdAt)) {
+          latestReviews.set(review.author, review);
+        }
+      }
+
+      // Check if any reviews request changes
+      const changesRequested = Array.from(latestReviews.values()).filter(
+        r => r.state === 'CHANGES_REQUESTED'
+      );
+
+      if (changesRequested.length === 0) {
+        console.log(`[PRProcessor] ${key}: No changes requested - all reviews approved or commented`);
+        state.prs[key].status = 'completed';
+        state.prs[key].iterations = totalIterations;
+        return;
+      }
+
+      console.log(`[PRProcessor] ${key}: Found ${changesRequested.length} review(s) requesting changes`);
+
+      // Get review comments for detailed feedback
+      const comments = await getPRReviewComments(pr.repo, pr.number);
+
+      // Build feedback summary
+      const feedbackLines: string[] = [];
+      for (const review of changesRequested) {
+        feedbackLines.push(`### Review by ${review.author}`);
+        if (review.body) {
+          feedbackLines.push(review.body);
+        }
+
+        // Add specific line comments from this reviewer
+        const reviewerComments = comments.filter(c => c.author === review.author);
+        if (reviewerComments.length > 0) {
+          feedbackLines.push('\n**Specific comments:**');
+          for (const comment of reviewerComments) {
+            if (comment.path && comment.line) {
+              feedbackLines.push(`- \`${comment.path}:${comment.line}\`: ${comment.body}`);
+            } else {
+              feedbackLines.push(`- ${comment.body}`);
+            }
+          }
+        }
+        feedbackLines.push('');
+      }
+
+      const feedbackSummary = feedbackLines.join('\n');
+
+      // Get current PR context
+      const { getPRContext } = await import('../github/github.js');
+      const details = await getPRContext(pr.repo, pr.number);
+      if (!details) {
+        console.log(`[PRProcessor] ${key}: Failed to get PR context for review iteration`);
+        return;
+      }
+
+      const diffSnippet = details.diff.slice(0, 5000);
+
+      // Build TaskItem with review feedback
+      const task: TaskItem = {
+        id: `pr-review-${pr.repo}-${pr.number}-${reviewIteration}`,
+        source: 'github_pr_review',
+        title: `Address review feedback for PR #${pr.number}: ${pr.title}`,
+        description: [
+          `## Review Feedback (Iteration ${reviewIteration}/${MAX_REVIEW_ITERATIONS})`,
+          `**PR:** ${pr.repo}#${pr.number} - ${pr.title}`,
+          `**Branch:** ${pr.branch}`,
+          '',
+          `## Requested Changes`,
+          feedbackSummary,
+          '',
+          `## Current Diff (first 5000 chars)`,
+          '```diff',
+          diffSnippet,
+          '```',
+          '',
+          '## Instructions',
+          'Address all review feedback points above.',
+          'Make the requested changes while maintaining code quality.',
+          'DO NOT change unrelated code or architecture.',
+          'Focus on addressing the specific points raised by reviewers.',
+        ].join('\n'),
+        priority: 2,
+        projectPath,
+        issueId: `pr-${pr.number}`,
+        workflowId: undefined,
+        createdAt: Date.now(),
+      };
+
+      // Run pipeline to address feedback
+      console.log(`[PRProcessor] ${key}: Running pipeline to address review feedback...`);
+      const pipeline = createPipelineFromConfig(
+        this.config.roles,
+        this.config.maxIterations
+      );
+      const result = await pipeline.run(task, projectPath);
+      totalIterations += result.iterations;
+
+      if (!result.success) {
+        const error = result.reviewResult?.feedback || result.workerResult?.error || 'Pipeline failed';
+        console.log(`[PRProcessor] ${key}: Failed to address review feedback - ${error}`);
+
+        await commentOnPR(
+          pr.repo,
+          pr.number,
+          [
+            `## ⚠️ Failed to address review feedback (iteration ${reviewIteration})`,
+            '',
+            `**Error:** ${error}`,
+            '',
+            'Manual intervention required.',
+          ].join('\n')
+        );
+        return;
+      }
+
+      // Push changes
+      console.log(`[PRProcessor] ${key}: Pushing review feedback changes...`);
+      await gitExec(projectPath, 'push', 'origin', pr.branch);
+
+      // Comment on PR
+      const summary = result.workerResult?.summary || 'Review feedback addressed';
+      const filesChanged = result.workerResult?.filesChanged?.join(', ') || 'N/A';
+
+      await commentOnPR(
+        pr.repo,
+        pr.number,
+        [
+          `## 🔄 Review feedback addressed (iteration ${reviewIteration})`,
+          '',
+          `**Summary:** ${summary}`,
+          `**Files changed:** ${filesChanged}`,
+          '',
+          'Please re-review.',
+        ].join('\n')
+      );
+
+      console.log(`[PRProcessor] ${key}: Review feedback iteration ${reviewIteration} complete`);
+
+      // Small delay before checking reviews again
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    }
+
+      // Max iterations reached
+      console.log(`[PRProcessor] ${key}: Max review iterations (${MAX_REVIEW_ITERATIONS}) reached`);
+      await commentOnPR(
+        pr.repo,
+        pr.number,
+        [
+          `## ⚠️ Max review feedback iterations reached`,
+          '',
+          `Attempted to address review feedback ${MAX_REVIEW_ITERATIONS} times.`,
+          'Please review manually and provide additional guidance if needed.',
+        ].join('\n')
+      );
+
+      // Update state
+      state.prs[key].status = 'completed';
+      state.prs[key].iterations = totalIterations;
+
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[PRProcessor] ${key} review feedback error:`, errorMsg);
       state.prs[key].status = 'failed';
       state.prs[key].lastError = errorMsg;
 

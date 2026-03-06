@@ -316,6 +316,18 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           res.end(JSON.stringify({ error: String(error) }));
         }
 
+      // ---- CI Worker Status ----
+      } else if (url === '/api/ci-worker-status' && req.method === 'GET') {
+        try {
+          const { getCIWorkerStatus } = await import('../automation/ciWorker.js');
+          const status = getCIWorkerStatus();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(status));
+        } catch (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+
       // ---- Stuck/Failed Issues ----
       } else if (url === '/api/stuck-issues' && req.method === 'GET') {
         try {

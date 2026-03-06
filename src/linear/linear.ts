@@ -105,7 +105,7 @@ export function initLinear(apiKey: string, team: string): void {
 /**
  * Return the Linear client instance
  */
-function getClient(): LinearClient {
+export function getClient(): LinearClient {
   if (!client) {
     throw new Error('Linear client not initialized. Call initLinear() first.');
   }

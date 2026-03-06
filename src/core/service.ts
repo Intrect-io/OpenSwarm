@@ -14,7 +14,9 @@ import * as scheduler from '../automation/scheduler.js';
 import * as web from '../support/web.js';
 import * as autonomous from '../automation/autonomousRunner.js';
 import { PRProcessor } from '../automation/prProcessor.js';
+import { startCIWorker, stopCIWorker } from '../automation/ciWorker.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
+import * as dailyReporter from '../automation/dailyReporter.js';
 import { initLocale, t } from '../locale/index.js';
 import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
 import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory/compaction.js';
@@ -208,12 +210,39 @@ export async function startService(config: SwarmConfig): Promise<void> {
     console.log(`[Service] PR Processor started (schedule: ${config.prProcessor.schedule}, repos: ${githubRepos.length}, maxRetries: ${config.prProcessor.maxRetries ?? 3}${resolverStatus})`);
   }
 
+  // Start CI Worker
+  if (config.ciWorker?.enabled && githubRepos.length > 0) {
+    startCIWorker({
+      repos: githubRepos,
+      checkIntervalMs: config.ciWorker.checkIntervalMs,
+      autoRetry: config.ciWorker.autoRetry,
+      createIssues: config.ciWorker.createIssues,
+      maxAgeDays: config.ciWorker.maxAgeDays,
+    });
+    const features = [
+      config.ciWorker.autoRetry && 'auto-retry',
+      config.ciWorker.createIssues && 'linear-issues',
+    ].filter(Boolean).join(', ');
+    console.log(`[Service] CI Worker started (interval: ${(config.ciWorker.checkIntervalMs ?? 300000) / 1000}s, repos: ${githubRepos.length}, features: ${features || 'monitor-only'})`);
+  }
+
   // Initialize long-running monitors
   if (config.monitors?.length) {
     initMonitors(config.monitors);
     console.log(`[Service] Long-running monitors initialized (${config.monitors.length} from config)`);
   } else {
     initMonitors(); // Restore only from persisted files
+  }
+
+  // Start daily status reporter
+  if (config.dailyReporter?.enabled) {
+    dailyReporter.setLinearClient(linear.getClient());
+    dailyReporter.setTeamId(config.linearTeamId);
+    dailyReporter.setDailyReporterDiscord(async (content: any) => {
+      await discord.sendToChannel(content);
+    });
+    dailyReporter.startDailyReporter(config.dailyReporter);
+    console.log(`[Service] Daily reporter started (schedule: ${config.dailyReporter.schedule || '18:00 daily'})`);
   }
 
   // Memory compaction scheduler (daily at 2 AM)
@@ -429,6 +458,10 @@ export async function stopService(): Promise<void> {
     prProcessor = null;
     console.log('PR Processor stopped');
   }
+
+  // Stop CI Worker
+  stopCIWorker();
+  console.log('CI Worker stopped');
 
   // Stop scheduler
   scheduler.stopAllSchedules();

@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# Git worktrees
+worktree/
+
 # Config with secrets
 config.json
 config.yaml

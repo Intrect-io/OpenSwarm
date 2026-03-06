@@ -1,7 +1,22 @@
 // OpenSwarm - Autonomous Runner
 // Heartbeat → Decision → Execution → Report
 import { Cron } from 'croner';
-import { loadTaskState, saveTaskState, buildProjectsInfo, appendPipelineHistory, getPipelineHistory, incrementRejection, clearRejection, isRejectionLimitReached, type TaskState, type ProjectInfo } from './runnerState.js';
+import {
+  loadTaskState,
+  saveTaskState,
+  buildProjectsInfo,
+  appendPipelineHistory,
+  getPipelineHistory,
+  incrementRejection,
+  clearRejection,
+  isRejectionLimitReached,
+  canRetryNow,
+  setRetryTime,
+  clearRetryTime,
+  formatRetryTime,
+  type TaskState,
+  type ProjectInfo,
+} from './runnerState.js';
 import {
   DecisionEngine,
   DecisionResult,
@@ -75,10 +90,15 @@ export class AutonomousRunner {
   // Track completed/failed task IDs to prevent re-selection (persisted to disk)
   private completedTaskIds = new Set<string>();
   private failedTaskCounts = new Map<string, number>();
-  private static readonly MAX_RETRY_COUNT = 2;
+  private failedTaskRetryTimes = new Map<string, number>(); // issueId → next retry timestamp (ms)
+  private static readonly MAX_RETRY_COUNT = 4; // Increased from 2 to allow more retries with backoff
 
   private get taskStateRef(): TaskState {
-    return { completedTaskIds: this.completedTaskIds, failedTaskCounts: this.failedTaskCounts };
+    return {
+      completedTaskIds: this.completedTaskIds,
+      failedTaskCounts: this.failedTaskCounts,
+      failedTaskRetryTimes: this.failedTaskRetryTimes,
+    };
   }
 
   private loadTaskState(): void {
@@ -138,6 +158,7 @@ export class AutonomousRunner {
       if (task.issueId && result.success) {
         this.completedTaskIds.add(task.issueId);
         clearRejection(task.issueId); // Clear rejection count on success
+        clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry backoff time
         this.saveTaskState();
       }
 
@@ -214,6 +235,7 @@ export class AutonomousRunner {
         if (isRejectionLimitReached(task.issueId)) {
           // Max rejections reached - permanently block
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
+          clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
           this.saveTaskState();
 
           try {
@@ -229,12 +251,17 @@ export class AutonomousRunner {
           }
           return;
         } else {
-          // Not max yet - temporary block, will retry later
+          // Not max yet - schedule retry with exponential backoff
+          const nextRetryTime = setRetryTime(task.issueId, rejectionCount, this.failedTaskRetryTimes);
+          const retryIn = formatRetryTime(nextRetryTime);
+          this.saveTaskState();
+
           try {
             await linear.logBlocked(task.issueId, 'autonomous-runner',
-              t('runner.reviewRejected', { feedback }) + `\n\n**Rejection count:** ${rejectionCount}/3 - Will retry automatically.`
+              t('runner.reviewRejected', { feedback }) +
+              `\n\n**Rejection count:** ${rejectionCount}/3 - Will retry automatically ${retryIn}.`
             );
-            console.log(`[Scheduler] Issue ${task.issueId} marked as Todo (blocked) (rejected ${rejectionCount}/3)`);
+            console.log(`[Scheduler] Issue ${task.issueId} marked as Todo (blocked) (rejected ${rejectionCount}/3) — retry ${retryIn}`);
           } catch (err) {
             console.error(`[Scheduler] Failed to update issue state:`, err);
           }
@@ -246,11 +273,13 @@ export class AutonomousRunner {
       if (task.issueId) {
         const count = (this.failedTaskCounts.get(task.issueId) ?? 0) + 1;
         this.failedTaskCounts.set(task.issueId, count);
-        console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx}`);
 
         if (count >= AutonomousRunner.MAX_RETRY_COUNT) {
+          // Max retries exceeded - permanently block
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
+          clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
           this.saveTaskState();
+          console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — BLOCKED`);
           try {
             await linear.logBlocked(task.issueId, 'autonomous-runner',
               `Autonomous execution failed ${count} times. Moving to Blocked for manual review.`
@@ -260,7 +289,10 @@ export class AutonomousRunner {
             console.error(`[Scheduler] Failed to update issue state:`, err);
           }
         } else {
-          // Save updated fail count even before max retries
+          // Schedule retry with exponential backoff
+          const nextRetryTime = setRetryTime(task.issueId, count, this.failedTaskRetryTimes);
+          const retryIn = formatRetryTime(nextRetryTime);
+          console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — retry ${retryIn}`);
           this.saveTaskState();
         }
       }
@@ -294,6 +326,7 @@ export class AutonomousRunner {
 
   private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
     let recovered = 0;
+    let backoffSkipped = 0;
     const recoverableStates = new Set(['Todo', 'In Progress', 'In Review']);
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
@@ -309,16 +342,28 @@ export class AutonomousRunner {
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         clearRejection(id); // Clear rejection count on recovery
+        clearRetryTime(id, this.failedTaskRetryTimes); // Clear retry backoff time
         recovered++;
         return true;
       }
+
       if (this.completedTaskIds.has(id)) return false;
       if ((this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT) return false;
+
+      // Check if task is in exponential backoff period
+      if (!canRetryNow(id, this.failedTaskRetryTimes)) {
+        backoffSkipped++;
+        return false; // Skip tasks still in backoff period
+      }
+
       return true;
     });
     if (recovered > 0) {
       this.saveTaskState();
       this.syslog(`♻ Recovered ${recovered} Todo issues from completed/failed/rejected list`);
+    }
+    if (backoffSkipped > 0) {
+      this.syslog(`⏰ Skipped ${backoffSkipped} tasks in exponential backoff period`);
     }
     return filtered;
   }

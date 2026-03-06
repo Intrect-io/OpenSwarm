@@ -119,8 +119,12 @@ export type SwarmConfig = {
   autonomous?: AutonomousStartupConfig;
   /** PR auto-improvement config */
   prProcessor?: PRProcessorConfig;
+  /** CI failure investigation worker config */
+  ciWorker?: CIWorkerConfig;
   /** Long-running task monitor configuration */
   monitors?: LongRunningMonitorConfig[];
+  /** Daily status report scheduler config */
+  dailyReporter?: DailyReporterConfig;
 };
 
 /**
@@ -143,6 +147,8 @@ export type PRProcessorConfig = {
   ciPollIntervalMs?: number;
   /** Conflict resolver config */
   conflictResolver?: ConflictResolverConfig;
+  /** Custom repo → local path mappings */
+  repoMappings?: Record<string, string>;
 };
 
 /**
@@ -161,6 +167,22 @@ export type ConflictResolverConfig = {
   workerModel?: string;
   /** Worker timeout (ms) */
   workerTimeoutMs?: number;
+};
+
+/**
+ * CI failure investigation worker config
+ */
+export type CIWorkerConfig = {
+  /** Enabled */
+  enabled: boolean;
+  /** Check interval in ms (default: 300000 = 5 minutes) */
+  checkIntervalMs?: number;
+  /** Auto-retry flaky tests */
+  autoRetry?: boolean;
+  /** Create Linear issues for failures */
+  createIssues?: boolean;
+  /** Max age of failures to consider (days) (default: 30) */
+  maxAgeDays?: number;
 };
 
 /**
@@ -385,4 +407,14 @@ export type AutonomousStartupConfig = {
   worktreeMode?: boolean;
   /** Pipeline guards configuration */
   guards?: Partial<PipelineGuardsConfig>;
+};
+
+/**
+ * Daily status report scheduler configuration
+ */
+export type DailyReporterConfig = {
+  /** Enable daily status reports */
+  enabled: boolean;
+  /** Cron schedule (default: "0 18 * * *" for 6 PM daily) */
+  schedule: string;
 };

@@ -28,7 +28,7 @@ async function gh(...args: string[]): Promise<string> {
 // ============================================
 
 export interface WorktreeInfo {
-  /** /tmp/swarm-worktrees/{issueId} */
+  /** {repoPath}/worktree/{issueId} */
   worktreePath: string;
   /** swarm/INT-XXX-slug */
   branchName: string;
@@ -60,7 +60,7 @@ export async function createWorktree(
   issueId: string,
   branchName: string,
 ): Promise<WorktreeInfo> {
-  const worktreePath = `/tmp/swarm-worktrees/${issueId}`;
+  const worktreePath = `${repoPath}/worktree/${issueId}`;
 
   // Clean up existing worktree (retry case)
   if (existsSync(worktreePath)) {

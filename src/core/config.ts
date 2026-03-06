@@ -224,6 +224,15 @@ const PRProcessorConfigSchema = z.object({
   cooldownHours: z.number().default(6),
   maxIterations: z.number().min(1).max(10).default(3),
   conflictResolver: ConflictResolverConfigSchema,
+  repoMappings: z.record(z.string(), z.string()).optional(),
+}).optional();
+
+const CIWorkerConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  checkIntervalMs: z.number().positive().default(300000),
+  autoRetry: z.boolean().default(false),
+  createIssues: z.boolean().default(true),
+  maxAgeDays: z.number().positive().default(30),
 }).optional();
 
 const RawConfigSchema = z.object({
@@ -235,6 +244,7 @@ const RawConfigSchema = z.object({
   pairMode: PairModeConfigSchema,
   autonomous: AutonomousConfigSchema,
   prProcessor: PRProcessorConfigSchema,
+  ciWorker: CIWorkerConfigSchema,
   monitors: z.array(LongRunningMonitorConfigSchema).optional(),
   agents: z.array(AgentSessionSchema).min(1, 'At least one agent is required'),
   defaultHeartbeatInterval: z.number().positive().default(DEFAULT_HEARTBEAT_INTERVAL),
@@ -400,6 +410,13 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       cooldownHours: raw.prProcessor.cooldownHours,
       maxIterations: raw.prProcessor.maxIterations,
       conflictResolver: raw.prProcessor.conflictResolver as ConflictResolverConfig | undefined,
+    } : undefined,
+    ciWorker: raw.ciWorker ? {
+      enabled: raw.ciWorker.enabled,
+      checkIntervalMs: raw.ciWorker.checkIntervalMs,
+      autoRetry: raw.ciWorker.autoRetry,
+      createIssues: raw.ciWorker.createIssues,
+      maxAgeDays: raw.ciWorker.maxAgeDays,
     } : undefined,
     monitors: raw.monitors as LongRunningMonitorConfig[] | undefined,
   };

@@ -178,8 +178,14 @@ export async function getPRChecks(
   prNumber: number
 ): Promise<{ name: string; status: string; conclusion: string }[]> {
   try {
-    const stdout = await ghExec('pr', 'checks', String(prNumber), '-R', repo, '--json', 'name,state,conclusion');
-    return JSON.parse(stdout);
+    const stdout = await ghExec('pr', 'checks', String(prNumber), '-R', repo, '--json', 'name,state');
+    const checks = JSON.parse(stdout);
+    // Map state to conclusion for backward compatibility
+    return checks.map((c: any) => ({
+      name: c.name,
+      status: c.state,
+      conclusion: c.state === 'failure' ? 'failure' : c.state === 'success' ? 'success' : c.state
+    }));
   } catch (err) {
     console.error(`Failed to get PR checks for ${repo}#${prNumber}:`, err);
     return [];
@@ -502,6 +508,55 @@ export async function getPRContext(repo: string, prNumber: number): Promise<PRDe
 }
 
 /**
+ * PR Review Comment
+ */
+export type PRReviewComment = {
+  id: number;
+  author: string;
+  body: string;
+  path?: string;
+  line?: number;
+  createdAt: string;
+  state?: 'PENDING' | 'COMMENTED' | 'APPROVED' | 'CHANGES_REQUESTED' | 'DISMISSED';
+};
+
+/**
+ * Get PR review comments
+ */
+export async function getPRReviews(repo: string, prNumber: number): Promise<PRReviewComment[]> {
+  try {
+    const { stdout } = await execFileAsync('gh', [
+      'api', `/repos/${repo}/pulls/${prNumber}/reviews`,
+      '--jq', '.[] | {id, author: .user.login, body, state, createdAt: .submitted_at}'
+    ]);
+
+    const lines = stdout.trim().split('\n').filter(Boolean);
+    return lines.map((line) => JSON.parse(line));
+  } catch (err) {
+    console.error(`[GitHub] Failed to get PR reviews for ${repo}#${prNumber}:`, err);
+    return [];
+  }
+}
+
+/**
+ * Get PR review comments (inline code comments)
+ */
+export async function getPRReviewComments(repo: string, prNumber: number): Promise<PRReviewComment[]> {
+  try {
+    const { stdout } = await execFileAsync('gh', [
+      'api', `/repos/${repo}/pulls/${prNumber}/comments`,
+      '--jq', '.[] | {id, author: .user.login, body, path, line, createdAt: .created_at}'
+    ]);
+
+    const lines = stdout.trim().split('\n').filter(Boolean);
+    return lines.map((line) => JSON.parse(line));
+  } catch (err) {
+    console.error(`[GitHub] Failed to get PR review comments for ${repo}#${prNumber}:`, err);
+    return [];
+  }
+}
+
+/**
  * Post a comment on a PR (piped via stdin to avoid shell escaping)
  */
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
@@ -520,6 +575,31 @@ export async function commentOnPR(repo: string, prNumber: number, body: string):
     });
   } catch (err) {
     console.error(`[GitHub] Failed to comment on PR ${repo}#${prNumber}:`, err);
+  }
+}
+
+/**
+ * Get PR comments (not review comments, but general issue comments on the PR)
+ */
+export async function getPRComments(repo: string, prNumber: number): Promise<Array<{
+  author: string;
+  body: string;
+  createdAt: string;
+}>> {
+  try {
+    const { stdout } = await execFileAsync('gh', [
+      'pr', 'view', String(prNumber), '-R', repo,
+      '--json', 'comments',
+    ]);
+    const data = JSON.parse(stdout);
+    return data.comments.map((c: any) => ({
+      author: c.author?.login || 'unknown',
+      body: c.body || '',
+      createdAt: c.createdAt || new Date().toISOString(),
+    }));
+  } catch (err) {
+    console.error(`[GitHub] Failed to get PR comments for ${repo}#${prNumber}:`, err);
+    return [];
   }
 }
 

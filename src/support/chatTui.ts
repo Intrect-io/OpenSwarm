@@ -11,6 +11,29 @@ import { spawn } from 'node:child_process';
 // Constants
 const CHAT_DIR = resolve(homedir(), '.openswarm', 'chat');
 const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
+
+// Render guard: blessed는 동시 render() 호출 시 화면이 검은색으로 깨질 수 있음
+let renderScheduled = false;
+let screenRef: blessed.Widgets.Screen | null = null;
+
+function safeRender() {
+  if (renderScheduled || !screenRef) return;
+  renderScheduled = true;
+  process.nextTick(() => {
+    renderScheduled = false;
+    try {
+      screenRef!.render();
+    } catch {
+      // render 실패 시 복구 시도
+      try {
+        screenRef!.alloc();
+        screenRef!.render();
+      } catch {
+        // 무시 — 다음 사이클에서 복구
+      }
+    }
+  });
+}
 // Types
 type Message = { role: 'user' | 'assistant'; content: string; cost?: number };
 
@@ -483,7 +506,7 @@ function switchTab(state: AppState, ui: ReturnType<typeof createUI>, tabIndex: n
   }
 
   updateTabBar(ui, tabIndex);
-  ui.screen.render();
+  safeRender();
 }
 // Data Loaders
 async function loadProjectsData(box: blessed.Widgets.BoxElement) {
@@ -715,7 +738,7 @@ function startSpinner(ui: ReturnType<typeof createUI>): { interval: NodeJS.Timeo
     const content = `  {#667eea-fg}${spinner}{/} {#718096-fg}${loadingMessage}...{/}`;
     ui.chatLog.setLine(lineIndex, content);
     ui.chatLog.setScrollPerc(100);
-    ui.screen.render();
+    safeRender();
     frameIndex++;
   }, 80);
 
@@ -728,7 +751,7 @@ function stopSpinner(
 ): void {
   clearInterval(spinnerData.interval);
   ui.chatLog.deleteLine(spinnerData.lineIndex);
-  ui.screen.render();
+  safeRender();
 }
 // Chat Logic
 async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, message: string) {
@@ -739,7 +762,7 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
   ui.chatLog.log(`  ${message}`);
   ui.chatLog.log('');
   ui.chatLog.setScrollPerc(100);
-  ui.screen.render();
+  safeRender();
 
   state.session.messages.push({ role: 'user', content: message });
 
@@ -783,9 +806,10 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
         if (now - lastRenderTime < 33) return;
         lastRenderTime = now;
 
-        // Clear previous content lines
+        // Clear previous content lines (안전한 역순 삭제)
         const currentLines = ui.chatLog.getLines().length;
-        for (let i = contentStartLine; i < currentLines; i++) {
+        const deleteCount = Math.max(0, Math.min(currentLines - contentStartLine, currentLines));
+        for (let i = 0; i < deleteCount; i++) {
           ui.chatLog.deleteLine(contentStartLine);
         }
 
@@ -797,7 +821,7 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
         }
 
         ui.chatLog.setScrollPerc(100);
-        ui.screen.render();
+        safeRender();
       }
     );
 
@@ -816,9 +840,10 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
     state.session.totalTokens += result.tokens;
 
     // Finalize assistant message with cost
-    // Clear streaming content first
-    const currentLines = ui.chatLog.getLines().length;
-    for (let i = contentStartLine; i < currentLines; i++) {
+    // Clear streaming content first (안전한 삭제)
+    const finalLines = ui.chatLog.getLines().length;
+    const finalDeleteCount = Math.max(0, Math.min(finalLines - contentStartLine, finalLines));
+    for (let i = 0; i < finalDeleteCount; i++) {
       ui.chatLog.deleteLine(contentStartLine);
     }
 
@@ -843,7 +868,7 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
 
     await saveSession(state.session);
     updateStatusBar(state, ui);
-    ui.screen.render();
+    safeRender();
   } catch (err) {
     if (!spinnerStopped) {
       stopSpinner(ui, spinnerData);
@@ -853,7 +878,7 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
     ui.chatLog.log(`  ${msg}`);
     ui.chatLog.log('');
     state.session.messages.pop(); // Remove user message on failure
-    ui.screen.render();
+    safeRender();
   }
 }
 // Status Bar Update
@@ -896,7 +921,7 @@ async function handleCommand(
       ui.chatLog.log('{#34d399-fg}✓ Conversation cleared{/}');
       ui.chatLog.log('');
       updateStatusBar(state, ui);
-      ui.screen.render();
+      safeRender();
       break;
 
     case 'model':
@@ -923,7 +948,7 @@ async function handleCommand(
         updateStatusBar(state, ui);
       }
       ui.chatLog.log('');
-      ui.screen.render();
+      safeRender();
       break;
     }
 
@@ -935,7 +960,7 @@ async function handleCommand(
       ui.chatLog.log(`  {#34d399-fg}✓ Session saved: {bold}${name}{/bold}{/}`);
       ui.chatLog.log('');
       updateStatusBar(state, ui);
-      ui.screen.render();
+      safeRender();
       break;
     }
 
@@ -958,7 +983,7 @@ async function handleCommand(
       ui.chatLog.log('    {#718096-fg}i / Enter{/}      Focus input (from chat)');
       ui.chatLog.log('    {#718096-fg}Ctrl+C{/}         Exit (double press to confirm)');
       ui.chatLog.log('');
-      ui.screen.render();
+      safeRender();
       break;
 
     default:
@@ -966,7 +991,7 @@ async function handleCommand(
       ui.chatLog.log(`  {#ef4444-fg}Unknown command: /{bold}${command}{/bold}{/}`);
       ui.chatLog.log(`  {#718096-fg}Type {/}{#60a5fa-fg}/help{/}{#718096-fg} for available commands{/}`);
       ui.chatLog.log('');
-      ui.screen.render();
+      safeRender();
   }
 
   return false;
@@ -1017,6 +1042,7 @@ export async function main(): Promise<void> {
   };
 
   const ui = createUI();
+  screenRef = ui.screen;  // safeRender용 참조 설정
 
   updateStatusBar(state, ui);
   updateTabBar(ui, state.currentTab);
@@ -1070,7 +1096,7 @@ export async function main(): Promise<void> {
       // If input has text, just clear it
       ui.inputBox.clearValue();
       ui.inputBox.focus();
-      ui.screen.render();
+      safeRender();
       ctrlCPressed = false;
     } else {
       // If input is empty, exit with double Ctrl+C
@@ -1080,11 +1106,11 @@ export async function main(): Promise<void> {
       } else {
         ctrlCPressed = true;
         ui.statusBar.setContent(' {#f59e0b-fg}Press Ctrl+C again to exit{/}');
-        ui.screen.render();
+        safeRender();
         setTimeout(() => {
           ctrlCPressed = false;
           updateStatusBar(state, ui);
-          ui.screen.render();
+          safeRender();
         }, 2000);
       }
     }
@@ -1099,13 +1125,13 @@ export async function main(): Promise<void> {
     }
     // Blur input box to exit input mode
     ui.chatLog.focus();
-    ui.screen.render();
+    safeRender();
   });
 
   // Enter in chatLog: focus input
   ui.chatLog.key(['enter', 'i'], () => {
     ui.inputBox.focus();
-    ui.screen.render();
+    safeRender();
   });
 
   // Shift+Enter: Insert newline (handled by textarea by default)
@@ -1118,7 +1144,7 @@ export async function main(): Promise<void> {
 
     ui.inputBox.clearValue();
     ui.inputBox.focus();
-    ui.screen.render();
+    safeRender();
 
     if (trimmed.startsWith('/')) {
       await handleCommand(trimmed, state, ui);
@@ -1130,22 +1156,26 @@ export async function main(): Promise<void> {
   // Focus input by default
   ui.inputBox.focus();
 
-  // Handle terminal resize (important for tmux)
+  // Handle terminal resize (important for tmux) — debounce로 연속 resize 시 깜빡임 방지
+  let resizeTimer: NodeJS.Timeout | null = null;
   process.stdout.on('resize', () => {
-    ui.screen.alloc();
-    ui.screen.realloc();
-    ui.screen.render();
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      ui.screen.alloc();
+      ui.screen.realloc();
+      safeRender();
+    }, 50);
   });
 
   // Render
-  ui.screen.render();
+  safeRender();
 
   // Auto-refresh Projects/Tasks/Stuck tabs every 5s
   setInterval(() => {
     if (state.currentTab === 1) loadProjectsData(ui.projectsBox);
     if (state.currentTab === 2) loadTasksData(ui.tasksBox);
     if (state.currentTab === 3) loadStuckData(ui.stuckBox);
-    ui.screen.render();
+    safeRender();
   }, 5000);
 
   // System logs (example - hook into eventHub in real implementation)

@@ -85,6 +85,20 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .btn-active:hover:not(:disabled) { background: #332200; border-color: var(--amber); }
     .btn-danger { border-color: #551111; color: var(--red); }
     .btn-danger:hover:not(:disabled) { background: #220000; border-color: var(--red); }
+    .move-to-todo-btn {
+      font-family: inherit;
+      font-size: 9px;
+      padding: 1px 6px;
+      background: transparent;
+      border: 1px solid var(--cyan-dim);
+      color: var(--cyan);
+      cursor: pointer;
+      margin-left: auto;
+      flex-shrink: 0;
+      transition: all 0.15s;
+    }
+    .move-to-todo-btn:hover:not(:disabled) { border-color: var(--cyan); background: var(--cyan-dim); }
+    .move-to-todo-btn:disabled { opacity: 0.4; cursor: default; }
     .svc-group { display: flex; align-items: center; gap: 4px; margin-right: 8px; }
     .svc-status {
       font-size: 9px; padding: 1px 6px;
@@ -628,6 +642,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="panel-hdr">
           <span class="panel-hdr-title">⚠ STUCK/FAILED</span>
           <span class="panel-hdr-badge" id="stuck-badge">0</span>
+          <button class="btn" style="margin-left: 0.5rem; font-size: 9px; padding: 1px 6px;" onclick="restartStuckIssues()" id="restart-stuck-btn">↻ RESTART ALL</button>
         </div>
         <div class="panel-body" style="font-size: 10px; line-height: 1.4; overflow-y: auto;">
           <div id="stuck-list" style="color: var(--dim);">Loading...</div>
@@ -914,6 +929,50 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         addLogLine({ taskId: "system", stage: "error", line: "Heartbeat failed: " + e.message });
         btn.disabled = false; btn.textContent = "▶ HEARTBEAT";
       }
+    }
+
+    // ---- Restart stuck issues ----
+    async function restartStuckIssues() {
+      if (!confirm("Move all stuck/failed issues to Todo?")) return;
+      const btn = document.getElementById("restart-stuck-btn");
+      btn.disabled = true;
+      btn.textContent = "⟳ PROCESSING...";
+
+      try {
+        const res = await fetch("/api/stuck-issues");
+        const data = await res.json();
+        const allIssues = [...data.stuckIssues, ...data.failedIssues];
+
+        let success = 0;
+        let failed = 0;
+
+        for (const issue of allIssues) {
+          try {
+            const moveRes = await fetch("/api/issue/move-to-todo", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ issueId: issue.id })
+            });
+
+            if (moveRes.ok) {
+              success++;
+              addLogLine({ taskId: "system", stage: "stuck", line: "Moved " + issue.identifier + " to Todo" });
+            } else {
+              failed++;
+            }
+          } catch (e) {
+            failed++;
+          }
+        }
+
+        addLogLine({ taskId: "system", stage: "stuck", line: "Restart complete: " + success + " moved, " + failed + " failed" });
+        setTimeout(fetchStuckIssues, 1000);
+      } catch (e) {
+        addLogLine({ taskId: "system", stage: "error", line: "Failed to restart stuck issues: " + e.message });
+      }
+
+      btn.disabled = false;
+      btn.textContent = "↻ RESTART ALL";
     }
 
     // ---- Project task updates ----

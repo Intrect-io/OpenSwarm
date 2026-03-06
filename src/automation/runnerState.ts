@@ -27,19 +27,29 @@ const MAX_REJECTION_ATTEMPTS = 3;
 export interface TaskState {
   completedTaskIds: Set<string>;
   failedTaskCounts: Map<string, number>;
+  failedTaskRetryTimes: Map<string, number>; // issueId → next retry timestamp (ms)
 }
 
 export function loadTaskState(state: TaskState): void {
   try {
     if (!existsSync(TASK_STATE_FILE)) return;
     const raw = readFileSync(TASK_STATE_FILE, 'utf8');
-    const data = JSON.parse(raw) as { completed?: string[]; failed?: Record<string, number> };
+    const data = JSON.parse(raw) as {
+      completed?: string[];
+      failed?: Record<string, number>;
+      retryTimes?: Record<string, number>;
+    };
     if (Array.isArray(data.completed)) {
       for (const id of data.completed) state.completedTaskIds.add(id);
     }
     if (data.failed && typeof data.failed === 'object') {
       for (const [id, count] of Object.entries(data.failed)) {
         state.failedTaskCounts.set(id, count as number);
+      }
+    }
+    if (data.retryTimes && typeof data.retryTimes === 'object') {
+      for (const [id, time] of Object.entries(data.retryTimes)) {
+        state.failedTaskRetryTimes.set(id, time as number);
       }
     }
     console.log(`[AutonomousRunner] Loaded task state: ${state.completedTaskIds.size} completed, ${state.failedTaskCounts.size} failed`);
@@ -53,6 +63,7 @@ export function saveTaskState(state: TaskState): void {
     const data = {
       completed: Array.from(state.completedTaskIds),
       failed: Object.fromEntries(state.failedTaskCounts),
+      retryTimes: Object.fromEntries(state.failedTaskRetryTimes),
       updatedAt: new Date().toISOString(),
     };
     writeFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2), 'utf8');
@@ -403,4 +414,88 @@ export function buildProjectsInfo(
         .map(t => ({ id: t.id, title: t.title, priority: t.priority, issueIdentifier: t.issueIdentifier || t.issueId, linearState: t.linearState })),
     };
   });
+}
+
+// ============================================
+// Exponential Backoff for Failed Task Retries
+// ============================================
+
+const BACKOFF_MINUTES = [10, 30, 60, 120]; // 10min, 30min, 1h, 2h
+
+/**
+ * Calculate backoff delay in milliseconds based on attempt number.
+ * @param attemptNumber - 1-indexed attempt number (1 = first failure)
+ * @returns Delay in milliseconds
+ */
+export function calculateBackoffTime(attemptNumber: number): number {
+  const index = Math.min(attemptNumber - 1, BACKOFF_MINUTES.length - 1);
+  return BACKOFF_MINUTES[index] * 60 * 1000;
+}
+
+/**
+ * Check if a task can be retried now (based on scheduled retry time).
+ * @param issueId - Issue ID to check
+ * @param retryTimes - Map of issueId → next retry timestamp
+ * @returns true if retry is allowed now, false if still in backoff period
+ */
+export function canRetryNow(issueId: string, retryTimes: Map<string, number>): boolean {
+  const nextRetryTime = retryTimes.get(issueId);
+  if (!nextRetryTime) return true; // No backoff scheduled
+  return Date.now() >= nextRetryTime;
+}
+
+/**
+ * Set next retry time for a failed task using exponential backoff.
+ * @param issueId - Issue ID
+ * @param attemptNumber - Current attempt number (1-indexed)
+ * @param retryTimes - Map to update
+ * @returns Next retry timestamp (ms)
+ */
+export function setRetryTime(
+  issueId: string,
+  attemptNumber: number,
+  retryTimes: Map<string, number>
+): number {
+  const delayMs = calculateBackoffTime(attemptNumber);
+  const nextRetryTime = Date.now() + delayMs;
+  retryTimes.set(issueId, nextRetryTime);
+  return nextRetryTime;
+}
+
+/**
+ * Clear retry time for a task (on success or manual recovery).
+ * @param issueId - Issue ID
+ * @param retryTimes - Map to update
+ */
+export function clearRetryTime(issueId: string, retryTimes: Map<string, number>): void {
+  retryTimes.delete(issueId);
+}
+
+/**
+ * Get next retry time for a task.
+ * @param issueId - Issue ID
+ * @param retryTimes - Map to query
+ * @returns Next retry timestamp (ms) or undefined if not scheduled
+ */
+export function getRetryTime(issueId: string, retryTimes: Map<string, number>): number | undefined {
+  return retryTimes.get(issueId);
+}
+
+/**
+ * Format retry time as human-readable string.
+ * @param timestamp - Timestamp in milliseconds
+ * @returns Formatted string like "in 15 minutes" or "in 2 hours"
+ */
+export function formatRetryTime(timestamp: number): string {
+  const now = Date.now();
+  const diffMs = timestamp - now;
+  if (diffMs <= 0) return 'now';
+
+  const minutes = Math.ceil(diffMs / (60 * 1000));
+  if (minutes < 60) return `in ${minutes} minute${minutes === 1 ? '' : 's'}`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (remainingMinutes === 0) return `in ${hours} hour${hours === 1 ? '' : 's'}`;
+  return `in ${hours}h ${remainingMinutes}m`;
 }

@@ -281,14 +281,30 @@ function buildStatusUpdateBody(
     lines.push('');
   }
 
-  // Failed Tasks
+  // Failed Tasks (grouped by issue with failure count and latest reason)
   const failedEntries = metrics.today.entries.filter(e => !e.success);
   if (failedEntries.length > 0) {
-    lines.push('### Failed Tasks');
+    // Group by issueIdentifier
+    const failedByIssue = new Map<string, { count: number; latestReason: string; taskTitle: string }>();
+
     for (const e of failedEntries) {
       const id = e.issueIdentifier || e.taskTitle.slice(0, 20);
-      const reason = e.reviewerFeedback || e.finalStatus;
-      lines.push(`- **${id}**: ${reason}`);
+      const reason = e.reviewerFeedback || e.finalStatus || 'Unknown failure';
+
+      if (!failedByIssue.has(id)) {
+        failedByIssue.set(id, { count: 0, latestReason: reason, taskTitle: e.taskTitle });
+      }
+
+      const entry = failedByIssue.get(id)!;
+      entry.count++;
+      entry.latestReason = reason; // Keep latest reason (entries are newest first)
+    }
+
+    lines.push('### Failed Tasks');
+    for (const [id, { count, latestReason }] of failedByIssue) {
+      const countStr = count > 1 ? ` (${count}회 실패)` : '';
+      const reasonStr = latestReason.length > 150 ? latestReason.slice(0, 147) + '...' : latestReason;
+      lines.push(`- **${id}**${countStr}: ${reasonStr}`);
     }
     lines.push('');
   }
@@ -426,7 +442,8 @@ function buildOverviewSection(
 // ============================================
 
 /**
- * Update Linear project Status + Overview after task completion
+ * Update Linear project Overview after task completion
+ * NOTE: Status Updates are now handled by dailyReporter (scheduled once daily)
  */
 export async function updateProjectAfterTask(
   projectId: string,
@@ -438,7 +455,7 @@ export async function updateProjectAfterTask(
   if (Date.now() - last < DEBOUNCE_MS) return;
   lastUpdateTime.set(projectId, Date.now());
 
-  await postStatusUpdate(projectId, projectName, task);
+  // Only refresh overview (Status Updates now handled by dailyReporter)
   await refreshProjectOverview(projectId, task.projectPath);
 }
 
@@ -446,10 +463,16 @@ export async function updateProjectAfterTask(
 // B-1. Create Status Update
 // ============================================
 
-async function postStatusUpdate(
+/**
+ * Post Status Update for a project (called by dailyReporter)
+ * @param projectId - Linear project ID
+ * @param projectName - Project name
+ * @param projectPath - Optional project path for knowledge graph metrics
+ */
+export async function postStatusUpdate(
   projectId: string,
   projectName: string,
-  task: CompletedTaskInfo,
+  projectPath?: string,
 ): Promise<void> {
   const linear = getClient();
 
@@ -457,8 +480,8 @@ async function postStatusUpdate(
   const metrics = collectProjectMetrics(projectName);
 
   // Async knowledge graph collection
-  if (task.projectPath) {
-    metrics.knowledge = await collectKnowledgeMetrics(task.projectPath);
+  if (projectPath) {
+    metrics.knowledge = await collectKnowledgeMetrics(projectPath);
   }
 
   // Build body

@@ -26,7 +26,7 @@ import type { ImpactAnalysis } from '../knowledge/index.js';
 /**
  * Task source
  */
-export type TaskSource = 'linear' | 'local' | 'discovered' | 'github_pr';
+export type TaskSource = 'linear' | 'local' | 'discovered' | 'github_pr' | 'github_pr_review';
 
 /**
  * Linear project info (summary)
