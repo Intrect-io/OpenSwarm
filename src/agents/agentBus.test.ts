@@ -3,7 +3,7 @@
 // Test Status: Complete
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { AgentBus, createBus, type AgentMessage, type StepCompletedPayload, type ContextUpdatePayload, type FileChangedPayload } from './agentBus.js';
+import { AgentBus, createBus, type StepCompletedPayload, type ContextUpdatePayload, type FileChangedPayload } from './agentBus.js';
 
 describe('agentBus', () => {
   let bus: AgentBus;

@@ -16,7 +16,7 @@ describe('cliStreamParser', () => {
     it('should skip empty lines', () => {
       const onLog = vi.fn();
       const ndjson = '\n\n';
-      const result = parseCliStreamChunk(ndjson, onLog);
+      parseCliStreamChunk(ndjson, onLog);
       expect(onLog).not.toHaveBeenCalled();
     });
 

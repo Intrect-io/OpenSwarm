@@ -29,8 +29,6 @@ import {
   CONFIDENCE_THRESHOLDS,
   type WorkerResult,
   type ReviewResult,
-  type PairSession,
-  type PairSessionStatus,
 } from './agentPair.js';
 
 describe('agentPair', () => {
