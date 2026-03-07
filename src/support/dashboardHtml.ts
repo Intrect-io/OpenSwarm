@@ -522,6 +522,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </div>
       <span id="sse-status">CONNECTING</span>
       <button class="btn btn-active" id="hb-btn" onclick="triggerHeartbeat()">▶ HEARTBEAT</button>
+      <button class="btn" id="pr-proc-btn" onclick="triggerPRProcessor()">↻ PR REVIEW</button>
     </div>
   </header>
 
@@ -928,6 +929,28 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       } catch(e) {
         addLogLine({ taskId: "system", stage: "error", line: "Heartbeat failed: " + e.message });
         btn.disabled = false; btn.textContent = "▶ HEARTBEAT";
+      }
+    }
+
+    // ---- PR Processor trigger ----
+    async function triggerPRProcessor() {
+      const btn = document.getElementById("pr-proc-btn");
+      btn.disabled = true; btn.textContent = "⟳ PROCESSING";
+      addLogLine({ taskId: "system", stage: "manual", line: "PR Processor triggered by user" });
+      try {
+        const res = await fetch("/api/trigger-pr-processor", { method: "POST" });
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error || "Failed to trigger PR processor");
+        }
+        addLogLine({ taskId: "system", stage: "manual", line: "PR Processor started successfully" });
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = "↻ PR REVIEW";
+        }, 3000);
+      } catch(e) {
+        addLogLine({ taskId: "system", stage: "error", line: "PR Processor failed: " + e.message });
+        btn.disabled = false; btn.textContent = "↻ PR REVIEW";
       }
     }
 
