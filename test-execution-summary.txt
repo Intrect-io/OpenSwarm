@@ -1,0 +1,73 @@
+================================================================================
+OPENSWARM UNIT TEST EXECUTION & COVERAGE REPORT
+================================================================================
+Date: 2026-03-07T22:39:48Z
+Project: OpenSwarm (Node.js + TypeScript)
+Test Framework: Vitest v4.0.18
+
+================================================================================
+EXECUTION RESULTS
+================================================================================
+
+Test Files: 5 passed
+Total Tests: 62 passed
+Test Success Rate: 100%
+Total Execution Time: 916ms
+  - Setup: 1.31s (transform)
+  - Import: 2.02s
+  - Tests: 166ms (actual test execution)
+
+================================================================================
+SLOWEST TESTS (Top 5)
+================================================================================
+
+1. src/__tests__/pairIntegration.test.ts - 63ms (15 tests)
+2. src/core/traceCollector.test.ts - 48ms (22 tests)
+3. src/__tests__/agentPair.test.ts - 35ms (14 tests)
+4. src/__tests__/reviewer.test.ts - 13ms (7 tests)
+5. src/__tests__/worker.test.ts - 8ms (4 tests)
+
+================================================================================
+LOWEST CODE COVERAGE MODULES (Top 10)
+================================================================================
+
+Note: Vitest v8 coverage provider has ESM compatibility issues
+Estimated coverage ~10-15% based on test suite
+
+1. src/support/dashboardHtml.ts (1,890 lines) - No tests
+2. src/linear/linear.ts (1,203 lines) - No tests
+3. src/support/chatTui.ts (1,191 lines) - No tests
+4. src/automation/autonomousRunner.ts (1,044 lines) - No tests
+5. src/discord/discordHandlers.ts (952 lines) - No tests
+6. src/memory/memoryCore.ts (896 lines) - No tests
+7. src/discord/discordCore.ts (889 lines) - No tests
+8. src/agents/pairPipeline.ts (879 lines) - No tests
+9. src/automation/prProcessor.ts (874 lines) - No tests
+10. src/support/web.ts (786 lines) - No tests
+
+================================================================================
+FILES GENERATED
+================================================================================
+
+- test-report.json - Detailed test execution metrics
+- coverage-analysis.json - Coverage analysis by module
+- UNIT_TEST_REPORT.md - Comprehensive markdown report
+- coverage/index.html - HTML coverage report (non-functional due to v8 issue)
+- test-execution-summary.txt - This summary file
+
+================================================================================
+ISSUES & RECOMMENDATIONS
+================================================================================
+
+ISSUE: Vitest v4 v8 coverage provider unable to instrument ESM modules
+
+CAUSE:
+  - Node.js ESM module limitations with dynamic instrumentation
+  - Compatibility issue when using --experimental-vm-modules
+
+RECOMMENDED SOLUTIONS:
+  1. Upgrade Vitest to latest version (>= 4.4.0)
+  2. Switch to Istanbul coverage provider
+  3. Consider using Bun test runner (native ESM support)
+
+================================================================================

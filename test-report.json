@@ -1,0 +1,85 @@
+{
+  "reportDate": "2026-03-07T22:39:48Z",
+  "projectName": "OpenSwarm",
+  "testFramework": "vitest",
+  "summary": {
+    "totalTestFiles": 5,
+    "totalTests": 62,
+    "passedTests": 62,
+    "failedTests": 0,
+    "totalDuration": "916ms",
+    "testsDuration": "166ms",
+    "transformDuration": "1.31s",
+    "importDuration": "2.02s",
+    "successRate": "100%"
+  },
+  "testFileBreakdown": [
+    {
+      "file": "src/__tests__/agentPair.test.ts",
+      "tests": 14,
+      "duration": "35ms",
+      "status": "passed"
+    },
+    {
+      "file": "src/core/traceCollector.test.ts",
+      "tests": 22,
+      "duration": "48ms",
+      "status": "passed"
+    },
+    {
+      "file": "src/__tests__/pairIntegration.test.ts",
+      "tests": 15,
+      "duration": "63ms",
+      "status": "passed"
+    },
+    {
+      "file": "src/__tests__/worker.test.ts",
+      "tests": 4,
+      "duration": "8ms",
+      "status": "passed"
+    },
+    {
+      "file": "src/__tests__/reviewer.test.ts",
+      "tests": 7,
+      "duration": "13ms",
+      "status": "passed"
+    }
+  ],
+  "slowestTests": [
+    {
+      "rank": 1,
+      "file": "src/__tests__/pairIntegration.test.ts",
+      "duration": "63ms",
+      "testCount": 15
+    },
+    {
+      "rank": 2,
+      "file": "src/core/traceCollector.test.ts",
+      "duration": "48ms",
+      "testCount": 22
+    },
+    {
+      "rank": 3,
+      "file": "src/__tests__/agentPair.test.ts",
+      "duration": "35ms",
+      "testCount": 14
+    },
+    {
+      "rank": 4,
+      "file": "src/__tests__/reviewer.test.ts",
+      "duration": "13ms",
+      "testCount": 7
+    },
+    {
+      "rank": 5,
+      "file": "src/__tests__/worker.test.ts",
+      "duration": "8ms",
+      "testCount": 4
+    }
+  ],
+  "coverageNotes": {
+    "status": "NotMeasured",
+    "reason": "vitest v8 provider has compatibility issues with ESM modules",
+    "recommendation": "Consider upgrading vitest or using alternative coverage provider"
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "coverageAnalysis": {
+    "status": "LowCoverage",
+    "message": "vitest v8 coverage provider unable to measure coverage for ESM modules",
+    "affectedModulesEstimate": "Estimated 85-90% of source code untested based on existing test suite"
+  },
+  "lowestCoverageModules": [
+    {
+      "rank": 1,
+      "module": "src/support/dashboardHtml.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 1890,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 2,
+      "module": "src/linear/linear.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 1203,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 3,
+      "module": "src/support/chatTui.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 1191,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 4,
+      "module": "src/automation/autonomousRunner.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 1044,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 5,
+      "module": "src/discord/discordHandlers.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 952,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 6,
+      "module": "src/memory/memoryCore.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 896,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 7,
+      "module": "src/discord/discordCore.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 889,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 8,
+      "module": "src/agents/pairPipeline.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 879,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 9,
+      "module": "src/automation/prProcessor.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 874,
+      "reason": "No test file found"
+    },
+    {
+      "rank": 10,
+      "module": "src/support/web.ts",
+      "estimatedCoverage": "0%",
+      "lineCount": 786,
+      "reason": "No test file found"
+    }
+  ]
+}

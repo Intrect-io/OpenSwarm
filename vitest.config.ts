@@ -9,8 +9,12 @@ export default defineConfig({
     testTimeout: 30000,
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'lcov'],
-      exclude: ['node_modules', 'dist', '**/*.test.ts'],
+      reporter: ['text', 'lcov', 'html', 'json'],
+      all: true,
+      exclude: ['node_modules', 'dist', '**/*.test.ts', 'src/__tests__'],
+      lines: 50,
+      functions: 50,
+      branches: 50,
     },
   },
 });
