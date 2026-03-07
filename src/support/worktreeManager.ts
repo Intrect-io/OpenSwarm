@@ -102,8 +102,9 @@ export async function commitAndCreatePR(
 ): Promise<string> {
   const { worktreePath, branchName } = info;
 
-  // Check for changes and commit
+  // Check for uncommitted changes and commit them
   const status = await git(worktreePath, 'status', '--porcelain');
+
   if (status.trim()) {
     await git(worktreePath, 'add', '-A');
     const commitMsg = [
@@ -121,10 +122,24 @@ export async function commitAndCreatePR(
     }
 
     await git(worktreePath, 'commit', '-m', commitMsg);
+    console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
   }
 
-  // push
+  // Check if there are any commits ahead of origin/main (including worker-made commits)
+  const commitsAhead = await git(worktreePath, 'rev-list', '--count', 'origin/main..HEAD')
+    .then((out) => parseInt(out.trim(), 10))
+    .catch(() => 0);
+
+  if (commitsAhead === 0) {
+    console.log(`[Worktree] No commits ahead of origin/main (${branchName}) - nothing to PR`);
+    throw new Error('No commits to create PR from - branch has no changes compared to main');
+  }
+
+  console.log(`[Worktree] Branch ${branchName} has ${commitsAhead} commit(s) ahead of origin/main`);
+
+  // Push branch to remote (always push since we have commits ahead)
   await git(worktreePath, 'push', '-u', 'origin', branchName, '--force-with-lease');
+  console.log(`[Worktree] Pushed branch ${branchName}`);
 
   // If PR already exists, just return the URL
   const existing = await gh('pr', 'list', '--head', branchName, '--state', 'open', '--json', 'url', '--jq', '.[0].url')

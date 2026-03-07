@@ -96,6 +96,8 @@ export interface PipelineContext {
   config: PipelineConfig;
   /** Current iteration number (1-based) */
   currentIteration: number;
+  /** Formatted task prefix for consistent logging (e.g., "OpenSwarm | INT-1171 | worktree/abc123") */
+  taskPrefix: string;
   workerResult?: WorkerResult;
   reviewResult?: ReviewResult;
   testerResult?: TesterResult;
@@ -103,6 +105,27 @@ export interface PipelineContext {
   auditorResult?: AuditorResult;
   skillDocumenterResult?: SkillDocumenterResult;
   guardsResult?: GuardsRunResult;
+}
+
+/**
+ * Build a consistent task prefix for logging across all pipeline stages.
+ * Format: "ProjectName | INT-XXX | worktree/abc123" or "ProjectName | INT-XXX"
+ */
+export function buildTaskPrefix(task: TaskItem, projectPath: string): string {
+  const parts: string[] = [];
+  const projectName = task.linearProject?.name || projectPath.split('/').pop() || 'unknown';
+  parts.push(projectName);
+  if (task.issueIdentifier) {
+    parts.push(task.issueIdentifier);
+  } else if (task.issueId) {
+    parts.push(task.issueId.slice(0, 8));
+  }
+  // Detect worktree path
+  const worktreeMatch = projectPath.match(/worktree\/([a-f0-9-]+)/);
+  if (worktreeMatch) {
+    parts.push(`worktree/${worktreeMatch[1].slice(0, 8)}`);
+  }
+  return parts.join(' | ');
 }
 
 // ============================================
@@ -174,12 +197,15 @@ export class PairPipeline extends EventEmitter {
       },
     });
 
+    const taskPrefix = buildTaskPrefix(task, projectPath);
+
     const context: PipelineContext = {
       task,
       projectPath,
       session,
       config: this.config,
       currentIteration: 0,
+      taskPrefix,
     };
 
     try {
@@ -196,7 +222,7 @@ export class PairPipeline extends EventEmitter {
           this.config.skipDocumenterIfNoChange &&
           (!context.workerResult.filesChanged || context.workerResult.filesChanged.length === 0)
         ) {
-          console.log('[Pipeline] Skipping documenter: no files changed');
+          console.log(`[${context.taskPrefix}] Skipping documenter: no files changed`);
         } else {
           const documenterResult = await this.runStage('documenter', context);
           stages.push(documenterResult);
@@ -223,7 +249,7 @@ export class PairPipeline extends EventEmitter {
       return this.buildResult(context, stages, startTime);
 
     } catch (error) {
-      console.error('[Pipeline] Error:', error);
+      console.error(`[${context.taskPrefix}] Error:`, error);
       agentPair.updateSessionStatus(session.id, 'failed');
       return {
         success: false,
@@ -267,6 +293,8 @@ export class PairPipeline extends EventEmitter {
   ): Promise<StageResult> {
     const startTime = Date.now();
     const stageModel = overrides?.model ?? this.config.roles?.[stage]?.model;
+    const prefix = context.taskPrefix;
+    console.log(`[${prefix}] Stage starting: ${stage}`);
     this.emit('stage:start', { stage, context });
     broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'start', model: stageModel } });
 
@@ -278,12 +306,12 @@ export class PairPipeline extends EventEmitter {
           agentPair.updateSessionStatus(context.session.id, 'working');
           const taskId = context.task.id;
           const onLog = (line: string) =>
-            broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line } });
+            broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line: `[${prefix}] ${line}` } });
 
           // Check if fresh context should be used (after N failures)
           const useFreshContext = agentPair.shouldUseFreshContext(context.session.id);
           if (useFreshContext) {
-            console.log('[Pipeline] Using fresh context for worker (retry with clean slate)');
+            console.log(`[${prefix}] Using fresh context for worker (retry with clean slate)`);
             agentPair.consumeFreshContext(context.session.id);
             onLog('🔄 Using fresh context (previous attempts failed)');
           }
@@ -313,7 +341,7 @@ export class PairPipeline extends EventEmitter {
 
           // Check if confidence intervention is needed
           if (agentPair.needsConfidenceIntervention(context.session.id)) {
-            console.warn('[Pipeline] Confidence intervention needed - early review triggered');
+            console.warn(`[${prefix}] Confidence intervention needed - early review triggered`);
             const summary = agentPair.getConfidenceSummary(context.session.id);
             this.emit('log', { line: `⚠️ Low confidence detected: ${summary}` });
             // Continue to review, but reviewer should be aware of low confidence
@@ -330,7 +358,7 @@ export class PairPipeline extends EventEmitter {
 
           // Pre-check disabled - Haiku format compliance issues causing false rejections
           // Proceed directly to full Sonnet review for reliability
-          console.log('[Pipeline] Running full review (Sonnet)...');
+          console.log(`[${prefix}] Running full review (Sonnet)...`);
           result = await reviewerAgent.runReviewer({
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
@@ -419,7 +447,7 @@ export class PairPipeline extends EventEmitter {
         completedAt,
       };
 
-      console.log(`[Pipeline] ${stage} completed at ${formatTimestamp(completedAt)} (${(stageResult.duration / 1000).toFixed(1)}s)`);
+      console.log(`[${prefix}] ${stage} completed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:complete', { stage, result: stageResult, context });
       const costInfo = (result as { costInfo?: CostInfo }).costInfo;
       broadcastEvent({ type: 'pipeline:stage', data: {
@@ -445,7 +473,7 @@ export class PairPipeline extends EventEmitter {
         completedAt,
       };
 
-      console.log(`[Pipeline] ${stage} failed at ${formatTimestamp(completedAt)} (${(stageResult.duration / 1000).toFixed(1)}s)`);
+      console.log(`[${prefix}] ${stage} failed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:fail', { stage, result: stageResult, context, error });
       broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'fail' } });
       return stageResult;
@@ -505,7 +533,7 @@ export class PairPipeline extends EventEmitter {
 
     // No point without a worker
     if (!hasWorker) {
-      console.log('[Pipeline] No worker stage configured');
+      console.log(`[${context.taskPrefix}] No worker stage configured`);
       return { success: false };
     }
 
@@ -515,8 +543,8 @@ export class PairPipeline extends EventEmitter {
       // Stuck detection check (before iteration starts)
       const stuckCheck = this.stuckDetector.check();
       if (stuckCheck.isStuck) {
-        console.error(`[Pipeline] STUCK DETECTED: ${stuckCheck.reason}`);
-        console.error(`[Pipeline] Suggestion: ${stuckCheck.suggestion}`);
+        console.error(`[${context.taskPrefix}] STUCK DETECTED: ${stuckCheck.reason}`);
+        console.error(`[${context.taskPrefix}] Suggestion: ${stuckCheck.suggestion}`);
         this.emit('stuck', {
           reason: stuckCheck.reason,
           suggestion: stuckCheck.suggestion,
@@ -533,7 +561,7 @@ export class PairPipeline extends EventEmitter {
       });
       broadcastEvent({ type: 'pipeline:iteration', data: { taskId: context.task.id, iteration: context.currentIteration } });
 
-      console.log(`[Pipeline] Iteration ${context.currentIteration}/${maxIterations}`);
+      console.log(`[${context.taskPrefix}] Iteration ${context.currentIteration}/${maxIterations}`);
 
       // ========== WORKER (with escalation) ==========
       const workerCfg = this.config.roles?.worker;
@@ -542,7 +570,7 @@ export class PairPipeline extends EventEmitter {
       const workerOverrides = shouldEscalate ? { model: workerCfg!.escalateModel! } : undefined;
 
       if (shouldEscalate) {
-        console.log(`[Pipeline] Escalating worker model → ${workerCfg!.escalateModel} (iteration ${context.currentIteration})`);
+        console.log(`[${context.taskPrefix}] Escalating worker model → ${workerCfg!.escalateModel} (iteration ${context.currentIteration})`);
         broadcastEvent({ type: 'pipeline:escalation', data: {
           taskId: context.task.id,
           iteration: context.currentIteration,
@@ -565,7 +593,7 @@ export class PairPipeline extends EventEmitter {
       });
 
       if (!workerResult.success) {
-        console.log('[Pipeline] Worker failed, retrying...');
+        console.log(`[${context.taskPrefix}] Worker failed, retrying...`);
         agentPair.trackFailure(context.session.id); // Track for fresh context decision
         this.emit('iteration:fail', {
           iteration: context.currentIteration,
@@ -577,7 +605,7 @@ export class PairPipeline extends EventEmitter {
 
       // ========== PIPELINE GUARDS (post-worker, pre-reviewer) ==========
       if (this.config.guards && context.workerResult) {
-        console.log('[Pipeline] Running pipeline guards...');
+        console.log(`[${context.taskPrefix}] Running pipeline guards...`);
         const guardsResult = await runGuards(
           context.workerResult,
           context.projectPath,
@@ -587,7 +615,7 @@ export class PairPipeline extends EventEmitter {
 
         if (!guardsResult.allPassed) {
           // Blocking guard failed → inject revise, skip reviewer
-          console.log(`[Pipeline] Blocking guard failed: ${guardsResult.combinedIssues.join('; ')}`);
+          console.log(`[${context.taskPrefix}] Blocking guard failed: ${guardsResult.combinedIssues.join('; ')}`);
           context.reviewResult = {
             decision: 'revise',
             feedback: `Pipeline guard failed: ${guardsResult.combinedIssues.join('; ')}`,
@@ -607,7 +635,7 @@ export class PairPipeline extends EventEmitter {
         // Log non-blocking guard warnings
         const warnings = guardsResult.results.filter(r => !r.passed && !r.blocking);
         if (warnings.length > 0) {
-          console.log(`[Pipeline] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
+          console.log(`[${context.taskPrefix}] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
           this.emit('log', {
             line: `⚠️ Guard warnings: ${warnings.flatMap(w => w.issues).join('; ')}`,
           });
@@ -620,7 +648,7 @@ export class PairPipeline extends EventEmitter {
         if (confidence < CONFIDENCE_THRESHOLDS.HALT) {
           const haltReason = context.workerResult.haltReason
             || `Low confidence: ${confidence}%`;
-          console.warn(`[Pipeline] HALT triggered: confidence=${confidence}%, reason=${haltReason}`);
+          console.warn(`[${context.taskPrefix}] HALT triggered: confidence=${confidence}%, reason=${haltReason}`);
 
           this.emit('halt', {
             confidence,
@@ -667,14 +695,14 @@ export class PairPipeline extends EventEmitter {
 
         if (decision === 'reject') {
           // reject = terminate immediately
-          console.log('[Pipeline] Reviewer rejected');
+          console.log(`[${context.taskPrefix}] Reviewer rejected`);
           agentPair.updateSessionStatus(context.session.id, 'rejected');
           return { success: false };
         }
 
         if (decision === 'revise') {
           // revise = next iteration
-          console.log('[Pipeline] Reviewer requested revision');
+          console.log(`[${context.taskPrefix}] Reviewer requested revision`);
           agentPair.trackFailure(context.session.id); // Track for fresh context decision
           this.emit('iteration:fail', {
             iteration: context.currentIteration,
@@ -696,7 +724,7 @@ export class PairPipeline extends EventEmitter {
 
         if (!testerResult.success && !this.config.continueOnTestFail) {
           // Test failed → set feedback then next iteration
-          console.log('[Pipeline] Tester failed, retrying...');
+          console.log(`[${context.taskPrefix}] Tester failed, retrying...`);
           agentPair.trackFailure(context.session.id); // Track for fresh context decision
 
           if (context.testerResult) {
@@ -719,7 +747,7 @@ export class PairPipeline extends EventEmitter {
       }
 
       // ========== ALL PASSED ==========
-      console.log(`[Pipeline] Iteration ${context.currentIteration} completed successfully`);
+      console.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
       this.emit('iteration:complete', {
         iteration: context.currentIteration,
         context,
@@ -728,7 +756,7 @@ export class PairPipeline extends EventEmitter {
     }
 
     // maxIterations exceeded
-    console.log(`[Pipeline] Max iterations (${maxIterations}) exceeded`);
+    console.log(`[${context.taskPrefix}] Max iterations (${maxIterations}) exceeded`);
     agentPair.updateSessionStatus(context.session.id, 'failed');
     return { success: false };
   }
@@ -763,7 +791,7 @@ export class PairPipeline extends EventEmitter {
     const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
 
     if (totalCost) {
-      console.log(`[Pipeline] Total cost: ${formatCost(totalCost)}`);
+      console.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
       broadcastEvent({ type: 'task:cost', data: { taskId: context.task.id, cost: totalCost } });
     }
 

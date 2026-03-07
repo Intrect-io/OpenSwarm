@@ -8,7 +8,7 @@ import type { TaskItem, DecisionResult } from '../orchestration/decisionEngine.j
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, PipelineStage } from '../core/types.js';
-import { createPipelineFromConfig } from '../agents/pairPipeline.js';
+import { createPipelineFromConfig, buildTaskPrefix } from '../agents/pairPipeline.js';
 import { formatParsedTaskSummary, loadParsedTask } from '../orchestration/taskParser.js';
 import { saveCognitiveMemory } from '../memory/index.js';
 import * as workerAgent from '../agents/worker.js';
@@ -160,8 +160,27 @@ export async function resolveProjectPath(
     return lowerPath;
   }
 
+  // Check ~/dev/tools/ subdirectory
+  const toolsPath = `${process.env.HOME}/dev/tools/${projectName}`;
+  if (await isValidProjectPath(toolsPath)) {
+    console.log(`[AutonomousRunner] Tools path found: ${projectName} → ${toolsPath}`);
+    return toolsPath;
+  }
+
+  // Check allowedProjects for exact basename match
+  for (const allowed of ctx.allowedProjects) {
+    const expanded = allowed.replace('~', process.env.HOME || '');
+    const dirName = expanded.split('/').pop();
+    if (dirName === projectName || dirName?.toLowerCase() === projectName.toLowerCase()) {
+      if (await isValidProjectPath(expanded)) {
+        console.log(`[AutonomousRunner] AllowedProjects match: ${projectName} → ${expanded}`);
+        return expanded;
+      }
+    }
+  }
+
   console.error(`[AutonomousRunner] Failed to resolve project path for "${projectName}" - SKIP`);
-  console.error(`[AutonomousRunner] Tried: mapper, ${directPath}, ${lowerPath}`);
+  console.error(`[AutonomousRunner] Tried: mapper, ${directPath}, ${lowerPath}, ${toolsPath}, allowedProjects`);
   return null;
 }
 
@@ -450,16 +469,9 @@ export async function executePipeline(
         // Planner says task is smaller than threshold — proceed with direct execution
         console.log('[AutonomousRunner] Planner says task fits in threshold, executing directly');
       } else {
-        // Decomposition actually failed (planner error, API error, etc.)
-        console.log('[AutonomousRunner] Decomposition failed for oversized task, skipping execution');
-        return {
-          success: false,
-          sessionId: `decomp-failed-${Date.now()}`,
-          iterations: 0,
-          totalDuration: 0,
-          finalStatus: 'failed',
-          stages: [],
-        };
+        // Decomposition failed (limit reached, planner error, API error, etc.)
+        // Fall through to direct execution instead of aborting entirely
+        console.log('[AutonomousRunner] Decomposition failed, falling back to direct execution');
       }
     }
   }
@@ -492,8 +504,10 @@ export async function executePipeline(
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
     const pipeline = createPipelineFromConfig(roles, ctx.pairMaxAttempts ?? 3, ctx.guards);
 
+    const taskPrefix = buildTaskPrefix(task, actualPath);
+
     pipeline.on('stage:start', ({ stage }) => {
-      console.log(`[Pipeline] Stage started: ${stage}`);
+      console.log(`[${taskPrefix}] Stage started: ${stage}`);
     });
 
     const taskReportCtx = {
@@ -503,7 +517,7 @@ export async function executePipeline(
     };
 
     pipeline.on('stage:complete', async ({ stage, result }) => {
-      console.log(`[Pipeline] Stage completed: ${stage}, success=${result.success}`);
+      console.log(`[${taskPrefix}] Stage completed: ${stage}, success=${result.success}`);
       await reportStageResult(stage, result, ctx.reportToDiscord, taskReportCtx);
     });
 
@@ -513,14 +527,14 @@ export async function executePipeline(
 
     // HALT event: low confidence → report to Linear + Discord
     pipeline.on('halt', async ({ confidence, haltReason, sessionId, iteration }) => {
-      console.warn(`[Pipeline] HALT event: confidence=${confidence}%, reason=${haltReason}`);
+      console.warn(`[${taskPrefix}] HALT event: confidence=${confidence}%, reason=${haltReason}`);
 
       // Report to Linear
       if (task.issueId && ctx.guards?.haltToLinear) {
         try {
           await linear.logHalt(task.issueId, sessionId, confidence, iteration, haltReason);
         } catch (err) {
-          console.error('[Pipeline] Linear logHalt failed:', err);
+          console.error(`[${taskPrefix}] Linear logHalt failed:`, err);
         }
       }
 
@@ -562,7 +576,7 @@ export async function executePipeline(
       try {
         await linear.logPairStart(task.issueId, `pipeline-${Date.now()}`, projectPath);
       } catch (err) {
-        console.error('[Pipeline] Linear logPairStart failed:', err);
+        console.error(`[${taskPrefix}] Linear logPairStart failed:`, err);
         // Continue pipeline even if this fails
         await linear.updateIssueState(task.issueId, 'In Progress');
       }
@@ -571,8 +585,8 @@ export async function executePipeline(
     // Run pipeline in worktree path
     const result = await pipeline.run(task, actualPath);
 
-    // Create PR (worktree mode + success + reviewer approved)
-    if (worktreeInfo && result.success && result.finalStatus !== 'rejected') {
+    // Create PR (worktree mode + pipeline success = finalStatus 'approved')
+    if (worktreeInfo && result.success && result.finalStatus === 'approved') {
       try {
         const prUrl = await commitAndCreatePR(
           worktreeInfo,
@@ -589,9 +603,24 @@ export async function executePipeline(
             line: `PR created: ${prUrl}`,
           },
         });
+        console.log(`[Runner] PR created for ${task.issueIdentifier}: ${prUrl}`);
       } catch (err) {
         console.error('[Worktree] PR creation failed:', err);
+        broadcastEvent({
+          type: 'log',
+          data: {
+            taskId: task.issueId || task.id,
+            stage: 'pr',
+            line: `PR creation failed: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        });
       }
+    } else if (worktreeInfo) {
+      // Log why PR was not created
+      const reason = !result.success
+        ? `Pipeline failed (${result.finalStatus})`
+        : `Unexpected state (success=${result.success}, finalStatus=${result.finalStatus})`;
+      console.log(`[Runner] PR not created for ${task.issueIdentifier}: ${reason}`);
     }
 
     return result;

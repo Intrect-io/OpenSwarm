@@ -20,6 +20,7 @@ import { getActiveMonitors, registerMonitor, unregisterMonitor } from '../automa
 import type { LongRunningMonitorConfig } from '../core/types.js';
 import { getAllProcesses, killProcess, startHealthChecker } from '../adapters/processRegistry.js';
 import * as memory from '../memory/index.js';
+import { fetchQuota } from './quotaTracker.js';
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
@@ -247,6 +248,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           const { projectPath } = JSON.parse(body) as { projectPath: string };
           if (typeof projectPath === 'string') {
             pinnedProjects.delete(projectPath);
+            // Also disable the project so it doesn't reappear via enabledPaths
+            runnerRef?.disableProject(projectPath);
             saveReposConfig();
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -740,6 +743,12 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         saveReposConfig();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
+
+      // ---- Claude Code Quota ----
+      } else if (url === '/api/quota' && req.method === 'GET') {
+        const quota = await fetchQuota();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(quota ?? { error: 'unavailable' }));
 
       // ---- Discord history (legacy) ----
       } else if (url === '/api/history') {
