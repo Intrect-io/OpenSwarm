@@ -102,12 +102,10 @@ export async function commitAndCreatePR(
 ): Promise<string> {
   const { worktreePath, branchName } = info;
 
-  // Check for changes and commit
+  // Check for uncommitted changes and commit them
   const status = await git(worktreePath, 'status', '--porcelain');
-  let hasChanges = false;
 
   if (status.trim()) {
-    hasChanges = true;
     await git(worktreePath, 'add', '-A');
     const commitMsg = [
       `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
@@ -124,45 +122,24 @@ export async function commitAndCreatePR(
     }
 
     await git(worktreePath, 'commit', '-m', commitMsg);
-    console.log(`[Worktree] Committed changes (${branchName})`);
-  } else {
-    console.log(`[Worktree] No changes detected (${branchName})`);
+    console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
   }
 
-  // Push if there are changes (need commits to push)
-  if (hasChanges) {
-    await git(worktreePath, 'push', '-u', 'origin', branchName, '--force-with-lease');
-    console.log(`[Worktree] Pushed branch ${branchName}`);
-  } else {
-    console.log(`[Worktree] No changes to commit (${branchName})`);
+  // Check if there are any commits ahead of origin/main (including worker-made commits)
+  const commitsAhead = await git(worktreePath, 'rev-list', '--count', 'origin/main..HEAD')
+    .then((out) => parseInt(out.trim(), 10))
+    .catch(() => 0);
+
+  if (commitsAhead === 0) {
+    console.log(`[Worktree] No commits ahead of origin/main (${branchName}) - nothing to PR`);
+    throw new Error('No commits to create PR from - branch has no changes compared to main');
   }
 
-  // Ensure branch exists on remote for PR creation
-  // This is critical when there are no changes - we still need the branch on remote to create a PR
-  let branchOnRemote = hasChanges; // If we pushed changes, branch is on remote
+  console.log(`[Worktree] Branch ${branchName} has ${commitsAhead} commit(s) ahead of origin/main`);
 
-  if (!branchOnRemote) {
-    // Check if branch exists on remote
-    const remoteBranchExists = await git(worktreePath, 'branch', '-r', '--list', `origin/${branchName}`)
-      .then((out) => out.trim().length > 0)
-      .catch(() => false);
-
-    if (!remoteBranchExists) {
-      // Branch created locally but not on remote, need to push it
-      console.log(`[Worktree] Branch not on remote, pushing ${branchName}...`);
-      try {
-        // Push branch without requiring commits
-        await git(worktreePath, 'push', '-u', 'origin', branchName);
-        console.log(`[Worktree] Pushed branch ${branchName} to remote (no commits, but branch created)`);
-        branchOnRemote = true;
-      } catch (err) {
-        console.warn(`[Worktree] Failed to push branch ${branchName}:`, err);
-        // Continue to PR creation - it may still work
-      }
-    } else {
-      branchOnRemote = true;
-    }
-  }
+  // Push branch to remote (always push since we have commits ahead)
+  await git(worktreePath, 'push', '-u', 'origin', branchName, '--force-with-lease');
+  console.log(`[Worktree] Pushed branch ${branchName}`);
 
   // If PR already exists, just return the URL
   const existing = await gh('pr', 'list', '--head', branchName, '--state', 'open', '--json', 'url', '--jq', '.[0].url')
