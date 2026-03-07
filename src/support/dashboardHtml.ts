@@ -129,6 +129,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .stat-val { font-size: 15px; font-weight: bold; color: var(--green); }
     .stat-val.amber { color: var(--amber); }
     .stat-val.cyan { color: var(--cyan); }
+    .stat-val.red { color: #ff5555; }
     .stat-divider { color: var(--border); }
 
     /* ===== MAIN GRID ===== */
@@ -539,6 +540,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="stat"><span class="stat-label">UPTIME</span><span class="stat-val" id="stat-uptime">-</span></div>
     <span class="stat-divider">│</span>
     <div class="stat"><span class="stat-label">COST</span><span class="stat-val cyan" id="stat-cost">$0.00</span></div>
+    <span class="stat-divider">│</span>
+    <div class="stat"><span class="stat-label">QUOTA 5h</span><span class="stat-val" id="stat-quota-5h">-</span></div>
+    <span class="stat-divider">│</span>
+    <div class="stat"><span class="stat-label">QUOTA 7d</span><span class="stat-val" id="stat-quota-7d">-</span></div>
   </div>
 
   <!-- TAB BAR (mobile only) -->
@@ -1208,6 +1213,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         const res = await fetch("/api/projects");
         projects = await res.json();
         renderProjects();
+        // Update picker state so re-adding works correctly
+        const item = allLocalProjects.find(function(p) { return p.path === path; });
+        if (item) item.pinned = false;
       } catch(e) { el.disabled = false; }
     }
     async function handleMoveToTodo(el) {
@@ -1867,6 +1875,28 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       } catch {}
     }
 
+    // ---- Quota tracker ----
+    async function fetchQuota() {
+      try {
+        var res = await fetch("/api/quota");
+        if (!res.ok) return;
+        var q = await res.json();
+        if (q.error) return;
+        var el5h = document.getElementById("stat-quota-5h");
+        var el7d = document.getElementById("stat-quota-7d");
+        if (q.five_hour && el5h) {
+          var u5 = Math.round(q.five_hour.utilization);
+          el5h.textContent = u5 + "%";
+          el5h.className = "stat-val " + (u5 >= 80 ? "red" : u5 >= 50 ? "amber" : "cyan");
+        }
+        if (q.seven_day && el7d) {
+          var u7 = Math.round(q.seven_day.utilization);
+          el7d.textContent = u7 + "%";
+          el7d.className = "stat-val " + (u7 >= 80 ? "red" : u7 >= 50 ? "amber" : "cyan");
+        }
+      } catch {}
+    }
+
     loadInitial().then(function() { connectSSE(true); });
     fetchSvcStatus();
     fetchPRProcessorStatus();
@@ -1874,12 +1904,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     fetchKnowledgeData();
     fetchMonitors();
     fetchProcesses();
+    fetchQuota();
     setInterval(fetchSvcStatus, 15000);
     setInterval(fetchPRProcessorStatus, 30000);
     setInterval(fetchStuckIssues, 30000);
     setInterval(fetchKnowledgeData, 60000);
     setInterval(fetchMonitors, 60000);
     setInterval(fetchProcesses, 30000);
+    setInterval(fetchQuota, 300000);
     // Refresh pipeline elapsed times every 10s
     setInterval(() => { if (stageRows.length) renderStages(); }, 10000);
   </script>
