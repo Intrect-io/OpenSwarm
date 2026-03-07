@@ -316,6 +316,25 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           res.end(JSON.stringify({ error: String(error) }));
         }
 
+      // ---- Trigger PR Processor ----
+      } else if (url === '/api/trigger-pr-processor' && req.method === 'POST') {
+        try {
+          const { getPRProcessor } = await import('../core/service.js');
+          const processor = getPRProcessor();
+          if (!processor) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'PR Processor not initialized' }));
+            return;
+          }
+          res.writeHead(202, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+          // Non-blocking PR processing
+          processor.processPRs().catch((e: Error) => console.error('[Web] PR Processor error:', e));
+        } catch (error) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+
       // ---- CI Worker Status ----
       } else if (url === '/api/ci-worker-status' && req.method === 'GET') {
         try {

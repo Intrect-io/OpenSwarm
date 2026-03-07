@@ -623,14 +623,10 @@ export class PRProcessor {
       reviewIteration++;
       console.log(`[PRProcessor] ${key}: Checking review feedback (iteration ${reviewIteration}/${MAX_REVIEW_ITERATIONS})...`);
 
-      // Get PR reviews
-      const { getPRReviews, getPRReviewComments } = await import('../github/github.js');
+      // Get PR reviews and comments
+      const { getPRReviews, getPRReviewComments, getPRComments } = await import('../github/github.js');
       const reviews = await getPRReviews(pr.repo, pr.number);
-
-      if (!reviews || reviews.length === 0) {
-        console.log(`[PRProcessor] ${key}: No reviews found`);
-        return;
-      }
+      const prComments = await getPRComments(pr.repo, pr.number);
 
       // Find latest reviews per user (only consider latest review from each reviewer)
       const latestReviews = new Map<string, typeof reviews[0]>();
@@ -646,20 +642,30 @@ export class PRProcessor {
         r => r.state === 'CHANGES_REQUESTED'
       );
 
-      if (changesRequested.length === 0) {
-        console.log(`[PRProcessor] ${key}: No changes requested - all reviews approved or commented`);
+      // Check for critical feedback in PR comments (from claude-review action)
+      const criticalKeywords = ['🔴', 'critical', '버그', 'bug', '수정 필요', 'must fix', '필수', 'required'];
+      const criticalComments = prComments.filter(c => {
+        const bodyLower = c.body.toLowerCase();
+        return (c.author === 'claude' || c.author.includes('claude')) &&
+               criticalKeywords.some(keyword => bodyLower.includes(keyword.toLowerCase()));
+      });
+
+      if (changesRequested.length === 0 && criticalComments.length === 0) {
+        console.log(`[PRProcessor] ${key}: No changes requested - all reviews approved or no critical feedback`);
         state.prs[key].status = 'completed';
         state.prs[key].iterations = totalIterations;
         return;
       }
 
-      console.log(`[PRProcessor] ${key}: Found ${changesRequested.length} review(s) requesting changes`);
+      console.log(`[PRProcessor] ${key}: Found ${changesRequested.length} review(s) requesting changes, ${criticalComments.length} critical comment(s)`);
 
       // Get review comments for detailed feedback
       const comments = await getPRReviewComments(pr.repo, pr.number);
 
       // Build feedback summary
       const feedbackLines: string[] = [];
+
+      // Add formal review feedback
       for (const review of changesRequested) {
         feedbackLines.push(`### Review by ${review.author}`);
         if (review.body) {
@@ -679,6 +685,16 @@ export class PRProcessor {
           }
         }
         feedbackLines.push('');
+      }
+
+      // Add critical PR comments feedback
+      if (criticalComments.length > 0) {
+        feedbackLines.push(`### Critical Feedback from PR Comments`);
+        for (const comment of criticalComments) {
+          feedbackLines.push(`**Comment by ${comment.author}:**`);
+          feedbackLines.push(comment.body);
+          feedbackLines.push('');
+        }
       }
 
       const feedbackSummary = feedbackLines.join('\n');
