@@ -8,7 +8,7 @@ import type { TaskItem, DecisionResult } from '../orchestration/decisionEngine.j
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, PipelineStage } from '../core/types.js';
-import { createPipelineFromConfig } from '../agents/pairPipeline.js';
+import { createPipelineFromConfig, buildTaskPrefix } from '../agents/pairPipeline.js';
 import { formatParsedTaskSummary, loadParsedTask } from '../orchestration/taskParser.js';
 import { saveCognitiveMemory } from '../memory/index.js';
 import * as workerAgent from '../agents/worker.js';
@@ -504,8 +504,10 @@ export async function executePipeline(
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
     const pipeline = createPipelineFromConfig(roles, ctx.pairMaxAttempts ?? 3, ctx.guards);
 
+    const taskPrefix = buildTaskPrefix(task, actualPath);
+
     pipeline.on('stage:start', ({ stage }) => {
-      console.log(`[Pipeline] Stage started: ${stage}`);
+      console.log(`[${taskPrefix}] Stage started: ${stage}`);
     });
 
     const taskReportCtx = {
@@ -515,7 +517,7 @@ export async function executePipeline(
     };
 
     pipeline.on('stage:complete', async ({ stage, result }) => {
-      console.log(`[Pipeline] Stage completed: ${stage}, success=${result.success}`);
+      console.log(`[${taskPrefix}] Stage completed: ${stage}, success=${result.success}`);
       await reportStageResult(stage, result, ctx.reportToDiscord, taskReportCtx);
     });
 
@@ -525,14 +527,14 @@ export async function executePipeline(
 
     // HALT event: low confidence → report to Linear + Discord
     pipeline.on('halt', async ({ confidence, haltReason, sessionId, iteration }) => {
-      console.warn(`[Pipeline] HALT event: confidence=${confidence}%, reason=${haltReason}`);
+      console.warn(`[${taskPrefix}] HALT event: confidence=${confidence}%, reason=${haltReason}`);
 
       // Report to Linear
       if (task.issueId && ctx.guards?.haltToLinear) {
         try {
           await linear.logHalt(task.issueId, sessionId, confidence, iteration, haltReason);
         } catch (err) {
-          console.error('[Pipeline] Linear logHalt failed:', err);
+          console.error(`[${taskPrefix}] Linear logHalt failed:`, err);
         }
       }
 
@@ -574,7 +576,7 @@ export async function executePipeline(
       try {
         await linear.logPairStart(task.issueId, `pipeline-${Date.now()}`, projectPath);
       } catch (err) {
-        console.error('[Pipeline] Linear logPairStart failed:', err);
+        console.error(`[${taskPrefix}] Linear logPairStart failed:`, err);
         // Continue pipeline even if this fails
         await linear.updateIssueState(task.issueId, 'In Progress');
       }
