@@ -17,6 +17,10 @@ export { spawnCli } from './base.js';
 export { ClaudeCliAdapter } from './claude.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
+// CryptoQuant adapter exports
+export type { USDCNetflowData, RiskOnSignal, CryptoQuantConfig } from './cryptoQuantAdapter.js';
+export { CryptoQuantAdapter, initCryptoQuantAdapter, getCryptoQuantAdapter } from './cryptoQuantAdapter.js';
+
 import { ClaudeCliAdapter } from './claude.js';
 import type { CliAdapter } from './types.js';
 

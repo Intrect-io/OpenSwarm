@@ -9,6 +9,8 @@ import { getPipelineHistory, getAllRejectionEntries, type PipelineHistoryEntry, 
 import { getGraph, toProjectSlug, getProjectHealth, type ModuleHealth } from '../knowledge/index.js';
 import type { ProjectSummary } from '../knowledge/index.js';
 import { getDateLocale } from '../locale/index.js';
+import { getRiskOnAnalyzer } from '../knowledge/riskOnAnalyzer.js';
+import type { RiskOnAnalysis } from '../knowledge/riskOnAnalyzer.js';
 
 // Debounce: prevent duplicate calls within 60 seconds per project
 const lastUpdateTime = new Map<string, number>();
@@ -73,6 +75,7 @@ interface ProjectMetrics {
   rolling: RollingMetrics;
   rejections: RejectionEntry[];
   knowledge: KnowledgeMetrics | null;
+  riskOn: RiskOnAnalysis | null;  // Market sentiment signal
 }
 
 function collectProjectMetrics(projectName: string): ProjectMetrics {
@@ -129,6 +132,7 @@ function collectProjectMetrics(projectName: string): ProjectMetrics {
   } catch { /* graceful fallback */ }
 
   // Knowledge graph is async — collected separately by caller via collectKnowledgeMetrics()
+  // Risk-On analysis is async — collected separately by caller via collectRiskOnMetrics()
 
   return {
     today: {
@@ -156,6 +160,7 @@ function collectProjectMetrics(projectName: string): ProjectMetrics {
     },
     rejections,
     knowledge: null,
+    riskOn: null,
   };
 }
 
@@ -171,13 +176,27 @@ async function collectKnowledgeMetrics(projectPath: string): Promise<KnowledgeMe
   }
 }
 
+/**
+ * Collect Risk-On (market sentiment) analysis
+ */
+async function collectRiskOnMetrics(): Promise<RiskOnAnalysis | null> {
+  try {
+    const analyzer = getRiskOnAnalyzer();
+    const analysis = await analyzer.analyze();
+    return analysis;
+  } catch (err) {
+    console.warn('[ProjectUpdater] Risk-On analysis failed (non-critical):', err);
+    return null;
+  }
+}
+
 // ============================================
 // Health Determination
 // ============================================
 
 type HealthStatus = 'onTrack' | 'atRisk' | 'offTrack';
 
-function determineHealth(metrics: ProjectMetrics): { health: HealthStatus; score: number } {
+function determineHealth(metrics: ProjectMetrics): { health: HealthStatus; score: number; riskOnNote?: string } {
   let score = 100;
 
   // Success rate signal
@@ -208,6 +227,18 @@ function determineHealth(metrics: ProjectMetrics): { health: HealthStatus; score
     else if (highRisk.length >= 2) score -= 5;
   }
 
+  // Risk-On market sentiment signal
+  let riskOnNote: string | undefined;
+  if (metrics.riskOn) {
+    const { score: riskScore, sentiment, healthImpact } = metrics.riskOn;
+
+    // Apply risk-on weight to project health
+    const riskOnAdjustment = (riskScore - 50) * (healthImpact.weightToApply / 100);
+    score += Math.round(riskOnAdjustment);
+
+    riskOnNote = `Risk-On: ${sentiment} (${riskScore}/100) - ${healthImpact.suggestion}`;
+  }
+
   // Clamp
   score = Math.max(0, Math.min(100, score));
 
@@ -216,7 +247,7 @@ function determineHealth(metrics: ProjectMetrics): { health: HealthStatus; score
   else if (score >= 40) health = 'atRisk';
   else health = 'offTrack';
 
-  return { health, score };
+  return { health, score, riskOnNote };
 }
 
 // ============================================
@@ -317,6 +348,35 @@ function buildStatusUpdateBody(
       const shortId = r.issueId.slice(0, 8);
       lines.push(`- Issue ${shortId}...: ${r.count} rejection(s) -- ${latestReason.slice(0, 80)}`);
     }
+    lines.push('');
+  }
+
+  // Market Sentiment (Risk-On Signal)
+  if (metrics.riskOn) {
+    const riskOnAnalysis = metrics.riskOn;
+    lines.push('### Market Sentiment (CryptoQuant USDC Netflow)');
+    lines.push(`**Signal**: ${riskOnAnalysis.signals.usdc.recommendation}`);
+    lines.push(`**Score**: ${riskOnAnalysis.score}/100 (${riskOnAnalysis.sentiment})`);
+    lines.push(`**Data Age**: ${riskOnAnalysis.dataAge}min`);
+
+    const binance = riskOnAnalysis.signals.exchanges.get('binance');
+    const coinbase = riskOnAnalysis.signals.exchanges.get('coinbase');
+    const kraken = riskOnAnalysis.signals.exchanges.get('kraken');
+
+    if (binance || coinbase || kraken) {
+      lines.push('**Exchange Flows**:');
+      if (binance) {
+        lines.push(`- Binance: ${binance.cexInflowStrength}% inflow, confidence ${binance.confidence}%`);
+      }
+      if (coinbase) {
+        lines.push(`- Coinbase: ${coinbase.cexInflowStrength}% inflow, confidence ${coinbase.confidence}%`);
+      }
+      if (kraken) {
+        lines.push(`- Kraken: ${kraken.cexInflowStrength}% inflow, confidence ${kraken.confidence}%`);
+      }
+    }
+
+    lines.push(`**Execution Impact**: ${riskOnAnalysis.healthImpact.suggestion}`);
     lines.push('');
   }
 
@@ -484,11 +544,14 @@ export async function postStatusUpdate(
     metrics.knowledge = await collectKnowledgeMetrics(projectPath);
   }
 
+  // Async Risk-On analysis (market sentiment)
+  metrics.riskOn = await collectRiskOnMetrics();
+
   // Build body
   const body = buildStatusUpdateBody(projectName, metrics);
 
   // Determine health
-  const { health } = determineHealth(metrics);
+  const { health, riskOnNote } = determineHealth(metrics);
 
   try {
     await linear.createProjectUpdate({
@@ -496,7 +559,12 @@ export async function postStatusUpdate(
       body,
       health: health as any,
     });
-    console.log(`[ProjectUpdater] Status update posted for "${projectName}" (health=${health})`);
+
+    if (riskOnNote) {
+      console.log(`[ProjectUpdater] Status update posted for "${projectName}" (health=${health}) - ${riskOnNote}`);
+    } else {
+      console.log(`[ProjectUpdater] Status update posted for "${projectName}" (health=${health})`);
+    }
   } catch (err) {
     console.warn(`[ProjectUpdater] Failed to post status update:`, err);
   }
