@@ -20,6 +20,8 @@ import * as dailyReporter from '../automation/dailyReporter.js';
 import { initLocale, t } from '../locale/index.js';
 import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
 import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory/compaction.js';
+import { initCryptoQuantAdapter } from '../adapters/cryptoQuantAdapter.js';
+import { initRiskOnAnalyzer } from '../knowledge/riskOnAnalyzer.js';
 import { Cron } from 'croner';
 
 let state: ServiceState = {
@@ -232,6 +234,34 @@ export async function startService(config: SwarmConfig): Promise<void> {
     console.log(`[Service] Long-running monitors initialized (${config.monitors.length} from config)`);
   } else {
     initMonitors(); // Restore only from persisted files
+  }
+
+  // Initialize CryptoQuant adapter and Risk-On analyzer
+  const cryptoQuantApiKey = process.env.CRYPTOQUANT_API_TOKEN;
+  if (cryptoQuantApiKey) {
+    try {
+      console.log('🔐 Initializing CryptoQuant adapter...');
+      const adapter = initCryptoQuantAdapter({
+        apiToken: cryptoQuantApiKey,
+        cacheDir: './cache/cryptoquant',
+        rateLimitPerDay: 50,
+        dataWindow: 7,
+      });
+
+      const analyzer = initRiskOnAnalyzer({
+        cryptoQuantAdapter: adapter,
+        cacheDir: './cache/risk-on',
+        cacheTTLMinutes: 60,
+        exchanges: ['binance', 'coinbase', 'kraken'],
+        daysBack: 7,
+      });
+
+      console.log('✅ CryptoQuant adapter and Risk-On analyzer initialized');
+    } catch (err) {
+      console.warn('⚠️ CryptoQuant initialization failed (optional):', err);
+    }
+  } else {
+    console.log('⚠️ CRYPTOQUANT_API_TOKEN not set - Risk-On signals disabled');
   }
 
   // Start daily status reporter
