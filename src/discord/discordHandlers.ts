@@ -853,7 +853,11 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
             description: issue.description,
             priority: issue.priority || 3,
             dueDate: issue.dueDate,
-            project: issue.project,
+            state: issue.state,
+            project: issue.project ? {
+              id: issue.project.id,
+              name: issue.project.name,
+            } : undefined,
           }));
         } catch (err) {
           console.error('Linear fetch error:', err);
@@ -873,6 +877,10 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
         dryRun: false,
         pairMode: hasPairFlag,
         pairMaxAttempts: pairModeConfig?.maxAttempts ?? 3,
+        maxConcurrentTasks: 4,
+        enableDecomposition: true,
+        decompositionThresholdMinutes: 30,
+        worktreeMode: true,
       });
 
       const startMsg = hasPairFlag

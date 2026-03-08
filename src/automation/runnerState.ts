@@ -250,7 +250,29 @@ export function getChildrenCount(issueId: string): number {
   return state.decompositions[issueId]?.childrenCount || 0;
 }
 
+/**
+ * Reset daily counter if date has changed (handles long-running service).
+ * ensureDecompositionStateLoaded only checks date on initial disk load;
+ * this function ensures the counter resets even when using the in-memory cache.
+ */
+function resetDailyCounterIfNeeded(): void {
+  const state = ensureDecompositionStateLoaded();
+  const today = new Date().toISOString().split('T')[0];
+  if (state.dailyCreationDate !== today) {
+    console.log(`[DecompositionState] Daily counter reset: ${state.dailyCreationCount} → 0 (date: ${state.dailyCreationDate} → ${today})`);
+    state.dailyCreationCount = 0;
+    state.dailyCreationDate = today;
+    state.updatedAt = new Date().toISOString();
+    try {
+      writeFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
+    } catch (err) {
+      console.warn('[DecompositionState] Failed to persist daily reset:', err);
+    }
+  }
+}
+
 export function getDailyCreationCount(): number {
+  resetDailyCounterIfNeeded();
   const state = ensureDecompositionStateLoaded();
   return state.dailyCreationCount;
 }

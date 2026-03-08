@@ -82,17 +82,27 @@ export function setLinearFetcher(fetchFn: LinearFetchFn): void {
   console.log('[AutonomousRunner] Linear fetcher registered');
 }
 
-export async function fetchLinearTasks(): Promise<TaskItem[]> {
+// Track consecutive fetch failures for visibility
+let fetchFailureCount = 0;
+
+export async function fetchLinearTasks(): Promise<{ tasks: TaskItem[]; error?: string }> {
   if (!linearFetch) {
     console.log('[AutonomousRunner] No Linear fetcher registered');
-    return [];
+    return { tasks: [], error: 'No Linear fetcher registered' };
   }
 
   try {
-    return await linearFetch();
+    const tasks = await linearFetch();
+    if (fetchFailureCount > 0) {
+      console.log(`[AutonomousRunner] Linear fetch recovered after ${fetchFailureCount} failures`);
+    }
+    fetchFailureCount = 0;
+    return { tasks };
   } catch (error) {
-    console.error('[AutonomousRunner] Linear fetch failed:', error);
-    return [];
+    fetchFailureCount++;
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`[AutonomousRunner] Linear fetch failed (${fetchFailureCount}x consecutive): ${msg}`);
+    return { tasks: [], error: msg };
   }
 }
 
@@ -272,22 +282,12 @@ export async function decomposeTask(
   }
 
   // Check daily creation limit
+  // NOTE: Don't move to Backlog on daily limit — it resets tomorrow.
+  // Moving to Backlog would permanently exclude the task from future heartbeats.
+  // Instead, skip decomposition and fall through to direct execution.
   if (!canCreateMoreIssues(dailyLimit)) {
     const currentCount = getDailyCreationCount();
-    console.log(`[AutonomousRunner] Daily issue creation limit reached: ${currentCount}/${dailyLimit}`);
-    if (autoBacklog && task.issueId) {
-      try {
-        await linear.updateIssueState(task.issueId, 'Backlog');
-        await linear.addComment(task.issueId,
-          `⚠️ **Auto-moved to Backlog**\n\n` +
-          `Reason: Daily issue creation limit reached (${currentCount}/${dailyLimit})\n\n` +
-          `The system has created too many issues today. This task will be reconsidered tomorrow.`
-        );
-        console.log(`[AutonomousRunner] Task moved to backlog (daily limit)`);
-      } catch (err) {
-        console.error(`[AutonomousRunner] Failed to move to backlog:`, err);
-      }
-    }
+    console.log(`[AutonomousRunner] Daily issue creation limit reached: ${currentCount}/${dailyLimit} — skipping decomposition (will retry tomorrow)`);
     return false;
   }
 

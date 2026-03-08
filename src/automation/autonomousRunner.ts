@@ -25,9 +25,7 @@ import {
 } from '../orchestration/decisionEngine.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
-import { formatParsedTaskSummary, loadParsedTask } from '../orchestration/taskParser.js';
 import { saveCognitiveMemory } from '../memory/index.js';
-import { EmbedBuilder } from 'discord.js';
 import * as linear from '../linear/index.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler } from '../orchestration/taskScheduler.js';
@@ -549,7 +547,13 @@ export class AutonomousRunner {
 
       // 2. Fetch tasks from Linear
       this.syslog('⟳ Fetching tasks from Linear...');
-      const tasks = await fetchLinearTasks();
+      const fetchResult = await fetchLinearTasks();
+      if (fetchResult.error) {
+        this.syslog(`✗ Linear fetch error: ${fetchResult.error}`);
+        await reportToDiscord(`⚠️ Linear fetch failed: ${fetchResult.error}`);
+        return;
+      }
+      const tasks = fetchResult.tasks;
       if (tasks.length === 0) {
         this.syslog('— No tasks in backlog');
         return;
@@ -581,7 +585,12 @@ export class AutonomousRunner {
       this.state.lastDecision = decision;
 
       // 4. Handle decision
-      await this.handleDecision(decision);
+      if (decision.action === 'execute' && decision.task) {
+        await this.executeTaskPairMode(decision.task);
+      } else if (decision.action === 'defer' && decision.task) {
+        this.state.pendingApproval = decision.task;
+        await this.requestApproval(decision);
+      }
       this.state.consecutiveErrors = 0;
 
     } catch (error) {
@@ -714,64 +723,7 @@ export class AutonomousRunner {
     await this.runAvailableTasks();
   }
 
-  /** Handle decision */
-  private async handleDecision(decision: DecisionResult): Promise<void> {
-    switch (decision.action) {
-      case 'execute':
-        if (decision.task && decision.workflow) await this.executeTask(decision.task, decision.workflow);
-        break;
-      case 'defer':
-        if (decision.task) { this.state.pendingApproval = decision.task; await this.requestApproval(decision); }
-        break;
-      case 'skip':
-      case 'add_to_backlog':
-        break;
-    }
-  }
-
-  private async executeTask(task: TaskItem, workflow: any): Promise<void> {
-    if (this.config.pairMode) {
-      await this.executeTaskPairMode(task);
-      return;
-    }
-
-    // Report start
-    const projectInfo = task.linearProject?.name
-      ? `📁 **${task.linearProject.name}**\n`
-      : '';
-    const issueRef = task.issueIdentifier || task.issueId || 'N/A';
-
-    const startEmbed = new EmbedBuilder()
-      .setTitle(t('runner.taskStarting'))
-      .setColor(0x00AE86)
-      .addFields(
-        { name: t('runner.result.taskLabel'), value: `${projectInfo}${task.title}`, inline: false },
-        { name: 'Issue', value: issueRef, inline: true },
-        { name: 'Priority', value: `P${task.priority}`, inline: true },
-        { name: 'Steps', value: `${workflow.steps?.length || '?'}`, inline: true },
-      )
-      .setTimestamp();
-
-    await reportToDiscord(startEmbed);
-
-    // Display parsed result if available
-    if (task.issueId) {
-      const parsed = await loadParsedTask(task.issueId);
-      if (parsed) {
-        const summary = formatParsedTaskSummary(parsed);
-        await reportToDiscord(`${t('runner.analysisResult')}\n${summary.slice(0, 1500)}`);
-      }
-    }
-
-    // Execute
-    const result = await this.engine.executeTask(task, workflow);
-    this.state.lastExecution = result;
-
-    // Report results
-    await execution.reportExecutionResult(task, result, reportToDiscord);
-  }
-
-  /** Execute task in pair mode (legacy single-task) */
+  /** Execute task in pair mode */
   private async executeTaskPairMode(task: TaskItem): Promise<void> {
     // Auto-resolve project path
     const projectPath = await this.resolveProjectPath(task);
@@ -917,7 +869,7 @@ export class AutonomousRunner {
     // Get workflow from Decision Engine
     const decision = await this.engine.heartbeat([task]);
     if (decision.workflow && decision.task) {
-      await this.executeTask(decision.task, decision.workflow);
+      await this.executeTaskPairMode(decision.task);
       return true;
     }
 
