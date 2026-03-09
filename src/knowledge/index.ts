@@ -21,6 +21,13 @@ export type { ModuleHealth, ReviewFocus } from './analyzer.js';
 export type { ImpactAnalysis, ProjectSummary } from './types.js';
 export type * from './types.js';
 
+// Risk-On analysis exports
+export type { RiskOnAnalysis, RiskOnAnalyzerConfig, MarketSentiment } from './riskOnAnalyzer.js';
+export { RiskOnAnalyzer, initRiskOnAnalyzer, getRiskOnAnalyzer } from './riskOnAnalyzer.js';
+
+// CryptoQuant re-export (used by Risk-On)
+export type { RiskOnSignal } from '../adapters/cryptoQuantAdapter.js';
+
 // Repository knowledge management
 export {
   linkIssueToModule,
