@@ -20,44 +20,14 @@ Real-time supervisor dashboard with repository status, pipeline events, live log
 $ openswarm chat --tui
 ```
 
-![TUI Chat Interface](screenshots/tui-demo.txt)
+![TUI Chat Interface](screenshots/tui.png)
 
-```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ OpenSwarm │ 20260303-1340 │ sonnet-4-5 │ 6 messages │ $0.0142                   │
-├──────────────────────────────────────────────────────────────────────────────────┤
-│ 💬 Chat   📁 Projects   ✓ Tasks   📝 Logs                                       │
-├──────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│ ▸ You                                                                            │
-│   What are the main features of OpenSwarm?                                      │
-│                                                                                  │
-│ ▸ Assistant                                                                      │
-│   OpenSwarm is an autonomous AI agent orchestrator...                           │
-│   2,847 tokens · $0.0068                                                         │
-│                                                                                  │
-│ ▸ You                                                                            │
-│   Tell me more about the TUI interface                                          │
-│                                                                                  │
-│ ▸ Assistant                                                                      │
-│   ⣽ Querying data-vault archives...                                             │
-│                                                                                  │
-├──────────────────────────────────────────────────────────────────────────────────┤
-│ Message                                                                          │
-│ |                                                                                │
-├──────────────────────────────────────────────────────────────────────────────────┤
-│ Tab Switch  Enter Send  Esc Clear  Ctrl+C Clear/Exit  /help Commands            │
-└──────────────────────────────────────────────────────────────────────────────────┘
-```
-
-Features:
-- 🎨 **Dark theme** with Claude Code inspired color palette
-- 📊 **4 interactive tabs**: Chat, Projects, Tasks, Logs
-- ⚡ **Real-time streaming** responses with inline spinner
-- 🔄 **Warhammer 40k themed** loading messages ("Querying data-vault archives...")
-- 💬 **Keyboard shortcuts**: Tab/Shift+Tab (switch tabs), Esc/Ctrl+C (clear input), Enter (send)
-- 💾 **Session management**: Auto-save, resume, model switching
-- 📈 **Status bar**: Session ID, model, message count, cumulative cost
+- Dark theme with Claude Code inspired color palette
+- 5 interactive tabs: Chat, Projects, Tasks, Stuck, Logs
+- Real-time streaming responses with themed loading messages
+- Keyboard shortcuts: Tab (switch tabs), Enter (send), Shift+Enter (newline), Esc (exit input)
+- Session management: auto-save, resume, model switching
+- Status bar: model, message count, cumulative cost
 
 **Simple Mode** (readline based):
 
