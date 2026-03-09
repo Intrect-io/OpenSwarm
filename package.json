@@ -20,6 +20,7 @@
     "test:watch": "node --experimental-vm-modules node_modules/vitest/vitest.mjs",
     "chat": "node --env-file=.env --import=tsx src/support/chat.ts",
     "cli:dev": "node --env-file=.env --import=tsx src/cli.ts",
+    "perf:measure": "tsx scripts/playwright-rendering-performance.ts",
     "ci": "npm run lint && npm run typecheck && npm run build"
   },
   "dependencies": {
@@ -38,8 +39,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.0.18",
     "bun-types": "^1.1.0",
     "oxlint": "^1.43.0",
+    "playwright": "^1.47.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"

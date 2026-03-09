@@ -380,13 +380,19 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Log buffer snapshot ----
       } else if (url === '/api/logs' && req.method === 'GET') {
+        // 성능 최적화: 최근 200개 로그만 반환 (응답 시간 단축)
+        const allLogs = getLogBuffer();
+        const recentLogs = allLogs.slice(-200);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(getLogBuffer()));
+        res.end(JSON.stringify(recentLogs));
 
       // ---- Stage buffer snapshot ----
       } else if (url === '/api/stages' && req.method === 'GET') {
+        // 성능 최적화: 최근 100개 스테이지만 반환 (응답 시간 단축)
+        const allStages = getStageBuffer();
+        const recentStages = allStages.slice(-100);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(getStageBuffer()));
+        res.end(JSON.stringify(recentStages));
 
       // ---- Chat message ----
       } else if (url === '/api/chat' && req.method === 'POST') {

@@ -1797,12 +1797,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     // ---- Init ----
     async function loadInitial() {
       try {
-        const [statsRes, projectsRes, chatRes, logsRes, stagesRes] = await Promise.all([
+        // 1단계: 필수 데이터 먼저 로드 (성능 개선)
+        const [statsRes, projectsRes] = await Promise.all([
           fetch("/api/stats"),
           fetch("/api/projects"),
-          fetch("/api/chat/history"),
-          fetch("/api/logs"),
-          fetch("/api/stages"),
         ]);
         const stats = await statsRes.json();
         updateStats(stats);
@@ -1810,6 +1808,22 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
         projects = await projectsRes.json();
         renderProjects();
+
+        // 2단계: 추가 데이터는 비동기로 지연 로드 (브라우저 렌더링 블로킹 제거)
+        loadSupplementalData();
+      } catch(e) {
+        console.error("Init failed:", e);
+      }
+    }
+
+    // 추가 데이터 지연 로드 (초기 렌더링을 방해하지 않음)
+    async function loadSupplementalData() {
+      try {
+        const [chatRes, logsRes, stagesRes] = await Promise.all([
+          fetch("/api/chat/history"),
+          fetch("/api/logs"),
+          fetch("/api/stages"),
+        ]);
 
         const history = await chatRes.json();
         for (const msg of history) appendChatMsg(msg.role, msg.text, null, msg.ts);
@@ -1822,11 +1836,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         const stages = await stagesRes.json();
         for (const ev of stages) handleEvent(ev);
       } catch(e) {
-        console.error("Init failed:", e);
+        console.error("Supplemental data load failed:", e);
       }
     }
 
-    // Periodic refresh (stats + projects every 30s)
+    // 성능 최적화: stats + projects 폴링을 60초로 증가 (변화 빈도 낮음)
     setInterval(async () => {
       try {
         const [sRes, pRes] = await Promise.all([fetch("/api/stats"), fetch("/api/projects")]);
@@ -1841,7 +1855,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         projects = fresh;
         renderProjects();
       } catch {}
-    }, 30000);
+    }, 60000);
 
     // ---- Mobile Tab Navigation ----
     function switchTab(idx) {
@@ -1897,23 +1911,31 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       } catch {}
     }
 
+    // 성능 최적화: 초기 로드 후 2단계 페칭 (렌더링 블로킹 방지)
     loadInitial().then(function() { connectSSE(true); });
-    fetchSvcStatus();
-    fetchPRProcessorStatus();
-    fetchStuckIssues();
-    fetchKnowledgeData();
-    fetchMonitors();
-    fetchProcesses();
-    fetchQuota();
+
+    // 1단계: 초기화 후 즉시 필수 폴링만 시작
     setInterval(fetchSvcStatus, 15000);
-    setInterval(fetchPRProcessorStatus, 30000);
-    setInterval(fetchStuckIssues, 30000);
+    setInterval(fetchPRProcessorStatus, 60000);  // 성능 최적화: 30초 → 60초 (변화 빈도 낮음)
+    setInterval(fetchStuckIssues, 60000);        // 성능 최적화: 30초 → 60초 (Linear API 부하 감소)
     setInterval(fetchKnowledgeData, 60000);
     setInterval(fetchMonitors, 60000);
     setInterval(fetchProcesses, 30000);
     setInterval(fetchQuota, 300000);
-    // Refresh pipeline elapsed times every 10s
-    setInterval(() => { if (stageRows.length) renderStages(); }, 10000);
+
+    // 2단계: 렌더링 안정화 후 비필수 데이터 로드 (3초 지연)
+    setTimeout(function() {
+      fetchSvcStatus();
+      fetchPRProcessorStatus();
+      fetchStuckIssues();
+      fetchKnowledgeData();
+      fetchMonitors();
+      fetchProcesses();
+      fetchQuota();
+    }, 3000);
+
+    // 렌더링 성능: 스테이지 업데이트 폴링 제거 (SSE 이벤트 활용)
+    // setInterval(() => { if (stageRows.length) renderStages(); }, 10000);
   </script>
 </body>
 </html>`;

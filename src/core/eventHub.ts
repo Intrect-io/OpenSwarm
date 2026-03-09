@@ -151,8 +151,17 @@ export function addSSEClient(res: ServerResponse, skipReplay = false): () => voi
     }
   }
   sseClients.add(res);
-  const cleanup = () => sseClients.delete(res);
-  res.on('close', cleanup);
+
+  // Cleanup function that removes client from set
+  const cleanup = () => {
+    sseClients.delete(res);
+    // Remove the close listener after cleanup to prevent memory leak
+    res.removeListener('close', cleanup);
+  };
+
+  // Register close listener to auto-cleanup when client disconnects
+  res.once('close', cleanup);
+
   return cleanup;
 }
 
@@ -170,4 +179,17 @@ export function getStageBuffer(): HubEvent[] {
 
 export function getChatBuffer(): HubEvent[] {
   return chatBuffer;
+}
+
+// Test cleanup function - clears all buffers and clients
+export function __resetForTests(): void {
+  // Clear all SSE clients
+  sseClients.clear();
+  // Clear all buffers
+  replayBuffer.length = 0;
+  logBuffer.length = 0;
+  stageBuffer.length = 0;
+  chatBuffer.length = 0;
+  // Clear all event listeners on the hub
+  hub.removeAllListeners();
 }

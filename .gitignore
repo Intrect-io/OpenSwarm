@@ -48,5 +48,35 @@ Thumbs.db
 # State files
 state.json
 
+# Test coverage
+coverage/
+.coverage
+
+# Test output
+test-output.txt
+test-report.json
+coverage-analysis.json
+
+# Performance results
+performance-results/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary analysis files
+ANALYSIS_SUMMARY.txt
+FORMATTER_REPORT.md
+LINEAR_ISSUES.json
+PERFORMANCE_*.md
+REFACTORING_*.md
+DASHBOARD_OPTIMIZATION_*.md
+DASHBOARD_PERFORMANCE_*.md
+IMPLEMENTATION_GUIDE.md
+*_IMPLEMENTATION_SUMMARY.md
+
+# Trash
+trash/
+
 # Subprojects
 openclaw/
