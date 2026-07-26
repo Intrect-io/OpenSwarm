@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.4 — 2026-07-26
+
+### Fixed
+
+- **Long Discord output arrived, instead of not arriving at all** — `sendToChannel` split at 3900 characters because a comment confused the embed *description* limit (4096) with the message *content* limit (2000). Every chunk it produced was rejected by the API, and content between 2001 and 3900 was not split at all and failed the same way, so long reports simply never appeared. Both send paths now share one constant below the real limit. (#331)
+- **Replies attach to the message they answer** — history responses were written to the last entry in the channel. Two messages in one channel are handled concurrently and do not finish in arrival order, so whichever finished first overwrote the newer message's slot: the newer message got no answer and the older one displayed a reply to a question nobody asked. Matched by message id now, and a response whose entry has aged out is dropped rather than misfiled. (#331)
+- **`!dev` progress stops when the task does** — the 10s progress timer was never disarmed on a failure path, so a stale "in progress" reply arrived ten seconds after the error had been reported. It is now disarmed from the task's completion callback, which fires for both a normal close and a spawn error, plus the two pre-launch paths that never reach it. (#331)
+
+### Security
+
+- Bumped `fast-uri` (GHSA-v2hh-gcrm-f6hx) and `hono` via the npm_and_yarn group. (#320)
+
 ## 0.19.3 — 2026-07-26
 
 ### Fixed
