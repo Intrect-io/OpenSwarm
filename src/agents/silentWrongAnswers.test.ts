@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -163,11 +163,15 @@ describe('AgentBus.publish', () => {
 
   const messagesDir = (executionId: string) => resolve(home, '.openswarm/bus', executionId, 'messages');
 
-  // A polling loop cannot reliably catch the window, so this watches the
-  // directory and reads each file the instant its name appears — which is
-  // exactly what an in-place write exposes and a rename does not. Measured
-  // against a plain fs.writeFile of this size, a watcher observes the file
-  // empty or truncated every time.
+  // Reads each file the instant it becomes visible — exactly what an in-place
+  // write exposes and a rename does not. Measured against a plain fs.writeFile
+  // of this size, this observes the file empty or truncated on every run.
+  //
+  // The watcher is only a trigger: node's fs.watch may deliver an event with a
+  // null filename, and relying on that name would make this observe nothing at
+  // all on such a platform and then fail for the wrong reason. Every event
+  // rescans the directory, and a short interval backs the watcher up so the
+  // test does not depend on watch being delivered at all.
   it('never exposes a message file before its contents are complete', async () => {
     const { AgentBus } = await loadBus();
     const bus = new AgentBus('exec-1');
@@ -175,37 +179,73 @@ describe('AgentBus.publish', () => {
 
     const dir = messagesDir('exec-1');
     const partial: string[] = [];
-    let complete = 0;
-    const watcher = watch(dir, (_event, name) => {
-      if (!name || !name.toString().endsWith('.json')) return;
-      let raw: string;
-      try {
-        raw = readFileSync(join(dir, name.toString()), 'utf-8');
-      } catch {
-        return; // the rename has not landed yet — nothing is visible, which is correct
-      }
-      if (raw.length === 0) { partial.push(`${name} empty`); return; }
-      try {
-        JSON.parse(raw);
-        complete++;
-      } catch {
-        partial.push(`${name} truncated at ${raw.length} bytes`);
-      }
-    });
+    const completed = new Set<string>();
 
+    const scan = (): void => {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (!name.endsWith('.json') || completed.has(name)) continue;
+        let raw: string;
+        try {
+          raw = readFileSync(join(dir, name), 'utf-8');
+        } catch {
+          continue; // the rename has not landed — nothing is visible, which is correct
+        }
+        if (raw.length === 0) { partial.push(`${name} empty`); continue; }
+        try {
+          JSON.parse(raw);
+          completed.add(name);
+        } catch {
+          partial.push(`${name} truncated at ${raw.length} bytes`);
+        }
+      }
+    };
+
+    const watcher = watch(dir, scan);
+    const ticker = setInterval(scan, 1);
     try {
       const big = 'x'.repeat(20_000_000);
       await Promise.all(
         Array.from({ length: 4 }, (_, i) => bus.publish('context_update', 'planner', { big, i })),
       );
-      await new Promise((r) => setTimeout(r, 300));
+      // Wait for all four to be observed intact rather than for a fixed delay.
+      const deadline = Date.now() + 10_000;
+      while (completed.size < 4 && Date.now() < deadline) {
+        scan();
+        await new Promise((r) => setTimeout(r, 5));
+      }
     } finally {
+      clearInterval(ticker);
       watcher.close();
     }
 
     expect(partial).toEqual([]);
-    expect(complete).toBeGreaterThan(0);
+    expect(completed.size).toBe(4);
   }, 30_000);
+
+  // The mode is not incidental: atomicWriteFile chmods explicitly after the
+  // rename, so a wider mode passed here would override even a restrictive
+  // umask that the previous plain writeFile respected. These payloads carry
+  // agent prompts, outputs and errors, and context.json beside them is
+  // owner-only.
+  it('keeps message files owner-only', async () => {
+    const { AgentBus } = await loadBus();
+    const bus = new AgentBus('exec-3');
+    await bus.init('wf-3');
+    await bus.publish('context_update', 'planner', { note: 'secret-ish' });
+
+    const dir = messagesDir('exec-3');
+    const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      expect(statSync(join(dir, file)).mode & 0o077).toBe(0);
+    }
+  });
 
   it('leaves no temp files behind', async () => {
     const { AgentBus } = await loadBus();
