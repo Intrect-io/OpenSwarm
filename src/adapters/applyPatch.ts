@@ -138,6 +138,13 @@ export async function applyV4APatch(
     const text = await fs.readFile(abs, 'utf-8').catch(() => null);
     snapshots.set(abs, text === null ? { kind: 'opaque' } : { kind: 'content', text });
   }
+  // Paths this patch actually created. Removing an absent-at-snapshot path is
+  // only correct for those: the snapshot is taken up front, so a path that
+  // appeared afterwards belongs to whoever wrote it, and an add that was
+  // refused because the path exists never created anything. Deleting either
+  // would be data loss dressed up as a clean rollback.
+  const created = new Set<string>();
+
   const rollback = async () => {
     for (const [abs, snapshot] of snapshots) {
       try {
@@ -147,6 +154,7 @@ export async function applyV4APatch(
           continue;
         }
         if (snapshot.kind === 'absent') {
+          if (!created.has(abs)) continue;
           await fs.rm(abs).catch(() => {});
         } else {
           await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -173,12 +181,19 @@ export async function applyV4APatch(
         // Failing here runs the rollback below, which is recoverable.
         try {
           await fs.writeFile(abs, op.addLines.join('\n'), { encoding: 'utf-8', flag: 'wx' });
+          created.add(abs);
         } catch (err) {
           if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+            // Deliberately NOT recorded as created: the file is someone else's,
+            // whether it predates the patch or appeared after the snapshot.
+            // Marking it here would have rollback delete it.
             throw new Error(
               `refusing to add ${op.filePath}: it already exists — use an update op to change it`,
             );
           }
+          // Any other failure may have left a partial file that this patch did
+          // create, so it is ours to clean up.
+          created.add(abs);
           throw err;
         }
         changed.push(op.filePath);
@@ -198,6 +213,8 @@ export async function applyV4APatch(
       if (op.moveTo) {
         await fs.mkdir(path.dirname(target), { recursive: true });
         await fs.rm(abs).catch(() => {});
+        // The move destination is written by this patch, so undoing it is ours.
+        created.add(target);
       }
       await fs.writeFile(target, lines.join('\n'), 'utf-8');
       changed.push(op.moveTo ?? op.filePath);

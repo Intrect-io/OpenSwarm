@@ -172,6 +172,31 @@ describe('applyPatch "add" operation', () => {
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 
+  // The snapshot is taken up front, so a path that appears afterwards was
+  // written by someone else. Rollback must not remove it just because it was
+  // absent when the patch started — that is data loss reported as a clean
+  // refusal. Encoded deterministically: resolvePath creates the file on the
+  // second call for a path, which is exactly the window between the snapshot
+  // pass and the apply loop.
+  it('does not delete a file that appeared after the snapshot', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const target = join(repo, 'raced.ts');
+    const calls = new Map<string, number>();
+    const resolveWithRace = (f: string) => {
+      const abs = join(repo, f);
+      const n = (calls.get(f) ?? 0) + 1;
+      calls.set(f, n);
+      if (f === 'raced.ts' && n === 2) writeFileSync(target, 'written by someone else\n');
+      return abs;
+    };
+
+    const result = await applyV4APatch(addPatch('raced.ts', 'export const mine = 1;'), repo, resolveWithRace);
+
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, 'utf-8')).toContain('someone else');
+  });
+
   // A rejected add must not leave earlier operations of the same patch applied.
   it('rolls back the rest of the patch', async () => {
     const repo = tempRoot('openswarm-patch-');
