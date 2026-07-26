@@ -440,6 +440,25 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
   // quoting output the user has already seen the conclusion for.
   let settled = false;
 
+  /**
+   * Stop the progress timer.
+   *
+   * Deliberately NOT called after `await runDevTask` returns. runDevTask
+   * registers the child's stdout/close listeners and returns `{taskId, path}`
+   * immediately — it does not await the process. Disarming there would set
+   * `settled` before the first chunk ever arrived and suppress every progress
+   * reply for the whole run. The task's real end is onComplete, which fires for
+   * both 'close' and 'error'; the only cases that never reach it are a task
+   * that failed to launch, handled explicitly below.
+   */
+  const stopProgressReporting = (): void => {
+    settled = true;
+    if (progressTimer) {
+      clearTimeout(progressTimer);
+      progressTimer = null;
+    }
+  };
+
   // Execute task
   let result: Awaited<ReturnType<typeof dev.runDevTask>>;
   try {
@@ -465,11 +484,8 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
     },
     // onComplete: send result on completion
     async (output, exitCode) => {
-      settled = true;
-      if (progressTimer) {
-        clearTimeout(progressTimer);
-        progressTimer = null;
-      }
+      // The task's actual end, for both a normal close and a spawn error.
+      stopProgressReporting();
 
       // Split result for sending (Discord 2000 char limit)
       const MAX_LEN = 1800;
@@ -502,18 +518,19 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
       }
     }
     );
-  } finally {
-    // runDevTask had no try/catch: a rejection propagated out of handleDev with
-    // the progress timer still armed, so a stale "in progress" reply arrived
-    // ten seconds after the error had already been reported to the user.
-    settled = true;
-    if (progressTimer) {
-      clearTimeout(progressTimer);
-      progressTimer = null;
-    }
+  } catch (err) {
+    // runDevTask threw before the child was registered (e.g. spawn failed), so
+    // onComplete will never fire. Previously this propagated out of handleDev
+    // with the timer still armed, and a stale "in progress" reply arrived ten
+    // seconds after the error had already been reported to the user.
+    stopProgressReporting();
+    throw err;
   }
 
   if ('error' in result) {
+    // Rejected before launch — time window, unknown repo, task already running.
+    // No child process exists, so nothing will ever call onComplete.
+    stopProgressReporting();
     await msg.reply(`❌ ${result.error}`);
   }
 }
