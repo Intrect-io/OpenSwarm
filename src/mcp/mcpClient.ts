@@ -274,6 +274,7 @@ interface McpTool {
  */
 export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefinition[]> {
   serverByTool = {};
+  lastDiscoveryUnreachable = [];
   const defs: ToolDefinition[] = [];
   const entries = Object.entries(registry);
   let next = 0;
@@ -300,6 +301,7 @@ export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefin
         });
       }
     } catch (err) {
+      lastDiscoveryUnreachable.push(server);
       console.warn(`[MCP] server "${server}" unreachable — skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
     }
@@ -310,6 +312,12 @@ export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefin
 
 // Cache the discovered tools so chat doesn't re-list every message.
 let cachedTools: ToolDefinition[] | null = null;
+/** When >0, the cached result was incomplete and may be re-attempted at this time. */
+let cachedToolsRetryAt = 0;
+/** Servers skipped by the most recent discovery because they were unreachable. */
+let lastDiscoveryUnreachable: string[] = [];
+/** How long an incomplete discovery is reused before another attempt. */
+const INCOMPLETE_DISCOVERY_RETRY_MS = 60_000;
 
 /**
  * The effective registry for auto-discovery: mcp.json merged with the servers
@@ -332,14 +340,23 @@ async function loadConfiguredRegistry(): Promise<Record<string, ServerConfig>> {
  * Empty when nothing is configured / no reachable servers. (INT-1951)
  */
 export async function getMcpTools(): Promise<ToolDefinition[]> {
-  if (cachedTools) return cachedTools;
+  const now = Date.now();
+  // A complete discovery is cached until resetMcpTools(). An incomplete one —
+  // some server was unreachable — is cached only briefly, so a server that was
+  // down for a moment comes back on its own. Caching it for the process
+  // lifetime meant a single blip removed those tools from every later call
+  // until someone noticed and ran resetMcpTools() by hand.
+  if (cachedTools && (!cachedToolsRetryAt || now < cachedToolsRetryAt)) return cachedTools;
   cachedTools = await initMcpTools(await loadConfiguredRegistry());
+  cachedToolsRetryAt = lastDiscoveryUnreachable.length > 0 ? now + INCOMPLETE_DISCOVERY_RETRY_MS : 0;
   return cachedTools;
 }
+
 
 /** Drop the cache (after editing mcp.json). */
 export function resetMcpTools(): void {
   cachedTools = null;
+  cachedToolsRetryAt = 0;
 }
 
 /**
