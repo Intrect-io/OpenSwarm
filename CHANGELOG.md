@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.9 — 2026-07-26
+
+### Fixed
+
+- **Schedule updates stop overwriting each other** — `schedules.json` was written atomically but updated non-atomically: four sites did load → mutate → save with no lock, so two jobs finishing near the same moment each read before the other wrote and the last writer discarded the other's update. A lost `lastRun` is cosmetic; a lost auto-pause leaves a failing job running on schedule, which is what auto-pause exists to prevent. All four now share one locked read-modify-write, and `addSchedule`'s duplicate-name check moved inside the lock. Job ids use a UUID instead of `Date.now()`, which two adds in the same millisecond shared. (#342)
+- **A plan whose description quotes code is no longer discarded** — the planner found the end of its JSON by counting braces, including the ones inside string values, so a subtask description containing an unmatched `{` or `}` moved the end offset and the parse failed. The whole plan then fell through to a lossy text heuristic with no error. Measured: `remove the trailing } here` ended two characters early; `{ here` never closed at all. (#341)
+
+### Removed
+
+- `createLinearSubIssues`, which returned `{ success: true }` after doing nothing. It had no callers. (#341)
+
 ## 0.19.8 — 2026-07-26
 
 ### Fixed
