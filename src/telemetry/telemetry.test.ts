@@ -8,6 +8,14 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(() => JSON.stringify({ installId: 'testinstall0123456789', noticeShown: true })),
   writeFileSync: vi.fn(),
   mkdirSync: vi.fn(),
+  // atomicWriteFileSync (used by writeState) opens a temp file, fsyncs and
+  // renames it into place; the payload still reaches writeFileSync as arg[1].
+  openSync: () => 1,
+  fsyncSync: () => undefined,
+  closeSync: () => undefined,
+  renameSync: () => undefined,
+  existsSync: () => false,
+  unlinkSync: () => undefined,
 }));
 
 import { initTelemetry, isTelemetryEnabled, track, buildPayload } from './telemetry.js';

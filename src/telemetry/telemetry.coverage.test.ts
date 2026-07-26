@@ -14,6 +14,14 @@ vi.mock('node:fs', () => ({
   readFileSync: (...args: unknown[]) => readFileSyncMock(...args),
   writeFileSync: (...args: unknown[]) => writeFileSyncMock(...args),
   mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
+  // atomicWriteFileSync (used by writeState) opens a temp file, fsyncs and
+  // renames it into place; the payload still reaches writeFileSync as arg[1].
+  openSync: () => 1,
+  fsyncSync: () => undefined,
+  closeSync: () => undefined,
+  renameSync: () => undefined,
+  existsSync: () => false,
+  unlinkSync: () => undefined,
 }));
 
 import { initTelemetry, maybeShowNotice, track } from './telemetry.js';

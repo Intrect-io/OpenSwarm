@@ -14,11 +14,11 @@
 //   - CI environments are excluded automatically (they are not real users).
 //   - Fire-and-forget: a telemetry failure must NEVER affect the CLI/daemon.
 
-import os from 'node:os';
-import { homedir } from 'node:os';
+import os, { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { nanoid } from 'nanoid';
+import { atomicWriteFileSync } from '../support/atomicFile.js';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
@@ -60,10 +60,42 @@ function readState(): TelemetryState | null {
   }
 }
 
+/**
+ * Persist state, re-reading immediately beforehand so a concurrent writer's
+ * install id is preserved rather than replaced.
+ *
+ * Two things were wrong. The write was in-place (`writeFileSync`), so a reader
+ * could observe a truncated file mid-write — the repo already writes every other
+ * piece of local state through `atomicWriteFileSync` (temp + fsync + rename), and
+ * this was the one path that did not. And both callers computed a whole new state
+ * from a read that had happened earlier, so on a first run the daemon and the CLI
+ * each minted their own install id and whichever wrote last silently replaced the
+ * other — the identifier is supposed to be stable for the install, and it also
+ * made `maybeShowNotice` able to clobber an id written between its own read and
+ * write.
+ *
+ * Re-reading here does not make the update atomic (that would need a lock), but
+ * it makes the outcome converge: whoever writes second keeps the id that is
+ * already on disk, so the install ends up with ONE id either way.
+ */
+export function mergeState(
+  current: TelemetryState | null,
+  next: TelemetryState,
+): TelemetryState {
+  return {
+    // An id already on disk always wins. Both callers build `next` from a read
+    // that happened earlier, so without this the writer that lands second
+    // replaces an id a concurrent first run had just persisted.
+    installId: isValidInstallId(current?.installId) ? current.installId : next.installId,
+    // Sticky: once the notice has been shown it must not be un-shown by a writer
+    // that read the state before it was displayed.
+    noticeShown: next.noticeShown || current?.noticeShown,
+  };
+}
+
 function writeState(state: TelemetryState): void {
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(TELEMETRY_FILE, JSON.stringify(state, null, 2));
+    atomicWriteFileSync(TELEMETRY_FILE, JSON.stringify(mergeState(readState(), state), null, 2));
   } catch {
     // A read-only home or race is non-fatal: telemetry just stays best-effort.
   }
@@ -87,9 +119,12 @@ export function isTelemetryEnabled(): boolean {
 function getInstallId(): string {
   const state = readState();
   if (isValidInstallId(state?.installId)) return state.installId;
-  const installId = nanoid();
-  writeState({ installId, noticeShown: state?.noticeShown });
-  return installId;
+  writeState({ installId: nanoid(), noticeShown: state?.noticeShown });
+  // Read back rather than returning the freshly minted id: a concurrent first
+  // run may have won, and the event should carry the id the install actually
+  // keeps, not the one this process happened to generate.
+  const persisted = readState();
+  return isValidInstallId(persisted?.installId) ? persisted.installId : nanoid();
 }
 
 /**
