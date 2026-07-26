@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.10 — 2026-07-26
+
+### Fixed
+
+- **A silent provider no longer hangs a worker indefinitely** — outbound requests were bounded only by the caller's AbortSignal, and the agentic loop checks its deadline between turns, so a connection that accepted a request and then stopped producing had nothing to interrupt it. Requests now carry the caller's own per-call ceiling, which covers the streamed body. A deadline abort is also classified as infrastructure rather than a task failure: `AbortSignal.timeout()` rejects with a `TimeoutError` whose message matched none of the existing patterns, so a hung provider was being reported as the task itself failing. (#345)
+- **A briefly unreachable MCP server no longer disappears for the process lifetime** — the first discovery result was cached forever, so one blip at startup removed that server's tools from every later call with no recovery short of a manual reset. A complete discovery is still cached indefinitely; an incomplete one gets a short lease, measured from when discovery finished. Discovery is also deduplicated and its routing map published atomically, so concurrent callers share one run and in-flight agents keep working tools while a rediscovery is under way. (#345)
+- **A failed adapter model lookup is retried** — the rejection was cached, so one lookup failure during startup left that adapter's displayed model blank for the whole process. (#345)
+
+### Removed
+
+- The unreferenced risk-on / CryptoQuant island: 962 lines nothing in the codebase imported, added four months ago and never wired in. Six of the standing audit findings lived there. (#344)
+
 ## 0.19.9 — 2026-07-26
 
 ### Fixed
