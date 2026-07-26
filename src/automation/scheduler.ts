@@ -11,10 +11,13 @@ import * as fs from 'fs/promises';
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { t, getDateLocale } from '../locale/index.js';
+import { randomUUID } from 'crypto';
+import { withFileLock } from '../support/fileLock.js';
 
 // Schedule storage path
 const SCHEDULE_DIR = resolve(homedir(), '.openswarm');
 const SCHEDULE_FILE = resolve(SCHEDULE_DIR, 'schedules.json');
+const SCHEDULE_LOCK_FILE = resolve(SCHEDULE_DIR, 'schedules.json.lock');
 
 // Scheduled job interface
 export interface ScheduledJob {
@@ -131,9 +134,33 @@ function isScheduledJob(value: unknown): value is ScheduledJob {
  */
 async function saveSchedules(schedules: ScheduledJob[]): Promise<void> {
   await fs.mkdir(SCHEDULE_DIR, { recursive: true });
-  const tempFile = `${SCHEDULE_FILE}.${process.pid}.${Date.now()}.tmp`;
+  const tempFile = `${SCHEDULE_FILE}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tempFile, JSON.stringify(schedules, null, 2), { mode: 0o600 });
   await fs.rename(tempFile, SCHEDULE_FILE);
+}
+
+/**
+ * Read the schedule file, transform it and write it back, all under one lock.
+ *
+ * The write was already atomic, but load → mutate → save was not: two jobs
+ * finishing near the same moment each read the file before the other wrote, so
+ * one job's lastRun, consecutiveFailures and auto-pause were discarded by
+ * whichever saved last. An auto-pause lost that way leaves a failing job
+ * running on schedule.
+ *
+ * The callback receives the state as it is *inside* the lock, so callers must
+ * not decide anything from a read taken before calling this. Returning a null
+ * `next` skips the write, for the cases that decide there is nothing to do.
+ */
+async function mutateSchedules<T>(
+  mutate: (schedules: ScheduledJob[]) => Promise<{ next: ScheduledJob[] | null; result: T }>,
+): Promise<T> {
+  return withFileLock(SCHEDULE_LOCK_FILE, async () => {
+    const current = await loadSchedules();
+    const { next, result } = await mutate(current);
+    if (next) await saveSchedules(next);
+    return result;
+  });
 }
 
 /**
@@ -324,24 +351,30 @@ async function runScheduledJob(
     }
 
     // Update last run + consecutive-failure tracking; auto-pause on repeated failure.
-    const schedules = await loadSchedules();
-    const latest = schedules.find((schedule) => schedule.id === job.id);
-    if (!latest) {
-      console.log(`[Scheduler] Job "${job.name}" was removed while running; skipping state update`);
-      return success;
-    }
-    const failureState = nextFailureState(latest.consecutiveFailures ?? 0, success);
-    const updated = schedules.map((s) =>
-      s.id === job.id
-        ? {
-            ...s,
-            lastRun: Date.now(),
-            consecutiveFailures: failureState.consecutiveFailures,
-            enabled: failureState.autoPause ? false : s.enabled,
-          }
-        : s
-    );
-    await saveSchedules(updated);
+    // Read and write under one lock: several jobs finish near the same moment,
+    // and an unlocked read-modify-write let the last writer discard another
+    // job's failure count — including an auto-pause, which would leave a
+    // failing job running on schedule.
+    const failureState = await mutateSchedules(async (schedules) => {
+      const latest = schedules.find((schedule) => schedule.id === job.id);
+      if (!latest) {
+        console.log(`[Scheduler] Job "${job.name}" was removed while running; skipping state update`);
+        return { next: null, result: null };
+      }
+      const state = nextFailureState(latest.consecutiveFailures ?? 0, success);
+      const updated = schedules.map((s) =>
+        s.id === job.id
+          ? {
+              ...s,
+              lastRun: Date.now(),
+              consecutiveFailures: state.consecutiveFailures,
+              enabled: state.autoPause ? false : s.enabled,
+            }
+          : s
+      );
+      return { next: updated, result: state };
+    });
+    if (!failureState) return success;
 
     if (failureState.autoPause) {
       activeJobs.get(job.id)?.stop();
@@ -372,27 +405,28 @@ export async function addSchedule(
   createdBy?: string
 ): Promise<ScheduledJob> {
   validateScheduleExpression(schedule);
-  const schedules = await loadSchedules();
 
-  // Check for duplicates
-  const existing = schedules.find((s) => s.name === name);
-  if (existing) {
-    throw new Error(`Schedule "${name}" already exists`);
-  }
-
-  const job: ScheduledJob = {
-    id: `job-${Date.now()}`,
-    name,
-    projectPath,
-    prompt,
-    schedule,
-    enabled: true,
-    createdAt: Date.now(),
-    createdBy,
-  };
-
-  schedules.push(job);
-  await saveSchedules(schedules);
+  // The duplicate-name check and the append have to be one atomic step, or two
+  // concurrent adds of the same name both see "no duplicate" and one is lost.
+  const job = await mutateSchedules<ScheduledJob>(async (schedules) => {
+    if (schedules.some((s) => s.name === name)) {
+      throw new Error(`Schedule "${name}" already exists`);
+    }
+    const created: ScheduledJob = {
+      // randomUUID, not Date.now(): ids are looked up by removeSchedule and
+      // toggleSchedule, and two schedules added in the same millisecond would
+      // otherwise share one.
+      id: `job-${randomUUID()}`,
+      name,
+      projectPath,
+      prompt,
+      schedule,
+      enabled: true,
+      createdAt: Date.now(),
+      createdBy,
+    };
+    return { next: [...schedules, created], result: created };
+  });
 
   // Start cron job
   await startCronJob(job);
@@ -405,14 +439,14 @@ export async function addSchedule(
  * Remove a scheduled job
  */
 export async function removeSchedule(nameOrId: string): Promise<boolean> {
-  const schedules = await loadSchedules();
-  const index = schedules.findIndex(
-    (s) => s.name === nameOrId || s.id === nameOrId
-  );
+  const job = await mutateSchedules<ScheduledJob | null>(async (schedules) => {
+    const index = schedules.findIndex((s) => s.name === nameOrId || s.id === nameOrId);
+    if (index === -1) return { next: null, result: null };
+    const removed = schedules[index];
+    return { next: schedules.filter((_, i) => i !== index), result: removed };
+  });
 
-  if (index === -1) return false;
-
-  const job = schedules[index];
+  if (!job) return false;
 
   // Stop cron job
   const cron = activeJobs.get(job.id);
@@ -428,10 +462,6 @@ export async function removeSchedule(nameOrId: string): Promise<boolean> {
     runningProcesses.delete(job.id);
   }
 
-  // Save
-  schedules.splice(index, 1);
-  await saveSchedules(schedules);
-
   console.log(`[Scheduler] Removed schedule: ${job.name}`);
   return true;
 }
@@ -442,14 +472,18 @@ export async function removeSchedule(nameOrId: string): Promise<boolean> {
 export async function toggleSchedule(
   nameOrId: string
 ): Promise<ScheduledJob | null> {
-  const schedules = await loadSchedules();
-  const job = schedules.find((s) => s.name === nameOrId || s.id === nameOrId);
+  const job = await mutateSchedules<ScheduledJob | null>(async (schedules) => {
+    const found = schedules.find((s) => s.name === nameOrId || s.id === nameOrId);
+    if (!found) return { next: null, result: null };
+    const toggled = { ...found, enabled: !found.enabled };
+    if (toggled.enabled) validateScheduleExpression(toggled.schedule);
+    return {
+      next: schedules.map((s) => (s.id === found.id ? toggled : s)),
+      result: toggled,
+    };
+  });
 
   if (!job) return null;
-
-  job.enabled = !job.enabled;
-  if (job.enabled) validateScheduleExpression(job.schedule);
-  await saveSchedules(schedules);
 
   // Toggle cron job
   const cron = activeJobs.get(job.id);
