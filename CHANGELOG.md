@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.1 — 2026-07-26
+
+### Fixed
+
+- **A pre-existing test failure no longer reports as a regression** — `hasSameFailure` waives a failing command when the base and head runs produce the same output fingerprint, but only the command's `cwd` was path-normalized. With a subdirectory `cwd`, everything outside it kept its random sandbox prefix — sibling sources, and the isolated `HOME`/`TMPDIR` beside the project root — and the two runs happen in different `mkdtemp` directories, so identical failures hashed differently. stdout and stderr also shared one fingerprint buffer filled in arrival order, letting OS scheduling change the hash of the same output. Paths are now normalized across the whole sandbox and the streams are captured separately and concatenated in a fixed order. (#321)
+- **Rollback restored the wrong stash** — `stash@{N}` is a position, not an identity: every `git stash push` shifts existing entries down, and the checkpoint reused the index captured at creation time. The `stash` strategy pushes `rollback-preserve-*` immediately before popping, so it reliably restored the stash it had just created and orphaned the checkpoint's — the work a user asked to preserve came back as different changes. The checkpoint stash is now located by its message at pop time, and a missing stash reports failure instead of popping whatever occupies that index. (#322)
+- **One telemetry install id per install** — `getInstallId()` and `maybeShowNotice()` each did read-then-write from a stale read, so on a first run a daemon and a CLI could both mint an id and the later write replaced the other. State was also written in place, so a reader seeing a torn file regenerated the id as if the install were new. Writes now merge against the current file and go through the atomic write helper the rest of the local state already uses. (#323)
+
 ## 0.19.0 — 2026-07-23
 
 ### Added
