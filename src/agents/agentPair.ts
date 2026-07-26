@@ -309,8 +309,14 @@ export function cancelSession(sessionId: string): boolean {
     return false; // Already terminated
   }
 
-  updateSessionStatus(sessionId, 'cancelled');
+  // Record the reason before the transition, not after. Moving to a terminal
+  // status archives the session, and archiving deletes it from `sessions` —
+  // after which addMessage's lookup misses and returns silently, so the
+  // cancellation notice never reached the transcript the user reads.
+  // archiveSession stores the same object reference, so a message added here
+  // is carried into the history.
   addMessage(sessionId, 'system', 'Session has been cancelled.');
+  updateSessionStatus(sessionId, 'cancelled');
   return true;
 }
 

@@ -7,6 +7,7 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Types
 
@@ -168,9 +169,13 @@ export class AgentBus {
       payload,
     };
 
-    // Save message
+    // Save message. Atomic (write-temp + fsync + rename) because the consumers
+    // here poll with readdir + readFile: an in-place write makes the filename
+    // visible to readdir before its contents are complete, so a poller can read
+    // a truncated message and fail to parse it. rename publishes the name and
+    // the content in one step.
     const messagePath = resolve(this.messagesPath, `${message.id}.json`);
-    await fs.writeFile(messagePath, JSON.stringify(message, null, 2));
+    await atomicWriteFile(messagePath, JSON.stringify(message, null, 2), 0o644);
     if (++this.publishedSincePrune >= 100) {
       this.publishedSincePrune = 0;
       await this.pruneMessages();
