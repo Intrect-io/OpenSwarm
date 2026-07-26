@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.3 — 2026-07-26
+
+### Fixed
+
+- **One provider's bad token response no longer wipes every credential** — all providers share `auth-profiles.json`, and the store validated it as a whole on load, so a single malformed profile quarantined the file and logged the user out of everything. Token responses were cast rather than parsed, so a 200 carrying an error body wrote an undefined access token and a `NaN` expiry: a bad Linear response cost the user their ChatGPT credentials. Responses are now validated at every endpoint (GPT exchange, Linear exchange, refresh), `setProfile` refuses to persist a profile that would fail the load check, `load()` drops individual unusable profiles with a warning instead of failing the whole file, and `save()` applies only the keys it touched onto the current file so a second process cannot roll back the other's `refresh_token` rotation. (#329)
+
 ## 0.19.2 — 2026-07-26
 
 ### Fixed
