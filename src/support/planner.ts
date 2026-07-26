@@ -288,10 +288,25 @@ function parsePlanResult(resultText: string, originalTitle: string): PlannerResu
 function parseDirectJson(text: string, startIdx: number, originalTitle: string): PlannerResult {
   let depth = 0;
   let endIdx = startIdx;
+  // Braces inside string values are not structure. Counting them made a plan
+  // whose description mentioned an unmatched `{` or `}` — a code snippet, a
+  // shell fragment — end at the wrong offset, so JSON.parse failed and the
+  // whole plan fell through to the lossy text heuristic below. Measured: a
+  // description containing "remove the trailing } here" ended two characters
+  // early; one containing "{ here" never closed at all.
+  let inString = false;
+  let escaped = false;
 
   for (let i = startIdx; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    if (text[i] === '}') {
+    const ch = text[i];
+
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+
+    if (ch === '{') depth++;
+    if (ch === '}') {
       depth--;
       if (depth === 0) {
         endIdx = i + 1;
@@ -344,26 +359,6 @@ function extractFromText(text: string, originalTitle: string): PlannerResult {
 
 // Linear Integration
 
-/**
- * Create sub-tasks as Linear sub-issues
- */
-export async function createLinearSubIssues(
-  parentIssueId: string,
-  subTasks: SubTask[],
-  _teamId: string,
-  _projectId?: string
-): Promise<{ success: boolean; createdIds: string[]; error?: string }> {
-  // This function needs to call Linear MCP directly,
-  // so autonomousRunner uses mcp__linear-server__create_issue
-  // Here we only prepare data
-
-  const createdIds: string[] = [];
-
-  // Note: actual Linear API calls are made in autonomousRunner
-  console.log(`[Planner] Prepared ${subTasks.length} sub-issues for ${parentIssueId}`);
-
-  return { success: true, createdIds };
-}
 
 /**
  * Estimate issue duration (heuristic)
