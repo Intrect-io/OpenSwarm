@@ -426,7 +426,13 @@ async function literalExistsInHeadSource(projectPath: string, literal: string): 
   try {
     const { stdout } = await execFileAsync(
       'git',
-      ['grep', '-F', '-l', literal, 'HEAD', '--', '.'],
+      // `-e` is required, not stylistic. Without it git parses a literal that
+      // begins with `-` as an option and exits with "unknown option", which
+      // lands in the catch below and reports "not present in HEAD". This guard
+      // is blocking, so a contract literal like "--output-format" made the
+      // pipeline reject correct work. `-F` fixes the match semantics but does
+      // not stop option parsing of the pattern itself.
+      ['grep', '-F', '-l', '-e', literal, 'HEAD', '--', '.'],
       { cwd: projectPath, timeout: 10_000 },
     );
     return stdout

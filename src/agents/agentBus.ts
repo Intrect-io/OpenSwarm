@@ -7,6 +7,7 @@ import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Types
 
@@ -168,9 +169,19 @@ export class AgentBus {
       payload,
     };
 
-    // Save message
+    // Save message. Atomic (write-temp + fsync + rename) because the consumers
+    // here poll with readdir + readFile: an in-place write makes the filename
+    // visible to readdir before its contents are complete, so a poller can read
+    // a truncated message and fail to parse it. rename publishes the name and
+    // the content in one step.
+    //
+    // Owner-only (the helper's default), matching context.json beside it. The
+    // mode is not incidental here: atomicWriteFile chmods explicitly after the
+    // rename, so passing a wider mode would override even a restrictive umask
+    // that the previous plain writeFile respected — and these payloads carry
+    // agent prompts, outputs and errors.
     const messagePath = resolve(this.messagesPath, `${message.id}.json`);
-    await fs.writeFile(messagePath, JSON.stringify(message, null, 2));
+    await atomicWriteFile(messagePath, JSON.stringify(message, null, 2));
     if (++this.publishedSincePrune >= 100) {
       this.publishedSincePrune = 0;
       await this.pruneMessages();
