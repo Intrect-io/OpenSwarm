@@ -146,7 +146,21 @@ export async function applyV4APatch(
       }
       if (op.kind === 'add') {
         await fs.mkdir(path.dirname(abs), { recursive: true });
-        await fs.writeFile(abs, op.addLines.join('\n'), 'utf-8');
+        // 'wx' fails when the path already exists. An "Add File" op naming an
+        // existing file used to overwrite it outright — the previous contents
+        // were gone with no error raised and nothing recorded as an update, so
+        // the agent believed it had created a file when it had replaced one.
+        // Failing here runs the rollback below, which is recoverable.
+        try {
+          await fs.writeFile(abs, op.addLines.join('\n'), { encoding: 'utf-8', flag: 'wx' });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
+            throw new Error(
+              `refusing to add ${op.filePath}: it already exists — use an update op to change it`,
+            );
+          }
+          throw err;
+        }
         changed.push(op.filePath);
         continue;
       }

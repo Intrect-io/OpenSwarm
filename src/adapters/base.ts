@@ -5,6 +5,8 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CliAdapter, CliRunOptions, CliRunResult } from './types.js';
 import { parseCliStreamChunk } from '../agents/cliStreamParser.js';
 import { registerProcess } from './processRegistry.js';
@@ -26,8 +28,20 @@ export async function spawnCli(
     return adapter.run(options);
   }
 
-  const promptFile = `/tmp/openswarm-prompt-${Date.now()}.txt`;
-  await fs.writeFile(promptFile, options.prompt);
+  // The prompt goes in a private per-call directory rather than a predictable
+  // path in the shared /tmp. Three things were wrong with
+  // `/tmp/openswarm-prompt-${Date.now()}.txt`:
+  //   - Millisecond resolution. Workers run in parallel, so two spawnCli calls
+  //     landing in the same millisecond overwrote each other's prompt — and the
+  //     path is what gets handed to the CLI, so one agent ran the other's task.
+  //   - Default file mode, leaving the prompt readable by every local user.
+  //   - A predictable name in a world-writable directory, which another local
+  //     user can pre-create as a symlink before the write lands.
+  // mkdtemp answers all three at once: a unique 0700 directory, created
+  // atomically by the OS.
+  const promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-prompt-'));
+  const promptFile = join(promptDir, 'prompt.txt');
+  await fs.writeFile(promptFile, options.prompt, { mode: 0o600 });
   let cleanupPaths: string[] = [];
 
   try {
@@ -147,7 +161,8 @@ export async function spawnCli(
     });
   } finally {
     try {
-      await fs.unlink(promptFile);
+      // Remove the whole private directory, not just the file inside it.
+      await fs.rm(promptDir, { recursive: true, force: true });
     } catch {
       // Ignore cleanup errors
     }
