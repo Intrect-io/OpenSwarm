@@ -3,8 +3,8 @@
 // ============================================
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 import { extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { expandPath } from '../core/config.js';
@@ -61,12 +61,33 @@ export function resolveRepoPath(repo: string): string | null {
   }
 
   // 3. Relative path (assumed under ~/dev/)
-  const devPath = expandPath(`~/dev/${repo}`);
-  if (existsSync(devPath)) {
-    return devPath;
+  //
+  // Contained deliberately. This name arrives from a Discord message via
+  // `!dev <repo> "<task>"`, and the path it resolves to becomes the cwd of a
+  // `claude --permission-mode bypassPermissions` process. Without the check,
+  // `../.ssh` resolved to ~/.ssh and `..` to the home directory — measured —
+  // so a repo name alone chose where an unsandboxed agent would run.
+  //
+  // realpath, not just resolve: a symlink inside ~/dev pointing outside it
+  // would otherwise pass a purely lexical check.
+  const devRoot = realpathIfPossible(expandPath('~/dev'));
+  const devPath = resolve(expandPath(`~/dev/${repo}`));
+  if (!existsSync(devPath)) return null;
+  const real = realpathIfPossible(devPath);
+  if (real !== devRoot && !real.startsWith(devRoot + sep)) {
+    console.warn(`[Dev] Refusing "${repo}": resolves outside ~/dev (${real})`);
+    return null;
   }
+  return devPath;
+}
 
-  return null;
+/** realpath when the path exists, the lexical form otherwise. */
+function realpathIfPossible(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 /**
