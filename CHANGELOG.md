@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.19.7 — 2026-07-26
+
+### Fixed
+
+- **Patch operations stop destroying files they were meant to leave alone** — "Add File" wrote unconditionally, so an op naming an existing file replaced it with no error raised and nothing recorded as an update. "Move to" did the same to its destination, and worse: a destination whose contents could not be snapshotted is skipped by rollback, so the overwrite outlived a failure that reported nothing had been applied. Both now refuse and name the path. Rollback also distinguishes a path that was absent from one it merely could not read, and only removes files this patch actually created — previously it deleted mode-000 files, dangling symlinks, and files written by another process after the snapshot was taken. (#337)
+
+### Security
+
+- **CLI prompts are no longer written to a predictable path in shared /tmp** — `/tmp/openswarm-prompt-${Date.now()}.txt` had millisecond resolution, so parallel workers could overwrite each other's prompt and run each other's task; it used the default file mode, leaving task content readable by every local user; and the predictable name in a world-writable directory could be pre-created as a symlink by another local user. The prompt now lives in a per-call `mkdtemp` directory (0700) as a 0600 file, removed on every exit path. (#337)
+
 ## 0.19.6 — 2026-07-26
 
 ### Fixed
