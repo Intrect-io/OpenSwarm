@@ -28,20 +28,28 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/** A git repo whose HEAD already declares `literal`, with an unstaged test that uses it. */
-async function repoWithLiteralInHead(literal: string): Promise<string> {
+// Fixture sources are written out as complete, literal strings rather than
+// assembled from a variable. Interpolating a value into generated source is the
+// code-construction pattern CodeQL flags (js/bad-code-sanitization), and it is
+// right to: JSON.stringify escapes for JSON, not for a JS string literal.
+// Nothing here needs to be parameterised, so the pattern is simply removed.
+const HEAD_SOURCE = 'export const header = "--x-trace-id:";\n';
+const TEST_USING_HEAD_LITERAL =
+  'it("sends the header", () => { expect(req.headers).toContain("--x-trace-id:"); });\n';
+const TEST_USING_INVENTED_LITERAL =
+  'it("sends it", () => { expect(req.headers).toContain("--x-invented-header:"); });\n';
+
+/** A git repo whose HEAD declares the trace-id header, plus an unstaged test file. */
+async function repoWithLiteralInHead(testSource: string): Promise<string> {
   const repo = tempRoot('openswarm-guard-');
-  writeFileSync(join(repo, 'app.ts'), `export const header = ${JSON.stringify(literal)};\n`);
+  writeFileSync(join(repo, 'app.ts'), HEAD_SOURCE);
   await execFileAsync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
   await execFileAsync('git', ['config', 'user.name', 'test'], { cwd: repo });
   await execFileAsync('git', ['add', '.'], { cwd: repo });
   await execFileAsync('git', ['commit', '-qm', 'init'], { cwd: repo });
 
-  writeFileSync(
-    join(repo, 'app.test.ts'),
-    `it('sends the header', () => { expect(req.headers).toContain(${JSON.stringify(literal)}); });\n`,
-  );
+  writeFileSync(join(repo, 'app.test.ts'), testSource);
   return repo;
 }
 
@@ -59,7 +67,7 @@ describe('contractEvidence guard with a literal that looks like an option', () =
   // exits with "unknown option"; the catch turns that into "not present in
   // HEAD". This guard is blocking, so the pipeline rejected correct work.
   it('does not flag a literal that HEAD already declares', async () => {
-    const repo = await repoWithLiteralInHead('--x-trace-id:');
+    const repo = await repoWithLiteralInHead(TEST_USING_HEAD_LITERAL);
 
     const result = await runGuards(workerResult as never, repo, { contractEvidenceCheck: true });
 
@@ -70,11 +78,7 @@ describe('contractEvidence guard with a literal that looks like an option', () =
   // The guard must still do its job for a literal that is genuinely new, or
   // "stop blocking correct work" would just mean "stop checking".
   it('still flags a literal that appears only in the test', async () => {
-    const repo = await repoWithLiteralInHead('--x-trace-id:');
-    writeFileSync(
-      join(repo, 'app.test.ts'),
-      `it('sends it', () => { expect(req.headers).toContain("--x-invented-header:"); });\n`,
-    );
+    const repo = await repoWithLiteralInHead(TEST_USING_INVENTED_LITERAL);
 
     const result = await runGuards(workerResult as never, repo, { contractEvidenceCheck: true });
 
