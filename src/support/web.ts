@@ -3,10 +3,11 @@
 // ============================================
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { writeFileSync, readFileSync, existsSync, watchFile, unwatchFile, type Stats } from 'node:fs';
+import { readFileSync, existsSync, watchFile, unwatchFile, type Stats } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, dirname, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, networkInterfaces } from 'node:os';
+import { atomicWriteFileSync } from './atomicFile.js';
 import { execFile } from 'node:child_process';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent, getLogBuffer, getStageBuffer, getChatBuffer } from '../core/eventHub.js';
@@ -288,6 +289,37 @@ function loadReposConfig(): ReposConfig {
   return { pinned: [], enabled: [], basePaths: [], removedConfigPaths: [] };
 }
 
+/**
+ * This machine's Tailscale address, or undefined when Tailscale is not up.
+ *
+ * Detected at runtime rather than hardcoded: the previous literal was one
+ * developer's actual node address committed to a public repo, and it went
+ * stale for everyone else the moment Tailscale reassigned it. Tailscale hands
+ * out addresses from the 100.64.0.0/10 CGNAT range, which nothing else on a
+ * normal LAN uses.
+ */
+export function detectTailscaleIP(): string | undefined {
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family !== 'IPv4' || address.internal) continue;
+      const [first, second] = address.address.split('.').map(Number);
+      if (first === 100 && second >= 64 && second <= 127) return address.address;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Persist the repos config.
+ *
+ * Atomic (write-temp + fsync + rename) because this file has three concurrent
+ * participants: this process, `openswarm add/remove` via projectHandler's
+ * saveRepos(), and startReposWatcher() polling it every 3s. A plain in-place
+ * write leaves a window where the poller reads a half-written file;
+ * loadReposConfig()'s catch then returns an empty config, and applyReposConfig
+ * computes an empty desired set — disabling every active project. Matches
+ * projectHandler.saveRepos(), which already writes this same path atomically.
+ */
 function saveReposConfig(): void {
   try {
     const cfg: ReposConfig = {
@@ -296,7 +328,7 @@ function saveReposConfig(): void {
       basePaths: Array.from(customBasePaths),
       removedConfigPaths: Array.from(removedConfigPaths),
     };
-    writeFileSync(REPOS_FILE, JSON.stringify(cfg, null, 2));
+    atomicWriteFileSync(REPOS_FILE, JSON.stringify(cfg, null, 2) + '\n', 0o600);
   } catch (e) {
     console.warn('[Web] Failed to save repos config:', e);
   }
@@ -1421,10 +1453,13 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
     const listenHost = process.env.OPENSWARM_WEB_TOKEN?.trim() ? '0.0.0.0' : '127.0.0.1';
     server.listen(port, listenHost, () => {
-      const tailscaleIP = '100.95.200.28'; // Current Tailscale IP
+      const tailscaleIP = detectTailscaleIP();
       console.log(`Web interface running at:`);
       console.log(`  - http://127.0.0.1:${port} (localhost)`);
-      if (listenHost === '0.0.0.0') console.log(`  - http://${tailscaleIP}:${port} (Tailscale, token required)`);
+      if (listenHost === '0.0.0.0') {
+        if (tailscaleIP) console.log(`  - http://${tailscaleIP}:${port} (Tailscale, token required)`);
+        else console.log(`  - http://<this-host>:${port} (token required)`);
+      }
       gitStatusPoller = startGitStatusPoller(() => Array.from(pinnedProjects));
       startHealthChecker(30000);
       resolve();

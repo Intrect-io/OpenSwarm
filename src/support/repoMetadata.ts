@@ -7,9 +7,10 @@
 // (Linear today, GitHub/etc later) and removes the need for fuzzy
 // name matching, which silently breaks on renames or ambiguous names.
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { atomicWriteFile } from './atomicFile.js';
 
 const LinearMappingSchema = z.object({
   teamId: z.string().uuid().optional(),
@@ -131,7 +132,13 @@ export async function loadRepoMetadata(repoPath: string): Promise<RepoMetadata |
 export async function saveRepoMetadata(repoPath: string, meta: RepoMetadata): Promise<string> {
   const validated = RepoMetadataSchema.parse(meta);
   const filePath = join(repoPath, REPO_METADATA_FILENAME);
-  await writeFile(filePath, `${JSON.stringify(validated, null, 2)}\n`, 'utf-8');
+  // Atomic: loadRepoMetadata has many concurrent readers (projectMapper,
+  // worktreeManager.linkSharedPaths, the daemon's repo resolution). An in-place
+  // rewrite lets them observe a half-written file and fail with
+  // RepoMetadataError. 0o644 preserves the mode a plain write produced — this
+  // file lives in the repo and is meant to be readable, unlike the 0o600
+  // config files under the user's home directory.
+  await atomicWriteFile(filePath, `${JSON.stringify(validated, null, 2)}\n`, 0o644);
   return filePath;
 }
 

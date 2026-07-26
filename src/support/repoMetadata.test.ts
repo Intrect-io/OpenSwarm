@@ -3,7 +3,7 @@
 // ============================================
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadRepoMetadata, saveRepoMetadata, REPO_METADATA_FILENAME, RepoMetadataError } from './repoMetadata.js';
@@ -131,5 +131,39 @@ describe('saveRepoMetadata', () => {
       saveRepoMetadata(dir, { schemaVersion: 1, linear: { projectId: 'not-a-uuid' } }),
     ).rejects.toThrow();
     await expect(loadRepoMetadata(dir)).resolves.toBeNull();
+  });
+
+  // openswarm.json has many concurrent readers (projectMapper, worktreeManager's
+  // linkSharedPaths, the daemon's repo resolution). Rewriting it in place lets a
+  // reader observe a truncated file and fail with RepoMetadataError. An atomic
+  // write is observable here as inode replacement: a plain writeFile truncates
+  // the existing file and keeps its inode, whereas write-temp + rename installs
+  // a new one.
+  it('replaces openswarm.json atomically rather than rewriting it in place', async () => {
+    const filePath = await saveRepoMetadata(dir, { schemaVersion: 1, projectName: 'A' });
+    const inodeBefore = statSync(filePath).ino;
+
+    const longer = {
+      schemaVersion: 1 as const,
+      linear: {
+        teamId: '49b7af95-3cac-4a56-adc7-f19d77dfbe9b',
+        teamKey: 'INTRECT-WITH-A-MUCH-LONGER-KEY',
+        projectId: '74a9d092-7b3c-4d4d-a998-a2c9a8f08e83',
+        projectName: 'OpenSwarm',
+      },
+    };
+    await saveRepoMetadata(dir, longer);
+
+    expect(statSync(filePath).ino).not.toBe(inodeBefore);
+    await expect(loadRepoMetadata(dir)).resolves.toEqual(longer);
+  });
+
+  // atomicWriteFile defaults to 0o600. This file is tracked in the repo and is
+  // meant to be readable like any other checked-in config, so the call has to
+  // opt out of that default — otherwise adopting the atomic helper would
+  // quietly turn openswarm.json owner-only.
+  it('keeps openswarm.json readable beyond its owner', async () => {
+    const filePath = await saveRepoMetadata(dir, { schemaVersion: 1, projectName: 'A' });
+    expect(statSync(filePath).mode & 0o044).not.toBe(0);
   });
 });

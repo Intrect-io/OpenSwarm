@@ -6,7 +6,8 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
+import { atomicWriteFile } from '../support/atomicFile.js';
 import { getDateLocale } from '../locale/index.js';
 
 const execFileAsync = promisify(execFile);
@@ -330,21 +331,51 @@ export type HealthTransition = {
   brokenSince?: string;
 };
 
-/** Load CI state */
+/**
+ * Load CI state.
+ *
+ * A missing file is the normal first-run case and stays silent. Anything else —
+ * malformed JSON, a permission error — means real brokenSince/lastReminder
+ * history is being discarded, silently resetting every repo's health timeline,
+ * so it is logged rather than swallowed by a bare catch.
+ */
 export async function loadCIState(): Promise<CIState> {
+  const empty = (): CIState => ({ repos: {}, updatedAt: new Date().toISOString() });
+  let data: string;
   try {
-    const data = await readFile(CI_STATE_PATH, 'utf-8');
+    data = await readFile(CI_STATE_PATH, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      console.warn('[CI] Could not read CI state, starting fresh:', err instanceof Error ? err.message : err);
+    }
+    return empty();
+  }
+  try {
     return JSON.parse(data);
-  } catch {
-    return { repos: {}, updatedAt: new Date().toISOString() };
+  } catch (err) {
+    console.warn(
+      `[CI] CI state at ${CI_STATE_PATH} is corrupt — repo health history is being reset:`,
+      err instanceof Error ? err.message : err,
+    );
+    return empty();
   }
 }
 
-/** Save CI state */
+/**
+ * Save CI state.
+ *
+ * Atomic because two independent callers (core/service.ts checkGitHubCI and
+ * automation/ciWorker.ts) each run their own load → modify → save cycle against
+ * this file with no lock. An in-place write lets the other one read a
+ * half-written file, which loadCIState would then treat as "no state" and wipe
+ * the health history. write-temp + rename means a concurrent reader always sees
+ * either the old file or the new one, never a torn one. (This does not make the
+ * read-modify-write sequence itself atomic — overlapping runs can still lose an
+ * update — but it removes the corruption path.)
+ */
 export async function saveCIState(state: CIState): Promise<void> {
-  await mkdir(resolve(homedir(), '.openswarm'), { recursive: true });
   state.updatedAt = new Date().toISOString();
-  await writeFile(CI_STATE_PATH, JSON.stringify(state, null, 2));
+  await atomicWriteFile(CI_STATE_PATH, JSON.stringify(state, null, 2) + '\n');
 }
 
 /**
