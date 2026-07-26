@@ -424,7 +424,6 @@ export class CodexResponsesAdapter implements CliAdapter {
     cacheKey?: string,
   ) {
     let token = initialToken;
-    let retried = false;
     let modelRetried = false;
     let effectiveModel = model;
 
@@ -432,6 +431,12 @@ export class CodexResponsesAdapter implements CliAdapter {
       // Per-API-call throttle budget (a fresh one each turn — a wait that cleared
       // one turn's throttle must not count against the next). (INT-2907)
       const throttle: ThrottleState = { attempts: 0 };
+      // Per-API-call too, for the same reason. Held in the createApiCaller
+      // closure this was set once per run, so the first 401 refresh consumed
+      // the only retry the whole run had: a second token expiry — ordinary in a
+      // run measured in hours — then failed every remaining call with 401 and
+      // never attempted the refresh that would have fixed it.
+      let retried = false;
       const { instructions, input } = chatToResponsesInput(messages);
       const body: Record<string, unknown> = {
         model: effectiveModel,

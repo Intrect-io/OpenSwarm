@@ -497,3 +497,98 @@ describe('429 throttle vs spent quota (INT-2907)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4); // initial + 3 retries
   });
 });
+
+describe('401 refresh scope', () => {
+  const okStreamResponse = () =>
+    new Response(
+      [
+        'data: {"type":"response.output_text.delta","delta":"ok"}',
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    );
+
+  /** Duck-typed AuthProfileStore: refreshAndRetry only needs get/set. */
+  function fakeStore() {
+    let profile = {
+      type: 'oauth' as const,
+      provider: 'openai-gpt',
+      access: 'stale',
+      refresh: 'refresh-token',
+      expires: Date.now() + 3_600_000,
+      clientId: 'client',
+    };
+    return {
+      getProfile: () => profile,
+      setProfile: (_k: string, p: typeof profile) => { profile = p; },
+    };
+  }
+
+  // The regression: `retried` lived in createApiCaller's closure, so it was set
+  // once per run. The first 401 consumed the only refresh the whole run had,
+  // and a second token expiry — ordinary in a run measured in hours — then
+  // failed every remaining call without ever attempting the refresh.
+  it('refreshes again when the token expires a second time in the same run', async () => {
+    let responsesCalls = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const target = String(url);
+      if (target.includes('oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'fresh', refresh_token: 'r2', expires_in: 3600 }), {
+          status: 200,
+        });
+      }
+      responsesCalls++;
+      // One 401 at the start of each of the two turns.
+      if (responsesCalls === 1 || responsesCalls === 3) {
+        return new Response('unauthorized', { status: 401 });
+      }
+      return okStreamResponse();
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    type CreateApiCaller = (
+      initialToken: string,
+      accountId: string,
+      store: unknown,
+      model: string,
+    ) => (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<unknown>;
+    const adapter = new CodexResponsesAdapter() as unknown as { createApiCaller: CreateApiCaller };
+    const callApi = adapter.createApiCaller('token', 'account', fakeStore(), 'gpt-5.5');
+
+    await expect(callApi([{ role: 'user', content: 'first' }], [])).resolves.toBeDefined();
+    // The second turn must get its own retry budget.
+    await expect(callApi([{ role: 'user', content: 'second' }], [])).resolves.toBeDefined();
+    expect(responsesCalls).toBe(4);
+  });
+
+  // The retry stays once per call: a 401 that survives the refresh must fail
+  // rather than loop.
+  it('does not retry a second time within one call', async () => {
+    let responsesCalls = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const target = String(url);
+      if (target.includes('oauth/token')) {
+        return new Response(JSON.stringify({ access_token: 'fresh', refresh_token: 'r2', expires_in: 3600 }), {
+          status: 200,
+        });
+      }
+      responsesCalls++;
+      return new Response('unauthorized', { status: 401 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    type CreateApiCaller = (
+      initialToken: string,
+      accountId: string,
+      store: unknown,
+      model: string,
+    ) => (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<unknown>;
+    const adapter = new CodexResponsesAdapter() as unknown as { createApiCaller: CreateApiCaller };
+    const callApi = adapter.createApiCaller('token', 'account', fakeStore(), 'gpt-5.5');
+
+    await expect(callApi([{ role: 'user', content: 'hi' }], [])).rejects.toThrow();
+    expect(responsesCalls).toBe(2);
+  });
+});
