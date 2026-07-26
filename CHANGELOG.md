@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.5 — 2026-07-26
+
+### Fixed
+
+- **A blocking guard stopped rejecting correct work** — `literalExistsInHeadSource` asked git whether a contract literal exists in HEAD without passing `-e`, so git parsed a literal beginning with `-` as an option and exited with "unknown option". The catch turned that into "not present in HEAD", and since this guard blocks, a contract literal like `--x-trace-id:` made the pipeline reject valid changes. (#333)
+- **Cancelling a session records why** — the "Session has been cancelled." message was added after the terminal status transition, which archives the session and removes it from the live map, so the message was silently dropped and never reached the transcript the user reads. (#333)
+- **Bus messages cannot be read half-written** — message files were written in place while three consumers poll the directory with `readdir` + `readFile`, so a poller could see a filename before its contents were complete. Now written atomically. (#333)
+
+### Security
+
+- **Agent bus messages are owner-only** — these files carry agent prompts, outputs and errors. They are now written at `0o600`, matching `context.json` beside them, instead of relying on the process umask. (#333)
+
 ## 0.19.4 — 2026-07-26
 
 ### Fixed
