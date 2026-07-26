@@ -61,3 +61,44 @@ describe('SqliteIssueStore durable semantics', () => {
     expect(() => getIssueStore(path('two.db'))).toThrow(/already initialized/);
   });
 });
+
+describe('getStats scoping', () => {
+  // byProject was the one field that ignored the projectId filter, so a
+  // per-project view showed a breakdown counting every project — numbers that
+  // did not add up to the total printed beside them.
+  it('scopes the project breakdown to the requested project', () => {
+    const store = new SqliteIssueStore(path());
+    store.createIssue({ projectId: 'alpha', title: 'a1' });
+    store.createIssue({ projectId: 'alpha', title: 'a2' });
+    store.createIssue({ projectId: 'beta', title: 'b1' });
+
+    const stats = store.getStats('alpha');
+
+    expect(stats.total).toBe(2);
+    expect(stats.byProject).toEqual({ alpha: 2 });
+    store.close();
+  });
+
+  it('agrees with its own total', () => {
+    const store = new SqliteIssueStore(path());
+    store.createIssue({ projectId: 'alpha', title: 'a1' });
+    store.createIssue({ projectId: 'beta', title: 'b1' });
+    store.createIssue({ projectId: 'beta', title: 'b2' });
+
+    for (const project of ['alpha', 'beta']) {
+      const stats = store.getStats(project);
+      const summed = Object.values(stats.byProject).reduce((a, b) => a + b, 0);
+      expect(summed).toBe(stats.total);
+    }
+    store.close();
+  });
+
+  it('still reports every project when no filter is given', () => {
+    const store = new SqliteIssueStore(path());
+    store.createIssue({ projectId: 'alpha', title: 'a1' });
+    store.createIssue({ projectId: 'beta', title: 'b1' });
+
+    expect(store.getStats().byProject).toEqual({ alpha: 1, beta: 1 });
+    store.close();
+  });
+});

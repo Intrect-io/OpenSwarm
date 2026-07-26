@@ -15,6 +15,7 @@ import { promises as fs } from 'fs';
 import { resolve, basename, join } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
+import { createHash } from 'crypto';
 
 // Codex storage path
 const CODEX_DIR = resolve(homedir(), '.openswarm/codex');
@@ -104,6 +105,21 @@ function slugify(text: string): string {
     .replace(/-+/g, '-')
     .slice(0, 50)
     .replace(/-$/, '');
+}
+
+/**
+ * The part of a session filename that makes it unique.
+ *
+ * Derived from a hash rather than the first N characters of the id. Ids look
+ * like `session-<ms>`, and taking the leading 12 characters left only the first
+ * four digits of the timestamp — a value that stays the same for ~11.6 days
+ * (10^9 ms). Uniqueness therefore collapsed to the `DD-HHMM` prefix plus the
+ * title slug, so two sessions with the same title in the same minute silently
+ * overwrote each other. A hash discriminates whatever shape the id takes,
+ * including a leading- or trailing-common one.
+ */
+export function sessionFilenameSuffix(id: string): string {
+  return createHash('sha256').update(id).digest('hex').slice(0, 12);
 }
 
 /**
@@ -260,7 +276,7 @@ export async function saveSession(
   const date = new Date(session.startedAt);
   const { monthDir, prefix } = getDatePaths(date);
   const slug = slugify(session.title);
-  const sessionSuffix = slugify(session.id || String(session.startedAt)).slice(0, 12);
+  const sessionSuffix = sessionFilenameSuffix(session.id || String(session.startedAt));
 
   // Create monthly directory
   const monthPath = join(CODEX_DIR, monthDir);
