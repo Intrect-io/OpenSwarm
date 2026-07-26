@@ -9,6 +9,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
 import { PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
+import { parseTokenResponse } from './tokenResponse.js';
 
 // ----- Constants -----
 
@@ -62,15 +63,18 @@ export interface LinearFlowOptions {
   scopes?: string;
 }
 
+/**
+ * Validate Linear's authorization-code exchange response.
+ *
+ * Thin wrapper over the shared validator. This is an exchange, so a refresh
+ * token is mandatory — it is the only point at which one is issued.
+ */
 export function parseLinearTokenResponse(value: unknown): LinearFlowResult {
-  if (!value || typeof value !== 'object') throw new Error('Linear token response is not an object');
-  const tokens = value as Record<string, unknown>;
-  if (typeof tokens.access_token !== 'string' || !tokens.access_token) throw new Error('Linear token response missing access_token');
-  if (typeof tokens.refresh_token !== 'string' || !tokens.refresh_token) throw new Error('Linear token response missing refresh_token');
-  if (typeof tokens.expires_in !== 'number' || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0) {
-    throw new Error('Linear token response has invalid expires_in');
-  }
-  return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresIn: tokens.expires_in };
+  const { accessToken, refreshToken, expiresIn } = parseTokenResponse(value, {
+    provider: 'Linear',
+    requireRefreshToken: true,
+  });
+  return { accessToken, refreshToken: refreshToken as string, expiresIn };
 }
 
 export function isValidLinearCallback(
