@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { enableWalWithRetry } from '../support/sqliteWal.js';
 import { ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION, CLAIMABLE_STATES, RUN_STATES } from './runLedgerTypes.js';
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
@@ -146,7 +147,7 @@ export class RunLedger {
       // Install the wait policy before WAL/schema pragmas: overlapping launchd
       // generations can contend as soon as journal_mode is negotiated.
       this.db.pragma(`busy_timeout = ${busyTimeoutMs}`);
-      this.db.pragma('journal_mode = WAL');
+      enableWalWithRetry(this.db, busyTimeoutMs);
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('synchronous = FULL');
       migrateAutomationSchema(this.db);
