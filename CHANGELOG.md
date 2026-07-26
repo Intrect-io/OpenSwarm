@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.19.8 — 2026-07-26
+
+### Fixed
+
+- **A wide tool fan-out no longer compacts the turn that just happened** — `compactPriorTurns` aligns its boundary forward past tool messages to avoid orphans, but when the most recent turn issues more tool calls than `keepRecent` the tail is entirely tool messages and that walk runs off the end. Measured on a 3-round history with 9 parallel calls, nothing at all was preserved: the model lost the reads it had just made and repeated them. The walk now falls back to going backwards to the assistant those tools belong to. (#339)
+- **A second token expiry mid-run refreshes instead of failing** — the 401 retry flag lived in the per-run caller closure, so the first refresh consumed the only retry the entire run had. A second expiry, ordinary in a run measured in hours, then failed every remaining call with 401 without attempting the refresh that would have fixed it. (#339)
+
 ## 0.19.7 — 2026-07-26
 
 ### Fixed
