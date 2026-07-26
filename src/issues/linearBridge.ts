@@ -213,14 +213,22 @@ function mapLinearStatusToLocal(stateName: string): IssueStatus {
   return map[stateName] ?? 'backlog';
 }
 
-function mapStatusToLinear(status: IssueStatus): string {
-  const map: Record<IssueStatus, string> = {
-    backlog: 'Backlog',
-    todo: 'Todo',
-    in_progress: 'In Progress',
-    in_review: 'In Review',
-    done: 'Done',
-    cancelled: 'Cancelled',
+/**
+ * Acceptable Linear workflow-state names for a local status, best first.
+ *
+ * A list rather than a single name because the state name is configured per
+ * workspace, not fixed by the API. Linear's own default is the US spelling
+ * "Canceled", so emitting only "Cancelled" made resolveLinearStateId throw for
+ * every team on the default — that status never synced outward for them.
+ */
+export function mapStatusToLinear(status: IssueStatus): string[] {
+  const map: Record<IssueStatus, string[]> = {
+    backlog: ['Backlog'],
+    todo: ['Todo', 'To Do'],
+    in_progress: ['In Progress'],
+    in_review: ['In Review'],
+    done: ['Done', 'Completed'],
+    cancelled: ['Cancelled', 'Canceled'],
   };
   return map[status];
 }
@@ -248,14 +256,28 @@ function mapPriorityToLinear(priority: IssuePriority): number {
   return map[priority];
 }
 
-async function resolveLinearStateId(stateName: string): Promise<string> {
+/**
+ * Resolve the first candidate state name that this team actually defines.
+ *
+ * Matching is case-insensitive and tries each candidate in order, so a
+ * workspace that spells a state differently still syncs instead of failing.
+ */
+async function resolveLinearStateId(candidates: string[]): Promise<string> {
   if (!linearClient) throw new Error('Linear 클라이언트 미초기화');
 
   const team = await linearClient.team(linearTeamId);
   const states = await team.states();
-  const state = states.nodes.find((s: any) => s.name === stateName);
-  if (!state) throw new Error(`Linear 상태 "${stateName}" 없음`);
-  return state.id;
+
+  for (const candidate of candidates) {
+    const wanted = candidate.toLowerCase();
+    const state = states.nodes.find((s: any) => String(s.name).toLowerCase() === wanted);
+    if (state) return state.id;
+  }
+
+  const available = states.nodes.map((s: any) => s.name).join(', ');
+  throw new Error(
+    `Linear 상태 "${candidates.join('" / "')}" 없음 (팀에 정의된 상태: ${available})`,
+  );
 }
 
 export function isLinearBridgeReady(): boolean {

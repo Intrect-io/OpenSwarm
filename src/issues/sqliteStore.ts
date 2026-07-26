@@ -673,10 +673,14 @@ export class SqliteIssueStore implements IIssueStore {
       `SELECT priority, COUNT(*) as cnt FROM issues ${where} GROUP BY priority`
     ).all(...params) as any[]).forEach((r) => { byPriority[r.priority] = r.cnt; });
 
+    // Scoped like every other field here. Without the filter this counted
+    // across all projects while total/byStatus/byPriority counted one, so a
+    // per-project stats view showed a breakdown whose numbers did not add up to
+    // its own total.
     const byProject: Record<string, number> = {};
     (this.db.prepare(
-      'SELECT project_id, COUNT(*) as cnt FROM issues GROUP BY project_id'
-    ).all() as any[]).forEach((r) => { byProject[r.project_id] = r.cnt; });
+      `SELECT project_id, COUNT(*) as cnt FROM issues ${where} GROUP BY project_id`
+    ).all(...params) as any[]).forEach((r) => { byProject[r.project_id] = r.cnt; });
 
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
