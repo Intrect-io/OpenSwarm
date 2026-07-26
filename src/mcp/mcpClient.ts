@@ -272,41 +272,68 @@ interface McpTool {
  * agentic-loop ToolDefinitions named `server__tool`. Unreachable servers are
  * skipped (logged). Call once before running the loop.
  */
-export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefinition[]> {
-  serverByTool = {};
-  lastDiscoveryUnreachable = [];
+interface DiscoveryResult {
+  defs: ToolDefinition[];
+  routing: Record<string, { cfg: ServerConfig; toolName: string }>;
+  /** Servers skipped because they could not be reached. Empty when complete. */
+  unreachable: string[];
+}
+
+/**
+ * Probe every configured server and build the tool set.
+ *
+ * Everything it produces is local to the call. Recording failures on a module
+ * variable meant two overlapping discoveries shared one list, and each one
+ * cleared it on entry — so one run could erase the other's record and a partial
+ * result would be cached as if it were complete, which is precisely the
+ * process-lifetime tool loss this module is meant to avoid.
+ *
+ * The routing map is likewise built locally and published by the caller only
+ * once the run finishes. Clearing the live map on entry made every in-flight
+ * agent see "MCP tool not registered" for tools that were working a moment
+ * earlier, for as long as rediscovery took.
+ */
+async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise<DiscoveryResult> {
   const defs: ToolDefinition[] = [];
+  const routing: Record<string, { cfg: ServerConfig; toolName: string }> = {};
+  const unreachable: string[] = [];
   const entries = Object.entries(registry);
   let next = 0;
-  const discover = async (): Promise<void> => {
+  const worker = async (): Promise<void> => {
     while (next < entries.length) {
       const [server, cfg] = entries[next++];
-    try {
-      const listed = (await withClient(cfg, (c) => c.listTools())) as { tools?: McpTool[] };
-      for (const tool of listed.tools ?? []) {
-        if (typeof tool.name !== 'string') continue;
-        const qualified = `${server}${SEP}${tool.name}`;
-        if (!isMcpTool(qualified)) {
-          console.warn(`[MCP] server "${server}" returned invalid tool name "${tool.name}" — skipped`);
-          continue;
+      try {
+        const listed = (await withClient(cfg, (c) => c.listTools())) as { tools?: McpTool[] };
+        for (const tool of listed.tools ?? []) {
+          if (typeof tool.name !== 'string') continue;
+          const qualified = `${server}${SEP}${tool.name}`;
+          if (!isMcpTool(qualified)) {
+            console.warn(`[MCP] server "${server}" returned invalid tool name "${tool.name}" — skipped`);
+            continue;
+          }
+          routing[qualified] = { cfg, toolName: tool.name };
+          defs.push({
+            type: 'function',
+            function: {
+              name: qualified,
+              description: (tool.description ?? '').slice(0, 1024),
+              parameters: sanitizeInputSchema(tool.inputSchema),
+            },
+          });
         }
-        serverByTool[qualified] = { cfg, toolName: tool.name };
-        defs.push({
-          type: 'function',
-          function: {
-            name: qualified,
-            description: (tool.description ?? '').slice(0, 1024),
-            parameters: sanitizeInputSchema(tool.inputSchema),
-          },
-        });
+      } catch (err) {
+        unreachable.push(server);
+        console.warn(`[MCP] server "${server}" unreachable — skipped: ${err instanceof Error ? err.message : String(err)}`);
       }
-    } catch (err) {
-      lastDiscoveryUnreachable.push(server);
-      console.warn(`[MCP] server "${server}" unreachable — skipped: ${err instanceof Error ? err.message : String(err)}`);
-    }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(4, entries.length) }, () => discover()));
+  await Promise.all(Array.from({ length: Math.min(4, entries.length) }, () => worker()));
+  return { defs, routing, unreachable };
+}
+
+export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefinition[]> {
+  const { defs, routing } = await discoverMcpTools(registry);
+  serverByTool = routing;
   return defs;
 }
 
@@ -314,8 +341,17 @@ export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefin
 let cachedTools: ToolDefinition[] | null = null;
 /** When >0, the cached result was incomplete and may be re-attempted at this time. */
 let cachedToolsRetryAt = 0;
-/** Servers skipped by the most recent discovery because they were unreachable. */
-let lastDiscoveryUnreachable: string[] = [];
+/** The discovery currently running, shared by every concurrent caller. */
+let inFlightDiscovery: Promise<ToolDefinition[]> | null = null;
+/**
+ * Bumped by resetMcpTools. A discovery that started before a reset must not
+ * publish its result afterwards — it would silently reinstate the state the
+ * reset just cleared. Unreachable today (the only reset call site is a
+ * short-lived CLI process with no discovery in flight), but the guard costs
+ * one comparison and the alternative is a bug that only appears once reset
+ * moves into the daemon.
+ */
+let discoveryGeneration = 0;
 /** How long an incomplete discovery is reused before another attempt. */
 const INCOMPLETE_DISCOVERY_RETRY_MS = 60_000;
 
@@ -340,30 +376,45 @@ async function loadConfiguredRegistry(): Promise<Record<string, ServerConfig>> {
  * Empty when nothing is configured / no reachable servers. (INT-1951)
  */
 export async function getMcpTools(): Promise<ToolDefinition[]> {
-  const now = Date.now();
   // A complete discovery is cached until resetMcpTools(). An incomplete one —
   // some server was unreachable — is cached only briefly, so a server that was
   // down for a moment comes back on its own. Caching it for the process
   // lifetime meant a single blip removed those tools from every later call
   // until someone noticed and ran resetMcpTools() by hand.
-  if (cachedTools && (!cachedToolsRetryAt || now < cachedToolsRetryAt)) return cachedTools;
-  cachedTools = await initMcpTools(await loadConfiguredRegistry());
-  // Measured from when discovery finished, not when it started. Unreachable
-  // servers are precisely the ones that take a long time to fail, so a
-  // discovery that ran longer than the lease would set a deadline already in
-  // the past and the next call would rediscover immediately — the lease would
-  // apply least often in exactly the case it exists for.
-  cachedToolsRetryAt = lastDiscoveryUnreachable.length > 0
-    ? Date.now() + INCOMPLETE_DISCOVERY_RETRY_MS
-    : 0;
-  return cachedTools;
+  if (cachedTools && (!cachedToolsRetryAt || Date.now() < cachedToolsRetryAt)) return cachedTools;
+  // One discovery at a time. Without this, concurrent callers each start their
+  // own run; they race to publish the routing map and the cache, so a slower
+  // stale run can undo a newer successful one — and every unreachable server
+  // gets hit once per caller.
+  inFlightDiscovery ??= (async () => {
+    const generation = discoveryGeneration;
+    try {
+      const { defs, routing, unreachable } = await discoverMcpTools(await loadConfiguredRegistry());
+      // A reset landed while this ran: return the result to whoever asked, but
+      // do not write it back over the cleared state.
+      if (generation !== discoveryGeneration) return defs;
+      serverByTool = routing;
+      cachedTools = defs;
+      // Measured from when discovery finished, not when it started. Unreachable
+      // servers are precisely the ones that take a long time to fail, so a
+      // discovery that ran longer than the lease would set a deadline already
+      // in the past and the next call would rediscover immediately — the lease
+      // would apply least often in exactly the case it exists for.
+      cachedToolsRetryAt = unreachable.length > 0 ? Date.now() + INCOMPLETE_DISCOVERY_RETRY_MS : 0;
+      return defs;
+    } finally {
+      if (generation === discoveryGeneration) inFlightDiscovery = null;
+    }
+  })();
+  return inFlightDiscovery;
 }
-
 
 /** Drop the cache (after editing mcp.json). */
 export function resetMcpTools(): void {
+  discoveryGeneration++;
   cachedTools = null;
   cachedToolsRetryAt = 0;
+  inFlightDiscovery = null;
 }
 
 /**

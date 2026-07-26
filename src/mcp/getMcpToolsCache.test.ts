@@ -139,6 +139,76 @@ describe('getMcpTools caching', () => {
     expect(clientMock.listTools).toHaveBeenCalledTimes(1);
   });
 
+  // Concurrent callers each starting their own discovery is how the fix
+  // defeated itself: the runs raced to publish the cache and the routing map,
+  // so a slower stale run could undo a newer successful one, and every
+  // unreachable server was hit once per caller.
+  it('runs one discovery for concurrent callers', async () => {
+    const { getMcpTools } = await loadClient({ good: stdio('good') });
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    clientMock.listTools.mockImplementation(async () => {
+      maxConcurrent = Math.max(maxConcurrent, ++inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight--;
+      return oneTool;
+    });
+
+    const results = await Promise.all([getMcpTools(), getMcpTools(), getMcpTools(), getMcpTools()]);
+
+    expect(maxConcurrent).toBe(1);
+    expect(clientMock.listTools).toHaveBeenCalledTimes(1);
+    for (const r of results) expect(r).toBe(results[0]);
+  });
+
+  // Rediscovery used to clear the live routing map on entry, so an agent
+  // holding a tool definition from the previous result got "not registered"
+  // for a tool that was working a moment earlier.
+  it('keeps the previous routing usable until the new one is ready', async () => {
+    const { getMcpTools, resetMcpTools, callMcpTool } = await loadClient({ good: stdio('good') });
+    clientMock.listTools.mockResolvedValue(oneTool);
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
+    await getMcpTools();
+
+    // Start a slow rediscovery and call the existing tool while it runs.
+    resetMcpTools();
+    let release!: () => void;
+    clientMock.listTools.mockImplementation(async () => {
+      await new Promise<void>((r) => { release = r; });
+      return oneTool;
+    });
+    const pending = getMcpTools();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const during = await callMcpTool('good__ok', {});
+    expect(JSON.stringify(during)).not.toMatch(/not registered/i);
+
+    release();
+    await pending;
+  });
+
+  // A discovery that started before a reset must not write its result back
+  // afterwards — it would silently reinstate the state the reset just cleared.
+  it('does not let a pre-reset discovery publish after the reset', async () => {
+    const { getMcpTools, resetMcpTools } = await loadClient({ good: stdio('good') });
+    let release!: () => void;
+    clientMock.listTools.mockImplementation(async () => {
+      await new Promise<void>((r) => { release = r; });
+      return oneTool;
+    });
+
+    const stale = getMcpTools();
+    await new Promise((r) => setTimeout(r, 10));
+    resetMcpTools();
+    release();
+    await stale;
+
+    // The reset must still be in force: the next call rediscovers.
+    clientMock.listTools.mockResolvedValue(oneTool);
+    await getMcpTools();
+    expect(clientMock.listTools).toHaveBeenCalledTimes(2);
+  });
+
   it('resetMcpTools forces a fresh discovery', async () => {
     const { getMcpTools, resetMcpTools } = await loadClient({ good: stdio('good') });
     clientMock.listTools.mockResolvedValue(oneTool);
