@@ -90,13 +90,35 @@ export function appendHistoryEntry(channelId: string, entry: HistoryEntry): void
 }
 
 /**
- * Add response to the last history entry
+ * Attach a response to the history entry it answers.
+ *
+ * Matched by messageId, not by position. Two messages in one channel are
+ * handled concurrently, and the model does not finish them in arrival order —
+ * writing to the last entry meant whichever finished first overwrote the newer
+ * message's entry, so the newer message's own reply was lost and the older one
+ * showed an answer to a question nobody asked.
+ *
+ * The positional fallback covers entries recorded without a messageId, which is
+ * the pre-existing behaviour for those and is safe when nothing else is in
+ * flight.
  */
-export function updateLastHistoryResponse(channelId: string, response: string): void {
+export function updateHistoryResponse(channelId: string, messageId: string | undefined, response: string): void {
   const history = channelHistoryMap.get(channelId);
-  if (history && history.length > 0) {
-    history[history.length - 1].response = response;
+  if (!history || history.length === 0) return;
+
+  if (messageId) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].messageId === messageId) {
+        history[i].response = response;
+        return;
+      }
+    }
+    // The entry aged out of the ring buffer while the model was running.
+    // Writing to whatever is last now would attach it to an unrelated message.
+    return;
   }
+
+  history[history.length - 1].response = response;
 }
 
 /**
@@ -580,9 +602,8 @@ export async function sendToChannel(content: string | { embeds: EmbedBuilder[] }
     const channel = await client.channels.fetch(reportChannelId) as TextChannel;
     if (!channel) return;
 
-    // If string, respect Discord 4000 char limit (split send)
-    if (typeof content === 'string' && content.length > 3900) {
-      const chunks = splitForDiscord(content, 3900);
+    if (typeof content === 'string' && content.length > DISCORD_MESSAGE_CHUNK) {
+      const chunks = splitForDiscord(content, DISCORD_MESSAGE_CHUNK);
       for (const chunk of chunks) {
         await channel.send(chunk);
       }
@@ -592,6 +613,30 @@ export async function sendToChannel(content: string | { embeds: EmbedBuilder[] }
   } catch (err) {
     console.error('[Discord] Send to channel failed:', err);
   }
+}
+
+/**
+ * Chunk size for Discord message content.
+ *
+ * Discord's hard limit on message content is 2000 characters. 4096 is the
+ * embed *description* limit and does not apply here — conflating the two is how
+ * sendToChannel came to split at 3900, which produced chunks the API rejected
+ * outright, so every long report failed to send rather than arriving in pieces.
+ * Anything between 2001 and 3900 was not split at all and failed the same way.
+ * The margin below 2000 leaves room for the code fences callers wrap around
+ * chunks.
+ */
+const DISCORD_MESSAGE_CHUNK = 1900;
+
+/**
+ * splitForDiscord at the chunk size production actually uses.
+ *
+ * Exported for tests so they assert the deployed pairing of splitter and limit
+ * rather than re-stating the number, which is what let the 3900 mismatch sit
+ * unnoticed.
+ */
+export function splitForDiscordForTest(text: string): string[] {
+  return splitForDiscord(text, DISCORD_MESSAGE_CHUNK);
 }
 
 function splitForDiscord(text: string, maxLen: number): string[] {
@@ -626,7 +671,7 @@ export async function sendToThread(threadId: string, content: string | EmbedBuil
     if (!thread || !thread.isThread()) return;
 
     if (typeof content === 'string') {
-      const chunks = content.length > 1900 ? splitForDiscord(content, 1900) : [content];
+      const chunks = content.length > DISCORD_MESSAGE_CHUNK ? splitForDiscord(content, DISCORD_MESSAGE_CHUNK) : [content];
       for (const chunk of chunks) {
         await thread.send(chunk);
       }
@@ -716,7 +761,7 @@ export async function handleChat(msg: Message): Promise<void> {
 
     if (typingInterval) clearInterval(typingInterval);
 
-    updateLastHistoryResponse(channelId, response);
+    updateHistoryResponse(channelId, msg.id, response);
 
     if (toolCalls.length > 0) {
       const toolSummary = toolCalls.slice(0, 10).map(tc => `• ${tc}`).join('\n');

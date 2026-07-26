@@ -434,9 +434,16 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
   let progressChunks: string[] = [];
   let _lastProgressMsg: Message | null = null;
   let progressTimer: NodeJS.Timeout | null = null;
+  // Set once the task is over, however it ended. The progress timer is armed
+  // from a callback and fires 10s later, so without this a task that already
+  // finished — or failed — still posts an "in progress" reply afterwards,
+  // quoting output the user has already seen the conclusion for.
+  let settled = false;
 
   // Execute task
-  const result = await dev.runDevTask(
+  let result: Awaited<ReturnType<typeof dev.runDevTask>>;
+  try {
+    result = await dev.runDevTask(
     repo,
     task,
     msg.author.username,
@@ -446,21 +453,22 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
 
       if (!progressTimer) {
         progressTimer = setTimeout(async () => {
-          const combined = progressChunks.join('').slice(-500);
-          if (combined.trim()) {
-            try {
-              _lastProgressMsg = await msg.reply(`${t('discord.dev.inProgress', { repo })}\n\`\`\`\n${combined}\n\`\`\``);
-            } catch { /* ignore */ }
-          }
-          progressChunks = [];
           progressTimer = null;
+          const combined = progressChunks.join('').slice(-500);
+          progressChunks = [];
+          if (settled || !combined.trim()) return;
+          try {
+            _lastProgressMsg = await msg.reply(`${t('discord.dev.inProgress', { repo })}\n\`\`\`\n${combined}\n\`\`\``);
+          } catch { /* ignore */ }
         }, 10000);
       }
     },
     // onComplete: send result on completion
     async (output, exitCode) => {
+      settled = true;
       if (progressTimer) {
         clearTimeout(progressTimer);
+        progressTimer = null;
       }
 
       // Split result for sending (Discord 2000 char limit)
@@ -493,7 +501,17 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
         }
       }
     }
-  );
+    );
+  } finally {
+    // runDevTask had no try/catch: a rejection propagated out of handleDev with
+    // the progress timer still armed, so a stale "in progress" reply arrived
+    // ten seconds after the error had already been reported to the user.
+    settled = true;
+    if (progressTimer) {
+      clearTimeout(progressTimer);
+      progressTimer = null;
+    }
+  }
 
   if ('error' in result) {
     await msg.reply(`❌ ${result.error}`);
