@@ -7,7 +7,6 @@ const integrationBoundaryCoverageExcludes = [
   'src/adapters/claude.ts',
   'src/adapters/codex.ts',
   'src/adapters/codexResponses.ts',
-  'src/adapters/cryptoQuantAdapter.ts',
   'src/adapters/envPath.ts',
   'src/adapters/gpt.ts',
   'src/adapters/index.ts',
