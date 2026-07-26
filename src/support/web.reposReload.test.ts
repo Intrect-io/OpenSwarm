@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { applyReposConfig } from './web.js';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
@@ -100,5 +101,38 @@ describe('applyReposConfig — repos.json → runner reconciliation', () => {
     const after1 = [...runner.getEnabledProjects()].sort();
     applyReposConfig(runner as unknown as AutonomousRunner, c);
     expect([...runner.getEnabledProjects()].sort()).toEqual(after1);
+  });
+});
+
+// repos.json has three concurrent participants: the dashboard
+// (saveReposConfig), the CLI (`openswarm add/remove` via
+// projectHandler.saveRepos), and startReposWatcher polling it every 3s. If the
+// dashboard rewrites the file in place, the poller can read it half-written;
+// loadReposConfig's catch then hands back an empty config, and applyReposConfig
+// — as the cases above show — disables every project missing from it. An
+// interrupted write does not merely lose an edit, it tears down the running set.
+//
+// Asserted at the source level rather than by driving the server:
+// saveReposConfig is module-private, reachable only through request handlers,
+// and startWebServer(0) never surfaces the port it bound. The check is
+// correspondingly narrow — it pins the write call, not the concurrency outcome
+// — but it does go red if the atomic write is reverted.
+describe('saveReposConfig write discipline', () => {
+  const source = readFileSync(new URL('./web.ts', import.meta.url), 'utf-8');
+  const body = source.slice(source.indexOf('function saveReposConfig'), source.indexOf('const _reposCfg'));
+
+  it('writes repos.json through the atomic helper', () => {
+    expect(body).toMatch(/atomicWriteFileSync\(REPOS_FILE,/);
+  });
+
+  it('does not write repos.json in place', () => {
+    expect(body).not.toMatch(/(?<!atomic)WriteFileSync\(REPOS_FILE|writeFileSync\(REPOS_FILE/);
+  });
+
+  it('uses the same file mode projectHandler uses for this file', () => {
+    const cli = readFileSync(new URL('../cli/projectHandler.ts', import.meta.url), 'utf-8');
+    const cliMode = cli.match(/atomicWriteFileSync\([^;]*?(0o\d+)\)/)?.[1];
+    expect(cliMode).toBeDefined();
+    expect(body).toContain(cliMode!);
   });
 });
