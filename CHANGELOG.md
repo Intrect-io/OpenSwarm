@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.6 — 2026-07-26
+
+### Fixed
+
+- **Session records no longer overwrite each other** — records are written to `<DD-HHMM>-<title-slug>-<suffix>.md`, and the suffix was the first 12 characters of `session-<ms>`, which is `session-` plus only four digits of the timestamp. Those four digits hold for 10^9 ms (~11.6 days), so the suffix was effectively constant and two sessions with the same title in the same minute silently replaced one another. It is now derived from a hash of the session id. (#335)
+- **Per-project issue stats agree with themselves** — `getStats(projectId)` scoped `total`, `byStatus` and `byPriority` to the project but not `byProject`, so the breakdown counted every project and did not add up to the total shown beside it. (#335)
+- **The cancelled status syncs to Linear again** — workflow state names are configured per workspace, and the bridge matched exactly one spelling exactly. Linear's own default for that state is the US "Canceled", so outbound sync threw for every team that never renamed it. Statuses now carry candidate names matched case-insensitively, and a genuine mismatch reports the states the team actually defines. (#335)
+
 ## 0.19.5 — 2026-07-26
 
 ### Fixed
