@@ -103,3 +103,53 @@ describe('runPlanner — agentic loop migration', () => {
     ).rejects.toBeInstanceOf(RateLimitError);
   });
 });
+
+describe('plan JSON containing braces inside string values', () => {
+  const planWith = (description: string) =>
+    JSON.stringify({
+      needsDecomposition: true,
+      subTasks: [{ title: 'A', description, estimatedMinutes: 20, priority: 2 }],
+      totalEstimatedMinutes: 20,
+    });
+
+  // Brace counting that ignores string literals ends the JSON at the wrong
+  // offset, JSON.parse fails, and the whole plan falls through to a lossy text
+  // heuristic — the model's actual decomposition is discarded. Descriptions
+  // quoting code are ordinary, so this is not an exotic input.
+  it.each([
+    ['an unmatched closing brace', 'remove the trailing } here'],
+    ['an unmatched opening brace', 'starts a block with { here'],
+    ['a balanced pair', 'replace if (x) { y } with a switch'],
+    ['several braces', '} then { then } again'],
+  ])('keeps the plan intact with %s', async (_label, description) => {
+    mockedSpawnCli.mockResolvedValue(cliResult(planWith(description)) as never);
+
+    const res = await runPlanner({ taskTitle: 'big task', taskDescription: 'do it', projectPath: '/tmp/x' });
+
+    expect(res.success).toBe(true);
+    expect(res.needsDecomposition).toBe(true);
+    expect(res.subTasks).toHaveLength(1);
+    expect(res.subTasks[0].description).toBe(description);
+  });
+
+  it('keeps a plan whose description contains an escaped quote before a brace', async () => {
+    const description = 'the \\"guard\\" closes with }';
+    mockedSpawnCli.mockResolvedValue(cliResult(planWith(description)) as never);
+
+    const res = await runPlanner({ taskTitle: 'big task', taskDescription: 'do it', projectPath: '/tmp/x' });
+
+    expect(res.success).toBe(true);
+    expect(res.subTasks[0].description).toBe(description);
+  });
+
+  it('still stops at the end of the first JSON object when trailing prose follows', async () => {
+    mockedSpawnCli.mockResolvedValue(
+      cliResult(`${planWith('plain')}\n\nThat is the plan. Let me know if } looks wrong.`) as never,
+    );
+
+    const res = await runPlanner({ taskTitle: 'big task', taskDescription: 'do it', projectPath: '/tmp/x' });
+
+    expect(res.success).toBe(true);
+    expect(res.subTasks).toHaveLength(1);
+  });
+});
