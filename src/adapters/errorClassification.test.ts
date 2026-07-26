@@ -129,3 +129,28 @@ describe('codexMcpAuthHint (INT-2408)', () => {
     expect(codexMcpAuthHint('')).toBeNull();
   });
 });
+
+describe('a request that ran past its deadline', () => {
+  // AbortSignal.timeout() rejects with a DOMException named TimeoutError whose
+  // message is "The operation was aborted due to timeout" — which matches none
+  // of the message patterns ('timed out', 'timeout after'). Without an explicit
+  // check a provider that accepted a request and then went silent was reported
+  // as the task itself failing, which changes how the worker retries.
+  it('is infrastructure, not a task failure', () => {
+    const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    expect(isInfraError(timeout)).toBe(true);
+    expect(isTimeoutError(timeout)).toBe(true);
+  });
+
+  // A user abort is a stop, not a fault — it must stay out of the infra bucket
+  // or a deliberate cancellation would be retried as though something broke.
+  it('is distinguished from a user abort', () => {
+    const aborted = new DOMException('This operation was aborted', 'AbortError');
+    expect(isInfraError(aborted)).toBe(false);
+  });
+
+  it('still classifies the message-based timeouts it always did', () => {
+    expect(isInfraError(new Error('connect ETIMEDOUT 1.2.3.4:443'))).toBe(true);
+    expect(isInfraError(new Error('claude timeout after 300000ms'))).toBe(true);
+  });
+});

@@ -11,6 +11,7 @@ import type {
   WorkerResult,
   ReviewResult,
 } from './types.js';
+import { abortSignalWithDeadline } from './requestDeadline.js';
 import {
   runAgenticLoop,
   loopResultToCliResult,
@@ -72,6 +73,7 @@ export class AtlasCloudCliAdapter implements CliAdapter {
     const callApi = createApiCaller(apiKey, model, {
       onToken: options.onToken,
       signal: options.signal,
+      timeoutMs: options.timeoutMs ?? 300000,
     });
 
     const mcpTools = await resolveMcpTools(options.mcpTools);
@@ -127,6 +129,15 @@ export class AtlasCloudCliAdapter implements CliAdapter {
 export interface AtlasCloudApiCallerOptions {
   onToken?: (delta: string) => void;
   signal?: AbortSignal;
+  /**
+   * Ceiling for one API call, including the streamed body.
+   *
+   * Without it the request was bounded only by the caller's signal, and the
+   * agentic loop checks its deadline between turns — so a connection that
+   * accepted the request and then went silent hung until something else
+   * intervened, which for a background worker is never.
+   */
+  timeoutMs?: number;
 }
 
 export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudApiCallerOptions = {}) {
@@ -153,7 +164,8 @@ export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudA
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
-        signal: opts.signal,
+        // The caller's signal AND this call's own deadline. Either one aborts.
+        signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
       });
 
       if (!res.ok) {

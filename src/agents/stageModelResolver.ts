@@ -19,7 +19,14 @@ export function resolveAdapterDefaultModel(
   if (!pending) {
     pending = Promise.resolve()
       .then(() => getAdapter(adapterName).getDefaultModel())
-      .catch(() => undefined);
+      .catch(() => {
+        // Drop the failure from the cache so a later call tries again. Storing
+        // it meant one transient lookup error — a provider blip during startup
+        // — left this adapter's displayed model blank for the whole process,
+        // with no way to recover short of a restart.
+        cache.delete(cacheKey);
+        return undefined;
+      });
     cache.set(cacheKey, pending);
   }
   return pending;

@@ -86,6 +86,14 @@ const INFRA_ERROR_REGEXES: readonly RegExp[] = [
  * instead). (INT-2010)
  */
 export function isInfraError(error: unknown): boolean {
+  // A request that ran past its deadline is infrastructure, not a verdict on
+  // the task. AbortSignal.timeout() rejects with a DOMException named
+  // TimeoutError whose message — "The operation was aborted due to timeout" —
+  // matches none of the patterns below ('timed out', 'timeout after'), so
+  // without this a provider that accepted a request and then went silent was
+  // reported as the task itself failing. A user abort is deliberately not
+  // included: that is a stop, not a fault.
+  if (error instanceof DOMException && error.name === 'TimeoutError') return true;
   const msg = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
   // undici wraps connection failures as `TypeError: fetch failed` with the real
   // code (ECONNREFUSED / ECONNRESET / UND_ERR_*) on `error.cause.code` — the

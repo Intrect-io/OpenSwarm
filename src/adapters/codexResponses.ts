@@ -13,6 +13,7 @@ import type {
   WorkerResult,
   ReviewResult,
 } from './types.js';
+import { abortSignalWithDeadline } from './requestDeadline.js';
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopOptions } from './agenticLoop.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
@@ -360,6 +361,7 @@ export class CodexResponsesAdapter implements CliAdapter {
     const cacheKey = `osw-${options.processContext?.taskId ?? 'cli'}-${options.processContext?.stage ?? 'run'}-${model}`;
     const callApi = this.createApiCaller(
       accessToken, accountId, store, model, options.onToken, options.signal, onReasoning, options.disableReasoning, options.reasoningEffort, cacheKey,
+      options.timeoutMs ?? 300000,
     );
 
     const loopOptions: AgenticLoopOptions = {
@@ -422,6 +424,13 @@ export class CodexResponsesAdapter implements CliAdapter {
     disableReasoning?: boolean,
     reasoningEffort?: 'low' | 'medium' | 'high',
     cacheKey?: string,
+    /**
+     * Ceiling for one API call, including the streamed body. Without it the
+     * request was bounded only by the caller's signal, and the agentic loop
+     * checks its deadline between turns — so a connection that accepted the
+     * request and then went silent hung with nothing to interrupt it.
+     */
+    timeoutMs?: number,
   ) {
     let token = initialToken;
     let modelRetried = false;
@@ -468,7 +477,8 @@ export class CodexResponsesAdapter implements CliAdapter {
             'OpenAI-Beta': 'responses=experimental',
           },
           body: JSON.stringify(body),
-          signal,
+          // The caller's signal AND this call's own deadline. Either aborts.
+          signal: abortSignalWithDeadline(signal, timeoutMs),
         });
 
         if (!res.ok) {
