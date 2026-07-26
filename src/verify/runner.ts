@@ -75,10 +75,35 @@ function hasSameFailure(base: CommandResult, head: CommandResult): boolean {
   return base.outputFingerprint !== undefined && base.outputFingerprint === head.outputFingerprint;
 }
 
-function normalizeFailureOutput(output: string, projectRoot: string): string {
-  const escapedRoot = projectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return output
-    .replace(new RegExp(escapedRoot, 'g'), '<PROJECT>')
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Replace every run-specific absolute path with a stable placeholder.
+ *
+ * `paths` is applied longest-first so a nested path is substituted before the
+ * ancestor containing it; doing the ancestor first would rewrite the shared
+ * prefix and leave the more specific label unreachable.
+ *
+ * This previously received only the command's `cwd`. When a command declared a
+ * subdirectory cwd, every path OUTSIDE that subdirectory — sibling source files,
+ * and the sandbox's isolated HOME/TMPDIR, which sit beside the project root —
+ * kept its randomly-named sandbox prefix. Base and head run in different
+ * `mkdtemp` directories, so those prefixes survived into the fingerprint and made
+ * two runs of the SAME pre-existing failure hash differently. `hasSameFailure`
+ * then reported it as a new regression — exactly what that check exists to
+ * prevent.
+ */
+export function normalizeFailureOutput(output: string, paths: Array<[string, string]>): string {
+  let normalized = output;
+  const ordered = [...paths]
+    .filter(([path]) => path.length > 0)
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [path, label] of ordered) {
+    normalized = normalized.replace(new RegExp(escapeForRegExp(path), 'g'), label);
+  }
+  return normalized
     .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
     .replace(/(=+ .*? in )\d+(?:\.\d+)?s( =+)/g, '$1<DURATION>$2')
     .replace(/(Ran \d+ tests? in )\d+(?:\.\d+)?s/g, '$1<DURATION>')
@@ -182,7 +207,16 @@ async function runCommand(command: VerifyCommand, root: string, env: NodeJS.Proc
   }
   return await new Promise((resolveResult) => {
     let output: Buffer = Buffer.alloc(0);
-    const fingerprintChunks: Buffer[] = [];
+    // Fingerprint bytes are kept per stream and concatenated in a fixed order at
+    // the end (stdout, then stderr, then any synthetic trailer). Recording both
+    // streams into one buffer as chunks arrived made the fingerprint depend on
+    // OS scheduling: the same command emitting the same stdout and stderr could
+    // interleave differently between the base and head runs and hash to two
+    // different values, so `hasSameFailure` saw a pre-existing failure as a new
+    // regression. Per-stream capture makes identical output hash identically.
+    const fingerprintChunks: Record<'stdout' | 'stderr' | 'extra', Buffer[]> = {
+      stdout: [], stderr: [], extra: [],
+    };
     let fingerprintBytes = 0;
     let fingerprintTruncated = false;
     let settled = false;
@@ -194,38 +228,41 @@ async function runCommand(command: VerifyCommand, root: string, env: NodeJS.Proc
       detached,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const record = (chunk: Buffer) => {
+    const retainForFingerprint = (stream: 'stdout' | 'stderr' | 'extra', chunk: Buffer) => {
       if (fingerprintBytes < FINGERPRINT_BYTES) {
         const retained = chunk.subarray(0, FINGERPRINT_BYTES - fingerprintBytes);
-        fingerprintChunks.push(retained);
+        fingerprintChunks[stream].push(retained);
         fingerprintBytes += retained.length;
         fingerprintTruncated ||= retained.length < chunk.length;
       } else fingerprintTruncated = true;
+    };
+    const record = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+      retainForFingerprint(stream, chunk);
+      // The human-facing output keeps true arrival order — interleaving is what
+      // makes a log readable. Only the fingerprint needs to be order-independent.
       output = appendTail(output, chunk);
     };
-    child.stdout.on('data', record);
-    child.stderr.on('data', record);
+    child.stdout.on('data', record('stdout'));
+    child.stderr.on('data', record('stderr'));
 
     const finish = (status: CommandResult['status'], extra = '') => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (extra) {
-        const extraBuffer = Buffer.from(extra);
-        if (fingerprintBytes < FINGERPRINT_BYTES) {
-          const retained = extraBuffer.subarray(0, FINGERPRINT_BYTES - fingerprintBytes);
-          fingerprintChunks.push(retained);
-          fingerprintBytes += retained.length;
-          fingerprintTruncated ||= retained.length < extraBuffer.length;
-        } else fingerprintTruncated = true;
+        retainForFingerprint('extra', Buffer.from(extra));
         output = appendTail(output, Buffer.from(extra));
       }
       const outputText = output.toString('utf8');
-      const fingerprintText = Buffer.concat(fingerprintChunks).toString('utf8') + (fingerprintTruncated ? '\n<TRUNCATED>' : '');
+      const fingerprintText = Buffer.concat([
+        ...fingerprintChunks.stdout, ...fingerprintChunks.stderr, ...fingerprintChunks.extra,
+      ]).toString('utf8') + (fingerprintTruncated ? '\n<TRUNCATED>' : '');
       resolveResult({
         status,
         output: outputText,
-        outputFingerprint: createHash('sha256').update(normalizeFailureOutput(fingerprintText, cwd)).digest('hex'),
+        outputFingerprint: createHash('sha256').update(normalizeFailureOutput(fingerprintText, [
+          [root, '<PROJECT>'], [isolatedHome, '<HOME>'], [isolatedTmp, '<TMP>'],
+        ])).digest('hex'),
         environmentFailure: status === 'fail' && isEnvironmentFailure(outputText),
       });
     };
