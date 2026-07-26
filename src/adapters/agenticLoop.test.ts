@@ -378,3 +378,91 @@ describe('loopResultToCliResult costInfo (INT-2508)', () => {
     expect(cli.executedCommands).toEqual(['npm test']);
   });
 });
+
+describe('compactPriorTurns with a wide tool fan-out', () => {
+  /**
+   * One assistant turn issuing many parallel tool calls — the shape the loop
+   * produces whenever a model batches reads. The tail of the array is then all
+   * tool messages, which is what the boundary alignment could not handle.
+   */
+  function buildFanOut(priorRounds: number, toolsInFinalTurn: number): ChatMessage[] {
+    const messages: ChatMessage[] = [
+      { role: 'system', content: 'You are a worker.' },
+      { role: 'user', content: 'Do the task.' },
+    ];
+    for (let i = 0; i < priorRounds; i++) {
+      messages.push({
+        role: 'assistant',
+        content: `Prior step ${i}`,
+        tool_calls: [{ id: `prior_${i}`, type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+      });
+      messages.push({ role: 'tool', tool_call_id: `prior_${i}`, content: `prior result ${i}` });
+    }
+    messages.push({
+      role: 'assistant',
+      content: 'Reading everything at once',
+      tool_calls: Array.from({ length: toolsInFinalTurn }, (_, i) => ({
+        id: `fan_${i}`,
+        type: 'function' as const,
+        function: { name: 'read_file', arguments: JSON.stringify({ path: `src/f${i}.ts` }) },
+      })),
+    });
+    for (let i = 0; i < toolsInFinalTurn; i++) {
+      messages.push({ role: 'tool', tool_call_id: `fan_${i}`, content: `fan result ${i}` });
+    }
+    return messages;
+  }
+
+  /** Orphan check that allows a run of tool messages after one assistant. */
+  function fanOutHasNoOrphans(messages: ChatMessage[]): boolean {
+    let openIds: string[] = [];
+    for (const m of messages) {
+      if (m.role === 'assistant') {
+        openIds = (m.tool_calls ?? []).map((tc) => tc.id);
+        continue;
+      }
+      if (m.role === 'tool' && !openIds.includes(m.tool_call_id as string)) return false;
+    }
+    return true;
+  }
+
+  // The defect: walking the boundary forward past a tail of tool messages ran
+  // off the end, so the compaction range covered everything — the model lost
+  // the results it had just received and re-ran the same reads.
+  it('keeps the turn whose results just arrived', () => {
+    const messages = buildFanOut(3, 9);
+
+    compactPriorTurns(messages, 8);
+
+    const kept = messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+    expect(kept).toContain('Reading everything at once');
+    for (let i = 0; i < 9; i++) expect(kept).toContain(`fan result ${i}`);
+  });
+
+  it('still compacts the rounds before it', () => {
+    const messages = buildFanOut(3, 9);
+
+    compactPriorTurns(messages, 8);
+
+    const kept = messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+    expect(kept).toContain('[Prior turns compacted]');
+    expect(kept).not.toContain('prior result 0');
+  });
+
+  it('leaves no orphan tool message', () => {
+    const messages = buildFanOut(3, 9);
+    compactPriorTurns(messages, 8);
+    expect(fanOutHasNoOrphans(messages)).toBe(true);
+  });
+
+  it.each([9, 12, 30])('holds for %i parallel tool calls', (toolCount) => {
+    const messages = buildFanOut(2, toolCount);
+
+    compactPriorTurns(messages, 8);
+
+    const kept = messages.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+    expect(kept).toContain('Reading everything at once');
+    expect(kept).toContain(`fan result ${toolCount - 1}`);
+    expect(fanOutHasNoOrphans(messages)).toBe(true);
+  });
+});

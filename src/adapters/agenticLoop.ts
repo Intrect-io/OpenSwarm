@@ -690,10 +690,23 @@ export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void
   const headerCount = messages[0]?.role === 'system' ? 2 : 1;
 
   // 최근 keepRecent개 메시지는 보존 — 압축 상한 인덱스 산출
-  let boundary = Math.max(headerCount, messages.length - keepRecent);
+  const desired = Math.max(headerCount, messages.length - keepRecent);
   // 보존 경계를 assistant 시작점으로 정렬 (orphan tool 메시지 방지)
+  let boundary = desired;
   while (boundary < messages.length && messages[boundary].role === 'tool') {
     boundary++;
+  }
+  // Walking forward runs off the end when the most recent turn made more tool
+  // calls than keepRecent: the tail is then entirely tool messages, the
+  // boundary lands at messages.length, and the compaction range covers the
+  // whole history — including the results that had just arrived, which the
+  // model then no longer has. Fall back to walking backwards to the assistant
+  // those trailing tools belong to, so that turn is preserved whole.
+  if (boundary >= messages.length) {
+    boundary = desired;
+    while (boundary > headerCount && messages[boundary].role === 'tool') {
+      boundary--;
+    }
   }
   if (boundary <= headerCount) return;
 
