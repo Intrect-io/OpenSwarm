@@ -211,6 +211,17 @@ export async function applyV4APatch(
       }
       const target = op.moveTo ? resolvePath(op.moveTo) : abs;
       if (op.moveTo) {
+        // Same rule as Add File, and for the same reason: a move onto an
+        // occupied path destroyed whatever was there with no error. It was
+        // worse than the add case, because a destination whose contents could
+        // not be snapshotted is skipped by rollback — the overwrite survived
+        // while the result reported that nothing had been applied.
+        const occupied = await fs.lstat(target).then(() => true, () => false);
+        if (occupied && target !== abs) {
+          throw new Error(
+            `refusing to move ${op.filePath} onto ${op.moveTo}: it already exists`,
+          );
+        }
         await fs.mkdir(path.dirname(target), { recursive: true });
         await fs.rm(abs).catch(() => {});
         // The move destination is written by this patch, so undoing it is ours.

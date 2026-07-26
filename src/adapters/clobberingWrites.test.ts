@@ -197,6 +197,48 @@ describe('applyPatch "add" operation', () => {
     expect(readFileSync(target, 'utf-8')).toContain('someone else');
   });
 
+  const movePatch = (from: string, to: string, oldLine: string, newLine: string) =>
+    `*** Begin Patch\n*** Update File: ${from}\n*** Move to: ${to}\n@@\n-${oldLine}\n+${newLine}\n*** End Patch`;
+
+  // Move had the same clobbering problem as add, and a worse consequence: a
+  // destination whose contents could not be snapshotted is skipped by rollback,
+  // so the overwrite survived while the result said nothing had been applied.
+  it('refuses to move onto an existing file', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    writeFileSync(join(repo, 'src.ts'), 'v = 1\n');
+    writeFileSync(join(repo, 'dest.ts'), 'do not lose me\n');
+
+    const result = await applyV4APatch(movePatch('src.ts', 'dest.ts', 'v = 1', 'v = 2'), repo, (f) => join(repo, f));
+
+    expect(result.errors.join('\n')).toMatch(/dest\.ts/);
+    expect(readFileSync(join(repo, 'dest.ts'), 'utf-8')).toContain('do not lose me');
+    // The source must survive the refusal too.
+    expect(readFileSync(join(repo, 'src.ts'), 'utf-8')).toContain('v = 1');
+  });
+
+  // Write-only, not mode 000: with 000 the OS refuses the write anyway, so the
+  // test would pass with or without the guard. 0o200 is the case that actually
+  // discriminates — the old code could overwrite it, and rollback skips paths
+  // it could not snapshot, so the overwrite survived a reported-clean failure.
+  it('refuses to move onto a file it cannot read', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    writeFileSync(join(repo, 'src.ts'), 'v = 1\n');
+    const dest = join(repo, 'dest.ts');
+    writeFileSync(dest, 'protected\n');
+    chmodSync(dest, 0o200);
+
+    try {
+      const result = await applyV4APatch(movePatch('src.ts', 'dest.ts', 'v = 1', 'v = 2'), repo, (f) => join(repo, f));
+
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(existsSync(dest)).toBe(true);
+      chmodSync(dest, 0o600);
+      expect(readFileSync(dest, 'utf-8')).toContain('protected');
+    } finally {
+      chmodSync(dest, 0o600);
+    }
+  });
+
   // A rejected add must not leave earlier operations of the same patch applied.
   it('rolls back the rest of the patch', async () => {
     const repo = tempRoot('openswarm-patch-');
