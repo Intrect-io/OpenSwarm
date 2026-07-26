@@ -119,18 +119,38 @@ export async function applyV4APatch(
     touched.add(resolvePath(op.filePath));
     if (op.moveTo) touched.add(resolvePath(op.moveTo));
   }
-  const snapshots = new Map<string, string | null>(); // abs -> prior content, or null if absent
+  // Existence and readability are recorded separately. Collapsing them into
+  // "content, or null" made rollback treat a file it could not read as one that
+  // had never existed, and rollback deletes those to restore absence — so a
+  // mode-000 file, a dangling symlink or a path owned by another user could be
+  // removed by a patch that only ever refused to touch it.
+  type Snapshot =
+    | { kind: 'absent' }
+    | { kind: 'content'; text: string }
+    | { kind: 'opaque' }; // exists, but its contents could not be captured
+  const snapshots = new Map<string, Snapshot>();
   for (const abs of touched) {
-    snapshots.set(abs, await fs.readFile(abs, 'utf-8').catch(() => null));
+    const exists = await fs.lstat(abs).then(() => true, () => false);
+    if (!exists) {
+      snapshots.set(abs, { kind: 'absent' });
+      continue;
+    }
+    const text = await fs.readFile(abs, 'utf-8').catch(() => null);
+    snapshots.set(abs, text === null ? { kind: 'opaque' } : { kind: 'content', text });
   }
   const rollback = async () => {
-    for (const [abs, content] of snapshots) {
+    for (const [abs, snapshot] of snapshots) {
       try {
-        if (content === null) {
+        if (snapshot.kind === 'opaque') {
+          // Nothing can be restored and nothing should be destroyed: leaving it
+          // as-is is the only option that cannot make the tree worse.
+          continue;
+        }
+        if (snapshot.kind === 'absent') {
           await fs.rm(abs).catch(() => {});
         } else {
           await fs.mkdir(path.dirname(abs), { recursive: true });
-          await fs.writeFile(abs, content, 'utf-8');
+          await fs.writeFile(abs, snapshot.text, 'utf-8');
         }
       } catch { /* best-effort restore */ }
     }

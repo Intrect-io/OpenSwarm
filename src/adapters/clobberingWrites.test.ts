@@ -6,7 +6,7 @@
 // prompt handed to every CLI adapter, and the "Add File" patch operation.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnCli } from './base.js';
@@ -134,6 +134,42 @@ describe('applyPatch "add" operation', () => {
     const result = await applyV4APatch(addPatch('existing.ts', 'y'), repo, (f) => join(repo, f));
 
     expect(result.errors.join('\n')).toMatch(/update op/);
+  });
+
+  // The refusal runs rollback, and rollback removes paths it recorded as
+  // absent. A snapshot that could not read the file must not be mistaken for
+  // one that found nothing — otherwise refusing to overwrite a protected file
+  // deletes it, which is worse than the overwrite being prevented.
+  it('does not delete a file it could not read while refusing to add it', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const target = join(repo, 'locked.ts');
+    writeFileSync(target, 'export const secret = 1;\n');
+    chmodSync(target, 0o000);
+
+    try {
+      const result = await applyV4APatch(addPatch('locked.ts', 'export const clobber = 1;'), repo, (f) => join(repo, f));
+
+      expect(result.errors.length).toBeGreaterThan(0);
+      // The file must still be there. Its contents are unchanged too, but the
+      // point of the assertion is that it exists at all.
+      expect(existsSync(target)).toBe(true);
+      chmodSync(target, 0o600);
+      expect(readFileSync(target, 'utf-8')).toContain('secret');
+    } finally {
+      chmodSync(target, 0o600);
+    }
+  });
+
+  // A dangling symlink exists as a path but cannot be read through.
+  it('does not delete a dangling symlink while refusing to add over it', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const link = join(repo, 'link.ts');
+    symlinkSync(join(repo, 'nowhere.ts'), link);
+
+    const result = await applyV4APatch(addPatch('link.ts', 'export const clobber = 1;'), repo, (f) => join(repo, f));
+
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 
   // A rejected add must not leave earlier operations of the same patch applied.

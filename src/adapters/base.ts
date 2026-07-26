@@ -41,10 +41,14 @@ export async function spawnCli(
   // atomically by the OS.
   const promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-prompt-'));
   const promptFile = join(promptDir, 'prompt.txt');
-  await fs.writeFile(promptFile, options.prompt, { mode: 0o600 });
   let cleanupPaths: string[] = [];
 
   try {
+    // Inside the try, so a write that fails partway — a full temp filesystem,
+    // say — still gets the directory removed rather than leaving a fragment of
+    // the prompt behind.
+    await fs.writeFile(promptFile, options.prompt, { mode: 0o600 });
+
     const commandSpec = adapter.buildCommand({
       ...options,
       // Pass the temp file path as the prompt so buildCommand can reference it
