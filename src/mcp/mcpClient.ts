@@ -348,7 +348,14 @@ export async function getMcpTools(): Promise<ToolDefinition[]> {
   // until someone noticed and ran resetMcpTools() by hand.
   if (cachedTools && (!cachedToolsRetryAt || now < cachedToolsRetryAt)) return cachedTools;
   cachedTools = await initMcpTools(await loadConfiguredRegistry());
-  cachedToolsRetryAt = lastDiscoveryUnreachable.length > 0 ? now + INCOMPLETE_DISCOVERY_RETRY_MS : 0;
+  // Measured from when discovery finished, not when it started. Unreachable
+  // servers are precisely the ones that take a long time to fail, so a
+  // discovery that ran longer than the lease would set a deadline already in
+  // the past and the next call would rediscover immediately — the lease would
+  // apply least often in exactly the case it exists for.
+  cachedToolsRetryAt = lastDiscoveryUnreachable.length > 0
+    ? Date.now() + INCOMPLETE_DISCOVERY_RETRY_MS
+    : 0;
   return cachedTools;
 }
 

@@ -116,6 +116,29 @@ describe('getMcpTools caching', () => {
     expect(clientMock.listTools).toHaveBeenCalledTimes(2);
   });
 
+  // Unreachable servers are exactly the ones that take a long time to fail, so
+  // a discovery can outlast the lease it is about to set. Measuring the lease
+  // from when discovery *started* put the deadline in the past, and the next
+  // call rediscovered immediately — the lease failed in the very case it
+  // exists for.
+  it('gives a full lease even when discovery outlasted it', async () => {
+    const { getMcpTools } = await loadClient({ flaky: stdio('flaky') });
+    const start = Date.now();
+    let clock = start;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    clientMock.listTools.mockImplementation(async () => {
+      // The discovery itself takes longer than INCOMPLETE_DISCOVERY_RETRY_MS.
+      clock = start + 120_000;
+      throw new Error('timed out');
+    });
+
+    await getMcpTools();
+    await getMcpTools();   // still inside the lease, must not rediscover
+
+    expect(clientMock.listTools).toHaveBeenCalledTimes(1);
+  });
+
   it('resetMcpTools forces a fresh discovery', async () => {
     const { getMcpTools, resetMcpTools } = await loadClient({ good: stdio('good') });
     clientMock.listTools.mockResolvedValue(oneTool);
