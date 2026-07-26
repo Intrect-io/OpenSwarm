@@ -8,6 +8,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
 import { PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
+import { parseTokenResponse } from './tokenResponse.js';
 
 // Constants
 
@@ -172,11 +173,18 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
           throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
         }
 
-        const tokens = (await tokenRes.json()) as {
-          access_token: string;
-          refresh_token: string;
-          expires_in: number;
-          id_token?: string;
+        // Validated before any of it reaches an AuthProfile: a 200 carrying an
+        // error body would otherwise be stored with an undefined access token
+        // and a NaN expiry, which fails the store's load-time check and used to
+        // take every other provider's credentials with it. An exchange is the
+        // only point a refresh token is issued, so it is required here.
+        const raw: unknown = await tokenRes.json();
+        const parsed = parseTokenResponse(raw, { provider: 'ChatGPT', requireRefreshToken: true });
+        const tokens = {
+          access_token: parsed.accessToken,
+          refresh_token: parsed.refreshToken as string,
+          expires_in: parsed.expiresIn,
+          id_token: (raw as { id_token?: unknown }).id_token as string | undefined,
         };
 
         // Codex 백엔드(/responses, /models)는 `chatgpt-account-id` 헤더를 요구한다.
