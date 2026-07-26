@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.2 — 2026-07-26
+
+### Fixed
+
+- **A concurrent open no longer crashes startup** — switching a database to WAL takes a brief exclusive lock, and `busy_timeout` does not cover it: a connection holding a read transaction makes `PRAGMA journal_mode = WAL` wait out the entire timeout and then throw `SQLITE_BUSY`. Since the daemon, the CLI and the dashboard all open these stores while the machine is under agent load, a single attempt turned "someone else opened it at the same moment" into a hard failure inside a constructor. The conversion now retries within a bounded budget, shared by all three stores; `SqliteIssueStore` and `SqliteRegistryStore` additionally had no `busy_timeout` at all. Measured at load ~11, the multi-process cases failed 6/6 runs before and 0/6 after. (#327)
+- **Shared config files are written atomically** — `repos.json`, `openswarm.json` and `ci-state.json` were rewritten in place while other processes read them, and each degraded into silent data loss rather than a visible error. A torn read of `repos.json` made the loader fall back to an empty config, so reconciliation disabled **every running project**; `openswarm.json` surfaced as `RepoMetadataError`; `ci-state.json` silently reset each repository's health timeline. All three now use the write-temp + fsync + rename helper the CLI already used for `repos.json`. `loadCIState` also stopped treating a corrupt file like a missing one. (#325)
+- **An EPIPE no longer takes down the daemon** — `commentOnPR` pipes the comment body through gh's stdin, and if gh exits first the stream emits `'error'`. Node rethrows an unhandled `'error'` event as an uncaught exception, and because it arrives asynchronously the function's own `try/catch` never saw it. Six gh readers also inherited Node's 1MB `maxBuffer` instead of the 4MB the shared helper uses, so long review threads — the ones most worth reading — failed with `ERR_CHILD_PROCESS_STDOUT_MAXBUFFER`. (#326)
+
+### Changed
+
+- **The dashboard's Tailscale URL is detected at runtime** — the address was a literal belonging to one developer's node, committed to a public repository and wrong for everyone else the moment Tailscale reassigned it. It is now read from this host's `100.64.0.0/10` interface, and the line is omitted entirely when Tailscale is not up. (#325)
+
 ## 0.19.1 — 2026-07-26
 
 ### Fixed
