@@ -533,10 +533,10 @@ export type PRDetails = PRInfo & {
  */
 export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
   try {
-    const { stdout } = await execFileAsync('gh', [
+    const stdout = await ghExec(
       'pr', 'list', '-R', repo, '--state', 'open',
       '--json', 'number,title,headRefName,createdAt,url,author'
-    ]);
+    );
     const prs = JSON.parse(stdout);
     return prs.map((pr: any) => ({
       repo,
@@ -609,10 +609,10 @@ export type PRReviewComment = {
  */
 export async function getPRReviews(repo: string, prNumber: number): Promise<PRReviewComment[]> {
   try {
-    const { stdout } = await execFileAsync('gh', [
+    const stdout = await ghExec(
       'api', `/repos/${repo}/pulls/${prNumber}/reviews`,
       '--jq', '.[] | {id, author: .user.login, body, state, createdAt: .submitted_at}'
-    ]);
+    );
 
     const lines = stdout.trim().split('\n').filter(Boolean);
     return lines.map((line) => JSON.parse(line));
@@ -627,10 +627,10 @@ export async function getPRReviews(repo: string, prNumber: number): Promise<PRRe
  */
 export async function getPRReviewComments(repo: string, prNumber: number): Promise<PRReviewComment[]> {
   try {
-    const { stdout } = await execFileAsync('gh', [
+    const stdout = await ghExec(
       'api', `/repos/${repo}/pulls/${prNumber}/comments`,
       '--jq', '.[] | {id, author: .user.login, body, path, line, createdAt: .created_at}'
-    ]);
+    );
 
     const lines = stdout.trim().split('\n').filter(Boolean);
     return lines.map((line) => JSON.parse(line));
@@ -641,13 +641,24 @@ export async function getPRReviewComments(repo: string, prNumber: number): Promi
 }
 
 /**
- * Post a comment on a PR (piped via stdin to avoid shell escaping)
+ * Post a comment on a PR (piped via stdin to avoid shell escaping).
+ *
+ * The stdin 'error' listener is not optional. If gh exits before draining the
+ * pipe — unauthenticated, a bad repo, a rate limit — writing to it emits EPIPE
+ * on the stream. An 'error' event with no listener is rethrown by Node as an
+ * uncaught exception, and because it arrives asynchronously the surrounding
+ * try/catch never sees it: the daemon dies instead of logging a failed comment.
+ * Reporting is left to the 'close' handler, which has gh's actual exit code;
+ * this listener only has to keep the event from going unhandled.
  */
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
   try {
     await new Promise<void>((resolve, reject) => {
       const proc = spawn('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
         stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      proc.stdin.on('error', (err) => {
+        console.error(`[GitHub] stdin closed while sending comment to ${repo}#${prNumber}:`, err);
       });
       proc.stdin.write(body);
       proc.stdin.end();
@@ -671,10 +682,10 @@ export async function getPRComments(repo: string, prNumber: number): Promise<Arr
   createdAt: string;
 }>> {
   try {
-    const { stdout } = await execFileAsync('gh', [
+    const stdout = await ghExec(
       'pr', 'view', String(prNumber), '-R', repo,
-      '--json', 'comments',
-    ]);
+      '--json', 'comments'
+    );
     const data = JSON.parse(stdout);
     return data.comments.map((c: any) => ({
       author: c.author?.login || 'unknown',
@@ -715,9 +726,9 @@ export async function getPRFailedLogs(repo: string, prNumber: number): Promise<s
  */
 export async function getPRBaseBranch(repo: string, prNumber: number): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('gh', [
+    const stdout = await ghExec(
       'pr', 'view', String(prNumber), '-R', repo, '--json', 'baseRefName'
-    ]);
+    );
     const { baseRefName } = JSON.parse(stdout);
     return baseRefName || 'main';
   } catch (err) {
@@ -733,9 +744,9 @@ export async function getPRBaseBranch(repo: string, prNumber: number): Promise<s
  */
 export async function checkPRConflicts(repo: string, prNumber: number): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync('gh', [
+    const stdout = await ghExec(
       'pr', 'view', String(prNumber), '-R', repo, '--json', 'mergeable'
-    ]);
+    );
     const { mergeable } = JSON.parse(stdout);
     // mergeable can be: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
     return mergeable === 'CONFLICTING';
