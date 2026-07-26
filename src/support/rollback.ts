@@ -47,6 +47,29 @@ export type RollbackStrategy = 'reset_hard' | 'reset_soft' | 'stash' | 'checkout
 // Checkpoint Storage
 
 const CHECKPOINT_DIR = resolve(homedir(), '.openswarm/checkpoints');
+const CHECKPOINT_STASH_PREFIX = 'openswarm-checkpoint-';
+
+function checkpointStashMessage(executionId: string): string {
+  return `${CHECKPOINT_STASH_PREFIX}${executionId}`;
+}
+
+/**
+ * Current `stash@{N}` for a stash identified by its message, or undefined if it
+ * is no longer in the list.
+ *
+ * `stash@{N}` is a POSITION, not an identity: every `git stash push` inserts at
+ * 0 and shifts everything down. The checkpoint's index was captured at creation
+ * time and reused verbatim at pop time, so any stash created in between made it
+ * point at the wrong entry — and the `stash` rollback strategy creates one
+ * itself, immediately before popping, so it reliably restored the
+ * `rollback-preserve-*` stash it had just made and orphaned the checkpoint's.
+ * Resolving by message at pop time is stable under that shifting.
+ */
+async function resolveStashRef(projectPath: string, message: string): Promise<string | undefined> {
+  const { stdout } = await gitExec(projectPath, 'stash', 'list');
+  const line = stdout.split('\n').find((entry) => entry.includes(message));
+  return line?.match(/stash@\{\d+\}/)?.[0];
+}
 
 const CheckpointSchema = z.object({
   id: z.string().min(1),
@@ -209,7 +232,7 @@ export async function createCheckpoint(
     const changedFiles = await getChangedFiles(expandedPath);
     console.log(`[Rollback] Stashing ${changedFiles.length} changed files`);
 
-    const stashMessage = `openswarm-checkpoint-${executionId}`;
+    const stashMessage = checkpointStashMessage(executionId);
     await gitExec(expandedPath, 'stash', 'push', '-m', stashMessage, '--include-untracked');
 
     // Find Stash ID
@@ -301,7 +324,12 @@ async function rollback(
         // Restore stash if it existed
         if (checkpoint.stashId) {
           try {
-            await gitExec(checkpoint.projectPath, 'stash', 'pop', checkpoint.stashId);
+            // Resolved by message, never by the stored index — see resolveStashRef.
+            const stashRef = await resolveStashRef(
+              checkpoint.projectPath, checkpointStashMessage(checkpoint.executionId),
+            );
+            if (!stashRef) throw new Error('checkpoint stash is no longer in the stash list');
+            await gitExec(checkpoint.projectPath, 'stash', 'pop', stashRef);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             console.log('[Rollback] Stash pop failed, may have conflicts');
@@ -344,7 +372,13 @@ async function rollback(
         // Restore original stash
         if (checkpoint.stashId) {
           try {
-            await gitExec(checkpoint.projectPath, 'stash', 'pop', checkpoint.stashId);
+            // Must be resolved AFTER the rollback-preserve push above, which
+            // shifted the checkpoint's stash down by one.
+            const stashRef = await resolveStashRef(
+              checkpoint.projectPath, checkpointStashMessage(checkpoint.executionId),
+            );
+            if (!stashRef) throw new Error('checkpoint stash is no longer in the stash list');
+            await gitExec(checkpoint.projectPath, 'stash', 'pop', stashRef);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             console.log('[Rollback] Original stash pop failed');

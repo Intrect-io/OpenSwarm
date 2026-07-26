@@ -305,8 +305,12 @@ describe('rollback.ts coverage', () => {
 
     it('stash strategy restores a pre-existing stash after checking out', async () => {
       writeFileSync(join(repo, 'file.txt'), 'stashed-value\n');
-      execFileSync('git', ['stash', 'push', '-m', 'pre-existing'], { cwd: repo });
-      const stashLine = stashList(repo).split('\n').find(line => line.includes('pre-existing'));
+      // The message must be the one createCheckpoint actually writes: the stash is
+      // now located by message rather than by its (shifting) stash@{N} position,
+      // so a fixture using an arbitrary message describes a checkpoint that
+      // createCheckpoint could never produce.
+      execFileSync('git', ['stash', 'push', '-m', 'openswarm-checkpoint-exec-fixture'], { cwd: repo });
+      const stashLine = stashList(repo).split('\n').find(line => line.includes('openswarm-checkpoint-exec-fixture'));
       const stashId = stashLine?.match(/stash@\{(\d+)\}/)?.[0];
       expect(stashId).toBeDefined();
 
