@@ -795,3 +795,65 @@ describe('RunLedger durable outbox races', () => {
     ledger.close();
   });
 });
+
+// Switching a fresh database to WAL takes a brief exclusive lock, and
+// busy_timeout does not rescue it — measured here, a connection holding a read
+// transaction makes `PRAGMA journal_mode = WAL` wait out the whole timeout and
+// then throw SQLITE_BUSY. With a single attempt that turned "another process
+// opened the ledger at the same moment" into a hard startup crash, which is
+// routine for OpenSwarm: the daemon and the CLI both open this file, under
+// agent load, and the multi-process cases above failed 6/6 runs at load ~11
+// before the retry loop and 0/6 after it.
+describe('RunLedger WAL negotiation', () => {
+  // Deliberately named for what it checks: the already-WAL fast path. `first`
+  // finishes the conversion before `second` is constructed, so there is no busy
+  // contention here — the real contention is covered by the multi-process cases
+  // above and by the held-lock case below.
+  it('takes the no-op fast path when the database is already in WAL', () => {
+    const dbPath = createDbPath();
+    const first = new RunLedger(dbPath);
+    const second = new RunLedger(dbPath);
+    register(second, 'WAL-1');
+    expect(second.getRun('WAL-1')).toMatchObject({ issueId: 'WAL-1' });
+    second.close();
+    first.close();
+  });
+
+  it('restores the caller busy_timeout once the conversion is done', () => {
+    const dbPath = createDbPath();
+    const ledger = new RunLedger(dbPath, { busyTimeoutMs: 7_321 });
+    const probe = new Database(dbPath);
+    try {
+      // The conversion runs at a deliberately short timeout so the retry loop
+      // gets many attempts; leaving it there would silently apply a 100ms wait
+      // policy to every later statement.
+      const [row] = (ledger as unknown as { db: Database.Database }).db.pragma('busy_timeout') as Array<{ timeout: number }>;
+      expect(row.timeout).toBe(7_321);
+    } finally {
+      probe.close();
+      ledger.close();
+    }
+  });
+
+  it('gives a bounded, explicit failure when the conversion can never succeed', () => {
+    const dbPath = createDbPath();
+    // Force the database into delete mode, then pin a read transaction open so
+    // the exclusive lock the conversion needs is permanently unavailable.
+    const holder = new Database(dbPath);
+    holder.pragma('journal_mode = DELETE');
+    holder.exec('CREATE TABLE probe(x)');
+    holder.exec('BEGIN');
+    holder.prepare('SELECT * FROM probe').all();
+
+    const started = Date.now();
+    try {
+      expect(() => new RunLedger(dbPath, { busyTimeoutMs: 1_000 })).toThrow(/WAL within \d+ms/);
+      // Bounded: it must give up near its budget rather than retry forever.
+      expect(Date.now() - started).toBeLessThan(8_000);
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
+  });
+});
+

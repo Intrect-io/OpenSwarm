@@ -10,6 +10,7 @@ import { nanoid } from 'nanoid';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
+import { DEFAULT_BUSY_TIMEOUT_MS, enableWalWithRetry } from '../support/sqliteWal.js';
 import type {
   CodeEntity, CodeEntityFilter, EntityKind, EntityStatus, RiskLevel,
   EntityEvent, EntityEventType, EntityWarning, EntityTag,
@@ -173,10 +174,23 @@ export class SqliteRegistryStore {
     mkdirSync(resolve(path, '..'), { recursive: true });
     this.db = new Database(path);
 
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-
-    this.migrate();
+    // Install the wait policy before the WAL conversion, then retry the
+    // conversion itself. The CLI, the daemon and the dashboard all open this
+    // store, so a single unguarded attempt turns a concurrent open into a hard
+    // crash in this constructor. See support/sqliteWal.ts.
+    //
+    // Setup can now fail where it previously could not, so the handle has to be
+    // closed on the way out — a leaked connection would keep its own locks
+    // alive for the life of the process.
+    try {
+      this.db.pragma(`busy_timeout = ${DEFAULT_BUSY_TIMEOUT_MS}`);
+      enableWalWithRetry(this.db, DEFAULT_BUSY_TIMEOUT_MS);
+      this.db.pragma('foreign_keys = ON');
+      this.migrate();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private migrate(): void {
