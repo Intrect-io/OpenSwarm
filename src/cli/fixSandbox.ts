@@ -6,6 +6,7 @@ import { mkdtemp, readdir, rm, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
+  BASELINE_UNTRACKED_FILE_LIMIT_BYTES,
   captureBaselinePatch,
   cloneSandbox,
   createSharedPathSnapshot,
@@ -63,15 +64,29 @@ export async function runIsolatedFixBatch<T extends IsolatedFixItem>(options: {
   signal?: AbortSignal;
   run: (item: T, sandbox: string, onLog: (line: string) => void) => Promise<{ success: boolean; error?: string }>;
   onLog?: (item: T, line: string) => void;
+  /** Batch-level notices (not tied to one unit), e.g. what the baseline left out. */
+  onNotice?: (line: string) => void;
 }): Promise<Array<IsolatedFixResult<T>>> {
   if (options.items.length === 0) return [];
   options.signal?.throwIfAborted();
-  // Every sandbox starts from the exact same dirty candidate state. A failed
-  // snapshot must abort rather than silently run against stale HEAD.
-  const baseline = await captureBaselinePatch(options.projectPath);
   const root = await mkdtemp(join(tmpdir(), 'openswarm-fix-units-'));
   const knownEntries = new Set<string>();
   try {
+    // Every sandbox starts from the exact same dirty candidate state. A failed
+    // snapshot must abort rather than silently run against stale HEAD. The patch
+    // is streamed to disk and shared by all sandboxes — a dirty tree carrying
+    // large artifacts used to blow the exec stdout buffer here. (INT-3098)
+    const baselineEntry = 'baseline.patch';
+    knownEntries.add(baselineEntry);
+    const baseline = await captureBaselinePatch(options.projectPath, join(root, baselineEntry));
+    if (baseline.skippedUntracked.length > 0) {
+      const limitMb = Math.round(BASELINE_UNTRACKED_FILE_LIMIT_BYTES / (1024 * 1024));
+      options.onNotice?.(
+        `Baseline left out ${baseline.skippedUntracked.length} untracked file(s) over ${limitMb}MB ` +
+          `(artifacts, not source): ${baseline.skippedUntracked.slice(0, 3).join(', ')}` +
+          `${baseline.skippedUntracked.length > 3 ? ', …' : ''}`,
+      );
+    }
     // Build one sanitized dependency/data snapshot for the whole batch. Each
     // worker still receives an independent filesystem clone, but large trees
     // are scanned for external symlinks only once instead of once per worker.
@@ -88,7 +103,6 @@ export async function runIsolatedFixBatch<T extends IsolatedFixItem>(options: {
       async (item, index): Promise<SandboxRun<T>> => {
         const id = `${String(index + 1).padStart(3, '0')}-${safeId(item.label, index)}`;
         knownEntries.add(id);
-        knownEntries.add(`${id}-base.patch`);
         let sandbox = '';
         let linkedSharedPaths: string[] = [];
         try {
@@ -103,7 +117,7 @@ export async function runIsolatedFixBatch<T extends IsolatedFixItem>(options: {
             'copy',
             sharedPathSnapshot,
           ));
-          await seedBaseline(sandbox, root, id, baseline);
+          await seedBaseline(sandbox, baseline);
           options.signal?.throwIfAborted();
           const worker = await options.run(item, sandbox, (line) => options.onLog?.(item, line));
           options.signal?.throwIfAborted();

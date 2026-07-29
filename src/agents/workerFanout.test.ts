@@ -1,7 +1,7 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { WorkerOptions } from './worker.js';
@@ -39,10 +39,83 @@ describe('captureBaselinePatch', () => {
       await writeFile(path.join(repo, 'README.md'), 'base\ndirty\n', 'utf8');
 
       const { captureBaselinePatch } = await import('./workerFanout.js');
-      const patch = await captureBaselinePatch(repo);
+      const dest = path.join(repo, '..', `baseline-${path.basename(repo)}.patch`);
+      const baseline = await captureBaselinePatch(repo, dest);
+      const patch = await readFile(baseline.path, 'utf8');
 
       expect(patch).toContain('README.md');
       expect(patch).not.toContain('node_modules');
+      await rm(dest, { force: true });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a clean worktree as no patch at all', async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), 'osw-fanout-clean-'));
+    try {
+      await writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+      initRepo(repo);
+
+      const { captureBaselinePatch } = await import('./workerFanout.js');
+      const dest = path.join(repo, '..', `baseline-clean-${path.basename(repo)}.patch`);
+      const baseline = await captureBaselinePatch(repo, dest);
+
+      expect(baseline.path).toBe('');
+      expect(existsSync(dest)).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('streams a patch far larger than the exec stdout buffer instead of failing', async () => {
+    // Production failure (enzyme, `review --max --fix`): a dirty tree carrying
+    // ~271MB of uncommitted files made `git diff --cached --binary` overflow the
+    // 20MB execFile buffer, and "stdout maxBuffer length exceeded" killed the
+    // whole audit after every reviewer had already run. (INT-3098)
+    const repo = await mkdtemp(path.join(tmpdir(), 'osw-fanout-huge-'));
+    try {
+      await writeFile(path.join(repo, 'big.txt'), 'seed\n', 'utf8');
+      initRepo(repo);
+      // Tracked (so the size limit for untracked artifacts does not apply) and
+      // well past the old 20MB ceiling.
+      await writeFile(path.join(repo, 'big.txt'), `${'x'.repeat(1024)}\n`.repeat(25 * 1024), 'utf8');
+
+      const { captureBaselinePatch } = await import('./workerFanout.js');
+      const dest = path.join(repo, '..', `baseline-huge-${path.basename(repo)}.patch`);
+      const baseline = await captureBaselinePatch(repo, dest);
+
+      expect(baseline.path).toBe(dest);
+      expect((await stat(dest)).size).toBeGreaterThan(24 * 1024 * 1024);
+      await rm(dest, { force: true });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('leaves oversized untracked artifacts out of the baseline but keeps source edits', async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), 'osw-fanout-artifact-'));
+    try {
+      await writeFile(path.join(repo, 'src.ts'), 'export const a = 1;\n', 'utf8');
+      initRepo(repo);
+      await writeFile(path.join(repo, 'src.ts'), 'export const a = 2;\n', 'utf8');
+      await writeFile(path.join(repo, 'new-source.ts'), 'export const b = 3;\n', 'utf8');
+      await mkdir(path.join(repo, 'trash'), { recursive: true });
+      await writeFile(path.join(repo, 'trash', 'bundle.bin'), 'z'.repeat(3 * 1024 * 1024), 'utf8');
+
+      const { captureBaselinePatch } = await import('./workerFanout.js');
+      const dest = path.join(repo, '..', `baseline-artifact-${path.basename(repo)}.patch`);
+      const baseline = await captureBaselinePatch(repo, dest);
+      const patch = await readFile(baseline.path, 'utf8');
+
+      // git reports repository-relative paths with forward slashes on every platform.
+      expect(baseline.skippedUntracked).toEqual(['trash/bundle.bin']);
+      expect(patch).toContain('src.ts');
+      expect(patch).toContain('new-source.ts');
+      expect(patch).not.toContain('bundle.bin');
+      // The project keeps the file — only the temporary index dropped it.
+      expect(existsSync(path.join(repo, 'trash', 'bundle.bin'))).toBe(true);
+      await rm(dest, { force: true });
     } finally {
       await rm(repo, { recursive: true, force: true });
     }

@@ -544,7 +544,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   if (opts.fix) {
     const targets = fixTargets(run);
     if (!targets.length) console.log('\n--fix: no reviewer edits requested; running the deterministic publication gate.');
-    {
+    try {
       const maxRounds = opts.fixRounds === undefined
         ? undefined
         : positiveIntegerOption(opts.fixRounds, opts.fixRounds, '--fix-rounds');
@@ -603,6 +603,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
           onFixProgress: (e) => {
             if (e.type === 'done') console.log(`  ${status.ok(`${e.label} — ${e.filesChanged} file(s) changed`)}`);
             else if (e.type === 'error') console.log(`  ${status.err(`${e.label} — ${e.error}`)}`);
+            else if (e.type === 'notice') console.log(`  ${c.dim(e.line)}`);
           },
           onReviewProgress: (e) => {
             if (e.type === 'done') console.log(`  ${status.info(`re-review ${e.label} — ${e.decision}`)}`);
@@ -648,6 +649,13 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
             : 'Changes are in the working tree — review the diff before committing.',
         ),
       );
+    } catch (error) {
+      // Infrastructure failure in the fix phase (sandbox, git, adapter) must not
+      // throw away a completed audit. Fall through with the pre-fix verdicts so
+      // the report, review history and follow-ups below are still persisted;
+      // fixResult stays undefined, which keeps the publication gate closed.
+      console.warn(`\n${status.err(`--fix aborted: ${error instanceof Error ? error.message : String(error)}`)}`);
+      console.warn(status.warn('Review findings kept — nothing was fixed or published.'));
     }
   }
 
