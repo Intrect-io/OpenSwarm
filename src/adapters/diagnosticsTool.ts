@@ -80,6 +80,25 @@ function isMissingBinary(err: unknown): boolean {
 }
 
 /**
+ * Resolve the TypeScript compiler deterministically: the nearest
+ * `node_modules/.bin/tsc` walking up from the project (a real repo's own
+ * dependency), else `tsc` from PATH (npm-script contexts). NOT `npx tsc` —
+ * outside a project that depends on typescript, npx tries to install the
+ * unrelated `tsc` placeholder package (measured on CI: garbage output in one
+ * run, an interactive-install failure in another).
+ */
+function resolveTscBinary(cwd: string): string {
+  let dir = path.resolve(cwd);
+  for (;;) {
+    const candidate = path.join(dir, 'node_modules', '.bin', 'tsc');
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return 'tsc';
+    dir = parent;
+  }
+}
+
+/**
  * Project-wide `tsc --noEmit`, split into "your files" vs "elsewhere".
  * Targeted single-file tsc would drop the tsconfig (wrong lib/paths → false
  * errors), so the project run is the correct unit; filtering keeps the model's
@@ -91,7 +110,7 @@ async function runTsc(cwd: string, requested: Set<string>): Promise<CheckOutcome
     return { label, output: '', infraError: 'no tsconfig.json — TypeScript check skipped' };
   }
   try {
-    await execFileAsync('npx', ['tsc', '--noEmit', '--pretty', 'false'], {
+    await execFileAsync(resolveTscBinary(cwd), ['--noEmit', '--pretty', 'false'], {
       cwd,
       timeout: TSC_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
@@ -99,7 +118,7 @@ async function runTsc(cwd: string, requested: Set<string>): Promise<CheckOutcome
     });
     return { label, output: '' };
   } catch (err) {
-    if (isMissingBinary(err)) return { label, output: '', infraError: 'npx/tsc unavailable' };
+    if (isMissingBinary(err)) return { label, output: '', infraError: 'tsc unavailable (no node_modules/.bin/tsc up the tree, none on PATH)' };
     const all = checkOutput(err).split('\n').filter(Boolean);
     // tsc error lines start with the relative file path: `src/a.ts(3,5): error TS...`
     const requestedNorm = [...requested].map((p) => p.replaceAll('\\', '/'));
