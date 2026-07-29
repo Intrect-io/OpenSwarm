@@ -29,6 +29,24 @@ describe('runReviewer parse failure (INT-2521)', () => {
 });
 
 describe('reviewer', () => {
+  it('uses a five-minute timeout when a review does not set one explicitly', async () => {
+    const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
+    vi.spyOn(adapters, 'getAdapter').mockReturnValue({
+      name: 'mock',
+      getDefaultModel: async () => 'm',
+      parseReviewerOutput: () => ({ decision: 'approve', feedback: 'ok' }),
+    } as never);
+
+    await runReviewer({
+      taskTitle: 'timeout default',
+      taskDescription: 'verify the default',
+      workerResult: { success: true, summary: 's', filesChanged: ['a.ts'], commands: [], output: '' },
+      projectPath: '/tmp',
+    });
+
+    expect(spawn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeoutMs: 300000 }));
+  });
+
   it('renders direct Git reviews without a fictitious command-less worker', () => {
     const prompt = buildReviewerPrompt({
       taskTitle: 'CLI working-tree review',

@@ -398,11 +398,11 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
         stderr += chunk.toString();
       });
 
-      if ((options.timeoutMs ?? 180000) > 0) {
+      if ((options.timeoutMs ?? 300000) > 0) {
         timeout = setTimeout(() => {
           proc.kill('SIGKILL');
           settle(() => reject(new Error('Chat response timeout')));
-        }, options.timeoutMs ?? 180000);
+        }, options.timeoutMs ?? 300000);
       }
 
       proc.on('close', (code) => {
