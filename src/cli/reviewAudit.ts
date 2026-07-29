@@ -525,6 +525,8 @@ export interface FixAreaResult {
 export type FixProgress =
   | { type: 'start'; label: string; done: number; total: number }
   | { type: 'log'; label: string; line: string }
+  /** Batch-level note that belongs to no single area (e.g. baseline exclusions). */
+  | { type: 'notice'; line: string }
   | { type: 'done'; label: string; filesChanged: number; done: number; total: number }
   | { type: 'error'; label: string; error: string; done: number; total: number };
 
@@ -681,6 +683,7 @@ export async function runAreaFixes(
         : defaultFixUnit(unit, context, sandbox, opts, onLog);
     },
     onLog: (unit, line) => deps.onProgress?.({ type: 'log', label: unit.label, line }),
+    onNotice: (line) => deps.onProgress?.({ type: 'notice', line }),
   });
   return isolated.map((result) => {
     onResult(result.item, result);

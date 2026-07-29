@@ -37,6 +37,8 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
 
   useEffect(() => {
     const onProgress = (e: AuditProgress | FixProgress) => {
+      // Batch-level notices belong to no area row — the CLI prints them instead.
+      if (!('label' in e)) return;
       setStatuses((prev) => {
         const cur = prev[e.label] ?? { status: 'pending' as const };
         let next: AreaStatus;

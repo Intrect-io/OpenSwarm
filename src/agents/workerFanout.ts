@@ -5,12 +5,13 @@
 // Runs candidate workers in isolated temporary git clones and promotes only the
 // selected winner's diff back into the real project path.
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync } from 'node:fs';
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readlink, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { pipeline as streamPipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 import type { WorkerFanoutCandidateConfig, PipelineGuardsConfig } from '../core/types.js';
 import { runPool } from '../support/concurrencyPool.js';
@@ -85,13 +86,95 @@ async function git(cwd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv
   return String(stdout);
 }
 
+/**
+ * Untracked files above this size are artifacts (build output, media, vendored
+ * bundles, trashed copies), not in-flight source edits. Seeding them copies the
+ * same bytes into every sandbox for no fix value, so they stay out of the
+ * baseline. Tracked modifications are always seeded, whatever their size.
+ */
+export const BASELINE_UNTRACKED_FILE_LIMIT_BYTES = 2 * 1024 * 1024;
+
+/** Where the captured baseline lives, plus what it deliberately left out. */
+export interface BaselinePatch {
+  /** Patch file path, or '' when there is nothing uncommitted to seed. */
+  path: string;
+  /** Untracked files excluded by BASELINE_UNTRACKED_FILE_LIMIT_BYTES. */
+  skippedUntracked: string[];
+}
+
+/** A baseline that seeds nothing — clean worktree, or capture failed. */
+export function emptyBaselinePatch(): BaselinePatch {
+  return { path: '', skippedUntracked: [] };
+}
+
+/**
+ * Run git with stdout streamed straight to a file. `git diff --binary` over a
+ * dirty tree carrying large untracked artifacts reaches hundreds of MB; buffering
+ * that through execFile dies with "stdout maxBuffer length exceeded" and takes
+ * the whole fix/fan-out run down with it. (INT-3098)
+ */
+async function gitToFile(
+  cwd: string,
+  args: string[],
+  destPath: string,
+  opts?: { env?: NodeJS.ProcessEnv },
+): Promise<void> {
+  const child = spawn('git', args, {
+    cwd,
+    env: opts?.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: FANOUT_GIT_TIMEOUT_MS,
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => {
+    if (stderr.length < 8_192) stderr += chunk;
+  });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, rejectExit) => {
+    child.once('error', rejectExit);
+    child.once('close', (code, signal) => resolveExit({ code, signal }));
+  });
+  try {
+    await streamPipeline(child.stdout, createWriteStream(destPath));
+  } catch (error) {
+    child.kill('SIGKILL');
+    await exited.catch(() => undefined);
+    throw error;
+  }
+  const { code, signal } = await exited;
+  if (code !== 0) {
+    throw new Error(`git ${args.join(' ')} failed${signal ? ` (${signal})` : ''}: ${stderr.trim()}`.trim());
+  }
+}
+
+/**
+ * Unstage untracked additions that are too big to be worth seeding, and report
+ * them. They stay untouched on disk in the project — only the temporary index
+ * (and therefore the baseline patch) drops them.
+ */
+async function dropOversizedUntracked(projectPath: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  const added = await git(projectPath, ['diff', '--cached', '--name-only', '--diff-filter=A', '-z', 'HEAD'], { env })
+    .catch(() => '');
+  const oversized: string[] = [];
+  for (const rel of added.split('\0').filter(Boolean)) {
+    const info = await stat(resolve(projectPath, rel)).catch(() => null);
+    if (info?.isFile() && info.size > BASELINE_UNTRACKED_FILE_LIMIT_BYTES) oversized.push(rel);
+  }
+  // Chunked: a repository can hold thousands of these, and one argv has a limit.
+  for (let i = 0; i < oversized.length; i += 100) {
+    await git(projectPath, ['rm', '--cached', '--quiet', '-r', '--ignore-unmatch', '--', ...oversized.slice(i, i + 100)], { env });
+  }
+  return oversized;
+}
+
 // Capture ALL uncommitted work in the project (tracked edits, deletions, and
 // untracked new files) as a binary patch vs HEAD, WITHOUT mutating the project's
 // real index or worktree — everything is staged into a throwaway temporary index
-// selected via GIT_INDEX_FILE. Returns '' when the worktree is clean. This lets
-// fan-out run on a dirty tree (e.g. a self-repair retry that still holds the
-// previous iteration's edits) by seeding that state into each sandbox.
-export async function captureBaselinePatch(projectPath: string): Promise<string> {
+// selected via GIT_INDEX_FILE. The patch is written to `destPath`; a clean
+// worktree yields no file and `{ path: '' }`. This lets fan-out run on a dirty
+// tree (e.g. a self-repair retry that still holds the previous iteration's
+// edits) by seeding that state into each sandbox.
+export async function captureBaselinePatch(projectPath: string, destPath: string): Promise<BaselinePatch> {
   const idxDir = await mkdtemp(join(tmpdir(), 'openswarm-fanout-idx-'));
   const env = { ...process.env, GIT_INDEX_FILE: join(idxDir, 'index') };
   try {
@@ -118,7 +201,14 @@ export async function captureBaselinePatch(projectPath: string): Promise<string>
       // symlink/directory while treating the normal absent case as a no-op.
       await git(projectPath, ['rm', '--cached', '--quiet', '-r', '--ignore-unmatch', '--', ...injectedUntracked], { env });
     }
-    return await git(projectPath, ['diff', '--cached', '--binary', 'HEAD'], { env });
+    const skippedUntracked = await dropOversizedUntracked(projectPath, env);
+    await gitToFile(projectPath, ['diff', '--cached', '--binary', 'HEAD'], destPath, { env });
+    const written = await stat(destPath).catch(() => null);
+    if (!written || written.size === 0) {
+      await rm(destPath, { force: true });
+      return { path: '', skippedUntracked };
+    }
+    return { path: destPath, skippedUntracked };
   } finally {
     await rm(idxDir, { recursive: true, force: true });
   }
@@ -598,12 +688,12 @@ function scoreCandidate(input: {
 // sandbox and commit it, so the candidate continues from the dirty base and the
 // winner's promoted diff is the incremental delta (not base+delta, which would
 // double-apply onto the already-dirty project).
-export async function seedBaseline(sandbox: string, root: string, id: string, baseline: string): Promise<void> {
-  if (!baseline.trim()) return;
-  const patchPath = join(root, `${id}-base.patch`);
-  await writeFile(patchPath, baseline, 'utf8');
-  await git(sandbox, ['apply', '--whitespace=nowarn', patchPath]);
-  await rm(patchPath, { force: true });
+// The patch file is shared read-only by every sandbox in the batch (each used to
+// rewrite its own copy, which meant holding the whole patch in memory per worker);
+// the batch owner deletes it with the sandbox root.
+export async function seedBaseline(sandbox: string, baseline: BaselinePatch): Promise<void> {
+  if (!baseline.path) return;
+  await git(sandbox, ['apply', '--whitespace=nowarn', baseline.path]);
   await git(sandbox, ['add', '-A']);
   await git(sandbox, [
     '-c', 'user.email=fanout@openswarm.local',
@@ -617,7 +707,7 @@ async function runCandidate(
   candidate: WorkerFanoutCandidateConfig,
   index: number,
   root: string,
-  baseline: string,
+  baseline: BaselinePatch,
   sharedPathSnapshot?: SharedPathSnapshot,
 ): Promise<WorkerFanoutCandidateRun> {
   const id = safeCandidateId(candidate.id, index);
@@ -633,7 +723,7 @@ async function runCandidate(
       sharedPathModeFor(options.linkSharedPaths),
       sharedPathSnapshot,
     ));
-    await seedBaseline(sandbox, root, id, baseline);
+    await seedBaseline(sandbox, baseline);
     const result = await runWorker({
       ...options.baseWorkerOptions,
       projectPath: sandbox,
@@ -694,14 +784,21 @@ export async function runWorkerFanout(options: RunWorkerFanoutOptions): Promise<
     return { candidates: [], fallbackReason: 'fan-out needs at least two candidates' };
   }
 
-  // A dirty worktree is expected on self-repair retries (the gate scores fan-out
-  // mainly on retry signals). Rather than bail, snapshot the uncommitted state
-  // and seed it into each sandbox so candidates continue from it and only the
-  // incremental winner diff is promoted back. Falls back to '' (clean) on error.
-  const baseline = await captureBaselinePatch(options.projectPath).catch(() => '');
-
   const root = await mkdtemp(join(tmpdir(), 'openswarm-worker-fanout-'));
   try {
+    // A dirty worktree is expected on self-repair retries (the gate scores fan-out
+    // mainly on retry signals). Rather than bail, snapshot the uncommitted state
+    // and seed it into each sandbox so candidates continue from it and only the
+    // incremental winner diff is promoted back. Falls back to clean on error.
+    const baseline = await captureBaselinePatch(options.projectPath, join(root, 'baseline.patch'))
+      .catch(() => emptyBaselinePatch());
+    if (baseline.skippedUntracked.length > 0) {
+      options.onLog?.(
+        `[fanout] baseline skipped ${baseline.skippedUntracked.length} untracked file(s) over ` +
+          `${Math.round(BASELINE_UNTRACKED_FILE_LIMIT_BYTES / (1024 * 1024))}MB: ${baseline.skippedUntracked.slice(0, 3).join(', ')}` +
+          `${baseline.skippedUntracked.length > 3 ? ', …' : ''}`,
+      );
+    }
     let sharedPathSnapshot: SharedPathSnapshot | undefined;
     if (sharedPathModeFor(options.linkSharedPaths) === 'copy') {
       try {
@@ -716,7 +813,7 @@ export async function runWorkerFanout(options: RunWorkerFanoutOptions): Promise<
         };
       }
     }
-    options.onLog?.(`[fanout] launching ${options.candidates.length} candidate worker(s)${baseline.trim() ? ' (seeded from dirty worktree)' : ''}`);
+    options.onLog?.(`[fanout] launching ${options.candidates.length} candidate worker(s)${baseline.path ? ' (seeded from dirty worktree)' : ''}`);
     const settled = await runPool(
       options.candidates,
       options.concurrency,
