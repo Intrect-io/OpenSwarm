@@ -90,7 +90,15 @@ async function sh(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?:
   return exec(cmd, args, { cwd: opts.cwd, timeout: opts.timeoutMs ?? 600_000, maxBuffer: 1024 * 1024 * 64 });
 }
 
-const MODEL_NAME = 'openswarm';
+/**
+ * model_name_or_path recorded in predictions. Includes the evaluated model so
+ * a preds file identifies what produced it without relying on its filename
+ * (PR #354 review). Slashes sanitized — the official harness uses this value
+ * in report/log paths.
+ */
+function predsModelName(model: string): string {
+  return `openswarm+${model.replaceAll('/', '__')}`;
+}
 
 async function solveOne(inst: SweInstance, model: string): Promise<{ pred: Record<string, unknown>; resolvedHint: string }> {
   const image = imageFor(inst.instance_id);
@@ -228,7 +236,7 @@ async function solveOne(inst: SweInstance, model: string): Promise<{ pred: Recor
 
     log(`  worker done — ${result.filesChanged?.length ?? 0} files, patch ${diff.split('\n').length} lines`);
     return {
-      pred: { instance_id: inst.instance_id, model_name_or_path: MODEL_NAME, model_patch: diff },
+      pred: { instance_id: inst.instance_id, model_name_or_path: predsModelName(model), model_patch: diff },
       resolvedHint: `${result.filesChanged?.length ?? 0} files`,
     };
   } finally {

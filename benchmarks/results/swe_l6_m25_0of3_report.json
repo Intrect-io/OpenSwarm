@@ -1,0 +1,28 @@
+{
+    "total_instances": 3,
+    "submitted_instances": 3,
+    "completed_instances": 1,
+    "resolved_instances": 0,
+    "unresolved_instances": 1,
+    "empty_patch_instances": 2,
+    "error_instances": 0,
+    "completed_ids": [
+        "pylint-dev__pylint-7080"
+    ],
+    "incomplete_ids": [],
+    "empty_patch_ids": [
+        "pylint-dev__pylint-5859",
+        "pylint-dev__pylint-7993"
+    ],
+    "submitted_ids": [
+        "pylint-dev__pylint-5859",
+        "pylint-dev__pylint-7080",
+        "pylint-dev__pylint-7993"
+    ],
+    "resolved_ids": [],
+    "unresolved_ids": [
+        "pylint-dev__pylint-7080"
+    ],
+    "error_ids": [],
+    "schema_version": 2
+}
