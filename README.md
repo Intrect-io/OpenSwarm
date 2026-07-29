@@ -117,6 +117,21 @@ openswarm annotate "funcName" --tag "needs-refactor"
 openswarm annotate "funcName" --warn "error/security: SQL injection"
 ```
 
+### `openswarm review` exit codes
+
+`review` is designed to work as a CI merge gate, and CI reads nothing but the
+exit code:
+
+| Exit | Meaning |
+|------|---------|
+| `0`  | The gate ran and did not reject (approve/revise), or there was nothing to review |
+| `1`  | The gate ran and the verdict is reject — with `--fix`, also when any area is left unresolved or deterministic verification did not pass |
+| `2`  | The gate did **not** run — no verdict was produced (provider usage limit, adapter failure, unparseable reviewer output). Never treat this as a pass |
+
+Treat any non-zero exit as a failed check. The `1`/`2` split lets a workflow
+retry or alert differently when the gate could not run at all (e.g. a quota
+window exhausted — stderr names the cause and, when known, the reset time).
+
 ### Deterministic verification
 
 Autonomous pipelines enable baseline-diff verification by default: OpenSwarm runs repository test/typecheck commands once, compares a failing head against the merge base, and gives the reviewer structured evidence so pre-existing failures do not block unrelated work. Add `.openswarm/verify.yaml` for repository-specific commands (see [`templates/verify.example.yaml`](templates/verify.example.yaml)), or let OpenSwarm discover standard Node, Python, Rust, and Go checks. Configure the behavior under `autonomous.verify`; the legacy `guards.qualityGate` whole-tree check is deprecated.

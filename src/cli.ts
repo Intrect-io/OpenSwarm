@@ -339,15 +339,23 @@ program
           fixRounds: opts.fixRounds,
           learn: opts.learn,
         });
-        if (reviewMaxResultFailed(result, !!opts.fix)) process.exitCode = 1;
+        // Exit contract (INT-3100): 2 = the gate did not run at all (no area
+        // reviewed — quota/infra), 1 = it ran and failed. CI reads only this.
+        const { REVIEW_EXIT_GATE_NOT_RUN } = await import('./cli/reviewExit.js');
+        if (result && !result.gateRan) process.exitCode = REVIEW_EXIT_GATE_NOT_RUN;
+        else if (reviewMaxResultFailed(result, !!opts.fix)) process.exitCode = 1;
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
       const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
-      console.error(e instanceof Error ? e.message : String(e));
-      process.exitCode = 1;
+      // A throw means no verdict was produced — the gate did NOT run. Exit 2,
+      // never 0/1, so CI can distinguish "couldn't review" from "reviewed and
+      // rejected" and neither reads as a pass. (INT-3100)
+      const { REVIEW_EXIT_GATE_NOT_RUN, describeReviewGateFailure } = await import('./cli/reviewExit.js');
+      console.error(describeReviewGateFailure(e));
+      process.exitCode = REVIEW_EXIT_GATE_NOT_RUN;
     }
   });
 

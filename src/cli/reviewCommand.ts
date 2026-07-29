@@ -327,59 +327,70 @@ export async function runReviewCommand(
   });
 
   const followups = result.recommendedActions?.length ?? 0;
-  if (opts.fileIssue && followups) {
-    // Resolve the parent issue: explicit id, else inferred from the git branch. (INT-1967)
-    let parent = typeof opts.fileIssue === 'string' ? opts.fileIssue : undefined;
-    if (!parent) {
-      const getBranch =
-        deps.getBranch ??
-        (async (c: string) => {
-          const { execFileSync } = await import('node:child_process');
-          return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-            cwd: c,
-            stdio: ['ignore', 'pipe', 'ignore'],
-          })
-            .toString()
-            .trim();
-        });
-      const branch = await getBranch(cwd).catch(() => '');
-      parent = resolveIssueFromBranch(branch);
-      if (parent) log(`Filing follow-ups under ${parent} (inferred from branch "${branch}").`);
-    }
-    // No parent → create top-level (standalone) issues rather than refusing. (INT-1968)
-    // Before that, make sure this repo actually has a Linear project to land
-    // in — map it now (interactive) or bail rather than file an orphan. (INT-2599)
-    const mapping = await (deps.ensureProjectMapping ?? (async (c, p) => ensureProjectMapping(c, p, { log })))(cwd, parent);
-    if (mapping.abort) {
-      log('Skipped filing follow-ups — map this repo to a Linear project first (see above), then re-run.');
-    } else {
-      // Default path initializes a Linear task source itself (the daemon isn't
-      // running here), and files regardless of decision. (INT-1969)
-      const fileFollowups =
-        deps.fileFollowups ??
-        (async (p: string | undefined, r: ReviewResult) => {
-          const { fileReviewerFollowups } = await import('../automation/runnerExecution.js');
-          const source = await ensureTaskSource();
-          if (!source) return 0;
-          return fileReviewerFollowups(source, p, r, { autoFile: true, projectId: mapping.projectId, requireApprove: false });
-        });
-      const filed = await fileFollowups(parent, result);
-      if (filed > 0) {
-        log(
-          parent
-            ? `Filed ${filed} follow-up sub-issue(s) under ${parent}.`
-            : `Filed ${filed} standalone follow-up issue(s) (pass \`--issues <id>\` to nest them under an issue).`,
-        );
-      } else {
-        log(
-          `Could not file follow-ups (0 created). Is Linear connected? Run \`openswarm auth login --provider linear\` (or set linearApiKey in config).`,
-        );
-      }
-    }
-  } else if (followups) {
-    // Suggestions were made but nothing was filed — make the flag discoverable. (INT-1966/1967)
-    log(`\n${followups} follow-up(s) suggested. Re-run with \`--issues\` to create them as Linear sub-issues (parent inferred from the branch, or pass \`--issues <id>\`).`);
+  // Post-verdict side-effects must not change the exit code: a verdict exists,
+  // so a Linear/network failure here is a warning, not gate-not-run. A rethrow
+  // would turn a completed (even rejecting) review into exit 2. (INT-3100)
+  try {
+    await fileFollowupsBestEffort();
+  } catch (error) {
+    log(`Could not file follow-ups: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   return result;
+
+  async function fileFollowupsBestEffort(): Promise<void> {
+    if (opts.fileIssue && followups) {
+      // Resolve the parent issue: explicit id, else inferred from the git branch. (INT-1967)
+      let parent = typeof opts.fileIssue === 'string' ? opts.fileIssue : undefined;
+      if (!parent) {
+        const getBranch =
+          deps.getBranch ??
+          (async (c: string) => {
+            const { execFileSync } = await import('node:child_process');
+            return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+              cwd: c,
+              stdio: ['ignore', 'pipe', 'ignore'],
+            })
+              .toString()
+              .trim();
+          });
+        const branch = await getBranch(cwd).catch(() => '');
+        parent = resolveIssueFromBranch(branch);
+        if (parent) log(`Filing follow-ups under ${parent} (inferred from branch "${branch}").`);
+      }
+      // No parent → create top-level (standalone) issues rather than refusing. (INT-1968)
+      // Before that, make sure this repo actually has a Linear project to land
+      // in — map it now (interactive) or bail rather than file an orphan. (INT-2599)
+      const mapping = await (deps.ensureProjectMapping ?? (async (c, p) => ensureProjectMapping(c, p, { log })))(cwd, parent);
+      if (mapping.abort) {
+        log('Skipped filing follow-ups — map this repo to a Linear project first (see above), then re-run.');
+      } else {
+        // Default path initializes a Linear task source itself (the daemon isn't
+        // running here), and files regardless of decision. (INT-1969)
+        const fileFollowups =
+          deps.fileFollowups ??
+          (async (p: string | undefined, r: ReviewResult) => {
+            const { fileReviewerFollowups } = await import('../automation/runnerExecution.js');
+            const source = await ensureTaskSource();
+            if (!source) return 0;
+            return fileReviewerFollowups(source, p, r, { autoFile: true, projectId: mapping.projectId, requireApprove: false });
+          });
+        const filed = await fileFollowups(parent, result);
+        if (filed > 0) {
+          log(
+            parent
+              ? `Filed ${filed} follow-up sub-issue(s) under ${parent}.`
+              : `Filed ${filed} standalone follow-up issue(s) (pass \`--issues <id>\` to nest them under an issue).`,
+          );
+        } else {
+          log(
+            `Could not file follow-ups (0 created). Is Linear connected? Run \`openswarm auth login --provider linear\` (or set linearApiKey in config).`,
+          );
+        }
+      }
+    } else if (followups) {
+      // Suggestions were made but nothing was filed — make the flag discoverable. (INT-1966/1967)
+      log(`\n${followups} follow-up(s) suggested. Re-run with \`--issues\` to create them as Linear sub-issues (parent inferred from the branch, or pass \`--issues <id>\`).`);
+    }
+  }
 }
