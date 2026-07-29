@@ -100,14 +100,14 @@ describe('loadVerifyConfigBestEffort (INT-2762)', () => {
 
 describe('reviewMaxResultFailed', () => {
   it('fails closed when --fix leaves a revise verdict unresolved', () => {
-    expect(reviewMaxResultFailed({ decision: 'revise', resolved: false }, true)).toBe(true);
-    expect(reviewMaxResultFailed({ decision: 'approve', resolved: true, verified: false }, true)).toBe(true);
-    expect(reviewMaxResultFailed({ decision: 'approve', resolved: true, verified: true }, true)).toBe(false);
+    expect(reviewMaxResultFailed({ decision: 'revise', gateRan: true, resolved: false }, true)).toBe(true);
+    expect(reviewMaxResultFailed({ decision: 'approve', gateRan: true, resolved: true, verified: false }, true)).toBe(true);
+    expect(reviewMaxResultFailed({ decision: 'approve', gateRan: true, resolved: true, verified: true }, true)).toBe(false);
   });
 
   it('preserves report-only review semantics without --fix', () => {
-    expect(reviewMaxResultFailed({ decision: 'revise' }, false)).toBe(false);
-    expect(reviewMaxResultFailed({ decision: 'reject' }, false)).toBe(true);
+    expect(reviewMaxResultFailed({ decision: 'revise', gateRan: true }, false)).toBe(false);
+    expect(reviewMaxResultFailed({ decision: 'reject', gateRan: true }, false)).toBe(true);
   });
 });
 

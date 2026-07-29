@@ -105,6 +105,12 @@ export interface ReviewMaxOptions {
 
 export interface ReviewMaxCommandResult {
   decision: string;
+  /**
+   * True when at least one area produced a real reviewer verdict. False means
+   * the gate did not run at all (quota exhausted, adapter down) — the caller
+   * must exit gate-not-run, never pass. (INT-3100)
+   */
+  gateRan: boolean;
   /** For --fix, true only when every area has a fresh approve verdict. */
   resolved?: boolean;
   /** For --fix, true only when trusted deterministic verification passed. */
@@ -371,9 +377,11 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   let files: string[];
   try {
     files = listSourceFiles(cwd);
-  } catch {
-    console.error(`Not a git repository (or git unavailable): ${cwd}`);
-    return null;
+  } catch (cause) {
+    // Not a "nothing to audit" no-op: in CI this is a wrong path or a missing
+    // checkout step, and returning null would exit 0 — a silent pass. Throw so
+    // the CLI reports gate-not-run (exit 2). (INT-3100)
+    throw new Error(`Not a git repository (or git unavailable): ${cwd}`, { cause });
   }
   if (!files.length) {
     console.log('No production source files to audit.');
@@ -693,12 +701,18 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   //     `--issues-per-area` keeps the legacy per-area fan-out; `--no-linear`
   //     skips Linear entirely (report only). (INT-2022 / INT-2225)
   let parent: AuditIssueParent = {};
-  if (opts.issuesPerArea) {
-    await filePerAreaFollowups(cwd, opts.issuesPerArea, run);
-  } else if (!opts.noLinear && run.summary.recommendedActions.length) {
-    parent = await filePmSynthesizedIssues(cwd, opts, run.summary, report, ts);
-  } else if (run.summary.recommendedActions.length) {
-    console.log(`\n${run.summary.recommendedActions.length} follow-up(s) — captured in the report (--no-linear).`);
+  // Post-verdict side-effect: a Linear/network failure here must not change the
+  // exit code — the verdict exists, so this is a warning, not gate-not-run. (INT-3100)
+  try {
+    if (opts.issuesPerArea) {
+      await filePerAreaFollowups(cwd, opts.issuesPerArea, run);
+    } else if (!opts.noLinear && run.summary.recommendedActions.length) {
+      parent = await filePmSynthesizedIssues(cwd, opts, run.summary, report, ts);
+    } else if (run.summary.recommendedActions.length) {
+      console.log(`\n${run.summary.recommendedActions.length} follow-up(s) — captured in the report (--no-linear).`);
+    }
+  } catch (error) {
+    console.warn(`Could not file follow-ups (report saved to file): ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // (4.5) Ship the isolated worktree: commit → push → PR, linked to the audit
@@ -727,6 +741,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
 
   return {
     decision: run.summary.decision,
+    gateRan: run.summary.completed > 0,
     resolved: opts.fix ? fixResolved ?? run.results.every((result) => result.review?.decision === 'approve') : undefined,
     verified: opts.fix ? fixVerified ?? fixVerificationStatus === 'passed' : undefined,
   };
