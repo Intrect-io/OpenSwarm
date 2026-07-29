@@ -25,6 +25,7 @@ import { RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
+import { abortSignalWithDeadline } from './requestDeadline.js';
 import type { ToolDefinition } from './tools.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
@@ -97,6 +98,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
       disableReasoning: options.disableReasoning,
       onToken: options.onToken,
       signal: options.signal,
+      timeoutMs: options.timeoutMs ?? 300000,
     });
 
     // MCP tools: caller-provided, else self-source from the registry. (INT-1951)
@@ -163,6 +165,10 @@ export interface ApiCallerOptions {
   onToken?: (delta: string) => void;
   /** 사용자 중단(Esc/Ctrl+C) — fetch에 전달. */
   signal?: AbortSignal;
+  /** Per-call ceiling covering the streamed body (see requestDeadline.ts) —
+   * #345 wired this into atlascloud/codexResponses but missed this adapter,
+   * leaving a silent OpenRouter connection able to hang a worker. */
+  timeoutMs?: number;
 }
 
 export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOptions = {}) {
@@ -216,11 +222,22 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
           ...ATTRIBUTION_HEADERS,
         },
         body: JSON.stringify(body),
-        signal: opts.signal,
+        // The caller's signal AND this call's own deadline. Either one aborts.
+        signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
       });
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
+        // Reasoning-mandatory models (minimax-m3, thinking-only variants)
+        // reject `reasoning: {enabled: false}` with a 400 — the static openai/*
+        // exclusion above cannot enumerate them, and the failure killed every
+        // minimax benchmark run instantly (INT-3106: 400 "invalid request
+        // params" from AtlasCloud). Drop the flag and retry once: worse to
+        // waste the whole call than to pay some reasoning tokens.
+        if (res.status === 400 && body.reasoning) {
+          delete body.reasoning;
+          return attempt();
+        }
         // OpenRouter signals out-of-credits with HTTP 402 "Insufficient credits"
         // (NOT 429) — money, so waiting never helps: that stays a TYPED
         // RateLimitError which pauses the scheduler instead of the loop
