@@ -93,7 +93,7 @@ const PairModeConfigSchema = z.object({
   /** Worker timeout (ms) */
   workerTimeoutMs: z.number().positive().default(300000), // 5 min
   /** Reviewer timeout (ms) */
-  reviewerTimeoutMs: z.number().positive().default(180000), // 3 min
+  reviewerTimeoutMs: z.number().positive().default(300000), // 5 min
   /** Webhook URL (notification on complete/failure). Empty string allowed so an
    *  unset `${PAIR_WEBHOOK_URL:-}` substitution validates (matches the other
    *  optional webhookUrl fields, which don't enforce .url()). */
@@ -865,7 +865,7 @@ pairMode:
   enabled: false              # Enable pair mode
   maxAttempts: 3              # Worker max attempts
   workerTimeoutMs: 300000     # Worker timeout (5 min)
-  reviewerTimeoutMs: 180000   # Reviewer timeout (3 min)
+  reviewerTimeoutMs: 300000   # Reviewer timeout (5 min)
   webhookUrl: \${PAIR_WEBHOOK_URL:-}  # Completion/failure notification (optional)
   autoLinearUpdate: true      # Auto Linear status update
 `;

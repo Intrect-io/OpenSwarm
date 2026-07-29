@@ -411,7 +411,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       taskDescription: session.taskDescription,
       workerResult,
       projectPath: session.projectPath,
-      timeoutMs: 180000, // 3 minutes
+      timeoutMs: 300000, // 5 minutes
     });
 
     session = agentPair.getPairSession(sessionId);

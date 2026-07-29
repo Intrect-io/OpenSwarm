@@ -257,7 +257,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
     const raw = await spawnCli(adapter, {
       prompt,
       cwd,
-      timeoutMs: options.timeoutMs ?? 180000, // 3 min default (review is faster)
+      timeoutMs: options.timeoutMs ?? 300000, // 5 min default
       model: options.model,
       maxTurns: options.maxTurns,
       processContext: options.processContext,

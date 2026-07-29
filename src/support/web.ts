@@ -954,7 +954,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           provider,
           model,
           cwd: process.cwd(),
-          timeoutMs: 180000,
+          timeoutMs: 300000,
         }).catch((error: Error) => ({
           response: `[Error: ${error.message}]`,
           provider,
