@@ -12,6 +12,15 @@
 //
 // Spike scope: TypeScript (project tsc, filtered to the requested files) and
 // Python (ruff). Other languages fall back to the bash tool as before.
+//
+// MEASURED VERDICT (2026-07-29, benchmarks/diagnosticsAb.ts, N=48 runs across
+// z-ai/glm-4.7-flash and openai/gpt-5-mini, with and without a verify nudge):
+// success control 19/24 vs diag 20/24 — no measurable uplift. Models that
+// verify do it through the bash tool anyway; failures were turn-budget
+// starvation, not verification blindness. The tool therefore stays OPT-IN
+// (`diagnosticsTool` loop option) for future re-measurement and is deliberately
+// NOT enabled by any production caller. Full LSP integration was rejected on
+// the same evidence. (INT-3105)
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';

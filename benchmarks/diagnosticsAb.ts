@@ -13,6 +13,12 @@
 //          tool budget): control = today's toolset (bash included, so the model
 //          COULD run tsc itself), diag = + `diagnostics` tool.
 //
+// RESULT (2026-07-29, N=48: glm-4.7-flash + gpt-5-mini × nudge on/off × 3 tasks
+// × 2 seeds): control 19/24 vs diag 20/24 — no measurable success uplift; the
+// hypothesis was rejected and the tool stays opt-in-only. Spontaneous tool use
+// is model-dependent (glm: every run; mini: rare). Raw records in
+// benchmarks/results/diagnosticsAb-2026-07-29*.json. (INT-3105)
+//
 // 실행:
 //   npx tsx benchmarks/diagnosticsAb.ts                          # default model, 2 seeds
 //   npx tsx benchmarks/diagnosticsAb.ts --model z-ai/glm-4.7-flash --seeds 3
@@ -142,18 +148,22 @@ async function tscClean(dir: string): Promise<boolean> {
   }
 }
 
-async function runOne(task: AbTask, arm: 'control' | 'diag', seed: number, model: string): Promise<RunRecord> {
+async function runOne(task: AbTask, arm: 'control' | 'diag', seed: number, model: string, nudge: boolean): Promise<RunRecord> {
   const dir = await materialize(task);
   const logs: string[] = [];
   const started = Date.now();
   try {
     const adapter = new OpenRouterCliAdapter();
-    // Both arms get the SAME generic verify nudge (the control can run tsc via
-    // bash), so the measured delta is the tool's contribution, not the nudge's.
+    // With --nudge on (default), both arms get the SAME generic verify nudge
+    // (the control can run tsc via bash), so the measured delta is the tool's
+    // contribution, not the nudge's. With --nudge off, neither arm is told to
+    // verify — measuring whether the tool's mere presence drives usage.
     const verifyNudge = 'After editing, verify the project still type-checks before finishing.';
-    const systemPrompt = arm === 'diag'
-      ? `${verifyNudge} Use the \`diagnostics\` tool with the files you changed.`
-      : verifyNudge;
+    const systemPrompt = !nudge
+      ? undefined
+      : arm === 'diag'
+        ? `${verifyNudge} Use the \`diagnostics\` tool with the files you changed.`
+        : verifyNudge;
     await adapter.run({
       prompt: task.prompt,
       cwd: dir,
@@ -224,6 +234,7 @@ async function main(): Promise<void> {
   const seeds = Number(flag('seeds') ?? 2);
   const only = flag('task');
   const concurrency = Number(flag('concurrency') ?? 3);
+  const nudge = flag('nudge') !== 'off';
 
   const tasks = only ? TASKS.filter((t) => t.name === only) : TASKS;
   if (tasks.length === 0) {
@@ -236,10 +247,10 @@ async function main(): Promise<void> {
       Array.from({ length: seeds }, (_, seed) => ({ task, arm, seed })),
     ),
   );
-  console.log(`diagnostics A/B: model=${model} runs=${plan.length} (tasks=${tasks.length} × arms=2 × seeds=${seeds})`);
+  console.log(`diagnostics A/B: model=${model} nudge=${nudge} runs=${plan.length} (tasks=${tasks.length} × arms=2 × seeds=${seeds})`);
 
   const settled = await runPool(plan, concurrency, async ({ task, arm, seed }) => {
-    const record = await runOne(task, arm, seed, model);
+    const record = await runOne(task, arm, seed, model, nudge);
     console.log(`done: ${record.task} ${record.arm} seed${record.seed} → ${record.success ? '✓' : '✗'}`);
     return record;
   });
@@ -253,7 +264,7 @@ async function main(): Promise<void> {
 
   summarize(records);
   const out = path.join('benchmarks', 'results', `diagnosticsAb-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-  writeFileSync(out, JSON.stringify({ model, seeds, records }, null, 2));
+  writeFileSync(out, JSON.stringify({ model, seeds, nudge, records }, null, 2));
   console.log(`\nsaved: ${out}`);
 }
 

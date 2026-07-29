@@ -1,0 +1,151 @@
+{
+  "model": "z-ai/glm-4.7-flash",
+  "seeds": 2,
+  "nudge": true,
+  "records": [
+    {
+      "task": "add-required-field",
+      "arm": "control",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 11,
+      "toolCalls": 11,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 2,
+      "durationMs": 39796
+    },
+    {
+      "task": "add-required-field",
+      "arm": "control",
+      "seed": 1,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 11,
+      "toolCalls": 11,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 2,
+      "durationMs": 41879
+    },
+    {
+      "task": "add-required-field",
+      "arm": "diag",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 13,
+      "toolCalls": 13,
+      "diagnosticsCalls": 2,
+      "bashTscCalls": 2,
+      "durationMs": 59224
+    },
+    {
+      "task": "add-required-field",
+      "arm": "diag",
+      "seed": 1,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 13,
+      "toolCalls": 14,
+      "diagnosticsCalls": 2,
+      "bashTscCalls": 0,
+      "durationMs": 52673
+    },
+    {
+      "task": "rename-function",
+      "arm": "control",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 7,
+      "toolCalls": 14,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 0,
+      "durationMs": 42799
+    },
+    {
+      "task": "rename-function",
+      "arm": "control",
+      "seed": 1,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 7,
+      "toolCalls": 12,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 1,
+      "durationMs": 40313
+    },
+    {
+      "task": "rename-function",
+      "arm": "diag",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 7,
+      "toolCalls": 12,
+      "diagnosticsCalls": 1,
+      "bashTscCalls": 0,
+      "durationMs": 31285
+    },
+    {
+      "task": "rename-function",
+      "arm": "diag",
+      "seed": 1,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 9,
+      "toolCalls": 11,
+      "diagnosticsCalls": 1,
+      "bashTscCalls": 0,
+      "durationMs": 56474
+    },
+    {
+      "task": "change-signature",
+      "arm": "control",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 12,
+      "toolCalls": 11,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 1,
+      "durationMs": 50556
+    },
+    {
+      "task": "change-signature",
+      "arm": "control",
+      "seed": 1,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 7,
+      "toolCalls": 10,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 1,
+      "durationMs": 37882
+    },
+    {
+      "task": "change-signature",
+      "arm": "diag",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 4,
+      "toolCalls": 7,
+      "diagnosticsCalls": 1,
+      "bashTscCalls": 0,
+      "durationMs": 29687
+    },
+    {
+      "task": "change-signature",
+      "arm": "diag",
+      "seed": 1,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 11,
+      "toolCalls": 10,
+      "diagnosticsCalls": 1,
+      "bashTscCalls": 0,
+      "durationMs": 37604
+    }
+  ]
+}
