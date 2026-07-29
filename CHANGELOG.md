@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.19.11 — 2026-07-29
+
+### Fixed
+
+- **A dirty worktree no longer kills `review --max --fix`** — the fix sandbox captured the project's uncommitted state by buffering the whole `git diff --cached --binary HEAD` through `execFile`, whose 1MB-by-default buffer was raised to 20MB and still overflowed: measured on a real repository, the baseline patch was 271MB, 98% of it untracked build and media artifacts. The run died with "stdout maxBuffer length exceeded" right after the fix round started, discarding an audit whose eleven reviewer areas had all completed. The diff is now streamed straight to a file that every sandbox applies read-only (it used to be re-written per worker), untracked files over 2MB stay out of the baseline as artifacts rather than in-flight source edits, and the skipped set is reported. Same repository after the fix: 271MB → 27.4MB in 2.6s. (#349)
+- **A crash in the fix phase no longer throws away the audit** — the report, review history and follow-up filing all ran after the fix loop, so any infrastructure failure there lost the completed review. They now run regardless, with the publication gate still closed. (#349)
+
 ## 0.19.10 — 2026-07-26
 
 ### Fixed
