@@ -379,6 +379,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
+      diagnosticsTool: options.diagnosticsTool,
       mcpTools: options.mcpTools,
       readOnly: options.readOnly,
       // codex models are RLHF-trained on the V4A apply_patch format — expose it as

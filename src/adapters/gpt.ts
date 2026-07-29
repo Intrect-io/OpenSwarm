@@ -98,6 +98,7 @@ export class GptCliAdapter implements CliAdapter {
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
+      diagnosticsTool: options.diagnosticsTool,
       readOnly: options.readOnly,
       mcpTools,
       signal: options.signal,

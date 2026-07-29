@@ -87,6 +87,8 @@ export interface CliRunOptions {
   webTools?: boolean;
   /** Expose repository memory search (default true). Set false for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
+  /** Expose the inline `diagnostics` tool (project tsc/ruff inside the loop). Spike opt-in (INT-3105). */
+  diagnosticsTool?: boolean;
   /** Enforce read-only tool exposure/execution where the adapter supports OpenSwarm's tool layer. */
   readOnly?: boolean;
   /**

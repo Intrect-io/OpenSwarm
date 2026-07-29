@@ -7,6 +7,7 @@
 // ============================================
 
 import { TOOL_DEFINITIONS, APPLY_PATCH_TOOL, executeToolCalls, createReadCache, isProtectedPath, validatePath, type ToolCall, type ToolResult, type ToolDefinition } from './tools.js';
+import { DIAGNOSTICS_TOOL } from './diagnosticsTool.js';
 import { WEB_TOOL_DEFINITIONS } from './webTools.js';
 import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
@@ -130,6 +131,9 @@ export interface AgenticLoopOptions {
   /** Expose the apply_patch (V4A) tool — codex adapters only (codex models are
    * RLHF-trained on V4A; non-codex models emit malformed V4A). Default false. */
   applyPatch?: boolean;
+  /** Expose the inline `diagnostics` tool (project tsc/ruff inside the loop).
+   * Spike opt-in while the uplift is being measured (INT-3105). Default false. */
+  diagnosticsTool?: boolean;
   /** MCP tools (named `server__tool`) discovered from mcp.json, exposed alongside the native tools. */
   mcpTools?: ToolDefinition[];
   /** Abort the loop (checked each turn) — Esc/Ctrl+C in chat. */
@@ -200,6 +204,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     memoryTools = true,
     readOnly = false,
     applyPatch = false,
+    diagnosticsTool = false,
     mcpTools,
     signal,
     editFormat = 'json',
@@ -239,6 +244,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     ? [
         ...visibleBaseTools,
         ...(applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
+        // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
+        ...(diagnosticsTool && !readOnly ? [DIAGNOSTICS_TOOL] : []),
         ...(webTools ? WEB_TOOL_DEFINITIONS : []),
         ...(mcpTools ?? []),
       ]

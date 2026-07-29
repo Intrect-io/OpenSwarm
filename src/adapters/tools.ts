@@ -632,6 +632,14 @@ export async function executeTool(
         }
       }
 
+      case 'diagnostics': {
+        // Lazy: only loops that opted in (AgenticLoopOptions.diagnosticsTool)
+        // expose the schema, so most consumers never load this module.
+        const { runDiagnosticsTool } = await import('./diagnosticsTool.js');
+        const text = await runDiagnosticsTool(args.paths, cwd);
+        return { tool_call_id: callId, content: text, is_error: false };
+      }
+
       case 'web_fetch': {
         const text = await webFetch(args.url);
         return { tool_call_id: callId, content: text, is_error: text.startsWith('Invalid URL') || text.startsWith('Fetch ') };
