@@ -51,15 +51,49 @@ describe('runDiagnosticsTool (INT-3105)', () => {
     }
   }, 60_000);
 
-  it('summarizes errors outside the requested paths instead of dumping them', async () => {
+  it('summarizes errors outside the requested paths WITH their filenames', async () => {
+    // A missed caller elsewhere is exactly what the tool exists to reveal —
+    // its filename must survive summarization (full lines stay omitted).
     const dir = await tsProject({
       'src/edited.ts': 'export const ok: number = 1;\n',
       'src/other.ts': 'export const broken: number = "not a number";\n',
     });
     try {
       const text = await runDiagnosticsTool(['src/edited.ts'], dir);
-      expect(text).toContain('error line(s) in other files');
+      expect(text).toContain('src/other.ts: 1 error(s)');
+      expect(text).toContain('missed callers');
       expect(text).not.toContain('src/other.ts(');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('accepts absolute paths under the root (the loop cwd note allows them)', async () => {
+    const dir = await tsProject({
+      'src/caller.ts': "export const x: number = 'nope';\n",
+    });
+    try {
+      const text = await runDiagnosticsTool([path.join(dir, 'src/caller.ts')], dir);
+      expect(text).toContain('src/caller.ts(');
+      expect(text).not.toContain('missed callers');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('finds a nested workspace tsconfig when the root has none', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'osw-diag-mono-'));
+    try {
+      await mkdir(path.join(dir, 'packages/app/src'), { recursive: true });
+      await writeFile(
+        path.join(dir, 'packages/app/tsconfig.json'),
+        JSON.stringify({ compilerOptions: { strict: true, noEmit: true, skipLibCheck: true } }),
+        'utf8',
+      );
+      await writeFile(path.join(dir, 'packages/app/src/a.ts'), "export const n: number = 'bad';\n", 'utf8');
+      const text = await runDiagnosticsTool(['packages/app/src/a.ts'], dir);
+      expect(text).toContain('error TS');
+      expect(text).not.toContain('SKIPPED');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

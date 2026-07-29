@@ -20,10 +20,10 @@
 // benchmarks/results/diagnosticsAb-2026-07-29*.json. (INT-3105)
 //
 // 실행:
-//   npx tsx benchmarks/diagnosticsAb.ts                          # default model, 2 seeds
-//   npx tsx benchmarks/diagnosticsAb.ts --model z-ai/glm-4.7-flash --seeds 3
-//   npx tsx benchmarks/diagnosticsAb.ts --task rename-function
-//   (OPENROUTER_API_KEY from .env)
+//   npx tsx benchmarks/diagnosticsAb.ts                          # atlas-cloud pinned, z-ai/glm-4.7, 2 seeds
+//   npx tsx benchmarks/diagnosticsAb.ts --provider any --model openai/gpt-5-mini
+//   npx tsx benchmarks/diagnosticsAb.ts --task rename-function --nudge off
+//   (OPENROUTER_API_KEY from .env; default provider pin = atlas-cloud sponsorship credits)
 // ============================================
 
 import { execFile } from 'node:child_process';
@@ -67,6 +67,12 @@ const TASKS: AbTask[] = [
       'Add a required field `priority: number` to the `Task` interface in src/types.ts. ' +
       'Update every place that constructs a Task object so the project still type-checks; use priority 0 for existing data.',
     assert: async (read) => {
+      // The field must be REQUIRED — `priority?: number` would keep tsc clean
+      // while skipping every construction site, silently passing the task.
+      const types = await read('src/types.ts');
+      if (!/priority\s*:\s*number/.test(types) || /priority\s*\?\s*:/.test(types)) {
+        return 'src/types.ts does not declare a required `priority: number`';
+      }
       for (const rel of ['src/create.ts', 'src/seed.ts', 'src/clone.ts']) {
         if (!(await read(rel)).includes('priority')) return `${rel} still constructs Task without priority`;
       }
@@ -118,10 +124,15 @@ const TASKS: AbTask[] = [
 interface RunRecord {
   task: string;
   arm: 'control' | 'diag';
+  /** Repeat index only — no sampling seed is threaded to the API (temperature
+   * is the adapter's fixed 0.2); repeats sample the model's own variance. */
   seed: number;
   success: boolean;
   failReason?: string;
   tscClean: boolean;
+  /** Tool-loop API calls (`▸ API call #` log lines). The loop's final-answer
+   * retries log differently and are not counted — identical in both arms, so
+   * comparisons hold even though the absolute count can undercount by 1-2. */
   apiCalls: number;
   toolCalls: number;
   diagnosticsCalls: number;
@@ -154,17 +165,19 @@ async function runOne(task: AbTask, arm: 'control' | 'diag', seed: number, model
   const started = Date.now();
   try {
     const adapter = new OpenRouterCliAdapter();
-    // With --nudge on (default), both arms get the SAME generic verify nudge
-    // (the control can run tsc via bash), so the measured delta is the tool's
-    // contribution, not the nudge's. With --nudge off, neither arm is told to
-    // verify — measuring whether the tool's mere presence drives usage.
+    // Arm treatment: with --nudge on (default), both arms get the SAME generic
+    // verify nudge (the control can run tsc via bash); the diag arm's prompt
+    // ADDITIONALLY names the tool — the treatment is the productized bundle
+    // (schema + affordance), not schema alone. With --nudge off, the prompts
+    // are strictly identical and only the schema differs, isolating whether
+    // mere exposure drives usage. Read the two modes together.
     const verifyNudge = 'After editing, verify the project still type-checks before finishing.';
     const systemPrompt = !nudge
       ? undefined
       : arm === 'diag'
         ? `${verifyNudge} Use the \`diagnostics\` tool with the files you changed.`
         : verifyNudge;
-    await adapter.run({
+    const result = await adapter.run({
       prompt: task.prompt,
       cwd: dir,
       model,
@@ -176,6 +189,13 @@ async function runOne(task: AbTask, arm: 'control' | 'diag', seed: number, model
       diagnosticsTool: arm === 'diag',
       onLog: (line) => logs.push(line),
     });
+    // An adapter failure that resolves (nonzero exit, e.g. auth/HTTP error the
+    // adapter didn't classify as infra) is an INFRA failure of the run, not a
+    // task failure — throwing routes it to the pool's error channel so it
+    // cannot deflate an arm's success rate.
+    if (result.exitCode !== 0) {
+      throw new Error(`adapter run failed (exit ${result.exitCode}): ${result.stderr.slice(0, 300)}`);
+    }
     const clean = await tscClean(dir);
     const read = (rel: string) => import('node:fs/promises').then((fs) => fs.readFile(path.join(dir, rel), 'utf8'));
     const assertFail = clean ? await task.assert(read) : 'tsc not clean';
@@ -230,7 +250,13 @@ async function main(): Promise<void> {
     const i = args.indexOf(`--${name}`);
     return i >= 0 ? args[i + 1] : undefined;
   };
-  const model = flag('model') ?? 'openai/gpt-5-mini';
+  // Default provider pin: Atlas Cloud (sponsorship credits) — `--provider any`
+  // unpins, `--provider <slug>` pins elsewhere. The default model must be one
+  // Atlas Cloud actually serves (glm-4.7, deepseek-v4-pro, kimi-k2.5, glm-5 as
+  // of 2026-07-29); a pinned run with an unserved model fails with no provider.
+  const provider = flag('provider') ?? 'atlas-cloud';
+  if (provider !== 'any') process.env.OPENROUTER_PROVIDER_ONLY = provider;
+  const model = flag('model') ?? (provider === 'atlas-cloud' ? 'z-ai/glm-4.7' : 'openai/gpt-5-mini');
   const seeds = Number(flag('seeds') ?? 2);
   const only = flag('task');
   const concurrency = Number(flag('concurrency') ?? 3);
@@ -247,7 +273,7 @@ async function main(): Promise<void> {
       Array.from({ length: seeds }, (_, seed) => ({ task, arm, seed })),
     ),
   );
-  console.log(`diagnostics A/B: model=${model} nudge=${nudge} runs=${plan.length} (tasks=${tasks.length} × arms=2 × seeds=${seeds})`);
+  console.log(`diagnostics A/B: model=${model} provider=${provider} nudge=${nudge} runs=${plan.length} (tasks=${tasks.length} × arms=2 × seeds=${seeds})`);
 
   const settled = await runPool(plan, concurrency, async ({ task, arm, seed }) => {
     const record = await runOne(task, arm, seed, model, nudge);
@@ -264,7 +290,7 @@ async function main(): Promise<void> {
 
   summarize(records);
   const out = path.join('benchmarks', 'results', `diagnosticsAb-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
-  writeFileSync(out, JSON.stringify({ model, seeds, nudge, records }, null, 2));
+  writeFileSync(out, JSON.stringify({ model, provider, seeds, nudge, records }, null, 2));
   console.log(`\nsaved: ${out}`);
 }
 

@@ -1,0 +1,33 @@
+{
+  "model": "z-ai/glm-4.7",
+  "provider": "atlas-cloud",
+  "seeds": 1,
+  "nudge": true,
+  "records": [
+    {
+      "task": "change-signature",
+      "arm": "control",
+      "seed": 0,
+      "success": true,
+      "tscClean": true,
+      "apiCalls": 5,
+      "toolCalls": 10,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 1,
+      "durationMs": 25302
+    },
+    {
+      "task": "change-signature",
+      "arm": "diag",
+      "seed": 0,
+      "success": false,
+      "failReason": "src/math.ts signature not changed",
+      "tscClean": true,
+      "apiCalls": 2,
+      "toolCalls": 2,
+      "diagnosticsCalls": 0,
+      "bashTscCalls": 0,
+      "durationMs": 135253
+    }
+  ]
+}

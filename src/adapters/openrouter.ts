@@ -177,11 +177,22 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       stream: true,
       stream_options: { include_usage: true },
     };
-    // ZDR(Zero Data Retention) — 데이터를 보존하지 않는 provider로만 라우팅.
-    // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
-    // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
-    // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
-    if (!/^openai\//i.test(model)) {
+    // Explicit provider pin (INT-3105): OPENROUTER_PROVIDER_ONLY routes every
+    // request to the named provider slug(s) with no fallback — e.g.
+    // `atlas-cloud` to burn sponsorship credits deterministically in tests.
+    // The pin is the caller's explicit intent, so it replaces the ZDR default
+    // below (combining them could leave zero eligible providers).
+    const pinnedProviders = (process.env.OPENROUTER_PROVIDER_ONLY ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (pinnedProviders.length > 0) {
+      body.provider = { only: pinnedProviders, allow_fallbacks: false };
+    } else if (!/^openai\//i.test(model)) {
+      // ZDR(Zero Data Retention) — 데이터를 보존하지 않는 provider로만 라우팅.
+      // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
+      // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
+      // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
       body.provider = { data_collection: 'deny' };
     }
     // 추론 불필요 역할은 reasoning 토큰을 끈다. glm-4.7-flash처럼 non-thinking

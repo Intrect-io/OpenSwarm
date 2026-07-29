@@ -23,7 +23,7 @@
 // the same evidence. (INT-3105)
 
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { buildBashToolEnv, type ToolDefinition } from './tools.js';
@@ -99,37 +99,94 @@ function resolveTscBinary(cwd: string): string {
 }
 
 /**
- * Project-wide `tsc --noEmit`, split into "your files" vs "elsewhere".
- * Targeted single-file tsc would drop the tsconfig (wrong lib/paths → false
- * errors), so the project run is the correct unit; filtering keeps the model's
- * context spend proportional to its own edit.
+ * Nearest tsconfig.json directory walking up from a file toward the project
+ * root — a monorepo's requested file may belong to `packages/app/tsconfig.json`
+ * while the root has none. Returns null when no config exists within the root.
+ */
+function nearestTsconfigDir(cwd: string, relFile: string): string | null {
+  const root = path.resolve(cwd);
+  let dir = path.dirname(path.resolve(root, relFile));
+  for (;;) {
+    if (!dir.startsWith(root)) return null;
+    if (existsSync(path.join(dir, 'tsconfig.json'))) return dir;
+    if (dir === root) return null;
+    dir = path.dirname(dir);
+  }
+}
+
+/**
+ * Project-wide `tsc --noEmit` per owning tsconfig, split into "your files" vs
+ * a per-file summary of errors elsewhere. Targeted single-file tsc would drop
+ * the tsconfig (wrong lib/paths → false errors), so the project run is the
+ * correct unit. Errors OUTSIDE the requested files keep their filenames — a
+ * missed caller elsewhere is exactly what this tool exists to reveal — but
+ * only as `file: N error(s)` summaries so context spend stays bounded.
  */
 async function runTsc(cwd: string, requested: Set<string>): Promise<CheckOutcome> {
   const label = 'tsc';
-  if (!existsSync(path.join(cwd, 'tsconfig.json'))) {
-    return { label, output: '', infraError: 'no tsconfig.json — TypeScript check skipped' };
+  // Canonicalize the root: tsc realpath-resolves what it prints, so a
+  // symlinked project dir (macOS /var → /private/var tmp) would otherwise make
+  // every output line ../../-relative and unmatchable.
+  const root = realpathSync(path.resolve(cwd));
+  // Canonical root-relative form of each requested path (absolute-under-root
+  // and relative spellings both allowed by the loop's cwd note; symlinked
+  // prefixes are realpath-resolved so they compare equal to tsc's output).
+  const requestedNorm = [...requested].map((p) => {
+    const abs = path.isAbsolute(p) ? p : path.resolve(root, p);
+    const real = existsSync(abs) ? realpathSync(abs) : abs;
+    return path.relative(root, real).replaceAll('\\', '/');
+  });
+  // Group the requested files by their owning tsconfig (nested workspaces).
+  const configDirs = new Set<string>();
+  for (const rel of requestedNorm) {
+    const dir = nearestTsconfigDir(root, rel);
+    if (dir) configDirs.add(dir);
   }
-  try {
-    await execFileAsync(resolveTscBinary(cwd), ['--noEmit', '--pretty', 'false'], {
-      cwd,
-      timeout: TSC_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-      env: buildBashToolEnv(),
-    });
-    return { label, output: '' };
-  } catch (err) {
-    if (isMissingBinary(err)) return { label, output: '', infraError: 'tsc unavailable (no node_modules/.bin/tsc up the tree, none on PATH)' };
-    const all = checkOutput(err).split('\n').filter(Boolean);
-    // tsc error lines start with the relative file path: `src/a.ts(3,5): error TS...`
-    const requestedNorm = [...requested].map((p) => p.replaceAll('\\', '/'));
-    const mine = all.filter((line) => requestedNorm.some((p) => line.replaceAll('\\', '/').startsWith(p)));
-    const elsewhere = all.length - mine.length;
-    const parts = [];
-    if (mine.length > 0) parts.push(mine.join('\n'));
-    if (elsewhere > 0) parts.push(`(+${elsewhere} error line(s) in other files — run with those paths to see them)`);
-    if (parts.length === 0) parts.push(all.join('\n')); // errors exist but none matched the filter — show them
-    return { label, output: truncate(parts.join('\n')) };
+  if (configDirs.size === 0) {
+    return { label, output: '', infraError: 'no tsconfig.json found for the given files — TypeScript check skipped' };
   }
+  const all: string[] = [];
+  // Bounded: one project run per distinct workspace, max 3 per call.
+  for (const configDir of [...configDirs].slice(0, 3)) {
+    try {
+      // `-p` relative to the canonical cwd keeps output paths root-relative.
+      await execFileAsync(resolveTscBinary(configDir), ['--noEmit', '--pretty', 'false', '-p', path.relative(root, configDir) || '.'], {
+        cwd: root,
+        timeout: TSC_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+        env: buildBashToolEnv(),
+      });
+    } catch (err) {
+      if (isMissingBinary(err)) return { label, output: '', infraError: 'tsc unavailable (no node_modules/.bin/tsc up the tree, none on PATH)' };
+      all.push(...checkOutput(err).split('\n').filter(Boolean));
+    }
+  }
+  if (all.length === 0) return { label, output: '' };
+
+  const fileOf = (line: string): string | null => {
+    // tsc error lines: `src/a.ts(3,5): error TS1234: ...`
+    const m = line.replaceAll('\\', '/').match(/^([^\s(][^(]*)\(\d+,\d+\):/);
+    return m ? m[1] : null;
+  };
+  const mine: string[] = [];
+  const elsewhereByFile = new Map<string, number>();
+  for (const line of all) {
+    const file = fileOf(line);
+    if (file && requestedNorm.includes(file)) mine.push(line);
+    else if (file) elsewhereByFile.set(file, (elsewhereByFile.get(file) ?? 0) + 1);
+    else mine.push(line); // non-file line (e.g. config error) — show as-is
+  }
+  const parts = [];
+  if (mine.length > 0) parts.push(mine.join('\n'));
+  if (elsewhereByFile.size > 0) {
+    const summary = [...elsewhereByFile.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([file, count]) => `  ${file}: ${count} error(s)`)
+      .join('\n');
+    parts.push(`Errors in files you did not list (likely missed callers — fix or re-run with these paths):\n${summary}`);
+  }
+  return { label, output: truncate(parts.join('\n')) };
 }
 
 async function runRuff(cwd: string, pyFiles: string[]): Promise<CheckOutcome> {
@@ -158,8 +215,8 @@ export async function runDiagnosticsTool(paths: unknown, cwd: string): Promise<s
     return 'diagnostics: pass the files you changed in "paths" (relative to the project root).';
   }
 
-  const tsFiles = requested.filter((f) => f.endsWith('.ts') || f.endsWith('.tsx'));
-  const pyFiles = requested.filter((f) => f.endsWith('.py'));
+  const tsFiles = requested.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f));
+  const pyFiles = requested.filter((f) => /\.pyi?$/.test(f));
   const checks: Promise<CheckOutcome>[] = [];
   if (tsFiles.length > 0) checks.push(runTsc(cwd, new Set(tsFiles)));
   if (pyFiles.length > 0) checks.push(runRuff(cwd, pyFiles));

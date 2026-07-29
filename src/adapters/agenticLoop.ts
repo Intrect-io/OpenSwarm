@@ -244,7 +244,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     ? [
         ...visibleBaseTools,
         ...(applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
-        ...(diagnosticsTool ? [DIAGNOSTICS_TOOL] : []),
+        // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
+        ...(diagnosticsTool && !readOnly ? [DIAGNOSTICS_TOOL] : []),
         ...(webTools ? WEB_TOOL_DEFINITIONS : []),
         ...(mcpTools ?? []),
       ]
