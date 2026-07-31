@@ -44,6 +44,7 @@ import { resolveIssueFromBranch, ensureTaskSource, ensureProjectMapping } from '
 import { synthesizeAuditIssues } from './auditPM.js';
 import { c, status } from '../support/colors.js';
 import type { AdapterName } from '../adapters/types.js';
+import { getDefaultAdapterName } from '../adapters/index.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import { loadConfig } from '../core/config.js';
 import type { VerifyConfig } from '../core/types.js';
@@ -127,10 +128,20 @@ export function reviewMaxResultFailed(result: ReviewMaxCommandResult | null, fix
  * Pick the adapter to retry usage-limited areas on. Explicit --fallback wins;
  * otherwise a codex primary auto-falls back to claude (Claude subscription). (INT-2192)
  */
-function resolveFallbackAdapter(opts: ReviewMaxOptions): AdapterName | undefined {
+export function resolveFallbackAdapter(
+  opts: ReviewMaxOptions,
+  activeAdapter: () => AdapterName = getDefaultAdapterName,
+): AdapterName | undefined {
   if (opts.noFallback) return undefined;
   if (opts.fallbackAdapter) return opts.fallbackAdapter as AdapterName;
-  const primary = opts.adapter ?? 'codex-responses';
+  // `opts.adapter` is set only when --adapter was passed explicitly. Defaulting
+  // the primary to a hardcoded 'codex-responses' meant every flagless run was
+  // treated as codex and silently armed the claude fallback — so a user on
+  // openrouter (via config or provider-override) had usage-limited areas retried
+  // on `claude -p`, which is slow and was never opted into. cli.ts already aligns
+  // the process default with config + provider-override (INT-2485); read that
+  // instead of guessing.
+  const primary = opts.adapter ?? activeAdapter();
   return primary === 'codex' || primary === 'codex-responses' ? 'claude' : undefined;
 }
 
