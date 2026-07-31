@@ -25,12 +25,50 @@ import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
+import {
+  loadModelCatalog,
+  parseOpenAiModelList,
+  resolveDefaultModel,
+  type CatalogSpec,
+} from './modelCatalog.js';
+
+/** Model listing must never block a run for long — it is advisory metadata. */
+const MODEL_LIST_TIMEOUT_MS = 10_000;
 
 export const ATLASCLOUD_API_BASE = 'https://api.atlascloud.ai/v1';
 export const ATLASCLOUD_DEFAULT_MODEL = 'deepseek-ai/deepseek-v4-pro';
 
+/**
+ * Ids to fall back on when the catalog is unreachable. Kept short on purpose —
+ * this list exists to keep an offline run working, not to mirror the ~120 models
+ * Atlas serves. Live discovery replaces it entirely.
+ */
+const CURATED_MODELS = [
+  ATLASCLOUD_DEFAULT_MODEL,
+  'deepseek-ai/deepseek-v4-flash',
+  'deepseek-ai/deepseek-v3.2',
+  'zai-org/GLM-4.6',
+];
+
 function getEnvApiKey(): string | undefined {
   return process.env.ATLASCLOUD_API_KEY?.trim() || process.env.ATLAS_CLOUD_API_KEY?.trim() || undefined;
+}
+
+function catalogSpec(): CatalogSpec {
+  return {
+    provider: 'atlascloud',
+    curated: CURATED_MODELS,
+    fetchLive: async () => {
+      const apiKey = getEnvApiKey();
+      if (!apiKey) return [];
+      const res = await fetch(`${ATLASCLOUD_API_BASE}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
+      });
+      if (!res.ok) return [];
+      return parseOpenAiModelList(await res.json());
+    },
+  };
 }
 
 export class AtlasCloudCliAdapter implements CliAdapter {
@@ -52,8 +90,12 @@ export class AtlasCloudCliAdapter implements CliAdapter {
     return { command: 'echo', args: ['"Atlas Cloud adapter uses run() — not shell spawn"'] };
   }
 
+  async listModels(): Promise<string[]> {
+    return (await loadModelCatalog(catalogSpec())).models;
+  }
+
   async getDefaultModel(): Promise<string> {
-    return ATLASCLOUD_DEFAULT_MODEL;
+    return resolveDefaultModel(catalogSpec(), ATLASCLOUD_DEFAULT_MODEL);
   }
 
   async run(options: CliRunOptions): Promise<CliRunResult> {

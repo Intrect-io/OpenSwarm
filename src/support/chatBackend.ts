@@ -5,6 +5,13 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { AdapterName } from '../adapters/index.js';
 import { getAdapter, getDefaultAdapterName } from '../adapters/index.js';
+// Single source for each provider's default model — see getDefaultChatModel.
+import { CODEX_DEFAULT_MODEL } from '../adapters/codex.js';
+import { DEFAULT_MODEL as CODEX_RESPONSES_DEFAULT_MODEL } from '../adapters/codexResponses.js';
+import { DEFAULT_MODEL as GPT_DEFAULT_MODEL } from '../adapters/gpt.js';
+import { DEFAULT_MODEL as LOCAL_DEFAULT_MODEL } from '../adapters/local.js';
+import { DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL } from '../adapters/openrouter.js';
+import { ATLASCLOUD_DEFAULT_MODEL } from '../adapters/atlascloud.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -108,15 +115,25 @@ export function inferProviderFromModel(model?: string): AdapterName {
   return getDefaultAdapterName();
 }
 
+/**
+ * Chat-side default per provider.
+ *
+ * Reuses each adapter's own default constant rather than repeating the id here.
+ * These used to be duplicated string literals and drifted apart the moment an
+ * adapter default changed — the chat UI would silently open on a different model
+ * than the one a task would run. This function stays synchronous (callers resolve
+ * models without awaiting), so it reads the static default rather than
+ * `getDefaultModel()`, which consults the live catalog.
+ */
 export function getDefaultChatModel(provider: AdapterName): string {
-  if (provider === 'codex') return 'gpt-5-codex';
-  if (provider === 'codex-responses') return 'gpt-5.6-terra';
-  if (provider === 'gpt') return 'gpt-4o';
-  if (provider === 'local') return 'gemma3:4b';
+  if (provider === 'codex') return CODEX_DEFAULT_MODEL;
+  if (provider === 'codex-responses') return CODEX_RESPONSES_DEFAULT_MODEL;
+  if (provider === 'gpt') return GPT_DEFAULT_MODEL;
+  if (provider === 'local') return LOCAL_DEFAULT_MODEL;
   if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';
-  if (provider === 'openrouter') return 'openai/gpt-5';
-  if (provider === 'atlascloud') return 'deepseek-ai/deepseek-v4-pro';
-  return 'gpt-5-codex';
+  if (provider === 'openrouter') return OPENROUTER_DEFAULT_MODEL;
+  if (provider === 'atlascloud') return ATLASCLOUD_DEFAULT_MODEL;
+  return CODEX_DEFAULT_MODEL;
 }
 
 export function resolveChatModel(input: string | undefined, provider: AdapterName): string {
@@ -139,7 +156,7 @@ export function curatedModels(provider: AdapterName): string[] {
  */
 export async function listChatModels(provider: AdapterName): Promise<string[]> {
   try {
-    const adapter = getAdapter(provider) as { listModels?: () => Promise<string[]> };
+    const adapter = getAdapter(provider);
     if (typeof adapter.listModels === 'function') {
       const live = await adapter.listModels();
       if (live?.length) return Array.from(new Set(live));

@@ -136,7 +136,7 @@ export class CodexCliAdapter implements CliAdapter {
  * default and log a warning so the operator can see what happened and either
  * fix their config or accept the substitution.
  */
-const CODEX_DEFAULT_MODEL = 'gpt-5-codex';
+export const CODEX_DEFAULT_MODEL = 'gpt-5-codex';
 const warnedAboutModel = new Set<string>();
 
 export function coerceCodexModel(requested: string): string {

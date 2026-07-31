@@ -27,14 +27,63 @@ import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import { abortSignalWithDeadline } from './requestDeadline.js';
 import type { ToolDefinition } from './tools.js';
+import {
+  loadModelCatalog,
+  parseOpenAiModelList,
+  resolveDefaultModel,
+  type CatalogSpec,
+} from './modelCatalog.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
-const DEFAULT_MODEL = 'openai/gpt-5';
+// Picked from the Atlas pool benchmark (benchmarks/, INT-3106): v4-flash passed
+// 100% of the L0–L5 ladder at the lowest cost per pass, and resolved 2/3 on the
+// real L6 SWE tasks — the only worker-tier model that cleared both.
+//
+// It is reasoning-mandatory: completions spend tokens on reasoning before any
+// content, so a very small max_tokens budget returns empty content rather than a
+// short answer (measured: 20 tokens → content null, 500 tokens → "OK"). The
+// reasoning-mandatory handling added for that lives further down in this file.
+export const DEFAULT_MODEL = 'deepseek/deepseek-v4-flash';
 const PROFILE_KEY = 'openrouter:default';
 
 /** OPENROUTER_API_KEY env var (legacy: OPENROUTER_API) → immediate API key (no PKCE needed). */
 function getEnvApiKey(): string | undefined {
   return process.env.OPENROUTER_API_KEY?.trim() || process.env.OPENROUTER_API?.trim() || undefined;
+}
+
+/** Model listing must never block a run for long — it is advisory metadata. */
+const MODEL_LIST_TIMEOUT_MS = 10_000;
+
+/**
+ * Fallbacks for an offline/unauthenticated run. OpenRouter serves hundreds of
+ * models; this is deliberately just enough to start, since live discovery
+ * replaces it whenever a key is present.
+ */
+const CURATED_MODELS = [DEFAULT_MODEL, 'deepseek/deepseek-v4-pro', 'openai/gpt-5', 'anthropic/claude-sonnet-4'];
+
+function catalogSpec(): CatalogSpec {
+  return {
+    provider: 'openrouter',
+    curated: CURATED_MODELS,
+    fetchLive: async () => {
+      // Listing accepts the env key or a stored profile, same precedence as run().
+      let apiKey = getEnvApiKey();
+      if (!apiKey) {
+        try {
+          apiKey = await ensureValidToken(new AuthProfileStore(), PROFILE_KEY);
+        } catch {
+          return [];
+        }
+      }
+      if (!apiKey) return [];
+      const res = await fetch(`${OPENROUTER_API_BASE}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
+      });
+      if (!res.ok) return [];
+      return parseOpenAiModelList(await res.json());
+    },
+  };
 }
 
 // Attribution headers — OpenRouter surfaces these in its analytics UI so
@@ -70,8 +119,12 @@ export class OpenRouterCliAdapter implements CliAdapter {
     return { command: 'echo', args: ['"OpenRouter adapter uses run() — not shell spawn"'] };
   }
 
+  async listModels(): Promise<string[]> {
+    return (await loadModelCatalog(catalogSpec())).models;
+  }
+
   async getDefaultModel(): Promise<string> {
-    return DEFAULT_MODEL;
+    return resolveDefaultModel(catalogSpec(), DEFAULT_MODEL);
   }
 
   async run(options: CliRunOptions): Promise<CliRunResult> {
