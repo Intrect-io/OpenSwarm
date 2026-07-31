@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.12 — 2026-07-31
+
+### Fixed
+
+- **Repo memory now embeds whole records instead of their first 512 characters** — `getEmbedding` sliced its input at 512 *characters* while the comment beside it claimed "token limit". The encoder's ceiling is 512 *tokens*, which is about 2,345 characters of English and 790 of Korean as measured on a live store, so **17.1% of the corpus never reached the encoder at all**. The loss was concentrated where it hurt most: `constraint` records — the reviewer pitfalls a worker is supposed to avoid repeating — lost over 40% of their text. Measured on the real store of 455 records through the shipped code path, querying with content that used to be truncated away goes from 25.7% to 67.3% recall@1 (MRR 0.339 → 0.730), while short-query retrieval is unchanged (72.2% → 73.3%), so the longer passages do not dilute matching. Existing stores keep their old vectors until rebuilt: run `openswarm memory reembed`. (#355)
+- **`review --max` no longer retries on `claude -p` when you are not on codex** — the fallback adapter was chosen from `opts.adapter ?? 'codex-responses'`, but that option is only populated when `--adapter` is passed explicitly, so every flagless run was treated as codex and silently armed the Claude fallback. A user on openrouter had usage-limited areas retried on a slow CLI delegate they never opted into. It reads the active adapter now — the one already aligned with config and provider-override. (#355)
+- **Adapter default models are checked against the provider's real catalog** — each adapter carried a hardcoded model id with nothing verifying it still existed, so a renamed or retired model surfaced only as a request failure mid-run; the `gpt` adapter had been pinned to `gpt-4o` since long after the GPT-5 line shipped. Defaults are now validated against the provider's live model list, cached on disk so the hot path stays off the network, and only a list that actually came from the provider can retire an id — being offline is not evidence a model is gone. (#355)
+
+### Changed
+
+- Embeddings run on `@huggingface/transformers` v4. The previous package had been unmaintained for two years and pinned `onnxruntime-node` to a 2023 build; process RSS drops from 1.58GB to 1.11GB. Model weights now live in `~/.openswarm/models`, so reinstalling OpenSwarm no longer discards ~280MB and re-downloads it on the next search. The embedding model, quantization and dimension are configurable via `OPENSWARM_EMBEDDING_*`, and the store records which encoder produced its vectors so a mismatch is reported instead of quietly skewing search rankings. (#355)
+- The default openrouter model is `deepseek/deepseek-v4-flash`. Across 24 runs per model on the L0–L5 task ladder, five candidates all passed 100%, so the deciding factor was cost — v4-flash at $0.0038 per pass, roughly a third of the next option. (#355)
+
 ## 0.19.11 — 2026-07-29
 
 ### Fixed
