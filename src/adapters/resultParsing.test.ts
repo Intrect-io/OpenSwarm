@@ -72,3 +72,50 @@ describe('parseReviewerResult recommendedActions (INT-1954)', () => {
     ).toBeUndefined();
   });
 });
+
+describe('parseReviewerResult rejects unsubstantiated verdicts (INT-3182)', () => {
+  it('throws when the body is only a provider control token', () => {
+    // Measured: on a 35-file diff, deepseek-v4-pro read everything across 22 API
+    // calls and then emitted this as its entire final message. It is non-empty, so
+    // it cleared the empty-output guard and became REVISE with zero findings.
+    expect(() => parseReviewerResult('<｜｜DSML｜｜tool_calls>')).toThrow(/control tokens/);
+  });
+
+  it('throws for other providers\' sentinels too', () => {
+    expect(() => parseReviewerResult('<|im_start|>')).toThrow(/control tokens/);
+    expect(() => parseReviewerResult('  <|eot_id|>\n<|im_end|>  ')).toThrow(/control tokens/);
+  });
+
+  it('throws when a non-approving verdict carries no findings at all', () => {
+    // "Decision: revise" and nothing else sends the worker round the loop with
+    // no guidance — that is a failed review, not a verdict.
+    expect(() => parseReviewerResult('Decision: revise')).toThrow(/no findings/);
+    expect(() => parseReviewerResult('Decision: reject')).toThrow(/no findings/);
+  });
+
+  it('keeps a verdict that actually says something', () => {
+    const r = parseReviewerResult(
+      'Decision: revise\nThe session fixture depends on CSRF validation, which this diff removes.',
+    );
+    expect(r.decision).toBe('revise');
+  });
+
+  it('still allows approve with no findings — that is its correct shape', () => {
+    const r = parseReviewerResult('Decision: approve');
+    expect(r.decision).toBe('approve');
+  });
+
+  it('does not trip on review prose that merely mentions a control token', () => {
+    // Reviewing tokenizer code is a legitimate reason to write one out; substantial
+    // text remains after stripping, and only the residue is judged.
+    const r = parseReviewerResult(
+      'Decision: revise\nThe template emits <|im_start|> without a matching close, so the prompt is malformed.',
+    );
+    expect(r.decision).toBe('revise');
+  });
+
+  it('rejects a JSON verdict that is empty in every actionable field', () => {
+    expect(() => parseReviewerResult(wrap({ decision: 'revise', feedback: '', issues: [], suggestions: [] })))
+      .toThrow(/no findings/);
+  });
+});

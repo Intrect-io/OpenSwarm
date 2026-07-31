@@ -193,6 +193,23 @@ export function parseWorkerResult(text: string): WorkerResult {
 }
 
 /** JSON-first with text fallback — the canonical reviewer-output parse. */
+/**
+ * Chat-template sentinels that leaked into a final message instead of being
+ * consumed by the provider's parser — `<|im_start|>`, `<|eot_id|>`, and DeepSeek's
+ * fullwidth `<｜｜DSML｜｜tool_calls>`. Matched by the angle-bracket-plus-pipe shape
+ * rather than a fixed list, because every provider spells its own differently.
+ *
+ * Deliberately narrow: real review prose can *mention* such a token when reviewing
+ * tokenizer code, but then substantial text remains after stripping, and only the
+ * residue is judged.
+ */
+const CONTROL_TOKEN = /<[｜|][^>]*>|<\/?[｜|][^>]*>/g;
+
+/** Does anything survive that a human could act on? */
+function hasSubstance(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text.replace(CONTROL_TOKEN, ''));
+}
+
 export function parseReviewerResult(text: string): ReviewResult {
   // An empty reviewer result is a harness failure, not a quality verdict. Falling
   // through to the safe text default would fabricate REVISE with no findings and
@@ -200,5 +217,50 @@ export function parseReviewerResult(text: string): ReviewResult {
   if (!text.trim()) {
     throw new Error('Reviewer output was empty: no final message or verdict');
   }
-  return extractReviewerResultJson(text) ?? extractReviewerFromText(text);
+  // Same failure wearing a disguise: a body consisting only of control tokens is
+  // non-empty, so it cleared the check above and became REVISE with zero findings.
+  // Measured on a 35-file diff: deepseek-v4-pro read the whole diff across 22 API
+  // calls and then emitted `<｜｜DSML｜｜tool_calls>` as its entire final message.
+  // (INT-3182)
+  if (!hasSubstance(text)) {
+    throw new Error('Reviewer output contained no verdict: only provider control tokens');
+  }
+
+  const json = extractReviewerResultJson(text);
+  const result = json ?? extractReviewerFromText(text);
+
+  // A non-approving verdict with nothing to act on is not a verdict — it is a
+  // failed review that would send the worker round the loop with no guidance.
+  // `approve` is exempt: having no findings is the correct shape for it.
+  if (result.decision !== 'approve' && !isSubstantiated(result, json !== null, text)) {
+    throw new Error(
+      `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`,
+    );
+  }
+
+  return result;
+}
+
+/** The decision declaration itself, which carries no information beyond the verdict. */
+const DECISION_PHRASE =
+  /\bdecision\b\s*[:=-]?\s*["'`]?\s*(?:approve[d]?|reject(?:ed)?|revis(?:e|ion)|request[- ]?changes)["'`]?/gi;
+
+/**
+ * Did the reviewer say anything beyond the verdict?
+ *
+ * The two parse paths need different evidence. A JSON verdict carries its findings
+ * in dedicated fields, so those are authoritative. The text fallback does not: its
+ * `feedback` comes from extractSummary, which quotes the first substantial line —
+ * usually the "Decision: revise" line itself — so a populated feedback field there
+ * proves nothing. For that path the question is whether the message holds anything
+ * once the control tokens and the verdict declaration are removed.
+ */
+function isSubstantiated(result: ReviewResult, fromJson: boolean, sourceText: string): boolean {
+  if ((result.issues ?? []).some(hasSubstance) || (result.suggestions ?? []).some(hasSubstance)) {
+    return true;
+  }
+  if (fromJson) {
+    return hasSubstance(result.feedback ?? '');
+  }
+  return hasSubstance(sourceText.replace(DECISION_PHRASE, ''));
 }
