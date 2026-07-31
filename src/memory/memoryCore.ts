@@ -4,20 +4,53 @@
  * Lean repo memory: embedding, storage, save, search.
  */
 import { connect, Table, Connection } from '@lancedb/lancedb';
-import { pipeline, type FeatureExtractionPipeline } from '@xenova/transformers';
+import { pipeline, env as transformersEnv, type FeatureExtractionPipeline } from '@huggingface/transformers';
 import { resolve } from 'path';
 import { homedir } from 'os';
 import { c, status } from '../support/colors.js';
 import { randomUUID } from 'node:crypto';
+import {
+  characterGuard,
+  embeddingSignature,
+  embeddingTextFor,
+  modelCacheDir,
+  readStoredSignature,
+  resolveEmbeddingConfig,
+  writeStoredSignature,
+  type EmbeddingModelSpec,
+} from './embeddingConfig.js';
 
 // Memory storage path
-const MEMORY_DIR = resolve(homedir(), '.openswarm/memory');
+export const MEMORY_DIR = resolve(homedir(), '.openswarm/memory');
 
-// Xenova embedding config (runs locally, no external dependencies)
-const EMBEDDING_MODEL = 'Xenova/multilingual-e5-base';  // 768 dimensions, multilingual
-export const EMBEDDING_DIM = 768;
+// Embedding runs locally (no external service). Model, dtype, dimension and the
+// passage/query prefixes are resolved from the environment — see embeddingConfig.ts.
+//
+// Resolving eagerly keeps EMBEDDING_DIM a plain constant, but a malformed
+// OPENSWARM_EMBEDDING_* value must not take down every command that merely imports
+// this module (memory is a small corner of the CLI). The failure is deferred to the
+// first embedding call, where the message is actionable instead of surfacing as an
+// unrelated startup crash.
+let embeddingConfigError: Error | null = null;
 
-// Xenova pipeline singleton (Promise-based init to prevent race conditions)
+function resolveSpecDeferringFailure(): EmbeddingModelSpec {
+  try {
+    return resolveEmbeddingConfig();
+  } catch (error) {
+    embeddingConfigError = error instanceof Error ? error : new Error(String(error));
+    // Defaults cannot throw; they only stand in until the deferred error fires.
+    return resolveEmbeddingConfig({});
+  }
+}
+
+const EMBEDDING_SPEC: EmbeddingModelSpec = resolveSpecDeferringFailure();
+export const EMBEDDING_DIM = EMBEDDING_SPEC.dim;
+
+// Cache weights outside node_modules so reinstalling OpenSwarm does not discard
+// them (the library default lives inside its own package directory).
+transformersEnv.cacheDir = modelCacheDir();
+
+// Pipeline singleton (Promise-based init to prevent race conditions)
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let pipelineInitPromise: Promise<FeatureExtractionPipeline> | null = null;
 let pipelineInitFailed = false;
@@ -324,13 +357,13 @@ async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
   pipelineInitPromise = (async () => {
     try {
       console.log(`${status.info('[Memory]')} ${c.dim('loading embedding model')} ${c.yellow('(first time may take a while)')}`);
-      const loadedPipeline = await pipeline('feature-extraction', EMBEDDING_MODEL, {
-        quantized: true,
+      const loadedPipeline = await pipeline('feature-extraction', EMBEDDING_SPEC.id, {
+        dtype: EMBEDDING_SPEC.dtype,
       });
       embeddingPipeline = loadedPipeline;
       pipelineInitFailed = false;
       pipelineInitError = null;
-      console.log(`${status.ok('[Memory] embedding model loaded')} ${c.cyan(EMBEDDING_MODEL)}`);
+      console.log(`${status.ok('[Memory] embedding model loaded')} ${c.cyan(EMBEDDING_SPEC.id)} ${c.dim(`(${EMBEDDING_SPEC.dtype}, ${EMBEDDING_SPEC.dim}d)`)}`);
       return loadedPipeline;
     } catch (error) {
       pipelineInitFailed = true;
@@ -345,15 +378,26 @@ async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 }
 
 /**
- * Generate embeddings via Xenova/transformers (local, no external dependencies)
+ * Generate an embedding locally (no external service).
+ *
+ * Truncation is left to the tokenizer, which cuts at the encoder's real token
+ * ceiling. This used to slice the input at 512 *characters* while the comment
+ * claimed "token limit" — the model's limit is 512 *tokens*, which is ~2,345
+ * characters of English and ~790 of Korean as measured on this store, so roughly
+ * a fifth of the corpus never reached the encoder at all (worst hit: `constraint`
+ * records, which lost >40% of their text). The remaining character bound is only
+ * a cost guard for pathological input; see characterGuard.
+ *
  * @throws Error - on embedding generation failure (zero vector fallback removed)
  */
-export async function getEmbedding(text: string): Promise<number[]> {
+async function embed(text: string, prefix: string): Promise<number[]> {
+  // Surface a bad OPENSWARM_EMBEDDING_* value here rather than at module load.
+  if (embeddingConfigError) throw embeddingConfigError;
+
   // Initialize pipeline (throws on failure)
   const pipe = await initEmbeddingPipeline();
 
-  // E5 model recommends "query: " or "passage: " prefix
-  const input = `query: ${text.slice(0, 512)}`;  // Token limit
+  const input = `${prefix}${text.slice(0, characterGuard(EMBEDDING_SPEC))}`;
   const result = await pipe(input, {
     pooling: 'mean',
     normalize: true,
@@ -369,6 +413,20 @@ export async function getEmbedding(text: string): Promise<number[]> {
   }
 
   return vector;
+}
+
+/**
+ * Embed text that is being STORED. E5 is trained on an asymmetric convention —
+ * stored text is a "passage", the search string is a "query" — and this code
+ * previously used the query prefix for both, discarding that distinction.
+ */
+export async function embedPassage(text: string): Promise<number[]> {
+  return embed(text, EMBEDDING_SPEC.passagePrefix);
+}
+
+/** Embed a SEARCH QUERY. See embedPassage for why the two differ. */
+export async function embedQuery(text: string): Promise<number[]> {
+  return embed(text, EMBEDDING_SPEC.queryPrefix);
 }
 
 // Semantic distillation
@@ -566,7 +624,7 @@ export async function initDatabase(): Promise<void> {
         id: 'init',
         type: 'system_pattern',
         content: 'Cognitive memory system initialized with v3 lean schema',
-        vector: await getEmbedding('Cognitive memory system initialized'),
+        vector: await embedPassage('Cognitive memory system initialized'),
 
         importance: 0.5,
         confidence: 1.0,
@@ -583,12 +641,38 @@ export async function initDatabase(): Promise<void> {
       };
 
       table = await db.createTable('cognitive_memory', [initialRecord]);
+      // Freshly built by the current encoder, so the signature is true by construction.
+      writeStoredSignature(MEMORY_DIR, embeddingSignature(EMBEDDING_SPEC));
       console.log(`${status.ok('[Memory] created table')} ${c.cyan('cognitive_memory v3.0')}`);
     }
+
+    warnOnEmbeddingDrift();
   } catch (error) {
     console.error('[Memory] Database init error:', error);
     throw error;
   }
+}
+
+/**
+ * Warn when the stored vectors were not produced by the currently configured
+ * encoder.
+ *
+ * Mixing vector spaces is a silent failure: writes succeed, searches return
+ * results, and only the ranking is quietly wrong. A missing signature means the
+ * store predates this check and therefore was built by the old stack, which is a
+ * mismatch too. Detection only — rebuilding is an explicit, user-run migration.
+ */
+export function warnOnEmbeddingDrift(memoryDir: string = MEMORY_DIR): boolean {
+  const current = embeddingSignature(EMBEDDING_SPEC);
+  const stored = readStoredSignature(memoryDir);
+  if (stored?.signature === current) return false;
+
+  console.warn(
+    `${status.warn('[Memory] embedding mismatch')} ${c.dim('stored vectors were built with')} ` +
+      `${c.yellow(stored?.signature ?? 'an unrecorded configuration')}${c.dim(', now using')} ${c.yellow(current)}`,
+  );
+  console.warn(`${c.dim('  search ranking is unreliable until you run')} ${c.cyan('openswarm memory reembed')}`);
+  return true;
 }
 
 /**
@@ -672,7 +756,7 @@ export async function saveMemory(
     id,
     type,
     content,
-    vector: await getEmbedding(`${title}\n${content}`),
+    vector: await embedPassage(embeddingTextFor(title, content)),
 
     importance,
     confidence,
@@ -723,12 +807,15 @@ export async function saveCognitiveMemory(
 
   const importance = clamp01(options?.importance, BASE_IMPORTANCE[type]);
   const confidence = clamp01(options?.confidence, 0.7);
+  // Derived from the head of the content, so embeddingTextFor drops it rather than
+  // double-weighting the opening.
+  const title = content.slice(0, 100);
 
   const record: CognitiveMemoryRecord = {
     id,
     type,
     content,
-    vector: await getEmbedding(content),
+    vector: await embedPassage(embeddingTextFor(title, content)),
 
     importance,
     confidence,
@@ -739,7 +826,7 @@ export async function saveCognitiveMemory(
 
     // Legacy fields (minimal)
     repo: options?.repo ?? 'cognitive',
-    title: content.slice(0, 100),
+    title,
     metadata: '{}',
     trust: confidence,
     expiresAt: PERMANENT_EXPIRY,
@@ -899,7 +986,7 @@ export async function searchMemorySafe(
 
     let queryVector: number[];
     try {
-      queryVector = await getEmbedding(query);
+      queryVector = await embedQuery(query);
     } catch (embeddingError) {
       return {
         success: false,
@@ -908,6 +995,7 @@ export async function searchMemorySafe(
         errorCode: 'EMBEDDING_FAILED',
       };
     }
+
 
     const now = Date.now();
     const predicates: string[] = [];

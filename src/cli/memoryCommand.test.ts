@@ -91,6 +91,45 @@ describe('runMemoryCommand', () => {
     expect(out).toContain('noisy reviewer failures: 15 -> 0');
   });
 
+  it('blocks reembed while the daemon is running unless forced', async () => {
+    // Re-embedding swaps the whole table; a concurrent daemon writer would race it.
+    const reembed = vi.fn();
+    await expect(runMemoryCommand('reembed', {}, {
+      inspect: async () => status(),
+      reembed,
+      daemonRunning: () => true,
+    })).rejects.toThrow(/daemon is running/);
+    expect(reembed).not.toHaveBeenCalled();
+  });
+
+  it('re-embeds and reports the resulting signature', async () => {
+    const reembed = vi.fn(async () => ({
+      total: 455,
+      reembedded: 455,
+      empty: 0,
+      signature: 'Xenova/multilingual-e5-base|dtype=q8|dim=768|max=512|pp=passage: |qp=query: ',
+    }));
+
+    const out = await runMemoryCommand('reembed', { force: true }, {
+      inspect: async () => status(),
+      reembed,
+      daemonRunning: () => true,
+    });
+
+    expect(reembed).toHaveBeenCalled();
+    expect(out).toContain('records:   455 (455 encoded, 0 empty)');
+    expect(out).toContain('dim=768');
+  });
+
+  it('returns JSON for reembed when requested', async () => {
+    const out = await runMemoryCommand('reembed', { json: true }, {
+      inspect: async () => status(),
+      reembed: async () => ({ total: 2, reembedded: 1, empty: 1, signature: 'sig' }),
+      daemonRunning: () => false,
+    });
+    expect(JSON.parse(out)).toMatchObject({ total: 2, reembedded: 1, empty: 1, signature: 'sig' });
+  });
+
   it('rejects unknown actions', async () => {
     await expect(runMemoryCommand('wat', {}, { inspect: async () => status() })).rejects.toThrow(/Unknown memory action/);
   });

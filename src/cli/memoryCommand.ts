@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { connect } from '@lancedb/lancedb';
 import { compactMemoryTable } from '../memory/compaction.js';
+import { reembedMemoryTable } from '../memory/reembed.js';
 import { EMBEDDING_DIM, PERMANENT_EXPIRY } from '../memory/memoryCore.js';
 import { isTransientReviewRejectionMemory } from '../memory/memoryFilters.js';
 import { c, status as statusIcon } from '../support/colors.js';
@@ -45,6 +46,7 @@ export interface MemoryCommandOptions {
 export interface MemoryCommandDeps {
   inspect?: () => Promise<MemoryStatus>;
   compact?: () => Promise<{ before: number; after: number; removed: number; deduplicated: number }>;
+  reembed?: () => Promise<{ total: number; reembedded: number; empty: number; signature: string }>;
   daemonRunning?: () => boolean;
 }
 
@@ -168,6 +170,7 @@ export async function runMemoryCommand(
 ): Promise<string> {
   const inspect = deps.inspect ?? (() => inspectMemoryStatus());
   const compact = deps.compact ?? (() => compactMemoryTable());
+  const reembed = deps.reembed ?? (() => reembedMemoryTable());
   const daemonRunning = deps.daemonRunning ?? (() => getDaemonStatus().running);
 
   switch (action) {
@@ -191,7 +194,21 @@ export async function runMemoryCommand(
         `  noisy reviewer failures: ${before.transientReviewRejections} -> ${after.transientReviewRejections}`,
       ].join('\n');
     }
+    case 'reembed': {
+      // Rewrites every vector, so a daemon writing concurrently would race the
+      // table swap — same guard as compact.
+      if (!opts.force && daemonRunning()) {
+        throw new Error('OpenSwarm daemon is running. Stop it first or pass --force to re-embed memory anyway.');
+      }
+      const result = await reembed();
+      if (opts.json) return JSON.stringify(result, null, 2);
+      return [
+        statusIcon.ok('Memory re-embedded'),
+        `  records:   ${result.total} (${result.reembedded} encoded, ${result.empty} empty)`,
+        `  signature: ${result.signature}`,
+      ].join('\n');
+    }
     default:
-      throw new Error(`Unknown memory action "${action}" (use status|compact)`);
+      throw new Error(`Unknown memory action "${action}" (use status|compact|reembed)`);
   }
 }
