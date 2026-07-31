@@ -28,7 +28,7 @@ const DEFAULT_ENDPOINTS = [
   'http://localhost:8080',   // llama.cpp server
 ];
 
-const DEFAULT_MODEL = 'gemma3:4b';
+export const DEFAULT_MODEL = 'gemma3:4b';
 const HEALTH_CHECK_TIMEOUT_MS = 2000;
 
 export interface LocalModelAdapterOptions {

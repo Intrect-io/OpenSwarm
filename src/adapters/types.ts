@@ -158,6 +158,18 @@ export interface CliAdapter {
    */
   getDefaultModel(): Promise<string>;
 
+  /**
+   * The provider's model catalog, when it can be discovered (a `/v1/models`
+   * endpoint, a CLI cache, a local server). Omitted by adapters that cannot list
+   * models — CLI-delegated ones such as `claude`, whose alias defaults are
+   * resolved downstream and therefore never go stale, and providers whose
+   * credentials lack the model-read scope.
+   *
+   * Declared here rather than duck-typed at the call site so a new adapter that
+   * can list models is a visible omission instead of a silent one.
+   */
+  listModels?(): Promise<string[]>;
+
   /** Build an executable + argv. Shell interpretation is never applied. */
   buildCommand(options: CliRunOptions): CliCommandSpec;
 

@@ -1,0 +1,17 @@
+[
+  {
+    "instance_id": "pylint-dev__pylint-5859",
+    "model_name_or_path": "openswarm+deepseek__deepseek-v4-flash",
+    "model_patch": "diff --git a/pylint/checkers/misc.py b/pylint/checkers/misc.py\nindex 69149e61a..a9e9912bd 100644\n--- a/pylint/checkers/misc.py\n+++ b/pylint/checkers/misc.py\n@@ -121,9 +121,9 @@ class EncodingChecker(BaseChecker):\n \n         notes = \"|\".join(re.escape(note) for note in self.config.notes)\n         if self.config.notes_rgx:\n-            regex_string = rf\"#\\s*({notes}|{self.config.notes_rgx})\\b\"\n+            regex_string = rf\"#\\s*({notes}|{self.config.notes_rgx})(?!\\w)\"\n         else:\n-            regex_string = rf\"#\\s*({notes})\\b\"\n+            regex_string = rf\"#\\s*({notes})(?!\\w)\"\n \n         self._fixme_pattern = re.compile(regex_string, re.I)\n \n"
+  },
+  {
+    "instance_id": "pylint-dev__pylint-7080",
+    "model_name_or_path": "openswarm+deepseek__deepseek-v4-flash",
+    "model_patch": "diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py\nindex 5cacc037..6eeeedc0 100644\n--- a/pylint/lint/expand_modules.py\n+++ b/pylint/lint/expand_modules.py\n@@ -56,7 +56,9 @@ def _is_ignored_file(\n     return (\n         basename in ignore_list\n         or _is_in_ignore_list_re(basename, ignore_list_re)\n-        or _is_in_ignore_list_re(element, ignore_list_paths_re)\n+        or _is_in_ignore_list_re(\n+            os.path.normpath(element), ignore_list_paths_re\n+        )\n     )\n \n \n"
+  },
+  {
+    "instance_id": "pylint-dev__pylint-7993",
+    "model_name_or_path": "openswarm+deepseek__deepseek-v4-flash",
+    "model_patch": "diff --git a/pylint/reporters/text.py b/pylint/reporters/text.py\nindex 29bd46798..220c85203 100644\n--- a/pylint/reporters/text.py\n+++ b/pylint/reporters/text.py\n@@ -175,14 +175,18 @@ class TextReporter(BaseReporter):\n         self._template = template\n \n         # Check to see if all parameters in the template are attributes of the Message\n-        arguments = re.findall(r\"\\{(.+?)(:.*)?\\}\", template)\n+        arguments = re.findall(r\"(?<!\\{)\\{(?!\\{)(.+?)(:.*)?\\}(?!\\})\", template)\n         for argument in arguments:\n             if argument[0] not in MESSAGE_FIELDS:\n                 warnings.warn(\n                     f\"Don't recognize the argument '{argument[0]}' in the --msg-template. \"\n                     \"Are you sure it is supported on the current version of pylint?\"\n                 )\n-                template = re.sub(r\"\\{\" + argument[0] + r\"(:.*?)?\\}\", \"\", template)\n+                template = re.sub(\n+                    r\"(?<!\\{)\\{(?!\\{)\" + re.escape(argument[0]) + r\"(:.*?)?\\}(?!\\})\",\n+                    \"\",\n+                    template,\n+                )\n         self._fixed_template = template\n \n     def write_message(self, msg: Message) -> None:\n"
+  }
+]

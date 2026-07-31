@@ -396,11 +396,28 @@ Linear (Todo/In Progress)
 
 ### Memory System
 
-Hybrid retrieval: `0.55 × similarity + 0.20 × importance + 0.15 × recency + 0.10 × frequency`
+Hybrid retrieval: `0.60 × similarity + 0.25 × importance + 0.15 × recency`
 
 Memory types: `belief` · `strategy` · `user_model` · `system_pattern` · `constraint`
 
 Background: decay, consolidation, contradiction detection, distillation.
+
+**Embeddings** run locally via `@huggingface/transformers` (ONNX, no external
+service). The default is `Xenova/multilingual-e5-base` (768d, int8), stored text is
+embedded as a `passage:` and searches as a `query:` per the E5 asymmetric
+convention. Weights are cached in `~/.openswarm/models` so reinstalling OpenSwarm
+does not discard them.
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENSWARM_EMBEDDING_MODEL` | Hugging Face repo id. Models outside the known table must also set `OPENSWARM_EMBEDDING_DIM`. |
+| `OPENSWARM_EMBEDDING_DIM` | Vector dimension. Required for unknown models — a wrong value silently produces an unsearchable table. |
+| `OPENSWARM_EMBEDDING_DTYPE` | ONNX weight variant: `q8` (default), `q4`, `q4f16`, `fp16`, `fp32`. |
+| `OPENSWARM_MODEL_CACHE_DIR` | Override the weight cache location. |
+
+Changing any of these invalidates every stored vector: the store records an
+embedding signature and warns when it no longer matches the active encoder.
+Rebuild with `openswarm memory reembed` (stop the daemon first, or pass `--force`).
 
 **Repo knowledge loop** — every completed task writes repo-scoped knowledge
 (success → `system_pattern` with files changed + approach, review rejection →

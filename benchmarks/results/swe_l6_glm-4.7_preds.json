@@ -1,0 +1,17 @@
+[
+  {
+    "instance_id": "pylint-dev__pylint-5859",
+    "model_name_or_path": "openswarm+z-ai__glm-4.7",
+    "model_patch": "diff --git a/pylint/checkers/misc.py b/pylint/checkers/misc.py\nindex 69149e61a..f3f0a5f51 100644\n--- a/pylint/checkers/misc.py\n+++ b/pylint/checkers/misc.py\n@@ -121,9 +121,9 @@ class EncodingChecker(BaseChecker):\n \n         notes = \"|\".join(re.escape(note) for note in self.config.notes)\n         if self.config.notes_rgx:\n-            regex_string = rf\"#\\s*({notes}|{self.config.notes_rgx})\\b\"\n+            regex_string = rf\"#\\s*({notes}|{self.config.notes_rgx})\"\n         else:\n-            regex_string = rf\"#\\s*({notes})\\b\"\n+            regex_string = rf\"#\\s*({notes})\"\n \n         self._fixme_pattern = re.compile(regex_string, re.I)\n \n"
+  },
+  {
+    "instance_id": "pylint-dev__pylint-7080",
+    "model_name_or_path": "openswarm+z-ai__glm-4.7",
+    "model_patch": "diff --git a/pylint/lint/expand_modules.py b/pylint/lint/expand_modules.py\nindex 5cacc037..c136de57 100644\n--- a/pylint/lint/expand_modules.py\n+++ b/pylint/lint/expand_modules.py\n@@ -135,8 +135,12 @@ def expand_modules(\n             and os.path.basename(filepath) == \"__init__.py\"\n         )\n         if has_init or is_namespace or is_directory:\n+            # Check if the directory itself should be ignored before recursing\n+            dirpath = os.path.dirname(filepath)\n+            if _is_in_ignore_list_re(dirpath, ignore_list_paths_re):\n+                continue\n             for subfilepath in modutils.get_module_files(\n-                os.path.dirname(filepath), ignore_list, list_all=is_namespace\n+                dirpath, ignore_list, list_all=is_namespace\n             ):\n                 if filepath == subfilepath:\n                     continue\n@@ -158,4 +162,4 @@ def expand_modules(\n                         \"basename\": modname,\n                     }\n                 )\n-    return result, errors\n+    return result, errors\n\\ No newline at end of file\n"
+  },
+  {
+    "instance_id": "pylint-dev__pylint-7993",
+    "model_name_or_path": "openswarm+z-ai__glm-4.7",
+    "model_patch": "diff --git a/pylint/reporters/text.py b/pylint/reporters/text.py\nindex 29bd46798..d492cdf74 100644\n--- a/pylint/reporters/text.py\n+++ b/pylint/reporters/text.py\n@@ -175,7 +175,10 @@ class TextReporter(BaseReporter):\n         self._template = template\n \n         # Check to see if all parameters in the template are attributes of the Message\n-        arguments = re.findall(r\"\\{(.+?)(:.*)?\\}\", template)\n+        # We need to handle escaped braces ({{ and }}) which should be treated as literal braces\n+        # Replace escaped braces with placeholders before extracting format arguments\n+        temp_template = template.replace('{{', '\\x00LEFT\\x00').replace('}}', '\\x00RIGHT\\x00')\n+        arguments = re.findall(r\"\\{(.+?)(:.*)?\\}\", temp_template)\n         for argument in arguments:\n             if argument[0] not in MESSAGE_FIELDS:\n                 warnings.warn(\n"
+  }
+]

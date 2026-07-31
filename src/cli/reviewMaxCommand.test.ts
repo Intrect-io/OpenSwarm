@@ -53,6 +53,7 @@ const {
   loadVerifyConfigBestEffort,
   dedupeAuditRunHistory,
   shipAuditWorktree,
+  resolveFallbackAdapter,
 } =
   await import('./reviewMaxCommand.js');
 
@@ -95,6 +96,32 @@ describe('loadVerifyConfigBestEffort (INT-2762)', () => {
     loadConfigMock.mockReturnValue({ autonomous: {} });
 
     expect(loadVerifyConfigBestEffort()).toEqual(defaults);
+  });
+});
+
+describe('resolveFallbackAdapter', () => {
+  it('does not arm the claude fallback when the active adapter is not codex', () => {
+    // The regression: with no --adapter flag the primary was assumed to be
+    // 'codex-responses', so an openrouter user had usage-limited areas silently
+    // retried on `claude -p`.
+    expect(resolveFallbackAdapter({}, () => 'openrouter')).toBeUndefined();
+    expect(resolveFallbackAdapter({}, () => 'atlascloud')).toBeUndefined();
+    expect(resolveFallbackAdapter({}, () => 'local')).toBeUndefined();
+  });
+
+  it('still falls back to claude when the active adapter is codex', () => {
+    expect(resolveFallbackAdapter({}, () => 'codex')).toBe('claude');
+    expect(resolveFallbackAdapter({}, () => 'codex-responses')).toBe('claude');
+  });
+
+  it('prefers an explicit --adapter over the process default', () => {
+    expect(resolveFallbackAdapter({ adapter: 'openrouter' }, () => 'codex')).toBeUndefined();
+    expect(resolveFallbackAdapter({ adapter: 'codex' }, () => 'openrouter')).toBe('claude');
+  });
+
+  it('honours --fallback and --no-fallback regardless of the active adapter', () => {
+    expect(resolveFallbackAdapter({ fallbackAdapter: 'gpt' }, () => 'openrouter')).toBe('gpt');
+    expect(resolveFallbackAdapter({ noFallback: true }, () => 'codex')).toBeUndefined();
   });
 });
 

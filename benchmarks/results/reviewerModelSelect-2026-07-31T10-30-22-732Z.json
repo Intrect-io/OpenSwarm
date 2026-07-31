@@ -1,0 +1,30 @@
+{
+  "results": [
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "fixture": "correctness-offbyone",
+      "category": "correctness",
+      "expectDefect": true,
+      "decision": "reject",
+      "flagged": true,
+      "named": true,
+      "correct": true,
+      "durationMs": 32600
+    }
+  ],
+  "table": [
+    {
+      "model": "deepseek/deepseek-v4-flash",
+      "defectRuns": 1,
+      "detected": 1,
+      "flaggedOnDefect": 1,
+      "cleanRuns": 0,
+      "falseRejects": 0,
+      "errors": 0,
+      "avgMs": 32600,
+      "detectionRate": 1,
+      "falseRejectRate": 0,
+      "balanced": 0.5
+    }
+  ]
+}

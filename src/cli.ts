@@ -229,14 +229,14 @@ program
     }
   });
 
-// openswarm memory status|compact
+// openswarm memory status|compact|reembed
 
 program
   .command('memory')
   .description('Inspect and maintain the repo knowledge memory DB')
-  .argument('<action>', 'status | compact')
+  .argument('<action>', 'status | compact | reembed')
   .option('--json', 'Print JSON')
-  .option('--force', 'Allow compact while the daemon is running')
+  .option('--force', 'Allow compact/reembed while the daemon is running')
   .action(async (action: string, opts: { json?: boolean; force?: boolean }) => {
     const { runMemoryCommand } = await import('./cli/memoryCommand.js');
     try {

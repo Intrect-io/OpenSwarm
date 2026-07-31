@@ -21,10 +21,50 @@ import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
+import {
+  loadModelCatalog,
+  parseOpenAiModelList,
+  resolveDefaultModel,
+  type CatalogSpec,
+} from './modelCatalog.js';
 
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
-const DEFAULT_MODEL = 'gpt-4o';
+// Was pinned to `gpt-4o` long after the GPT-5 line shipped — the exact staleness
+// the catalog layer exists to prevent. GPT-5.6 (sol/terra/luna) is the current
+// public line, confirmed 2026-07-31 against OpenRouter's live catalog, which
+// proxies the public OpenAI API. `terra` matches the codex-responses adapter's
+// default so the two OpenAI-family adapters do not silently disagree.
+export const DEFAULT_MODEL = 'gpt-5.6-terra';
 const PROFILE_KEY = 'openai-gpt:default';
+
+/** Model listing must never block a run for long — it is advisory metadata. */
+const MODEL_LIST_TIMEOUT_MS = 10_000;
+
+const CURATED_MODELS = [DEFAULT_MODEL, 'gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.5'];
+
+/**
+ * Live discovery needs an `OPENAI_API_KEY` carrying the `api.model.read` scope.
+ * The ChatGPT OAuth profile this adapter normally authenticates with does NOT
+ * have it (verified 2026-07-31: `GET /v1/models` → 403 `Missing scopes:
+ * api.model.read`), so in the common case this returns [] and the curated list
+ * stands. It self-heals the moment a scoped key is present.
+ */
+function catalogSpec(): CatalogSpec {
+  return {
+    provider: 'gpt',
+    curated: CURATED_MODELS,
+    fetchLive: async () => {
+      const apiKey = process.env.OPENAI_API_KEY?.trim();
+      if (!apiKey) return [];
+      const res = await fetch(`${OPENAI_API_BASE}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
+      });
+      if (!res.ok) return [];
+      return parseOpenAiModelList(await res.json());
+    },
+  };
+}
 
 export class GptCliAdapter implements CliAdapter {
   readonly name = 'gpt';
@@ -52,8 +92,12 @@ export class GptCliAdapter implements CliAdapter {
     return { command: 'echo', args: ['"GPT adapter uses run() — not shell spawn"'] };
   }
 
+  async listModels(): Promise<string[]> {
+    return (await loadModelCatalog(catalogSpec())).models;
+  }
+
   async getDefaultModel(): Promise<string> {
-    return DEFAULT_MODEL;
+    return resolveDefaultModel(catalogSpec(), DEFAULT_MODEL);
   }
 
   async run(options: CliRunOptions): Promise<CliRunResult> {

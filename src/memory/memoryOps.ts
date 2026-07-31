@@ -9,7 +9,7 @@ import {
   PERMANENT_EXPIRY,
   normalizeRecords,
   initDatabase,
-  getEmbedding,
+  embedPassage,
   getTable,
   searchMemory,
   calculateFreshness,
@@ -20,6 +20,7 @@ import {
   type MemorySearchResult,
   type CognitiveMemoryRecord,
 } from './memoryCore.js';
+import { embeddingTextFor } from './embeddingConfig.js';
 
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
@@ -88,7 +89,7 @@ export async function reviseMemory(
     const revised: CognitiveMemoryRecord = {
       ...existing,
       content: newContent,
-      vector: await getEmbedding(newContent),
+      vector: await embedPassage(embeddingTextFor(String(existing.title ?? ''), newContent)),
       lastUpdated: now,
       confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
       metadata: JSON.stringify({
