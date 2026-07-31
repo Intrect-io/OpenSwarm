@@ -270,4 +270,95 @@ export const LENS_FIXTURES: LensFixture[] = [
     expectDefect: false,
     detectionKeywords: [],
   },
+  {
+    // A rename is the change most likely to be wrongly flagged: the reviewer sees a
+    // symbol disappear and has to check every call site before concluding anything.
+    key: 'clean-rename-all-callers',
+    category: 'clean',
+    taskTitle: 'Rename fetchUser() to loadUser() across the module',
+    taskDescription:
+      'Rename fetchUser to loadUser. Every caller must be updated; no behavior change.',
+    committed: {
+      'src/user.ts':
+        `export function fetchUser(id: string): string {\n` +
+        `  return 'user:' + id;\n` +
+        `}\n`,
+      'src/profile.ts':
+        `import { fetchUser } from './user.js';\n` +
+        `export function profile(id: string): string {\n` +
+        `  return fetchUser(id).toUpperCase();\n` +
+        `}\n`,
+    },
+    changed: {
+      'src/user.ts':
+        `export function loadUser(id: string): string {\n` +
+        `  return 'user:' + id;\n` +
+        `}\n`,
+      'src/profile.ts':
+        `import { loadUser } from './user.js';\n` +
+        `export function profile(id: string): string {\n` +
+        `  return loadUser(id).toUpperCase();\n` +
+        `}\n`,
+    },
+    summary: 'Renamed fetchUser to loadUser and updated the only caller in profile.ts.',
+    commands: ['npx tsc --noEmit'],
+    expectDefect: false,
+    detectionKeywords: [],
+  },
+  {
+    // Tests-only diffs invite "where is the implementation change?" objections even
+    // though adding coverage for existing behavior is complete on its own.
+    key: 'clean-tests-only',
+    category: 'clean',
+    taskTitle: 'Add test coverage for parsePort()',
+    taskDescription:
+      'parsePort() is untested. Add tests for the valid, out-of-range and non-numeric cases. Do not change the implementation.',
+    committed: {
+      'src/port.ts':
+        `export function parsePort(raw: string): number | undefined {\n` +
+        `  const n = Number(raw);\n` +
+        `  if (!Number.isInteger(n) || n < 1 || n > 65535) return undefined;\n` +
+        `  return n;\n` +
+        `}\n`,
+    },
+    changed: {
+      'src/port.test.ts':
+        `import { describe, it, expect } from 'vitest';\n` +
+        `import { parsePort } from './port.js';\n` +
+        `\n` +
+        `describe('parsePort', () => {\n` +
+        `  it('accepts a valid port', () => expect(parsePort('8080')).toBe(8080));\n` +
+        `  it('rejects out-of-range', () => expect(parsePort('70000')).toBeUndefined());\n` +
+        `  it('rejects non-numeric', () => expect(parsePort('http')).toBeUndefined());\n` +
+        `});\n`,
+    },
+    summary: 'Added port.test.ts covering valid, out-of-range and non-numeric input. Implementation untouched.',
+    commands: ['npx vitest run src/port.test.ts'],
+    expectDefect: false,
+    detectionKeywords: [],
+  },
+  {
+    // Widening a type is safe for every existing caller, but reads as an API change.
+    key: 'clean-widen-parameter-type',
+    category: 'clean',
+    taskTitle: 'Accept Iterable<string> in joinLines()',
+    taskDescription:
+      'joinLines() only takes string[]. Widen it to Iterable<string> so Sets and generators work. Existing callers must keep compiling.',
+    committed: {
+      'src/lines.ts':
+        `export function joinLines(lines: string[]): string {\n` +
+        `  return Array.from(lines).join('\\n');\n` +
+        `}\n`,
+    },
+    changed: {
+      'src/lines.ts':
+        `export function joinLines(lines: Iterable<string>): string {\n` +
+        `  return Array.from(lines).join('\\n');\n` +
+        `}\n`,
+    },
+    summary: 'Widened joinLines to Iterable<string>. string[] satisfies Iterable<string>, so all callers still compile.',
+    commands: ['npx tsc --noEmit'],
+    expectDefect: false,
+    detectionKeywords: [],
+  },
 ];
