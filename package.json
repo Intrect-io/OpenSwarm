@@ -24,7 +24,7 @@
     "start": "node --env-file=.env dist/index.js",
     "stop": "pkill -f 'node --env-file=.env.*openswarm' 2>/dev/null || echo 'No process running'",
     "lint": "oxlint src/",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",
     "test:coverage": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/vitest/vitest.mjs",
