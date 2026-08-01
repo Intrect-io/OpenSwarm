@@ -194,6 +194,27 @@ export class AuthProfileStore {
     this.save();
   }
 
+  /**
+   * Mark a key's token expired, based on the current on-disk profile rather
+   * than this instance's snapshot.
+   *
+   * A caller holding a long-lived store — the adapters build one when a run
+   * starts and can hit a 401 hours later — would otherwise write its whole
+   * stale profile back through `setProfile`, and `save()` puts the touched key
+   * over the disk value. If another process refreshed in the meantime and the
+   * provider rotated the refresh token, that write restores the dead one and
+   * every later run fails with invalid_grant until the user logs in again. Only
+   * `expires` is ours to change here.
+   */
+  expireProfile(key: string): boolean {
+    const current = this.readProfilesQuietly()[key] ?? this.data.profiles[key];
+    if (!current) return false;
+    this.data.profiles[key] = { ...current, expires: 0 };
+    this.touched.add(key);
+    this.save();
+    return true;
+  }
+
   deleteProfile(key: string): boolean {
     if (!(key in this.data.profiles)) return false;
     delete this.data.profiles[key];

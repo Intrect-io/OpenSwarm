@@ -197,6 +197,26 @@ const BLOCKED_COMMANDS = [
   /\bkill\s+-9\b/,
 ];
 
+/**
+ * Tools a read-only run refuses to execute.
+ *
+ * Kept beside the loop's tool-list filter rather than inline, because the two
+ * drifted apart once already: `diagnostics` was withheld from the list but
+ * missing here, and the loop's own comment explains why that is not enough — a
+ * model calls tools it was never shown. `diagnostics` matters as much as `bash`
+ * does, since it runs a `tsc`/`ruff` binary found by walking up from the tree
+ * under review, with the full environment. (INT-3189, INT-2961)
+ */
+const READ_ONLY_DENIED_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'apply_patch',
+  'bash',
+  'web_fetch',
+  'web_search',
+  'diagnostics',
+]);
+
 function isCommandBlocked(command: string): boolean {
   return BLOCKED_COMMANDS.some(pattern => pattern.test(command));
 }
@@ -409,7 +429,7 @@ export async function executeTool(
     // `serverByTool`, and a later read-only run whose model emits `server__tool`
     // would connect to one. (INT-3189)
     const readOnlyDenied = execOptions?.readOnly
-      && (['write_file', 'edit_file', 'apply_patch', 'bash', 'web_fetch', 'web_search'].includes(name) || isMcpTool(name));
+      && (READ_ONLY_DENIED_TOOLS.has(name) || isMcpTool(name));
     if (readOnlyDenied) {
       return {
         tool_call_id: callId,
@@ -530,8 +550,13 @@ export async function executeTool(
         }
         // Scan BOTH the source headers and `*** Move to:` targets — a rename can
         // overwrite a protected harness path that no Update/Add/Delete header names. (INT-1928)
+        // `.trim()` on the line, because that is what parseV4A does before it
+        // matches a header. Scanning the raw line while the parser trims meant
+        // one leading space hid a header from this guard and still applied it —
+        // the guard is the only protection, applyV4APatch has none of its own.
         const protectedHit = patchText
           .split('\n')
+          .map((raw) => raw.trim())
           .map((l) =>
             l.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/)?.[1]?.trim()
             ?? l.match(/^\*\*\* Move to: (.+)$/)?.[1]?.trim(),

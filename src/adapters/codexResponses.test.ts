@@ -523,6 +523,9 @@ describe('401 refresh scope', () => {
     return {
       getProfile: () => profile,
       setProfile: (_k: string, p: typeof profile) => { profile = p; },
+      // refreshAndRetry expires the token through the store rather than writing
+      // a snapshot back, so the fake has to offer the same door. (INT-2961)
+      expireProfile: (_k: string) => { profile = { ...profile, expires: 0 }; return true; },
     };
   }
 
