@@ -402,7 +402,15 @@ export async function executeTool(
     // the denial lives here too: a model can emit a call for a tool it was never
     // shown, and an outbound request is the exfiltration path the mode exists to
     // close. Withholding is the hint; this is the enforcement. (INT-3189)
-    if (execOptions?.readOnly && ['write_file', 'edit_file', 'apply_patch', 'bash', 'web_fetch', 'web_search'].includes(name)) {
+    // MCP tools are denied by predicate, not by name: their names are whatever
+    // the servers declare, so no fixed list can cover them. Skipping discovery
+    // in the adapter is not enough on its own — a long-lived daemon that
+    // resolved these servers during an earlier ordinary run still has them in
+    // `serverByTool`, and a later read-only run whose model emits `server__tool`
+    // would connect to one. (INT-3189)
+    const readOnlyDenied = execOptions?.readOnly
+      && (['write_file', 'edit_file', 'apply_patch', 'bash', 'web_fetch', 'web_search'].includes(name) || isMcpTool(name));
+    if (readOnlyDenied) {
       return {
         tool_call_id: callId,
         content: `READ_ONLY: ${name} is disabled for this run. Use read_file/search_files/search_memory only.`,

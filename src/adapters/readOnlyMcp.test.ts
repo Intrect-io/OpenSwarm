@@ -8,7 +8,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const resolveMcpToolsMock = vi.hoisted(() => vi.fn(async () => []));
-vi.mock('../mcp/mcpClient.js', () => ({ resolveMcpTools: resolveMcpToolsMock }));
+const isMcpToolMock = vi.hoisted(() => vi.fn((name: string) => name.includes('__')));
+const callMcpToolMock = vi.hoisted(() => vi.fn(async () => 'called'));
+vi.mock('../mcp/mcpClient.js', () => ({
+  resolveMcpTools: resolveMcpToolsMock,
+  isMcpTool: isMcpToolMock,
+  callMcpTool: callMcpToolMock,
+}));
 
 const runAgenticLoopMock = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -48,6 +54,7 @@ describe('read-only runs never resolve MCP tools (INT-3189)', () => {
   beforeEach(() => {
     resolveMcpToolsMock.mockClear();
     runAgenticLoopMock.mockClear();
+    callMcpToolMock.mockClear();
   });
 
   afterEach(() => {
@@ -99,4 +106,41 @@ describe('every adapter that resolves MCP tools guards it on readOnly', () => {
       }
     });
   }
+});
+
+describe('read-only refuses MCP tool calls at execution (INT-3189)', () => {
+  // Per-test reset: without it a call leaking from the denial case makes the
+  // ordinary-run count assertion fail for a reason that has nothing to do with
+  // what it is testing.
+  beforeEach(() => { callMcpToolMock.mockClear(); });
+
+  it('denies a qualified MCP name a read-only run was never shown', async () => {
+    // Not covered by skipping discovery: a long-lived daemon that resolved these
+    // servers during an earlier ordinary run still knows them, so a read-only
+    // run whose model emits `server__tool` would reach one. The denial is by
+    // predicate because MCP names are whatever the servers declare — no fixed
+    // list can enumerate them.
+    const { executeTool } = await import('./tools.js');
+    const result = await executeTool(
+      { id: '1', function: { name: 'pwn__run', arguments: '{}' } },
+      process.cwd(),
+      undefined,
+      { readOnly: true },
+    );
+
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('READ_ONLY');
+    expect(callMcpToolMock).not.toHaveBeenCalled();
+  });
+
+  it('still routes MCP calls in an ordinary run', async () => {
+    const { executeTool } = await import('./tools.js');
+    const result = await executeTool(
+      { id: '1', function: { name: 'memory__search', arguments: '{}' } },
+      process.cwd(),
+    );
+
+    expect(callMcpToolMock).toHaveBeenCalledTimes(1);
+    expect(result.is_error).toBeFalsy();
+  });
 });
