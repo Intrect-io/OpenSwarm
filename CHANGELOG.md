@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.20.2 — 2026-08-01
+
+Three fixes to the CI review gate, all found by running it rather than reading it. Each is the same failure in a different place: the gate produced a confident verdict while something it needed was missing.
+
+### Fixed
+
+- **The reviewer is given the diff.** `buildReviewerPrompt` handed direct mode only a list of changed filenames — its own comment said direct mode "reviews a Git diff supplied by a user/CI checkout", but no diff was ever supplied. In working-tree mode an agent can recover the rest with `bash`; under `--read-only` it cannot, and in `--base` mode there is nothing in the working tree to recover, because reading a file shows the result of a change and never the change. Those two flags together are what the GitHub Action passes, so the flagship CI path was reviewing blind — a real run said so in its own feedback ("I cannot determine the actual diff… the .git directory is not accessible") and returned a verdict anyway. The diff now travels in the prompt, bounded at 200KB and explicit when it truncates. (#375)
+- **`search_files` no longer loses its capability silently.** It shells out to ripgrep, which a hosted runner may not have; every search then failed with ENOENT, the agent stopped searching, and it reviewed the diff without reading the code around it — while still returning `approve`. It falls back to `git grep` now, and when neither is available it says the search was unavailable and that this is not "no matches", because the quiet failure is the one that gets read as evidence of absence. The bundled action installs ripgrep so the fast path is used. (#373)
+- **A failing gate says why.** `--json` suppresses the human report by design and SARIF carries only findings that have a file and line, so a `revise` reached the job log as a single word with its reasoning nowhere. The action now renders decision, feedback, issues, suggestions and follow-ups into the step log and the GitHub job summary. That text comes from a model that just read an untrusted diff, so it is written inside a `::stop-commands::` fence with an unpredictable token — otherwise injected prose could forge annotations or silence the rest of the step. (#374)
+
 ## 0.20.1 — 2026-08-01
 
 ### Fixed
