@@ -233,12 +233,21 @@ runs:
             out.push(`## OpenSwarm review: ${r.decision || "gate did not run"}`);
             if (r.feedback) out.push("", r.feedback);
             if (r.issues?.length) out.push("", "### Issues", ...r.issues.map((i) => `- ${i}`));
+            if (r.suggestions?.length) out.push("", "### Suggestions", ...r.suggestions.map((x) => `- ${x}`));
             if (r.findings?.length) {
               out.push("", "### Follow-ups");
               for (const f of r.findings) out.push(`- [${f.type}] ${f.title}${f.location ? ` — \`${f.location}\`` : ""}`);
             }
             const text = out.join("\n");
-            process.stdout.write(`${text}\n`);
+            // Every word of this came from a model that just read an untrusted
+            // diff. GitHub turns any stdout line beginning with `::` into a
+            // workflow command, so printing it raw would let injected prose
+            // forge annotations or run ::stop-commands:: to silence the rest of
+            // this step. The documented fence is stop-commands around the block
+            // with a token the writer cannot predict.
+            const token = require("crypto").randomUUID();
+            process.stdout.write(`::stop-commands::${token}\n${text}\n::${token}::\n`);
+            // The summary is rendered as Markdown, not parsed for commands.
             if (process.env.GITHUB_STEP_SUMMARY) require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
           ' || echo "::warning::Could not render the review document for the log"
         fi
