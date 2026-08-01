@@ -68,6 +68,12 @@ export interface ReviewerOptions {
    * claim. (INT-3189)
    */
   readOnly?: boolean;
+  /**
+   * The change under review, as text. Supplied rather than discovered: a
+   * read-only reviewer cannot shell out for it, and in committed-diff mode
+   * there is nothing in the working tree to read. (INT-3101)
+   */
+  diff?: string;
 }
 
 export interface PreCheckResult {
@@ -143,10 +149,23 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
   // OpenSwarm worker result. Do not manufacture a zero-command worker report:
   // "evidence not collected here" is different from "validation was not run".
   if (options.mode === 'direct') {
+    // The diff goes in the prompt, not left for the agent to reconstruct. A
+    // read-only reviewer has no bash, and in committed-diff mode the working
+    // tree is clean — reading a file shows the result, never the change. Under
+    // `--read-only --base`, which is what the CI gate uses, the reviewer could
+    // not see its own subject and said so while still returning a verdict.
+    // (INT-3101)
+    // Appended as plain text on purpose: the template already wraps the whole
+    // report in its untrusted-data block, which escapes the closing marker and
+    // code fences. A second fence here would be escaped by that one, so it
+    // would add noise while providing none of the protection it appears to.
+    const report = options.diff
+      ? `- **Files changed (${files.length}):** ${filesSummary}\n- **Diff under review:**\n${options.diff}`
+      : `- **Files changed (${files.length}):** ${filesSummary}`;
     return getPrompts().buildReviewerPrompt({
       taskTitle: options.taskTitle,
       taskDescription: options.taskDescription,
-      workerReport: `- **Files changed (${files.length}):** ${filesSummary}`,
+      workerReport: report,
       mode: 'direct',
       priorReviewContext: options.priorReviewContext,
     });

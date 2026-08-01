@@ -41,6 +41,31 @@ export async function getChangedFiles(
 }
 
 /**
+ * The diff itself, for handing to a reviewer that cannot run git.
+ *
+ * Bounded, and honest about it: a truncated diff that does not say so invites a
+ * verdict on a change the reviewer only partly saw. Binary contents are omitted
+ * — they are noise in a prompt — but the fact that a binary changed is kept.
+ */
+export async function getDiffText(
+  projectPath: string,
+  since?: string,
+  maxBytes = 200_000,
+): Promise<string> {
+  const args = since
+    ? ['diff', '--no-color', '--no-ext-diff', since]
+    : ['diff', '--no-color', '--no-ext-diff', 'HEAD'];
+  try {
+    const diff = await runGitCommand(projectPath, args);
+    if (diff.length <= maxBytes) return diff;
+    return `${diff.slice(0, maxBytes)}\n\n[diff truncated at ${maxBytes} bytes of ${diff.length}; read the files directly for the rest]`;
+  } catch (error) {
+    console.error('[GitTracker] getDiffText error:', error);
+    return '';
+  }
+}
+
+/**
  * Capture the CURRENT worktree state (tracked + untracked-non-ignored) as a git
  * tree object, without touching the real index or worktree. A throwaway index
  * (via GIT_INDEX_FILE) lets `git add -A` stage everything there, then `write-tree`
