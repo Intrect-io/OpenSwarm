@@ -583,3 +583,44 @@ describe('the reviewer is given the diff, not asked to find it (INT-3101)', () =
     expect(prompt).not.toContain('Diff under review');
   });
 });
+
+describe('a truncated diff still tells the reviewer it was truncated (INT-3101)', () => {
+  it('keeps getDiffText\'s notice inside the prompt template\'s own ceiling', async () => {
+    // The template bounds the whole worker report as untrusted data and appends
+    // a bare `[truncated]`. If the diff limit sits above that ceiling, the
+    // template cuts first and the informative notice — the part telling the
+    // reviewer to read the files for the rest — is what gets cut. A limit that
+    // lets its own warning be truncated is not a limit.
+    const { getDiffText } = await import('../support/gitTracker.js');
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+
+    const repo = mkdtempSync(join(tmpdir(), 'openswarm-difflimit-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: repo });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+    writeFileSync(join(repo, 'big.txt'), 'seed\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+    execFileSync('git', ['commit', '-qm', 'seed'], { cwd: repo });
+    // Comfortably past both the diff limit and the template ceiling.
+    writeFileSync(join(repo, 'big.txt'), Array.from({ length: 4000 }, (_, i) => `line ${i}`).join('\n'));
+
+    const diff = await getDiffText(repo);
+    expect(diff).toContain('diff truncated at');
+
+    const prompt = buildReviewerPrompt({
+      taskTitle: 't',
+      taskDescription: 'd',
+      workerResult: { success: true, summary: 's', filesChanged: ['big.txt'], commands: [], output: '' },
+      projectPath: repo,
+      mode: 'direct',
+      diff,
+    });
+
+    // The notice, not just the template's bare `[truncated]`.
+    expect(prompt).toContain('diff truncated at');
+    expect(prompt).toContain('read the files directly for the rest');
+  });
+});

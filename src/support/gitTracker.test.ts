@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getChangedFiles, getChangedFilesSinceSnapshot, getWorkingDiffDetail, takeSnapshot } from './gitTracker.js';
+import { getChangedFiles, getChangedFilesSinceSnapshot, getDiffText, getWorkingDiffDetail, takeSnapshot } from './gitTracker.js';
 
 describe('gitTracker', () => {
   let repo: string;
@@ -22,6 +22,48 @@ describe('gitTracker', () => {
   afterEach(() => {
     if (existsSync(repo)) {
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('getDiffText returns the working-tree change with its content', async () => {
+    writeFileSync(join(repo, 'tracked.txt'), 'changed\n');
+
+    const diff = await getDiffText(repo);
+
+    expect(diff).toContain('tracked.txt');
+    expect(diff).toContain('-tracked');
+    expect(diff).toContain('+changed');
+  });
+
+  it('getDiffText diffs against a base ref when given one', async () => {
+    const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf-8' }).trim();
+    writeFileSync(join(repo, 'tracked.txt'), 'committed change\n');
+    execFileSync('git', ['commit', '-aqm', 'second'], { cwd: repo });
+
+    // The committed-diff case: nothing dirty in the working tree, so a
+    // HEAD diff would be empty and the reviewer would see no change at all.
+    await expect(getDiffText(repo)).resolves.toBe('');
+    await expect(getDiffText(repo, base)).resolves.toContain('+committed change');
+  });
+
+  it('getDiffText says how much it dropped rather than trailing off', async () => {
+    writeFileSync(join(repo, 'tracked.txt'), Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n'));
+
+    const diff = await getDiffText(repo, undefined, 500);
+
+    expect(diff.length).toBeLessThan(700);
+    expect(diff).toContain('diff truncated at 500 bytes of');
+    expect(diff).toContain('read the files directly for the rest');
+  });
+
+  it('getDiffText returns empty rather than throwing when git cannot answer', async () => {
+    // Degrades the review to the file list; it must not end it.
+    const notARepo = join(tmpdir(), `openswarm-not-a-repo-${process.pid}-${Date.now()}`);
+    mkdirSync(notARepo, { recursive: true });
+    try {
+      await expect(getDiffText(notARepo)).resolves.toBe('');
+    } finally {
+      rmSync(notARepo, { recursive: true, force: true });
     }
   });
 

@@ -44,13 +44,20 @@ export async function getChangedFiles(
  * The diff itself, for handing to a reviewer that cannot run git.
  *
  * Bounded, and honest about it: a truncated diff that does not say so invites a
- * verdict on a change the reviewer only partly saw. Binary contents are omitted
- * — they are noise in a prompt — but the fact that a binary changed is kept.
+ * verdict on a change the reviewer only partly saw.
+ *
+ * The default sits below the prompt template's own untrusted-data ceiling
+ * (20,000 characters, shared by the whole worker report). The first version
+ * used 200KB, which meant the template cut the diff first and this function's
+ * explanatory notice — the part that tells the reviewer to go read the files —
+ * was itself cut off, leaving only a bare `[truncated]`. A limit that lets your
+ * own warning be truncated is not a limit. `reviewer.test.ts` asserts the
+ * notice survives into the built prompt, so this cannot drift back.
  */
 export async function getDiffText(
   projectPath: string,
   since?: string,
-  maxBytes = 200_000,
+  maxBytes = 16_000,
 ): Promise<string> {
   const args = since
     ? ['diff', '--no-color', '--no-ext-diff', since]
