@@ -82,6 +82,20 @@ export async function spawnCli(
         stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
 
+      // The stdin 'error' listener is not optional, for the same reason it is
+      // not optional in github.ts: if the CLI exits before draining the pipe —
+      // a rejected flag, an auth failure, or our own SIGKILL on timeout — the
+      // pending write emits EPIPE on the stream, and an 'error' event with no
+      // listener is rethrown by Node as an uncaught exception. It arrives
+      // asynchronously, so neither the promise nor the caller's try/catch sees
+      // it, and `proc.on('error')` below is a different emitter. Every adapter
+      // that feeds a prompt file through stdin passes here, so without this one
+      // oversized prompt to a CLI that exits early kills the daemon. Reporting
+      // is left to 'close', which has the real exit code; this only has to keep
+      // the event handled.
+      proc.stdin?.on('error', (error) => {
+        if (options.onLog) options.onLog(`stdin closed before the prompt was written: ${error.message}`);
+      });
       if (stdin) proc.stdin?.end(stdin);
 
       // Register process for tracking if context provided

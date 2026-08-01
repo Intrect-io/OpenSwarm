@@ -353,6 +353,24 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe('keep');
   });
 
+  it('refuses diagnostics, which runs a binary found in the tree under review', async () => {
+    // The loop withholds this tool in readOnly ("it spawns compiler
+    // subprocesses, matching bash's exclusion") but the executor did not deny
+    // it, and withholding is only a hint — the comment above exists because a
+    // model calls tools it was never shown. runTsc walks up from the reviewed
+    // tree for node_modules/.bin/tsc and runs it with the full environment, so
+    // this was `bash` by another name. (INT-2961)
+    const result = await executeTool(
+      makeCall('diagnostics', { path: TMP_DIR }),
+      TMP_DIR,
+      undefined,
+      { readOnly: true },
+    );
+
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('READ_ONLY');
+  });
+
   it('refuses the web tools too, since a fetch is an outbound channel', async () => {
     // Read-only runs exist because the material under inspection is untrusted.
     // A fetch would carry out whatever the agent can read, credentials included.
@@ -518,6 +536,30 @@ describe('ToolExecOptions', () => {
       undefined,
       { protectedFiles: ['run_tests.sh'] },
     );
+    expect(res.is_error).toBe(true);
+    expect(res.content).toContain('PROTECTED');
+    expect(await fs.readFile(filePath, 'utf-8')).toContain('echo ok');
+  });
+
+  it('apply_patch refuses a protected file whose header is indented', async () => {
+    // parseV4A trims each line before matching a header; this guard used to
+    // match the raw line. One leading space therefore hid the header from the
+    // guard while the parser still applied the patch — and applyV4APatch has no
+    // protection of its own, so this scan is the only thing standing there.
+    // Blast radius today is benchmark integrity: a worker could neuter
+    // run_tests.sh and manufacture a RESOLVED. (INT-2961)
+    const filePath = path.join(TMP_DIR, 'run_tests.sh');
+    await fs.writeFile(filePath, 'echo ok\n');
+
+    const res = await executeTool(
+      makeCall('apply_patch', {
+        input: '*** Begin Patch\n *** Update File: run_tests.sh\n@@\n-echo ok\n+exit 0\n*** End Patch',
+      }),
+      TMP_DIR,
+      undefined,
+      { protectedFiles: ['run_tests.sh'] },
+    );
+
     expect(res.is_error).toBe(true);
     expect(res.content).toContain('PROTECTED');
     expect(await fs.readFile(filePath, 'utf-8')).toContain('echo ok');
