@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.20.1 — 2026-08-01
+
+### Fixed
+
+- **`--read-only` now denies the `diagnostics` tool.** 0.20.0 introduced read-only reviews as the control that makes reviewing an untrusted diff safe, and this was a hole in it: the agentic loop withheld `diagnostics` from the tool list, but the executor's denial set did not include it — and that set exists precisely because a model calls tools it was never shown. `runTsc` executes a `tsc` binary found by walking up from the tree under review, with the full environment, which is `bash` by another name; a read-only run was reproduced writing a file. The denied set now lives beside the loop's filter so the two cannot drift apart again. (#371)
+- **A CLI that exits before reading its prompt no longer kills the daemon.** Every adapter feeds its prompt to the child through stdin, and that stream had no `'error'` listener. When the CLI exits early — a flag it rejects, an auth failure, or OpenSwarm's own SIGKILL on timeout — the pending write emits EPIPE, and an `'error'` event with no listener is rethrown by Node as an uncaught exception. It arrives asynchronously, so neither the promise nor the caller's `try/catch` sees it: the whole daemon went down instead of one task failing. (#371)
+- **Spawned agent processes no longer inherit every credential.** The `dev.ts` path spawned `claude -p --permission-mode bypassPermissions` — an agent with a shell — with `env: process.env`, handing it a key for every provider plus the Linear token and npm/GitHub credentials. It now gets an allowlist: enough to run, plus the `ANTHROPIC_`/`CLAUDE_` variables an operator may authenticate through. (#370)
+- **The local issue store is owner-only.** It was created under the process umask, so on a shared machine every tracked repository's issue titles, descriptions and task history were readable by any local account. Directory `0700`, database `0600`. (#370)
+- **A forced token refresh no longer restores a rotated-away refresh token.** `refreshAndRetry` wrote back the whole profile it had read when the run started, and a 401 can arrive hours later; if another process refreshed in between, that write put the dead refresh token back and every later run failed `invalid_grant` until the user logged in again. It now changes only `expires`, against the current file. (#371)
+- **An indented V4A header no longer bypasses harness protection.** The patch parser trims a line before matching a header while the protected-path guard matched the raw line, so one leading space hid the header from the guard and still applied the patch. Only benchmark harnesses set protected files today, so the reach was a worker able to neuter `run_tests.sh` and manufacture a RESOLVED — numbers that decide model routing. (#371)
+
+### Changed
+
+- CI asserts what the verify sandbox actually needs on `ubuntu-latest`: bubblewrap **and** `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Measured on the runner, the image sets that restriction to `1`, and with it set even `bwrap --unshare-user` fails at "setting up uid map: Permission denied" — installing the package alone is not enough, which the README previously implied. The job also warns if a future image lifts the restriction, so the documented recipe cannot go stale silently. (#369)
+
 ## 0.20.0 — 2026-08-01
 
 ### Added
