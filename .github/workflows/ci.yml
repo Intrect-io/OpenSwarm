@@ -112,41 +112,34 @@ jobs:
           done
 
   verify-sandbox:
-    # Deterministic verification refuses to run without an OS sandbox, and the
-    # answer depends on the runner, not on our code: bubblewrap is absent from
-    # ubuntu-latest by default, and even installed it needs unprivileged user
-    # namespaces the host may deny. Measuring it here is the only way that claim
-    # in the README stays true — a unit test cannot tell you what this runner
-    # allows. (INT-3103)
+    # Deterministic verification refuses to run without an OS sandbox, and
+    # whether one is available is a property of the runner, not of our code — no
+    # unit test can answer it. This job asserts the recipe the README gives
+    # operators, so that recipe cannot go stale silently. (INT-3103)
+    #
+    # Measured on ubuntu-latest 2026-08-01: unprivileged_userns_clone=1 and
+    # user.max_user_namespaces=63838, but apparmor_restrict_unprivileged_userns=1,
+    # and with that set even `bwrap --unshare-user` fails at "setting up uid map:
+    # Permission denied". Installing bubblewrap alone is NOT enough there.
     name: Verify sandbox (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Probe before installing bubblewrap
-        run: |
-          if command -v bwrap >/dev/null; then
-            echo "::warning::bwrap is present on this runner by default — the README says it is not"
-          else
-            echo "bwrap absent by default, as documented"
-          fi
-      - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - name: Probe the sandbox the verify runner actually uses
+      - name: Bubblewrap alone must not be assumed sufficient
         run: |
           set -uo pipefail
-          probe() {
-            label="$1"; shift
-            if out=$(bwrap "$@" -- /usr/bin/true 2>&1); then
-              echo "  PASS  $label"
-            else
-              echo "  FAIL  $label — $out"
-            fi
-          }
-          echo "kernel.unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '<absent>')"
-          echo "kernel.apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo '<absent>')"
-          echo "user.max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo '<absent>')"
-          probe "user namespace only"        --ro-bind / / --unshare-user
-          probe "+ /proc + /dev"             --ro-bind / / --dev /dev --proc /proc
-          probe "+ network namespace"        --ro-bind / / --unshare-net --dev /dev --proc /proc
-          probe "network ns, no loopback"    --ro-bind / / --unshare-net --disable-userns --dev /dev --proc /proc
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          if bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
+            echo "::warning::The sandbox now works without lifting the AppArmor restriction — the README's sysctl step may be obsolete on this image"
+          else
+            echo "Confirmed: installing bubblewrap alone does not give a working sandbox on this runner"
+          fi
+      - name: The documented recipe must work
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # The same namespaces src/verify/runner.ts sets up. Probing a subset
+          # would pass on a host that denies one of the others.
+          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true
+          echo "OS verification sandbox is available on ubuntu-latest with bubblewrap + the AppArmor sysctl"

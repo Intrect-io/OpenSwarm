@@ -216,6 +216,26 @@ it for every pull request is left as an explicit choice.
 
 Autonomous pipelines enable baseline-diff verification by default: OpenSwarm runs repository test/typecheck commands once, compares a failing head against the merge base, and gives the reviewer structured evidence so pre-existing failures do not block unrelated work. Add `.openswarm/verify.yaml` for repository-specific commands (see [`templates/verify.example.yaml`](templates/verify.example.yaml)), or let OpenSwarm discover standard Node, Python, Rust, and Go checks. Configure the behavior under `autonomous.verify`; the legacy `guards.qualityGate` whole-tree check is deprecated.
 
+#### The Linux sandbox
+
+On Linux, verification runs each command inside bubblewrap and **fails closed
+when it cannot** — running a worker's code unsandboxed to decide whether to
+trust it defeats the point. On macOS it uses the platform sandbox and needs no
+setup.
+
+Installing the package is not always enough, and CI is where that bites:
+
+| Environment | What it takes |
+| --- | --- |
+| GitHub Actions `ubuntu-latest` | `sudo apt-get install -y bubblewrap` **and** `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Measured 2026-08-01: the image sets that restriction to `1`, and with it set even `bwrap --unshare-user` fails at `setting up uid map: Permission denied`. This repository's own CI asserts the recipe so it cannot go stale. |
+| Docker, default seccomp | `--security-opt seccomp=unconfined`; add `--cap-add SYS_ADMIN` if the runtime also drops the capability |
+| Debian/Ubuntu host | `apt-get install -y bubblewrap`, usually nothing else |
+| Alpine | `apk add bubblewrap` |
+
+When the sandbox is unavailable, OpenSwarm says which of these applies rather
+than reporting a bare failure: it runs bwrap to find out instead of guessing
+from sysctls, quotes bwrap's own error, and prints the matching fix.
+
 For crash recovery, fenced execution leases, outbox semantics, rollout modes, and
 repository admission policy, see [Durable autonomous loop](docs/DURABLE_AUTONOMY.md).
 
