@@ -51,33 +51,46 @@ const APPARMOR_USERNS = '/proc/sys/kernel/apparmor_restrict_unprivileged_userns'
  * generic container case.
  */
 function explainFailure(probe: SandboxProbe, stderr: string): { reason: string; remedy: string[] } {
+  // bwrap's own message is the only ground truth here; a sysctl is a likely
+  // cause, never a proven one. Carrying the last stderr line into every reason
+  // keeps the operator from chasing a guess when the real cause was something
+  // this function cannot see.
+  const detail = stderr.trim() ? `: ${stderr.trim().split('\n').slice(-1)[0]}` : '';
+  const generic = [
+    'Docker: --security-opt seccomp=unconfined (the default profile denies the syscall)',
+    'Docker: --cap-add SYS_ADMIN, if the runtime also drops the capability',
+    'Check sysctl user.max_user_namespaces — 0 disables them outright',
+  ];
+
   if (probe.readSysctl(USERNS_CLONE)?.trim() === '0') {
     return {
-      reason: 'unprivileged user namespaces are disabled (kernel.unprivileged_userns_clone=0)',
+      reason: `unprivileged user namespaces are disabled (kernel.unprivileged_userns_clone=0)${detail}`,
       remedy: [
-        'Host: sudo sysctl -w kernel.unprivileged_userns_clone=1',
+        'Host: sysctl -w kernel.unprivileged_userns_clone=1 (prefix with sudo unless already root)',
         'Or install a setuid-root bwrap, or grant the process CAP_SYS_ADMIN',
       ],
     };
   }
 
   if (probe.readSysctl(APPARMOR_USERNS)?.trim() === '1') {
+    // Mediation being ON does not mean it was the thing that denied us — a
+    // profile may already permit bwrap while seccomp or an exhausted
+    // user.max_user_namespaces is the real cause. Named as the likeliest
+    // suspect, with the generic remedies kept for when it is not.
     return {
-      reason: 'AppArmor is mediating unprivileged user namespaces and no profile permits this binary (Ubuntu 24.04+ default)',
+      reason: `AppArmor is mediating unprivileged user namespaces (kernel.apparmor_restrict_unprivileged_userns=1, Ubuntu 24.04+ default) — the likeliest cause${detail}`,
       remedy: [
-        'Host: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0',
+        'Host: sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 (prefix with sudo unless already root)',
         'Or install an AppArmor profile granting userns to bwrap',
+        'If a profile already permits bwrap, the denial is elsewhere:',
+        ...generic,
       ],
     };
   }
 
   return {
-    reason: `bwrap could not create a namespace${stderr.trim() ? `: ${stderr.trim().split('\n').slice(-1)[0]}` : ''}`,
-    remedy: [
-      'Docker: --security-opt seccomp=unconfined (the default profile denies the syscall)',
-      'Docker: --cap-add SYS_ADMIN, if the runtime also drops the capability',
-      'Check sysctl user.max_user_namespaces — 0 disables them outright',
-    ],
+    reason: `bwrap could not set up the sandbox${detail}`,
+    remedy: generic,
   };
 }
 
@@ -87,10 +100,15 @@ export function describeLinuxSandbox(probe: SandboxProbe): SandboxAvailability {
     return {
       available: false,
       reason: 'bubblewrap (bwrap) is not installed',
+      // No sudo in the package commands: the environment where bwrap is most
+      // often missing is a minimal Debian/Alpine container running as root,
+      // where sudo itself is not installed and the advertised command would fail
+      // before reaching the package manager. The Actions line keeps it, because
+      // that runner is specifically not root.
       remedy: [
-        'Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y bubblewrap',
-        'Alpine: sudo apk add bubblewrap',
-        'GitHub Actions (ubuntu-latest): add that apt-get step before the gate — the runner user is not root',
+        'Debian/Ubuntu: apt-get update && apt-get install -y bubblewrap (prefix with sudo unless already root)',
+        'Alpine: apk add bubblewrap (prefix with sudo unless already root)',
+        'GitHub Actions (ubuntu-latest): sudo apt-get update && sudo apt-get install -y bubblewrap, before the gate',
       ],
     };
   }
@@ -101,14 +119,23 @@ export function describeLinuxSandbox(probe: SandboxProbe): SandboxAvailability {
   return { available: false, ...explainFailure(probe, attempt.stderr) };
 }
 
+/** Absolute paths for the probe's no-op command, most specific first. */
+const TRUE_PATHS = ['/usr/bin/true', '/bin/true'];
+
+/**
+ * The namespaces the probe must set up, mirroring the real invocation in
+ * `runner.ts`. Probing a strict subset is how a probe lies: on a host that
+ * permits user namespaces but denies network ones, `--unshare-user` alone
+ * succeeds and every verification command afterwards fails, which is the exact
+ * failure this module exists to catch before it happens. Keep in step with the
+ * runner's argv.
+ */
+const PROBE_NAMESPACE_ARGS = ['--ro-bind', '/', '/', '--unshare-net', '--dev', '/dev', '--proc', '/proc'];
+
 /**
  * The real probe, kept here rather than at the call site so it is reachable from
  * any host. The Linux branch of the verify runner never executes on macOS, so
  * wiring assembled inline there would ship untested.
- *
- * `--unshare-user` with a trivial command is the smallest thing that fails for
- * every reason we care about: no permission to create the namespace, a dropped
- * capability, a seccomp filter, or an exhausted `user.max_user_namespaces`.
  */
 export function makeSystemProbe(deps: {
   exists: (path: string) => boolean;
@@ -125,12 +152,41 @@ export function makeSystemProbe(deps: {
       }
     },
     tryBwrap: (executable) => {
-      const probe = deps.spawn(executable, ['--ro-bind', '/', '/', '--unshare-user', 'true']);
+      // An absolute command, never the bare `true`. Inside the sandbox the token
+      // is resolved with execvp against the inherited PATH, so a project-supplied
+      // directory on it — `node_modules/.bin`, say — decides what the probe runs.
+      // Falls back to bwrap itself, which is guaranteed to exist at this point.
+      const trueBin = TRUE_PATHS.find(deps.exists);
+      const command = trueBin ? [trueBin] : [executable, '--version'];
+      const probe = deps.spawn(executable, [...PROBE_NAMESPACE_ARGS, '--', ...command]);
       return {
         ok: probe.status === 0,
         stderr: probe.stderr ?? String(probe.error?.message ?? ''),
       };
     },
+  };
+}
+
+/**
+ * Memoize a working sandbox, re-probe a broken one.
+ *
+ * A success cannot regress in a way that matters — every later command runs the
+ * same bwrap anyway — so paying for one namespace creation per verification
+ * command is waste. A failure is different: the daemon is long-lived, so caching
+ * it would mean an operator who follows the emitted remedy (installs bubblewrap,
+ * flips the sysctl) keeps getting fail-closed until they restart the process. A
+ * re-probe costs one `bwrap true` on a host that is already broken.
+ *
+ * A factory rather than module state so the decision is testable without a Linux
+ * host and without leaking a cache between tests.
+ */
+export function makeSandboxCache(probe: () => SandboxAvailability): () => SandboxAvailability {
+  let cached: Extract<SandboxAvailability, { available: true }> | undefined;
+  return () => {
+    if (cached) return cached;
+    const result = probe();
+    if (result.available) cached = result;
+    return result;
   };
 }
 

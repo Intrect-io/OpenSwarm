@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
-import { describeLinuxSandbox, formatSandboxUnavailable, makeSystemProbe } from './sandboxDiagnostics.js';
+import { describeLinuxSandbox, formatSandboxUnavailable, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
@@ -158,21 +158,12 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
   }
 }
 
-/**
- * Availability is decided by actually running bwrap, so the answer is cached for
- * the process: it cannot change mid-run, and every verification command would
- * otherwise pay for another namespace creation.
- */
-let cachedLinuxSandbox: ReturnType<typeof describeLinuxSandbox> | undefined;
-
-function linuxSandbox(): ReturnType<typeof describeLinuxSandbox> {
-  cachedLinuxSandbox ??= describeLinuxSandbox(makeSystemProbe({
-    exists: existsSync,
-    readFile: (path) => readFileSync(path, 'utf8'),
-    spawn: (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
-  }));
-  return cachedLinuxSandbox;
-}
+/** Working sandbox memoized, broken one re-probed — see makeSandboxCache. */
+const linuxSandbox = makeSandboxCache(() => describeLinuxSandbox(makeSystemProbe({
+  exists: existsSync,
+  readFile: (path) => readFileSync(path, 'utf8'),
+  spawn: (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
+})));
 
 async function runCommand(command: VerifyCommand, root: string, env: NodeJS.ProcessEnv = process.env): Promise<CommandResult> {
   const candidate = command.cwd ? resolve(root, command.cwd) : root;
