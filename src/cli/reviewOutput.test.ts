@@ -5,6 +5,7 @@ import {
   parseLocation,
   toReviewJson,
   toSarif,
+  toUriReference,
 } from './reviewOutput.js';
 
 const review = (over: Partial<ReviewResult> = {}): ReviewResult => ({
@@ -82,7 +83,8 @@ describe('toSarif', () => {
 
   it('places a finding on its file and line', () => {
     const sarif = toSarif(review(), '0.0.0') as any;
-    const loc = sarif.runs[0].results[0].locations[0].physicalLocation;
+    // results[0] is now the blocking issue; the located follow-up follows it.
+    const loc = sarif.runs[0].results[1].locations[0].physicalLocation;
     expect(loc.artifactLocation.uri).toBe('src/auth/session.ts');
     expect(loc.region.startLine).toBe(42);
   });
@@ -94,13 +96,13 @@ describe('toSarif', () => {
       review({ recommendedActions: [{ type: 'bug', title: 'Tighten the guard', location: 'the auth middleware' }] }),
       '0.0.0',
     ) as any;
-    expect(sarif.runs[0].results).toHaveLength(1);
-    expect(sarif.runs[0].results[0].locations).toBeUndefined();
+    expect(sarif.runs[0].results.filter((r: any) => r.ruleId !== 'openswarm/issue')).toHaveLength(1);
+    expect(sarif.runs[0].results.find((r: any) => r.ruleId === 'openswarm/bug').locations).toBeUndefined();
   });
 
-  it('reports findings as warnings — the verdict blocks, not the individual finding', () => {
+  it('reports follow-ups as warnings — they are advisory, unlike blocking issues', () => {
     const sarif = toSarif(review(), '0.0.0') as any;
-    expect(sarif.runs[0].results[0].level).toBe('warning');
+    expect(sarif.runs[0].results.find((r: any) => r.ruleId === 'openswarm/bug').level).toBe('warning');
   });
 
   it('declares one rule per finding type', () => {
@@ -115,8 +117,8 @@ describe('toSarif', () => {
       '0.0.0',
     ) as any;
     expect(sarif.runs[0].tool.driver.rules.map((r: any) => r.id).sort())
-      .toEqual(['openswarm/bug', 'openswarm/test-coverage']);
-    expect(sarif.runs[0].results).toHaveLength(3);
+      .toEqual(['openswarm/bug', 'openswarm/issue', 'openswarm/test-coverage']);
+    expect(sarif.runs[0].results.filter((r: any) => r.ruleId !== 'openswarm/issue')).toHaveLength(3);
   });
 });
 
@@ -142,5 +144,70 @@ describe('packageVersion', () => {
     const version = await packageVersion();
     expect(typeof version).toBe('string');
     expect(version.length).toBeGreaterThan(0);
+  });
+});
+
+describe('review findings feed SARIF (INT-3102 review)', () => {
+  it('emits blocking issues even when there are no follow-ups', () => {
+    // A revise carrying issues but no recommendedActions is a normal reviewer
+    // response — the prompt separates blocking issues from advisory follow-ups.
+    // Emitting only the latter left code scanning showing nothing for a failed gate.
+    const sarif = toSarif(
+      { decision: 'revise', feedback: 'x', issues: ['CSRF guard removed'], recommendedActions: [] },
+      '0.0.0',
+    ) as any;
+    expect(sarif.runs[0].results).toHaveLength(1);
+    expect(sarif.runs[0].results[0]).toMatchObject({ ruleId: 'openswarm/issue', level: 'error' });
+    expect(sarif.runs[0].tool.driver.rules.map((r: any) => r.id)).toContain('openswarm/issue');
+  });
+
+  it('separates blocking issues from advisory follow-ups by level', () => {
+    const sarif = toSarif(
+      {
+        decision: 'revise', feedback: 'x', issues: ['blocking'],
+        recommendedActions: [{ type: 'bug', title: 'advisory' }],
+      },
+      '0.0.0',
+    ) as any;
+    const levels = sarif.runs[0].results.map((r: any) => r.level);
+    expect(levels).toEqual(['error', 'warning']);
+  });
+});
+
+describe('artifact URIs (INT-3102 review)', () => {
+  it('converts Windows separators and encodes reserved characters', () => {
+    expect(toUriReference('C:\\src\\my file.ts')).toBe('C%3A/src/my%20file.ts');
+    expect(toUriReference('src/a#b/c.ts')).toBe('src/a%23b/c.ts');
+  });
+
+  it('applies the encoding in the SARIF location', () => {
+    const sarif = toSarif(
+      { decision: 'revise', feedback: 'x', recommendedActions: [{ type: 'bug', title: 't', location: 'src/my file.ts:7' }] },
+      '0.0.0',
+    ) as any;
+    expect(sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri).toBe('src/my%20file.ts');
+  });
+});
+
+describe('extensionless root files (INT-3102 review)', () => {
+  it('keeps a location for build files that carry no suffix', () => {
+    expect(parseLocation('Dockerfile')).toEqual({ file: 'Dockerfile' });
+    expect(parseLocation('Makefile:12')).toEqual({ file: 'Makefile', line: 12 });
+  });
+
+  it('still refuses a bare prose word', () => {
+    expect(parseLocation('middleware')).toEqual({});
+    expect(parseLocation('the auth middleware:2')).toEqual({});
+  });
+});
+
+describe('gateNotRunJson (INT-3102 review)', () => {
+  it('reports no verdict rather than inventing one', async () => {
+    const { gateNotRunJson } = await import('./reviewOutput.js');
+    const json = gateNotRunJson(new Error('usage limit reached'));
+    expect(json.gateRan).toBe(false);
+    expect(json.decision).toBe('');
+    expect(json.feedback).toContain('usage limit');
+    expect(json.schemaVersion).toBe(REVIEW_JSON_SCHEMA_VERSION);
   });
 });

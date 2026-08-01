@@ -442,7 +442,7 @@ describe('runReviewCommand machine-readable output (INT-3102)', () => {
 
     const sarif = JSON.parse(await readFile(target, 'utf8'));
     expect(sarif.version).toBe('2.1.0');
-    expect(sarif.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri).toBe('src/auth.ts');
+    expect(sarif.runs[0].results.find((r: any) => r.ruleId === 'openswarm/bug').locations[0].physicalLocation.artifactLocation.uri).toBe('src/auth.ts');
     expect(logs.join('\n')).toContain('SARIF report written');
   });
 
