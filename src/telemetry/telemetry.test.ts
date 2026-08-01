@@ -158,3 +158,63 @@ describe('privacy contract (payload shape)', () => {
     expect(JSON.stringify(p)).not.toMatch(/Users|secret prompt|tmp\/path/);
   });
 });
+
+describe('the allowlist must not silently discard real commands (INT-3190)', () => {
+  it('accepts every command cli.ts registers', () => {
+    // Read the registrations rather than restate them. This list dropped
+    // `openswarm` — the bare TUI launch, the most-used entry point and the last
+    // thing 11 of 18 external installs ever did — and nothing failed: the event
+    // still arrived, with a NULL command. Nine days of the drop-off signal went
+    // unlabelled before anyone looked. A new command is now a red test.
+    const { readFileSync } = require('node:fs') as typeof import('node:fs');
+    const cli = readFileSync(new URL('../cli.ts', import.meta.url), 'utf8');
+    const registered = [...cli.matchAll(/\.command\('([a-z-]+)'/g)].map((m) => m[1]);
+
+    expect(registered.length).toBeGreaterThan(5);
+    const dropped = registered.filter((name) => buildPayload({ command: name }, 'i').command !== name);
+    expect(dropped).toEqual([]);
+  });
+
+  it('accepts the bare TUI launch, which is not a registered subcommand', () => {
+    expect(buildPayload({ command: 'openswarm' }, 'i').command).toBe('openswarm');
+  });
+});
+
+describe('completion events (INT-3190)', () => {
+  it('carries the outcome and how long the command ran', () => {
+    const p = buildPayload({ event: 'complete', command: 'doctor', isError: true, durationMs: 1234.6 }, 'i');
+    expect(p).toMatchObject({ event: 'complete', command: 'doctor', isError: 1, durationMs: 1235 });
+  });
+
+  it('omits a duration that is missing or nonsensical rather than storing a lie', () => {
+    for (const durationMs of [undefined, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(buildPayload({ event: 'complete', durationMs }, 'i')).not.toHaveProperty('durationMs');
+    }
+  });
+});
+
+describe('doctor detail is names, never messages (INT-3190)', () => {
+  it('keeps recognised check names', () => {
+    expect(buildPayload({ detail: ['node', 'providers'] }, 'i').detail).toBe('node,providers');
+  });
+
+  it('drops anything not on the list, including messages that mention a real check', () => {
+    // The doctor lines that produce these names also contain versions, paths and
+    // port numbers. Only the name may travel.
+    const p = buildPayload({
+      detail: ['providers', 'node v22 at /Users/unohee/.nvm/versions/node', '/home/x/config.yaml', 'port 3000 in use'],
+    }, 'i');
+    expect(p.detail).toBe('providers');
+    expect(JSON.stringify(p)).not.toMatch(/\/Users\/|\/home\/|nvm|3000/);
+  });
+
+  it('omits the field entirely when nothing survives, rather than sending an empty string', () => {
+    expect(buildPayload({ detail: ['not-a-check'] }, 'i')).not.toHaveProperty('detail');
+    expect(buildPayload({}, 'i')).not.toHaveProperty('detail');
+  });
+
+  it('bounds the list so a caller cannot pad the row', () => {
+    const p = buildPayload({ detail: Array.from({ length: 50 }, () => 'node') }, 'i');
+    expect((p.detail ?? '').split(',').length).toBeLessThanOrEqual(8);
+  });
+});
