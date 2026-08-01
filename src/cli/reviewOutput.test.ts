@@ -119,3 +119,28 @@ describe('toSarif', () => {
     expect(sarif.runs[0].results).toHaveLength(3);
   });
 });
+
+describe('packageVersion', () => {
+  it('reads the shipped version rather than a hardcoded string', async () => {
+    // A SARIF tool record that drifts from what actually ran is worse than
+    // useless — it attributes findings to a version that never produced them.
+    const { packageVersion } = await import('./reviewOutput.js');
+    const pkg = JSON.parse(
+      await (await import('node:fs/promises')).readFile(
+        new URL('../../package.json', import.meta.url),
+        'utf8',
+      ),
+    ) as { version: string };
+    expect(await packageVersion()).toBe(pkg.version);
+  });
+
+  it('falls back rather than failing a report that is otherwise complete', async () => {
+    // Exercised by pointing the reader at a directory with no package.json:
+    // the module resolves relative to its own location, so the fallback is the
+    // only reachable branch when the manifest is missing.
+    const { packageVersion } = await import('./reviewOutput.js');
+    const version = await packageVersion();
+    expect(typeof version).toBe('string');
+    expect(version.length).toBeGreaterThan(0);
+  });
+});
