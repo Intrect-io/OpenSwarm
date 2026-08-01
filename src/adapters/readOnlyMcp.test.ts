@@ -28,17 +28,18 @@ vi.mock('./agenticLoop.js', async (importOriginal) => {
   return { ...actual, runAgenticLoop: runAgenticLoopMock };
 });
 
+import { readFileSync } from 'node:fs';
 import { OpenRouterCliAdapter } from './openrouter.js';
 import { AtlasCloudCliAdapter } from './atlascloud.js';
-import { GptCliAdapter } from './gpt.js';
-import { LocalModelAdapter } from './local.js';
 
-// Each adapter needs its own credential/endpoint to reach the MCP step at all.
+// Only the two adapters that reach the MCP step from an API key alone are
+// driven behaviourally. `gpt` wants an OAuth profile and `local` probes for a
+// live server, so on a developer machine that happens to have either they pass
+// for the wrong reason and on a CI runner they never reach the code under test.
+// Every adapter is covered by the source invariant at the bottom instead.
 const ADAPTERS = [
   { name: 'openrouter', make: () => new OpenRouterCliAdapter(), env: { OPENROUTER_API_KEY: 'test-key' } },
   { name: 'atlascloud', make: () => new AtlasCloudCliAdapter(), env: { ATLASCLOUD_API_KEY: 'test-key' } },
-  { name: 'gpt', make: () => new GptCliAdapter(), env: { OPENAI_API_KEY: 'test-key' } },
-  { name: 'local', make: () => new LocalModelAdapter(), env: { LOCAL_LLM_URL: 'http://127.0.0.1:1234/v1' } },
 ];
 
 describe('read-only runs never resolve MCP tools (INT-3189)', () => {
@@ -78,6 +79,24 @@ describe('read-only runs never resolve MCP tools (INT-3189)', () => {
       await adapter.run?.({ prompt: 'do work', cwd: process.cwd(), model: 'm' }).catch(() => {});
 
       expect(resolveMcpToolsMock).toHaveBeenCalledTimes(1);
+    });
+  }
+});
+
+describe('every adapter that resolves MCP tools guards it on readOnly', () => {
+  // Read the sources rather than restate the list: an adapter added later, or an
+  // existing one refactored back to an unconditional call, is a regression this
+  // file must catch even though it cannot drive that adapter end to end.
+  const SOURCES = ['openrouter', 'atlascloud', 'gpt', 'local'];
+
+  for (const name of SOURCES) {
+    it(`${name}.ts does not call resolveMcpTools unconditionally`, () => {
+      const source = readFileSync(new URL(`./${name}.ts`, import.meta.url), 'utf8');
+      const calls = source.split('\n').filter((line) => line.includes('resolveMcpTools(') && !line.trim().startsWith('import'));
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call).toContain('options.readOnly ?');
+      }
     });
   }
 });
