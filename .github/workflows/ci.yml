@@ -110,3 +110,36 @@ jobs:
               echo "::warning file=$file::File exceeds 800 lines ($lines)"
             fi
           done
+
+  verify-sandbox:
+    # Deterministic verification refuses to run without an OS sandbox, and
+    # whether one is available is a property of the runner, not of our code — no
+    # unit test can answer it. This job asserts the recipe the README gives
+    # operators, so that recipe cannot go stale silently. (INT-3103)
+    #
+    # Measured on ubuntu-latest 2026-08-01: unprivileged_userns_clone=1 and
+    # user.max_user_namespaces=63838, but apparmor_restrict_unprivileged_userns=1,
+    # and with that set even `bwrap --unshare-user` fails at "setting up uid map:
+    # Permission denied". Installing bubblewrap alone is NOT enough there.
+    name: Verify sandbox (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bubblewrap alone must not be assumed sufficient
+        run: |
+          set -uo pipefail
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          if bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
+            echo "::warning::The sandbox now works without lifting the AppArmor restriction — the README's sysctl step may be obsolete on this image"
+          else
+            echo "Confirmed: installing bubblewrap alone does not give a working sandbox on this runner"
+          fi
+      - name: The documented recipe must work
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # The same namespaces src/verify/runner.ts sets up. Probing a subset
+          # would pass on a host that denies one of the others.
+          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true
+          echo "OS verification sandbox is available on ubuntu-latest with bubblewrap + the AppArmor sysctl"
