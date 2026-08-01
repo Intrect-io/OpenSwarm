@@ -499,3 +499,44 @@ describe('reviewer', () => {
     });
   });
 });
+
+describe('reviewer read-only mode (INT-3189)', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const mockAdapter = () =>
+    vi.spyOn(adapters, 'getAdapter').mockReturnValue({
+      name: 'mock',
+      getDefaultModel: async () => 'm',
+      parseReviewerOutput: () => ({ decision: 'approve', feedback: 'ok' }),
+    } as never);
+
+  const wr: WorkerResult = { success: true, summary: 's', filesChanged: ['a.ts'], commands: [], output: '' };
+
+  it('passes readOnly through so mutating tools are denied', async () => {
+    // Without this the reviewer keeps bash. In CI that is an agent with shell
+    // access on attacker-controlled files while the provider credential is in
+    // the environment — prompt injection becomes command execution.
+    const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
+    // The `reviewer` block above never restores its spies, so spyOn hands back an
+    // existing mock carrying that block's calls. Without the clear, calls[0] is
+    // someone else's call and the assertion reads a stale argument.
+    spawn.mockClear();
+    mockAdapter();
+
+    await runReviewer({ taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp', readOnly: true });
+
+    expect(spawn.mock.calls[0][1]).toMatchObject({ readOnly: true });
+  });
+
+  it('leaves the local path unrestricted when readOnly is not set', async () => {
+    // `openswarm review` reviews the operator's own working tree, where running
+    // a command is how the reviewer substantiates a claim.
+    const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
+    spawn.mockClear();
+    mockAdapter();
+
+    await runReviewer({ taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp' });
+
+    expect(spawn.mock.calls[0][1].readOnly).toBeUndefined();
+  });
+});

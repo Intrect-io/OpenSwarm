@@ -128,6 +128,15 @@ export interface AdapterCapabilities {
   supportsModelSelection: boolean;
   managedGit: boolean;
   supportedSkills: string[];
+  /**
+   * This adapter actually denies mutating tools when `CliRunOptions.readOnly` is
+   * set. Optional, and absent means "cannot enforce": `spawnCli` refuses a
+   * read-only run on such an adapter rather than executing it with full tool
+   * access. A caller asking for read-only is usually doing so because the input
+   * is untrusted, and a flag that quietly does nothing there is worse than no
+   * flag at all. (INT-3189)
+   */
+  enforcesReadOnly?: boolean;
 }
 
 export interface CliCommandSpec {

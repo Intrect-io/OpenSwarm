@@ -35,6 +35,7 @@ export class CodexCliAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: true,
     supportedSkills: [],
+    enforcesReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {
@@ -77,9 +78,16 @@ export class CodexCliAdapter implements CliAdapter {
     // replacement is `--sandbox workspace-write`: same low-friction policy (writes
     // confined to the workspace, no approval prompts in non-interactive `exec`). (INT-1699)
     // Register OpenSwarm's memory MCP server unless the caller needs an isolated run.
-    const args = ['exec', '--json', '--sandbox', 'workspace-write', '--skip-git-repo-check'];
+    // A read-only run drops to codex's own `read-only` sandbox policy. Stronger
+    // than a tool denylist: shell commands still run, but the filesystem is
+    // read-only and the sandbox denies network, so a prompt-injected reviewer
+    // has nothing to write to and nowhere to send what it read. (INT-3189)
+    const sandbox = options.readOnly ? 'read-only' : 'workspace-write';
+    const args = ['exec', '--json', '--sandbox', sandbox, '--skip-git-repo-check'];
     if (resolvedModel) args.push('-m', resolvedModel);
-    if (options.memoryTools !== false) args.push(...codexMcpConfigArgs());
+    // See the claude adapter: the memory server exposes writes, and a read-only
+    // review is exactly where injected content must not reach them.
+    if (options.memoryTools !== false && !options.readOnly) args.push(...codexMcpConfigArgs());
     return { command: 'codex', args, stdinFile: promptFile };
   }
 

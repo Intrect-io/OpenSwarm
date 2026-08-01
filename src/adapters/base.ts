@@ -23,6 +23,17 @@ export async function spawnCli(
   adapter: CliAdapter,
   options: CliRunOptions,
 ): Promise<CliRunResult> {
+  // Fail closed before anything runs. `readOnly` is asked for when the input is
+  // untrusted, so an adapter that ignores it would hand a full toolset to an
+  // agent reading attacker-authored files. Refusing is loud; ignoring is not.
+  // (INT-3189)
+  if (options.readOnly && !adapter.capabilities.enforcesReadOnly) {
+    throw new Error(
+      `Adapter '${adapter.name}' cannot enforce read-only mode; refusing to run with full tool access. ` +
+        `Use an adapter that declares enforcesReadOnly, or drop the read-only requirement.`,
+    );
+  }
+
   // 어댑터가 직접 실행을 지원하면 shell spawn 대신 사용
   if (adapter.run) {
     return adapter.run(options);

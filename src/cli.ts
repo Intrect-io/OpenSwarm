@@ -298,6 +298,7 @@ program
   .option('--adapter <name>', 'Adapter override for the reviewer')
   .option('--json', 'Emit the verdict as JSON on stdout instead of the human report (for CI)')
   .option('--sarif <file>', 'Write a SARIF 2.1.0 report for GitHub code scanning')
+  .option('--read-only', 'Deny the reviewer all mutating tools including bash — required when reviewing an untrusted diff in CI')
   .option('--debug', 'Verbose logging')
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
@@ -314,7 +315,7 @@ program
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
-    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string;
+    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
@@ -325,6 +326,14 @@ program
       // read an absent SARIF as "no findings".
       if (opts.max && (opts.json || opts.sarif)) {
         console.error('--json and --sarif are not supported with --max yet; use --out for the audit report.');
+        process.exitCode = 2;
+        return;
+      }
+      // Same refusal, and it matters more here: silently ignoring --read-only
+      // would leave the caller believing bash was denied when the audit
+      // subagents still have it. (INT-3189)
+      if (opts.max && opts.readOnly) {
+        console.error('--read-only is not supported with --max yet; the audit fan-out still grants the reviewer its full toolset.');
         process.exitCode = 2;
         return;
       }
@@ -358,7 +367,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,

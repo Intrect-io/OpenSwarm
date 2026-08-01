@@ -53,6 +53,21 @@ export interface ReviewerOptions {
   onToken?: (delta: string) => void;
   /** Abort the run + in-flight adapter call (pipeline cancel / project disable). */
   signal?: AbortSignal;
+  /**
+   * Deny the reviewer every mutating tool — write_file, edit_file, apply_patch
+   * and bash — leaving read_file/search_files/search_memory.
+   *
+   * Mandatory whenever the diff under review is not trusted. Reviewing a pull
+   * request in CI puts an agent with shell access on attacker-controlled files
+   * while the provider credential sits in the environment, which turns prompt
+   * injection into command execution. A review is a judgement, not an
+   * execution, so nothing legitimate is lost.
+   *
+   * Off by default: the local `openswarm review` path reviews the operator's own
+   * working tree, and running commands there is how the reviewer substantiates a
+   * claim. (INT-3189)
+   */
+  readOnly?: boolean;
 }
 
 export interface PreCheckResult {
@@ -187,6 +202,7 @@ export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckRes
       processContext: options.processContext,
       onLog: options.onLog,
       signal: options.signal,
+      readOnly: options.readOnly,
     });
 
     // DEBUG: Log raw Haiku output for troubleshooting
@@ -267,6 +283,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       onLog: options.onLog,
       onToken: options.onToken,
       signal: options.signal,
+      readOnly: options.readOnly,
     });
 
     // Parse result via adapter

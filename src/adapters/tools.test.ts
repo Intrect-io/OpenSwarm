@@ -352,6 +352,30 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     expect(bash.content).toContain('READ_ONLY');
     await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe('keep');
   });
+
+  it('refuses the web tools too, since a fetch is an outbound channel', async () => {
+    // Read-only runs exist because the material under inspection is untrusted.
+    // A fetch would carry out whatever the agent can read, credentials included.
+    // The tool list already withholds these; this is the enforcement behind it,
+    // for a model that calls a tool it was never shown. (INT-3189)
+    const fetched = await executeTool(
+      makeCall('web_fetch', { url: 'https://example.com/' }),
+      TMP_DIR,
+      undefined,
+      { readOnly: true },
+    );
+    const searched = await executeTool(
+      makeCall('web_search', { query: 'anything' }),
+      TMP_DIR,
+      undefined,
+      { readOnly: true },
+    );
+
+    expect(fetched.is_error).toBe(true);
+    expect(fetched.content).toContain('READ_ONLY');
+    expect(searched.is_error).toBe(true);
+    expect(searched.content).toContain('READ_ONLY');
+  });
 });
 
 // ──────────────────────────────────────────────
