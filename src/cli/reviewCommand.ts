@@ -21,6 +21,20 @@ import {
 } from './reviewHistory.js';
 
 /** Synthesize a WorkerResult describing the working-tree changes for the reviewer. */
+/**
+ * The diff the reviewer will read, when git can produce one.
+ *
+ * A failure here degrades the review rather than ending it: the reviewer still
+ * has the file list and its own read tools. It must not throw, because a gate
+ * that cannot produce a diff is still better than no gate — but it also must not
+ * pretend, which is why the empty string means "no diff supplied" and the prompt
+ * simply omits the section.
+ */
+async function defaultGetDiff(cwd: string, base?: string): Promise<string> {
+  const { getDiffText } = await import('../support/gitTracker.js');
+  return getDiffText(cwd, base);
+}
+
 export function buildReviewWorkerResult(changedFiles: string[], summary?: string): WorkerResult {
   return {
     success: true,
@@ -237,6 +251,8 @@ export async function runReviewCommand(
   opts: ReviewCommandOptions = {},
   deps: {
     getChangedFiles?: (cwd: string) => Promise<string[]>;
+    /** The diff text handed to the reviewer; injectable so tests need no git. */
+    getDiff?: (cwd: string, base?: string) => Promise<string>;
     review?: (
       wr: WorkerResult,
       cwd: string,
@@ -309,6 +325,7 @@ export async function runReviewCommand(
         mode: 'direct',
         priorReviewContext: history.context,
         readOnly: opts.readOnly,
+        diff: await deps.getDiff?.(c, opts.base) ?? await defaultGetDiff(c, opts.base),
         onLog,
       });
     });
