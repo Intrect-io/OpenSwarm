@@ -278,9 +278,16 @@ describe('runVerify', () => {
   // under full-suite parallel load they intermittently blew through it. A timeout
   // surfaces as headStatus 'infra' — errorClassification treats "timeout after" as
   // infrastructure — so the failure read as a broken sandbox rather than a slow
-  // one. The ceiling is a hang guard, not a performance assertion, so it is set
-  // wide enough that only a genuine hang trips it. (INT-3104)
-  const SANDBOX_GIT_TIMEOUT_MS = 30_000;
+  // one. The ceiling is a hang guard, not a performance assertion.
+  //
+  // It must stay clearly BELOW vitest's own testTimeout (30s, vitest.config.ts).
+  // runVerify starts this timer only after building the sandbox, so a ceiling at
+  // the harness limit would let vitest kill the test first and report a generic
+  // suite timeout — losing the headStatus and rawOutputTail this guard exists to
+  // produce, which is the same unexplained failure in different clothing. 15s
+  // leaves ~7x margin over the 2.1s measured under load and half the budget spare
+  // for sandbox setup and teardown. (INT-3104)
+  const SANDBOX_GIT_TIMEOUT_MS = 15_000;
 
   it('preserves Git metadata inside the isolated head sandbox', async () => {
     const [evidence] = await runVerify({
