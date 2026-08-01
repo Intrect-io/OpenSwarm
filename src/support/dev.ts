@@ -8,6 +8,7 @@ import { resolve, sep } from 'node:path';
 import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 import { extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { expandPath } from '../core/config.js';
+import { safeInheritedEnv, CLAUDE_CLI_ENV_KEYS } from './spawnEnv.js';
 
 /**
  * Known repository list (alias -> path)
@@ -168,7 +169,12 @@ export async function runDevTask(
     '--permission-mode', 'bypassPermissions'
   ], {
     cwd: path,
-    env: process.env,
+    // Not `process.env`. This child runs with bypassPermissions — it has a
+    // shell — and the parent holds every provider key, the Linear token, and
+    // npm/GitHub credentials, none of which the claude CLI needs. It keeps its
+    // own (via HOME, or the ANTHROPIC_/CLAUDE_ variables an operator may
+    // authenticate through) and nothing else.
+    env: safeInheritedEnv(CLAUDE_CLI_ENV_KEYS),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
