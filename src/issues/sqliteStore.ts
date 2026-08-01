@@ -10,7 +10,7 @@ import { nanoid } from 'nanoid';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { DEFAULT_BUSY_TIMEOUT_MS, enableWalWithRetry } from '../support/sqliteWal.js';
 import type {
   Issue, IssueFilter, IssueEvent, IssueEventType,
@@ -98,13 +98,38 @@ export interface IssueStats {
   recentlyClosed: number;   // 최근 7일
 }
 
+/**
+ * Owner-only permissions on the database and any WAL sidecars already present.
+ *
+ * Best-effort: a store on a filesystem without POSIX modes, or one owned by
+ * another account, must not stop the CLI from opening it.
+ */
+function restrictDatabasePermissions(path: string): void {
+  for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+    try {
+      chmodSync(file, 0o600);
+    } catch {
+      // Sidecars may not exist yet, and a non-POSIX filesystem has no modes.
+    }
+  }
+}
+
 export class SqliteIssueStore implements IIssueStore {
   private db: Database.Database;
 
   constructor(dbPath?: string) {
     const path = dbPath ?? DEFAULT_DB_PATH;
-    mkdirSync(resolve(path, '..'), { recursive: true });
+    // 0700/0600 rather than the process umask. This store holds issue titles,
+    // descriptions and task history for every tracked repository; on a shared
+    // machine the default 0644 leaves all of it readable by any local account.
+    //
+    // Tightening the main file is enough for the -wal and -shm sidecars too:
+    // SQLite creates them with the database's own mode, verified on disk. The
+    // test asserts the property rather than this mechanism, so it still holds if
+    // that ever stops being true.
+    mkdirSync(resolve(path, '..'), { recursive: true, mode: 0o700 });
     this.db = new Database(path);
+    restrictDatabasePermissions(path);
 
     // WAL for concurrency. Install the wait policy first and retry the
     // conversion: the CLI, the daemon and the dashboard all open this store, so

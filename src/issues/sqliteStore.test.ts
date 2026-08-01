@@ -102,3 +102,31 @@ describe('getStats scoping', () => {
     store.close();
   });
 });
+
+describe('store permissions (INT-2961 audit)', () => {
+  it('keeps the database and its WAL sidecars owner-only', async () => {
+    // The store holds issue titles, descriptions and task history for every
+    // tracked repository. Under the default umask that is 0644 — readable by
+    // any local account — and WAL mode puts most of the payload in the sidecars,
+    // which is why the main file alone is not enough.
+    const { mkdtempSync, statSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-perm-'));
+    const dbPath = join(root, 'nested', 'issues.db');
+    const store = new SqliteIssueStore(dbPath);
+
+    const mode = (p: string) => statSync(p).mode & 0o777;
+    expect(mode(join(root, 'nested'))).toBe(0o700);
+    expect(mode(dbPath)).toBe(0o600);
+    // Created by enabling WAL, i.e. after the database file itself — a single
+    // chmod at open time would miss both.
+    for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+      expect(existsSync(sidecar)).toBe(true);
+      expect(mode(sidecar)).toBe(0o600);
+    }
+
+    store.close?.();
+  });
+});

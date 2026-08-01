@@ -17,23 +17,11 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { ToolDefinition } from '../adapters/tools.js';
+import { safeInheritedEnv } from '../support/spawnEnv.js';
 
 /** Qualified tool name separator: `<server>__<tool>`. */
 const SEP = '__';
 const MCP_JSON_PATH = join(homedir(), '.openswarm', 'mcp.json');
-const MCP_STDIO_ENV_ALLOWLIST = new Set([
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'SHELL',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
-  'SystemRoot',
-  'ComSpec',
-  'PATHEXT',
-]);
 const MAX_MCP_TOOL_RESULT_CHARS = 20_000;
 const MCP_CONNECT_TIMEOUT_MS = 15_000;
 const MCP_OPERATION_TIMEOUT_MS = 30_000;
@@ -210,15 +198,6 @@ function makeTransport(cfg: ServerConfig) {
   const url = new URL(cfg.url!);
   const init = cfg.headers ? { requestInit: { headers: cfg.headers } } : undefined;
   return cfg.transport === 'sse' ? new SSEClientTransport(url, init) : new StreamableHTTPClientTransport(url, init);
-}
-
-function safeInheritedEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const key of MCP_STDIO_ENV_ALLOWLIST) {
-    const value = process.env[key];
-    if (typeof value === 'string') env[key] = value;
-  }
-  return env;
 }
 
 export async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
