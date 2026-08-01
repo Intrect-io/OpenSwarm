@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.20.0 — 2026-08-01
+
+### Added
+
+- **The review gate ships as a GitHub Action.** `uses: unohee/OpenSwarm@main` installs OpenSwarm, diffs a pull request against its merge base, runs the review, and maps the exit contract onto the job result. Inputs cover the checkout path, base, adapter, read-only, version, SARIF destination, and whether a gate that never ran fails the job; outputs are `decision`, `gate-ran`, and `sarif-file`. It fails closed in the places that matter: a base branch it could not fetch is refused rather than reviewed against nothing, a non-zero exit without a parsed verdict is reported as gate-not-run rather than as a rejected change, and the flags it passes are checked against the installed CLI first — an older install would otherwise have reported every run as rejected, because Commander exits 1 on an unknown option and 1 is the reject code. (#364)
+- **`openswarm review --read-only`** denies the reviewer every mutating tool, including `bash`. Reviewing a pull request in CI puts an agent with shell access on attacker-authored files while the provider credential sits in the environment; a review is a judgement, not an execution, so nothing legitimate is lost. Enforcement is per adapter — `claude` drops `bypassPermissions` for an allowlist, `codex` drops to its `read-only` sandbox, the API adapters withhold the tools from the loop — and an adapter that has not declared enforcement **refuses to run** rather than silently ignoring the flag. (#366)
+- **Machine-readable review output.** `--json` prints the verdict on stdout under a versioned schema with the human report suppressed, and `--sarif <file>` writes SARIF 2.1.0 for GitHub code scanning. (#362)
+
+### Fixed
+
+- **A read-only run no longer connects MCP servers, and no longer executes their tools.** Resolving MCP tools means connecting to them: the registry merges `mcp.servers` from whatever config is found in the working directory, and the stdio transport spawns each server's command with secrets already expanded into its environment. During a CI review that directory is the checkout under review, so the config belongs to whoever opened the pull request — and every API adapter resolved unconditionally, before the loop's read-only filter, which only hides tools from the model. The attacker's command had already run and already been handed the credential. Discovery is now skipped outright in read-only mode, and the executor refuses MCP calls by predicate as well, since a daemon that resolved those servers during an earlier ordinary run still knows them. (#367)
+- **The Linux sandbox check runs bwrap instead of guessing from sysctls.** Availability was inferred from `/proc/sys/kernel/*` toggles that describe only one of several ways namespace creation can be denied — a container can block it through seccomp, missing capabilities, or an exhausted `user.max_user_namespaces` while every one of those files reads permissive — and that produced false negatives too, since `unprivileged_userns_clone=0` does not stop a setuid-root bwrap. The probe now performs the same namespace setup the verification runner does, so a host that permits user namespaces but denies network ones is caught before the commands fail rather than after; the sysctls are consulted only to explain a denial that already happened, with bwrap's own stderr quoted alongside. A working sandbox is memoized and a broken one re-probed, so following the emitted remedy does not require restarting the daemon. (#363, #365)
+- **A reviewer verdict it never substantiated is refused.** (#358)
+
 ## 0.19.12 — 2026-07-31
 
 ### Fixed
