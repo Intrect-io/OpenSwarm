@@ -134,8 +134,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Probe the sandbox the verify runner actually uses
         run: |
-          set -euo pipefail
-          # The same namespaces src/verify/runner.ts sets up. A probe of a subset
-          # would pass on a host that denies one of the others.
-          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true
-          echo "OS verification sandbox is available on ubuntu-latest after installing bubblewrap"
+          set -uo pipefail
+          probe() {
+            label="$1"; shift
+            if out=$(bwrap "$@" -- /usr/bin/true 2>&1); then
+              echo "  PASS  $label"
+            else
+              echo "  FAIL  $label — $out"
+            fi
+          }
+          echo "kernel.unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '<absent>')"
+          echo "kernel.apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo '<absent>')"
+          echo "user.max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo '<absent>')"
+          probe "user namespace only"        --ro-bind / / --unshare-user
+          probe "+ /proc + /dev"             --ro-bind / / --dev /dev --proc /proc
+          probe "+ network namespace"        --ro-bind / / --unshare-net --dev /dev --proc /proc
+          probe "network ns, no loopback"    --ro-bind / / --unshare-net --disable-userns --dev /dev --proc /proc
