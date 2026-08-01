@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import * as os from 'node:os';
 import { TOOL_DEFINITIONS, executeTool, createReadCache, ToolCall, buildBashToolEnv, validatePath } from './tools.js';
 import { homedir } from 'node:os';
 
@@ -616,5 +617,55 @@ describe('ToolExecOptions', () => {
     const env = buildBashToolEnv({ PATH: `${path.join(homedir(), '.cargo', 'bin')}:/usr/bin` });
     const cargo = path.join(homedir(), '.cargo', 'bin');
     expect((env.PATH ?? '').split(':').filter((p) => p === cargo)).toHaveLength(1);
+  });
+});
+
+describe('search_files without ripgrep', () => {
+  // Observed on a real GitHub Actions run of the review gate: five consecutive
+  // `spawn rg ENOENT`, and the reviewer still returned `approve`. An agent whose
+  // search always errors stops searching and reviews the diff without ever
+  // looking at the surrounding code, while the verdict reads exactly like one
+  // produced with working tools.
+  it('falls back to git grep when rg is not installed', async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-nogrep-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    await fs.writeFile(path.join(repo, 'a.ts'), 'const needle = 1;\nconst other = 2;\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+
+    // A PATH with no rg on it, which is what the hosted runner effectively had.
+    const savedPath = process.env.PATH;
+    const emptyBin = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-bin-'));
+    process.env.PATH = `${emptyBin}:/usr/bin:/bin`;
+    try {
+      const result = await executeTool(
+        makeCall('search_files', { pattern: 'needle', path: repo }),
+        repo,
+      );
+      expect(result.is_error).toBeFalsy();
+      expect(result.content).toContain('needle');
+      expect(result.content).toContain('a.ts');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('says the search failed rather than reporting no matches', async () => {
+    // The dangerous failure is the quiet one: "(no matches)" from a search that
+    // never ran reads as evidence of absence.
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-nogit-'));
+    const savedPath = process.env.PATH;
+    const emptyBin = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-bin2-'));
+    process.env.PATH = `${emptyBin}:/usr/bin:/bin`;
+    try {
+      const result = await executeTool(
+        makeCall('search_files', { pattern: 'needle', path: outside }),
+        outside,
+      );
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('unavailable');
+      expect(result.content).not.toBe('(no matches)');
+    } finally {
+      process.env.PATH = savedPath;
+    }
   });
 });

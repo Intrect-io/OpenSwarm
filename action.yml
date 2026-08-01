@@ -79,6 +79,24 @@ runs:
       shell: bash
       run: npm install -g "@intrect/openswarm@${{ inputs.version }}"
 
+    - name: Ensure ripgrep
+      shell: bash
+      # The reviewer's search tool prefers ripgrep. It falls back to git grep
+      # when that is missing, but the fallback is the safety net, not the plan:
+      # a hosted runner without rg was observed making every search fail, and an
+      # agent whose search errors stops searching and reviews the diff without
+      # reading the code around it — while still returning a confident verdict.
+      run: |
+        set -euo pipefail
+        if command -v rg >/dev/null; then exit 0; fi
+        if command -v apt-get >/dev/null; then
+          sudo apt-get update && sudo apt-get install -y ripgrep
+        elif command -v apk >/dev/null; then
+          apk add --no-cache ripgrep
+        else
+          echo "::warning::ripgrep is unavailable and could not be installed; searches will use the git grep fallback"
+        fi
+
     - name: Run review gate
       id: review
       shell: bash
