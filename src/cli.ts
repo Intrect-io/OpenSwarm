@@ -319,6 +319,15 @@ program
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
     try {
+      // --json/--sarif are declared on the shared `review` command but only the
+      // direct path implements them. Silently printing the normal report and
+      // never writing the requested file is worse than refusing: a CI step would
+      // read an absent SARIF as "no findings".
+      if (opts.max && (opts.json || opts.sarif)) {
+        console.error('--json and --sarif are not supported with --max yet; use --out for the audit report.');
+        process.exitCode = 2;
+        return;
+      }
       if (opts.max) {
         const { runReviewMaxCommand, reviewMaxResultFailed } = await import('./cli/reviewMaxCommand.js');
         const result = await runReviewMaxCommand({
@@ -357,6 +366,14 @@ program
       // rejected" and neither reads as a pass. (INT-3100)
       const { REVIEW_EXIT_GATE_NOT_RUN, describeReviewGateFailure } = await import('./cli/reviewExit.js');
       console.error(describeReviewGateFailure(e));
+      // Emit the documented gate-not-run document rather than nothing. Without
+      // this, `--json` produced no parseable output in exactly the case a CI
+      // step most needs one, and the advertised `gateRan: false` state was
+      // unreachable. The exit code still carries the outcome. (INT-3102)
+      if (opts.json) {
+        const { gateNotRunJson } = await import('./cli/reviewOutput.js');
+        process.stdout.write(`${JSON.stringify(gateNotRunJson(e), null, 2)}\n`);
+      }
       process.exitCode = REVIEW_EXIT_GATE_NOT_RUN;
     }
   });
