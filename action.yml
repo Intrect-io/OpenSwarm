@@ -220,6 +220,38 @@ runs:
         echo "gate-ran=$GATE_RAN" >> "$GITHUB_OUTPUT"
         if [ -f "$SARIF_PATH" ]; then echo "sarif-file=$SARIF_PATH" >> "$GITHUB_OUTPUT"; fi
 
+        # Put the reasoning where the person looking at a red check will find it.
+        # `--json` suppresses the human report by design, so without this a
+        # `revise` or `reject` reached the log as a single word. SARIF carries
+        # only findings that have a file and line; feedback and issues without a
+        # location — often the whole of a `revise` — appear nowhere at all, which
+        # leaves an operator with a failing gate and no way to act on it.
+        if [ -s "$REVIEW_JSON" ]; then
+          REVIEW_JSON="$REVIEW_JSON" node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON, "utf8"));
+            const out = [];
+            out.push(`## OpenSwarm review: ${r.decision || "gate did not run"}`);
+            if (r.feedback) out.push("", r.feedback);
+            if (r.issues?.length) out.push("", "### Issues", ...r.issues.map((i) => `- ${i}`));
+            if (r.suggestions?.length) out.push("", "### Suggestions", ...r.suggestions.map((x) => `- ${x}`));
+            if (r.findings?.length) {
+              out.push("", "### Follow-ups");
+              for (const f of r.findings) out.push(`- [${f.type}] ${f.title}${f.location ? ` — \`${f.location}\`` : ""}`);
+            }
+            const text = out.join("\n");
+            // Every word of this came from a model that just read an untrusted
+            // diff. GitHub turns any stdout line beginning with `::` into a
+            // workflow command, so printing it raw would let injected prose
+            // forge annotations or run ::stop-commands:: to silence the rest of
+            // this step. The documented fence is stop-commands around the block
+            // with a token the writer cannot predict.
+            const token = require("crypto").randomUUID();
+            process.stdout.write(`::stop-commands::${token}\n${text}\n::${token}::\n`);
+            // The summary is rendered as Markdown, not parsed for commands.
+            if (process.env.GITHUB_STEP_SUMMARY) require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+          ' || echo "::warning::Could not render the review document for the log"
+        fi
+
         # Exit contract (INT-3100): 0 ran and did not reject · 1 ran and rejected
         # · 2 never ran. The 1/2 split is preserved so a workflow can alert
         # differently, but both are failures by default — a review that did not
@@ -237,7 +269,7 @@ runs:
 
         case "$STATUS" in
           0) echo "::notice::OpenSwarm review: ${DECISION:-no changes}" ;;
-          1) echo "::error::OpenSwarm review rejected this change"; exit 1 ;;
+          1) echo "::error::OpenSwarm review did not pass: ${DECISION:-rejected}"; exit 1 ;;
           2)
             echo "::error::OpenSwarm review gate did not run — no verdict was produced"
             if [ "$FAIL_ON_GATE_NOT_RUN" = "true" ]; then exit 2; fi
