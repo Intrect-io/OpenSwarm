@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
-import { describeLinuxSandbox, formatSandboxUnavailable } from './sandboxDiagnostics.js';
+import { describeLinuxSandbox, formatSandboxUnavailable, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
@@ -158,6 +158,13 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
   }
 }
 
+/** Working sandbox memoized, broken one re-probed — see makeSandboxCache. */
+const linuxSandbox = makeSandboxCache(() => describeLinuxSandbox(makeSystemProbe({
+  exists: existsSync,
+  readFile: (path) => readFileSync(path, 'utf8'),
+  spawn: (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
+})));
+
 async function runCommand(command: VerifyCommand, root: string, env: NodeJS.ProcessEnv = process.env): Promise<CommandResult> {
   const candidate = command.cwd ? resolve(root, command.cwd) : root;
   let cwd: string;
@@ -203,16 +210,7 @@ async function runCommand(command: VerifyCommand, root: string, env: NodeJS.Proc
     // which of the two causes applies and how to fix it, instead of reporting
     // "unavailable" for a missing binary and dying at exec time with an opaque
     // error for a blocked user namespace. (INT-3103)
-    const sandbox = describeLinuxSandbox({
-      exists: existsSync,
-      readSysctl: (path) => {
-        try {
-          return readFileSync(path, 'utf8');
-        } catch {
-          return undefined;
-        }
-      },
-    });
+    const sandbox = linuxSandbox();
     if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
     executable = sandbox.executable;
     const writableRoot = dirname(root);
