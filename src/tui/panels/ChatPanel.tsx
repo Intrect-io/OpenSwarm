@@ -30,6 +30,7 @@ import { getDefaultChatModel, listChatModels } from '../../support/chatBackend.j
 import { runPlanCommand, type PlanIO } from '../../support/planCommand.js';
 import { runGoalCommand, buildGoalPursuitPrompt, GOAL_PURSUIT_MAX_TURNS } from '../../support/goalCommand.js';
 import type { AdapterName } from '../../adapters/types.js';
+import { track } from '../../telemetry/telemetry.js';
 
 function buildConversationPrompt(messages: Message[]): string {
   if (messages.length <= 1) return messages[0]?.content ?? '';
@@ -53,6 +54,9 @@ export interface ChatPanelProps {
   /** Session goal restored from a resumed session — keeps it "in pursuit". (INT-2014) */
   goal?: string;
 }
+
+/** Process-scoped: the signal is "did this session engage at all", not a counter. */
+let engagementReported = false;
 
 export function ChatPanel({ active, provider: providerProp, model: modelProp, projectPath, sessionId: sessionIdProp, initialHistory, goal: goalProp }: ChatPanelProps) {
   const [state, dispatch] = useReducer(
@@ -360,6 +364,14 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
 
   const submit = useCallback(
     async (raw: string) => {
+      // One bit, once per process: this session got as far as a submitted line.
+      // Launching the TUI and submitting nothing were indistinguishable, and
+      // that is precisely the difference between someone who bounced off the
+      // first screen and someone who tried and was let down. (INT-3190)
+      if (!engagementReported) {
+        engagementReported = true;
+        void track({ event: 'engage', command: 'openswarm' });
+      }
       setInput('');
       const parsed = parseInput(raw);
       // A pending /plan confirm/edit consumes the next line verbatim.

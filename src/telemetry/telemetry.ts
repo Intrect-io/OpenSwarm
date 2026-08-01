@@ -152,6 +152,13 @@ export interface TrackOptions {
   isError?: boolean;
   /** Event kind; defaults to 'invoke'. */
   event?: string;
+  /**
+   * Names of failed diagnostic checks — from ALLOWED_DETAILS and nothing else.
+   * Never a message, a path, or a value.
+   */
+  detail?: string[];
+  /** How long the command ran, for completion events. */
+  durationMs?: number;
 }
 
 /** The exact wire payload — kept flat and asserted by tests so PII can't creep in. */
@@ -165,13 +172,42 @@ export interface TelemetryPayload {
   command?: string;
   adapter?: string;
   isError: 0 | 1;
+  detail?: string;
+  durationMs?: number;
 }
 
-const ALLOWED_EVENTS = new Set(['invoke', 'complete', 'error', 'start', 'stop']);
+const ALLOWED_EVENTS = new Set(['invoke', 'complete', 'error', 'start', 'stop', 'engage']);
+
+/**
+ * Commands whose names may be recorded.
+ *
+ * This list silently discarded real usage once already. `allowTelemetryLabel`
+ * returns undefined for anything absent, so the event still arrives with a NULL
+ * command — the row survives and the fact it describes does not. When it landed
+ * (2026-07-23) it was missing `openswarm`, the bare TUI launch, which was the
+ * single most-used entry point and the last thing 11 of 18 external installs
+ * ever did. That signal went unlabelled for nine days before anyone looked.
+ *
+ * `telemetry.test.ts` reads the commands registered in cli.ts and requires every
+ * one of them to be here, so adding a command without adding it here is a
+ * failing test rather than a blind spot discovered months later.
+ */
 const ALLOWED_COMMANDS = new Set([
-  'add', 'auth', 'chat', 'dash', 'doctor', 'init', 'mcp', 'projects', 'remove',
-  'review', 'run', 'start', 'status', 'stop', 'upgrade', 'version',
+  'add', 'annotate', 'auth', 'chat', 'check', 'dash', 'design-pipeline', 'doctor',
+  'exec', 'fix', 'init', 'login', 'logout', 'mcp', 'memory', 'models', 'openswarm',
+  'projects', 'provider', 'remove', 'resume', 'review', 'run', 'schedule', 'start',
+  'status', 'stop', 'upgrade', 'validate', 'version',
 ]);
+
+/**
+ * The only free-form-looking field, and it is not free-form: a fixed set of
+ * check names. Anything else is dropped rather than truncated, because a value
+ * we did not anticipate is exactly what a privacy contract has to refuse.
+ */
+const ALLOWED_DETAILS = new Set([
+  'node', 'native-deps', 'providers', 'config', 'linear', 'ports', 'git', 'gh',
+]);
+const MAX_DETAIL_ITEMS = 8;
 const ALLOWED_ADAPTERS = new Set([
   'atlascloud', 'claude', 'codex', 'codex-responses', 'gpt', 'lmstudio', 'local', 'openrouter',
 ]);
@@ -188,6 +224,11 @@ function allowTelemetryLabel(
 
 /** Build the payload (pure — used directly by tests to assert the privacy contract). */
 export function buildPayload(opts: TrackOptions, installId: string): TelemetryPayload {
+  const detail = (opts.detail ?? [])
+    .map((name) => allowTelemetryLabel(name, ALLOWED_DETAILS))
+    .filter((name): name is string => !!name)
+    .slice(0, MAX_DETAIL_ITEMS)
+    .join(',');
   return {
     installId,
     event: allowTelemetryLabel(opts.event, ALLOWED_EVENTS, 'invoke') ?? 'invoke',
@@ -198,6 +239,10 @@ export function buildPayload(opts: TrackOptions, installId: string): TelemetryPa
     command: allowTelemetryLabel(opts.command, ALLOWED_COMMANDS),
     adapter: allowTelemetryLabel(opts.adapter, ALLOWED_ADAPTERS),
     isError: opts.isError ? 1 : 0,
+    ...(detail ? { detail } : {}),
+    ...(Number.isFinite(opts.durationMs) && (opts.durationMs as number) >= 0
+      ? { durationMs: Math.round(opts.durationMs as number) }
+      : {}),
   };
 }
 

@@ -44,6 +44,8 @@ function loadTelemetryEnabledQuietly(quiet: boolean): boolean | undefined {
 // DO_NOT_TRACK / CI. One event per command invocation (command name only — never
 // arguments). Fire-and-forget: not awaited, and track() never throws.
 initTelemetry({ version: VERSION });
+/** Start times, so the completion event can report how long the command ran. */
+const commandStartedAt = new WeakMap<object, number>();
 program.hook('preAction', (_thisCommand, actionCommand) => {
   // Honor config telemetry.enabled when a config exists (best-effort — `run`/`init`
   // may have none, in which case the env opt-out still applies).
@@ -64,7 +66,28 @@ program.hook('preAction', (_thisCommand, actionCommand) => {
   } catch {
     /* no/invalid config — keep the built-in default */
   }
+  commandStartedAt.set(actionCommand, Date.now());
   void track({ command: actionCommand.name() });
+});
+
+// The other half of the pair. `invoke` alone says a command started and nothing
+// else — a run that crashed, hung, or was killed looked exactly like one that
+// finished. That gap mattered: 11 of 18 external installs ended on the TUI and
+// the data could not say whether it failed or they simply quit.
+//
+// An `invoke` with no matching `complete` is now itself the signal, so this hook
+// does not need to catch every abnormal exit to be useful — it only has to be
+// honest about the ones it does see. Commands that report failure by setting
+// process.exitCode are the common case here; a thrown error skips postAction and
+// leaves the absent-completion signal instead, which is the correct reading.
+program.hook('postAction', (_thisCommand, actionCommand) => {
+  const startedAt = commandStartedAt.get(actionCommand);
+  void track({
+    event: 'complete',
+    command: actionCommand.name(),
+    isError: !!process.exitCode,
+    ...(startedAt ? { durationMs: Date.now() - startedAt } : {}),
+  });
 });
 
 program

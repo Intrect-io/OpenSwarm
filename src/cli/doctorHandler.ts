@@ -11,12 +11,41 @@ import { listAvailableAdapters } from '../adapters/index.js';
 import { findConfigFile } from '../core/config.js';
 import { banner } from '../support/banner.js';
 import { c } from '../support/colors.js';
+import { track } from '../telemetry/telemetry.js';
 
 const execFileAsync = promisify(execFile);
 
 type Status = 'ok' | 'warn' | 'fail';
 
+/**
+ * Which checks came back not-ok, as stable names.
+ *
+ * Names, never the accompanying message: the message contains versions, paths
+ * and port numbers, and this set is reported by telemetry. `check` is derived
+ * from the label rather than passed separately so a new `line()` call cannot
+ * forget it — an unrecognised label simply contributes nothing.
+ */
+const failedChecks = new Set<string>();
+
+/** Label → stable check name. Labels carry variable parts; these do not. */
+function checkName(label: string): string | undefined {
+  if (label === 'Node.js') return 'node';
+  if (label.startsWith('native:')) return 'native-deps';
+  if (label === 'providers') return 'providers';
+  if (label === 'config') return 'config';
+  if (label === 'linear') return 'linear';
+  if (label.startsWith('port ')) return 'ports';
+  if (label === 'codex' || label === 'claude') return 'providers';
+  if (label === 'git') return 'git';
+  if (label === 'gh') return 'gh';
+  return undefined;
+}
+
 function line(status: Status, label: string, detail = ''): void {
+  if (status !== 'ok') {
+    const name = checkName(label);
+    if (name) failedChecks.add(name);
+  }
   const icon = status === 'ok' ? c.green('✓') : status === 'warn' ? c.yellow('⚠') : c.red('✗');
   console.log(`${icon} ${c.bold(label)}${detail ? ` ${c.dim('—')} ${c.dim(detail)}` : ''}`);
 }
@@ -111,6 +140,18 @@ export async function handleDoctor(): Promise<void> {
   else line('warn', 'linear', 'not configured — local SQLite issue store will be used');
 
   console.log('');
+  // Which checks failed, by name. Twelve external installs ran `doctor` and only
+  // four ever reached `start`; without this the data says they diagnosed
+  // something and stops there. Awaited rather than fire-and-forget because the
+  // fatal branch calls process.exit, which would drop an in-flight request —
+  // track() has its own timeout, so this cannot hang the command.
+  await track({
+    event: 'complete',
+    command: 'doctor',
+    isError: fatal,
+    detail: [...failedChecks],
+  });
+
   if (fatal) {
     console.log(c.red(c.bold('✗ Critical issues found — fix the ✗ items above.')));
     process.exit(1);
