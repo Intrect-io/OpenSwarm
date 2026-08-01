@@ -623,4 +623,44 @@ describe('a truncated diff still tells the reviewer it was truncated (INT-3101)'
     expect(prompt).toContain('diff truncated at');
     expect(prompt).toContain('read the files directly for the rest');
   });
+
+  it('survives a long file list sharing the same budget', async () => {
+    // The previous attempt set the diff limit "just under" the template ceiling
+    // and called it room for the file list. That was arithmetic never actually
+    // done: the summary carries up to 20 paths of unbounded length ahead of the
+    // diff. The notice leads the diff now, so nothing downstream can push it out.
+    const { getDiffText } = await import('../support/gitTracker.js');
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+
+    const repo = mkdtempSync(join(tmpdir(), 'openswarm-longlist-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: repo });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+    writeFileSync(join(repo, 'big.txt'), 'seed\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+    execFileSync('git', ['commit', '-qm', 'seed'], { cwd: repo });
+    writeFileSync(join(repo, 'big.txt'), Array.from({ length: 4000 }, (_, i) => `line ${i}`).join('\n'));
+
+    const prompt = buildReviewerPrompt({
+      taskTitle: 't',
+      taskDescription: 'd',
+      // 20 paths of ~250 characters each, all of which precede the diff.
+      workerResult: {
+        success: true,
+        summary: 's',
+        filesChanged: Array.from({ length: 20 }, (_, i) => `${'deeply/nested/'.repeat(17)}file-${i}.ts`),
+        commands: [],
+        output: '',
+      },
+      projectPath: repo,
+      mode: 'direct',
+      diff: await getDiffText(repo),
+    });
+
+    expect(prompt).toContain('diff truncated at');
+    expect(prompt).toContain('read the files directly for the rest');
+  });
 });

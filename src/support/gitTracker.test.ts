@@ -52,7 +52,8 @@ describe('gitTracker', () => {
     const diff = await getDiffText(repo, undefined, 500);
 
     expect(diff.length).toBeLessThan(700);
-    expect(diff).toContain('diff truncated at 500 bytes of');
+    // Leading, so downstream truncation cannot be what removes it.
+    expect(diff.startsWith('[diff truncated at 500 bytes of')).toBe(true);
     expect(diff).toContain('read the files directly for the rest');
   });
 

@@ -46,13 +46,14 @@ export async function getChangedFiles(
  * Bounded, and honest about it: a truncated diff that does not say so invites a
  * verdict on a change the reviewer only partly saw.
  *
- * The default sits below the prompt template's own untrusted-data ceiling
- * (20,000 characters, shared by the whole worker report). The first version
- * used 200KB, which meant the template cut the diff first and this function's
- * explanatory notice — the part that tells the reviewer to go read the files —
- * was itself cut off, leaving only a bare `[truncated]`. A limit that lets your
- * own warning be truncated is not a limit. `reviewer.test.ts` asserts the
- * notice survives into the built prompt, so this cannot drift back.
+ * The notice goes at the TOP, not the bottom. Downstream truncation — the
+ * prompt template bounds the whole worker report as untrusted data — removes
+ * the end of the text, so a notice appended after the diff is the first thing
+ * lost, leaving a diff that stops mid-hunk with no sign that anything is
+ * missing. Putting it first makes it survive any later cut, and removes the
+ * need to reason about how our limit compares to anyone else's: the earlier
+ * attempt tried to sit "just under" the template ceiling and still lost to a
+ * long file list sharing the same budget.
  */
 export async function getDiffText(
   projectPath: string,
@@ -65,7 +66,7 @@ export async function getDiffText(
   try {
     const diff = await runGitCommand(projectPath, args);
     if (diff.length <= maxBytes) return diff;
-    return `${diff.slice(0, maxBytes)}\n\n[diff truncated at ${maxBytes} bytes of ${diff.length}; read the files directly for the rest]`;
+    return `[diff truncated at ${maxBytes} bytes of ${diff.length}; read the files directly for the rest]\n\n${diff.slice(0, maxBytes)}`;
   } catch (error) {
     console.error('[GitTracker] getDiffText error:', error);
     return '';
