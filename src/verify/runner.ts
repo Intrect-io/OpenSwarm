@@ -1,11 +1,12 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
+import { describeLinuxSandbox, formatSandboxUnavailable } from './sandboxDiagnostics.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
@@ -197,9 +198,23 @@ async function runCommand(command: VerifyCommand, root: string, env: NodeJS.Proc
     executable = '/usr/bin/sandbox-exec';
     invocationArgs = ['-p', profile, shell, '-lc', command.run];
   } else if (process.platform === 'linux') {
-    const bubblewrap = ['/usr/bin/bwrap', '/usr/local/bin/bwrap'].find(existsSync);
-    if (!bubblewrap) return { status: 'fail', output: '[security] OS verification sandbox is unavailable (bubblewrap not installed)' };
-    executable = bubblewrap;
+    // Still fails closed — running a worker's code unsandboxed to decide whether
+    // to trust it defeats the point. What changed is that the message now names
+    // which of the two causes applies and how to fix it, instead of reporting
+    // "unavailable" for a missing binary and dying at exec time with an opaque
+    // error for a blocked user namespace. (INT-3103)
+    const sandbox = describeLinuxSandbox({
+      exists: existsSync,
+      readSysctl: (path) => {
+        try {
+          return readFileSync(path, 'utf8');
+        } catch {
+          return undefined;
+        }
+      },
+    });
+    if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
+    executable = sandbox.executable;
     const writableRoot = dirname(root);
     invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', command.run];
   } else if (process.platform === 'win32') {
