@@ -272,13 +272,33 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'skipped', newFailure: true });
   });
 
+  // The two tests below are the only ones that run real Git *inside* the sandbox,
+  // which makes them 4-7x heavier than the rest of this file (~1.4s vs ~0.2s
+  // measured in isolation). At the old 5s ceiling that left a 3.6x margin, and
+  // under full-suite parallel load they intermittently blew through it. A timeout
+  // surfaces as headStatus 'infra' — errorClassification treats "timeout after" as
+  // infrastructure — so the failure read as a broken sandbox rather than a slow
+  // one. The ceiling is a hang guard, not a performance assertion.
+  //
+  // It must stay clearly BELOW vitest's own testTimeout (30s, vitest.config.ts).
+  // runVerify starts this timer only after building the sandbox, so a ceiling at
+  // the harness limit would let vitest kill the test first and report a generic
+  // suite timeout — losing the headStatus and rawOutputTail this guard exists to
+  // produce, which is the same unexplained failure in different clothing. 15s
+  // leaves ~7x margin over the 2.1s measured under load and half the budget spare
+  // for sandbox setup and teardown. (INT-3104)
+  const SANDBOX_GIT_TIMEOUT_MS = 15_000;
+
   it('preserves Git metadata inside the isolated head sandbox', async () => {
     const [evidence] = await runVerify({
       projectPath: repo,
-      commands: [verify('git rev-parse --is-inside-work-tree && git diff --check', 5_000)],
+      commands: [verify('git rev-parse --is-inside-work-tree && git diff --check', SANDBOX_GIT_TIMEOUT_MS)],
       baseRef: 'HEAD',
     });
-    expect(evidence).toMatchObject({ headStatus: 'pass', newFailure: false });
+    // Surface the sandbox output on failure: an 'infra' result is otherwise a bare
+    // status with no clue whether the sandbox broke or merely ran out of time.
+    expect(evidence.headStatus, evidence.rawOutputTail).toBe('pass');
+    expect(evidence.newFailure).toBe(false);
     expect(evidence.rawOutputTail).toContain('true');
   });
 
@@ -289,11 +309,11 @@ describe('runVerify', () => {
 
     const [evidence] = await runVerify({
       projectPath: linked,
-      commands: [verify('printf sandbox > README.md; git add README.md', 5_000)],
+      commands: [verify('printf sandbox > README.md; git add README.md', SANDBOX_GIT_TIMEOUT_MS)],
       baseRef: 'HEAD',
     });
 
-    expect(evidence.headStatus).toBe('pass');
+    expect(evidence.headStatus, evidence.rawOutputTail).toBe('pass');
     expect(execFileSync('git', ['-C', linked, 'status', '--porcelain=v1'], { encoding: 'utf8' })).toBe(before);
     expect(await readFile(join(linked, 'README.md'), 'utf8')).toBe('base\n');
   });
