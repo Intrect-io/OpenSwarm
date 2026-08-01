@@ -110,3 +110,32 @@ jobs:
               echo "::warning file=$file::File exceeds 800 lines ($lines)"
             fi
           done
+
+  verify-sandbox:
+    # Deterministic verification refuses to run without an OS sandbox, and the
+    # answer depends on the runner, not on our code: bubblewrap is absent from
+    # ubuntu-latest by default, and even installed it needs unprivileged user
+    # namespaces the host may deny. Measuring it here is the only way that claim
+    # in the README stays true — a unit test cannot tell you what this runner
+    # allows. (INT-3103)
+    name: Verify sandbox (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe before installing bubblewrap
+        run: |
+          if command -v bwrap >/dev/null; then
+            echo "::warning::bwrap is present on this runner by default — the README says it is not"
+          else
+            echo "bwrap absent by default, as documented"
+          fi
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Probe the sandbox the verify runner actually uses
+        run: |
+          set -euo pipefail
+          # The same namespaces src/verify/runner.ts sets up. A probe of a subset
+          # would pass on a host that denies one of the others.
+          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true
+          echo "OS verification sandbox is available on ubuntu-latest after installing bubblewrap"
