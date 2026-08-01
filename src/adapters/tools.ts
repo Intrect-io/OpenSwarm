@@ -217,6 +217,48 @@ const READ_ONLY_DENIED_TOOLS = new Set([
   'diagnostics',
 ]);
 
+
+/** Did this spawn fail because the binary is not installed? */
+function isMissingExecutable(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === 'ENOENT';
+}
+
+/**
+ * `git grep` stand-in for ripgrep.
+ *
+ * Deliberately not a full reimplementation: it covers the case that matters —
+ * searching a repository — and says so plainly when it cannot, rather than
+ * returning an error the agent reads as "no matches". Line numbers and the
+ * 50-match cap match the ripgrep invocation so the output shape is the same.
+ */
+async function searchWithGitGrep(
+  pattern: string,
+  searchPath: string,
+  glob: string | undefined,
+  callId: string,
+  cwd: string,
+): Promise<ToolResult> {
+  const args = ['grep', '--no-color', '-n', '-I', '-E', '-e', pattern, '--'];
+  args.push(glob ? `${searchPath}/${glob}` : searchPath);
+  try {
+    const { stdout } = await execFileAsync('git', args, { cwd, timeout: 10000, maxBuffer: 1024 * 256 });
+    const lines = stdout.split('\n').filter(Boolean).slice(0, 50);
+    return { tool_call_id: callId, content: lines.length ? lines.join('\n') : '(no matches)', is_error: false };
+  } catch (error) {
+    // git grep also exits 1 for no matches.
+    if (error && typeof error === 'object' && 'code' in error && (error as { code: number }).code === 1) {
+      return { tool_call_id: callId, content: '(no matches)', is_error: false };
+    }
+    return {
+      tool_call_id: callId,
+      content:
+        'search_files is unavailable: ripgrep is not installed and git grep failed. ' +
+        'Install ripgrep, or run this inside a git repository. Do not treat this as "no matches".',
+      is_error: true,
+    };
+  }
+}
+
 function isCommandBlocked(command: string): boolean {
   return BLOCKED_COMMANDS.some(pattern => pattern.test(command));
 }
@@ -599,6 +641,16 @@ export async function executeTool(
           // rg exit code 1 = no matches
           if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 1) {
             return { tool_call_id: callId, content: '(no matches)', is_error: false };
+          }
+          // ripgrep is not everywhere. On a hosted CI runner it can be absent
+          // entirely, and then every search returns ENOENT: the agent learns
+          // that searching does not work, stops trying, and reviews the diff
+          // without ever looking at the surrounding code — while still emitting
+          // a confident verdict. Observed on a real GitHub Actions run: five
+          // consecutive `spawn rg ENOENT`, verdict `approve`. Falling back to
+          // git grep keeps the capability instead of silently losing it.
+          if (isMissingExecutable(err)) {
+            return searchWithGitGrep(args.pattern, searchPath, args.glob, callId, cwd);
           }
           throw err;
         }
