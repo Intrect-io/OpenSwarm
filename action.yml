@@ -1,0 +1,114 @@
+name: 'OpenSwarm Review'
+description: 'Run the OpenSwarm agentic review gate over a pull request diff'
+author: 'Heewon Oh'
+
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  base:
+    description: >-
+      Git ref to diff against. Defaults to the PR base branch. A checked-out PR
+      branch has no dirty working tree, only commits ahead of its base, so the
+      gate must review the committed diff rather than working-tree changes.
+    required: false
+    default: ''
+  adapter:
+    description: 'Adapter override (openrouter, atlascloud, codex-responses, ...). Defaults to the configured provider.'
+    required: false
+    default: ''
+  version:
+    description: 'Version of @intrect/openswarm to install.'
+    required: false
+    default: 'latest'
+  sarif-file:
+    description: >-
+      Where to write the SARIF report. Uploading it is left to the caller —
+      that step needs `security-events: write`, which a composite action cannot
+      grant itself.
+    required: false
+    default: 'openswarm-review.sarif'
+  fail-on-gate-not-run:
+    description: >-
+      Whether a gate that never produced a verdict (quota exhausted, adapter
+      down) fails the job. Default true: a review that did not happen must not
+      read as a pass. Set false only if a separate alert covers it.
+    required: false
+    default: 'true'
+
+outputs:
+  decision:
+    description: 'approve | revise | reject — empty when the gate did not run.'
+    value: ${{ steps.review.outputs.decision }}
+  gate-ran:
+    description: 'true when a verdict was produced, false when the gate could not run.'
+    value: ${{ steps.review.outputs.gate-ran }}
+  sarif-file:
+    description: 'Path to the SARIF report, when one was written.'
+    value: ${{ steps.review.outputs.sarif-file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install OpenSwarm
+      shell: bash
+      run: npm install -g "@intrect/openswarm@${{ inputs.version }}"
+
+    - name: Run review gate
+      id: review
+      shell: bash
+      env:
+        # `review` reads provider credentials from the environment; the caller
+        # passes whichever secrets its configured adapter needs.
+        OPENSWARM_BASE: ${{ inputs.base }}
+        OPENSWARM_ADAPTER: ${{ inputs.adapter }}
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        FAIL_ON_GATE_NOT_RUN: ${{ inputs.fail-on-gate-not-run }}
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+      run: |
+        set -uo pipefail
+
+        BASE="${OPENSWARM_BASE:-}"
+        if [ -z "$BASE" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+          # actions/checkout fetches only the PR head by default, so the base
+          # branch has to be fetched before it can be diffed against.
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF" || true
+          BASE="origin/$GITHUB_BASE_REF"
+        fi
+
+        ARGS=(review --json --sarif "$SARIF_FILE")
+        [ -n "$BASE" ] && ARGS+=(--base "$BASE")
+        [ -n "${OPENSWARM_ADAPTER:-}" ] && ARGS+=(--adapter "$OPENSWARM_ADAPTER")
+
+        # stdout is the JSON document; diagnostics go to stderr and stay on the
+        # job log.
+        set +e
+        openswarm "${ARGS[@]}" > review.json
+        STATUS=$?
+        set -e
+
+        DECISION=""
+        GATE_RAN="false"
+        if [ -s review.json ]; then
+          DECISION=$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync("review.json","utf8")).decision??""))}catch{}')
+          GATE_RAN=$(node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync("review.json","utf8")).gateRan??false))}catch{process.stdout.write("false")}')
+        fi
+
+        echo "decision=$DECISION" >> "$GITHUB_OUTPUT"
+        echo "gate-ran=$GATE_RAN" >> "$GITHUB_OUTPUT"
+        [ -f "$SARIF_FILE" ] && echo "sarif-file=$SARIF_FILE" >> "$GITHUB_OUTPUT"
+
+        # Exit contract (INT-3100): 0 ran and did not reject · 1 ran and rejected
+        # · 2 never ran. The 1/2 split is preserved so a workflow can alert
+        # differently, but both are failures by default — a review that did not
+        # happen is not a pass.
+        case "$STATUS" in
+          0) echo "::notice::OpenSwarm review: ${DECISION:-no changes}" ;;
+          1) echo "::error::OpenSwarm review rejected this change"; exit 1 ;;
+          2)
+            echo "::error::OpenSwarm review gate did not run — no verdict was produced"
+            if [ "$FAIL_ON_GATE_NOT_RUN" = "true" ]; then exit 2; fi
+            ;;
+          *) echo "::error::OpenSwarm exited with unexpected status $STATUS"; exit "$STATUS" ;;
+        esac

@@ -1,0 +1,66 @@
+name: Review Gate
+
+# Dogfoods action.yml against this repository's own pull requests.
+#
+# Deliberately manual (workflow_dispatch), not `on: pull_request`. The gate calls
+# a paid model on every run, so turning it on for every PR is a spending decision
+# the repository owner should make explicitly rather than inherit from a merge.
+# To enable it, add the `pull_request` trigger below.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Pull request number to review'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  # Required by upload-sarif. Without it the review still runs; only the
+  # code-scanning upload fails.
+  security-events: write
+
+jobs:
+  review:
+    name: OpenSwarm review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr }}/head
+          # The gate diffs against the base branch, which a shallow single-ref
+          # clone does not contain.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve the PR base branch
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BASE=$(gh pr view "${{ inputs.pr }}" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+          echo "ref=origin/$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Review
+        id: review
+        uses: ./
+        with:
+          base: ${{ steps.base.outputs.ref }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Pin routing to the sponsor's capacity. Without it the account's own
+          # credit is spent, and it has none.
+          OPENROUTER_PROVIDER_ONLY: atlas-cloud
+
+      - name: Upload SARIF
+        # Runs even when the gate rejected — the findings are most useful exactly
+        # then. Skipped only if no report was produced.
+        if: always() && steps.review.outputs.sarif-file != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.review.outputs.sarif-file }}

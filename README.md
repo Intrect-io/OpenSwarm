@@ -132,6 +132,46 @@ Treat any non-zero exit as a failed check. The `1`/`2` split lets a workflow
 retry or alert differently when the gate could not run at all (e.g. a quota
 window exhausted — stderr names the cause and, when known, the reset time).
 
+### Running the gate in CI
+
+A composite action wraps the whole flow — install, diff against the PR base,
+review, and map the exit code onto the job result:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write   # only needed for the SARIF upload
+
+steps:
+  - uses: actions/checkout@v4
+    with: { fetch-depth: 0 }   # the base branch has to be present to diff against
+  - uses: actions/setup-node@v4
+    with: { node-version: '22' }
+  - id: review
+    uses: unohee/OpenSwarm@main
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  - if: always() && steps.review.outputs.sarif-file != ''
+    uses: github/codeql-action/upload-sarif@v3
+    with: { sarif_file: ${{ steps.review.outputs.sarif-file }} }
+```
+
+Inputs: `base` (defaults to the PR base branch), `adapter`, `version`,
+`sarif-file`, and `fail-on-gate-not-run` — the last defaults to `true` because a
+review that did not happen must not read as a pass.
+
+Outputs: `decision`, `gate-ran`, `sarif-file`.
+
+For scripting without the action, `--json` prints the verdict on stdout under a
+versioned schema (the human report is suppressed so `openswarm review --json |
+jq` works), and `--sarif <file>` writes SARIF 2.1.0 for code scanning. Findings
+are reported at `warning`: the verdict is what blocks, while individual
+follow-ups are advisory and some accompany an approve.
+
+`.github/workflows/review-gate.yml` in this repository dogfoods the action. It is
+`workflow_dispatch` only — the gate calls a paid model on every run, so enabling
+it for every pull request is left as an explicit choice.
+
 ### Deterministic verification
 
 Autonomous pipelines enable baseline-diff verification by default: OpenSwarm runs repository test/typecheck commands once, compares a failing head against the merge base, and gives the reviewer structured evidence so pre-existing failures do not block unrelated work. Add `.openswarm/verify.yaml` for repository-specific commands (see [`templates/verify.example.yaml`](templates/verify.example.yaml)), or let OpenSwarm discover standard Node, Python, Rust, and Go checks. Configure the behavior under `autonomous.verify`; the legacy `guards.qualityGate` whole-tree check is deprecated.
