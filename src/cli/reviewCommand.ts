@@ -221,6 +221,13 @@ export interface ReviewCommandOptions {
   json?: boolean;
   /** Write a SARIF 2.1.0 report here for GitHub code scanning. (INT-3102) */
   sarif?: string;
+  /**
+   * Deny the reviewer every mutating tool, including bash. Required when the
+   * diff under review is untrusted — a CI review of a pull request otherwise
+   * hands an agent shell access on attacker-authored files with the provider
+   * credential in the environment. (INT-3189)
+   */
+  readOnly?: boolean;
 }
 
 /**
@@ -301,6 +308,7 @@ export async function runReviewCommand(
         adapterName: opts.adapter as never,
         mode: 'direct',
         priorReviewContext: history.context,
+        readOnly: opts.readOnly,
         onLog,
       });
     });

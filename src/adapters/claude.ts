@@ -30,6 +30,18 @@ const execFileAsync = promisify(execFile);
  */
 const CLAUDE_DEFAULT_MODEL = 'sonnet';
 
+/**
+ * The only tools a read-only run may use. Inspection and search, nothing that
+ * writes and nothing that shells out.
+ *
+ * `Task` is absent deliberately: a subagent is a second agent whose toolset this
+ * flag does not reach, which would turn the allowlist into a suggestion. Web
+ * tools are absent for the same reason the sandbox exists — the diff under
+ * review is attacker-authored, and a fetch is an outbound channel for whatever
+ * the agent can read, including the provider credential.
+ */
+const READ_ONLY_CLAUDE_TOOLS = ['Read', 'Grep', 'Glob'];
+
 // Claude CLI Adapter
 
 export class ClaudeCliAdapter implements CliAdapter {
@@ -41,6 +53,7 @@ export class ClaudeCliAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: false,
     supportedSkills: ['/audit', '/documents', '/refactor'],
+    enforcesReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {
@@ -62,8 +75,21 @@ export class ClaudeCliAdapter implements CliAdapter {
     if (!model.trim() || model.includes('\0')) throw new Error('Invalid Claude model');
     // Register OpenSwarm's memory MCP server unless the caller needs an isolated run.
     // bypassPermissions auto-allows its tool when present.
-    const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
-    const mcpConfig = options.memoryTools !== false ? writeClaudeMcpConfig() : undefined;
+    //
+    // Read-only runs must not use bypassPermissions — it is what grants Write and
+    // Bash in the first place. `--permission-mode default` in `-p` has no one to
+    // prompt, so anything outside the allowlist is denied outright (verified:
+    // Write refused twice, no file created). An allowlist rather than a denylist,
+    // so a tool added to the CLI later is denied by default. (INT-3189)
+    const args = options.readOnly
+      ? ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default',
+         '--allowedTools', ...READ_ONLY_CLAUDE_TOOLS]
+      : ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
+    // Not registered in a read-only run: the memory tools are outside the
+    // allowlist, so every call would be denied anyway, and the server exposes
+    // writes — memory is the one place a prompt-injected review could leave
+    // something behind for the next run.
+    const mcpConfig = options.memoryTools !== false && !options.readOnly ? writeClaudeMcpConfig() : undefined;
     if (mcpConfig) args.push('--mcp-config', mcpConfig);
     args.push('--model', model);
     if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));

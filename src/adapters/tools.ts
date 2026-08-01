@@ -398,7 +398,11 @@ export async function executeTool(
 
   try {
     const args = JSON.parse(argsJson);
-    if (execOptions?.readOnly && ['write_file', 'edit_file', 'apply_patch', 'bash'].includes(name)) {
+    // `web_fetch`/`web_search` are withheld from the tool list in readOnly, but
+    // the denial lives here too: a model can emit a call for a tool it was never
+    // shown, and an outbound request is the exfiltration path the mode exists to
+    // close. Withholding is the hint; this is the enforcement. (INT-3189)
+    if (execOptions?.readOnly && ['write_file', 'edit_file', 'apply_patch', 'bash', 'web_fetch', 'web_search'].includes(name)) {
       return {
         tool_call_id: callId,
         content: `READ_ONLY: ${name} is disabled for this run. Use read_file/search_files/search_memory only.`,

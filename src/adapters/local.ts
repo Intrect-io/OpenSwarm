@@ -49,6 +49,8 @@ export class LocalModelAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: false,
     supportedSkills: [],
+    // The agentic loop honours CliRunOptions.readOnly (see agenticLoop/tools). (INT-3189)
+    enforcesReadOnly: true,
   };
 
   // 활성 서버 URL (isAvailable에서 감지, run에서 사용)

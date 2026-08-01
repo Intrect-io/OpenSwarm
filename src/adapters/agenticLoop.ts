@@ -246,8 +246,14 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         ...(applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
         // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
         ...(diagnosticsTool && !readOnly ? [DIAGNOSTICS_TOOL] : []),
-        ...(webTools ? WEB_TOOL_DEFINITIONS : []),
-        ...(mcpTools ?? []),
+        // Both are withheld in readOnly. A read-only run exists because the
+        // material under inspection is untrusted, and a fetch is an outbound
+        // channel for anything the agent can read — the provider credential
+        // included. MCP servers are withheld for the mirror reason: OpenSwarm's
+        // own memory server exposes writes, so injected content could leave
+        // something behind for a later run. (INT-3189)
+        ...(webTools && !readOnly ? WEB_TOOL_DEFINITIONS : []),
+        ...(readOnly ? [] : mcpTools ?? []),
       ]
     : [];
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)

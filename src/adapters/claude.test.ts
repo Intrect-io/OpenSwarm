@@ -56,3 +56,42 @@ describe('ClaudeCliAdapter.buildCommand model pinning (INT-2509)', () => {
     expect(args[args.indexOf('--model') + 1]).toBe('sonnet; touch /tmp/pwned');
   });
 });
+
+describe('ClaudeCliAdapter read-only mode (INT-3189)', () => {
+  it('drops bypassPermissions for an allowlist of inspection tools', () => {
+    // bypassPermissions is what grants Write and Bash, so a read-only run that
+    // kept it would deny nothing. `-p` has no one to prompt, so anything outside
+    // --allowedTools is refused outright.
+    const { args } = new ClaudeCliAdapter().buildCommand({
+      prompt: '/tmp/prompt.txt',
+      cwd: '/tmp/project',
+      model: 'claude-sonnet-4',
+      readOnly: true,
+    });
+
+    expect(args).not.toContain('bypassPermissions');
+    expect(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2))
+      .toEqual(['--permission-mode', 'default']);
+    const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--model'));
+    expect(allowed).toEqual(['Read', 'Grep', 'Glob']);
+    // Task would spawn a subagent whose toolset this flag never reaches.
+    expect(allowed).not.toContain('Task');
+    expect(allowed.some((tool) => /Write|Edit|Bash|Web/.test(tool))).toBe(false);
+  });
+
+  it('does not register the memory MCP server in a read-only run', () => {
+    // It exposes writes, and every call would be denied by the allowlist anyway.
+    const { args } = new ClaudeCliAdapter().buildCommand({
+      prompt: '/tmp/prompt.txt',
+      cwd: '/tmp/project',
+      model: 'claude-sonnet-4',
+      readOnly: true,
+    });
+
+    expect(args).not.toContain('--mcp-config');
+  });
+
+  it('declares that it enforces read-only, so spawnCli does not refuse it', () => {
+    expect(new ClaudeCliAdapter().capabilities.enforcesReadOnly).toBe(true);
+  });
+});

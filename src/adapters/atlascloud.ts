@@ -80,6 +80,8 @@ export class AtlasCloudCliAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: false,
     supportedSkills: [],
+    // The agentic loop honours CliRunOptions.readOnly (see agenticLoop/tools). (INT-3189)
+    enforcesReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {

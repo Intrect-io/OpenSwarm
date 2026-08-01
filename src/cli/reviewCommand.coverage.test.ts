@@ -311,6 +311,27 @@ describe('runReviewCommand default deps (no injected review/getBranch/log/fileFo
     );
   });
 
+  it('forwards --read-only to the reviewer so CI reviews cannot mutate or shell out', async () => {
+    // The CI gate reviews an attacker-authored diff. If the flag stopped at the
+    // CLI boundary the reviewer would keep bash with the provider credential in
+    // the environment. (INT-3189)
+    runReviewerMock.mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' } as ReviewResult);
+    await runReviewCommand(
+      { base: 'origin/main', readOnly: true },
+      { getChangedFiles: async () => ['a.ts'], startProgress: () => null, log: () => {} },
+    );
+    expect(runReviewerMock).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
+  });
+
+  it('leaves the local review unrestricted when --read-only is absent', async () => {
+    runReviewerMock.mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' } as ReviewResult);
+    await runReviewCommand(
+      {},
+      { getChangedFiles: async () => ['a.ts'], startProgress: () => null, log: () => {} },
+    );
+    expect(runReviewerMock.mock.calls.at(-1)?.[0].readOnly).toBeUndefined();
+  });
+
   it('builds the reviewer call itself (committed-diff mode) when `opts.base` is set', async () => {
     runReviewerMock.mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' } as ReviewResult);
     await runReviewCommand(
