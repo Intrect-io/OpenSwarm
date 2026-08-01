@@ -144,11 +144,14 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-    with: { fetch-depth: 0 }   # the base branch has to be present to diff against
+    with: { fetch-depth: 0 }   # the merge base has to be present to diff against
   - uses: actions/setup-node@v4
     with: { node-version: '22' }
   - id: review
     uses: unohee/OpenSwarm@main
+    with:
+      adapter: openrouter   # a hosted runner has no config; without this the CLI
+                            # falls back to its `codex` default
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
   - if: always() && steps.review.outputs.sarif-file != ''
@@ -156,11 +159,48 @@ steps:
     with: { sarif_file: ${{ steps.review.outputs.sarif-file }} }
 ```
 
-Inputs: `base` (defaults to the PR base branch), `adapter`, `version`,
+Inputs: `path` (which checkout to review), `base` (defaults to the merge base of
+the PR head and its base branch), `adapter`, `read-only`, `version`,
 `sarif-file`, and `fail-on-gate-not-run` — the last defaults to `true` because a
 review that did not happen must not read as a pass.
 
 Outputs: `decision`, `gate-ran`, `sarif-file`.
+
+#### Reviewing pull requests safely
+
+The reviewer reads attacker-authored files with your provider credential in the
+environment. Two properties keep that from becoming code execution:
+
+**`read-only` defaults to `true`**, which denies the reviewer every mutating tool
+including `bash`. It is enforced per adapter, and an adapter that cannot enforce
+it refuses to run rather than quietly ignoring the flag:
+
+| Adapter | How read-only is enforced |
+| --- | --- |
+| `openrouter`, `atlascloud`, `gpt`, `codex-responses`, `local`/`lmstudio` | The agentic loop withholds the mutating, web, and MCP tools, and the executor refuses them if called anyway |
+| `claude` | `--permission-mode default` with an allowlist of `Read`/`Grep`/`Glob`, instead of `bypassPermissions` |
+| `codex` | `--sandbox read-only` instead of `workspace-write` |
+| anything else | Refused — `spawnCli` will not start a read-only run on an adapter that has not declared enforcement |
+
+**The reviewed checkout never becomes the working directory.** OpenSwarm looks
+for its own `config.yaml` in the current directory first, so a config committed
+to the pull request would otherwise choose the run's adapter, model, and MCP
+servers. The action runs from the runner temp and points `--path` at the
+checkout instead.
+
+**Run the action's code from a trusted ref.** `uses: unohee/OpenSwarm@main`
+already does this — the action code comes from this repository, not from the
+pull request. It is only `uses: ./` that is unsafe, because after checking out a
+pull request that path holds `action.yml` as the contributor wrote it, with your
+secrets in scope. If you self-host the action, check it out from your default
+branch into its own path and the pull request into another, then point `path` at
+the latter — see
+[`.github/workflows/review-gate.yml`](.github/workflows/review-gate.yml), which
+does exactly that to dogfood this repository.
+
+**To run it automatically, the trigger is `pull_request_target`.** A
+`pull_request` run from a fork gets no secrets, so the provider key would be
+empty and every fork PR would fail as gate-not-run.
 
 For scripting without the action, `--json` prints the verdict on stdout under a
 versioned schema (the human report is suppressed so `openswarm review --json |

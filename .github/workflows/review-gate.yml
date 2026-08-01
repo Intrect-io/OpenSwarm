@@ -5,7 +5,14 @@ name: Review Gate
 # Deliberately manual (workflow_dispatch), not `on: pull_request`. The gate calls
 # a paid model on every run, so turning it on for every PR is a spending decision
 # the repository owner should make explicitly rather than inherit from a merge.
-# To enable it, add the `pull_request` trigger below.
+#
+# To automate it, the trigger you want is `pull_request_target`, not
+# `pull_request`: secrets are not exposed to a `pull_request` run from a fork, so
+# OPENROUTER_API_KEY would be empty and every fork PR would fail as gate-not-run.
+# `pull_request_target` runs with secrets — which is safe here only because the
+# two checkouts below keep the executed action code and the reviewed code apart,
+# and the reviewer itself runs read-only. The PR number resolves from either
+# trigger already.
 
 on:
   workflow_dispatch:
@@ -27,10 +34,45 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      # The action's own code comes from the default branch, never from the pull
+      # request. `uses: ./` against a PR checkout executes action.yml as the
+      # contributor wrote it, and this job hands that code OPENROUTER_API_KEY —
+      # so a PR that edits action.yml would be a credential handout. Two
+      # checkouts in two paths keep the executed code and the reviewed code
+      # apart.
+      #
+      # Consequence worth knowing: this workflow cannot run against the pull
+      # request that introduces action.yml, because the default branch does not
+      # have that file yet. The first real execution is necessarily after merge.
+      - name: Check out the trusted action code
+        uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ inputs.pr }}/head
-          # The gate diffs against the base branch, which a shallow single-ref
+          ref: ${{ github.event.repository.default_branch }}
+          path: action-src
+
+      - name: Resolve the pull request number
+        id: pr
+        env:
+          # From the event when a PR triggered this, from the dispatch input
+          # otherwise. Reading only `inputs.pr` would produce `refs/pull//head`
+          # the moment the `pull_request` trigger above is enabled.
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          INPUT_PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          NUMBER="${EVENT_PR:-$INPUT_PR}"
+          if [ -z "$NUMBER" ]; then
+            echo "::error::No pull request number from the event or the dispatch input"
+            exit 1
+          fi
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          path: pr
+          # The gate diffs against the merge base, which a shallow single-ref
           # clone does not contain.
           fetch-depth: 0
 
@@ -38,19 +80,39 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Resolve the PR base branch
+      - name: Resolve the PR base
         id: base
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          BASE=$(gh pr view "${{ inputs.pr }}" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
-          echo "ref=origin/$BASE" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          BASE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)
+          cd pr
+          git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE"
+          # The merge base, not the tip: the base branch may have moved since the
+          # PR diverged, and a two-dot diff against its tip would list files the
+          # PR never touched.
+          #
+          # Assigned first, deliberately. `set -e` does not fire on a command
+          # substitution that fails inside an argument, so `echo "ref=$(git
+          # merge-base ...)"` would write an empty ref and let the step succeed —
+          # and an empty base makes the gate review a clean working tree, find
+          # nothing, and go green.
+          REF=$(git merge-base HEAD "refs/remotes/origin/$BASE")
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Review
         id: review
-        uses: ./
+        uses: ./action-src
         with:
+          path: pr
           base: ${{ steps.base.outputs.ref }}
+          # A hosted runner has no OpenSwarm config, so the CLI would fall back
+          # to its `codex` default and never reach OpenRouter no matter which key
+          # is exported.
+          adapter: openrouter
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           # Pin routing to the sponsor's capacity. Without it the account's own
@@ -64,3 +126,11 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ steps.review.outputs.sarif-file }}
+          # Locations in the report are relative to the reviewed checkout, not
+          # the workspace root.
+          checkout_path: ${{ github.workspace }}/pr
+          # Without these the upload is attributed to whatever ref dispatched the
+          # workflow — the default branch — instead of the pull request that was
+          # actually analysed.
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          sha: ${{ steps.base.outputs.sha }}
