@@ -384,3 +384,76 @@ describe('runReviewCommand --base (INT-2552)', () => {
     expect(logs.join('\n')).toContain('origin/main');
   });
 });
+
+describe('runReviewCommand machine-readable output (INT-3102)', () => {
+  const reviewed = async () =>
+    ({
+      decision: 'revise',
+      feedback: 'CSRF validation removed',
+      issues: ['the session fixture depends on it'],
+      recommendedActions: [{ type: 'bug', title: 'Restore the guard', location: 'src/auth.ts:42' }],
+    }) as ReviewResult;
+
+  it('--json writes the verdict to stdout and keeps prose off it', async () => {
+    // Mixing the human report into stdout would break `review --json | jq`.
+    const stdout: string[] = [];
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => {
+      stdout.push(String(chunk));
+      return true;
+    });
+    const logs: string[] = [];
+    try {
+      await runReviewCommand(
+        { json: true },
+        { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: (l) => logs.push(l) },
+      );
+    } finally {
+      write.mockRestore();
+    }
+
+    const parsed = JSON.parse(stdout.join(''));
+    expect(parsed).toMatchObject({ schemaVersion: 1, decision: 'revise', gateRan: true });
+    expect(parsed.findings[0]).toMatchObject({ file: 'src/auth.ts', line: 42 });
+    // The human verdict block must not have gone to stdout as well.
+    expect(logs.join('\n')).not.toContain('Decision: REVISE');
+  });
+
+  it('still prints the human report when --json is absent', async () => {
+    const logs: string[] = [];
+    await runReviewCommand(
+      {},
+      { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: (l) => logs.push(l) },
+    );
+    expect(logs.join('\n')).toContain('Decision: REVISE');
+  });
+
+  it('--sarif writes a report and reports where it went', async () => {
+    const { mkdtemp, readFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = await mkdtemp(join(tmpdir(), 'osw-sarif-'));
+    const target = join(dir, 'out.sarif');
+    const logs: string[] = [];
+
+    await runReviewCommand(
+      { sarif: target },
+      { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: (l) => logs.push(l) },
+    );
+
+    const sarif = JSON.parse(await readFile(target, 'utf8'));
+    expect(sarif.version).toBe('2.1.0');
+    expect(sarif.runs[0].results.find((r: any) => r.ruleId === 'openswarm/bug').locations[0].physicalLocation.artifactLocation.uri).toBe('src/auth.ts');
+    expect(logs.join('\n')).toContain('SARIF report written');
+  });
+
+  it('an unwritable SARIF path warns instead of failing the gate', async () => {
+    // The verdict already exists and must still decide the exit code (INT-3100).
+    const logs: string[] = [];
+    const result = await runReviewCommand(
+      { sarif: '/nonexistent-directory-openswarm/out.sarif' },
+      { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: (l) => logs.push(l) },
+    );
+    expect(result?.decision).toBe('revise');
+    expect(logs.join('\n')).toContain('Could not write SARIF report');
+  });
+});

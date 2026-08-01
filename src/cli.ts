@@ -296,6 +296,8 @@ program
   .option('--issues-per-area [parent]', 'For --max: legacy per-area follow-up fan-out (skips the PM synthesis)')
   .option('--file [parent]', 'Alias for --issues (back-compat)')
   .option('--adapter <name>', 'Adapter override for the reviewer')
+  .option('--json', 'Emit the verdict as JSON on stdout instead of the human report (for CI)')
+  .option('--sarif <file>', 'Write a SARIF 2.1.0 report for GitHub code scanning')
   .option('--debug', 'Verbose logging')
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
@@ -312,11 +314,20 @@ program
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
-    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean;
+    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
     try {
+      // --json/--sarif are declared on the shared `review` command but only the
+      // direct path implements them. Silently printing the normal report and
+      // never writing the requested file is worse than refusing: a CI step would
+      // read an absent SARIF as "no findings".
+      if (opts.max && (opts.json || opts.sarif)) {
+        console.error('--json and --sarif are not supported with --max yet; use --out for the audit report.');
+        process.exitCode = 2;
+        return;
+      }
       if (opts.max) {
         const { runReviewMaxCommand, reviewMaxResultFailed } = await import('./cli/reviewMaxCommand.js');
         const result = await runReviewMaxCommand({
@@ -347,7 +358,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,
@@ -355,6 +366,14 @@ program
       // rejected" and neither reads as a pass. (INT-3100)
       const { REVIEW_EXIT_GATE_NOT_RUN, describeReviewGateFailure } = await import('./cli/reviewExit.js');
       console.error(describeReviewGateFailure(e));
+      // Emit the documented gate-not-run document rather than nothing. Without
+      // this, `--json` produced no parseable output in exactly the case a CI
+      // step most needs one, and the advertised `gateRan: false` state was
+      // unreachable. The exit code still carries the outcome. (INT-3102)
+      if (opts.json) {
+        const { gateNotRunJson } = await import('./cli/reviewOutput.js');
+        process.stdout.write(`${JSON.stringify(gateNotRunJson(e), null, 2)}\n`);
+      }
       process.exitCode = REVIEW_EXIT_GATE_NOT_RUN;
     }
   });
