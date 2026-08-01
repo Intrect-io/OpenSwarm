@@ -296,6 +296,8 @@ program
   .option('--issues-per-area [parent]', 'For --max: legacy per-area follow-up fan-out (skips the PM synthesis)')
   .option('--file [parent]', 'Alias for --issues (back-compat)')
   .option('--adapter <name>', 'Adapter override for the reviewer')
+  .option('--json', 'Emit the verdict as JSON on stdout instead of the human report (for CI)')
+  .option('--sarif <file>', 'Write a SARIF 2.1.0 report for GitHub code scanning')
   .option('--debug', 'Verbose logging')
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
@@ -312,7 +314,7 @@ program
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
-    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean;
+    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
@@ -347,7 +349,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,

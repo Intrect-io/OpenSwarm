@@ -213,6 +213,14 @@ export interface ReviewCommandOptions {
    * working-tree changes to find, only commits ahead of its base. (INT-2552)
    */
   base?: string;
+  /**
+   * Emit the verdict as JSON on stdout instead of the human report, so a CI step
+   * can branch on it without scraping terminal text. Progress and diagnostics
+   * stay on stderr, keeping stdout a clean document. (INT-3102)
+   */
+  json?: boolean;
+  /** Write a SARIF 2.1.0 report here for GitHub code scanning. (INT-3102) */
+  sarif?: string;
 }
 
 /**
@@ -310,7 +318,30 @@ export async function runReviewCommand(
   const deduped = dedupeReviewActions(result, history.records, history.currentHashes);
   result = deduped.review;
   if (deduped.removed > 0) log(`Suppressed ${deduped.removed} duplicate follow-up(s) already recorded for unchanged code.`);
-  log(formatReviewOutput(result, !!process.stdout.isTTY));
+
+  // --json replaces the human report rather than adding to it: mixing prose into
+  // stdout would break `openswarm review --json | jq`. Everything else this
+  // command says already goes through `log`, which callers route to stderr in
+  // that mode. (INT-3102)
+  if (opts.json) {
+    const { toReviewJson } = await import('./reviewOutput.js');
+    process.stdout.write(`${JSON.stringify(toReviewJson(result), null, 2)}\n`);
+  } else {
+    log(formatReviewOutput(result, !!process.stdout.isTTY));
+  }
+
+  if (opts.sarif) {
+    const { toSarif, packageVersion } = await import('./reviewOutput.js');
+    const { writeFile: writeSarif } = await import('node:fs/promises');
+    try {
+      await writeSarif(opts.sarif, `${JSON.stringify(toSarif(result, await packageVersion()), null, 2)}\n`);
+      log(`SARIF report written to ${opts.sarif}`);
+    } catch (error) {
+      // A report we could not write is a warning, not a failed gate: the verdict
+      // already exists and must still decide the exit code. (INT-3100)
+      log(`Could not write SARIF report: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   const saveHistoryForReview = deps.saveHistory
     ?? (deps.review
