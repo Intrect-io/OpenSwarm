@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.4 — 2026-08-04
+
+### Fixed
+
+- **`.env` credentials that only exist in the global `~/.config/openswarm/.env` are no longer invisible to repos with their own local `.env`.** `loadEnvFile()` returned as soon as it found the first `.env` file on its search path, so a project whose own `.env` predates a credential added later to the global file never even read that file. `ATLAS_CLOUD_API_KEY` is global-only, so `openswarm review --max` run from a repo with its own `.env` (predating Atlas Cloud) failed every subagent auth instantly, project-wide, while the identical command worked from a repo whose `.env` already had every key. It now layers every file on the search path, applying each key only when not already set by shell env or an earlier, more specific file. (INT-3256)
+
 ## 0.20.3 — 2026-08-04
 
 ### Fixed
