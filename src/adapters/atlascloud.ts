@@ -42,8 +42,12 @@ export const ATLASCLOUD_DEFAULT_MODEL = 'deepseek-ai/deepseek-v4-pro';
  * Ids to fall back on when the catalog is unreachable. Kept short on purpose —
  * this list exists to keep an offline run working, not to mirror the ~120 models
  * Atlas serves. Live discovery replaces it entirely.
+ *
+ * Also doubles as the offline half of modelCompat.ts's cross-provider guard: it
+ * needs *some* way to recognize an Atlas Cloud id even when the live/cached
+ * catalog is empty.
  */
-const CURATED_MODELS = [
+export const ATLASCLOUD_CURATED_MODELS = [
   ATLASCLOUD_DEFAULT_MODEL,
   'deepseek-ai/deepseek-v4-flash',
   'deepseek-ai/deepseek-v3.2',
@@ -57,7 +61,7 @@ function getEnvApiKey(): string | undefined {
 function catalogSpec(): CatalogSpec {
   return {
     provider: 'atlascloud',
-    curated: CURATED_MODELS,
+    curated: ATLASCLOUD_CURATED_MODELS,
     fetchLive: async () => {
       const apiKey = getEnvApiKey();
       if (!apiKey) return [];
