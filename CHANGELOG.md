@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.3 — 2026-08-04
+
+### Fixed
+
+- **Switching provider to `atlascloud` no longer 400s on every review and worker call.** `mapModelForProvider` special-cased `codex`/`codex-responses` and `claude`, but every other adapter — including `atlascloud` — fell into the generic "any `vendor/model`-shaped id survives" branch it shares with openrouter/gpt/local/lmstudio. OpenRouter and Atlas Cloud both name models `vendor/model`, but with different catalogs (OpenRouter's `z-ai/glm-5.2` vs Atlas's own `zai-org/GLM-4.6`), so a role configured for OpenRouter kept its model id verbatim on a switch to `atlascloud` and every call to `api.atlascloud.ai` 400'd `"not found"` — confirmed live against the real API. It now checks membership against Atlas's curated model list and live catalog cache, in both directions, so a switch away from `atlascloud` can't leak its ids into OpenRouter either. (INT-3246)
+
 ## 0.20.2 — 2026-08-01
 
 Three fixes to the CI review gate, all found by running it rather than reading it. Each is the same failure in a different place: the gate produced a confident verdict while something it needed was missing.
