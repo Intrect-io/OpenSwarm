@@ -44,6 +44,8 @@ function loadTelemetryEnabledQuietly(quiet: boolean): boolean | undefined {
 // DO_NOT_TRACK / CI. One event per command invocation (command name only — never
 // arguments). Fire-and-forget: not awaited, and track() never throws.
 initTelemetry({ version: VERSION });
+/** Start times, so the completion event can report how long the command ran. */
+const commandStartedAt = new WeakMap<object, number>();
 program.hook('preAction', (_thisCommand, actionCommand) => {
   // Honor config telemetry.enabled when a config exists (best-effort — `run`/`init`
   // may have none, in which case the env opt-out still applies).
@@ -64,7 +66,28 @@ program.hook('preAction', (_thisCommand, actionCommand) => {
   } catch {
     /* no/invalid config — keep the built-in default */
   }
+  commandStartedAt.set(actionCommand, Date.now());
   void track({ command: actionCommand.name() });
+});
+
+// The other half of the pair. `invoke` alone says a command started and nothing
+// else — a run that crashed, hung, or was killed looked exactly like one that
+// finished. That gap mattered: 11 of 18 external installs ended on the TUI and
+// the data could not say whether it failed or they simply quit.
+//
+// An `invoke` with no matching `complete` is now itself the signal, so this hook
+// does not need to catch every abnormal exit to be useful — it only has to be
+// honest about the ones it does see. Commands that report failure by setting
+// process.exitCode are the common case here; a thrown error skips postAction and
+// leaves the absent-completion signal instead, which is the correct reading.
+program.hook('postAction', (_thisCommand, actionCommand) => {
+  const startedAt = commandStartedAt.get(actionCommand);
+  void track({
+    event: 'complete',
+    command: actionCommand.name(),
+    isError: !!process.exitCode,
+    ...(startedAt ? { durationMs: Date.now() - startedAt } : {}),
+  });
 });
 
 program
@@ -296,6 +319,9 @@ program
   .option('--issues-per-area [parent]', 'For --max: legacy per-area follow-up fan-out (skips the PM synthesis)')
   .option('--file [parent]', 'Alias for --issues (back-compat)')
   .option('--adapter <name>', 'Adapter override for the reviewer')
+  .option('--json', 'Emit the verdict as JSON on stdout instead of the human report (for CI)')
+  .option('--sarif <file>', 'Write a SARIF 2.1.0 report for GitHub code scanning')
+  .option('--read-only', 'Deny the reviewer all mutating tools including bash — required when reviewing an untrusted diff in CI')
   .option('--debug', 'Verbose logging')
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
@@ -312,11 +338,28 @@ program
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
-    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean;
+    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
     try {
+      // --json/--sarif are declared on the shared `review` command but only the
+      // direct path implements them. Silently printing the normal report and
+      // never writing the requested file is worse than refusing: a CI step would
+      // read an absent SARIF as "no findings".
+      if (opts.max && (opts.json || opts.sarif)) {
+        console.error('--json and --sarif are not supported with --max yet; use --out for the audit report.');
+        process.exitCode = 2;
+        return;
+      }
+      // Same refusal, and it matters more here: silently ignoring --read-only
+      // would leave the caller believing bash was denied when the audit
+      // subagents still have it. (INT-3189)
+      if (opts.max && opts.readOnly) {
+        console.error('--read-only is not supported with --max yet; the audit fan-out still grants the reviewer its full toolset.');
+        process.exitCode = 2;
+        return;
+      }
       if (opts.max) {
         const { runReviewMaxCommand, reviewMaxResultFailed } = await import('./cli/reviewMaxCommand.js');
         const result = await runReviewMaxCommand({
@@ -347,7 +390,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,
@@ -355,6 +398,14 @@ program
       // rejected" and neither reads as a pass. (INT-3100)
       const { REVIEW_EXIT_GATE_NOT_RUN, describeReviewGateFailure } = await import('./cli/reviewExit.js');
       console.error(describeReviewGateFailure(e));
+      // Emit the documented gate-not-run document rather than nothing. Without
+      // this, `--json` produced no parseable output in exactly the case a CI
+      // step most needs one, and the advertised `gateRan: false` state was
+      // unreachable. The exit code still carries the outcome. (INT-3102)
+      if (opts.json) {
+        const { gateNotRunJson } = await import('./cli/reviewOutput.js');
+        process.stdout.write(`${JSON.stringify(gateNotRunJson(e), null, 2)}\n`);
+      }
       process.exitCode = REVIEW_EXIT_GATE_NOT_RUN;
     }
   });

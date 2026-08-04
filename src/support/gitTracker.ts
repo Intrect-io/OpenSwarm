@@ -41,6 +41,39 @@ export async function getChangedFiles(
 }
 
 /**
+ * The diff itself, for handing to a reviewer that cannot run git.
+ *
+ * Bounded, and honest about it: a truncated diff that does not say so invites a
+ * verdict on a change the reviewer only partly saw.
+ *
+ * The notice goes at the TOP, not the bottom. Downstream truncation — the
+ * prompt template bounds the whole worker report as untrusted data — removes
+ * the end of the text, so a notice appended after the diff is the first thing
+ * lost, leaving a diff that stops mid-hunk with no sign that anything is
+ * missing. Putting it first makes it survive any later cut, and removes the
+ * need to reason about how our limit compares to anyone else's: the earlier
+ * attempt tried to sit "just under" the template ceiling and still lost to a
+ * long file list sharing the same budget.
+ */
+export async function getDiffText(
+  projectPath: string,
+  since?: string,
+  maxBytes = 16_000,
+): Promise<string> {
+  const args = since
+    ? ['diff', '--no-color', '--no-ext-diff', since]
+    : ['diff', '--no-color', '--no-ext-diff', 'HEAD'];
+  try {
+    const diff = await runGitCommand(projectPath, args);
+    if (diff.length <= maxBytes) return diff;
+    return `[diff truncated at ${maxBytes} bytes of ${diff.length}; read the files directly for the rest]\n\n${diff.slice(0, maxBytes)}`;
+  } catch (error) {
+    console.error('[GitTracker] getDiffText error:', error);
+    return '';
+  }
+}
+
+/**
  * Capture the CURRENT worktree state (tracked + untracked-non-ignored) as a git
  * tree object, without touching the real index or worktree. A throwaway index
  * (via GIT_INDEX_FILE) lets `git add -A` stage everything there, then `write-tree`

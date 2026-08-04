@@ -179,3 +179,25 @@ describe('CodexCliAdapter', () => {
     expect(logs).toEqual(['Hello world']);
   });
 });
+
+describe('CodexCliAdapter read-only mode (INT-3189)', () => {
+  const adapter = new CodexCliAdapter();
+
+  it('drops to the read-only sandbox policy and unregisters memory', () => {
+    const { args } = adapter.buildCommand({
+      prompt: '/tmp/prompt.txt',
+      cwd: '/tmp/project',
+      model: 'gpt-5-codex',
+      readOnly: true,
+    });
+
+    expect(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2))
+      .toEqual(['--sandbox', 'read-only']);
+    expect(args).not.toContain('workspace-write');
+    expect(args.join(' ')).not.toContain('openswarm_memory');
+  });
+
+  it('declares that it enforces read-only, so spawnCli does not refuse it', () => {
+    expect(adapter.capabilities.enforcesReadOnly).toBe(true);
+  });
+});

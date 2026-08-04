@@ -290,6 +290,8 @@ export class CodexResponsesAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: false,
     supportedSkills: [],
+    // The agentic loop honours CliRunOptions.readOnly (see agenticLoop/tools). (INT-3189)
+    enforcesReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {
@@ -558,9 +560,10 @@ export class CodexResponsesAdapter implements CliAdapter {
 }
 
 async function refreshAndRetry(store: AuthProfileStore): Promise<string> {
-  const profile = store.getProfile(PROFILE_KEY);
-  if (!profile) throw new Error('No auth profile found');
-  profile.expires = 0; // force refresh
-  store.setProfile(PROFILE_KEY, profile);
+  // expireProfile, not getProfile + setProfile. `store` was built when run()
+  // started and this 401 can arrive hours later, so writing its snapshot back
+  // would restore whatever the refresh token was then — dead, if another
+  // process rotated it in between. Only `expires` is ours to change.
+  if (!store.expireProfile(PROFILE_KEY)) throw new Error('No auth profile found');
   return ensureValidToken(store, PROFILE_KEY);
 }

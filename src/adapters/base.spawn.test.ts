@@ -17,7 +17,7 @@ describe('argv-safe adapter spawning', () => {
       pid: 123,
       stdout: new PassThrough(),
       stderr: new PassThrough(),
-      stdin: { end: vi.fn() },
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
       kill: vi.fn(),
     });
     spawnMock.mockImplementationOnce(() => {
@@ -54,7 +54,7 @@ describe('argv-safe adapter spawning', () => {
       pid: 124,
       stdout: new PassThrough(),
       stderr: new PassThrough(),
-      stdin: { end: vi.fn() },
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
       kill: vi.fn(),
     });
     spawnMock.mockImplementationOnce(() => {
@@ -76,5 +76,88 @@ describe('argv-safe adapter spawning', () => {
     await spawnCli(adapter, { prompt: 'hello', cwd: process.cwd() });
 
     expect(existsSync(temporaryDir)).toBe(false);
+  });
+});
+
+describe('read-only fail-closed guard (INT-3189)', () => {
+  const stub = (enforcesReadOnly?: boolean): CliAdapter => ({
+    name: 'fixture',
+    capabilities: {
+      supportsStreaming: false,
+      supportsJsonOutput: false,
+      supportsModelSelection: false,
+      managedGit: false,
+      supportedSkills: [],
+      ...(enforcesReadOnly === undefined ? {} : { enforcesReadOnly }),
+    },
+    isAvailable: async () => true,
+    getDefaultModel: async () => 'fixture',
+    buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+    run: async () => ({ exitCode: 0, stdout: '', stderr: '', durationMs: 1 }),
+    parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+    parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+  });
+
+  it('refuses a read-only run on an adapter that cannot enforce it', async () => {
+    // The alternative is running with full tool access while the caller believes
+    // writes and shell are denied — the failure mode the flag exists to prevent.
+    await expect(
+      spawnCli(stub(), { prompt: 'p', cwd: process.cwd(), readOnly: true }),
+    ).rejects.toThrow(/cannot enforce read-only/);
+  });
+
+  it('lets the same adapter run when read-only was never asked for', async () => {
+    await expect(spawnCli(stub(), { prompt: 'p', cwd: process.cwd() })).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it('runs read-only on an adapter that declares enforcement', async () => {
+    await expect(
+      spawnCli(stub(true), { prompt: 'p', cwd: process.cwd(), readOnly: true }),
+    ).resolves.toMatchObject({ exitCode: 0 });
+  });
+});
+
+describe('stdin EPIPE must not take the process down (INT-2961)', () => {
+  it('handles an error on the child stdin stream', async () => {
+    // A CLI that exits before draining the pipe — a rejected flag, an auth
+    // failure, our own SIGKILL on timeout — makes the pending write emit EPIPE.
+    // An 'error' event with no listener is rethrown by Node as an uncaught
+    // exception; it arrives asynchronously, so neither the promise nor the
+    // caller's try/catch sees it and the daemon dies. `proc.on('error')` is a
+    // different emitter and does not cover this.
+    const stdinStream = Object.assign(new EventEmitter(), { end: vi.fn() });
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 321,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: stdinStream,
+      kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        stdinStream.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+        proc.emit('close', 1);
+      });
+      return proc;
+    });
+
+    const logged: string[] = [];
+    const adapter = {
+      name: 'fixture',
+      capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
+      isAvailable: async () => true,
+      getDefaultModel: async () => 'fixture',
+      buildCommand: (o: { prompt: string }) => ({ command: 'fixture-cli', args: [], stdinFile: o.prompt }),
+      parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+      parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+    } as unknown as CliAdapter;
+
+    // Fails through the normal 'close' path with the child's real exit code,
+    // rather than throwing out of band where nothing can catch it.
+    await expect(
+      spawnCli(adapter, { prompt: 'p', cwd: process.cwd(), onLog: (l) => logged.push(l) }),
+    ).rejects.toThrow(/failed with code 1/);
+    expect(stdinStream.listenerCount('error')).toBeGreaterThan(0);
+    expect(logged.join('\n')).toContain('EPIPE');
   });
 });

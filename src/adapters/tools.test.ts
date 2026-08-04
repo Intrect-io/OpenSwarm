@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import * as os from 'node:os';
 import { TOOL_DEFINITIONS, executeTool, createReadCache, ToolCall, buildBashToolEnv, validatePath } from './tools.js';
 import { homedir } from 'node:os';
 
@@ -352,6 +353,48 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     expect(bash.content).toContain('READ_ONLY');
     await expect(fs.readFile(filePath, 'utf-8')).resolves.toBe('keep');
   });
+
+  it('refuses diagnostics, which runs a binary found in the tree under review', async () => {
+    // The loop withholds this tool in readOnly ("it spawns compiler
+    // subprocesses, matching bash's exclusion") but the executor did not deny
+    // it, and withholding is only a hint — the comment above exists because a
+    // model calls tools it was never shown. runTsc walks up from the reviewed
+    // tree for node_modules/.bin/tsc and runs it with the full environment, so
+    // this was `bash` by another name. (INT-2961)
+    const result = await executeTool(
+      makeCall('diagnostics', { path: TMP_DIR }),
+      TMP_DIR,
+      undefined,
+      { readOnly: true },
+    );
+
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('READ_ONLY');
+  });
+
+  it('refuses the web tools too, since a fetch is an outbound channel', async () => {
+    // Read-only runs exist because the material under inspection is untrusted.
+    // A fetch would carry out whatever the agent can read, credentials included.
+    // The tool list already withholds these; this is the enforcement behind it,
+    // for a model that calls a tool it was never shown. (INT-3189)
+    const fetched = await executeTool(
+      makeCall('web_fetch', { url: 'https://example.com/' }),
+      TMP_DIR,
+      undefined,
+      { readOnly: true },
+    );
+    const searched = await executeTool(
+      makeCall('web_search', { query: 'anything' }),
+      TMP_DIR,
+      undefined,
+      { readOnly: true },
+    );
+
+    expect(fetched.is_error).toBe(true);
+    expect(fetched.content).toContain('READ_ONLY');
+    expect(searched.is_error).toBe(true);
+    expect(searched.content).toContain('READ_ONLY');
+  });
 });
 
 // ──────────────────────────────────────────────
@@ -499,6 +542,30 @@ describe('ToolExecOptions', () => {
     expect(await fs.readFile(filePath, 'utf-8')).toContain('echo ok');
   });
 
+  it('apply_patch refuses a protected file whose header is indented', async () => {
+    // parseV4A trims each line before matching a header; this guard used to
+    // match the raw line. One leading space therefore hid the header from the
+    // guard while the parser still applied the patch — and applyV4APatch has no
+    // protection of its own, so this scan is the only thing standing there.
+    // Blast radius today is benchmark integrity: a worker could neuter
+    // run_tests.sh and manufacture a RESOLVED. (INT-2961)
+    const filePath = path.join(TMP_DIR, 'run_tests.sh');
+    await fs.writeFile(filePath, 'echo ok\n');
+
+    const res = await executeTool(
+      makeCall('apply_patch', {
+        input: '*** Begin Patch\n *** Update File: run_tests.sh\n@@\n-echo ok\n+exit 0\n*** End Patch',
+      }),
+      TMP_DIR,
+      undefined,
+      { protectedFiles: ['run_tests.sh'] },
+    );
+
+    expect(res.is_error).toBe(true);
+    expect(res.content).toContain('PROTECTED');
+    expect(await fs.readFile(filePath, 'utf-8')).toContain('echo ok');
+  });
+
   it('write_file refuses protected files', async () => {
     const filePath = path.join(TMP_DIR, 'run_tests.sh');
     const res = await executeTool(
@@ -550,5 +617,55 @@ describe('ToolExecOptions', () => {
     const env = buildBashToolEnv({ PATH: `${path.join(homedir(), '.cargo', 'bin')}:/usr/bin` });
     const cargo = path.join(homedir(), '.cargo', 'bin');
     expect((env.PATH ?? '').split(':').filter((p) => p === cargo)).toHaveLength(1);
+  });
+});
+
+describe('search_files without ripgrep', () => {
+  // Observed on a real GitHub Actions run of the review gate: five consecutive
+  // `spawn rg ENOENT`, and the reviewer still returned `approve`. An agent whose
+  // search always errors stops searching and reviews the diff without ever
+  // looking at the surrounding code, while the verdict reads exactly like one
+  // produced with working tools.
+  it('falls back to git grep when rg is not installed', async () => {
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-nogrep-'));
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    await fs.writeFile(path.join(repo, 'a.ts'), 'const needle = 1;\nconst other = 2;\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+
+    // A PATH with no rg on it, which is what the hosted runner effectively had.
+    const savedPath = process.env.PATH;
+    const emptyBin = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-bin-'));
+    process.env.PATH = `${emptyBin}:/usr/bin:/bin`;
+    try {
+      const result = await executeTool(
+        makeCall('search_files', { pattern: 'needle', path: repo }),
+        repo,
+      );
+      expect(result.is_error).toBeFalsy();
+      expect(result.content).toContain('needle');
+      expect(result.content).toContain('a.ts');
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it('says the search failed rather than reporting no matches', async () => {
+    // The dangerous failure is the quiet one: "(no matches)" from a search that
+    // never ran reads as evidence of absence.
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-nogit-'));
+    const savedPath = process.env.PATH;
+    const emptyBin = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-bin2-'));
+    process.env.PATH = `${emptyBin}:/usr/bin:/bin`;
+    try {
+      const result = await executeTool(
+        makeCall('search_files', { pattern: 'needle', path: outside }),
+        outside,
+      );
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('unavailable');
+      expect(result.content).not.toBe('(no matches)');
+    } finally {
+      process.env.PATH = savedPath;
+    }
   });
 });

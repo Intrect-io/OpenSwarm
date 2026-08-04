@@ -152,6 +152,32 @@ describe('AuthProfileStore.save concurrency', () => {
     expect(onDisk['linear:default'].refresh).toBe('rotated-by-second');
   });
 
+  it('expireProfile keeps the same-key rotation another writer just made', async () => {
+    // The case setProfile could not cover, and the one that actually bites: an
+    // adapter builds a store when a run starts and hits a 401 hours later. It
+    // only wants to force a refresh, but writing its snapshot back restores the
+    // pre-rotation refresh token, and a dead refresh token fails every later
+    // run with invalid_grant until the user logs in again. (INT-2961)
+    writeStore({ 'gpt:default': validProfile({ refresh: 'original' }) });
+    const { AuthProfileStore } = await loadModule();
+
+    const stale = new AuthProfileStore();           // snapshot: refresh=original
+    const other = new AuthProfileStore();
+    other.setProfile('gpt:default', validProfile({ refresh: 'rotated-by-other' }) as never);
+
+    expect(stale.expireProfile('gpt:default')).toBe(true);
+
+    const onDisk = readStore().profiles['gpt:default'];
+    expect(onDisk.refresh).toBe('rotated-by-other');
+    expect(onDisk.expires).toBe(0);
+  });
+
+  it('expireProfile reports an absent key rather than inventing one', async () => {
+    writeStore({});
+    const { AuthProfileStore } = await loadModule();
+    expect(new AuthProfileStore().expireProfile('gpt:default')).toBe(false);
+  });
+
   it('still applies a delete against the current file', async () => {
     writeStore({ 'gpt:default': validProfile(), 'linear:default': validProfile({ provider: 'linear' }) });
     const { AuthProfileStore } = await loadModule();

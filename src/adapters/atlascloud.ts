@@ -42,8 +42,12 @@ export const ATLASCLOUD_DEFAULT_MODEL = 'deepseek-ai/deepseek-v4-pro';
  * Ids to fall back on when the catalog is unreachable. Kept short on purpose —
  * this list exists to keep an offline run working, not to mirror the ~120 models
  * Atlas serves. Live discovery replaces it entirely.
+ *
+ * Also doubles as the offline half of modelCompat.ts's cross-provider guard: it
+ * needs *some* way to recognize an Atlas Cloud id even when the live/cached
+ * catalog is empty.
  */
-const CURATED_MODELS = [
+export const ATLASCLOUD_CURATED_MODELS = [
   ATLASCLOUD_DEFAULT_MODEL,
   'deepseek-ai/deepseek-v4-flash',
   'deepseek-ai/deepseek-v3.2',
@@ -57,7 +61,7 @@ function getEnvApiKey(): string | undefined {
 function catalogSpec(): CatalogSpec {
   return {
     provider: 'atlascloud',
-    curated: CURATED_MODELS,
+    curated: ATLASCLOUD_CURATED_MODELS,
     fetchLive: async () => {
       const apiKey = getEnvApiKey();
       if (!apiKey) return [];
@@ -80,6 +84,8 @@ export class AtlasCloudCliAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: false,
     supportedSkills: [],
+    // The agentic loop honours CliRunOptions.readOnly (see agenticLoop/tools). (INT-3189)
+    enforcesReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {
@@ -118,7 +124,17 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       timeoutMs: options.timeoutMs ?? 300000,
     });
 
-    const mcpTools = await resolveMcpTools(options.mcpTools);
+    // MCP tools: caller-provided, else self-source from the registry. (INT-1951)
+    //
+    // Skipped entirely in read-only mode, and the skip has to be here rather
+    // than in the loop. Resolving means CONNECTING: the registry merges
+    // `mcp.servers` from the config discovered in cwd, and the stdio transport
+    // spawns each server's command with `${SECRETS}` already expanded into its
+    // environment. When the cwd is a checkout under review, that config is
+    // attacker-authored, so a read-only run that resolved first and filtered
+    // afterwards would have executed the attacker's command and handed it the
+    // provider credential before any tool list was consulted. (INT-3189)
+    const mcpTools = options.readOnly ? undefined : await resolveMcpTools(options.mcpTools);
 
     const loopOptions: AgenticLoopOptions = {
       systemPrompt: options.systemPrompt,

@@ -23,6 +23,17 @@ export async function spawnCli(
   adapter: CliAdapter,
   options: CliRunOptions,
 ): Promise<CliRunResult> {
+  // Fail closed before anything runs. `readOnly` is asked for when the input is
+  // untrusted, so an adapter that ignores it would hand a full toolset to an
+  // agent reading attacker-authored files. Refusing is loud; ignoring is not.
+  // (INT-3189)
+  if (options.readOnly && !adapter.capabilities.enforcesReadOnly) {
+    throw new Error(
+      `Adapter '${adapter.name}' cannot enforce read-only mode; refusing to run with full tool access. ` +
+        `Use an adapter that declares enforcesReadOnly, or drop the read-only requirement.`,
+    );
+  }
+
   // 어댑터가 직접 실행을 지원하면 shell spawn 대신 사용
   if (adapter.run) {
     return adapter.run(options);
@@ -71,6 +82,20 @@ export async function spawnCli(
         stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
 
+      // The stdin 'error' listener is not optional, for the same reason it is
+      // not optional in github.ts: if the CLI exits before draining the pipe —
+      // a rejected flag, an auth failure, or our own SIGKILL on timeout — the
+      // pending write emits EPIPE on the stream, and an 'error' event with no
+      // listener is rethrown by Node as an uncaught exception. It arrives
+      // asynchronously, so neither the promise nor the caller's try/catch sees
+      // it, and `proc.on('error')` below is a different emitter. Every adapter
+      // that feeds a prompt file through stdin passes here, so without this one
+      // oversized prompt to a CLI that exits early kills the daemon. Reporting
+      // is left to 'close', which has the real exit code; this only has to keep
+      // the event handled.
+      proc.stdin?.on('error', (error) => {
+        if (options.onLog) options.onLog(`stdin closed before the prompt was written: ${error.message}`);
+      });
       if (stdin) proc.stdin?.end(stdin);
 
       // Register process for tracking if context provided

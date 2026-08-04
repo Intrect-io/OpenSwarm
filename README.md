@@ -132,9 +132,109 @@ Treat any non-zero exit as a failed check. The `1`/`2` split lets a workflow
 retry or alert differently when the gate could not run at all (e.g. a quota
 window exhausted — stderr names the cause and, when known, the reset time).
 
+### Running the gate in CI
+
+A composite action wraps the whole flow — install, diff against the PR base,
+review, and map the exit code onto the job result:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write   # only needed for the SARIF upload
+
+steps:
+  - uses: actions/checkout@v4
+    with: { fetch-depth: 0 }   # the merge base has to be present to diff against
+  - uses: actions/setup-node@v4
+    with: { node-version: '22' }
+  - id: review
+    uses: unohee/OpenSwarm@main
+    with:
+      adapter: openrouter   # a hosted runner has no config; without this the CLI
+                            # falls back to its `codex` default
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  - if: always() && steps.review.outputs.sarif-file != ''
+    uses: github/codeql-action/upload-sarif@v3
+    with: { sarif_file: ${{ steps.review.outputs.sarif-file }} }
+```
+
+Inputs: `path` (which checkout to review), `base` (defaults to the merge base of
+the PR head and its base branch), `adapter`, `read-only`, `version`,
+`sarif-file`, and `fail-on-gate-not-run` — the last defaults to `true` because a
+review that did not happen must not read as a pass.
+
+Outputs: `decision`, `gate-ran`, `sarif-file`.
+
+#### Reviewing pull requests safely
+
+The reviewer reads attacker-authored files with your provider credential in the
+environment. Two properties keep that from becoming code execution:
+
+**`read-only` defaults to `true`**, which denies the reviewer every mutating tool
+including `bash`. It is enforced per adapter, and an adapter that cannot enforce
+it refuses to run rather than quietly ignoring the flag:
+
+| Adapter | How read-only is enforced |
+| --- | --- |
+| `openrouter`, `atlascloud`, `gpt`, `codex-responses`, `local`/`lmstudio` | The agentic loop withholds the mutating, web, and MCP tools, and the executor refuses them if called anyway |
+| `claude` | `--permission-mode default` with an allowlist of `Read`/`Grep`/`Glob`, instead of `bypassPermissions` |
+| `codex` | `--sandbox read-only` instead of `workspace-write` |
+| anything else | Refused — `spawnCli` will not start a read-only run on an adapter that has not declared enforcement |
+
+**The reviewed checkout never becomes the working directory.** OpenSwarm looks
+for its own `config.yaml` in the current directory first, so a config committed
+to the pull request would otherwise choose the run's adapter, model, and MCP
+servers. The action runs from the runner temp and points `--path` at the
+checkout instead.
+
+**Run the action's code from a trusted ref.** `uses: unohee/OpenSwarm@main`
+already does this — the action code comes from this repository, not from the
+pull request. It is only `uses: ./` that is unsafe, because after checking out a
+pull request that path holds `action.yml` as the contributor wrote it, with your
+secrets in scope. If you self-host the action, check it out from your default
+branch into its own path and the pull request into another, then point `path` at
+the latter — see
+[`.github/workflows/review-gate.yml`](.github/workflows/review-gate.yml), which
+does exactly that to dogfood this repository.
+
+**To run it automatically, the trigger is `pull_request_target`.** A
+`pull_request` run from a fork gets no secrets, so the provider key would be
+empty and every fork PR would fail as gate-not-run.
+
+For scripting without the action, `--json` prints the verdict on stdout under a
+versioned schema (the human report is suppressed so `openswarm review --json |
+jq` works), and `--sarif <file>` writes SARIF 2.1.0 for code scanning. Findings
+are reported at `warning`: the verdict is what blocks, while individual
+follow-ups are advisory and some accompany an approve.
+
+`.github/workflows/review-gate.yml` in this repository dogfoods the action. It is
+`workflow_dispatch` only — the gate calls a paid model on every run, so enabling
+it for every pull request is left as an explicit choice.
+
 ### Deterministic verification
 
 Autonomous pipelines enable baseline-diff verification by default: OpenSwarm runs repository test/typecheck commands once, compares a failing head against the merge base, and gives the reviewer structured evidence so pre-existing failures do not block unrelated work. Add `.openswarm/verify.yaml` for repository-specific commands (see [`templates/verify.example.yaml`](templates/verify.example.yaml)), or let OpenSwarm discover standard Node, Python, Rust, and Go checks. Configure the behavior under `autonomous.verify`; the legacy `guards.qualityGate` whole-tree check is deprecated.
+
+#### The Linux sandbox
+
+On Linux, verification runs each command inside bubblewrap and **fails closed
+when it cannot** — running a worker's code unsandboxed to decide whether to
+trust it defeats the point. On macOS it uses the platform sandbox and needs no
+setup.
+
+Installing the package is not always enough, and CI is where that bites:
+
+| Environment | What it takes |
+| --- | --- |
+| GitHub Actions `ubuntu-latest` | `sudo apt-get install -y bubblewrap` **and** `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`. Measured 2026-08-01: the image sets that restriction to `1`, and with it set even `bwrap --unshare-user` fails at `setting up uid map: Permission denied`. This repository's own CI asserts the recipe so it cannot go stale. |
+| Docker, default seccomp | `--security-opt seccomp=unconfined`; add `--cap-add SYS_ADMIN` if the runtime also drops the capability |
+| Debian/Ubuntu host | `apt-get install -y bubblewrap`, usually nothing else |
+| Alpine | `apk add bubblewrap` |
+
+When the sandbox is unavailable, OpenSwarm says which of these applies rather
+than reporting a bare failure: it runs bwrap to find out instead of guessing
+from sysctls, quotes bwrap's own error, and prints the matching fix.
 
 For crash recovery, fenced execution leases, outbox semantics, rollout modes, and
 repository admission policy, see [Durable autonomous loop](docs/DURABLE_AUTONOMY.md).

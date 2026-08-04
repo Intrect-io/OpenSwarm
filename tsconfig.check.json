@@ -1,0 +1,19 @@
+{
+  // Typecheck-only project. The build config roots at src/ so it can emit to
+  // dist/, which left benchmarks/ checked by nothing: `tsc --noEmit` reported
+  // clean on a fixture file with a hard syntax error, and the break only surfaced
+  // when the benchmark was actually run.
+  //
+  // scripts/ is still outside this net — it carries pre-existing errors that are
+  // their own cleanup, not this file's job.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*", "benchmarks/**/*"],
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/**/*.test.tsx"]
+}

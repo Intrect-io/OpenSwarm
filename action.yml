@@ -1,0 +1,278 @@
+name: 'OpenSwarm Review'
+description: 'Run the OpenSwarm agentic review gate over a pull request diff'
+author: 'Heewon Oh'
+
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  path:
+    description: >-
+      Directory holding the checkout to review, relative to the workspace.
+      Defaults to the workspace root. Set this when the reviewed code and the
+      action's own code are checked out to separate paths — which is the safe
+      arrangement for reviewing pull requests.
+    required: false
+    default: ''
+  base:
+    description: >-
+      Git ref or commit to diff against. Defaults to the merge base of the PR
+      head and its base branch. A checked-out PR branch has no dirty working
+      tree, only commits ahead of its base, so the gate must review the
+      committed diff rather than working-tree changes.
+    required: false
+    default: ''
+  adapter:
+    description: >-
+      Adapter override (openrouter, atlascloud, codex-responses, ...). Pass one
+      explicitly on a hosted runner: with no OpenSwarm config present the CLI
+      falls back to its `codex` default, so exporting another provider's key is
+      not by itself enough to select that provider.
+    required: false
+    default: ''
+  read-only:
+    description: >-
+      Deny the reviewer every mutating tool, including bash. Default true, and
+      it should stay true for anything triggered by a pull request: the reviewer
+      reads attacker-authored files with the provider credential in the
+      environment, so a shell is an exfiltration path. Adapters that cannot
+      enforce read-only refuse to run rather than silently ignoring this.
+    required: false
+    default: 'true'
+  version:
+    description: 'Version of @intrect/openswarm to install.'
+    required: false
+    default: 'latest'
+  sarif-file:
+    description: >-
+      Where to write the SARIF report. Relative paths are resolved against the
+      runner temp directory, not the checkout — a report written inside the
+      reviewed tree would itself show up as a changed file. Uploading it is left
+      to the caller: that step needs `security-events: write`, which a composite
+      action cannot grant itself.
+    required: false
+    default: 'openswarm-review.sarif'
+  fail-on-gate-not-run:
+    description: >-
+      Whether a gate that never produced a verdict (quota exhausted, adapter
+      down) fails the job. Default true: a review that did not happen must not
+      read as a pass. Set false only if a separate alert covers it.
+    required: false
+    default: 'true'
+
+outputs:
+  decision:
+    description: 'approve | revise | reject — empty when the gate did not run.'
+    value: ${{ steps.review.outputs.decision }}
+  gate-ran:
+    description: 'true when a verdict was produced, false when the gate could not run.'
+    value: ${{ steps.review.outputs.gate-ran }}
+  sarif-file:
+    description: 'Absolute path to the SARIF report, when one was written.'
+    value: ${{ steps.review.outputs.sarif-file }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install OpenSwarm
+      shell: bash
+      run: npm install -g "@intrect/openswarm@${{ inputs.version }}"
+
+    - name: Ensure ripgrep
+      shell: bash
+      # The reviewer's search tool prefers ripgrep. It falls back to git grep
+      # when that is missing, but the fallback is the safety net, not the plan:
+      # a hosted runner without rg was observed making every search fail, and an
+      # agent whose search errors stops searching and reviews the diff without
+      # reading the code around it — while still returning a confident verdict.
+      run: |
+        set -euo pipefail
+        if command -v rg >/dev/null; then exit 0; fi
+        if command -v apt-get >/dev/null; then
+          sudo apt-get update && sudo apt-get install -y ripgrep
+        elif command -v apk >/dev/null; then
+          apk add --no-cache ripgrep
+        else
+          echo "::warning::ripgrep is unavailable and could not be installed; searches will use the git grep fallback"
+        fi
+
+    - name: Run review gate
+      id: review
+      shell: bash
+      env:
+        # `review` reads provider credentials from the environment; the caller
+        # passes whichever secrets its configured adapter needs.
+        REVIEW_PATH: ${{ inputs.path }}
+        OPENSWARM_BASE: ${{ inputs.base }}
+        OPENSWARM_ADAPTER: ${{ inputs.adapter }}
+        READ_ONLY: ${{ inputs.read-only }}
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        FAIL_ON_GATE_NOT_RUN: ${{ inputs.fail-on-gate-not-run }}
+        GITHUB_BASE_REF: ${{ github.base_ref }}
+      run: |
+        set -euo pipefail
+
+        # Booleans are parsed, not string-compared. `[ "$X" = "true" ]` turns a
+        # typo — `True`, `yes`, a trailing space — into a silently disabled
+        # security control, which for `read-only` means reviewing attacker code
+        # with a shell. Anything that is not exactly true or false is refused.
+        parse_bool() {
+          case "$2" in
+            true|false) printf '%s' "$2" ;;
+            *) echo "::error::Input '$1' must be exactly 'true' or 'false' (got '$2')" >&2; exit 2 ;;
+          esac
+        }
+        READ_ONLY=$(parse_bool read-only "${READ_ONLY:-true}")
+        FAIL_ON_GATE_NOT_RUN=$(parse_bool fail-on-gate-not-run "${FAIL_ON_GATE_NOT_RUN:-true}")
+
+        # Written as if-statements rather than `test && action` one-liners on
+        # purpose: under `set -e` a one-liner whose test is false returns 1 and
+        # kills the step, so the optional paths would abort the run.
+        REPO_DIR="$GITHUB_WORKSPACE"
+        if [ -n "${REVIEW_PATH:-}" ]; then
+          case "$REVIEW_PATH" in
+            /*) echo "::error::Input 'path' must be relative to the workspace (got '$REVIEW_PATH')" >&2; exit 2 ;;
+          esac
+          REPO_DIR="$GITHUB_WORKSPACE/$REVIEW_PATH"
+        fi
+        if [ ! -d "$REPO_DIR" ]; then
+          echo "::error::No checkout at '$REPO_DIR'" >&2
+          exit 2
+        fi
+        cd "$RUNNER_TEMP"
+
+        # The installed CLI has to actually support what this action passes it.
+        # Commander exits 1 on an unknown option, and 1 is the reject code — so
+        # an older @intrect/openswarm would report every run as "rejected"
+        # without ever reviewing anything. Fail as gate-not-run instead.
+        HELP=$(openswarm review --help 2>&1 || true)
+        for required in --json --sarif $( [ "$READ_ONLY" = "true" ] && echo --read-only ); do
+          case "$HELP" in
+            *"$required"*) ;;
+            *)
+              echo "::error::The installed @intrect/openswarm does not support 'review $required'. Pin a newer 'version' input." >&2
+              exit 2
+              ;;
+          esac
+        done
+
+        BASE="${OPENSWARM_BASE:-}"
+        if [ -z "$BASE" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+          # actions/checkout fetches only the PR head by default, so the base
+          # branch has to be fetched before it can be diffed against. No
+          # `|| true` here: continuing with a ref that was never fetched makes
+          # the gate pass in exactly the case where it could not establish a
+          # base, and a stale remote-tracking ref is no better — it produces a
+          # confident verdict about the wrong diff.
+          if ! git -C "$REPO_DIR" fetch --no-tags origin \
+            "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"; then
+            echo "::error::Could not fetch base branch '$GITHUB_BASE_REF' — refusing to review against an unknown base"
+            exit 2
+          fi
+
+          # The merge base, not the base tip. `--base <ref>` becomes a two-dot
+          # `git diff`, so passing the current tip of a base branch that moved
+          # after the PR diverged lists files the PR never touched, and the
+          # reviewer rejects a change over someone else's commits.
+          if ! BASE=$(git -C "$REPO_DIR" merge-base HEAD "refs/remotes/origin/$GITHUB_BASE_REF"); then
+            echo "::error::Could not resolve a merge base with '$GITHUB_BASE_REF' — a shallow checkout cannot; use fetch-depth: 0"
+            exit 2
+          fi
+          echo "Reviewing against merge base $BASE"
+        fi
+
+        # Scratch files live in the runner temp, never in the checkout: an
+        # untracked file inside the tree is picked up by the changed-file scan
+        # and reviewed as part of the diff, so even a base with no real changes
+        # would invoke the paid reviewer.
+        case "$SARIF_FILE" in
+          /*) SARIF_PATH="$SARIF_FILE" ;;
+          *)  SARIF_PATH="$RUNNER_TEMP/$SARIF_FILE" ;;
+        esac
+        REVIEW_JSON="$RUNNER_TEMP/openswarm-review.json"
+
+        # `--path` rather than running from inside the checkout. OpenSwarm looks
+        # for its own config in the current directory first, and a config.yaml
+        # authored by whoever opened the pull request would otherwise choose this
+        # run's adapter, model and MCP servers. Reviewing from the runner temp
+        # keeps that discovery away from the reviewed tree.
+        ARGS=(review --path "$REPO_DIR" --json --sarif "$SARIF_PATH")
+        if [ -n "$BASE" ]; then ARGS+=(--base "$BASE"); fi
+        if [ -n "${OPENSWARM_ADAPTER:-}" ]; then ARGS+=(--adapter "$OPENSWARM_ADAPTER"); fi
+        if [ "${READ_ONLY:-true}" = "true" ]; then ARGS+=(--read-only); fi
+
+        # stdout is the JSON document; diagnostics go to stderr and stay on the
+        # job log.
+        set +e
+        openswarm "${ARGS[@]}" > "$REVIEW_JSON"
+        STATUS=$?
+        set -e
+
+        DECISION=""
+        GATE_RAN="false"
+        if [ -s "$REVIEW_JSON" ]; then
+          DECISION=$(REVIEW_JSON="$REVIEW_JSON" node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON,"utf8")).decision??""))}catch{}')
+          GATE_RAN=$(REVIEW_JSON="$REVIEW_JSON" node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON,"utf8")).gateRan??false))}catch{process.stdout.write("false")}')
+        fi
+
+        echo "decision=$DECISION" >> "$GITHUB_OUTPUT"
+        echo "gate-ran=$GATE_RAN" >> "$GITHUB_OUTPUT"
+        if [ -f "$SARIF_PATH" ]; then echo "sarif-file=$SARIF_PATH" >> "$GITHUB_OUTPUT"; fi
+
+        # Put the reasoning where the person looking at a red check will find it.
+        # `--json` suppresses the human report by design, so without this a
+        # `revise` or `reject` reached the log as a single word. SARIF carries
+        # only findings that have a file and line; feedback and issues without a
+        # location — often the whole of a `revise` — appear nowhere at all, which
+        # leaves an operator with a failing gate and no way to act on it.
+        if [ -s "$REVIEW_JSON" ]; then
+          REVIEW_JSON="$REVIEW_JSON" node -e '
+            const r = JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON, "utf8"));
+            const out = [];
+            out.push(`## OpenSwarm review: ${r.decision || "gate did not run"}`);
+            if (r.feedback) out.push("", r.feedback);
+            if (r.issues?.length) out.push("", "### Issues", ...r.issues.map((i) => `- ${i}`));
+            if (r.suggestions?.length) out.push("", "### Suggestions", ...r.suggestions.map((x) => `- ${x}`));
+            if (r.findings?.length) {
+              out.push("", "### Follow-ups");
+              for (const f of r.findings) out.push(`- [${f.type}] ${f.title}${f.location ? ` — \`${f.location}\`` : ""}`);
+            }
+            const text = out.join("\n");
+            // Every word of this came from a model that just read an untrusted
+            // diff. GitHub turns any stdout line beginning with `::` into a
+            // workflow command, so printing it raw would let injected prose
+            // forge annotations or run ::stop-commands:: to silence the rest of
+            // this step. The documented fence is stop-commands around the block
+            // with a token the writer cannot predict.
+            const token = require("crypto").randomUUID();
+            process.stdout.write(`::stop-commands::${token}\n${text}\n::${token}::\n`);
+            // The summary is rendered as Markdown, not parsed for commands.
+            if (process.env.GITHUB_STEP_SUMMARY) require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+          ' || echo "::warning::Could not render the review document for the log"
+        fi
+
+        # Exit contract (INT-3100): 0 ran and did not reject · 1 ran and rejected
+        # · 2 never ran. The 1/2 split is preserved so a workflow can alert
+        # differently, but both are failures by default — a review that did not
+        # happen is not a pass.
+        # An exit status is only trusted to mean "rejected" when a verdict was
+        # actually parsed. Anything that exits non-zero before producing one —
+        # an unknown option, a crash, output that is not the JSON document — is
+        # a gate that did not run, and calling that a reject both misreports the
+        # change and hides the real failure.
+        if [ "$STATUS" != "0" ] && [ "$GATE_RAN" != "true" ]; then
+          echo "::error::OpenSwarm exited $STATUS without producing a verdict — the gate did not run"
+          if [ "$FAIL_ON_GATE_NOT_RUN" = "true" ]; then exit 2; fi
+          exit 0
+        fi
+
+        case "$STATUS" in
+          0) echo "::notice::OpenSwarm review: ${DECISION:-no changes}" ;;
+          1) echo "::error::OpenSwarm review did not pass: ${DECISION:-rejected}"; exit 1 ;;
+          2)
+            echo "::error::OpenSwarm review gate did not run — no verdict was produced"
+            if [ "$FAIL_ON_GATE_NOT_RUN" = "true" ]; then exit 2; fi
+            ;;
+          *) echo "::error::OpenSwarm exited with unexpected status $STATUS"; exit "$STATUS" ;;
+        esac

@@ -49,6 +49,8 @@ export class LocalModelAdapter implements CliAdapter {
     supportsModelSelection: true,
     managedGit: false,
     supportedSkills: [],
+    // The agentic loop honours CliRunOptions.readOnly (see agenticLoop/tools). (INT-3189)
+    enforcesReadOnly: true,
   };
 
   // 활성 서버 URL (isAvailable에서 감지, run에서 사용)
@@ -159,7 +161,16 @@ export class LocalModelAdapter implements CliAdapter {
     const callApi = this.createApiCaller(baseUrl, model, options.onToken, options.signal);
 
     // MCP tools: caller-provided, else self-source from the registry. (INT-1951)
-    const mcpTools = await resolveMcpTools(options.mcpTools);
+    //
+    // Skipped entirely in read-only mode, and the skip has to be here rather
+    // than in the loop. Resolving means CONNECTING: the registry merges
+    // `mcp.servers` from the config discovered in cwd, and the stdio transport
+    // spawns each server's command with `${SECRETS}` already expanded into its
+    // environment. When the cwd is a checkout under review, that config is
+    // attacker-authored, so a read-only run that resolved first and filtered
+    // afterwards would have executed the attacker's command and handed it the
+    // provider credential before any tool list was consulted. (INT-3189)
+    const mcpTools = options.readOnly ? undefined : await resolveMcpTools(options.mcpTools);
 
     const loopOptions: AgenticLoopOptions = {
       systemPrompt: options.systemPrompt,
