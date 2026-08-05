@@ -444,6 +444,65 @@ program
     }
   });
 
+// openswarm pr status|fix|watch|create — on-demand PR autopilot (INT-3282)
+
+program
+  .command('pr')
+  .description('PR autopilot: status | fix | watch | create (conflict → comments → CI)')
+  .argument('<action>', 'status | fix | watch | create')
+  .option('--path <path>', 'Project path (default: cwd)')
+  .option('--number <n>', 'PR number (or owner/repo#n); default: open PR for current branch')
+  .option('--repo <owner/repo>', 'Repository override')
+  .option('--rounds <n>', 'watch: max fix rounds (default 5)', (v) => parseInt(v, 10))
+  .option('--max-iterations <n>', 'fix/watch: pipeline iterations per attempt', parsePositiveIntegerOption)
+  .option('--max-retries <n>', 'fix/watch: CI-retry attempts', parsePositiveIntegerOption)
+  .option('--no-conflicts', 'fix/watch: do not auto-resolve merge conflicts')
+  .option('--title <title>', 'create: PR title')
+  .option('--issue <id>', 'create: issue id for commit message / Closes (default: local)')
+  .option('--body <text>', 'create: PR body')
+  .option('--no-fix', 'create: skip local openswarm fix before publish')
+  .option('--draft', 'create: open as draft')
+  .option('--json', 'status: print machine-readable JSON')
+  .action(async (action: string, opts: {
+    path?: string;
+    number?: string;
+    repo?: string;
+    rounds?: number;
+    maxIterations?: number;
+    maxRetries?: number;
+    noConflicts?: boolean;
+    title?: string;
+    issue?: string;
+    body?: string;
+    fix?: boolean;
+    draft?: boolean;
+    json?: boolean;
+  }) => {
+    try {
+      const { runPrCommand } = await import('./cli/prCommand.js');
+      const result = await runPrCommand(action, {
+        path: opts.path,
+        number: opts.number,
+        repo: opts.repo,
+        rounds: opts.rounds,
+        maxIterations: opts.maxIterations,
+        maxRetries: opts.maxRetries,
+        noConflicts: opts.noConflicts,
+        title: opts.title,
+        issue: opts.issue,
+        body: opts.body,
+        noFix: opts.fix === false,
+        draft: opts.draft,
+        json: opts.json,
+      });
+      console.log(result.message);
+      if (result.exitCode) process.exitCode = result.exitCode;
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exitCode = 1;
+    }
+  });
+
 // openswarm exec <prompt>
 
 program

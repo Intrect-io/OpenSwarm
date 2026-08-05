@@ -105,6 +105,14 @@ openswarm fix                    # Run the checks (package.json scripts, or carg
 openswarm fix --checks lint,test # only these checks · --concurrency <n> · --rounds <n> (default 3)
                                  # any language: put {"checks": {"test": "pytest -x"}} in openswarm.json
 
+# PR autopilot (on-demand — conflict → comments → CI; does not merge)
+openswarm pr status              # Snapshot: conflicts, CI, CHANGES_REQUESTED / critical comments
+openswarm pr status --json       # Machine-readable; exit 0 only when merge-ready
+openswarm pr fix                 # One-shot fix for the current branch's open PR (or --number N)
+openswarm pr watch               # Loop fix until merge-ready or --rounds exhausted (default 5)
+openswarm pr create              # Local fix → commit → push → gh pr create (from feature branch)
+openswarm pr create --no-fix --issue INT-123 --title "feat: …"  # skip local fix; set issue id
+
 # Code Registry & BS Detector
 openswarm check --scan           # Scan repo → register all entities
 openswarm check src/foo.ts       # File brief (entities, tests, risk)
@@ -461,6 +469,7 @@ openswarm dash                # open the web dashboard (:3847)
 - **Worker/Reviewer Pairs** — Multi-iteration code generation with automated review, testing, and documentation stages
 - **Codebase Audit (`review --max`)** — fans reviewer subagents out over directory-shaped areas (auto-split to fill `--concurrency`), aggregates a deduped verdict into a markdown report, and synthesizes ≤10 cohesive Linear issues via a PM agent. Both `review` modes consult repository-local prior review logs; resolved/stale findings are not repeated, and byte-identical duplicate follow-ups are suppressed while unresolved issues remain visible. `--fix` groups findings by repository dependency closure, injects the package manager/manifests/verification contract and repo knowledge, runs only independent fix units concurrently in isolated sandboxes, and promotes disjoint in-scope diffs into an audit worktree. It publishes the PR only when every area re-approves and trusted deterministic verification passes; unavailable dependencies/checks fail closed. `--in-place` keeps edits in the current working tree but uses the same gates. Language-agnostic; codex usage-limit aware with automatic `claude` fallback
 - **CI / test gate auto-fix (`openswarm fix`)** — runs the project's objective checks (lint / typecheck / build / test), groups the failures by file into areas, fans a fix-worker out over each, then **re-runs the checks and repeats until green** (or the round budget). Deterministic convergence — unlike the review fix pass, it verifies its own work. Multi-language: auto-detects npm scripts, `Cargo.toml` (`cargo check`/`test`, clippy on request), and Python tooling (`ruff`/`mypy`/`pytest`, gated on the repo's config); any other toolchain via a `"checks"` map in `openswarm.json`
+- **PR autopilot (`openswarm pr`)** — on-demand surface over the daemon's PRProcessor + `commitAndCreatePR`. `status` reports conflicts / review feedback / CI; `fix` runs one autopilot pass (conflict → comments → CI); `watch` loops until merge-ready; `create` publishes the current feature branch (local fix → commit → push → `gh pr create`). Never merges or enables auto-merge.
 - **Decision Engine** — Scope validation, rate limiting, priority-based task selection, and workflow mapping
 - **Cognitive Memory** — LanceDB vector store with Xenova/multilingual-e5-base embeddings for long-term recall across sessions
 - **Repo Knowledge Loop** — workers learn each repository over time: task outcomes (success patterns, review-rejection pitfalls) are stored per-repo and recalled into the next worker prompt

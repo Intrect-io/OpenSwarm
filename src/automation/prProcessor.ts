@@ -197,6 +197,36 @@ export class PRProcessor {
   }
 
   /**
+   * One-shot fix for a single PR (CLI `openswarm pr fix` / `pr watch`).
+   * Skips cron cooldown and multi-repo scanning — runs processPR directly.
+   * (INT-3282)
+   */
+  async fixOne(
+    pr: PRInfo,
+    projectPath: string,
+  ): Promise<{ success: boolean; error?: string; iterations: number }> {
+    const key = `${pr.repo}#${pr.number}`;
+    const state: PRState = {
+      prs: {
+        [key]: {
+          repo: pr.repo,
+          prNumber: pr.number,
+          status: 'processing',
+          iterations: 0,
+        },
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    await this.processPR(pr, projectPath, state, key);
+    const entry = state.prs[key];
+    return {
+      success: entry?.status === 'completed',
+      error: entry?.lastError,
+      iterations: entry?.iterations ?? 0,
+    };
+  }
+
+  /**
    * Start schedule
    */
   start(): void {
