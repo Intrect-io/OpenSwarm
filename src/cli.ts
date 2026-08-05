@@ -322,6 +322,8 @@ program
   .option('--json', 'Emit the verdict as JSON on stdout instead of the human report (for CI)')
   .option('--sarif <file>', 'Write a SARIF 2.1.0 report for GitHub code scanning')
   .option('--read-only', 'Deny the reviewer all mutating tools including bash — required when reviewing an untrusted diff in CI')
+  .option('--max-turns <n>', 'Override the reviewer\'s agentic-loop turn ceiling (default: scaled by diff size)', parsePositiveIntegerOption)
+  .option('--timeout <ms>', 'Override the reviewer\'s wall-clock budget in ms (default: scaled by diff size)', parsePositiveIntegerOption)
   .option('--debug', 'Verbose logging')
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
@@ -339,6 +341,7 @@ program
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
     path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
+    maxTurns?: number; timeout?: number;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
   }) => {
@@ -390,7 +393,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,

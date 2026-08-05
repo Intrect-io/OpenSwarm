@@ -5,6 +5,8 @@ import {
   runReviewCommand,
   resolveIssueFromBranch,
   ensureProjectMapping,
+  scaledReviewMaxTurns,
+  scaledReviewTimeoutMs,
 } from './reviewCommand.js';
 import type { ReviewResult } from '../agents/agentPair.js';
 
@@ -44,6 +46,34 @@ describe('formatReviewOutput (INT-1955)', () => {
     expect(colored).toContain('\x1b['); // has ANSI codes
     expect(colored).toContain('Decision: REJECT'); // substring still intact
     expect(formatReviewOutput(review, false)).not.toContain('\x1b['); // plain by default
+  });
+});
+
+// Regression: `openswarm review` had no way to raise the reviewer's turn/time
+// budget, so a large diff (29 files/+2200 lines) hit the agentic loop's
+// hardcoded 20-turn ceiling deterministically on two separate runs and got a
+// truncated/empty verdict, while a third run was cut by the 5-minute wall
+// clock mid-analysis having already found real defects.
+describe('scaledReviewMaxTurns / scaledReviewTimeoutMs', () => {
+  it('leaves small diffs at the original defaults', () => {
+    expect(scaledReviewMaxTurns(1)).toBe(20);
+    expect(scaledReviewMaxTurns(10)).toBe(20);
+    expect(scaledReviewTimeoutMs(1)).toBe(300_000);
+    expect(scaledReviewTimeoutMs(10)).toBe(300_000);
+  });
+
+  it('scales up past the free-file threshold, capped', () => {
+    expect(scaledReviewMaxTurns(29)).toBe(30); // the diff that triggered this fix
+    expect(scaledReviewMaxTurns(200)).toBe(60); // cap
+    expect(scaledReviewTimeoutMs(29)).toBe(585_000);
+    expect(scaledReviewTimeoutMs(200)).toBe(900_000); // cap
+  });
+
+  it('is monotonically non-decreasing', () => {
+    for (let n = 1; n < 100; n++) {
+      expect(scaledReviewMaxTurns(n + 1)).toBeGreaterThanOrEqual(scaledReviewMaxTurns(n));
+      expect(scaledReviewTimeoutMs(n + 1)).toBeGreaterThanOrEqual(scaledReviewTimeoutMs(n));
+    }
   });
 });
 
