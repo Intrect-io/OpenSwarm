@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.5 — 2026-08-05
+
+### Fixed
+
+- **`openswarm review` had no way to raise the reviewer's turn/timeout budget for large diffs.** Every run was stuck at the agentic loop's hardcoded 20-turn/5-minute defaults regardless of diff size, so a large diff could hit the ceiling deterministically before the reviewer finished — a 29-file/+2200-line change hit the same turn cutoff on two separate runs and got cut by the timeout on a third, mid-analysis, having already located the real defects. The daemon's autonomous pair-review loop already supported a configurable per-role `maxTurns`; the standalone CLI gate did not. It now scales the turn/timeout budget with the number of changed files (small diffs keep the original defaults, larger ones get proportionally more room, capped at 60 turns / 15 minutes), and `--max-turns`/`--timeout` are available to override either explicitly. (INT-3263)
+
 ## 0.20.4 — 2026-08-04
 
 ### Fixed
