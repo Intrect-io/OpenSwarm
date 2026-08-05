@@ -195,7 +195,7 @@ const ALLOWED_EVENTS = new Set(['invoke', 'complete', 'error', 'start', 'stop', 
 const ALLOWED_COMMANDS = new Set([
   'add', 'annotate', 'auth', 'chat', 'check', 'dash', 'design-pipeline', 'doctor',
   'exec', 'fix', 'init', 'login', 'logout', 'mcp', 'memory', 'models', 'openswarm',
-  'projects', 'provider', 'remove', 'resume', 'review', 'run', 'schedule', 'start',
+  'pr', 'projects', 'provider', 'remove', 'resume', 'review', 'run', 'schedule', 'start',
   'status', 'stop', 'upgrade', 'validate', 'version',
 ]);
 
