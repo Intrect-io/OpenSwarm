@@ -11,7 +11,7 @@ import { parsePRRef, resolvePR, toPRInfo, type ResolvePROptions } from './prReso
 import { formatPrStatus, gatherPrStatus, type PrStatusSnapshot } from './prStatus.js';
 import { createPrFromCwd, type PrCreateOptions } from './prCreate.js';
 
-export type PrAction = 'status' | 'fix' | 'watch' | 'create';
+export type PrAction = 'status' | 'fix' | 'review' | 'watch' | 'create';
 
 export interface PrCommandOptions {
   path?: string;
@@ -44,6 +44,11 @@ export interface PrCommandDeps {
   resolve?: (opts: ResolvePROptions) => ReturnType<typeof resolvePR>;
   gatherStatus?: typeof gatherPrStatus;
   fixOne?: (
+    pr: { repo: string; number: number; title: string; branch: string; url: string },
+    projectPath: string,
+    opts: PrCommandOptions,
+  ) => Promise<{ success: boolean; error?: string; iterations: number }>;
+  reviewOne?: (
     pr: { repo: string; number: number; title: string; branch: string; url: string },
     projectPath: string,
     opts: PrCommandOptions,
@@ -113,6 +118,20 @@ async function defaultFixOne(
   return processor.fixOne(toPRInfo({ ...pr, author: undefined }), projectPath);
 }
 
+async function defaultReviewOne(
+  pr: { repo: string; number: number; title: string; branch: string; url: string },
+  projectPath: string,
+  opts: PrCommandOptions,
+  loadRoles: () => DefaultRolesConfig | undefined,
+): Promise<{ success: boolean; error?: string; iterations: number }> {
+  const roles = loadRoles();
+  // review-only: conflictResolver is built but unused — processReviewFeedback
+  // never touches conflicts — maxIterations/maxRetries still apply to the
+  // pipeline run it fires for each round of feedback.
+  const processor = new PRProcessor(buildProcessorConfig(opts, roles));
+  return processor.reviewOne(toPRInfo({ ...pr, author: undefined }), projectPath);
+}
+
 /** Route a `pr` subcommand. Returns the message to print. Sets exit semantics via result.exitCode. */
 export async function runPrCommand(
   action: string,
@@ -164,6 +183,29 @@ export async function runPrCommand(
       }
       return {
         message: `PR ${resolved.repo}#${resolved.number} fix failed: ${result.error ?? 'unknown'}\n${resolved.url}`,
+        exitCode: 1,
+      };
+    }
+
+    case 'review': {
+      const resolved = await (deps.resolve ?? resolvePR)({
+        path: cwd,
+        number: resolveNumber(opts),
+        repo: resolveRepoOverride(opts),
+      });
+      log(`Checking review feedback on ${resolved.repo}#${resolved.number} (${resolved.title})…`);
+      const review =
+        deps.reviewOne ??
+        ((pr, path, o) => defaultReviewOne(pr, path, o, loadRoles));
+      const result = await review(resolved, cwd, opts);
+      if (result.success) {
+        return {
+          message: `PR ${resolved.repo}#${resolved.number} review feedback addressed (${result.iterations} iteration(s)).\n${resolved.url}`,
+          exitCode: 0,
+        };
+      }
+      return {
+        message: `PR ${resolved.repo}#${resolved.number} review feedback failed: ${result.error ?? 'unknown'}\n${resolved.url}`,
         exitCode: 1,
       };
     }
@@ -250,7 +292,7 @@ export async function runPrCommand(
 
     default:
       throw new Error(
-        `Unknown pr action "${action}" (use status|fix|watch|create)`,
+        `Unknown pr action "${action}" (use status|fix|review|watch|create)`,
       );
   }
 }

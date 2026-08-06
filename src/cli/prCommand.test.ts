@@ -130,6 +130,7 @@ function mkDeps(over: Partial<PrCommandDeps> = {}): PrCommandDeps {
       mergeReady: true,
     })),
     fixOne: vi.fn(async () => ({ success: true, iterations: 1 })),
+    reviewOne: vi.fn(async () => ({ success: true, iterations: 1 })),
     waitCI: vi.fn(async () => ({ status: 'success' })),
     create: vi.fn(async () => ({ url: resolved.url, message: `Created PR: ${resolved.url}` })),
     log: vi.fn(),
@@ -188,6 +189,23 @@ describe('runPrCommand (INT-3282)', () => {
     const result = await runPrCommand('fix', {}, deps);
     expect(result.exitCode).toBe(1);
     expect(result.message).toMatch(/CI still red/);
+  });
+
+  it('review delegates to reviewOne', async () => {
+    const deps = mkDeps();
+    const result = await runPrCommand('review', {}, deps);
+    expect(deps.reviewOne).toHaveBeenCalledWith(resolved, expect.any(String), expect.any(Object));
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toMatch(/review feedback addressed/);
+  });
+
+  it('review reports failure', async () => {
+    const deps = mkDeps({
+      reviewOne: vi.fn(async () => ({ success: false, error: 'pipeline failed', iterations: 1 })),
+    });
+    const result = await runPrCommand('review', {}, deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/pipeline failed/);
   });
 
   it('watch returns immediately when already merge-ready', async () => {

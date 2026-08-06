@@ -21,7 +21,7 @@ async function gitExec(cwd: string, ...args: string[]): Promise<string> {
   return stdout;
 }
 
-type PRIssueComment = {
+export type PRIssueComment = {
   author: string;
   body: string;
   createdAt: string;
@@ -32,6 +32,20 @@ type AutoStash = {
 };
 
 const CRITICAL_COMMENT_KEYWORDS = ['🔴', 'critical', '버그', 'bug', '수정 필요', 'must fix', '필수', 'required'];
+
+/**
+ * Bare substring matching on 'bug'/'critical'/'required' also fires inside
+ * "debug", "bugfix", "prerequisite" — words with no bearing on whether a
+ * comment is actionable review feedback. Word-boundary matching for the
+ * single-token ASCII keywords fixes that without touching the multi-word
+ * phrase or the Korean/emoji tokens, where `\b` isn't meaningful.
+ */
+function matchesCriticalKeyword(bodyLower: string): boolean {
+  return CRITICAL_COMMENT_KEYWORDS.some((keyword) => {
+    const kw = keyword.toLowerCase();
+    return /^[a-z]+$/.test(kw) ? new RegExp(`\\b${kw}\\b`).test(bodyLower) : bodyLower.includes(kw);
+  });
+}
 const FEEDBACK_ADDRESSED_MARKERS = [
   'Review feedback addressed',
   'Auto-fix completed - CI passing',
@@ -76,12 +90,25 @@ async function restoreAutoStash(cwd: string, stash: AutoStash | null): Promise<v
   }
 }
 
-function isClaudeComment(comment: PRIssueComment): boolean {
+/** Known AI review-bot author name fragments. Codex comments were previously
+ * invisible to critical-comment detection because this check only matched
+ * "claude" — the `claude-review` action was the only bot in mind when it was
+ * written, so a repo also running a Codex-based review action never had its
+ * feedback picked up here at all. */
+const REVIEW_BOT_AUTHOR_FRAGMENTS = ['claude', 'codex'];
+
+export function isReviewBotComment(comment: PRIssueComment): boolean {
   const author = comment.author.toLowerCase();
-  return author === 'claude' || author.includes('claude');
+  // Exact bare name (e.g. a PAT-based integration posting as "codex"), or a
+  // GitHub App/bot account (GitHub always suffixes those "[bot]") whose name
+  // contains the fragment. Plain substring matching without the [bot] anchor
+  // would also treat a human account that merely contains "claude"/"codex" in
+  // its username as an automated reviewer.
+  return REVIEW_BOT_AUTHOR_FRAGMENTS.some((fragment) =>
+    author === fragment || (author.endsWith('[bot]') && author.includes(fragment)));
 }
 
-function getActiveCriticalComments(comments: PRIssueComment[]): PRIssueComment[] {
+export function getActiveCriticalComments(comments: PRIssueComment[]): PRIssueComment[] {
   const lastAddressedAt = comments.reduce<number | null>((latest, comment) => {
     if (!FEEDBACK_ADDRESSED_MARKERS.some((marker) => comment.body.includes(marker))) {
       return latest;
@@ -96,9 +123,7 @@ function getActiveCriticalComments(comments: PRIssueComment[]): PRIssueComment[]
     if (lastAddressedAt !== null && (!Number.isNaN(createdAt) && createdAt <= lastAddressedAt)) {
       return false;
     }
-    const bodyLower = comment.body.toLowerCase();
-    return isClaudeComment(comment) &&
-      CRITICAL_COMMENT_KEYWORDS.some((keyword) => bodyLower.includes(keyword.toLowerCase()));
+    return isReviewBotComment(comment) && matchesCriticalKeyword(comment.body.toLowerCase());
   });
 }
 
@@ -218,6 +243,44 @@ export class PRProcessor {
       updatedAt: new Date().toISOString(),
     };
     await this.processPR(pr, projectPath, state, key);
+    const entry = state.prs[key];
+    return {
+      success: entry?.status === 'completed',
+      error: entry?.lastError,
+      iterations: entry?.iterations ?? 0,
+    };
+  }
+
+  /**
+   * One-shot review-feedback pass for a single PR (CLI `openswarm pr review`).
+   * Runs only `processReviewFeedback` — unlike `fixOne`, it does not touch
+   * conflicts or wait on CI, so it is safe to call as a lightweight "did a
+   * reviewer (Claude, Codex, or a human CHANGES_REQUESTED) leave feedback I
+   * haven't addressed yet?" check on demand. (INT-3282)
+   *
+   * Loads/saves the same durable state file the cron path uses (unlike
+   * `fixOne`, which is throwaway-state only). The formal-review freshness
+   * gate has no GitHub-visible "already addressed" marker to fall back on the
+   * way comments do (no equivalent of the `FEEDBACK_ADDRESSED_MARKERS` scan),
+   * so without a persisted watermark, every separate `pr review` invocation
+   * would re-detect the same still-open CHANGES_REQUESTED review and
+   * re-trigger a fix for it indefinitely.
+   */
+  async reviewOne(
+    pr: PRInfo,
+    projectPath: string,
+  ): Promise<{ success: boolean; error?: string; iterations: number }> {
+    const key = `${pr.repo}#${pr.number}`;
+    const state = await this.loadState();
+    state.prs[key] = {
+      ...state.prs[key],
+      repo: pr.repo,
+      prNumber: pr.number,
+      status: 'processing',
+      iterations: 0,
+    };
+    await this.processReviewFeedback(pr, projectPath, state, key, 0);
+    await this.saveState(state);
     const entry = state.prs[key];
     return {
       success: entry?.status === 'completed',
@@ -762,6 +825,13 @@ export class PRProcessor {
       reviewIteration++;
       console.log(`[PRProcessor] ${key}: Checking review feedback (iteration ${reviewIteration}/${MAX_REVIEW_ITERATIONS})...`);
 
+      // Captured before the fetch below, not after the pipeline run finishes.
+      // The pipeline can take minutes; feedback submitted while it is running
+      // is invisible to THIS iteration (it was not fetched yet) but must not
+      // be stamped "processed" once we mark this round done, or it silently
+      // never gets picked up on the next iteration either.
+      const fetchStartedAt = new Date().toISOString();
+
       // Get PR reviews and comments
       const { getPRReviews, getPRReviewComments, getPRComments } = await import('../github/github.js');
       const reviews = await getPRReviews(pr.repo, pr.number);
@@ -776,19 +846,26 @@ export class PRProcessor {
         }
       }
 
-      // Check if any reviews request changes
-      const changesRequested = Array.from(latestReviews.values()).filter(
-        r => r.state === 'CHANGES_REQUESTED'
-      );
-
       // Check for active critical feedback in PR comments (from claude-review action)
       const lastReviewFeedbackProcessed = state.prs[key]?.lastReviewFeedbackProcessed;
-      const criticalComments = getActiveCriticalComments(prComments).filter((comment) => {
+      const stillFresh = (createdAtIso: string): boolean => {
         if (!lastReviewFeedbackProcessed) return true;
-        const createdAt = new Date(comment.createdAt).getTime();
+        const createdAt = new Date(createdAtIso).getTime();
         const lastProcessed = new Date(lastReviewFeedbackProcessed).getTime();
         return Number.isNaN(createdAt) || Number.isNaN(lastProcessed) || createdAt > lastProcessed;
-      });
+      };
+
+      // Check if any reviews request changes. A CHANGES_REQUESTED review stays
+      // in that state until the reviewer re-reviews — pushing a fix does not
+      // clear it — so without this freshness gate a formal review keeps
+      // "requesting changes" on every iteration even after it was already
+      // addressed, and the loop can never report success: it just re-fixes the
+      // same feedback until MAX_REVIEW_ITERATIONS gives up.
+      const changesRequested = Array.from(latestReviews.values())
+        .filter(r => r.state === 'CHANGES_REQUESTED')
+        .filter(r => stillFresh(r.createdAt));
+
+      const criticalComments = getActiveCriticalComments(prComments).filter((comment) => stillFresh(comment.createdAt));
 
       if (changesRequested.length === 0 && criticalComments.length === 0) {
         console.log(`[PRProcessor] ${key}: No changes requested - all reviews approved or no critical feedback`);
@@ -844,6 +921,9 @@ export class PRProcessor {
       const details = await getPRContext(pr.repo, pr.number);
       if (!details) {
         console.log(`[PRProcessor] ${key}: Failed to get PR context for review iteration`);
+        state.prs[key].status = 'failed';
+        state.prs[key].iterations = totalIterations;
+        state.prs[key].lastError = `Failed to fetch PR context for ${key} (iteration ${reviewIteration})`;
         return;
       }
 
@@ -906,6 +986,9 @@ export class PRProcessor {
             'Manual intervention required.',
           ].join('\n')
         );
+        state.prs[key].status = 'failed';
+        state.prs[key].iterations = totalIterations;
+        state.prs[key].lastError = error;
         return;
       }
 
@@ -931,7 +1014,8 @@ export class PRProcessor {
       );
 
       console.log(`[PRProcessor] ${key}: Review feedback iteration ${reviewIteration} complete`);
-      state.prs[key].lastReviewFeedbackProcessed = new Date().toISOString();
+      // fetchStartedAt, not now() — see its declaration above.
+      state.prs[key].lastReviewFeedbackProcessed = fetchStartedAt;
 
       // Small delay before checking reviews again
       await new Promise(resolve => setTimeout(resolve, 5000));

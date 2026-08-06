@@ -448,13 +448,13 @@ program
 
 program
   .command('pr')
-  .description('PR autopilot: status | fix | watch | create (conflict → comments → CI)')
-  .argument('<action>', 'status | fix | watch | create')
+  .description('PR autopilot: status | fix | review | watch | create (conflict → comments → CI)')
+  .argument('<action>', 'status | fix | review | watch | create')
   .option('--path <path>', 'Project path (default: cwd)')
   .option('--number <n>', 'PR number (or owner/repo#n); default: open PR for current branch')
   .option('--repo <owner/repo>', 'Repository override')
   .option('--rounds <n>', 'watch: max fix rounds (default 5)', (v) => parseInt(v, 10))
-  .option('--max-iterations <n>', 'fix/watch: pipeline iterations per attempt', parsePositiveIntegerOption)
+  .option('--max-iterations <n>', 'fix/review/watch: pipeline iterations per attempt', parsePositiveIntegerOption)
   .option('--max-retries <n>', 'fix/watch: CI-retry attempts', parsePositiveIntegerOption)
   .option('--no-conflicts', 'fix/watch: do not auto-resolve merge conflicts')
   .option('--title <title>', 'create: PR title')
