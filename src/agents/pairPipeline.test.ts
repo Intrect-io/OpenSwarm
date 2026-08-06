@@ -133,6 +133,36 @@ describe('PairPipeline model selection', () => {
     }));
   });
 
+  it('drops incompatible profile and escalation models at the Claude execution boundary', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 2,
+      roles: {
+        worker: {
+          enabled: true,
+          adapter: 'claude',
+          model: 'sonnet',
+          escalateModel: 'z-ai/glm-5.2',
+          escalateAfterIteration: 1,
+          timeoutMs: 0,
+        },
+        reviewer: { enabled: true, adapter: 'claude', model: 'sonnet', timeoutMs: 0 },
+      },
+      jobProfiles: [{
+        name: 'foreign-profile',
+        minMinutes: 1,
+        roles: { worker: 'z-ai/glm-5.2' },
+      }],
+    });
+
+    await pipeline.run(task(), process.cwd());
+
+    expect(runWorker).toHaveBeenCalledWith(expect.objectContaining<Partial<WorkerOptions>>({
+      model: 'sonnet',
+    }));
+  });
+
   it('a post-success documenter rate-limit does NOT revert the approved task (INT-2521)', async () => {
     // Worker approved, reviewer approved — the task is DONE. A documenter (post-
     // success, non-blocking) rate-limit must not discard that success.
@@ -187,6 +217,36 @@ describe('PairPipeline model selection', () => {
     await pipeline.run(task({ fileScope: ['src/example.ts'] }), process.cwd());
 
     expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ fileScope: ['src/example.ts'] }));
+  });
+
+  it('does not enforce knowledge-graph inferred scope at the worker boundary', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'], maxIterations: 1,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    await pipeline.run(task({
+      fileScope: ['stale/inferred.ts'],
+      fileScopeSource: 'inferred',
+    }), process.cwd());
+
+    expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ fileScope: undefined }));
+  });
+
+  it('passes preserved WIP files to the worker Git authority boundary', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'], maxIterations: 1,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+      resumedTaskFiles: ['src/preserved.ts'],
+    });
+
+    await pipeline.run(task(), process.cwd());
+
+    expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({
+      resumedTaskFiles: ['src/preserved.ts'],
+    }));
   });
 
   it('falls back to role models when no jobProfile matches', async () => {

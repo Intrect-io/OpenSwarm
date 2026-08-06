@@ -57,6 +57,8 @@ export interface TaskItem {
   dueDate?: number;
   blockedBy?: string[];    // Other task IDs
   fileScope?: string[];    // Files/modules this task modifies (planner-declared) — for parallel conflict detection
+  /** Whether fileScope came from an explicit planner declaration or KG inference. */
+  fileScopeSource?: 'declared' | 'inferred';
   impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
   estimatedMinutes?: number;
   priorAttemptFeedback?: string;  // Last failure/rejection feedback from a previous session — injected into the worker's first iteration (INT-2474)

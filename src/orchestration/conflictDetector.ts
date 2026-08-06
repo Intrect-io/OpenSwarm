@@ -108,6 +108,7 @@ export async function resolveTaskFileScope(task: TaskItem, projectPath: string):
   if (declared.size > 0) {
     const scope = [...declared];
     task.fileScope = scope;
+    task.fileScopeSource ??= 'declared';
     return scope;
   }
 
@@ -118,6 +119,7 @@ export async function resolveTaskFileScope(task: TaskItem, projectPath: string):
       if (inferred.size > 0) {
         const scope = [...inferred];
         task.fileScope = scope;
+        task.fileScopeSource = 'inferred';
         return scope;
       }
     }
@@ -126,6 +128,7 @@ export async function resolveTaskFileScope(task: TaskItem, projectPath: string):
   }
 
   task.fileScope = undefined;
+  task.fileScopeSource = undefined;
   return [];
 }
 

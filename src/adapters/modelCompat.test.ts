@@ -26,6 +26,7 @@ describe('mapModelForProvider', () => {
     expect(mapModelForProvider('claude', 'claude-sonnet-5')).toBe('claude-sonnet-5');
     expect(mapModelForProvider('claude', 'gpt-5.5')).toBeUndefined(); // the INT-2510 leak
     expect(mapModelForProvider('claude', 'openai/gpt-5')).toBeUndefined(); // config schema default
+    expect(mapModelForProvider('claude', 'z-ai/glm-5.2')).toBeUndefined(); // OpenRouter escalation
   });
 
   it('openrouter-style adapters keep namespaced ids only', () => {

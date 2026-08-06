@@ -332,6 +332,7 @@ export function enrichTaskFromState(task: TaskItem): TaskItem {
   const state = getTaskState(issueId);
   if (!state) return task;
 
+  const stateScope = (!task.fileScope || task.fileScope.length === 0) && state.fileScope.length > 0;
   return {
     ...task,
     parentId: task.parentId || state.parentIssueId,
@@ -339,6 +340,7 @@ export function enrichTaskFromState(task: TaskItem): TaskItem {
     topoRank: task.topoRank ?? state.topoRank,
     linearState: task.linearState || state.linearState,
     fileScope: task.fileScope && task.fileScope.length > 0 ? task.fileScope : state.fileScope,
+    fileScopeSource: task.fileScopeSource ?? (stateScope ? 'declared' : undefined),
   };
 }
 

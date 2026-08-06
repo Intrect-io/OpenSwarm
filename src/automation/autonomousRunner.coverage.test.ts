@@ -135,6 +135,12 @@ type Internal = {
     startTask: TaskScheduler['startTask'];
   };
   engine: { heartbeat: ReturnType<typeof vi.fn> };
+  durableRuns: {
+    listRuns(states?: readonly string[]): Array<{ issueId: string; lastErrorCode?: string }>;
+    markReady(issueId: string): boolean;
+  };
+  rateLimitUntil: number;
+  scheduleNextHeartbeat(): void;
   executeTaskPairMode: ReturnType<typeof vi.fn>;
   state: { pendingApproval?: TaskItem };
 };
@@ -232,7 +238,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
     });
 
     it('groups syntactic aliases of one repository into one conflict analysis', async () => {
-      const r = new AutonomousRunner(cfg());
+      const r = new AutonomousRunner(cfg({ allowSameProjectConcurrent: false }));
       const internal = r as unknown as Internal;
       const first = task({ id: 'alias-first' });
       const second = task({ id: 'alias-second' });
@@ -248,9 +254,33 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
     });
 
-    it('defers a candidate whose scope overlaps an already-running worktree', async () => {
+    it('fans out overlapping scopes when each issue runs in its own worktree', async () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+      }));
+      const internal = r as unknown as Internal;
+      const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
+      const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
+      internal.scheduler.getRunningTasks = () => [{
+        runId: 'active-run',
+        task: activeTask,
+        projectPath: '/repo',
+        startedAt: Date.now(),
+        promise: Promise.resolve(pipelineResult('approved', { success: true })),
+        executorSettled: Promise.resolve(),
+        abortController: new AbortController(),
+      }];
+
+      const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
+
+      expect(safe).toEqual(new Set(['candidate']));
+      expect(fileScopesConflictMock).not.toHaveBeenCalled();
+      expect(detectFileConflictsMock).not.toHaveBeenCalled();
+    });
+
+    it('still defers overlapping scopes when worktree fan-out is disabled', async () => {
+      const r = new AutonomousRunner(cfg({
+        allowSameProjectConcurrent: false, worktreeMode: true, maxConcurrentTasks: 3,
       }));
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
@@ -289,12 +319,12 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(internal.sameProjectCandidateCap()).toBeNull();
     });
 
-    it('sameProjectCandidateCap uses the shared safe default when the setting is omitted', () => {
+    it('sameProjectCandidateCap fills the global pool when the setting is omitted', () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 4,
       }));
       const internal = r as unknown as Internal;
-      expect(internal.sameProjectCandidateCap()).toBe(2);
+      expect(internal.sameProjectCandidateCap()).toBe(4);
     });
 
     it('sameProjectCandidateCap clamps between 1 and maxConcurrentTasks', () => {
@@ -380,12 +410,12 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
   });
 
   describe('getAdapterSummary', () => {
-    it('uses explicit worker/reviewer models without resolving adapter defaults', async () => {
+    it('drops startup models incompatible with the configured default adapter', async () => {
       const r = new AutonomousRunner(cfg({ workerModel: 'w-model', reviewerModel: 'r-model' }));
       const summary = await r.getAdapterSummary();
       expect(summary.defaultAdapter).toBe('codex'); // fallback default
-      expect(summary.worker).toEqual({ adapter: 'codex', model: 'w-model', enabled: true });
-      expect(summary.reviewer).toEqual({ adapter: 'codex', model: 'r-model', enabled: true });
+      expect(summary.worker).toEqual({ adapter: 'codex', model: 'mocked-default-model', enabled: true });
+      expect(summary.reviewer).toEqual({ adapter: 'codex', model: 'mocked-default-model', enabled: true });
       expect(summary.tester).toBeUndefined();
       expect(summary.documenter).toBeUndefined();
     });
@@ -411,11 +441,30 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(summary.worker).toEqual({ adapter: 'gpt', model: 'w2', enabled: true });
       expect(summary.reviewer).toEqual({ adapter: 'claude', model: 'r2', enabled: false });
       expect(summary.tester).toEqual({ adapter: 'local', model: 't1', enabled: true });
-      expect(summary.documenter).toEqual({ adapter: 'codex', model: 'd1', enabled: false });
+      expect(summary.documenter).toEqual({ adapter: 'codex', model: undefined, enabled: false });
     });
   });
 
   describe('switchProvider', () => {
+    it('releases only provider-quota retries and clears the in-memory pause', () => {
+      const r = new AutonomousRunner(cfg({ defaultAdapter: 'codex' }));
+      const internal = r as unknown as Internal;
+      internal.rateLimitUntil = Date.now() + 60_000;
+      internal.durableRuns.listRuns = vi.fn(() => [
+        { issueId: 'quota-1', lastErrorCode: 'rate_limited' },
+        { issueId: 'infra-1', lastErrorCode: 'infra_error' },
+      ]);
+      internal.durableRuns.markReady = vi.fn(() => true);
+      internal.scheduleNextHeartbeat = vi.fn();
+
+      r.switchProvider('claude');
+
+      expect(internal.rateLimitUntil).toBe(0);
+      expect(internal.durableRuns.markReady).toHaveBeenCalledTimes(1);
+      expect(internal.durableRuns.markReady).toHaveBeenCalledWith('quota-1');
+      expect(internal.scheduleNextHeartbeat).toHaveBeenCalledTimes(1);
+    });
+
     it('updates defaultAdapter and remaps workerModel/reviewerModel/plannerModel', () => {
       const r = new AutonomousRunner(cfg({
         defaultAdapter: 'codex',
@@ -614,6 +663,33 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(source.updateState).not.toHaveBeenCalled();
       expect(source.logStuck).not.toHaveBeenCalled();
       expect(source.logBlocked).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pickPipelineFailureDetail', () => {
+    it('prefers deterministic verification output over an earlier reviewer approval', () => {
+      const result = pipelineResult('failed', {
+        lastReviewFeedback: 'Work complete and approved.',
+        testerResult: {
+          success: false,
+          testsPassed: 0,
+          testsFailed: 1,
+          output: '[cargo test] error[E0425]: cannot find type Rect in this scope',
+          deterministic: true,
+        },
+      });
+
+      expect(runnerModule.pickPipelineFailureDetail(result)).toContain('cannot find type Rect');
+    });
+
+    it('keeps reviewer feedback when verification did not fail', () => {
+      const result = pipelineResult('failed', {
+        lastReviewFeedback: 'The implementation still misses the requested behavior.',
+      });
+
+      expect(runnerModule.pickPipelineFailureDetail(result)).toBe(
+        'The implementation still misses the requested behavior.',
+      );
     });
   });
 

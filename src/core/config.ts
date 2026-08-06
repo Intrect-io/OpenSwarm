@@ -286,10 +286,10 @@ const AutonomousConfigSchema = z.object({
   workerTimeoutMs: z.number().min(0).default(0),
   /** Reviewer timeout (ms). 0/unset = pipeline per-stage ceiling (not unlimited). */
   reviewerTimeoutMs: z.number().min(0).default(0),
-  /** Max concurrent tasks */
-  maxConcurrentTasks: z.number().min(1).max(10).default(1),
+  /** Max concurrent tasks. The daemon fills every available slot, up to 32. */
+  maxConcurrentTasks: z.number().int().min(1).max(32).default(32),
   /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
-  maxConcurrentPerProject: z.number().int().min(1).max(10).optional(),
+  maxConcurrentPerProject: z.number().int().min(1).max(32).optional(),
   /** SQLite execution-truth rollout. primary is fail-closed; shadow only observes. */
   automationLedgerMode: z.enum(['off', 'shadow', 'primary']).default('primary'),
   automationDbPath: z.string().min(1).optional(),

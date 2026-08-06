@@ -84,6 +84,33 @@ export interface WorktreeInfo {
   issueId: string;
   /** Unique ownership token for this process generation's active marker. */
   activeMarkerToken?: string;
+  /** Files already committed by preserveWorktree for this task and resumed now. */
+  resumedTaskFiles?: string[];
+}
+
+async function getPreservedTaskFiles(worktreePath: string): Promise<string[]> {
+  const log = await git(worktreePath, 'log', '--format=%H%x09%s', '-n', '100').catch(() => '');
+  const commits = log.split('\n').filter(Boolean).map((line) => {
+    const tab = line.indexOf('\t');
+    return { hash: line.slice(0, tab), subject: line.slice(tab + 1) };
+  });
+  let preservedCount = 0;
+  while (commits[preservedCount]?.subject.startsWith('wip: preserved partial work')) preservedCount += 1;
+  if (preservedCount === 0) return [];
+
+  const base = commits[preservedCount]?.hash;
+  const diffArgs = base
+    ? ['diff', '--name-only', base, 'HEAD']
+    : ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'];
+  const files = await git(worktreePath, ...diffArgs);
+  return [...new Set(files.split('\n').filter((file) => file && file !== PRESERVE_MARKER))];
+}
+
+/** Runtime ownership metadata must never be published in a task branch/PR. */
+async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
+  const markerPath = join(worktreePath, PRESERVE_MARKER);
+  try { rmSync(markerPath, { force: true }); } catch { /* git cleanup below still runs */ }
+  await git(worktreePath, 'rm', '--cached', '--ignore-unmatch', '--', PRESERVE_MARKER).catch(() => '');
 }
 
 // Branch & Path Utilities
@@ -117,6 +144,18 @@ function resolveWorktreePath(repoPath: string, issueId: string): string {
     throw new Error(`Resolved worktree path escapes ${root}: ${path}`);
   }
   return path;
+}
+
+/** True when a task has an on-disk worktree that createWorktree can reconcile/resume. */
+export async function hasRecoverableWorktree(repoPath: string, issueId: string, branchName: string): Promise<boolean> {
+  try {
+    if (existsSync(resolveWorktreePath(repoPath, issueId))) return true;
+    return await git(repoPath, 'show-ref', '--verify', '--quiet', `refs/heads/${branchName}`)
+      .then(() => true)
+      .catch(() => false);
+  } catch {
+    return false;
+  }
 }
 
 function assertManagedWorktreePath(repoPath: string, worktreePath: string): string {
@@ -409,6 +448,7 @@ async function removePreservedWorktreeAtUnlocked(worktreePath: string): Promise<
   if (!m || !existsSync(worktreePath)) return;
   const repoRoot = m[1];
   try {
+    await stripRuntimeMarkerFromGit(worktreePath);
     await git(worktreePath, 'add', '-A');
     await git(
       worktreePath,
@@ -532,7 +572,10 @@ export async function createWorktree(
     const valid = await git(worktreePath, 'status', '--porcelain').then(() => true).catch(() => false);
     const branch = await git(worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD').then((b) => b.trim()).catch(() => '');
     if (valid && branch === branchName) {
-      const resumed: WorktreeInfo = { worktreePath, branchName, originalPath: repoPath, issueId };
+      const resumed: WorktreeInfo = {
+        worktreePath, branchName, originalPath: repoPath, issueId,
+        resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
+      };
       resumed.activeMarkerToken = await writeActiveWorktreeMarker(resumed);
       try {
         // Acquire the new generation's ownership marker before consuming the
@@ -558,7 +601,10 @@ export async function createWorktree(
     if (!valid || branch !== branchName) {
       throw new Error(`Existing worktree requires reconciliation (valid=${valid}, branch=${branch}): ${worktreePath}`);
     }
-    const resumed: WorktreeInfo = { worktreePath, branchName, originalPath: repoPath, issueId };
+    const resumed: WorktreeInfo = {
+      worktreePath, branchName, originalPath: repoPath, issueId,
+      resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
+    };
     resumed.activeMarkerToken = await writeActiveWorktreeMarker(resumed);
     console.log(`[Worktree] Resuming crash-recovered worktree: ${worktreePath} (branch: ${branchName})`);
     return resumed;
@@ -588,7 +634,10 @@ export async function createWorktree(
   }
   console.log(`[Worktree] Created: ${worktreePath} (branch: ${branchName}, base: ${baseRef})`);
 
-  const info: WorktreeInfo = { worktreePath, branchName, originalPath: repoPath, issueId };
+  const info: WorktreeInfo = {
+    worktreePath, branchName, originalPath: repoPath, issueId,
+    resumedTaskFiles: branchExists ? await getPreservedTaskFiles(worktreePath) : undefined,
+  };
   // Written before dependency setup or worker invocation. A crash anywhere after
   // `git worktree add` is therefore recoverable.
   info.activeMarkerToken = await writeActiveWorktreeMarker(info);
@@ -930,6 +979,7 @@ export async function commitAndCreatePR(
   const { worktreePath, branchName } = info;
 
   // Check for uncommitted changes and commit them
+  await stripRuntimeMarkerFromGit(worktreePath);
   const status = await git(worktreePath, 'status', '--porcelain');
 
   if (status.trim()) {

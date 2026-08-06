@@ -52,4 +52,46 @@ describe('runWorker Git authority (INT-2609)', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('outside declared fileScope');
   });
+
+  it('accepts task-owned files resumed from preserved WIP commits', async () => {
+    getChangedFilesSinceSnapshot.mockResolvedValue([]);
+
+    const result = await runWorker({
+      taskTitle: 'resume exec tools', taskDescription: 'finish preserved work',
+      projectPath: '/repo', adapterName: 'gpt',
+      resumedTaskFiles: ['kyte_cli/core/exec_tools.py'],
+      fileScope: ['kyte_cli/core/exec_tools.py'],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.filesChanged).toEqual(['kyte_cli/core/exec_tools.py']);
+  });
+
+  it('does not re-reject task-owned WIP solely because the preserved scope was incomplete', async () => {
+    getChangedFilesSinceSnapshot.mockResolvedValue([]);
+
+    const result = await runWorker({
+      taskTitle: 'resume exec tools', taskDescription: 'finish preserved work',
+      projectPath: '/repo', adapterName: 'gpt',
+      resumedTaskFiles: ['worktree/other/web_tools.py'],
+      fileScope: ['kyte_cli/core/exec_tools.py'],
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.filesChanged).toEqual(['worktree/other/web_tools.py']);
+  });
+
+  it('still enforces declared scope for fresh edits made after resume', async () => {
+    getChangedFilesSinceSnapshot.mockResolvedValue(['fresh/outside.py']);
+
+    const result = await runWorker({
+      taskTitle: 'resume exec tools', taskDescription: 'finish preserved work',
+      projectPath: '/repo', adapterName: 'gpt',
+      resumedTaskFiles: ['kyte_cli/core/exec_tools.py'],
+      fileScope: ['kyte_cli/core/exec_tools.py'],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('fresh/outside.py');
+  });
 });

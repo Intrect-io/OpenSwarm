@@ -13,6 +13,7 @@ import {
   type RunRecord,
   type RunState,
 } from './runLedger.js';
+import { pickPipelineFailureDetail } from './runnerState.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -36,6 +37,8 @@ export interface ExecutionDurabilityHooks {
 export interface DurableExecuteOptions {
   successEffect?: (result: PipelineResult, claim: RunClaim) => EffectInput;
   cancelEffect?: (result: PipelineResult, claim: RunClaim) => EffectInput;
+  /** Service shutdown is a resumable interruption, unlike an operator cancel. */
+  retryCancellation?: (result: PipelineResult, claim: RunClaim) => boolean;
   admission?: RepositoryAdmissionPolicy;
 }
 
@@ -83,9 +86,16 @@ function fencedResult(result: PipelineResult): PipelineResult {
   };
 }
 
-function retryAtFor(result: PipelineResult, now: number): number {
+export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): number {
   if (result.finalStatus === 'rate_limited') return result.rateLimitResetsAt ?? now + 60_000;
-  if (result.finalStatus === 'superseded') return now + 5 * 60_000;
+  if (result.finalStatus === 'superseded') {
+    // A first overlap can disappear quickly, but a still-open PR or persistent
+    // file-scope conflict should not burn a fresh Draft/worker admission every
+    // heartbeat forever. Back off repeated supersession while retaining a
+    // bounded recheck so closing/merging the owning PR makes the issue runnable.
+    const exponent = Math.max(0, Math.min(16, attemptNo - 1));
+    return now + Math.min(6 * 60 * 60_000, 5 * 60_000 * (2 ** exponent));
+  }
   if (result.finalStatus === 'infra_error') return now + 15 * 60_000;
   return now + 30 * 60_000;
 }
@@ -226,9 +236,10 @@ export class DurableRunCoordinator {
     if (!claim) {
       if (this.isPrimary) {
         const now = Date.now();
+        const circuitOpenUntil = this.ledger.getCircuitOpenUntil(issueId, now);
         this.ledger.deferUnclaimedRun(
           issueId,
-          now + 30_000,
+          Math.max(now + 30_000, circuitOpenUntil ?? 0),
           'Durable claim unavailable (repository admission, circuit, budget, or concurrent owner)',
           now,
         );
@@ -372,6 +383,13 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'cancelled') {
+      if (options.retryCancellation?.(result, claim)) {
+        return this.ledger.transition(claim, 'RETRY_AT', {
+          retryAt: now + 60_000,
+          errorCode: 'shutdown_cancelled',
+          eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus, resumable: true },
+        }, now) ? result : fencedResult(result);
+      }
       const effect = options.cancelEffect?.(result, claim);
       if (effect) {
         return this.ledger.commitRunForSync(claim, effect, {
@@ -386,7 +404,7 @@ export class DurableRunCoordinator {
 
     if (result.finalStatus === 'superseded') {
       return this.ledger.transition(claim, 'RETRY_AT', {
-        retryAt: retryAtFor(result, now),
+        retryAt: retryAtFor(result, now, claim.attemptNo),
         errorCode: result.finalStatus,
         eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
       }, now) ? result : fencedResult(result);
@@ -415,7 +433,7 @@ export class DurableRunCoordinator {
     const transitioned = this.ledger.transition(claim, target, {
       retryAt: target === 'RETRY_AT' ? retryAtFor(result, now) : null,
       errorCode: result.finalStatus,
-      errorMessage: result.workerResult?.error || result.reviewResult?.feedback,
+      errorMessage: pickPipelineFailureDetail(result),
       eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
     }, now);
     return transitioned ? result : fencedResult(result);
@@ -426,6 +444,23 @@ export class DurableRunCoordinator {
     const reconciled = this.ledger.reconcileExpiredLeases(now);
 
     for (const claim of this.exitedClaims.values()) this.confirmExitedClaim(claim, now);
+    for (const run of this.ledger.listRuns(['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING'])) {
+      if (!run.ownerInstanceId || !run.leaseToken) continue;
+      const pid = ownerProcessId(run.ownerInstanceId);
+      if (pid == null || this.processIsAlive(pid)) continue;
+      const ownership = {
+        issueId: run.issueId,
+        ownerInstanceId: run.ownerInstanceId,
+        leaseToken: run.leaseToken,
+        leaseEpoch: run.leaseEpoch,
+        attemptNo: run.attemptNo,
+        leaseExpiresAt: run.leaseExpiresAt ?? 0,
+      };
+      if (this.ledger.reconcileDeadOwner(ownership, now)) {
+        reconciled.push(this.ledger.getRun(run.issueId)!);
+        this.confirmExitedClaim(ownership, now);
+      }
+    }
     for (const run of this.ledger.listRuns(['NEEDS_RECONCILE'])) {
       if (!run.ownerInstanceId || !run.leaseToken) continue;
       const pid = ownerProcessId(run.ownerInstanceId);
