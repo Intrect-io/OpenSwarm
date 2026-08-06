@@ -7,6 +7,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from '
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -219,6 +220,24 @@ export function pickFailureDetail(candidates: Array<string | undefined>): string
     if (trimmed && !JUNK_DETAILS.has(trimmed)) return trimmed;
   }
   return undefined;
+}
+
+/** Prefer the stage that actually failed over earlier successful feedback. */
+export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
+  const testerFailure = result.testerResult?.success === false
+    ? pickFailureDetail([
+      result.testerResult.error,
+      result.testerResult.output,
+      result.testerResult.failedTests?.join(', '),
+    ])
+    : undefined;
+
+  return pickFailureDetail([
+    testerFailure,
+    result.lastReviewFeedback,
+    result.reviewResult?.feedback,
+    result.workerResult?.error,
+  ]);
 }
 
 export function recordLastFailureDetail(state: TaskState, issueId: string, detail: string): void {

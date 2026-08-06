@@ -268,6 +268,21 @@ describe('createWorktree retry/resume error paths', () => {
     writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
     expect(await preserveWorktree(info, 'retryable failure')).toBe(true);
     await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({ state: 'preserved' });
+
+    const resumed = await createWorktree(repo, 'INT-1', 'swarm/INT-1-recovery');
+    expect(resumed.resumedTaskFiles).toEqual(['app.py']);
+  });
+
+  it('restores preserved WIP files when only the task branch remains', async () => {
+    const branch = 'swarm/INT-1-branch-only';
+    const info = await createWorktree(repo, 'INT-1', branch);
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\nbranch-only\n');
+    expect(await preserveWorktree(info, 'retryable failure')).toBe(true);
+    git(repo, 'worktree', 'remove', '--force', info.worktreePath);
+
+    const resumed = await createWorktree(repo, 'INT-1', branch);
+
+    expect(resumed.resumedTaskFiles).toEqual(['app.py']);
   });
 
   it('clears only its own active marker when a newer owner token exists', async () => {
@@ -569,6 +584,12 @@ describe('collectActiveScopes / buildFileOverlapSection real gh+git integration 
     const selfBranch = 'swarm/INT-1-test';
     const info = await createWorktree(repo, 'INT-1', selfBranch);
 
+    // Simulate a legacy preserved branch created before runtime markers were
+    // excluded from WIP commits. Publication must remove this control file.
+    writeFileSync(join(info.worktreePath, '.openswarm-preserved'), '{"legacy":true}\n');
+    git(info.worktreePath, 'add', '.openswarm-preserved');
+    git(info.worktreePath, 'commit', '-m', 'wip: legacy tracked runtime marker');
+
     // Another worker's swarm/* branch, pushed via a separate clone (no PR of
     // its own yet) — touches otherfile.py.
     const otherClone = join(root, 'other-clone');
@@ -605,6 +626,9 @@ esac`);
     } finally {
       process.env.PATH = prevPath;
     }
+
+    expect(git(info.worktreePath, 'ls-files', '--', '.openswarm-preserved').toString().trim()).toBe('');
+    expect(existsSync(join(info.worktreePath, '.openswarm-preserved'))).toBe(false);
 
     const calls = readFileSync(ghLog, 'utf8');
     // Overlap from the mocked open PR #501 (self PR #500 excluded, broken #502 tolerated).

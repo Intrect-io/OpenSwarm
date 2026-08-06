@@ -29,6 +29,7 @@ vi.mock('../support/worktreeManager.js', () => ({
   createWorktree: vi.fn(),
   commitAndCreatePR: vi.fn(),
   findOpenPRFileOverlaps: vi.fn(),
+  hasRecoverableWorktree: vi.fn(async () => false),
   preserveWorktree: vi.fn(),
   removeWorktree: vi.fn(),
 }));

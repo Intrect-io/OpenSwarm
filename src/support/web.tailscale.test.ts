@@ -69,3 +69,20 @@ describe('detectTailscaleIP', () => {
     expect(literals).toEqual([]);
   });
 });
+
+describe('isTailscaleAddress', () => {
+  it('accepts Tailscale IPv4, mapped IPv4, and ULA addresses', async () => {
+    const { isTailscaleAddress } = await import('./web.js');
+    expect(isTailscaleAddress('100.64.0.1')).toBe(true);
+    expect(isTailscaleAddress('::ffff:100.123.244.103')).toBe(true);
+    expect(isTailscaleAddress('fd7a:115c:a1e0::b601:f469')).toBe(true);
+  });
+
+  it('rejects LAN, loopback, and addresses outside the CGNAT range', async () => {
+    const { isTailscaleAddress } = await import('./web.js');
+    expect(isTailscaleAddress('192.168.50.196')).toBe(false);
+    expect(isTailscaleAddress('127.0.0.1')).toBe(false);
+    expect(isTailscaleAddress('100.128.0.1')).toBe(false);
+    expect(isTailscaleAddress('fd00::1')).toBe(false);
+  });
+});

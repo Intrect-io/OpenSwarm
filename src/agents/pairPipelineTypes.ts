@@ -41,6 +41,8 @@ export interface PipelineConfig {
   skipTesterIfNoCodeChange?: boolean;
   skipAuditorUnderFileCount?: number;
   verbose?: boolean;
+  /** Task-owned files already committed in a preserved WIP chain before this run. */
+  resumedTaskFiles?: string[];
   draftAnalysis?: {
     taskType: string;
     intentSummary: string;

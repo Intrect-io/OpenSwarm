@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync, existsSync, watchFile, unwatchFile, type Stats } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, dirname, basename } from 'node:path';
-import { homedir, networkInterfaces } from 'node:os';
+import { homedir } from 'node:os';
 import { atomicWriteFileSync } from './atomicFile.js';
 import { execFile } from 'node:child_process';
 import { getChatHistory } from '../discord/index.js';
@@ -15,18 +15,21 @@ import { formatCost } from './costTracker.js';
 import { getRateLimiterMetrics } from './rateLimiter.js';
 import { scanLocalProjects, invalidateProjectCache } from './projectMapper.js';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
-import { DASHBOARD_HTML } from './dashboardHtml.js';
+import { buildDashboardHtml } from './dashboardHtml.js';
 import { getGraph, toProjectSlug, getProjectHealth, scanAndCache, listGraphs } from '../knowledge/index.js';
 import { getProjectGitInfo, startGitStatusPoller, stopGitStatusPoller } from './gitStatus.js';
 import { getActiveMonitors, registerMonitor, unregisterMonitor } from '../automation/longRunningMonitor.js';
 import type { LongRunningMonitorConfig } from '../core/types.js';
 import { getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from '../adapters/processRegistry.js';
 import { setDefaultAdapter, isKnownAdapter, listAdapterNames } from '../adapters/index.js';
+import { writeProviderOverride } from '../core/providerOverride.js';
 import * as memory from '../memory/index.js';
 import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
 import { initLocale } from '../locale/index.js';
+import { detectTailscaleIP, isLoopbackAddress, isTailscaleAddress } from './tailscaleNetwork.js';
+export { detectTailscaleIP, isTailscaleAddress } from './tailscaleNetwork.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
@@ -80,8 +83,10 @@ function safeErrorMessage(err: unknown): string {
   return 'Internal error';
 }
 
-function isLoopbackAddress(address: string | undefined): boolean {
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+function isTrustedTailscaleRequest(req: IncomingMessage): boolean {
+  return process.env.OPENSWARM_TRUST_TAILSCALE === 'true'
+    && isTailscaleAddress(req.socket.remoteAddress)
+    && isTrustedLocalOrigin(req);
 }
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -146,12 +151,14 @@ function isTrustedLocalOrigin(req: IncomingMessage): boolean {
 
 function isAuthorizedMutation(req: IncomingMessage): boolean {
   if (hasValidWebToken(req)) return true;
-  return isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req);
+  return (isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req))
+    || isTrustedTailscaleRequest(req);
 }
 
 function isAuthorizedLocalRead(req: IncomingMessage): boolean {
   if (hasValidWebToken(req)) return true;
-  return isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req);
+  return (isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req))
+    || isTrustedTailscaleRequest(req);
 }
 
 function isMutatingApiRequest(pathname: string, method: string | undefined): boolean {
@@ -290,26 +297,6 @@ function loadReposConfig(): ReposConfig {
 }
 
 /**
- * This machine's Tailscale address, or undefined when Tailscale is not up.
- *
- * Detected at runtime rather than hardcoded: the previous literal was one
- * developer's actual node address committed to a public repo, and it went
- * stale for everyone else the moment Tailscale reassigned it. Tailscale hands
- * out addresses from the 100.64.0.0/10 CGNAT range, which nothing else on a
- * normal LAN uses.
- */
-export function detectTailscaleIP(): string | undefined {
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const address of addresses ?? []) {
-      if (address.family !== 'IPv4' || address.internal) continue;
-      const [first, second] = address.address.split('.').map(Number);
-      if (first === 100 && second >= 64 && second <= 127) return address.address;
-    }
-  }
-  return undefined;
-}
-
-/**
  * Persist the repos config.
  *
  * Atomic (write-temp + fsync + rename) because this file has three concurrent
@@ -439,10 +426,12 @@ export function stopReposWatcher(): void {
 }
 
 /**
- * Set runner reference (call after autonomous runner is initialized)
+ * Set runner reference (call after autonomous runner is initialized).
+ * Pass `undefined` to detach (tests / early boot without autonomous mode).
  */
-export function setWebRunner(runner: AutonomousRunner): void {
+export function setWebRunner(runner: AutonomousRunner | undefined): void {
   runnerRef = runner;
+  if (!runner) return;
   applyReposConfig(runner);
   startReposWatcher();
 }
@@ -527,7 +516,9 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       // ---- Dashboard ----
       } else if (url === '/' || url === '/index.html') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(DASHBOARD_HTML);
+        // Build buttons from the live registry so the toggle never drifts from
+        // isKnownAdapter validation (INT-1901 / INT-3284).
+        res.end(buildDashboardHtml(listAdapterNames()));
 
       // ---- SSE stream ----
       } else if (url === '/api/events') {
@@ -755,6 +746,10 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
           setDefaultAdapter(provider);
           runnerRef?.switchProvider(provider);
+          // switchProvider persists only when a runner is attached. Always write
+          // here so a dashboard-only / runner-less daemon still survives restart.
+          // Idempotent with switchProvider's own write. (INT-3284)
+          writeProviderOverride(provider);
           broadcastEvent({
             type: 'log',
             data: { taskId: 'system', stage: 'provider', line: `Provider switched to ${provider}` },
@@ -1451,13 +1446,17 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       }
     });
 
-    const listenHost = process.env.OPENSWARM_WEB_TOKEN?.trim() ? '0.0.0.0' : '127.0.0.1';
+    const trustTailscale = process.env.OPENSWARM_TRUST_TAILSCALE === 'true';
+    const listenHost = process.env.OPENSWARM_WEB_TOKEN?.trim() || trustTailscale ? '0.0.0.0' : '127.0.0.1';
     server.listen(port, listenHost, () => {
       const tailscaleIP = detectTailscaleIP();
       console.log(`Web interface running at:`);
       console.log(`  - http://127.0.0.1:${port} (localhost)`);
       if (listenHost === '0.0.0.0') {
-        if (tailscaleIP) console.log(`  - http://${tailscaleIP}:${port} (Tailscale, token required)`);
+        const access = trustTailscale && !process.env.OPENSWARM_WEB_TOKEN?.trim()
+          ? 'Tailscale only'
+          : 'token required';
+        if (tailscaleIP) console.log(`  - http://${tailscaleIP}:${port} (${access})`);
         else console.log(`  - http://<this-host>:${port} (token required)`);
       }
       gitStatusPoller = startGitStatusPoller(() => Array.from(pinnedProjects));

@@ -27,8 +27,9 @@ const execFileAsync = promisify(execFile);
  * Version-agnostic model alias — the claude CLI resolves "sonnet" to the
  * current Sonnet, so it never goes stale the way a pinned model id would.
  * Single source for both getDefaultModel() and the buildCommand fallback. (INT-2509)
+ * Exported so chatBackend.getDefaultChatModel stays in sync (INT-3284).
  */
-const CLAUDE_DEFAULT_MODEL = 'sonnet';
+export const CLAUDE_DEFAULT_MODEL = 'sonnet';
 
 /**
  * The only tools a read-only run may use. Inspection and search, nothing that
@@ -83,8 +84,9 @@ export class ClaudeCliAdapter implements CliAdapter {
     // so a tool added to the CLI later is denied by default. (INT-3189)
     const args = options.readOnly
       ? ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'default',
-         '--allowedTools', ...READ_ONLY_CLAUDE_TOOLS]
-      : ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
+         '--strict-mcp-config', '--allowedTools', ...READ_ONLY_CLAUDE_TOOLS]
+      : ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions',
+         '--strict-mcp-config'];
     // Not registered in a read-only run: the memory tools are outside the
     // allowlist, so every call would be denied anyway, and the server exposes
     // writes — memory is the one place a prompt-injected review could leave

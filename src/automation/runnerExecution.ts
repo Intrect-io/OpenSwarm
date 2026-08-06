@@ -30,7 +30,7 @@ import {
   buildBranchName,
   createWorktree,
   commitAndCreatePR,
-  findOpenPRFileOverlaps,
+  hasRecoverableWorktree,
   preserveWorktree,
   removeWorktree,
 } from '../support/worktreeManager.js';
@@ -38,6 +38,28 @@ import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
+import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
+import { rateLimitedPipelineResult } from './pipelinePreflight.js';
+export { rateLimitedPipelineResult } from './pipelinePreflight.js';
+
+export const PIPELINE_EFFECT_TIMEOUT_MS = 30_000;
+
+export function boundPipelineEffect(
+  effect: Promise<unknown>,
+  label: string,
+  timeoutMs = PIPELINE_EFFECT_TIMEOUT_MS,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+    effect.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
 import {
   getDecompositionDepth,
   getChildrenCount,
@@ -179,6 +201,8 @@ export interface ExecutionContext {
   maxReflections?: number;
   /** Fenced durable-run callbacks. Omitted for legacy/off mode. */
   durability?: ExecutionDurabilityHooks;
+  /** Current open issue snapshot for same-project duplicate grooming in draft. */
+  peerIssues?: TaskItem[];
 }
 
 // Project Path Resolution
@@ -696,25 +720,6 @@ export async function decomposeTask(
   );
 }
 
-// Pipeline Execution
-
-/**
- * The 'rate_limited' PipelineResult the scheduler reads to pause: finalStatus +
- * rateLimitResetsAt (ms) so the runner backs off until the reset without counting
- * toward STUCK. Built here for a pre-pipeline (draft/planner) rate limit. (INT-2521)
- */
-export function rateLimitedPipelineResult(err: RateLimitError): PipelineResult {
-  return {
-    success: false,
-    sessionId: `rate-limited-${Date.now()}`,
-    iterations: 0,
-    totalDuration: 0,
-    finalStatus: 'rate_limited',
-    rateLimitResetsAt: err.resetsAt ? err.resetsAt * 1000 : undefined,
-    stages: [],
-  };
-}
-
 export async function executePipeline(
   ctx: ExecutionContext,
   task: TaskItem,
@@ -758,6 +763,7 @@ export async function executePipeline(
         taskDescription: task.description || '',
         projectPath,
         model: ctx.draftModel,
+        peerIssues: projectDraftPeers(task, ctx.peerIssues),
         // No fixed timeout: the draft scales its own read/analyze budget to the
         // codebase size (registry entity count). A fixed 30s timed out on large
         // repos (WAVE ~600k entities) → type=unknown, files=[] → the worker starts
@@ -774,31 +780,26 @@ export async function executePipeline(
       broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'complete', durationMs: draftResult.durationMs, ...metadata } });
       console.log(`[AutonomousRunner] Draft: type=${draftResult.taskType}, files=${draftResult.relevantFiles.length}, ${draftResult.durationMs}ms`);
 
-      // Stop before branch creation when an open PR already owns any planned
-      // file. The existing PR is the coordination surface; starting another
-      // worker here is what produced the INT-2568 audit PR clusters.
-      if (ctx.worktreeMode && draftResult.relevantFiles.length > 0) {
-        const overlaps = await findOpenPRFileOverlaps(projectPath, draftResult.relevantFiles);
-        if (overlaps.length > 0) {
-          const lines = overlaps.map((o) => `- ${o.url}: ${o.files.map((f) => `\`${f}\``).join(', ')}`);
-          console.warn(`[AutonomousRunner] Existing open PR owns planned files — skipping duplicate worker: ${lines.join(' ')}`);
-          return {
-            success: true,
-            sessionId: `superseded-${Date.now()}`,
-            iterations: 0,
-            totalDuration: draftResult.durationMs,
-            finalStatus: 'superseded',
-            stages: [],
-          };
-        }
-      }
+      const draftGate = await applyDraftGates({ task, projectPath, draft: draftResult,
+        peers: ctx.peerIssues, source: taskSource, worktreeMode: ctx.worktreeMode });
+      if (draftGate) return draftGate;
     } catch (err) {
       if (err instanceof RateLimitError) throw err; // → outer catch → rate_limited (INT-2521)
       console.warn('[AutonomousRunner] Draft analysis failed (non-blocking):', err);
     }
   }
 
-  if (ctx.enableDecomposition) {
+  const resumesPreservedWork = !!(
+    ctx.worktreeMode
+    && task.issueId
+    && await hasRecoverableWorktree(
+      projectPath,
+      task.issueId,
+      buildBranchName(task.issueIdentifier ?? task.issueId, task.title),
+    )
+  );
+
+  if (ctx.enableDecomposition && !resumesPreservedWork) {
     const threshold = ctx.decompositionThresholdMinutes ?? 30;
     const needsDecomp = planner.needsDecomposition(task, threshold, true); // heuristic pre-filter
 
@@ -827,6 +828,8 @@ export async function executePipeline(
         console.log('[AutonomousRunner] Decomposition failed, falling back to direct execution');
       }
     }
+  } else if (resumesPreservedWork) {
+    console.log(`[AutonomousRunner] Preserved work exists for ${task.issueIdentifier ?? task.issueId} — skipping decomposition and resuming the task branch`);
   }
   } catch (err) {
     // Pre-pipeline rate limit → pause the scheduler (finalStatus 'rate_limited'
@@ -922,6 +925,7 @@ export async function executePipeline(
       ctx.maxReflections,
       pipelineMetadata(task, actualPath, worktreeInfo),
       ctx.verify,
+      worktreeInfo?.resumedTaskFiles,
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
@@ -955,8 +959,9 @@ export async function executePipeline(
         else console.error(`[${taskPrefix}] ${label} failed:`, error);
         return;
       }
+      const boundedEffect = boundPipelineEffect(effect, label);
       let tracked!: Promise<void>;
-      tracked = effect
+      tracked = boundedEffect
         .then((value) => {
           if (critical && value === false) {
             throw new Error('durable lease fence rejected the event');

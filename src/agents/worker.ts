@@ -45,6 +45,8 @@ export interface WorkerOptions {
   protectedFiles?: string[];
   /** Planner-declared files/modules this task may edit. */
   fileScope?: string[];
+  /** Task-owned files restored from preserveWorktree WIP commits. */
+  resumedTaskFiles?: string[];
   /** bash tool timeout in ms — raise for slow verification such as docker-based tests */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */
@@ -307,9 +309,17 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     // a task as failed when the working tree actually changed (VEGA-style: real
     // signal over self-report).
     if (isGitRepo && snapshotHash) {
-      const gitChangedFiles = await gitTracker.getChangedFilesSinceSnapshot(cwd, snapshotHash);
+      const freshChangedFiles = (await gitTracker.getChangedFilesSinceSnapshot(cwd, snapshotHash))
+        .filter((file) => file !== '.openswarm-preserved');
+      const gitChangedFiles = [...new Set([...(options.resumedTaskFiles ?? []), ...freshChangedFiles])];
 
-      const { filesChanged, outsideScope } = reconcileWorkerFiles(gitChangedFiles, options.fileScope);
+      // Scope is an execution-time write boundary. Enforce it against edits made
+      // by THIS invocation. Task-owned WIP was already preserved after a prior
+      // invocation; rejecting the same committed files on every retry creates a
+      // permanent loop that can never reach reviewer. Keep those files in the
+      // authoritative result, but let reviewer judge the resumed branch.
+      const { outsideScope } = reconcileWorkerFiles(freshChangedFiles, options.fileScope);
+      const filesChanged = gitChangedFiles;
       parsedResult.filesChanged = filesChanged;
 
       if (gitChangedFiles.length > 0) {

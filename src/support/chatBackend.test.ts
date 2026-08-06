@@ -20,10 +20,16 @@ describe('curatedModels (INT-1961)', () => {
   });
 
   it('always yields at least the default for every provider', () => {
-    for (const p of ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud'] as const) {
+    for (const p of ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude'] as const) {
       const m = curatedModels(p);
       expect(m).toContain(getDefaultChatModel(p));
     }
+  });
+
+  it('returns the claude adapter default (not a Codex model) for provider claude (INT-3284)', () => {
+    expect(getDefaultChatModel('claude')).toBe('sonnet');
+    expect(getDefaultChatModel('claude')).not.toMatch(/codex|gpt-/);
+    expect(curatedModels('claude')[0]).toBe('sonnet');
   });
 
   it('maps Codex Responses aliases to the GPT-5.6 capability tiers', () => {

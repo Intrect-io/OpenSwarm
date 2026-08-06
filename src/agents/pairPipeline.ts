@@ -49,6 +49,7 @@ import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js'
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
+import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
@@ -72,7 +73,6 @@ import { stageTimeoutMs } from './stageTimeouts.js';
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
-  private jobProfiles: JobProfile[];
   /** Set per run() — aborts the pipeline + in-flight adapter call on cancel/disable. */
   private abortSignal?: AbortSignal;
   /** Cache of adapter default models (heavy: OAuth + live catalog) keyed by adapter name. (INT-2393) */
@@ -99,31 +99,6 @@ export class PairPipeline extends EventEmitter {
       sameErrorRepeat: 3,
       revisionLoop: 4,
     });
-    this.jobProfiles = config.jobProfiles ?? [];
-  }
-
-  private matchesProfile(task: TaskItem, profile: JobProfile): boolean {
-    const estimate = task.estimatedMinutes ?? 0;
-    if (profile.minMinutes != null && estimate < profile.minMinutes) return false;
-    if (profile.maxMinutes != null && estimate > profile.maxMinutes) return false;
-    if (profile.priority != null && task.priority !== profile.priority) return false;
-    return true;
-  }
-
-  private getProfileForTask(task: TaskItem): JobProfile | undefined {
-    if (!this.jobProfiles || this.jobProfiles.length === 0) return undefined;
-    return this.jobProfiles.find((profile) => this.matchesProfile(task, profile));
-  }
-
-  private getModelForRole(stage: PipelineStage, task: TaskItem): string | undefined {
-    const profile = this.getProfileForTask(task);
-    return profile?.roles?.[stage] || this.config.roles?.[stage]?.model;
-  }
-
-
-  /** Reasoning effort from the matched jobProfile (heavy tasks reason harder). */
-  private getEffortForTask(task: TaskItem): 'low' | 'medium' | 'high' | undefined {
-    return this.getProfileForTask(task)?.effort;
   }
 
   // ============================================
@@ -412,8 +387,8 @@ export class PairPipeline extends EventEmitter {
     const startTime = Date.now();
     // Display model: explicit override → configured (jobProfile/role) → adapter
     // default (so the TUI/dashboard aren't blank when config omits it). (INT-2393)
-    const stageModel = overrides?.model
-      ?? this.getModelForRole(stage, context.task)
+    const stageModel = compatibleStageModel(this.config, stage, overrides?.model)
+      ?? modelForTask(this.config, stage, context.task)
       ?? await resolveAdapterDefaultModel(this.config.roles?.[stage]?.adapter, this.defaultModelCache);
     const prefix = context.taskPrefix;
     const metadata = this.stageMetadata(context);
@@ -489,18 +464,25 @@ export class PairPipeline extends EventEmitter {
             // light/heavy → gpt-5.5/5.4), falling back to roles.worker.model. Reading
             // roles.worker.model directly here silently dropped the jobProfile model, so a
             // codex worker fell through to the CLI's config.toml default (Codex-Spark). (INT-1599)
-            model: overrides?.model ?? this.getModelForRole('worker', context.task),
+            model: compatibleStageModel(this.config, 'worker', overrides?.model)
+              ?? modelForTask(this.config, 'worker', context.task),
             maxTurns: this.config.roles?.worker?.maxTurns,
             adapterName: this.config.roles?.worker?.adapter,
-            reasoningEffort: overrides?.reasoningEffort ?? this.getEffortForTask(context.task),
-            bashTimeoutMs: await workerAgent.resolveWorkerBashTimeout(context.projectPath, overrides?.reasoningEffort ?? this.getEffortForTask(context.task)), // INT-2415
+            reasoningEffort: overrides?.reasoningEffort ?? effortForTask(this.config, context.task),
+            bashTimeoutMs: await workerAgent.resolveWorkerBashTimeout(context.projectPath, overrides?.reasoningEffort ?? effortForTask(this.config, context.task)), // INT-2415
             // No-edit guard (re-applied from stranded feat/v0.7.0 commit 2eea3bc):
             // reasoning workers frequently end with analysis only and never call
             // edit_file. Without this the guard defaults to 0 (disabled) — measured:
             // codex spark AND gpt-5.5 both read 30-37× and shipped 0 edits. Push the
             // worker to actually edit before concluding.
             nudgeMaxOnNoEdit: 3,
-            fileScope: context.task.fileScope,
+            // Knowledge-graph scope is useful for scheduling conflicts, but it is
+            // advisory and may be stale. Only an explicitly planner-declared
+            // scope may reject real Git changes at the worker boundary.
+            fileScope: context.task.fileScopeSource === 'inferred'
+              ? undefined
+              : context.task.fileScope,
+            resumedTaskFiles: this.config.resumedTaskFiles,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
@@ -573,10 +555,11 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
             // jobProfile model precedence (see worker stage above). (INT-1599)
-            model: overrides?.model ?? this.getModelForRole('reviewer', context.task),
+            model: compatibleStageModel(this.config, 'reviewer', overrides?.model)
+              ?? modelForTask(this.config, 'reviewer', context.task),
             maxTurns: reviewerMaxTurns,
             adapterName: this.config.roles?.reviewer?.adapter,
-            reasoningEffort: this.getEffortForTask(context.task),
+            reasoningEffort: effortForTask(this.config, context.task),
             completionCriteria: this.config.draftAnalysis?.completionCriteria,
             verificationEvidence: context.testerResult?.verificationEvidence,
             // Surface non-blocking guard warnings (dead-module, reformat/scope)
@@ -867,7 +850,7 @@ export class PairPipeline extends EventEmitter {
       const workerOverrides = resolveWorkerStageOverrides({
         workerCfg: this.config.roles?.worker,
         iteration: context.currentIteration,
-        baseModel: this.getModelForRole('worker', context.task),
+        baseModel: modelForTask(this.config, 'worker', context.task),
         signalEscalation: context.workerEscalation,
         taskId: context.task.id,
         taskPrefix: context.taskPrefix,
@@ -878,7 +861,7 @@ export class PairPipeline extends EventEmitter {
         draftAnalysis: this.config.draftAnalysis,
         iteration: context.currentIteration,
         feedbackSource: context.feedbackSource,
-        effort: this.getEffortForTask(context.task),
+        effort: effortForTask(this.config, context.task),
         config: this.config.roles?.worker?.fanout,
       });
       context.workerFanoutDecision = fanoutDecision;
@@ -903,7 +886,12 @@ export class PairPipeline extends EventEmitter {
       });
 
       if (!workerResult.success) {
-        console.log(`[${context.taskPrefix}] Worker failed, retrying...`);
+        const failedWorker = workerResult.result as WorkerResult;
+        const detail = failedWorker.error
+          ?? failedWorker.haltReason
+          ?? failedWorker.noChangesReason
+          ?? failedWorker.summary;
+        console.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
         agentPair.trackFailure(context.session.id); // Track for fresh context decision
         this.emit('iteration:fail', {
           iteration: context.currentIteration,
@@ -1032,8 +1020,8 @@ export class PairPipeline extends EventEmitter {
             context.workerEscalation = buildRepeatEscalation({
               workerCfg: this.config.roles?.worker,
               currentIteration: context.currentIteration,
-              currentModel: this.getModelForRole('worker', context.task),
-              currentEffort: this.getEffortForTask(context.task),
+              currentModel: modelForTask(this.config, 'worker', context.task),
+              currentEffort: effortForTask(this.config, context.task),
             });
           }
           context.reviewResult = {
@@ -1175,8 +1163,8 @@ export class PairPipeline extends EventEmitter {
               ? buildRepeatEscalation({
                   workerCfg: this.config.roles?.worker,
                   currentIteration: context.currentIteration,
-                  currentModel: this.getModelForRole('worker', context.task),
-                  currentEffort: this.getEffortForTask(context.task),
+                  currentModel: modelForTask(this.config, 'worker', context.task),
+                  currentEffort: effortForTask(this.config, context.task),
                 })
               : undefined;
             if (escalation) {
@@ -1351,6 +1339,7 @@ export function createPipelineFromConfig(
   maxReflections?: number,
   runMetadata?: PipelineRunMetadata,
   verify?: PipelineConfig['verify'],
+  resumedTaskFiles?: string[],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1383,6 +1372,7 @@ export function createPipelineFromConfig(
     draftAnalysis,
     runMetadata,
     verify,
+    resumedTaskFiles,
   });
 }
 

@@ -163,6 +163,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       display: inline-flex;
       align-items: center;
       gap: 4px;
+      flex-wrap: wrap;
+      max-width: 420px;
       padding: 2px;
       border: 1px solid var(--border);
       background: var(--bg3);
@@ -613,9 +615,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div class="svc-group">
         <span class="svc-status" id="svc-status">...</span>
         <span class="svc-sep">│</span>
-        <div class="provider-toggle">
-          <button class="provider-btn" id="provider-claude" onclick="switchProvider('claude')">Claude</button>
-          <button class="provider-btn" id="provider-codex" onclick="switchProvider('codex')">Codex</button>
+        <div class="provider-toggle" id="provider-toggle">
+          <!--PROVIDER_BUTTONS-->
         </div>
         <span class="svc-sep">│</span>
         <button class="btn" id="turbo-btn" onclick="toggleTurbo()" title="Max pace: full concurrency + heartbeat, persistent (on by default)">MAX PACE</button>
@@ -931,8 +932,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       document.getElementById("stat-pair-adapters").textContent =
         "W " + workerAdapter + ":" + workerModel + " / R " + reviewerAdapter + ":" + reviewerModel;
       document.getElementById("chat-status").textContent = defaultAdapter + ":" + chatModel;
-      document.getElementById("provider-claude").classList.toggle("active", defaultAdapter === "claude");
-      document.getElementById("provider-codex").classList.toggle("active", defaultAdapter === "codex");
+      document.querySelectorAll(".provider-btn").forEach(btn => {
+        const name = btn.id.slice("provider-".length);
+        btn.classList.toggle("active", defaultAdapter === name);
+      });
       if (data.uptime != null) {
         const s = Math.floor(data.uptime / 1000);
         const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
@@ -2312,5 +2315,28 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
+/** Short labels for the header toggle — registry names stay on id/onclick. */
+const PROVIDER_BUTTON_LABELS: Record<string, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  'codex-responses': 'Codex-R',
+  gpt: 'GPT',
+  openrouter: 'OpenRouter',
+  atlascloud: 'Atlas',
+  lmstudio: 'LM Studio',
+  local: 'Local',
+};
+
+/**
+ * Inject registry-backed provider buttons so the dashboard toggle cannot
+ * drift from `isKnownAdapter` / POST /api/provider validation. (INT-3284)
+ */
+export function buildDashboardHtml(providers: readonly string[]): string {
+  const buttons = providers.map((name) => {
+    const label = PROVIDER_BUTTON_LABELS[name] ?? name;
+    return `<button class="provider-btn" id="provider-${name}" onclick="switchProvider('${name}')">${label}</button>`;
+  }).join('\n          ');
+  return DASHBOARD_HTML.replace('<!--PROVIDER_BUTTONS-->', buttons);
+}
 
 export { DASHBOARD_HTML };

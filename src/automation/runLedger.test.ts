@@ -227,6 +227,25 @@ describe('RunLedger claim and fencing races', () => {
     newDaemon.close();
   });
 
+  it('reconciles a proven-dead owner before its lease expires using the full ownership fence', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'DEAD-OWNER');
+    const stale = claim(ledger, 'DEAD-OWNER', '1234-old-generation', 2_000);
+    expect(ledger.transition(stale, 'EXECUTING', {}, 2_100)).toBe(true);
+
+    expect(ledger.reconcileDeadOwner({ ...stale, leaseToken: 'wrong-token' }, 2_200)).toBe(false);
+    expect(ledger.getRun('DEAD-OWNER')?.state).toBe('EXECUTING');
+    expect(ledger.reconcileDeadOwner(stale, 2_200)).toBe(true);
+    expect(ledger.getRun('DEAD-OWNER')).toMatchObject({
+      state: 'NEEDS_RECONCILE',
+      lastErrorCode: 'owner_process_exited',
+    });
+    expect(ledger.markAttemptRemediated('DEAD-OWNER', 1, 'owner exit handling fixed', 2_200)).toBe(true);
+    expect(ledger.confirmExecutorExit(stale, 2_201)).toBe(true);
+    expect(ledger.markReady('DEAD-OWNER', 2_202)).toBe(true);
+    ledger.close();
+  });
+
   it('does not resurrect an already-expired lease through renewal', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'RACE-4');
@@ -401,6 +420,8 @@ describe('RunLedger claim and fencing races', () => {
       ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
       maxAttemptsPerHour: 1, circuitCooldownMs: 60_000,
     })).toBeNull();
+    expect(ledger.getCircuitOpenUntil('BUDGET-2', 2_200)).toBe(62_200);
+    expect(ledger.getCircuitOpenUntil('BUDGET-2', 62_200)).toBeUndefined();
     expect(ledger.getMetrics(2_200).openCircuits).toBe(1);
     ledger.close();
   });
@@ -477,6 +498,28 @@ describe('RunLedger claim and fencing races', () => {
       maxFailuresPerHour: 1,
     })).toBeNull();
     expect(ledger.getMetrics(2_200).openCircuits).toBe(1);
+    ledger.close();
+  });
+
+  it('preserves remediated attempts while excluding them from the failure circuit', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'FIXED-1', '/fixed-repo');
+    register(ledger, 'FIXED-2', '/fixed-repo');
+    const first = claim(ledger, 'FIXED-1', 'daemon', 2_000);
+    expect(ledger.recordAttemptResult(first, {
+      success: false,
+      finalStatus: 'infra_error',
+      maxFailuresPerHour: 1,
+      circuitCooldownMs: 60_000,
+    }, 2_100)).toBe(true);
+    expect(ledger.transition(first, 'RETRY_AT', { retryAt: 9_000 }, 2_101)).toBe(true);
+
+    expect(ledger.markAttemptRemediated('FIXED-1', 1, 'provider model routing fixed', 2_150)).toBe(true);
+    expect(ledger.getMetrics(2_150).openCircuits).toBe(0);
+    expect(ledger.claimRun('FIXED-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
+      maxAttemptsPerHour: 1, maxFailuresPerHour: 1,
+    })).not.toBeNull();
     ledger.close();
   });
 });
@@ -856,4 +899,3 @@ describe('RunLedger WAL negotiation', () => {
     }
   });
 });
-
