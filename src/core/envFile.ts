@@ -2,10 +2,13 @@
 // OpenSwarm - .env auto-loader
 // ============================================
 //
-// Minimal, zero-dependency .env loader. Populates process.env with entries
-// from the first .env file found, searching locations parallel to the config
+// Minimal, zero-dependency .env loader. Populates process.env by layering
+// every .env file found across the search path (project-local first, then
+// the global fallbacks), searching locations parallel to the config
 // resolver. Existing process.env values are never overwritten — a shell
-// export always wins over the file.
+// export always wins over any file, and a key already set by an
+// earlier (more specific) file wins over the same key in a later,
+// more general one.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -13,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 
 export interface EnvLoadResult {
-  path: string | null;
+  paths: string[];
   loadedKeys: string[];
 }
 
@@ -124,17 +127,27 @@ export function writeEnvVars(path: string, kv: Record<string, string>): void {
 }
 
 /**
- * Load the first discovered .env file into process.env without overwriting
- * existing values. Returns the path loaded (or null) and the list of keys
- * that were newly applied — callers can log this for diagnostics.
+ * Load every discovered .env file into process.env without overwriting
+ * existing values. A project-local `.env` shadows the global fallback ones
+ * key-by-key, not file-by-file — a repo whose own `.env` predates a
+ * credential that only lives in `~/.config/openswarm/.env` still picks that
+ * credential up, instead of the global file being skipped entirely because
+ * the local one was found first. (INT-3256: `ATLASCLOUD_API_KEY` set only in
+ * the global .env was invisible to every run from a repo with its own,
+ * older `.env` — every subagent failed auth instantly, project-wide.)
+ *
+ * Returns the paths actually read (in precedence order) and the list of
+ * keys that were newly applied — callers can log this for diagnostics.
  */
 export function loadEnvFile(): EnvLoadResult {
+  const paths: string[] = [];
+  const loadedKeys: string[] = [];
+
   for (const path of getSearchPaths()) {
     if (!existsSync(path)) continue;
+    paths.push(path);
 
     const content = readFileSync(path, 'utf8');
-    const loadedKeys: string[] = [];
-
     for (const rawLine of content.split(/\r?\n/)) {
       const parsed = parseLine(rawLine);
       if (parsed === null) continue;
@@ -143,9 +156,7 @@ export function loadEnvFile(): EnvLoadResult {
       process.env[key] = value;
       loadedKeys.push(key);
     }
-
-    return { path, loadedKeys };
   }
 
-  return { path: null, loadedKeys: [] };
+  return { paths, loadedKeys };
 }

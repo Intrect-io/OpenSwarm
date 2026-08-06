@@ -12,8 +12,8 @@ dns.setDefaultResultOrder('ipv4first');
 // launched from a non-interactive shell without those vars exported.
 import { loadEnvFile } from './core/envFile.js';
 const envLoad = loadEnvFile();
-if (envLoad.path !== null) {
-  console.log(`Loaded env from: ${envLoad.path} (${envLoad.loadedKeys.length} keys)`);
+if (envLoad.paths.length > 0) {
+  console.log(`Loaded env from: ${envLoad.paths.join(', ')} (${envLoad.loadedKeys.length} keys)`);
 }
 
 // Strip Claude Code session markers so child processes (worker, planner) can launch Claude CLI

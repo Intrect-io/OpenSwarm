@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.20.5 — 2026-08-05
+
+### Fixed
+
+- **`openswarm review` had no way to raise the reviewer's turn/timeout budget for large diffs.** Every run was stuck at the agentic loop's hardcoded 20-turn/5-minute defaults regardless of diff size, so a large diff could hit the ceiling deterministically before the reviewer finished — a 29-file/+2200-line change hit the same turn cutoff on two separate runs and got cut by the timeout on a third, mid-analysis, having already located the real defects. The daemon's autonomous pair-review loop already supported a configurable per-role `maxTurns`; the standalone CLI gate did not. It now scales the turn/timeout budget with the number of changed files (small diffs keep the original defaults, larger ones get proportionally more room, capped at 60 turns / 15 minutes), and `--max-turns`/`--timeout` are available to override either explicitly. (INT-3263)
+
+## 0.20.4 — 2026-08-04
+
+### Fixed
+
+- **`.env` credentials that only exist in the global `~/.config/openswarm/.env` are no longer invisible to repos with their own local `.env`.** `loadEnvFile()` returned as soon as it found the first `.env` file on its search path, so a project whose own `.env` predates a credential added later to the global file never even read that file. `ATLAS_CLOUD_API_KEY` is global-only, so `openswarm review --max` run from a repo with its own `.env` (predating Atlas Cloud) failed every subagent auth instantly, project-wide, while the identical command worked from a repo whose `.env` already had every key. It now layers every file on the search path, applying each key only when not already set by shell env or an earlier, more specific file. (INT-3256)
+
+## 0.20.3 — 2026-08-04
+
+### Fixed
+
+- **Switching provider to `atlascloud` no longer 400s on every review and worker call.** `mapModelForProvider` special-cased `codex`/`codex-responses` and `claude`, but every other adapter — including `atlascloud` — fell into the generic "any `vendor/model`-shaped id survives" branch it shares with openrouter/gpt/local/lmstudio. OpenRouter and Atlas Cloud both name models `vendor/model`, but with different catalogs (OpenRouter's `z-ai/glm-5.2` vs Atlas's own `zai-org/GLM-4.6`), so a role configured for OpenRouter kept its model id verbatim on a switch to `atlascloud` and every call to `api.atlascloud.ai` 400'd `"not found"` — confirmed live against the real API. It now checks membership against Atlas's curated model list and live catalog cache, in both directions, so a switch away from `atlascloud` can't leak its ids into OpenRouter either. (INT-3246)
+
 ## 0.20.2 — 2026-08-01
 
 Three fixes to the CI review gate, all found by running it rather than reading it. Each is the same failure in a different place: the gate produced a confident verdict while something it needed was missing.
