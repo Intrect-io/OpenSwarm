@@ -133,6 +133,7 @@ import {
   commentOnPR,
   checkPRConflicts,
   waitForCICompletion,
+  getPRBaseBranchOrThrow,
   type PRInfo,
 } from '../github/index.js';
 import {
@@ -287,6 +288,130 @@ export class PRProcessor {
       error: entry?.lastError,
       iterations: entry?.iterations ?? 0,
     };
+  }
+
+  /**
+   * One-shot brand-new code review of the PR's current diff (CLI `openswarm
+   * pr review --fresh`) — independent of `reviewOne`, which only reacts to
+   * feedback a reviewer already left. This runs the same reviewer agentic
+   * loop `openswarm review` uses locally, against base..head, and posts the
+   * verdict as a PR comment. Throwaway state: there is nothing to dedupe
+   * against (unlike `reviewOne`'s watermark), so every call reviews fresh.
+   * (INT-3282)
+   */
+  async freshReview(
+    pr: PRInfo,
+    projectPath: string,
+  ): Promise<{ success: boolean; error?: string; iterations: number }> {
+    const key = `${pr.repo}#${pr.number}`;
+    this.currentPR = key;
+
+    let originalBranch: string;
+    try {
+      originalBranch = (await gitExec(projectPath, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
+      if (originalBranch === 'HEAD') {
+        // Already detached — a branch name can't restore this exact commit,
+        // so capture the SHA instead. `checkout HEAD` after moving HEAD
+        // elsewhere is a no-op on the *new* position, not a return to this one.
+        originalBranch = (await gitExec(projectPath, 'rev-parse', 'HEAD')).trim();
+      }
+    } catch (err) {
+      // Unlike processPR/processReviewFeedback (which fall back to 'main' and
+      // press on), refuse here: this method's whole point is a checkout it
+      // did not have before, so if it cannot even find out where the caller
+      // currently is, guessing 'main' risks force-moving them there instead
+      // of back where they started. No fetch/stash/checkout has happened yet.
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[PRProcessor] ${key} fresh review: could not determine current checkout, aborting:`, errorMsg);
+      this.currentPR = null;
+      return { success: false, error: `Could not determine current checkout: ${errorMsg}`, iterations: 0 };
+    }
+
+    let autoStash: AutoStash | null = null;
+    try {
+      const base = await getPRBaseBranchOrThrow(pr.repo, pr.number);
+      // Fetch the PR head via GitHub's own `refs/pull/<n>/head`, not
+      // `pr.branch` directly: a fork-originated PR's branch does not exist
+      // under `origin` at all, and even same-repo PRs would otherwise reuse
+      // whatever a same-named local branch already points at (stale from a
+      // prior checkout) instead of the PR's current head — silently
+      // reviewing the wrong revision either way.
+      const prHeadRef = `refs/openswarm/pr-${pr.number}-review`;
+      const baseRef = `refs/openswarm/pr-${pr.number}-base`;
+      // Both sides fetched into explicit local refs via `<src>:<dst>`, not a
+      // bare branch name for the base — a bare name updates the `origin/<base>`
+      // remote-tracking ref only via the remote's configured fetch refspec,
+      // which this method has no way to confirm is the normal
+      // `+refs/heads/*:refs/remotes/origin/*` default for whatever repo it's
+      // pointed at. An explicit destination has no such dependency.
+      await gitExec(
+        projectPath, 'fetch', 'origin',
+        `pull/${pr.number}/head:${prHeadRef}`, `${base}:${baseRef}`,
+      );
+
+      autoStash = await stashLocalChanges(
+        projectPath,
+        `PRProcessor fresh review for ${key} at ${new Date().toISOString()}`
+      );
+      // Detached checkout onto the fetched ref directly — never `pr.branch`
+      // itself. A `checkout -B pr.branch <ref>` would force-repoint any local
+      // branch of that name to the PR head, discarding wherever it actually
+      // pointed (e.g. the operator's own unpushed commits on that branch)
+      // from view. The review only reads a diff; it never needs pr.branch to
+      // exist as a ref at all.
+      await gitExec(projectPath, 'checkout', prHeadRef);
+
+      // The merge-base, not the base branch's current tip: the base branch
+      // may have moved since the PR diverged, and a two-dot diff (what
+      // getDiffText runs under the hood) against its tip would list every
+      // commit merged into base since then as if the PR had made those
+      // changes too. Same reasoning as review-gate.yml's `Resolve the PR
+      // base` step.
+      const mergeBase = (await gitExec(projectPath, 'merge-base', prHeadRef, baseRef)).trim();
+
+      const { runReviewCommand, formatReviewOutput } = await import('../cli/reviewCommand.js');
+      const review = await runReviewCommand({
+        path: projectPath,
+        base: mergeBase,
+        // The checked-out content is another PR's diff — untrusted the same
+        // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
+        // including bash, keeps a malicious PR from using the reviewer's
+        // shell access and provider credential as an attack surface.
+        readOnly: true,
+      });
+
+      if (!review) {
+        return { success: false, error: `No diff found against ${base}`, iterations: 0 };
+      }
+
+      await commentOnPR(
+        pr.repo,
+        pr.number,
+        ['## 🔍 Fresh review (`openswarm pr review --fresh`)', '', formatReviewOutput(review, false)].join('\n')
+      );
+
+      return {
+        success: review.decision === 'approve',
+        error: review.decision === 'approve' ? undefined : (review.feedback || 'Reviewer requested changes'),
+        iterations: 0,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[PRProcessor] ${key} fresh review error:`, errorMsg);
+      return { success: false, error: errorMsg, iterations: 0 };
+    } finally {
+      let restoredBranch = false;
+      try {
+        await gitExec(projectPath, 'checkout', originalBranch);
+        restoredBranch = true;
+      } catch (restoreErr) {
+        console.error(`[PRProcessor] Failed to restore branch ${originalBranch}:`, restoreErr);
+      }
+      if (restoredBranch) {
+        await restoreAutoStash(projectPath, autoStash);
+      }
+      this.currentPR = null;
+    }
   }
 
   /**

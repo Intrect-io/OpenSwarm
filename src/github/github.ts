@@ -747,6 +747,23 @@ export async function getPRBaseBranch(repo: string, prNumber: number): Promise<s
   }
 }
 
+/**
+ * Get the base branch of a PR, without the `main`-on-any-failure fallback
+ * above. That fallback is fine for conflict resolution (a wrong base just
+ * fails the rebase visibly), but silently swapping in the wrong base branch
+ * for a diff computation makes the diff wrong instead of failing — the
+ * reviewer would then read the PR's changes plus every unrelated commit
+ * between the real base and `main` as if it were all part of the PR. Callers
+ * that feed the result straight into a diff should use this and propagate
+ * the failure instead.
+ */
+export async function getPRBaseBranchOrThrow(repo: string, prNumber: number): Promise<string> {
+  const stdout = await ghExec('pr', 'view', String(prNumber), '-R', repo, '--json', 'baseRefName');
+  const { baseRefName } = JSON.parse(stdout);
+  if (!baseRefName) throw new Error(`gh pr view returned no baseRefName for ${repo}#${prNumber}`);
+  return baseRefName;
+}
+
 // PR Auto-Fix Support
 
 /**
