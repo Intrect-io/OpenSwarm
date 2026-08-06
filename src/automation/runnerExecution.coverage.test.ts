@@ -375,6 +375,22 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(markDuplicate).not.toHaveBeenCalled();
     });
 
+    it('does not create a duplicate relation when issue timestamps are equal', async () => {
+      const markDuplicate = vi.fn(async () => true);
+      taskSourceMock = makeTaskSource({ markDuplicate });
+      setTaskSource(taskSourceMock);
+      runDraftAnalysis.mockResolvedValueOnce(draftAnalysisFixture({
+        duplicateOfIssueId: 'issue-peer',
+        duplicateConfidence: 0.99,
+        duplicateEvidence: ['same endpoint', 'same acceptance criterion'],
+      }));
+      createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
+      const current = task({ createdAt: 100 });
+      const peer = task({ id: 'peer', issueId: 'issue-peer', createdAt: 100 });
+      const result = await executePipeline(makeCtx({ peerIssues: [peer] }), current, '/repo');
+      expect(result.finalStatus).toBe('approved');
+      expect(markDuplicate).not.toHaveBeenCalled();
+    });
     it('runs draft analysis by default, then proceeds to the pipeline (happy path)', async () => {
       createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
 

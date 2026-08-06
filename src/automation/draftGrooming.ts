@@ -34,7 +34,7 @@ export async function applyDraftGates(options: {
   const { task, draft, peers, source } = options;
   const duplicateTarget = peers?.find(peer => (peer.issueId || peer.id) === draft.duplicateOfIssueId);
   const evidence = draft.duplicateEvidence ?? [];
-  if (task.issueId && duplicateTarget && duplicateTarget.createdAt <= task.createdAt
+  if (task.issueId && duplicateTarget && duplicateTarget.createdAt < task.createdAt
     && (draft.duplicateConfidence ?? 0) >= 0.9 && evidence.length >= 2 && source?.markDuplicate) {
     const canonicalId = duplicateTarget.issueId || duplicateTarget.id;
     if (await source.markDuplicate(task.issueId, canonicalId)) {
