@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.8 — 2026-08-06
+
+### Added
+
+- **`openswarm pr review`.** A new PR autopilot action that re-applies outstanding review feedback on demand — including comments left by Codex-based review actions, which formal CHANGES_REQUESTED-only detection previously missed entirely alongside Claude's. Sits next to `status`/`fix`/`watch`/`create`; skips conflict handling and CI waits, so it's safe to run as a lightweight "did a reviewer leave feedback I haven't addressed yet?" check.
+
 ## 0.20.7 — 2026-08-06
 
 ### Fixed
