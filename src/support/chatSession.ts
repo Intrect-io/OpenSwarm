@@ -12,6 +12,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 import { readFile, mkdir, readdir, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
+import { readProviderOverride } from '../core/providerOverride.js';
 import { getDefaultAdapterName, isKnownAdapter, type AdapterName } from '../adapters/index.js';
 import { getDefaultChatModel, runChatCompletion } from './chatBackend.js';
 import { atomicWriteFileSync } from './atomicFile.js';
@@ -163,8 +164,14 @@ export function inferProvider(provider?: AdapterName, model?: string): AdapterNa
   return loadDefaultProvider();
 }
 
+/**
+ * Chat default provider — same precedence as CLI/daemon without a live process:
+ * provider-override.json → config.yaml → registry default. (INT-3284)
+ */
 export function loadDefaultProvider(): AdapterName {
   try {
+    const override = readProviderOverride();
+    if (override) return override;
     return loadConfig().adapter ?? getDefaultAdapterName();
   } catch {
     return getDefaultAdapterName();

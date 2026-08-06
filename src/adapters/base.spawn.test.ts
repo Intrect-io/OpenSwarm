@@ -77,6 +77,34 @@ describe('argv-safe adapter spawning', () => {
 
     expect(existsSync(temporaryDir)).toBe(false);
   });
+
+  it('settles after child exit when an inherited stdio descriptor prevents close', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+        pid: 125,
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+        kill: vi.fn(),
+      });
+      spawnMock.mockImplementationOnce(() => {
+        queueMicrotask(() => proc.emit('exit', 0));
+        return proc;
+      });
+      const adapter = {
+        name: 'fixture',
+        capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
+        isAvailable: async () => true,
+        getDefaultModel: async () => 'fixture',
+        buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+        parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+        parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
+      } satisfies CliAdapter;
+
+    const started = Date.now();
+    await expect(spawnCli(adapter, { prompt: 'hello', cwd: process.cwd() }))
+      .resolves.toMatchObject({ exitCode: 0 });
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
 });
 
 describe('read-only fail-closed guard (INT-3189)', () => {

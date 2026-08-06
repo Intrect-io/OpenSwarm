@@ -44,6 +44,7 @@ const buildBranchName = vi.fn();
 const createWorktree = vi.fn();
 const commitAndCreatePR = vi.fn();
 const findOpenPRFileOverlaps = vi.fn();
+const hasRecoverableWorktree = vi.fn();
 const preserveWorktree = vi.fn();
 const removeWorktree = vi.fn();
 const broadcastEvent = vi.fn();
@@ -99,6 +100,7 @@ vi.mock('../support/worktreeManager.js', () => ({
   createWorktree,
   commitAndCreatePR,
   findOpenPRFileOverlaps,
+  hasRecoverableWorktree,
   preserveWorktree,
   removeWorktree,
 }));
@@ -150,6 +152,7 @@ vi.mock('fs/promises', () => ({ stat: fsStat }));
 // avoids that ordering trap. Mirrors the dynamic-import convention already
 // used by `pairPipeline.coverage.test.ts` for the same reason.
 let executePipeline: typeof import('./runnerExecution.js')['executePipeline'];
+let boundPipelineEffect: typeof import('./runnerExecution.js')['boundPipelineEffect'];
 let setTaskSource: typeof import('./runnerExecution.js')['setTaskSource'];
 let reportExecutionResult: typeof import('./runnerExecution.js')['reportExecutionResult'];
 let reconcileCompletionState: typeof import('./runnerExecution.js')['reconcileCompletionState'];
@@ -158,6 +161,7 @@ let requestApproval: typeof import('./runnerExecution.js')['requestApproval'];
 beforeAll(async () => {
   const mod = await import('./runnerExecution.js');
   executePipeline = mod.executePipeline;
+  boundPipelineEffect = mod.boundPipelineEffect;
   setTaskSource = mod.setTaskSource;
   reportExecutionResult = mod.reportExecutionResult;
   reconcileCompletionState = mod.reconcileCompletionState;
@@ -301,6 +305,7 @@ describe('runnerExecution.ts coverage extension', () => {
     buildBranchName.mockReturnValue('swarm/INT-100-fix-the-flaky-retry-logic');
     commitAndCreatePR.mockResolvedValue('https://github.com/org/repo/pull/1');
     findOpenPRFileOverlaps.mockResolvedValue([]);
+    hasRecoverableWorktree.mockResolvedValue(false);
     removeWorktree.mockResolvedValue(undefined);
     preserveWorktree.mockResolvedValue(true);
     analyzeIssue.mockResolvedValue(null);
@@ -327,6 +332,65 @@ describe('runnerExecution.ts coverage extension', () => {
   // ============================================
 
   describe('draft analysis', () => {
+    it('marks a high-confidence older peer as the canonical duplicate and skips the worker', async () => {
+      const markDuplicate = vi.fn(async () => true);
+      taskSourceMock = makeTaskSource({ markDuplicate });
+      setTaskSource(taskSourceMock);
+      runDraftAnalysis.mockResolvedValueOnce(draftAnalysisFixture({
+        duplicateOfIssueId: 'issue-older',
+        duplicateConfidence: 0.97,
+        duplicateReason: 'Same endpoint and observable behavior.',
+        duplicateEvidence: ['same POST /cards/status endpoint', 'same dashboard write-back criterion'],
+      }));
+      const current = task({ createdAt: 200 });
+      const older = task({ id: 'peer', issueId: 'issue-older', issueIdentifier: 'INT-90', createdAt: 100 });
+
+      const result = await executePipeline(makeCtx({ peerIssues: [current, older] }), current, '/repo');
+
+      expect(result.finalStatus).toBe('superseded');
+      expect(markDuplicate).toHaveBeenCalledWith('issue-1', 'issue-older');
+      expect(taskSourceMock.addComment).toHaveBeenCalledWith('issue-1', expect.stringContaining('INT-90'));
+      expect(createPipelineFromConfig).not.toHaveBeenCalled();
+      expect(runDraftAnalysis).toHaveBeenCalledWith(expect.objectContaining({
+        peerIssues: [expect.objectContaining({ issueId: 'issue-older' })],
+      }));
+    });
+
+    it('does not create a duplicate relation when the proposed canonical issue is newer', async () => {
+      const markDuplicate = vi.fn(async () => true);
+      taskSourceMock = makeTaskSource({ markDuplicate });
+      setTaskSource(taskSourceMock);
+      runDraftAnalysis.mockResolvedValueOnce(draftAnalysisFixture({
+        duplicateOfIssueId: 'issue-newer',
+        duplicateConfidence: 0.99,
+        duplicateEvidence: ['same endpoint', 'same acceptance criterion'],
+      }));
+      createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
+      const current = task({ createdAt: 100 });
+      const newer = task({ id: 'peer', issueId: 'issue-newer', createdAt: 200 });
+
+      const result = await executePipeline(makeCtx({ peerIssues: [newer] }), current, '/repo');
+
+      expect(result.finalStatus).toBe('approved');
+      expect(markDuplicate).not.toHaveBeenCalled();
+    });
+
+    it('does not create a duplicate relation when issue timestamps are equal', async () => {
+      const markDuplicate = vi.fn(async () => true);
+      taskSourceMock = makeTaskSource({ markDuplicate });
+      setTaskSource(taskSourceMock);
+      runDraftAnalysis.mockResolvedValueOnce(draftAnalysisFixture({
+        duplicateOfIssueId: 'issue-peer',
+        duplicateConfidence: 0.99,
+        duplicateEvidence: ['same endpoint', 'same acceptance criterion'],
+      }));
+      createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
+      const current = task({ createdAt: 100 });
+      const peer = task({ id: 'peer', issueId: 'issue-peer', createdAt: 100 });
+      const result = await executePipeline(makeCtx({ peerIssues: [peer] }), current, '/repo');
+      expect(result.finalStatus).toBe('approved');
+      expect(markDuplicate).not.toHaveBeenCalled();
+    });
     it('runs draft analysis by default, then proceeds to the pipeline (happy path)', async () => {
       createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
 
@@ -867,6 +931,19 @@ describe('runnerExecution.ts coverage extension', () => {
       const result = await execution;
       expect(result.finalStatus).toBe('approved');
       expect(settled).toBe(true);
+    });
+
+    it('bounds a non-critical event effect that never settles', async () => {
+      vi.useFakeTimers();
+      try {
+        const never = new Promise<void>(() => {});
+        const bounded = boundPipelineEffect(never, 'Worker complete audit comment', 10);
+        const rejection = expect(bounded).rejects.toThrow('Worker complete audit comment timed out after 10ms');
+        await vi.advanceTimersByTimeAsync(10);
+        await rejection;
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('aborts publication and preserves the worktree when a durable stage fence rejects', async () => {

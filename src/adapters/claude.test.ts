@@ -11,6 +11,7 @@ describe('ClaudeCliAdapter.buildCommand', () => {
     expect(command).toBe('claude');
     expect(args).toContain('-p');
     expect(args).toContain('bypassPermissions');
+    expect(args).toContain('--strict-mcp-config');
     expect(args).toContain('--mcp-config');
     expect(args[args.indexOf('--mcp-config') + 1]).toMatch(/mcp\.json$/);
     expect(stdinFile).toBe('/tmp/prompt.txt');
@@ -26,6 +27,7 @@ describe('ClaudeCliAdapter.buildCommand', () => {
 
     expect(command).toBe('claude');
     expect(args).toContain('bypassPermissions');
+    expect(args).toContain('--strict-mcp-config');
     expect(args).not.toContain('--mcp-config');
   });
 });
@@ -70,6 +72,7 @@ describe('ClaudeCliAdapter read-only mode (INT-3189)', () => {
     });
 
     expect(args).not.toContain('bypassPermissions');
+    expect(args).toContain('--strict-mcp-config');
     expect(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2))
       .toEqual(['--permission-mode', 'default']);
     const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--model'));

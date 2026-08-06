@@ -343,6 +343,17 @@ export class RunLedger {
     return defer.immediate();
   }
 
+  /** Return the active repository-circuit deadline blocking this issue. */
+  getCircuitOpenUntil(issueId: string, now = Date.now()): number | undefined {
+    const row = this.db.prepare(`
+      SELECT c.open_until
+      FROM automation_runs r
+      JOIN automation_repo_circuits c ON c.project_path = r.project_path
+      WHERE r.issue_id = ? AND c.open_until > ?
+    `).get(issueId, now) as { open_until: number } | undefined;
+    return row?.open_until;
+  }
+
   /** Explicit operator recovery from NEEDS_HUMAN. A dead external effect resumes
    * synchronization; only implementation failures return to READY. */
   resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
@@ -437,6 +448,7 @@ export class RunLedger {
           FROM automation_attempts a
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ?
+            AND COALESCE(a.result_status, '') != 'operator_remediated'
         `).get(row.project_path, hourAgo) as { count: number }).count;
         if (attempts >= Math.max(1, options.maxAttemptsPerHour)) {
           openCircuit(`attempt budget exhausted: ${attempts}/${options.maxAttemptsPerHour} in 1h`);
@@ -451,7 +463,8 @@ export class RunLedger {
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ? AND a.success = 0
             AND COALESCE(a.result_status, '') NOT IN (
-              'cancelled', 'superseded', 'rate_limited', 'publication_reconcile'
+              'cancelled', 'superseded', 'rate_limited', 'publication_reconcile',
+              'operator_remediated'
             )
         `).get(row.project_path, hourAgo) as { count: number }).count;
         if (failures >= Math.max(1, options.maxFailuresPerHour)) {
@@ -621,7 +634,8 @@ export class RunLedger {
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ? AND a.success = 0
             AND COALESCE(a.result_status, '') NOT IN (
-              'cancelled', 'superseded', 'rate_limited', 'publication_reconcile'
+              'cancelled', 'superseded', 'rate_limited', 'publication_reconcile',
+              'operator_remediated'
             )
         `).get(run.project_path, now - 60 * 60_000) as { count: number }).count;
         if (failures >= Math.max(1, input.maxFailuresPerHour)) {
@@ -639,6 +653,31 @@ export class RunLedger {
       return true;
     });
     return record.immediate();
+  }
+
+  /**
+   * Operator acknowledgement that a recorded failure's external/root cause was
+   * fixed. Preserve the attempt and its error evidence, but exclude it from the
+   * rolling failure circuit so the repaired repository can be retried now.
+   */
+  markAttemptRemediated(issueId: string, attemptNo: number, reason: string, now = Date.now()): boolean {
+    if (!reason.trim()) throw new Error('remediation reason is required');
+    const remediate = this.db.transaction(() => {
+      const run = this.db.prepare('SELECT project_path FROM automation_runs WHERE issue_id = ?')
+        .get(issueId) as { project_path: string } | undefined;
+      if (!run) return false;
+      const updated = this.db.prepare(`
+        UPDATE automation_attempts
+        SET result_status = 'operator_remediated'
+        WHERE issue_id = ? AND attempt_no = ? AND COALESCE(success, 0) = 0
+          AND COALESCE(result_status, '') NOT IN ('cancelled', 'superseded', 'rate_limited', 'operator_remediated')
+      `).run(issueId, attemptNo);
+      if (updated.changes !== 1) return false;
+      this.db.prepare('DELETE FROM automation_repo_circuits WHERE project_path = ?').run(run.project_path);
+      this.insertEvent(issueId, attemptNo, 'operator_remediated', null, null, { reason }, now);
+      return true;
+    });
+    return remediate.immediate();
   }
 
   transition(claim: RunClaim, to: RunState, patch: TransitionPatch = {}, now = Date.now()): boolean {
@@ -762,6 +801,62 @@ export class RunLedger {
       `).all(...ACTIVE_LEASE_STATES, now) as RunRow[];
       const reconciledIssueIds = this.reconcileExpiredRows(expired, now);
       return reconciledIssueIds.map((issueId) => this.getRun(issueId)!).filter(Boolean);
+    });
+    return reconcile.immediate();
+  }
+
+  /**
+   * Fence an active lease immediately when the local owner process is proven
+   * dead. The owner/token/epoch CAS prevents a stale observer from fencing a
+   * replacement executor that has already reclaimed the run.
+   */
+  reconcileDeadOwner(
+    ownership: Pick<RunClaim, 'issueId' | 'ownerInstanceId' | 'leaseToken' | 'leaseEpoch' | 'attemptNo'>,
+    now = Date.now(),
+  ): boolean {
+    const reconcile = this.db.transaction(() => {
+      const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?')
+        .get(ownership.issueId) as RunRow | undefined;
+      if (
+        !row
+        || !ACTIVE_LEASE_STATES.includes(row.state as RunState)
+        || row.owner_instance_id !== ownership.ownerInstanceId
+        || row.lease_token !== ownership.leaseToken
+        || row.lease_epoch !== ownership.leaseEpoch
+        || row.attempt_no !== ownership.attemptNo
+      ) return false;
+      assertRunState(row.state);
+
+      const updated = this.db.prepare(`
+        UPDATE automation_runs
+        SET state = 'NEEDS_RECONCILE', state_version = state_version + 1,
+            lease_expires_at = NULL,
+            last_error_code = 'owner_process_exited',
+            last_error_message = 'Executor owner process exited before a terminal transition',
+            updated_at = ?
+        WHERE issue_id = ? AND state_version = ?
+          AND owner_instance_id = ? AND lease_token = ? AND lease_epoch = ?
+          AND attempt_no = ? AND state IN (${placeholders(ACTIVE_LEASE_STATES)})
+      `).run(
+        now,
+        ownership.issueId,
+        row.state_version,
+        ownership.ownerInstanceId,
+        ownership.leaseToken,
+        ownership.leaseEpoch,
+        ownership.attemptNo,
+        ...ACTIVE_LEASE_STATES,
+      );
+      if (updated.changes !== 1) return false;
+      this.db.prepare(`
+        UPDATE automation_attempts
+        SET status = 'orphaned', finished_at = ?, error_code = 'owner_process_exited',
+            error_message = 'Executor owner process exited before a terminal transition'
+        WHERE issue_id = ? AND attempt_no = ? AND lease_epoch = ? AND status = 'running'
+      `).run(now, ownership.issueId, ownership.attemptNo, ownership.leaseEpoch);
+      this.insertEvent(ownership.issueId, ownership.attemptNo, 'owner_process_exited',
+        row.state, 'NEEDS_RECONCILE', { ownerInstanceId: ownership.ownerInstanceId }, now);
+      return true;
     });
     return reconcile.immediate();
   }

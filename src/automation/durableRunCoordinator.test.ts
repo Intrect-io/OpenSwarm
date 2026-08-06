@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import { DurableRunCoordinator } from './durableRunCoordinator.js';
+import { DurableRunCoordinator, retryAtFor } from './durableRunCoordinator.js';
 import { RunLedger } from './runLedger.js';
 
 const roots: string[] = [];
@@ -46,6 +46,15 @@ afterEach(() => {
 });
 
 describe('DurableRunCoordinator', () => {
+  it('exponentially backs off repeated superseded attempts with a six-hour cap', () => {
+    const superseded = { ...result(true), finalStatus: 'superseded' as const };
+
+    expect(retryAtFor(superseded, 1_000, 1)).toBe(1_000 + 5 * 60_000);
+    expect(retryAtFor(superseded, 1_000, 2)).toBe(1_000 + 10 * 60_000);
+    expect(retryAtFor(superseded, 1_000, 3)).toBe(1_000 + 20 * 60_000);
+    expect(retryAtFor(superseded, 1_000, 20)).toBe(1_000 + 6 * 60 * 60_000);
+  });
+
   it('admits only one concurrent run per repository across coordinator instances', async () => {
     const path = dbPath();
     const first = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'a' });
@@ -419,6 +428,46 @@ describe('DurableRunCoordinator', () => {
     coordinator.close();
   });
 
+  it('returns a shutdown cancellation to RETRY_AT without emitting a tracker cancellation', async () => {
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: dbPath(), instanceId: 'daemon' });
+    const cancelEffect = vi.fn();
+    const cancelled = await coordinator.execute(task('SHUTDOWN-RETRY'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'cancelled',
+    }), {
+      retryCancellation: () => true,
+      cancelEffect,
+    });
+
+    expect(cancelled.finalStatus).toBe('cancelled');
+    expect(cancelEffect).not.toHaveBeenCalled();
+    expect(coordinator.getRun('SHUTDOWN-RETRY')).toMatchObject({
+      state: 'RETRY_AT',
+      lastErrorCode: 'shutdown_cancelled',
+    });
+    expect(coordinator.getRun('SHUTDOWN-RETRY')?.retryAt).toBeGreaterThan(Date.now());
+    coordinator.close();
+  });
+
+  it('defers an unclaimed run until the repository circuit reopens', async () => {
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: dbPath(), instanceId: 'daemon' });
+    const admission = { maxAttemptsPerHour: 1, circuitCooldownMs: 60_000 };
+
+    await coordinator.execute(task('CIRCUIT-1'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'infra_error',
+    }), { admission });
+
+    const before = Date.now();
+    const blocked = await coordinator.execute(task('CIRCUIT-2'), '/repo', async () => result(), { admission });
+    const run = coordinator.getRun('CIRCUIT-2');
+
+    expect(blocked.taskContext?.taskTitle).toContain('durable claim unavailable');
+    expect(run).toMatchObject({ state: 'RETRY_AT', lastErrorCode: 'claim_deferred' });
+    expect(run!.retryAt).toBeGreaterThanOrEqual(before + 59_000);
+    coordinator.close();
+  });
+
   it('keeps a failed delivery pending and never reports the run done', async () => {
     const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: dbPath(), instanceId: 'daemon' });
     await coordinator.execute(task('RETRY'), '/repo', async () => result(), {
@@ -465,6 +514,29 @@ describe('DurableRunCoordinator', () => {
     expect(coordinator.getRun('SUPERSEDED')?.retryAt).toBeGreaterThan(Date.now());
     expect(effectFactory).not.toHaveBeenCalled();
     await expect(coordinator.drainOutbox(async () => {})).resolves.toEqual({ applied: 0, retried: 0, dead: 0 });
+    coordinator.close();
+  });
+
+  it('persists deterministic tester output instead of an earlier reviewer approval', async () => {
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: dbPath(), instanceId: 'daemon' });
+    await coordinator.execute(task('VERIFY-FAIL'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'failed',
+      lastReviewFeedback: 'Work complete and approved.',
+      reviewResult: { decision: 'approve', feedback: 'Work complete and approved.' },
+      testerResult: {
+        success: false,
+        testsPassed: 0,
+        testsFailed: 1,
+        output: '[cargo test] rustdoc: No such file or directory',
+        deterministic: true,
+      },
+    }));
+
+    expect(coordinator.getRun('VERIFY-FAIL')).toMatchObject({
+      state: 'RETRY_AT',
+      lastErrorMessage: '[cargo test] rustdoc: No such file or directory',
+    });
     coordinator.close();
   });
 

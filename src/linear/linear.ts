@@ -75,9 +75,11 @@ interface RawIssueNode {
   title: string;
   description?: string | null;
   priority: number;
+  updatedAt?: string;
   state?: { name?: string } | null;
   project?: { id: string; name: string; icon?: string | null; color?: string | null } | null;
   labels?: { nodes: Array<{ name: string }> } | null;
+  comments?: { nodes: Array<{ id: string; body: string; createdAt: string }> } | null;
 }
 
 const ISSUES_QUERY = `
@@ -97,6 +99,25 @@ const ISSUES_QUERY = `
     }
   }`;
 
+const STUCK_ISSUES_QUERY = `
+  query OswStuckIssues($filter: IssueFilter, $first: Int, $after: String) {
+    issues(filter: $filter, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        updatedAt
+        state { name }
+        project { id name icon color }
+        labels { nodes { name } }
+        comments(first: 50) { nodes { id body createdAt } }
+      }
+      pageInfo { hasNextPage endCursor }
+    }
+  }`;
+
 export async function fetchIssuesForStates(
   linear: LinearClient,
   stateNames: string[],
@@ -110,6 +131,15 @@ export async function fetchIssuesForStates(
     state: { name: { in: stateNames } },
   };
 
+  return fetchRawIssues(linear, filter);
+}
+
+async function fetchRawIssues(
+  linear: LinearClient,
+  filter: Record<string, unknown>,
+  query = ISSUES_QUERY,
+): Promise<{ nodes: RawIssueNode[] }> {
+
   // graphql-request client under the SDK — one query returns the nested fields.
   const gql = (linear as unknown as {
     client: { rawRequest: <T>(q: string, v?: Record<string, unknown>) => Promise<{ data: T }> };
@@ -122,7 +152,7 @@ export async function fetchIssuesForStates(
   for (let page = 0; page < 10; page++) {
     const res = await withRateLimit('linear', () =>
       gql.rawRequest<{ issues: { nodes: RawIssueNode[]; pageInfo: { hasNextPage: boolean; endCursor: string } } }>(
-        ISSUES_QUERY,
+        query,
         { filter, first: FETCH_PAGE_SIZE, after },
       ),
     );
@@ -831,6 +861,24 @@ export async function updateIssueDescription(issueId: string, description: strin
   console.log(`[Linear] Issue ${issueId} description updated`);
 }
 
+/** Create Linear's native duplicate relation; Linear moves the duplicate to its configured canceled state. */
+export async function markIssueDuplicate(issueId: string, canonicalIssueId: string): Promise<boolean> {
+  if (!isLinearInitialized() || issueId === canonicalIssueId) return false;
+  try {
+    const payload = await getClient().createIssueRelation({
+      issueId,
+      relatedIssueId: canonicalIssueId,
+      type: 'duplicate' as Parameters<LinearClient['createIssueRelation']>[0]['type'],
+    });
+    clearLinearCache();
+    console.log(`[Linear] Issue ${issueId} marked duplicate of ${canonicalIssueId}`);
+    return payload.success;
+  } catch (error) {
+    console.error(`[Linear] Failed to mark ${issueId} duplicate of ${canonicalIssueId}:`, error);
+    return false;
+  }
+}
+
 /**
  * Add a comment to an issue
  */
@@ -1531,57 +1579,53 @@ export async function getStuckIssues(): Promise<{
   const now = Date.now();
   const STUCK_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-  // Fetch In Progress issues
-  const inProgressIssues = await withRateLimit('linear', async () => linear.issues({
-    filter: {
-      team: teamFilter(),
+  // Fetch all display fields in two nested GraphQL requests. Resolving SDK
+  // relations per issue here used to create an N+1 waterfall and made the
+  // dashboard endpoint time out whenever the stuck list became sizeable.
+  const ids = teamIds.length > 0 ? teamIds : (teamId ? [teamId] : []);
+  const team = ids.length === 1 ? { id: { eq: ids[0] } } : { id: { in: ids } };
+  const [inProgressIssues, problematicIssues] = await Promise.all([
+    fetchRawIssues(linear, {
+      ...(ids.length ? { team } : {}),
       state: { name: { eq: 'In Progress' } },
-    },
-    first: 100,
-  }));
-
-  // Fetch issues with retry/failed/blocked labels
-  const problematicIssues = await withRateLimit('linear', async () => linear.issues({
-    filter: {
-      team: teamFilter(),
+    }, STUCK_ISSUES_QUERY),
+    fetchRawIssues(linear, {
+      ...(ids.length ? { team } : {}),
       state: { name: { nin: ['Done', 'Canceled'] } },
       labels: { name: { in: ['retry', 'failed', 'blocked', 'needs-help', STUCK_LABEL] } },
-    },
-    first: 100,
-  }));
+    }, STUCK_ISSUES_QUERY),
+  ]);
 
   const stuckIssues: Array<LinearIssueInfo & { stuckDays: number; reason: string }> = [];
   const failedIssues: Array<LinearIssueInfo & { reason: string }> = [];
 
   // Process In Progress issues (check if stuck)
   for (const issue of inProgressIssues.nodes) {
-    const updatedAt = new Date(issue.updatedAt).getTime();
+    const updatedAt = new Date(issue.updatedAt ?? 0).getTime();
     const stuckMs = now - updatedAt;
 
     if (stuckMs > STUCK_THRESHOLD_MS) {
-      const [state, labels, comments, project] = await Promise.all([
-        issue.state,
-        issue.labels(),
-        issue.comments(),
-        getProjectInfo(issue),
-      ]);
-
       const stuckDays = Math.floor(stuckMs / (24 * 60 * 60 * 1000));
       stuckIssues.push({
         id: issue.id,
         identifier: issue.identifier,
         title: issue.title,
         description: issue.description ?? undefined,
-        state: state?.name ?? 'Unknown',
+        state: issue.state?.name ?? 'Unknown',
         priority: issue.priority,
-        labels: labels.nodes.map((l) => l.name),
-        comments: comments.nodes.map((c) => ({
+        labels: issue.labels?.nodes.map((l) => l.name) ?? [],
+        comments: issue.comments?.nodes.map((c) => ({
           id: c.id,
           body: c.body,
-          createdAt: c.createdAt.toISOString(),
+          createdAt: new Date(c.createdAt).toISOString(),
           user: undefined,
-        })),
-        project,
+        })) ?? [],
+        project: issue.project ? {
+          id: issue.project.id,
+          name: issue.project.name,
+          icon: issue.project.icon ?? undefined,
+          color: issue.project.color ?? undefined,
+        } : undefined,
         stuckDays,
         reason: `No updates for ${stuckDays} days`,
       });
@@ -1590,14 +1634,7 @@ export async function getStuckIssues(): Promise<{
 
   // Process problematic issues (retry, failed, blocked)
   for (const issue of problematicIssues.nodes) {
-    const [state, labels, comments, project] = await Promise.all([
-      issue.state,
-      issue.labels(),
-      issue.comments(),
-      getProjectInfo(issue),
-    ]);
-
-    const labelNames = labels.nodes.map((l) => l.name);
+    const labelNames = issue.labels?.nodes.map((l) => l.name) ?? [];
     let reason = 'Unknown issue';
 
     if (labelNames.includes('failed')) {
@@ -1617,16 +1654,21 @@ export async function getStuckIssues(): Promise<{
       identifier: issue.identifier,
       title: issue.title,
       description: issue.description ?? undefined,
-      state: state?.name ?? 'Unknown',
+      state: issue.state?.name ?? 'Unknown',
       priority: issue.priority,
       labels: labelNames,
-      comments: comments.nodes.map((c) => ({
+      comments: issue.comments?.nodes.map((c) => ({
         id: c.id,
         body: c.body,
-        createdAt: c.createdAt.toISOString(),
+        createdAt: new Date(c.createdAt).toISOString(),
         user: undefined,
-      })),
-      project,
+      })) ?? [],
+      project: issue.project ? {
+        id: issue.project.id,
+        name: issue.project.name,
+        icon: issue.project.icon ?? undefined,
+        color: issue.project.color ?? undefined,
+      } : undefined,
       reason,
     });
   }

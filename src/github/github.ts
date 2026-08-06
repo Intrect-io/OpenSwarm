@@ -388,16 +388,21 @@ export async function getActiveFailures(repo: string, maxAgeDays: number = 30): 
   try {
     const since = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const stdout = await ghExec(
-      'api', '--method', 'GET', '--paginate', '--slurp',
+      'api', '--method', 'GET', '--paginate',
       `repos/${repo}/actions/runs`, '-f', 'per_page=100', '-f', `created=>=${since}`,
+      '--jq', '.workflow_runs[] | {databaseId: .id, name: .name, headBranch: .head_branch, createdAt: .created_at, conclusion: .conclusion, url: .html_url}',
     );
-    const parsed = JSON.parse(stdout) as unknown;
-    const runs = Array.isArray(parsed) && parsed.every((page) => page && typeof page === 'object' && 'workflow_runs' in page)
-      ? parsed.flatMap((page) => (page as { workflow_runs: any[] }).workflow_runs).map((run) => ({
-          databaseId: run.id, name: run.name, headBranch: run.head_branch,
-          createdAt: run.created_at, conclusion: run.conclusion, url: run.html_url,
-        }))
-      : parsed as any[];
+    const trimmed = stdout.trim();
+    if (!trimmed) return [];
+    // `gh api --paginate --jq` emits one compact JSON value per matching run.
+    // Keep array parsing for tests and older gh versions that aggregate output.
+    let runs: any[];
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      runs = Array.isArray(parsed) ? parsed as any[] : [parsed as any];
+    } catch {
+      runs = trimmed.split('\n').filter(Boolean).map((line) => JSON.parse(line) as any);
+    }
     if (runs.length === 0) return [];
 
     // Keep only the latest run per workflow+branch (gh run list returns newest first)
@@ -428,7 +433,12 @@ export async function getActiveFailures(repo: string, maxAgeDays: number = 30): 
 
     return failures;
   } catch (err) {
-    console.error(`[GitHub] Failed to get active failures for ${repo}:`, err);
+    // ChildProcess errors may retain multi-megabyte stdout/stderr buffers. Passing
+    // the whole object to console.error makes Node inspect/stringify those buffers
+    // and synchronously flush them to the daemon log, blocking heartbeat/lease
+    // timers for seconds. The message carries the actionable command/error code.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[GitHub] Failed to get active failures for ${repo}: ${message}`);
     return null;
   }
 }
