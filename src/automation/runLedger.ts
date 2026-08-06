@@ -502,7 +502,10 @@ export class RunLedger {
       // The cap controls capacity; the write scope controls safety inside that
       // capacity. Both checks happen in the same SQLite transaction as the
       // claim, so two daemon instances cannot race disjoint scheduler views.
-      if (maxActive > 1) {
+      // An omitted conflictScope explicitly means the caller relies on isolated
+      // worktrees and wants capacity-only admission. An explicitly supplied but
+      // empty/unknown scope still fails closed inside admitsConflictScope().
+      if (maxActive > 1 && options.conflictScope !== undefined) {
         const activeScopes = activeRows
           .filter(active => ACTIVE_LEASE_STATES.includes(active.state as RunState))
           .map(active => parseJson(active.metadata_json));
