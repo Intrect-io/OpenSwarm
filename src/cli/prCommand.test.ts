@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { parsePRRef } from './prResolve.js';
 import {
   classifyBlocker,
@@ -8,7 +8,29 @@ import {
   summarizeCriticalComments,
   type PrStatusSnapshot,
 } from './prStatus.js';
-import { runPrCommand, type PrCommandDeps } from './prCommand.js';
+import { loadConfig } from '../core/config.js';
+
+const { fixOneImpl, reviewOneImpl, PRProcessorCtor } = vi.hoisted(() => {
+  const fixOneImpl = vi.fn(async () => ({ success: true, iterations: 1 }));
+  const reviewOneImpl = vi.fn(async () => ({ success: true, iterations: 0 }));
+  const PRProcessorCtor = vi.fn().mockImplementation(function PRProcessor(this: unknown) {
+    return { fixOne: fixOneImpl, reviewOne: reviewOneImpl };
+  });
+  return { fixOneImpl, reviewOneImpl, PRProcessorCtor };
+});
+vi.mock('../automation/prProcessor.js', () => ({ PRProcessor: PRProcessorCtor }));
+
+vi.mock('../core/config.js', () => ({
+  loadConfig: vi.fn(() => ({ autonomous: { defaultRoles: { worker: { model: 'x' } } } })),
+}));
+
+const { waitForCICompletionImpl } = vi.hoisted(() => ({
+  waitForCICompletionImpl: vi.fn(async () => ({ status: 'success' })),
+}));
+vi.mock('../github/github.js', () => ({ waitForCICompletion: waitForCICompletionImpl }));
+
+const { runPrCommand, resolveNumber, resolveRepoOverride, loadRolesBestEffort, buildProcessorConfig } = await import('./prCommand.js');
+type PrCommandDeps = Parameters<typeof runPrCommand>[2];
 
 describe('parsePRRef (INT-3282)', () => {
   it('parses owner/repo#n', () => {
@@ -139,6 +161,91 @@ function mkDeps(over: Partial<PrCommandDeps> = {}): PrCommandDeps {
   };
 }
 
+beforeEach(() => {
+  fixOneImpl.mockClear().mockResolvedValue({ success: true, iterations: 1 });
+  reviewOneImpl.mockClear().mockResolvedValue({ success: true, iterations: 0 });
+  PRProcessorCtor.mockClear();
+  waitForCICompletionImpl.mockClear().mockResolvedValue({ status: 'success' });
+});
+
+describe('resolveNumber / resolveRepoOverride (INT-3282)', () => {
+  it('passes a numeric --number through unchanged', () => {
+    expect(resolveNumber({ number: 9 })).toBe(9);
+  });
+  it('parses a string --number', () => {
+    expect(resolveNumber({ number: '9' })).toBe(9);
+  });
+  it('is undefined when no --number is given', () => {
+    expect(resolveNumber({})).toBeUndefined();
+  });
+
+  it('prefers an explicit --repo', () => {
+    expect(resolveRepoOverride({ repo: 'o/r' })).toBe('o/r');
+  });
+  it('infers repo from an owner/repo#n --number string', () => {
+    expect(resolveRepoOverride({ number: 'o/r#9' })).toBe('o/r');
+  });
+  it('is undefined when neither is present', () => {
+    expect(resolveRepoOverride({ number: 9 })).toBeUndefined();
+  });
+});
+
+describe('loadRolesBestEffort / buildProcessorConfig (INT-3282)', () => {
+  it('reads defaultRoles from config', () => {
+    expect(loadRolesBestEffort()).toEqual({ worker: { model: 'x' } });
+  });
+
+  it('enables the conflict resolver by default', () => {
+    const config = buildProcessorConfig({});
+    expect(config.conflictResolver?.enabled).toBe(true);
+    expect(config.maxIterations).toBe(3);
+    expect(config.maxRetries).toBe(3);
+  });
+
+  it('omits the conflict resolver when --no-conflicts is set', () => {
+    const config = buildProcessorConfig({ noConflicts: true });
+    expect(config.conflictResolver).toBeUndefined();
+  });
+
+  it('honors explicit maxIterations/maxRetries', () => {
+    const config = buildProcessorConfig({ maxIterations: 5, maxRetries: 1 });
+    expect(config.maxIterations).toBe(5);
+    expect(config.maxRetries).toBe(1);
+  });
+
+  it('falls back to undefined when loadConfig throws', () => {
+    vi.mocked(loadConfig).mockImplementationOnce(() => {
+      throw new Error('no config file');
+    });
+    expect(loadRolesBestEffort()).toBeUndefined();
+  });
+});
+
+describe('runPrCommand default fix/review wiring (INT-3282)', () => {
+  // These omit deps.fixOne/deps.reviewOne so the real defaultFixOne/defaultReviewOne
+  // run against a mocked PRProcessor — the only way to exercise that wiring, since
+  // every other test in this file injects fixOne/reviewOne directly.
+  it('fix builds a PRProcessor and calls its fixOne when not overridden', async () => {
+    const result = await runPrCommand('fix', {}, { resolve: async () => resolved, log: vi.fn() });
+    expect(PRProcessorCtor).toHaveBeenCalledTimes(1);
+    expect(fixOneImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'o/r', number: 9 }),
+      expect.any(String),
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('review builds a PRProcessor and calls its reviewOne when not overridden', async () => {
+    const result = await runPrCommand('review', {}, { resolve: async () => resolved, log: vi.fn() });
+    expect(PRProcessorCtor).toHaveBeenCalledTimes(1);
+    expect(reviewOneImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'o/r', number: 9 }),
+      expect.any(String),
+    );
+    expect(result.exitCode).toBe(0);
+  });
+});
+
 describe('runPrCommand (INT-3282)', () => {
   it('status returns formatted report and exit 0 when ready', async () => {
     const deps = mkDeps();
@@ -248,6 +355,93 @@ describe('runPrCommand (INT-3282)', () => {
     const result = await runPrCommand('watch', { rounds: 3 }, deps);
     expect(deps.fixOne).toHaveBeenCalledTimes(1);
     expect(deps.waitCI).toHaveBeenCalled();
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('watch waits out a pending_ci blocker instead of running a fix pass', async () => {
+    let calls = 0;
+    const deps = mkDeps({
+      waitCI: undefined,
+      gatherStatus: vi.fn(async () => {
+        calls += 1;
+        return {
+          ...resolved,
+          mergeable: false,
+          hasConflicts: false,
+          ci: { status: 'pending' as const },
+          changesRequested: [],
+          criticalComments: [],
+          blocker: calls === 1 ? ('pending_ci' as const) : ('none' as const),
+          mergeReady: calls > 1,
+        };
+      }),
+    });
+    const result = await runPrCommand('watch', { rounds: 3 }, deps);
+    expect(waitForCICompletionImpl).toHaveBeenCalled();
+    expect(deps.fixOne).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('watch reports a blocked message with exit 1 when the fix pass fails', async () => {
+    const deps = mkDeps({
+      fixOne: vi.fn(async () => ({ success: false, error: 'still red', iterations: 1 })),
+      gatherStatus: vi.fn(async () => ({
+        ...resolved,
+        mergeable: false,
+        hasConflicts: false,
+        ci: { status: 'failure' as const, failedChecks: [{ name: 'test', conclusion: 'failure' }] },
+        changesRequested: [],
+        criticalComments: [],
+        blocker: 'ci' as const,
+        mergeReady: false,
+      })),
+    });
+    const result = await runPrCommand('watch', { rounds: 3 }, deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/Blocked on round 1: still red/);
+  });
+
+  it('watch gives up and reports the last blocker after exhausting all rounds', async () => {
+    const deps = mkDeps({
+      gatherStatus: vi.fn(async () => ({
+        ...resolved,
+        mergeable: false,
+        hasConflicts: false,
+        ci: { status: 'failure' as const, failedChecks: [{ name: 'test', conclusion: 'failure' }] },
+        changesRequested: [],
+        criticalComments: [],
+        blocker: 'ci' as const,
+        mergeReady: false,
+      })),
+    });
+    const result = await runPrCommand('watch', { rounds: 2 }, deps);
+    expect(deps.fixOne).toHaveBeenCalledTimes(2);
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/Gave up after 2 round\(s\)\. Last blocker: ci/);
+  });
+
+  it('watch uses the default fixOne/waitCI wiring when neither is injected', async () => {
+    let calls = 0;
+    const deps = mkDeps({
+      fixOne: undefined,
+      waitCI: undefined,
+      gatherStatus: vi.fn(async () => {
+        calls += 1;
+        return {
+          ...resolved,
+          mergeable: calls > 1,
+          hasConflicts: false,
+          ci: { status: calls > 1 ? ('success' as const) : ('failure' as const), failedChecks: calls > 1 ? undefined : [{ name: 'test', conclusion: 'failure' }] },
+          changesRequested: [],
+          criticalComments: [],
+          blocker: calls > 1 ? ('none' as const) : ('ci' as const),
+          mergeReady: calls > 1,
+        };
+      }),
+    });
+    const result = await runPrCommand('watch', { rounds: 3 }, deps);
+    expect(fixOneImpl).toHaveBeenCalled();
+    expect(waitForCICompletionImpl).toHaveBeenCalled();
     expect(result.exitCode).toBe(0);
   });
 

@@ -63,13 +63,13 @@ export interface PrCommandDeps {
   loadRoles?: () => DefaultRolesConfig | undefined;
 }
 
-function resolveNumber(opts: PrCommandOptions): number | undefined {
+export function resolveNumber(opts: PrCommandOptions): number | undefined {
   if (opts.number == null) return undefined;
   if (typeof opts.number === 'number') return opts.number;
   return parsePRRef(String(opts.number)).number;
 }
 
-function resolveRepoOverride(opts: PrCommandOptions): string | undefined {
+export function resolveRepoOverride(opts: PrCommandOptions): string | undefined {
   if (opts.repo) return opts.repo;
   if (typeof opts.number === 'string' && opts.number.includes('#')) {
     return parsePRRef(opts.number).repo;
@@ -77,7 +77,7 @@ function resolveRepoOverride(opts: PrCommandOptions): string | undefined {
   return undefined;
 }
 
-function loadRolesBestEffort(): DefaultRolesConfig | undefined {
+export function loadRolesBestEffort(): DefaultRolesConfig | undefined {
   try {
     return loadConfig().autonomous?.defaultRoles;
   } catch {
@@ -85,7 +85,7 @@ function loadRolesBestEffort(): DefaultRolesConfig | undefined {
   }
 }
 
-function buildProcessorConfig(opts: PrCommandOptions, roles?: DefaultRolesConfig): PRProcessorConfig {
+export function buildProcessorConfig(opts: PrCommandOptions, roles?: DefaultRolesConfig): PRProcessorConfig {
   const conflictResolver: ConflictResolverConfig | undefined = opts.noConflicts
     ? undefined
     : {
