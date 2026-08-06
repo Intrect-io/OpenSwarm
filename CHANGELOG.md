@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.7 — 2026-08-06
+
+### Fixed
+
+- **Worktree fan-out now survives durable admission.** `0.20.6` intentionally omitted `conflictScope` when isolated worktrees should use capacity-only admission, but the ledger interpreted the omitted value as an unknown scope and failed closed as soon as one worker was active. The scheduler briefly started eight issues and the ledger immediately superseded seven, making the dashboard look single-threaded. Omitted scope now bypasses scope serialization while an explicitly supplied empty or unknown scope still fails closed. Verified live with eight KYTE-Portal issues simultaneously in `EXECUTING` state.
+
 ## 0.20.6 — 2026-08-06
 
 ### Added
