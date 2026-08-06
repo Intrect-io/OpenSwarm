@@ -48,6 +48,8 @@ export interface ITaskSource {
   createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult>;
   updateState(issueId: string, state: TaskState): Promise<boolean>;
   updateDescription?(issueId: string, description: string): Promise<void>;
+  /** Mark issueId as a duplicate of canonicalIssueId in the tracker. */
+  markDuplicate?(issueId: string, canonicalIssueId: string): Promise<boolean>;
   addComment(issueId: string, body: string, idempotencyKey?: string): Promise<void>;
   /** Fresh tracker discussion for execution-time context; avoids stale discovery snapshots. */
   getExecutionComments?(issueId: string): Promise<Array<{ body: string; createdAt: string }>>;
@@ -85,6 +87,7 @@ export class LinearTaskSource implements ITaskSource {
   }
   updateState(issueId: string, state: TaskState): Promise<boolean> { return linear.updateIssueState(issueId, state); }
   updateDescription(issueId: string, description: string): Promise<void> { return linear.updateIssueDescription(issueId, description); }
+  markDuplicate(issueId: string, canonicalIssueId: string): Promise<boolean> { return linear.markIssueDuplicate(issueId, canonicalIssueId); }
   addComment(issueId: string, body: string, idempotencyKey?: string): Promise<void> {
     return linear.addComment(issueId, body, idempotencyKey ? linear.effectCommentId(idempotencyKey) : undefined);
   }
@@ -161,6 +164,10 @@ export class SqliteTaskSource implements ITaskSource {
   }
   async updateDescription(issueId: string, description: string): Promise<void> {
     this.store.updateIssue(issueId, { description });
+  }
+  async markDuplicate(issueId: string, canonicalIssueId: string): Promise<boolean> {
+    await this.addComment(issueId, `Duplicate of ${canonicalIssueId}; groomed during draft analysis.`);
+    return this.updateState(issueId, 'Backlog');
   }
   async addComment(issueId: string, body: string, idempotencyKey?: string): Promise<void> {
     this.store.addEvent(issueId, 'commented', {

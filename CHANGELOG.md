@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.20.7 — 2026-08-06
+
+### Fixed
+
+- **Worktree fan-out now survives durable admission.** `0.20.6` intentionally omitted `conflictScope` when isolated worktrees should use capacity-only admission, but the ledger interpreted the omitted value as an unknown scope and failed closed as soon as one worker was active. The scheduler briefly started eight issues and the ledger immediately superseded seven, making the dashboard look single-threaded. Omitted scope now bypasses scope serialization while an explicitly supplied empty or unknown scope still fails closed. Verified live with eight KYTE-Portal issues simultaneously in `EXECUTING` state.
+
+## 0.20.6 — 2026-08-06
+
+### Added
+
+- **Autonomous work now fans out by issue into isolated worktrees.** With `worktreeMode` and same-project concurrency enabled, one project can fill the global worker pool (up to 32) even when issues touch overlapping files. Integration conflicts remain a PR/rebase concern instead of silently serializing execution.
+- **Draft analysis grooms duplicate Linear issues before implementation.** The drafter compares an issue with open peers in the same project and creates Linear's native duplicate relation only when confidence is at least 90%, two concrete overlap signals are present, and the canonical issue is older. Ambiguous overlap continues to the worker unchanged.
+- **The web dashboard accepts direct Tailscale access.** Trusted tailnet addresses can reach the dashboard while loopback and explicit host protections remain intact.
+
+### Fixed
+
+- **Provider switches and restarts no longer leak stale model ids or quota pauses.** Startup normalizes role models for the configured provider, an explicit switch clears only provider-quota retries, and the daemon persists the selected adapter. Codex PKCE-backed `codex-responses` can therefore resume work without inheriting incompatible OpenRouter pins.
+- **Durable automation recovers cleanly across daemon replacement.** Shutdown cancellations, expired owners, retry claims, preserved worktrees, and superseded runs now reconcile without turning transient process replacement into permanent STUCK state.
+- **Pair stagnation gets a bounded fresh-context retry.** A repeated response or revision ends the current pair session but no longer immediately consumes the entire outer retry budget.
+- **Verification and Git/worktree ownership checks are more reliable.** Verification paths are normalized, worker commits preserve issue authority, existing PR ownership prevents duplicate publication, and worktree preservation carries actionable failure evidence into the next attempt.
+
 ## 0.20.5 — 2026-08-05
 
 ### Fixed

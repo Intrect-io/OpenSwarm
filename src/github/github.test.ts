@@ -140,8 +140,41 @@ describe('getActiveFailures', () => {
 
     const args = execFileMock.mock.calls[0][1] as string[];
     expect(args).toContain('--paginate');
-    expect(args).toContain('--slurp');
+    expect(args).not.toContain('--slurp');
+    expect(args).toContain('--jq');
     expect(args).toContain('created=>=2026-06-01');
+  });
+
+  it('parses paginated jq output as newline-delimited compact objects', async () => {
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args.at(-1) as (err: Error | null, stdout: string, stderr: string) => void;
+      callback(null, [
+        JSON.stringify({ databaseId: 1, name: 'ci', headBranch: 'main', createdAt: '2026-06-30T00:00:00.000Z', conclusion: 'failure', url: 'https://example.test/1' }),
+        JSON.stringify({ databaseId: 2, name: 'lint', headBranch: 'main', createdAt: '2026-06-30T00:00:00.000Z', conclusion: 'success', url: 'https://example.test/2' }),
+      ].join('\n'), '');
+    });
+
+    await expect(getActiveFailures('owner/repo', 30)).resolves.toEqual([
+      { workflow: 'ci', branch: 'main', runId: 1, url: 'https://example.test/1', createdAt: '2026-06-30T00:00:00.000Z' },
+    ]);
+  });
+
+  it('does not log retained child-process stdout on failure', async () => {
+    const error = Object.assign(new Error('stdout maxBuffer length exceeded'), {
+      stdout: 'sensitive-and-huge-output',
+    });
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args.at(-1) as (err: Error | null, stdout: string, stderr: string) => void;
+      callback(error, '', '');
+    });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(getActiveFailures('owner/repo', 30)).resolves.toBeNull();
+    expect(log).toHaveBeenCalledWith(
+      '[GitHub] Failed to get active failures for owner/repo: stdout maxBuffer length exceeded',
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain('sensitive-and-huge-output');
+    log.mockRestore();
   });
 
   it('treats every blocking conclusion as an active failure', async () => {

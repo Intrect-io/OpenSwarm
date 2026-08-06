@@ -131,15 +131,22 @@ export async function spawnCli(
 
       const timeoutMs = options.timeoutMs ?? 300000;
       let timer: NodeJS.Timeout | null = null;
+      let exitDrainTimer: NodeJS.Timeout | null = null;
+      let settled = false;
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
           proc.kill('SIGKILL');
           reject(new Error(`${adapter.name} timeout after ${timeoutMs}ms`));
         }, timeoutMs);
       }
 
-      proc.on('close', (code) => {
+      const finish = (code: number | null) => {
+        if (settled) return;
+        settled = true;
         if (timer) clearTimeout(timer);
+        if (exitDrainTimer) clearTimeout(exitDrainTimer);
         const durationMs = Date.now() - startTime;
 
         if (options.onLog && adapter.capabilities.supportsStreaming && streamBuffer.trim()) {
@@ -181,10 +188,24 @@ export async function spawnCli(
         }
 
         resolve({ exitCode: code ?? 0, stdout, stderr, durationMs });
+      };
+
+      proc.on('close', finish);
+      // `close` waits for every inherited stdio descriptor to close. Some CLIs
+      // launch MCP/tool grandchildren that briefly retain those descriptors
+      // after the direct child has exited, leaving an otherwise-finished stage
+      // stuck until its full timeout. `exit` proves the direct executor is done;
+      // allow a short drain window, then finalize with the bytes received so far.
+      proc.on('exit', (code) => {
+        if (settled || exitDrainTimer) return;
+        exitDrainTimer = setTimeout(() => finish(code), 1_000);
       });
 
       proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
         if (timer) clearTimeout(timer);
+        if (exitDrainTimer) clearTimeout(exitDrainTimer);
         reject(new Error(`${adapter.name} spawn error: ${err.message}`));
       });
     });

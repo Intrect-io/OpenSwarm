@@ -275,6 +275,7 @@ async function runCommand(command: VerifyCommand, root: string, env: NodeJS.Proc
         output: outputText,
         outputFingerprint: createHash('sha256').update(normalizeFailureOutput(fingerprintText, [
           [root, '<PROJECT>'], [isolatedHome, '<HOME>'], [isolatedTmp, '<TMP>'],
+          [dirname(root), '<SANDBOX>'],
         ])).digest('hex'),
         environmentFailure: status === 'fail' && isEnvironmentFailure(outputText),
       });
@@ -392,7 +393,13 @@ async function validateSandboxSymlinks(projectPath: string, sharedPaths: string[
           }
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            throw new Error(`[security] verify sandbox rejects dangling symlink: ${path}`);
+            // A missing target is not an escape when the lexical target was
+            // already proven relative and contained by projectRoot above.
+            // Repositories commonly track build-output links whose targets are
+            // created only after a platform-specific build. Reject absolute or
+            // lexically escaping links, but do not make an unchanged internal
+            // dangling link render every unrelated verification impossible.
+            continue;
           }
           throw error;
         }

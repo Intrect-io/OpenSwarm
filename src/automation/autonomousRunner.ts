@@ -23,6 +23,7 @@ import {
   saveProjectSelection,
   recordLastFailureDetail,
   pickFailureDetail,
+  pickPipelineFailureDetail,
   type LastFailureEntry,
   type TaskState,
   type ProjectInfo,
@@ -68,6 +69,7 @@ import {
 } from '../orchestration/conflictDetector.js';
 import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
+export { pickPipelineFailureDetail } from './runnerState.js';
 import type { AdapterName } from '../adapters/types.js';
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
@@ -98,10 +100,20 @@ export function effectiveProjectConcurrency(config: Pick<AutonomousConfig,
   'allowSameProjectConcurrent' | 'worktreeMode' | 'maxConcurrentPerProject' | 'maxConcurrentTasks'
 >): number {
   const globalCap = Math.max(1, Math.floor(config.maxConcurrentTasks ?? 1));
-  const parallel = (config.allowSameProjectConcurrent ?? true) && (config.worktreeMode ?? false);
+  const parallel = worktreeFanoutEnabled(config);
   if (!parallel) return 1;
-  const requested = Math.floor(config.maxConcurrentPerProject ?? Math.min(2, globalCap));
+  // Match `openswarm review`: fill the available global pool. File-scope
+  // conflict analysis and durable admission remain the safety boundary; an
+  // omitted per-project setting must not impose a hidden throughput cap.
+  const requested = Math.floor(config.maxConcurrentPerProject ?? globalCap);
   return Math.max(1, Math.min(requested, globalCap));
+}
+
+/** Worktrees isolate issue execution; integration conflicts are handled later. */
+export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
+  'allowSameProjectConcurrent' | 'worktreeMode'
+>): boolean {
+  return (config.allowSameProjectConcurrent ?? true) && (config.worktreeMode ?? false);
 }
 
 export type RunnableCandidate = { task: TaskItem; projectPath: string };
@@ -323,6 +335,11 @@ export class AutonomousRunner {
 
   constructor(config: AutonomousConfig) {
     this.config = config;
+    // Config files may retain model pins from a previous provider. Normalize
+    // them before the first heartbeat; switchProvider() used to do this only
+    // after a live dashboard toggle, so a restart leaked OpenRouter model ids
+    // into codex-responses and failed every fresh worker call.
+    this.applyProviderConfig(config.defaultAdapter ?? 'codex', false);
     this.loadTaskState();  // Restore completed/failed task IDs from disk
     // Restore the persisted project selection so "disable all" survives a daemon
     // restart. Skipped under dryRun (tests) so the real ~/.openswarm isn't touched. (INT-2208)
@@ -553,37 +570,17 @@ export class AutonomousRunner {
         return;
       }
 
-      // The bounded pair loop already proved stagnation (same error/output or
-      // repeated REVISE). Retrying the whole pipeline would only replay the same
-      // loop up to MAX_RETRY_COUNT times, multiplying cost and STUCK log noise.
+      // Pair-level stagnation only proves that the CURRENT session stopped
+      // making progress. A fresh outer attempt gets a new model context and can
+      // resume the preserved worktree, which is often enough to escape a repeated
+      // output/error loop. Let this flow through the normal bounded failure budget
+      // below; only MAX_RETRY_COUNT consecutive outer attempts may require a human.
       if (result.failureSignal === 'stuck' && task.issueId) {
         const failureDetail = result.stuckReason
           ?? pickFailureDetail([result.lastReviewFeedback, result.reviewResult?.feedback, result.workerResult?.error])
           ?? 'Pair pipeline detected repeated non-progress.';
-        this.completedTaskIds.add(task.issueId);
-        this.failedTaskCounts.set(task.issueId, AutonomousRunner.MAX_RETRY_COUNT);
-        clearRetryTime(task.issueId, this.failedTaskRetryTimes);
         recordLastFailureDetail(this.taskStateRef, task.issueId, failureDetail);
-        if (this.durableRuns.isPrimary) {
-          this.durableRuns.markNeedsHuman(task.issueId, `Pair pipeline stuck: ${failureDetail}`);
-        }
-        this.saveTaskState();
-        if (result.taskContext?.projectPath) {
-          await removePreservedWorktreeAt(result.taskContext.projectPath)
-            .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
-        }
-        try {
-          await execution.syncFailureState(task, `Pair pipeline stuck: ${failureDetail}`);
-          await getTaskSource()?.logStuck(
-            task.issueId,
-            'autonomous-runner',
-            `Pair pipeline detected repeated non-progress; another full retry would repeat the same loop.\n\n**Reason:**\n${failureDetail}`,
-          );
-          console.log(`[Scheduler] Issue ${task.issueId} marked STUCK from pair-level stagnation (no outer retry)`);
-        } catch (err) {
-          console.error('[Scheduler] Failed to update pair-level STUCK issue state:', err);
-        }
-        return;
+        console.warn(`[Scheduler] Pair session stagnated for ${taskCtx}; retrying with fresh context: ${failureDetail}`);
       }
 
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
@@ -725,11 +722,8 @@ export class AutonomousRunner {
         // (validation nudge / HALT overwrite it), and a junk-but-truthy worker
         // error ("Unknown error" from the text-fallback parser) used to mask the
         // reviewer's actionable feedback entirely (INT-2504).
-        const failureDetail = pickFailureDetail([
-          result.lastReviewFeedback,
-          result.reviewResult?.feedback,
-          result.workerResult?.error,
-        ]) ?? 'No error detail captured (worker produced no output).';
+        const failureDetail = pickPipelineFailureDetail(result)
+          ?? 'No error detail captured (worker produced no output).';
         recordLastFailureDetail(this.taskStateRef, task.issueId, failureDetail);
 
         if (count >= AutonomousRunner.MAX_RETRY_COUNT) {
@@ -1066,14 +1060,19 @@ export class AutonomousRunner {
           taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
         };
       }
-      const sameRepoParallelAllowed = (this.config.worktreeMode ?? false)
-        && (this.config.allowSameProjectConcurrent ?? true);
+      const sameRepoParallelAllowed = worktreeFanoutEnabled(this.config);
       admission = {
         maxConcurrent: sameRepoParallelAllowed
           ? (metadata?.automation?.maxConcurrent ?? effectiveProjectConcurrency(this.config))
           : 1,
-        conflictScope: task.fileScope,
-        maxAttemptsPerHour: metadata?.automation?.maxAttemptsPerHour ?? 12,
+        // Each issue gets its own worktree in fan-out mode. Overlapping files
+        // may conflict when branches integrate, but must not serialize workers.
+        conflictScope: sameRepoParallelAllowed ? undefined : task.fileScope,
+        // A fixed default attempt budget of 12 made a 32-slot daemon trip its
+        // repository circuit before the first pool could even fill. Treat this
+        // as an explicit repository policy; failure and cost circuits remain
+        // independent safety boundaries.
+        maxAttemptsPerHour: metadata?.automation?.maxAttemptsPerHour,
         maxFailuresPerHour: metadata?.automation?.maxFailuresPerHour ?? 6,
         maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay,
         circuitCooldownMs: (metadata?.automation?.circuitCooldownMinutes ?? 60) * 60_000,
@@ -1106,6 +1105,7 @@ export class AutonomousRunner {
         admission,
         successEffect: (result, claim) => this.buildCompletionEffect(task, result, claim.attemptNo),
         cancelEffect: (_result, claim) => this.buildCancellationEffect(task, claim.attemptNo),
+        retryCancellation: () => this.stopping,
       },
     );
   }
@@ -2034,6 +2034,10 @@ export class AutonomousRunner {
   }
 
   private async detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
+    if (worktreeFanoutEnabled(this.config)) {
+      return new Set(candidates.map(candidate => candidate.task.id));
+    }
+
     // Group candidates by canonical repository identity for conflict detection.
     // A symlink/relative-path alias must not split one repository into two groups
     // and bypass same-repository conflict serialization.
@@ -2263,6 +2267,7 @@ export class AutonomousRunner {
       verify: this.config.verify,
       maxReflections: this.config.maxReflections,
       durability,
+      peerIssues: this.lastFetchedTasks,
     };
   }
 
@@ -2395,7 +2400,7 @@ export class AutonomousRunner {
     };
   }
 
-  switchProvider(adapter: AdapterName): void {
+  private applyProviderConfig(adapter: AdapterName, overrideRoleAdapters = true): void {
     // On a provider switch, keep the model only if it clearly belongs to the new
     // provider; otherwise drop it (undefined) so the target adapter resolves its
     // own default via getDefaultModel(). Shared with the planner's model guard
@@ -2406,43 +2411,39 @@ export class AutonomousRunner {
     this.config.defaultAdapter = adapter;
 
     if (this.config.defaultRoles) {
+      const roleConfig = <T extends { adapter?: AdapterName; model?: string }>(role: T): T => {
+        if (!overrideRoleAdapters && role.adapter) return role;
+        return {
+          ...role,
+          adapter,
+          model: mapModelForProvider(role.model),
+        };
+      };
       this.config.defaultRoles.worker = {
-        ...this.config.defaultRoles.worker,
-        adapter,
-        model: mapModelForProvider(this.config.defaultRoles.worker.model, 'worker'),
+        ...roleConfig(this.config.defaultRoles.worker),
       };
       this.config.defaultRoles.reviewer = {
-        ...this.config.defaultRoles.reviewer,
-        adapter,
-        model: mapModelForProvider(this.config.defaultRoles.reviewer.model, 'reviewer'),
+        ...roleConfig(this.config.defaultRoles.reviewer),
       };
 
       if (this.config.defaultRoles.tester) {
         this.config.defaultRoles.tester = {
-          ...this.config.defaultRoles.tester,
-          adapter,
-          model: mapModelForProvider(this.config.defaultRoles.tester.model, 'tester'),
+          ...roleConfig(this.config.defaultRoles.tester),
         };
       }
       if (this.config.defaultRoles.documenter) {
         this.config.defaultRoles.documenter = {
-          ...this.config.defaultRoles.documenter,
-          adapter,
-          model: mapModelForProvider(this.config.defaultRoles.documenter.model, 'documenter'),
+          ...roleConfig(this.config.defaultRoles.documenter),
         };
       }
       if (this.config.defaultRoles.auditor) {
         this.config.defaultRoles.auditor = {
-          ...this.config.defaultRoles.auditor,
-          adapter,
-          model: mapModelForProvider(this.config.defaultRoles.auditor.model, 'auditor'),
+          ...roleConfig(this.config.defaultRoles.auditor),
         };
       }
       if (this.config.defaultRoles['skill-documenter']) {
         this.config.defaultRoles['skill-documenter'] = {
-          ...this.config.defaultRoles['skill-documenter'],
-          adapter,
-          model: mapModelForProvider(this.config.defaultRoles['skill-documenter'].model, 'skill-documenter'),
+          ...roleConfig(this.config.defaultRoles['skill-documenter']),
         };
       }
     }
@@ -2474,6 +2475,24 @@ export class AutonomousRunner {
           else profile.roles[role] = mapped;
         }
       }
+    }
+  }
+
+  switchProvider(adapter: AdapterName): void {
+    const previousAdapter = this.config.defaultAdapter ?? 'codex';
+    this.applyProviderConfig(adapter);
+
+    // A provider quota belongs to the provider that reported it. Keeping the
+    // old reset timestamp after an explicit provider switch leaves every free
+    // scheduler slot idle even though the replacement provider is available.
+    // Only release quota-paused runs; task/infra failures and human gates keep
+    // their durable state.
+    if (adapter !== previousAdapter) {
+      this.rateLimitUntil = 0;
+      for (const run of this.durableRuns.listRuns(['RETRY_AT'])) {
+        if (run.lastErrorCode === 'rate_limited') this.durableRuns.markReady(run.issueId);
+      }
+      this.scheduleNextHeartbeat();
     }
 
     // Persist the choice so a daemon restart keeps it (in-memory switch was lost every restart).

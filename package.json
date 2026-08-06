@@ -1,6 +1,6 @@
 {
   "name": "@intrect/openswarm",
-  "version": "0.20.5",
+  "version": "0.20.7",
   "description": "Autonomous AI agent orchestrator — Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
   "license": "MIT",
   "type": "module",
@@ -89,6 +89,6 @@
   },
   "overrides": {
     "protobufjs": "^7.6.3",
-    "undici": "^6.27.0"
+    "undici": "^6.28.0"
   }
 }

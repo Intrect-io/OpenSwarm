@@ -231,6 +231,25 @@ describe('runDraftAnalysis — real tracked-file count (countTrackedFiles succes
 });
 
 describe('parseDraftResponse — JSON/anchor extraction edge cases', () => {
+  it('parses a high-confidence duplicate grooming recommendation', () => {
+    const r = parseDraftResponse(JSON.stringify({
+      taskType: 'feature',
+      intentSummary: 'Implement the existing card status write-back behavior.',
+      relevantFiles: ['src/cards.ts'],
+      suggestedApproach: 'Reuse the existing mutation path.',
+      completionCriteria: ['Status mutation is observable in the dashboard'],
+      duplicateOfIssueId: 'older-issue',
+      duplicateConfidence: 0.96,
+      duplicateReason: 'Both request the same mutation and UI flow.',
+      duplicateEvidence: ['same endpoint', 'same acceptance criterion'],
+    }));
+    expect(r).toMatchObject({
+      duplicateOfIssueId: 'older-issue',
+      duplicateConfidence: 0.96,
+      duplicateEvidence: ['same endpoint', 'same acceptance criterion'],
+    });
+  });
+
   it('falls all the way through to prose salvage when there is no fence and no field anchor at all', () => {
     const text = 'The repository is large and the task is unclear. No structured answer was produced.';
     const r = parseDraftResponse(text);

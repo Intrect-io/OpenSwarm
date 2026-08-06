@@ -12,6 +12,7 @@ import { DEFAULT_MODEL as GPT_DEFAULT_MODEL } from '../adapters/gpt.js';
 import { DEFAULT_MODEL as LOCAL_DEFAULT_MODEL } from '../adapters/local.js';
 import { DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL } from '../adapters/openrouter.js';
 import { ATLASCLOUD_DEFAULT_MODEL } from '../adapters/atlascloud.js';
+import { CLAUDE_DEFAULT_MODEL } from '../adapters/claude.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -133,6 +134,7 @@ export function getDefaultChatModel(provider: AdapterName): string {
   if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';
   if (provider === 'openrouter') return OPENROUTER_DEFAULT_MODEL;
   if (provider === 'atlascloud') return ATLASCLOUD_DEFAULT_MODEL;
+  if (provider === 'claude') return CLAUDE_DEFAULT_MODEL;
   return CODEX_DEFAULT_MODEL;
 }
 

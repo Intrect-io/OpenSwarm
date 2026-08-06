@@ -15,6 +15,16 @@ describe('ChatPanel /provider (INT-1960)', () => {
     expect(lastFrame()).toContain('Provider → gpt');
   });
 
+  it('switches to claude with the claude default model, not a Codex id (INT-3284)', async () => {
+    const { stdin, lastFrame } = render(<ChatPanel active />);
+    stdin.write('/provider claude');
+    await tick();
+    stdin.write('\r');
+    await tick();
+    expect(lastFrame()).toContain('Provider → claude (model: sonnet)');
+    expect(lastFrame()).not.toContain('gpt-5-codex');
+  });
+
   it('opens an interactive selector on bare /provider', async () => {
     const { stdin, lastFrame } = render(<ChatPanel active />);
     stdin.write('/provider');

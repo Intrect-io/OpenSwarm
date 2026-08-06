@@ -26,6 +26,7 @@ function paths(sandbox: string): Array<[string, string]> {
     [`${sandbox}/worktree`, '<PROJECT>'],
     [`${sandbox}/home`, '<HOME>'],
     [`${sandbox}/tmp`, '<TMP>'],
+    [sandbox, '<SANDBOX>'],
   ];
 }
 
@@ -53,6 +54,16 @@ describe('normalizeFailureOutput', () => {
 
     expect(a).toBe(normalizeFailureOutput(out(SANDBOX_B), paths(SANDBOX_B)));
     expect(a).not.toContain('openswarm-verify-head');
+  });
+
+  it('normalizes sibling path dependencies outside the copied worktree', () => {
+    const out = (s: string) =>
+      `failed to read ${s}/intrect-plugin/crates/intrect-license/Cargo.toml`;
+
+    const a = normalizeFailureOutput(out(SANDBOX_A), paths(SANDBOX_A));
+
+    expect(a).toBe(normalizeFailureOutput(out(SANDBOX_B), paths(SANDBOX_B)));
+    expect(a).toBe('failed to read <SANDBOX>/intrect-plugin/crates/intrect-license/Cargo.toml');
   });
 
   it('normalizes the isolated HOME and TMPDIR, not just the project', () => {

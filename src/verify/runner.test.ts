@@ -466,6 +466,20 @@ describe('runVerify', () => {
     expect(evidence.rawOutputTail).toContain('[security] verify sandbox rejects escaping symlink');
   });
 
+  it('allows a tracked dangling symlink whose target remains inside the project', async () => {
+    await symlink('generated/pkg', join(repo, 'pkg'));
+    git('add', 'pkg');
+    git('commit', '-m', 'track internal build output link');
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('test -L pkg')],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
+  });
+
   it('classifies a timeout as infrastructure', async () => {
     const started = Date.now();
     const [evidence] = await runVerify({ projectPath: repo, commands: [verify('sleep 1', 20)], baseRef: 'HEAD' });
