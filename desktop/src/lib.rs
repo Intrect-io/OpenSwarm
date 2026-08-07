@@ -96,6 +96,33 @@ fn backend_failure_script(backend: &str, log_path: &str) -> String {
     )
 }
 
+fn config_failure_script(error: &str) -> String {
+    let error = js_string(error);
+    format!(
+        r#"document.body.replaceChildren();const box=document.createElement('div');box.style.cssText='font-family:sans-serif;padding:40px;color:#e6edf3;background:#0d1117';const title=document.createElement('h2');title.textContent='서버 설정 오류';const detail=document.createElement('p');detail.textContent={error};const hint=document.createElement('p');hint.style.color='#9aa4b2';hint.textContent='설정 창에서 서버 URL을 다시 저장하면 즉시 재연결합니다.';box.append(title,detail,hint);document.body.append(box)"#
+    )
+}
+
+/// Daemon pages open external references (e.g. Linear issue links on the issue
+/// board) with `target="_blank"`, which asks for a NEW WebView window and never
+/// reaches `on_navigation` — in this shell such clicks would silently do
+/// nothing (review finding). The bridge turns them into ordinary top-level
+/// navigations; `on_navigation` then rejects the external origin and hands the
+/// URL to the OS browser. No IPC involved, so it works on daemon pages, which
+/// have no remote capability.
+const NEW_WINDOW_BRIDGE_JS: &str = r#"(function(){
+  if (window.__osNewWindowBridge) return; window.__osNewWindowBridge = true;
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest ? e.target.closest('a[target="_blank"]') : null;
+    if (a && a.href) { e.preventDefault(); window.location.href = a.href; }
+  }, true);
+  var origOpen = window.open;
+  window.open = function(u){
+    if (u) { window.location.href = String(u); return null; }
+    return origOpen ? origOpen.apply(window, arguments) : null;
+  };
+})();"#;
+
 fn navigation_allowed(candidate: &url::Url) -> bool {
     trusted_webview_url(candidate)
 }
@@ -284,13 +311,21 @@ fn restart_daemon_service() -> Result<(), String> {
 // ── Daemon health / readiness ─────────────────────────────────────────────────
 
 fn backend_is_listening(backend: &url::Url) -> bool {
+    use std::net::ToSocketAddrs;
     let Some(host) = backend.host_str() else {
         return false;
     };
     let Some(port) = backend.port_or_known_default() else {
         return false;
     };
-    std::net::TcpStream::connect((host, port)).is_ok()
+    // Bounded connect: an unbounded TcpStream::connect against a blackholed
+    // endpoint can stall a poll iteration for minutes (review finding).
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.next().is_some_and(|addr| {
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)).is_ok()
+    })
 }
 
 /// Plain HTTP 200 check on /api/health. Used by tests and as a coarse liveness
@@ -333,6 +368,35 @@ fn backend_url() -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Monotonic generation for the backend waiter/watcher threads. Saving a new
+/// server URL bumps it; every thread spawned under an older generation exits on
+/// its next tick, so exactly one watcher observes exactly the configured
+/// backend (review finding: the old watcher kept polling the previous daemon
+/// and could yank the WebView back to the stale URL on a PID swap there).
+static WATCH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn current_watch_generation() -> u64 {
+    WATCH_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn bump_watch_generation() -> u64 {
+    WATCH_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// Retire all existing waiter/watcher threads and bind a fresh recovery watcher
+/// to the just-saved backend configuration. Called after a successful
+/// `set_server_url` save.
+pub(crate) fn restart_backend_watch(app: &tauri::AppHandle, url: String) {
+    let generation = bump_watch_generation();
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    match backend_base() {
+        Ok(backend) => watch_backend_recovery(win, backend, url, None, false, generation),
+        Err(error) => vlog!("[OpenSwarm] cannot watch the new backend: {error}"),
+    }
+}
+
 /// Keep observing the daemon after the WebView attached. launchd restarting the
 /// daemon (crash, `npm run service:install`, Restart daemon tray item) is an
 /// everyday event; a PID swap between healthy samples reattaches the WebView.
@@ -342,12 +406,16 @@ fn watch_backend_recovery(
     url: String,
     initial_pid: Option<u32>,
     initially_disconnected: bool,
+    generation: u64,
 ) {
     let app = win.app_handle().clone();
     std::thread::spawn(move || {
         let mut tracker = BackendRecoveryTracker::new(initial_pid, initially_disconnected);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
+            if current_watch_generation() != generation {
+                return;
+            }
             if app.get_webview_window("main").is_none() {
                 return;
             }
@@ -462,6 +530,7 @@ impl LogTail {
 /// stdout/stderr under ~/.openswarm/logs) to the splash console.
 fn wait_and_navigate(win: tauri::WebviewWindow, url: String, shell_log_from: u64) {
     std::thread::spawn(move || {
+        let generation = current_watch_generation();
         let backend = match backend_base() {
             Ok(url) => url,
             Err(error) => {
@@ -497,18 +566,26 @@ fn wait_and_navigate(win: tauri::WebviewWindow, url: String, shell_log_from: u64
             }
         };
 
-        // Polling: 500 ms × 240 = max 120 s. Progress is driven by real signals:
+        // Polling against a wall-clock 120 s deadline (a tick counter alone
+        // undercounts: each iteration can spend up to 1.6 s inside the bounded
+        // health/TCP probes — review finding). Progress is driven by real signals:
         //  - TCP not connectable yet: elapsed-time based 0→80%
         //  - TCP listening: 85–96% ("checking daemon response")
         //  - health OK + identity match: 100%, then navigate
+        let started = std::time::Instant::now();
+        let deadline = std::time::Duration::from_secs(120);
         let mut listening_seen = false;
-        for i in 0..240u32 {
+        let mut i: u32 = 0;
+        loop {
+            if current_watch_generation() != generation {
+                return;
+            }
             push_logs(&win, &mut tails);
             if let Some(backend_pid) = ready_backend_pid(&backend) {
                 push_logs(&win, &mut tails);
                 progress(&win, 100, "준비 완료");
                 let _ = win.eval(&format!("window.location.href = {}", js_string(&url))); // cxt-ignore: security
-                watch_backend_recovery(win, backend, url, backend_pid, false);
+                watch_backend_recovery(win, backend, url, backend_pid, false, generation);
                 return;
             }
             if backend_is_listening(&backend) {
@@ -520,11 +597,15 @@ fn wait_and_navigate(win: tauri::WebviewWindow, url: String, shell_log_from: u64
                 let creep = 90 + (i % 7);
                 progress(&win, creep.min(96), "데몬 상태 확인 중…");
             } else {
-                // No listener yet — elapsed time fills 0→80% (~16 s to 80%).
+                // No listener yet — poll count fills 0→80% (~16 s to 80%).
                 let pct = (i * 5).min(80);
                 progress(&win, pct, "OpenSwarm 데몬 연결 중…");
             }
+            if started.elapsed() >= deadline {
+                break;
+            }
             let poll_ms = if i == 0 { 100 } else { 500 };
+            i = i.saturating_add(1);
             std::thread::sleep(std::time::Duration::from_millis(poll_ms));
         }
         // Still not up after 120 s — show the failure page.
@@ -534,7 +615,7 @@ fn wait_and_navigate(win: tauri::WebviewWindow, url: String, shell_log_from: u64
         )); // cxt-ignore: security
         // launchd may recover after the startup deadline. Keep observing so the
         // failure page can attach without requiring the user to restart the shell.
-        watch_backend_recovery(win, backend, url, None, true);
+        watch_backend_recovery(win, backend, url, None, true, generation);
     });
 }
 
@@ -746,6 +827,11 @@ pub fn run() {
                     }
                     false
                 })
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                        let _ = window.eval(NEW_WINDOW_BRIDGE_JS); // cxt-ignore: security
+                    }
+                })
                 .inner_size(980.0, 760.0)
                 .min_inner_size(420.0, 480.0)
                 .resizable(true)
@@ -768,7 +854,15 @@ pub fn run() {
             // Navigate once the daemon is ready (avoids a white window).
             match backend_url() {
                 Ok(url) => wait_and_navigate(win, url, shell_log_from),
-                Err(error) => vlog!("invalid configured backend URL: {error}"),
+                Err(error) => {
+                    // A malformed config.json must not strand the splash at a
+                    // frozen progress bar (review finding): surface the error in
+                    // the window and open settings so a valid save — which calls
+                    // restart_backend_watch — recovers without a shell restart.
+                    vlog!("invalid configured backend URL: {error}");
+                    let _ = win.eval(&config_failure_script(&error)); // cxt-ignore: security
+                    spawn_settings_window(app.handle(), String::new());
+                }
             }
 
             // Tray menu
@@ -860,7 +954,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("OpenSwarm desktop build error"); // cxt-ignore: panic_risk
 
-    app.run(|_app_handle, _event| {});
+    app.run(|app_handle, event| match event {
+        // macOS delivers a Reopen run event when the Dock icon of the running
+        // app is clicked; with close-to-tray the main window is merely hidden
+        // and must be restored here (review finding).
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => show_main_window(app_handle),
+        _ => {
+            let _ = app_handle;
+        }
+    });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

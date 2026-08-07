@@ -172,6 +172,10 @@ pub fn set_server_url(url: String, window: tauri::WebviewWindow) -> Result<(), S
             "window.location.href = {}",
             crate::js_string(entry_url.as_str())
         )); // cxt-ignore: security
+        // Retire the watcher bound to the previous backend and monitor the new
+        // one — otherwise daemon restarts on the old URL would keep yanking the
+        // WebView back there (review finding).
+        crate::restart_backend_watch(window.app_handle(), entry_url.to_string());
     }
     Ok(())
 }
