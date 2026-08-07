@@ -231,7 +231,11 @@ export async function runPrCommand(
           );
         }
         const repo = repoOverride ?? cwdRepo;
-        const prs = await (deps.listOpenPRs ?? getOpenPRsOrThrow)(repo);
+        // `getOpenPRsOrThrow` defaults its limit to gh's own 30 — the daemon
+        // cron scan's expectation — so `--all` (the "every open PR" caller)
+        // requests a much higher one explicitly rather than changing that
+        // default and inflating every cron cycle's PR scan along with it.
+        const prs = await (deps.listOpenPRs ?? ((r: string) => getOpenPRsOrThrow(r, 1000)))(repo);
         if (!prs.length) {
           return { message: `No open PRs in ${repo}.`, exitCode: 0 };
         }

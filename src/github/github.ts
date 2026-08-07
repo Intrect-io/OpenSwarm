@@ -541,11 +541,16 @@ export type PRDetails = PRInfo & {
 };
 
 /**
- * Get open PR list for a specific repo
+ * Get open PR list for a specific repo. `limit` defaults to gh's own default
+ * (30) — this is the daemon cron scan's read, called every cycle, and
+ * raising it by default would grow that scan from a light periodic check
+ * into something that can exhaust API limits and occupy the processor for
+ * an entire schedule. `pr review --all` (the one caller that means "every
+ * open PR") passes an explicit higher limit instead of changing this default.
  */
-export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
+export async function getOpenPRs(repo: string, limit = 30): Promise<PRInfo[]> {
   try {
-    return await getOpenPRsOrThrow(repo);
+    return await getOpenPRsOrThrow(repo, limit);
   } catch (err) {
     console.error(`[GitHub] Failed to get open PRs for ${repo}:`, err);
     return [];
@@ -559,11 +564,9 @@ export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
  * PR" would otherwise read a `gh` auth/network failure as "repo has zero open
  * PRs" and silently do nothing instead of erroring.
  */
-export async function getOpenPRsOrThrow(repo: string): Promise<PRInfo[]> {
+export async function getOpenPRsOrThrow(repo: string, limit = 30): Promise<PRInfo[]> {
   const stdout = await ghExec(
-    // gh defaults `pr list` to 30 results — explicit so "every open PR" means
-    // what it says instead of silently truncating past that.
-    'pr', 'list', '-R', repo, '--state', 'open', '--limit', '1000',
+    'pr', 'list', '-R', repo, '--state', 'open', '--limit', String(limit),
     '--json', 'number,title,headRefName,createdAt,url,author,isCrossRepository'
   );
   const prs = JSON.parse(stdout);

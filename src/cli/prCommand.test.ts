@@ -433,7 +433,10 @@ describe('runPrCommand (INT-3282)', () => {
   it('review --all builds a PRProcessor and calls listOpenPRs/reviewOne when neither is overridden', async () => {
     getOpenPRsImpl.mockResolvedValue([{ repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', url: 'https://example/pr/9' }]);
     const result = await runPrCommand('review', { all: true }, { resolveRepo: async () => 'o/r', log: vi.fn() });
-    expect(getOpenPRsImpl).toHaveBeenCalledWith('o/r');
+    // A much higher limit than getOpenPRs/getOpenPRsOrThrow's own 30 default
+    // — that default is the daemon cron scan's expectation; only --all (the
+    // "every open PR" caller) asks for more (INT-3282 review finding).
+    expect(getOpenPRsImpl).toHaveBeenCalledWith('o/r', 1000);
     expect(PRProcessorCtor).toHaveBeenCalledTimes(1);
     expect(reviewOneImpl).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'o/r', number: 9 }),

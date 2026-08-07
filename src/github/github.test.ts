@@ -192,13 +192,21 @@ describe('getOpenPRs / getOpenPRsOrThrow (INT-3282)', () => {
     execFileMock.mockReset();
   });
 
-  it('raises the list past gh pr list\'s 30-result default (INT-3282 review finding)', async () => {
+  it('defaults the limit to gh\'s own 30 — the daemon cron scan should not suddenly grow (INT-3282 review finding)', async () => {
     mockGhJson([]);
     await getOpenPRs('owner/repo');
     const args = execFileMock.mock.calls[0]?.[1] as string[];
     const limitIndex = args.indexOf('--limit');
     expect(limitIndex).toBeGreaterThan(-1);
-    expect(Number(args[limitIndex + 1])).toBeGreaterThanOrEqual(1000);
+    expect(Number(args[limitIndex + 1])).toBe(30);
+  });
+
+  it('accepts an explicit higher limit for callers that mean "every open PR" (INT-3282 review finding)', async () => {
+    mockGhJson([]);
+    await getOpenPRs('owner/repo', 1000);
+    const args = execFileMock.mock.calls[0]?.[1] as string[];
+    const limitIndex = args.indexOf('--limit');
+    expect(Number(args[limitIndex + 1])).toBe(1000);
   });
 
   it('getOpenPRs swallows a gh failure and returns an empty list', async () => {
