@@ -798,7 +798,10 @@ export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssue
       project,
     };
   } catch (error) {
-    console.error(`[Linear] getIssue error for ${issueIdOrIdentifier}:`, error);
+    // Fixed first argument: the id is user-supplied (reachable from the
+    // /api/work HTTP surface), and console's printf-style formatting must
+    // never receive a tainted format string (CodeQL js/tainted-format-string).
+    console.error('[Linear] getIssue error:', issueIdOrIdentifier, error);
     return null;
   }
 }
