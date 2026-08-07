@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.9 — 2026-08-07
+
+### Added
+
+- **`openswarm pr review --fresh`.** Runs a brand-new code review of the PR's current diff — the same reviewer `openswarm review` uses locally — instead of only reacting to feedback a reviewer already left, and posts the verdict as a PR comment naming the exact commit reviewed. Reviews inside a scratch `git worktree` at the PR/base merge-base, in read-only mode (the PR's contents are untrusted), so nothing under the caller's own checkout is ever touched.
+
 ## 0.20.8 — 2026-08-06
 
 ### Added
