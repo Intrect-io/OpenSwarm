@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "OpenSwarm desktop shell — a thin Tauri client for the local OpenSwarm daemon"
 authors = ["unohee"]
 edition = "2021"
-rust-version = "1.77"
+# Max MSRV across the committed Cargo.lock (time/image/plist/darling = 1.88.0).
+rust-version = "1.88"
 default-run = "openswarm-desktop"
 
 [lib]
