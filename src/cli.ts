@@ -509,6 +509,45 @@ program
     }
   });
 
+// openswarm work [issueIds...] — deploy agents per selected Linear issue into
+// isolated worktrees (INT-3387)
+
+program
+  .command('work')
+  .description('Pick Linear issues and deploy an agent pipeline per issue into isolated git worktrees')
+  .argument('[issueIds...]', 'Issue ids/identifiers (e.g. INT-123); omit for the interactive picker')
+  .option('--path <path>', 'Repository path (default: cwd)')
+  .option('--concurrency <n>', 'Max issues in flight (default: min(selected, config autonomous.maxConcurrentTasks ?? 4))', parsePositiveIntegerOption)
+  .option('--dry-run', 'Print the execution plan (issue → branch/worktree/resume) and exit')
+  .option('--yes', 'Skip the confirmation prompt')
+  .option('--adapter <name>', 'Adapter override for the worker/reviewer')
+  .option('--json', 'Emit the final summary as JSON on stdout (progress logs go to stderr)')
+  .action(async (issueIds: string[], opts: {
+    path?: string;
+    concurrency?: number;
+    dryRun?: boolean;
+    yes?: boolean;
+    adapter?: string;
+    json?: boolean;
+  }) => {
+    try {
+      const { runWorkCommand } = await import('./cli/workCommand.js');
+      const exitCode = await runWorkCommand({
+        issueIds,
+        path: opts.path,
+        concurrency: opts.concurrency,
+        dryRun: opts.dryRun,
+        yes: opts.yes,
+        adapter: opts.adapter,
+        json: opts.json,
+      });
+      if (exitCode) process.exitCode = exitCode;
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exitCode = 1;
+    }
+  });
+
 // openswarm exec <prompt>
 
 program

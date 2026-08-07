@@ -51,7 +51,7 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
-import { buildTaskStateSyncComment, getTaskState } from '../taskState/store.js';
+import { getTaskState } from '../taskState/store.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -84,8 +84,8 @@ import {
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
-import type { EffectClaim, EffectInput, ImportRunInput, RunLedgerMode } from './runLedger.js';
-import type { PairCompleteStats } from './taskSource.js';
+import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
+import { buildCancellationEffect, buildCompletionEffect, deliverTrackerEffect } from './trackerEffects.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -118,43 +118,9 @@ export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
 
 export type RunnableCandidate = { task: TaskItem; projectPath: string };
 
-interface CompletionEffectPayload {
-  version: 1;
-  marker: string;
-  task: TaskItem;
-  stats: PairCompleteStats;
-  projectPath?: string;
-  costUsd?: number;
-}
-
-interface CancellationEffectPayload {
-  version: 1;
-  marker: string;
-  task: TaskItem;
-  /** Frozen at effect creation so retries reuse the same idempotent comment. */
-  comment: string;
-}
-
-function isCompletionEffectPayload(value: unknown): value is CompletionEffectPayload {
-  if (!value || typeof value !== 'object') return false;
-  const payload = value as Partial<CompletionEffectPayload>;
-  return payload.version === 1
-    && typeof payload.marker === 'string'
-    && !!payload.task
-    && typeof payload.task === 'object'
-    && !!payload.stats
-    && typeof payload.stats === 'object';
-}
-
-function isCancellationEffectPayload(value: unknown): value is CancellationEffectPayload {
-  if (!value || typeof value !== 'object') return false;
-  const payload = value as Partial<CancellationEffectPayload>;
-  return payload.version === 1
-    && typeof payload.marker === 'string'
-    && !!payload.task
-    && typeof payload.task === 'object'
-    && typeof payload.comment === 'string';
-}
+// The completion/cancellation effect payload contract (and its delivery) lives
+// in trackerEffects.ts, shared with the `openswarm work` CLI so the marker
+// format cannot drift between the two outbox writers. (INT-3387)
 
 /**
  * Conflict analysis is an admission safety check. If it is unavailable, allow
@@ -995,51 +961,6 @@ export class AutonomousRunner {
     });
   }
 
-  private completionStats(result: PipelineResult): PairCompleteStats {
-    return {
-      attempts: result.iterations,
-      duration: Math.floor(result.totalDuration / 1000),
-      filesChanged: result.workerResult?.filesChanged || [],
-      workerSummary: result.workerResult?.summary,
-      workerCommands: result.workerResult?.commands,
-      reviewerFeedback: result.reviewResult?.feedback,
-      reviewerDecision: result.reviewResult?.decision,
-      testResults: result.testerResult ? {
-        passed: result.testerResult.testsPassed,
-        failed: result.testerResult.testsFailed,
-        coverage: result.testerResult.coverage,
-        failedTests: result.testerResult.failedTests,
-      } : undefined,
-    };
-  }
-
-  private buildCompletionEffect(task: TaskItem, result: PipelineResult, attemptNo: number): EffectInput {
-    const marker = `complete:${task.issueId || task.id}:attempt:${attemptNo}`;
-    const payload: CompletionEffectPayload = {
-      version: 1,
-      marker,
-      task,
-      stats: { ...this.completionStats(result), idempotencyMarker: marker },
-      projectPath: result.taskContext?.projectPath,
-      costUsd: result.totalCost?.costUsd,
-    };
-    return { kind: 'tracker.complete', dedupeKey: marker, payload };
-  }
-
-  private buildCancellationEffect(task: TaskItem, attemptNo: number): EffectInput {
-    const marker = `cancel:${task.issueId || task.id}:attempt:${attemptNo}`;
-    const state = execution.projectCancellationState(task);
-    const payload: CancellationEffectPayload = {
-      version: 1,
-      marker,
-      task,
-      comment: state
-        ? `${buildTaskStateSyncComment(state, 'Task cancelled')}\n\n<!-- openswarm-effect:${marker} -->`
-        : `Task cancelled\n\n<!-- openswarm-effect:${marker} -->`,
-    };
-    return { kind: 'tracker.cancel', dedupeKey: marker, payload };
-  }
-
   private async executeDurably(task: TaskItem, projectPath: string, signal?: AbortSignal): Promise<PipelineResult> {
     const cancelled = (): PipelineResult => ({
       success: false,
@@ -1109,8 +1030,8 @@ export class AutonomousRunner {
       ),
       {
         admission,
-        successEffect: (result, claim) => this.buildCompletionEffect(task, result, claim.attemptNo),
-        cancelEffect: (_result, claim) => this.buildCancellationEffect(task, claim.attemptNo),
+        successEffect: (result, claim) => buildCompletionEffect(task, result, claim.attemptNo),
+        cancelEffect: (_result, claim) => buildCancellationEffect(task, claim.attemptNo),
         retryCancellation: () => this.stopping,
       },
     );
@@ -1161,7 +1082,7 @@ export class AutonomousRunner {
           if (this.durableRuns.recoverPublishedRun(
             run.issueId,
             { prUrl: pr.url, headSha: pr.headSha },
-            this.buildCompletionEffect(task, recoveredResult, run.attemptNo),
+            buildCompletionEffect(task, recoveredResult, run.attemptNo),
           )) {
             console.log(`[Reconciler] Recovered published run ${run.identifier ?? run.issueId}: ${pr.url}`);
           }
@@ -1269,60 +1190,7 @@ export class AutonomousRunner {
   }
 
   private async deliverOutboxEffect(effect: EffectClaim): Promise<void> {
-    if (effect.kind === 'tracker.cancel') {
-      if (!isCancellationEffectPayload(effect.payload)) {
-        throw new Error(`Invalid automation effect payload: ${effect.kind}`);
-      }
-      await execution.syncCancellationState(
-        effect.payload.task,
-        effect.dedupeKey,
-        effect.payload.comment,
-      );
-      return;
-    }
-    if (effect.kind !== 'tracker.complete' || !isCompletionEffectPayload(effect.payload)) {
-      throw new Error(`Unsupported automation effect: ${effect.kind}`);
-    }
-    const payload = effect.payload;
-    const taskSource = getTaskSource();
-    if (!taskSource) throw new Error('Task source unavailable for outbox delivery');
-    const issueId = payload.task.issueId || payload.task.id;
-    const markerComment = `<!-- openswarm-effect:${payload.marker} -->`;
-
-    const comments = taskSource.getExecutionComments
-      ? await taskSource.getExecutionComments(issueId)
-      : [];
-    const alreadyCommented = comments.some((comment) => comment.body.includes(markerComment));
-    if (alreadyCommented) {
-      // The remote comment may have succeeded immediately before a process crash,
-      // while the following state mutation/local ack did not. Reapply the
-      // idempotent state transition but never duplicate the completion comment.
-      const accepted = await taskSource.updateState(issueId, 'Done');
-      if (!accepted) throw new Error(`Tracker refused Done reconciliation for ${issueId}`);
-    } else {
-      await taskSource.logPairComplete(issueId, effect.dedupeKey, payload.stats);
-    }
-
-    execution.projectSuccessState(payload.task);
-    await execution.reconcileCompletionState(payload.task);
-
-    if (payload.projectPath) {
-      await recordTaskOutcome(payload.projectPath, {
-        taskTitle: payload.task.title,
-        derivedFrom: payload.task.issueIdentifier ?? issueId,
-        iterations: payload.stats.attempts,
-      });
-    }
-    if (payload.task.linearProject) {
-      await updateProjectAfterTask(payload.task.linearProject.id, payload.task.linearProject.name, {
-        title: payload.task.title,
-        success: true,
-        duration: payload.stats.duration * 1000,
-        issueIdentifier: payload.task.issueIdentifier,
-        cost: payload.costUsd,
-        projectPath: payload.projectPath,
-      });
-    }
+    return deliverTrackerEffect(effect, getTaskSource());
   }
 
   private async drainDurableOutbox(): Promise<void> {
