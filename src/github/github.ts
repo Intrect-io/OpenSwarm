@@ -525,6 +525,8 @@ export type PRInfo = {
   createdAt: string;
   url: string;
   author?: string;
+  /** True when the PR's head branch lives in a different repo (a fork). */
+  isFork?: boolean;
 };
 
 /**
@@ -543,24 +545,38 @@ export type PRDetails = PRInfo & {
  */
 export async function getOpenPRs(repo: string): Promise<PRInfo[]> {
   try {
-    const stdout = await ghExec(
-      'pr', 'list', '-R', repo, '--state', 'open',
-      '--json', 'number,title,headRefName,createdAt,url,author'
-    );
-    const prs = JSON.parse(stdout);
-    return prs.map((pr: any) => ({
-      repo,
-      number: pr.number,
-      title: pr.title,
-      branch: pr.headRefName,
-      createdAt: pr.createdAt,
-      url: pr.url,
-      author: pr.author?.login,
-    }));
+    return await getOpenPRsOrThrow(repo);
   } catch (err) {
     console.error(`[GitHub] Failed to get open PRs for ${repo}:`, err);
     return [];
   }
+}
+
+/**
+ * Same as {@link getOpenPRs}, but propagates failure instead of returning an
+ * empty list. Swallowing to `[]` is right for the cron scan loop (best-effort,
+ * retried next cycle), but a one-shot caller that means to act on "every open
+ * PR" would otherwise read a `gh` auth/network failure as "repo has zero open
+ * PRs" and silently do nothing instead of erroring.
+ */
+export async function getOpenPRsOrThrow(repo: string): Promise<PRInfo[]> {
+  const stdout = await ghExec(
+    // gh defaults `pr list` to 30 results — explicit so "every open PR" means
+    // what it says instead of silently truncating past that.
+    'pr', 'list', '-R', repo, '--state', 'open', '--limit', '1000',
+    '--json', 'number,title,headRefName,createdAt,url,author,isCrossRepository'
+  );
+  const prs = JSON.parse(stdout);
+  return prs.map((pr: any) => ({
+    repo,
+    number: pr.number,
+    title: pr.title,
+    branch: pr.headRefName,
+    createdAt: pr.createdAt,
+    url: pr.url,
+    author: pr.author?.login,
+    isFork: !!pr.isCrossRepository,
+  }));
 }
 
 /**

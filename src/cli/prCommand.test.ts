@@ -25,10 +25,11 @@ vi.mock('../core/config.js', () => ({
   loadConfig: vi.fn(() => ({ autonomous: { defaultRoles: { worker: { model: 'x' } } } })),
 }));
 
-const { waitForCICompletionImpl } = vi.hoisted(() => ({
+const { waitForCICompletionImpl, getOpenPRsImpl } = vi.hoisted(() => ({
   waitForCICompletionImpl: vi.fn(async () => ({ status: 'success' })),
+  getOpenPRsImpl: vi.fn(async () => [] as Array<{ repo: string; number: number; title: string; branch: string; url: string }>),
 }));
-vi.mock('../github/github.js', () => ({ waitForCICompletion: waitForCICompletionImpl }));
+vi.mock('../github/github.js', () => ({ waitForCICompletion: waitForCICompletionImpl, getOpenPRsOrThrow: getOpenPRsImpl }));
 
 const { runPrCommand, resolveNumber, resolveRepoOverride, loadRolesBestEffort, buildProcessorConfig } = await import('./prCommand.js');
 type PrCommandDeps = Parameters<typeof runPrCommand>[2];
@@ -157,6 +158,8 @@ function mkDeps(over: Partial<PrCommandDeps> = {}): PrCommandDeps {
     freshReviewOne: vi.fn(async () => ({ success: true, iterations: 0 })),
     waitCI: vi.fn(async () => ({ status: 'success' })),
     create: vi.fn(async () => ({ url: resolved.url, message: `Created PR: ${resolved.url}` })),
+    listOpenPRs: vi.fn(async () => [resolved]),
+    resolveRepo: vi.fn(async () => resolved.repo),
     log: vi.fn(),
     loadRoles: () => undefined,
     ...over,
@@ -169,6 +172,7 @@ beforeEach(() => {
   freshReviewImpl.mockClear().mockResolvedValue({ success: true, iterations: 0 });
   PRProcessorCtor.mockClear();
   waitForCICompletionImpl.mockClear().mockResolvedValue({ status: 'success' });
+  getOpenPRsImpl.mockClear().mockResolvedValue([]);
 });
 
 describe('resolveNumber / resolveRepoOverride (INT-3282)', () => {
@@ -345,6 +349,105 @@ describe('runPrCommand (INT-3282)', () => {
     const result = await runPrCommand('review', { fresh: true }, deps);
     expect(result.exitCode).toBe(1);
     expect(result.message).toMatch(/null deref in x.ts/);
+  });
+
+  it('review --all resolves the repo, lists every open PR, and reviews each one (not just current branch\'s)', async () => {
+    const prA = { ...resolved, number: 1, title: 'Fix A' };
+    const prB = { ...resolved, number: 2, title: 'Fix B' };
+    const reviewOne = vi.fn(async (pr: { number: number }) => ({ success: pr.number !== 2, error: pr.number === 2 ? 'nope' : undefined, iterations: 1 }));
+    const deps = mkDeps({
+      listOpenPRs: vi.fn(async () => [prA, prB]),
+      reviewOne,
+    });
+    const result = await runPrCommand('review', { all: true }, deps);
+    expect(deps.resolve).not.toHaveBeenCalled();
+    expect(reviewOne).toHaveBeenCalledTimes(2);
+    expect(reviewOne).toHaveBeenNthCalledWith(1, prA, expect.any(String), expect.any(Object));
+    expect(reviewOne).toHaveBeenNthCalledWith(2, prB, expect.any(String), expect.any(Object));
+    expect(result.message).toMatch(/#1 \(Fix A\).*✓|✓.*#1/s);
+    expect(result.message).toMatch(/1\/2 succeeded/);
+    expect(result.exitCode).toBe(1); // one of the two failed
+  });
+
+  it('review --all --fresh runs a fresh review on every open PR', async () => {
+    const prA = { ...resolved, number: 1 };
+    const prB = { ...resolved, number: 2 };
+    const freshReviewOne = vi.fn(async () => ({ success: true, iterations: 0 }));
+    const deps = mkDeps({ listOpenPRs: vi.fn(async () => [prA, prB]), freshReviewOne });
+    const result = await runPrCommand('review', { all: true, fresh: true }, deps);
+    expect(freshReviewOne).toHaveBeenCalledTimes(2);
+    expect(deps.reviewOne).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toMatch(/2\/2 succeeded/);
+  });
+
+  it('review --all reports no open PRs without calling reviewOne', async () => {
+    const deps = mkDeps({ listOpenPRs: vi.fn(async () => []) });
+    const result = await runPrCommand('review', { all: true }, deps);
+    expect(deps.reviewOne).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toMatch(/No open PRs/);
+  });
+
+  it('review --all --repo matching cwd\'s own origin is used for listOpenPRs', async () => {
+    const resolveRepo = vi.fn(async () => 'o/r');
+    const deps = mkDeps({ resolveRepo, listOpenPRs: vi.fn(async () => []) });
+    const result = await runPrCommand('review', { all: true, repo: 'o/r' }, deps);
+    expect(resolveRepo).toHaveBeenCalledWith(expect.any(String));
+    expect(deps.listOpenPRs).toHaveBeenCalledWith('o/r');
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('review --all --repo pointing at a different repo than cwd\'s own origin refuses instead of fetching from the wrong remote (INT-3282 review finding)', async () => {
+    const resolveRepo = vi.fn(async () => 'o/r');
+    const deps = mkDeps({ resolveRepo });
+    await expect(
+      runPrCommand('review', { all: true, repo: 'other-org/other-repo' }, deps),
+    ).rejects.toThrow(/does not match this checkout's own repo/);
+    expect(deps.listOpenPRs).not.toHaveBeenCalled();
+  });
+
+  it('review --all skips fork PRs under feedback re-application (non-fresh) instead of failing them (INT-3282 review finding)', async () => {
+    const forkPr = { ...resolved, number: 3, title: 'Fork contribution', isFork: true };
+    const ownPr = { ...resolved, number: 4, title: 'Own branch' };
+    const reviewOne = vi.fn(async () => ({ success: true, iterations: 1 }));
+    const deps = mkDeps({ listOpenPRs: vi.fn(async () => [forkPr, ownPr]), reviewOne });
+    const result = await runPrCommand('review', { all: true }, deps);
+    expect(reviewOne).toHaveBeenCalledTimes(1);
+    expect(reviewOne).toHaveBeenCalledWith(ownPr, expect.any(String), expect.any(Object));
+    expect(result.message).toMatch(/skipped — fork PR/);
+    expect(result.message).toMatch(/1\/1 succeeded \(1 fork PR\(s\) skipped\)/);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('review --all --fresh does NOT skip fork PRs (fresh review fetches pull/<n>/head, which works for forks)', async () => {
+    const forkPr = { ...resolved, number: 3, title: 'Fork contribution', isFork: true };
+    const freshReviewOne = vi.fn(async () => ({ success: true, iterations: 0 }));
+    const deps = mkDeps({ listOpenPRs: vi.fn(async () => [forkPr]), freshReviewOne });
+    const result = await runPrCommand('review', { all: true, fresh: true }, deps);
+    expect(freshReviewOne).toHaveBeenCalledTimes(1);
+    expect(result.message).not.toMatch(/skipped/);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('review --all builds a PRProcessor and calls listOpenPRs/reviewOne when neither is overridden', async () => {
+    getOpenPRsImpl.mockResolvedValue([{ repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', url: 'https://example/pr/9' }]);
+    const result = await runPrCommand('review', { all: true }, { resolveRepo: async () => 'o/r', log: vi.fn() });
+    expect(getOpenPRsImpl).toHaveBeenCalledWith('o/r');
+    expect(PRProcessorCtor).toHaveBeenCalledTimes(1);
+    expect(reviewOneImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'o/r', number: 9 }),
+      expect.any(String),
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('review --all propagates a PR-listing failure instead of reporting zero PRs as success (INT-3282 review finding)', async () => {
+    const deps = mkDeps({
+      listOpenPRs: vi.fn(async () => { throw new Error('gh: authentication required'); }),
+    });
+    await expect(runPrCommand('review', { all: true }, deps)).rejects.toThrow(/authentication required/);
+    expect(deps.reviewOne).not.toHaveBeenCalled();
   });
 
   it('watch returns immediately when already merge-ready', async () => {
