@@ -214,6 +214,27 @@ fn request_restart(window: tauri::WebviewWindow) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Settings-window connection test. settings.html runs on the Tauri asset
+/// origin, so a direct fetch of the daemon's /api/health is cross-origin and
+/// the daemon's CORS allowlist (correctly) does not include that origin — the
+/// probe goes through the shell instead. The URL is untrusted form input and
+/// gets the same validation as a save.
+#[tauri::command]
+async fn test_daemon_connection(
+    window: tauri::WebviewWindow,
+    url: String,
+) -> Result<daemon_health::ConnectionTestResult, String> {
+    if !trusted_command_window(&window, &["settings"]) {
+        return Err("untrusted WebView sender".into());
+    }
+    let base = client_config::parse_server_base_url(&url)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        daemon_health::connection_test(&base, std::time::Duration::from_secs(5))
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// Restart the launchd-managed daemon (`launchctl kickstart -k`). The daemon's
 /// own /api/service/restart calls systemctl and does nothing on macOS, so the
 /// shell drives launchctl directly instead of relying on that API.
@@ -706,6 +727,7 @@ pub fn run() {
         open_settings,
         request_restart,
         restart_daemon,
+        test_daemon_connection,
     ]);
 
     let app = builder
@@ -879,6 +901,68 @@ mod origin_tests {
         let backend =
             url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         assert!(super::backend_is_listening(&backend));
+    }
+
+    #[test]
+    fn connection_test_reports_identity_and_metadata() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 512];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"status":"ok","app":"openswarm","backend_version":"0.20.10","uptime_s":42.0}"#;
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+                        .as_bytes(),
+                )
+                .unwrap();
+        });
+        let backend = parse_server_base_url(&format!("http://{address}")).unwrap();
+        let result =
+            crate::daemon_health::connection_test(&backend, std::time::Duration::from_secs(2));
+        server.join().unwrap();
+        assert!(result.reachable);
+        assert!(result.is_openswarm);
+        assert_eq!(result.backend_version.as_deref(), Some("0.20.10"));
+        assert_eq!(result.uptime_s, Some(42.0));
+    }
+
+    #[test]
+    fn connection_test_flags_non_openswarm_and_unreachable() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 512];
+            let _ = stream.read(&mut request).unwrap();
+            let body = r#"{"status":"ok","app":"vega"}"#;
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+                        .as_bytes(),
+                )
+                .unwrap();
+        });
+        let backend = parse_server_base_url(&format!("http://{address}")).unwrap();
+        let wrong_app =
+            crate::daemon_health::connection_test(&backend, std::time::Duration::from_secs(2));
+        server.join().unwrap();
+        assert!(wrong_app.reachable);
+        assert!(!wrong_app.is_openswarm);
+
+        // Nobody listening: bind a port, drop the listener, probe it.
+        let vacated = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = vacated.local_addr().unwrap();
+        drop(vacated);
+        let backend = parse_server_base_url(&format!("http://{address}")).unwrap();
+        let unreachable =
+            crate::daemon_health::connection_test(&backend, std::time::Duration::from_millis(500));
+        assert!(!unreachable.reachable);
+        assert!(!unreachable.is_openswarm);
     }
 
     fn health_sample(status: Option<&str>, app: Option<&str>) -> BackendHealth {

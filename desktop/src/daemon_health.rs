@@ -18,25 +18,32 @@ pub(crate) struct BackendHealth {
     pub(crate) app: Option<String>,
     #[allow(dead_code)]
     pub(crate) backend_owner: Option<String>,
-    #[allow(dead_code)]
     pub(crate) backend_version: Option<String>,
     #[allow(dead_code)]
     pub(crate) backend_instance_id: Option<String>,
     pub(crate) backend_pid: Option<u32>,
     #[allow(dead_code)]
     pub(crate) backend_parent_pid: Option<u32>,
-    #[allow(dead_code)]
     pub(crate) uptime_s: Option<f64>,
 }
 
 pub(crate) fn fetch_backend_health(backend: &url::Url) -> Option<BackendHealth> {
+    // 800ms suits the background polling loop; the interactive settings test
+    // passes its own, longer budget via fetch_backend_health_with_timeout.
+    fetch_backend_health_with_timeout(backend, std::time::Duration::from_millis(800))
+}
+
+pub(crate) fn fetch_backend_health_with_timeout(
+    backend: &url::Url,
+    timeout: std::time::Duration,
+) -> Option<BackendHealth> {
     let health = backend.join("api/health").ok()?;
     if !matches!(health.scheme(), "http" | "https") {
         return None;
     }
     reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(800))
-        .timeout(std::time::Duration::from_millis(800))
+        .connect_timeout(timeout)
+        .timeout(timeout)
         .build()
         .ok()?
         .get(health)
@@ -46,6 +53,34 @@ pub(crate) fn fetch_backend_health(backend: &url::Url) -> Option<BackendHealth> 
         .ok()?
         .json()
         .ok()
+}
+
+/// Serializable outcome of the settings window's interactive connection test.
+/// The bundled settings page runs on the Tauri asset origin, which the daemon's
+/// CORS allowlist (correctly) does not grant, so the probe runs in the shell.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ConnectionTestResult {
+    pub(crate) reachable: bool,
+    pub(crate) is_openswarm: bool,
+    pub(crate) backend_version: Option<String>,
+    pub(crate) uptime_s: Option<f64>,
+}
+
+pub(crate) fn connection_test(backend: &url::Url, timeout: std::time::Duration) -> ConnectionTestResult {
+    match fetch_backend_health_with_timeout(backend, timeout) {
+        None => ConnectionTestResult {
+            reachable: false,
+            is_openswarm: false,
+            backend_version: None,
+            uptime_s: None,
+        },
+        Some(health) => ConnectionTestResult {
+            reachable: true,
+            is_openswarm: identity_matches(&health),
+            backend_version: health.backend_version,
+            uptime_s: health.uptime_s,
+        },
+    }
 }
 
 /// The shell attaches to any healthy OpenSwarm daemon: unlike vega's bundled

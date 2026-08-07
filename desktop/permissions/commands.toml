@@ -19,6 +19,11 @@ description = "Allows trusted OpenSwarm windows to restart the launchd-managed d
 commands.allow = ["restart_daemon"]
 
 [[permission]]
+identifier = "allow-test-daemon-connection"
+description = "Allows the trusted settings window to probe a daemon URL's /api/health through the shell (the asset origin cannot fetch it cross-origin)."
+commands.allow = ["test_daemon_connection"]
+
+[[permission]]
 identifier = "allow-get-close-to-tray"
 description = "Allows trusted OpenSwarm windows to read the close-to-tray preference."
 commands.allow = ["get_close_to_tray"]

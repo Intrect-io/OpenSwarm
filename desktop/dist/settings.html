@@ -117,6 +117,7 @@ async function tauriCall(cmd, args) {
   if (invoke) return invoke(cmd, args);
   if (cmd === 'get_server_url') return 'http://127.0.0.1:3847';
   if (cmd === 'get_close_to_tray') return true;
+  if (cmd === 'test_daemon_connection') return { reachable: false, is_openswarm: false };
   console.log('[mock]', cmd, args);
 }
 
@@ -153,7 +154,9 @@ document.getElementById('close-to-tray').addEventListener('change', async (e) =>
   }
 });
 
-// Connection test — GET /api/health and verify the OpenSwarm identity.
+// Connection test — probes /api/health through the shell (test_daemon_connection):
+// this page runs on the Tauri asset origin, which the daemon's CORS allowlist
+// does not (and should not) grant, so a direct fetch would always fail.
 document.getElementById('test-btn').addEventListener('click', async () => {
   const base = document.getElementById('server-url').value.trim().replace(/\/$/, '');
   const status = document.getElementById('conn-status');
@@ -162,10 +165,9 @@ document.getElementById('test-btn').addEventListener('click', async () => {
   status.textContent = T.checking; status.style.color = 'var(--muted)';
   document.getElementById('test-btn').disabled = true;
   try {
-    const r = await fetch(base + '/api/health', { signal: AbortSignal.timeout(6000) });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
-    if (d.app && d.app !== 'openswarm') {
+    const d = await tauriCall('test_daemon_connection', { url: base });
+    if (!d?.reachable) throw new Error('daemon unreachable');
+    if (!d.is_openswarm) {
       status.textContent = T.connWrongApp;
       status.style.color = 'var(--warning)';
       info.style.display = 'none';
@@ -177,7 +179,7 @@ document.getElementById('test-btn').addEventListener('click', async () => {
     document.getElementById('info-uptime').textContent = fmtUptime(d.uptime_s) || '—';
     info.style.display = 'grid';
   } catch (e) {
-    status.textContent = T.connErr(e.message || '');
+    status.textContent = T.connErr(typeof e === 'string' ? e : (e?.message || ''));
     status.style.color = 'var(--error)';
     info.style.display = 'none';
   } finally {

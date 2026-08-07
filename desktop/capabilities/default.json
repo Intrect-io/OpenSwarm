@@ -20,6 +20,7 @@
     "allow-request-restart",
     "allow-restart-daemon",
     "allow-get-close-to-tray",
-    "allow-set-close-to-tray"
+    "allow-set-close-to-tray",
+    "allow-test-daemon-connection"
   ]
 }
