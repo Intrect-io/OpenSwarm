@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.21.0 — 2026-08-08
+
+### Added
+
+- **`openswarm work [issueIds...]`** — explicit issue-selection fan-out. Pick Linear issues directly (by id, or interactively with a checkbox picker) and deploy one agent per issue into an isolated git worktree, running the full worker→reviewer pipeline in parallel and delivering tracker completions itself. Replaces "point the daemon at a repo and let it choose" as the primary workflow now that the autonomous heartbeat defaults off. Honors `openswarm.json` automation policy (enabled/limits), skips issues with unresolved blockers or a mismatched Linear project mapping, dedupes against the shared run ledger (so a concurrently running daemon never double-executes), and supports `--dry-run`, `--concurrency`, `--adapter`, `--json`, and SIGINT-safe cancellation.
+- **Explicit issue dispatch in the daemon.** `POST /api/work` + `GET /api/work/issues` + `GET /api/work/projects` let a UI hand the daemon a set of issues to fan out (In Progress claim before queueing, duplicate/rollback safety, `work:queued` SSE event) without the decision engine involved. With `autonomous.enabled: false` the runner now starts in explicit-dispatch mode: durable recovery and dispatch work, but no heartbeat loop.
+- **`GET /api/health`** — unauthenticated daemon identity endpoint (status/app/version/instance/pid/uptime) compatible with the vega BackendHealth contract, served ahead of both auth gates.
+- **Static issue board at `/app`.** A new vanilla-JS screen (repo picker → issue checkboxes → deploy → live pipeline-stage cards over SSE) served from `web/static/`, alongside the legacy dashboard. GitHub-dark token stylesheet as the single design-token source.
+- **macOS desktop app (phase 1).** `desktop/` — a thin Tauri v2 shell for the local daemon, ported from vega-agent's client flavor: real-log boot splash, health-identity gating (an arbitrary HTTP 200 on the port is not "the daemon"), PID-watching auto-reconnect across launchd restarts, tray + settings (server URL with shell-side connection test, close-to-tray), `launchctl kickstart` daemon restart, and strict origin trust — privileged IPC is capability- and sender-origin-gated, with no remote IPC capability granted at all. Build with `scripts/build-desktop.sh` (not part of the npm package).
+
 ## 0.20.10 — 2026-08-07
 
 ### Added
