@@ -207,9 +207,16 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   console.log('🎉 ════════════════════════════════════════');
   console.log('');
 
-  // Auto-start autonomous mode
-  if (config.autonomous?.enabled) {
-    console.log('[Service] Autonomous mode auto-start enabled');
+  // Start the runner whenever an autonomous section exists at all. With
+  // `enabled: false` it comes up in explicit-dispatch mode: no heartbeat cron,
+  // no self-selected backlog work — but durable recovery, worktree pruning,
+  // and user-initiated dispatch (POST /api/work, dashboard buttons) all keep
+  // working. `enabled: true` additionally turns the heartbeat on. (INT-3388)
+  if (config.autonomous) {
+    const heartbeatEnabled = config.autonomous.enabled === true;
+    console.log(heartbeatEnabled
+      ? '[Service] Autonomous mode auto-start enabled'
+      : '[Service] Autonomous runner starting in explicit-dispatch mode (heartbeat off)');
 
     // Select the task source: Linear when configured, else the local SQLite
     // store (no external account). The Linear fetcher closure is preserved
@@ -265,7 +272,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       reviewerModel: config.autonomous.models?.reviewer,
       workerTimeoutMs: config.autonomous.workerTimeoutMs || 0, // 0 = unlimited
       reviewerTimeoutMs: config.autonomous.reviewerTimeoutMs || 0, // 0 = unlimited
-      triggerNow: true,  // Execute immediately on start
+      autonomousHeartbeat: heartbeatEnabled,
+      triggerNow: heartbeatEnabled,  // Execute immediately on start (heartbeat mode only)
       maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
       maxConcurrentPerProject: config.autonomous.maxConcurrentPerProject,
       automationLedgerMode: config.autonomous.automationLedgerMode,
@@ -307,7 +315,9 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     const modelInfo = config.autonomous.models
       ? `, Worker: ${config.autonomous.models.worker || 'default'}, Reviewer: ${config.autonomous.models.reviewer || 'default'}`
       : '';
-    console.log(`[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`);
+    console.log(heartbeatEnabled
+      ? `[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`
+      : `[Service] Autonomous runner ready for explicit dispatch (pairMode: ${config.autonomous.pairMode}${modelInfo})`);
   }
 
   // Start PR Auto-Improvement

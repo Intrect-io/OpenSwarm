@@ -62,6 +62,13 @@ export interface TaskItem {
   impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
   estimatedMinutes?: number;
   priorAttemptFeedback?: string;  // Last failure/rejection feedback from a previous session — injected into the worker's first iteration (INT-2474)
+  /**
+   * The user explicitly chose this issue (POST /api/work, `openswarm work`)
+   * rather than the heartbeat selecting it. Durable admission reopens
+   * terminal (DONE/CANCELLED/DECOMPOSED) ledger records for these regardless
+   * of the autonomous Todo-only reopen rule. (INT-3388)
+   */
+  explicitDispatch?: boolean;
 }
 
 /**
