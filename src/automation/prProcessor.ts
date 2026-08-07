@@ -4,11 +4,12 @@
 // ============================================
 
 import { Cron } from 'croner';
-import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { resolve, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
@@ -19,6 +20,23 @@ const execFileAsync = promisify(execFile);
 async function gitExec(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd });
   return stdout;
+}
+
+/**
+ * Resolve `owner/repo` for a specific remote URL via `gh repo view <url>`,
+ * rather than `gh repo view` with no argument. The bare form lets `gh` pick
+ * whichever remote it considers "the" repository for `cwd`, which is not
+ * documented to be `origin` specifically — a repo with more than one remote
+ * configured could have `gh` resolve one while a subsequent `git fetch
+ * origin ...` reads from another, defeating an identity check meant to catch
+ * exactly that mismatch. Passing the caller's own resolved `origin` URL pins
+ * both to the same remote.
+ */
+async function ghRepoView(cwd: string, remoteUrl: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    'gh', ['repo', 'view', remoteUrl, '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd }
+  );
+  return stdout.trim();
 }
 
 export type PRIssueComment = {
@@ -131,11 +149,13 @@ import {
   getOpenPRs,
   getPRContext,
   commentOnPR,
+  commentOnPROrThrow,
   checkPRConflicts,
   waitForCICompletion,
   getPRBaseBranchOrThrow,
   type PRInfo,
 } from '../github/index.js';
+import { runReviewCommand, formatReviewOutput } from '../cli/reviewCommand.js';
 import {
   createPipelineFromConfig,
 } from '../agents/pairPipeline.js';
@@ -294,10 +314,25 @@ export class PRProcessor {
    * One-shot brand-new code review of the PR's current diff (CLI `openswarm
    * pr review --fresh`) — independent of `reviewOne`, which only reacts to
    * feedback a reviewer already left. This runs the same reviewer agentic
-   * loop `openswarm review` uses locally, against base..head, and posts the
-   * verdict as a PR comment. Throwaway state: there is nothing to dedupe
-   * against (unlike `reviewOne`'s watermark), so every call reviews fresh.
-   * (INT-3282)
+   * loop `openswarm review` uses, against base..head, and posts the verdict
+   * as a PR comment. Throwaway state: there is nothing to dedupe against
+   * (unlike `reviewOne`'s watermark), so every call reviews fresh.
+   *
+   * Reviews inside a scratch `git worktree` rather than checking out
+   * `projectPath` in place. `processPR`/`processReviewFeedback` do check out
+   * in place (stash → checkout → restore), which is fine for them — they are
+   * the caller's own PR branch, being actively fixed. A fresh review is
+   * different: it inspects a PR from the caller's own working directory
+   * without the caller asking to be moved anywhere, and a stash-based
+   * approach a review-gate.yml comment thread found genuinely broken on
+   * every axis it has: `git stash push -u` does not cover ignored files, so
+   * a PR that adds a path the caller's `.gitignore` already claims (a
+   * generated file, a local `.env`) gets silently overwritten by the
+   * checkout and never restored; `stash apply` without `--index` un-stages
+   * whatever the caller had staged for their next commit; and restoring an
+   * already-detached HEAD by branch name is unreliable. A worktree sidesteps
+   * all of it: nothing under `projectPath` is ever touched, so there is
+   * nothing to preserve or restore. (INT-3282)
    */
   async freshReview(
     pr: PRInfo,
@@ -306,29 +341,27 @@ export class PRProcessor {
     const key = `${pr.repo}#${pr.number}`;
     this.currentPR = key;
 
-    let originalBranch: string;
+    let worktreePath: string | null = null;
+    let prHeadRef: string | null = null;
+    let baseRef: string | null = null;
     try {
-      originalBranch = (await gitExec(projectPath, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
-      if (originalBranch === 'HEAD') {
-        // Already detached — a branch name can't restore this exact commit,
-        // so capture the SHA instead. `checkout HEAD` after moving HEAD
-        // elsewhere is a no-op on the *new* position, not a return to this one.
-        originalBranch = (await gitExec(projectPath, 'rev-parse', 'HEAD')).trim();
+      // `--repo`/`--number owner/repo#n` can target a different repository
+      // than this checkout's `origin` — fetching `pull/<n>/head` would then
+      // silently pull the wrong repo's PR (or fail) since it always reads
+      // from the local `origin` remote regardless of `pr.repo`. Resolved by
+      // handing `origin`'s own URL to `gh repo view` — a bare `gh repo view`
+      // (what `resolveRepoName` does for the rest of this CLI surface) is not
+      // documented to specifically pick `origin` when a repo has multiple
+      // remotes configured, which would let this check pass against one
+      // remote while `git fetch origin` below reads from another.
+      const originUrl = (await gitExec(projectPath, 'remote', 'get-url', 'origin')).trim();
+      const localRepo = await ghRepoView(projectPath, originUrl);
+      if (localRepo !== pr.repo) {
+        throw new Error(
+          `Local origin (${originUrl} → ${localRepo}) does not match PR repo ${pr.repo} — refusing to fetch a possibly-wrong PR from the wrong repository`
+        );
       }
-    } catch (err) {
-      // Unlike processPR/processReviewFeedback (which fall back to 'main' and
-      // press on), refuse here: this method's whole point is a checkout it
-      // did not have before, so if it cannot even find out where the caller
-      // currently is, guessing 'main' risks force-moving them there instead
-      // of back where they started. No fetch/stash/checkout has happened yet.
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[PRProcessor] ${key} fresh review: could not determine current checkout, aborting:`, errorMsg);
-      this.currentPR = null;
-      return { success: false, error: `Could not determine current checkout: ${errorMsg}`, iterations: 0 };
-    }
 
-    let autoStash: AutoStash | null = null;
-    try {
       const base = await getPRBaseBranchOrThrow(pr.repo, pr.number);
       // Fetch the PR head via GitHub's own `refs/pull/<n>/head`, not
       // `pr.branch` directly: a fork-originated PR's branch does not exist
@@ -336,31 +369,27 @@ export class PRProcessor {
       // whatever a same-named local branch already points at (stale from a
       // prior checkout) instead of the PR's current head — silently
       // reviewing the wrong revision either way.
-      const prHeadRef = `refs/openswarm/pr-${pr.number}-review`;
-      const baseRef = `refs/openswarm/pr-${pr.number}-base`;
+      //
+      // Suffixed with a random id, not just the PR number: two overlapping
+      // `pr review --fresh` calls for the same PR (two sessions, or a retry
+      // racing the first attempt) would otherwise fetch into the exact same
+      // ref names and could hand each other a mid-update or wrong-generation
+      // SHA.
+      const scratchId = randomUUID();
+      prHeadRef = `refs/openswarm/pr-${pr.number}-review-${scratchId}`;
+      baseRef = `refs/openswarm/pr-${pr.number}-base-${scratchId}`;
       // Both sides fetched into explicit local refs via `<src>:<dst>`, not a
-      // bare branch name for the base — a bare name updates the `origin/<base>`
-      // remote-tracking ref only via the remote's configured fetch refspec,
-      // which this method has no way to confirm is the normal
-      // `+refs/heads/*:refs/remotes/origin/*` default for whatever repo it's
-      // pointed at. An explicit destination has no such dependency.
+      // bare branch name for the base — a bare name (a) updates the
+      // `origin/<base>` remote-tracking ref only via the remote's configured
+      // fetch refspec, which this method has no way to confirm is the normal
+      // default for whatever repo it's pointed at, and (b) is ambiguous
+      // between a branch and a same-named tag (`refs/heads/<base>` pins it).
       await gitExec(
         projectPath, 'fetch', 'origin',
-        `pull/${pr.number}/head:${prHeadRef}`, `${base}:${baseRef}`,
+        `pull/${pr.number}/head:${prHeadRef}`, `refs/heads/${base}:${baseRef}`,
       );
 
-      autoStash = await stashLocalChanges(
-        projectPath,
-        `PRProcessor fresh review for ${key} at ${new Date().toISOString()}`
-      );
-      // Detached checkout onto the fetched ref directly — never `pr.branch`
-      // itself. A `checkout -B pr.branch <ref>` would force-repoint any local
-      // branch of that name to the PR head, discarding wherever it actually
-      // pointed (e.g. the operator's own unpushed commits on that branch)
-      // from view. The review only reads a diff; it never needs pr.branch to
-      // exist as a ref at all.
-      await gitExec(projectPath, 'checkout', prHeadRef);
-
+      const reviewedSha = (await gitExec(projectPath, 'rev-parse', prHeadRef)).trim();
       // The merge-base, not the base branch's current tip: the base branch
       // may have moved since the PR diverged, and a two-dot diff (what
       // getDiffText runs under the hood) against its tip would list every
@@ -369,9 +398,11 @@ export class PRProcessor {
       // base` step.
       const mergeBase = (await gitExec(projectPath, 'merge-base', prHeadRef, baseRef)).trim();
 
-      const { runReviewCommand, formatReviewOutput } = await import('../cli/reviewCommand.js');
+      worktreePath = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
+      await gitExec(projectPath, 'worktree', 'add', '--detach', worktreePath, reviewedSha);
+
       const review = await runReviewCommand({
-        path: projectPath,
+        path: worktreePath,
         base: mergeBase,
         // The checked-out content is another PR's diff — untrusted the same
         // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
@@ -384,10 +415,16 @@ export class PRProcessor {
         return { success: false, error: `No diff found against ${base}`, iterations: 0 };
       }
 
-      await commentOnPR(
+      // Names the exact commit reviewed: a long-running review racing a new
+      // push must not read as an approval of commits it never saw.
+      await commentOnPROrThrow(
         pr.repo,
         pr.number,
-        ['## 🔍 Fresh review (`openswarm pr review --fresh`)', '', formatReviewOutput(review, false)].join('\n')
+        [
+          `## 🔍 Fresh review of ${reviewedSha.slice(0, 7)} (\`openswarm pr review --fresh\`)`,
+          '',
+          formatReviewOutput(review, false),
+        ].join('\n')
       );
 
       return {
@@ -400,15 +437,22 @@ export class PRProcessor {
       console.error(`[PRProcessor] ${key} fresh review error:`, errorMsg);
       return { success: false, error: errorMsg, iterations: 0 };
     } finally {
-      let restoredBranch = false;
-      try {
-        await gitExec(projectPath, 'checkout', originalBranch);
-        restoredBranch = true;
-      } catch (restoreErr) {
-        console.error(`[PRProcessor] Failed to restore branch ${originalBranch}:`, restoreErr);
+      if (worktreePath) {
+        try {
+          await gitExec(projectPath, 'worktree', 'remove', '--force', worktreePath);
+        } catch (cleanupErr) {
+          console.error(`[PRProcessor] Failed to remove scratch worktree ${worktreePath}:`, cleanupErr);
+        }
       }
-      if (restoredBranch) {
-        await restoreAutoStash(projectPath, autoStash);
+      // Best-effort — each ref is uniquely named per call, so a leaked one
+      // costs disk, not correctness of a later run.
+      for (const ref of [prHeadRef, baseRef]) {
+        if (!ref) continue;
+        try {
+          await gitExec(projectPath, 'update-ref', '-d', ref);
+        } catch (cleanupErr) {
+          console.error(`[PRProcessor] Failed to remove scratch ref ${ref}:`, cleanupErr);
+        }
       }
       this.currentPR = null;
     }

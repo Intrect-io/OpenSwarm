@@ -49,6 +49,7 @@ const gh = vi.hoisted(() => ({
   getPRReviewComments: vi.fn(async () => [] as Array<{ author: string; body: string; path?: string; line?: number; createdAt: string }>),
   getPRChecks: vi.fn(async () => [] as Array<{ conclusion: string }>),
   getPRBaseBranchOrThrow: vi.fn(async () => 'main'),
+  commentOnPROrThrow: vi.fn(async () => undefined),
 }));
 vi.mock('../github/github.js', () => gh);
 vi.mock('../github/index.js', () => gh);
@@ -132,6 +133,7 @@ beforeEach(() => {
   gh.getPRReviewComments.mockResolvedValue([]);
   gh.getPRChecks.mockResolvedValue([]);
   gh.getPRBaseBranchOrThrow.mockResolvedValue('main');
+  gh.commentOnPROrThrow.mockResolvedValue(undefined);
   runReviewCommandImpl.mockResolvedValue({ decision: 'approve', feedback: 'looks good' });
   formatReviewOutputImpl.mockImplementation((r: { decision: string }) => `Decision: ${r.decision.toUpperCase()}`);
   pipelineRunImpl.run.mockResolvedValue({
@@ -460,38 +462,88 @@ describe('PRProcessor.reviewOne (INT-3282)', () => {
 });
 
 describe('PRProcessor.freshReview (INT-3282)', () => {
-  it('runs a fresh review against the PR merge-base, posts it as a comment, and reports approve as success', async () => {
-    const prHeadRef = `refs/openswarm/pr-${pr.number}-review`;
-    const baseRef = `refs/openswarm/pr-${pr.number}-base`;
-    gh.getPRBaseBranchOrThrow.mockResolvedValue('main');
+  const prHeadRefPattern = new RegExp(`^refs/openswarm/pr-${pr.number}-review-`);
+  const baseRefPattern = new RegExp(`^refs/openswarm/pr-${pr.number}-base-`);
+  const scratchDirPattern = new RegExp(`openswarm-pr-review-${pr.number}-`);
+
+  beforeEach(() => {
+    // A working default for every command the happy path runs: `origin`
+    // resolves (via `gh repo view <url>`, args[0]='repo') to the PR's own
+    // repo, and distinguishable SHAs for the head and the merge-base so
+    // assertions can tell them apart.
     gitExecImpl.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'remote' && args[1] === 'get-url') return { stdout: 'https://github.com/o/r.git\n', stderr: '' };
+      if (args[0] === 'repo' && args[1] === 'view') return { stdout: 'o/r\n', stderr: '' };
+      if (args[0] === 'rev-parse') return { stdout: 'headsha1234567\n', stderr: '' };
       if (args[0] === 'merge-base') return { stdout: 'mergebasesha123\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
-    runReviewCommandImpl.mockResolvedValue({ decision: 'approve', feedback: 'looks good' });
+  });
+
+  it('reviews inside a scratch worktree at the merge-base, posts the reviewed SHA as a comment, and reports approve as success', async () => {
     const processor = newProcessor();
     const result = await processor.freshReview(pr, '/tmp/proj');
     expect(result).toEqual({ success: true, error: undefined, iterations: 0 });
+
+    // Origin must match the PR's own repo before anything is fetched — a
+    // `--repo`/`--number owner/repo#n` override could otherwise point this
+    // at a different repository's PR number (INT-3282 review finding).
+    // `origin`'s own URL is handed to `gh repo view` so the identity check
+    // and the subsequent `git fetch origin` are pinned to the same remote,
+    // not whichever one a bare `gh repo view` happens to pick (INT-3282
+    // review finding).
+    expect(gitExecImpl).toHaveBeenCalledWith(['remote', 'get-url', 'origin']);
+    expect(gitExecImpl).toHaveBeenCalledWith(
+      ['repo', 'view', 'https://github.com/o/r.git', '--json', 'nameWithOwner', '-q', '.nameWithOwner'],
+    );
+
+    // Both the PR head and the base are fetched into explicit local refs
+    // (`<src>:<dst>`), the base pinned to `refs/heads/<base>` — this depends
+    // on neither `origin`'s remote-tracking refspec configuration nor branch
+    // vs. same-named-tag ambiguity (INT-3282 review finding). Each ref name
+    // carries a random suffix so two concurrent `--fresh` calls for the same
+    // PR don't race on the same ref (INT-3282 review finding).
+    const fetchCall = gitExecImpl.mock.calls.map((c) => c[0] as string[]).find((a) => a[0] === 'fetch');
+    expect(fetchCall).toBeDefined();
+    expect(fetchCall![1]).toBe('origin');
+    const [headSrc, prHeadRef] = fetchCall![2].split(':');
+    const [baseSrc, baseRef] = fetchCall![3].split(':');
+    expect(headSrc).toBe(`pull/${pr.number}/head`);
+    expect(prHeadRef).toMatch(prHeadRefPattern);
+    expect(baseSrc).toBe('refs/heads/main');
+    expect(baseRef).toMatch(baseRefPattern);
+
     // Diffed against the merge-base, not the base branch's tip — a plain tip
     // diff would list every commit merged into base after the PR diverged
     // as if the PR had made those changes too (INT-3282 review finding).
-    expect(runReviewCommandImpl).toHaveBeenCalledWith(
-      expect.objectContaining({ path: '/tmp/proj', base: 'mergebasesha123', readOnly: true }),
-    );
     expect(gitExecImpl).toHaveBeenCalledWith(['merge-base', prHeadRef, baseRef]);
-    expect(gh.commentOnPR).toHaveBeenCalledWith(
-      'o/r', 9, expect.stringContaining('Fresh review'),
-    );
-    // Both the PR head and the base are fetched into explicit local refs
-    // (`<src>:<dst>`) rather than a bare branch name for the base — this does
-    // not depend on `origin`'s remote-tracking refspec being configured any
-    // particular way (INT-3282 review finding).
+
+    // Reviewed from a scratch worktree, never `projectPath` itself — nothing
+    // under the caller's own checkout is touched (INT-3282 review finding:
+    // stash-based checkout could overwrite ignored files the PR newly tracks,
+    // or unstage the caller's own staged changes on restore).
     expect(gitExecImpl).toHaveBeenCalledWith(
-      ['fetch', 'origin', `pull/${pr.number}/head:${prHeadRef}`, `main:${baseRef}`],
+      ['worktree', 'add', '--detach', expect.stringMatching(scratchDirPattern), 'headsha1234567'],
     );
-    // Detached checkout onto the fetched PR-head ref, never onto pr.branch —
-    // see the comment in freshReview() for why.
-    expect(gitExecImpl).toHaveBeenCalledWith(['checkout', prHeadRef]);
+    expect(runReviewCommandImpl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: expect.stringMatching(scratchDirPattern),
+        base: 'mergebasesha123',
+        readOnly: true,
+      }),
+    );
+    expect(gitExecImpl).toHaveBeenCalledWith(
+      ['worktree', 'remove', '--force', expect.stringMatching(scratchDirPattern)],
+    );
+    // Scratch refs are cleaned up alongside the worktree.
+    expect(gitExecImpl).toHaveBeenCalledWith(['update-ref', '-d', prHeadRef]);
+    expect(gitExecImpl).toHaveBeenCalledWith(['update-ref', '-d', baseRef]);
+
+    // Names the exact commit reviewed, so a verdict can't misread as
+    // approving commits pushed after the review started (INT-3282 review finding).
+    expect(gh.commentOnPROrThrow).toHaveBeenCalledWith(
+      'o/r', 9, expect.stringContaining('headsha'),
+    );
   });
 
   it('reports a REVISE/reject verdict as a failure with the reviewer feedback as the error', async () => {
@@ -502,85 +554,30 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     expect(result.error).toBe('null deref in x.ts');
   });
 
-  it('reports failure without posting a comment when there is no diff against base', async () => {
+  it('reports failure without posting a comment when there is no diff against base, and still cleans up the worktree', async () => {
     runReviewCommandImpl.mockResolvedValue(null);
     const processor = newProcessor();
     const result = await processor.freshReview(pr, '/tmp/proj');
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/No diff found against main/);
-    expect(gh.commentOnPR).not.toHaveBeenCalled();
+    expect(gh.commentOnPROrThrow).not.toHaveBeenCalled();
+    expect(gitExecImpl).toHaveBeenCalledWith(
+      ['worktree', 'remove', '--force', expect.stringMatching(scratchDirPattern)],
+    );
   });
 
-  it('catches a thrown error and reports it instead of throwing', async () => {
-    gh.getPRBaseBranchOrThrow.mockRejectedValueOnce(new Error('gh api down'));
-    const processor = newProcessor();
-    const result = await processor.freshReview(pr, '/tmp/proj');
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('gh api down');
-  });
-
-  it('aborts before touching git when the current checkout cannot be determined (INT-3282 review finding)', async () => {
+  it('refuses to fetch when origin does not resolve to the PR repository (INT-3282 review finding)', async () => {
     gitExecImpl.mockImplementation(async (args: string[]) => {
-      if (args[0] === 'rev-parse') throw new Error('not a git repository');
+      if (args[0] === 'remote' && args[1] === 'get-url') return { stdout: 'https://github.com/some-other/repo.git\n', stderr: '' };
+      if (args[0] === 'repo' && args[1] === 'view') return { stdout: 'some-other/repo\n', stderr: '' };
       return { stdout: '', stderr: '' };
     });
     const processor = newProcessor();
     const result = await processor.freshReview(pr, '/tmp/proj');
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/Could not determine current checkout/);
-    // Falling back to a guessed branch (e.g. 'main') here would let the
-    // eventual restore force-move the caller somewhere they never were.
+    expect(result.error).toMatch(/does not match PR repo/);
     expect(gitExecImpl).not.toHaveBeenCalledWith(expect.arrayContaining(['fetch']));
-    expect(gitExecImpl).not.toHaveBeenCalledWith(expect.arrayContaining(['checkout']));
-  });
-
-  it('restores the original branch afterward even when the review fails', async () => {
-    runReviewCommandImpl.mockResolvedValue({ decision: 'reject', feedback: 'nope' });
-    gitExecImpl.mockImplementation(async (args: string[]) => {
-      if (args[0] === 'rev-parse') return { stdout: 'develop\n', stderr: '' };
-      return { stdout: '', stderr: '' };
-    });
-    const processor = newProcessor();
-    await processor.freshReview(pr, '/tmp/proj');
-    expect(gitExecImpl).toHaveBeenCalledWith(expect.arrayContaining(['checkout', 'develop']));
-  });
-
-  it('does not throw out of freshReview when restoring the original branch fails in the finally block', async () => {
-    const prHeadRef = `refs/openswarm/pr-${pr.number}-review`;
-    gitExecImpl.mockImplementation(async (args: string[]) => {
-      // Only the restore checkout (back to the original branch) should fail —
-      // the checkout onto the fetched PR head must still succeed.
-      if (args[0] === 'checkout' && args[1] !== prHeadRef) {
-        throw new Error('checkout restore failed');
-      }
-      return { stdout: '', stderr: '' };
-    });
-    const processor = newProcessor();
-    const result = await processor.freshReview(pr, '/tmp/proj');
-    expect(result.success).toBe(true);
-  });
-
-  it('never checks out or force-repoints a local branch named pr.branch (INT-3282 review finding)', async () => {
-    const processor = newProcessor();
-    await processor.freshReview(pr, '/tmp/proj');
-    for (const call of gitExecImpl.mock.calls) {
-      const args = call[0] as string[];
-      if (args[0] === 'checkout') {
-        expect(args).not.toContain(pr.branch);
-        expect(args).not.toContain('-B');
-      }
-    }
-  });
-
-  it('restores an already-detached HEAD by SHA, not by the literal string "HEAD" (INT-3282 review finding)', async () => {
-    gitExecImpl.mockImplementation(async (args: string[]) => {
-      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return { stdout: 'HEAD\n', stderr: '' };
-      if (args[0] === 'rev-parse') return { stdout: 'abc1234deadbeef\n', stderr: '' };
-      return { stdout: '', stderr: '' };
-    });
-    const processor = newProcessor();
-    await processor.freshReview(pr, '/tmp/proj');
-    expect(gitExecImpl).toHaveBeenCalledWith(['checkout', 'abc1234deadbeef']);
+    expect(gitExecImpl).not.toHaveBeenCalledWith(expect.arrayContaining(['worktree']));
   });
 
   it('propagates a failure to resolve the base branch instead of silently reviewing against main', async () => {
@@ -590,6 +587,57 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/no baseRefName/);
     expect(runReviewCommandImpl).not.toHaveBeenCalled();
+  });
+
+  it('reports a comment-posting failure as the overall failure instead of the review verdict (INT-3282 review finding)', async () => {
+    runReviewCommandImpl.mockResolvedValue({ decision: 'approve', feedback: 'looks good' });
+    gh.commentOnPROrThrow.mockRejectedValueOnce(new Error('gh pr comment exited with code 4'));
+    const processor = newProcessor();
+    const result = await processor.freshReview(pr, '/tmp/proj');
+    // Posting the verdict IS this command's job — a failure there must not
+    // read as success just because the (unposted) verdict was "approve".
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/gh pr comment exited with code 4/);
+  });
+
+  it('still removes the scratch worktree when the reviewer itself throws', async () => {
+    runReviewCommandImpl.mockRejectedValueOnce(new Error('reviewer crashed'));
+    const processor = newProcessor();
+    const result = await processor.freshReview(pr, '/tmp/proj');
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('reviewer crashed');
+    expect(gitExecImpl).toHaveBeenCalledWith(
+      ['worktree', 'remove', '--force', expect.stringMatching(scratchDirPattern)],
+    );
+  });
+
+  it('does not throw out of freshReview when worktree cleanup itself fails', async () => {
+    gitExecImpl.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('worktree busy');
+      if (args[0] === 'remote' && args[1] === 'get-url') return { stdout: 'https://github.com/o/r.git\n', stderr: '' };
+      if (args[0] === 'repo' && args[1] === 'view') return { stdout: 'o/r\n', stderr: '' };
+      if (args[0] === 'rev-parse') return { stdout: 'headsha1234567\n', stderr: '' };
+      if (args[0] === 'merge-base') return { stdout: 'mergebasesha123\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+    const processor = newProcessor();
+    const result = await processor.freshReview(pr, '/tmp/proj');
+    expect(result.success).toBe(true);
+  });
+
+  it('uses distinct scratch refs and worktree paths across two overlapping calls for the same PR (INT-3282 review finding)', async () => {
+    const processor = newProcessor();
+    const [first, second] = await Promise.all([
+      processor.freshReview(pr, '/tmp/proj'),
+      processor.freshReview(pr, '/tmp/proj'),
+    ]);
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    const fetchCalls = gitExecImpl.mock.calls.map((c) => c[0] as string[]).filter((a) => a[0] === 'fetch');
+    expect(fetchCalls).toHaveLength(2);
+    expect(fetchCalls[0][2]).not.toBe(fetchCalls[1][2]);
+    const worktreeAddCalls = gitExecImpl.mock.calls.map((c) => c[0] as string[]).filter((a) => a[0] === 'worktree' && a[1] === 'add');
+    expect(worktreeAddCalls[0][3]).not.toBe(worktreeAddCalls[1][3]);
   });
 });
 

@@ -661,26 +661,41 @@ export async function getPRReviewComments(repo: string, prNumber: number): Promi
  * Reporting is left to the 'close' handler, which has gh's actual exit code;
  * this listener only has to keep the event from going unhandled.
  */
+function execGhComment(repo: string, prNumber: number, body: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const proc = spawn('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    proc.stdin.on('error', (err) => {
+      console.error(`[GitHub] stdin closed while sending comment to ${repo}#${prNumber}:`, err);
+    });
+    proc.stdin.write(body);
+    proc.stdin.end();
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`gh pr comment exited with code ${code}`));
+    });
+    proc.on('error', reject);
+  });
+}
+
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
   try {
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      proc.stdin.on('error', (err) => {
-        console.error(`[GitHub] stdin closed while sending comment to ${repo}#${prNumber}:`, err);
-      });
-      proc.stdin.write(body);
-      proc.stdin.end();
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`gh pr comment exited with code ${code}`));
-      });
-      proc.on('error', reject);
-    });
+    await execGhComment(repo, prNumber, body);
   } catch (err) {
     console.error(`[GitHub] Failed to comment on PR ${repo}#${prNumber}:`, err);
   }
+}
+
+/**
+ * Same as {@link commentOnPR}, but propagates failure instead of swallowing
+ * it. Fire-and-forget logging is right for a status ping a caller doesn't
+ * block on, but wrong for a caller whose whole job IS posting this comment —
+ * silently eating a `gh` auth/permission/network failure there would let it
+ * report success (or a review verdict) despite never actually telling anyone.
+ */
+export async function commentOnPROrThrow(repo: string, prNumber: number, body: string): Promise<void> {
+  await execGhComment(repo, prNumber, body);
 }
 
 /**
