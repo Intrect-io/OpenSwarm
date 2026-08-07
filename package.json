@@ -20,7 +20,7 @@
     "dev": "node --env-file=.env --import=tsx src/index.ts",
     "prestart": "pkill -f 'dist/index.js' 2>/dev/null || true",
     "build": "tsc",
-    "postbuild": "chmod +x dist/cli.js && rm -rf dist/web-static && cp -R web/static dist/web-static",
+    "postbuild": "chmod +x dist/cli.js && node -e \"const fs=require('node:fs');fs.rmSync('dist/web-static',{recursive:true,force:true});fs.cpSync('web/static','dist/web-static',{recursive:true})\"",
     "start": "node --env-file=.env dist/index.js",
     "stop": "pkill -f 'node --env-file=.env.*openswarm' 2>/dev/null || echo 'No process running'",
     "lint": "oxlint src/",
