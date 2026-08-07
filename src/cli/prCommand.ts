@@ -38,6 +38,8 @@ export interface PrCommandOptions {
   noConflicts?: boolean;
   /** status/watch: emit JSON */
   json?: boolean;
+  /** review: run a brand-new code review of the PR diff instead of addressing existing feedback */
+  fresh?: boolean;
 }
 
 export interface PrCommandDeps {
@@ -49,6 +51,11 @@ export interface PrCommandDeps {
     opts: PrCommandOptions,
   ) => Promise<{ success: boolean; error?: string; iterations: number }>;
   reviewOne?: (
+    pr: { repo: string; number: number; title: string; branch: string; url: string },
+    projectPath: string,
+    opts: PrCommandOptions,
+  ) => Promise<{ success: boolean; error?: string; iterations: number }>;
+  freshReviewOne?: (
     pr: { repo: string; number: number; title: string; branch: string; url: string },
     projectPath: string,
     opts: PrCommandOptions,
@@ -132,6 +139,17 @@ async function defaultReviewOne(
   return processor.reviewOne(toPRInfo({ ...pr, author: undefined }), projectPath);
 }
 
+async function defaultFreshReviewOne(
+  pr: { repo: string; number: number; title: string; branch: string; url: string },
+  projectPath: string,
+  opts: PrCommandOptions,
+  loadRoles: () => DefaultRolesConfig | undefined,
+): Promise<{ success: boolean; error?: string; iterations: number }> {
+  const roles = loadRoles();
+  const processor = new PRProcessor(buildProcessorConfig(opts, roles));
+  return processor.freshReview(toPRInfo({ ...pr, author: undefined }), projectPath);
+}
+
 /** Route a `pr` subcommand. Returns the message to print. Sets exit semantics via result.exitCode. */
 export async function runPrCommand(
   action: string,
@@ -193,6 +211,23 @@ export async function runPrCommand(
         number: resolveNumber(opts),
         repo: resolveRepoOverride(opts),
       });
+      if (opts.fresh) {
+        log(`Running a fresh code review of ${resolved.repo}#${resolved.number} (${resolved.title})…`);
+        const freshReview =
+          deps.freshReviewOne ??
+          ((pr, path, o) => defaultFreshReviewOne(pr, path, o, loadRoles));
+        const result = await freshReview(resolved, cwd, opts);
+        if (result.success) {
+          return {
+            message: `PR ${resolved.repo}#${resolved.number} fresh review: approved.\n${resolved.url}`,
+            exitCode: 0,
+          };
+        }
+        return {
+          message: `PR ${resolved.repo}#${resolved.number} fresh review: ${result.error ?? 'changes requested'}\n${resolved.url}`,
+          exitCode: 1,
+        };
+      }
       log(`Checking review feedback on ${resolved.repo}#${resolved.number} (${resolved.title})…`);
       const review =
         deps.reviewOne ??

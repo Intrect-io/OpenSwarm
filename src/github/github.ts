@@ -661,26 +661,41 @@ export async function getPRReviewComments(repo: string, prNumber: number): Promi
  * Reporting is left to the 'close' handler, which has gh's actual exit code;
  * this listener only has to keep the event from going unhandled.
  */
+function execGhComment(repo: string, prNumber: number, body: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const proc = spawn('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    proc.stdin.on('error', (err) => {
+      console.error(`[GitHub] stdin closed while sending comment to ${repo}#${prNumber}:`, err);
+    });
+    proc.stdin.write(body);
+    proc.stdin.end();
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`gh pr comment exited with code ${code}`));
+    });
+    proc.on('error', reject);
+  });
+}
+
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
   try {
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn('gh', ['pr', 'comment', String(prNumber), '-R', repo, '--body-file', '-'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      proc.stdin.on('error', (err) => {
-        console.error(`[GitHub] stdin closed while sending comment to ${repo}#${prNumber}:`, err);
-      });
-      proc.stdin.write(body);
-      proc.stdin.end();
-      proc.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`gh pr comment exited with code ${code}`));
-      });
-      proc.on('error', reject);
-    });
+    await execGhComment(repo, prNumber, body);
   } catch (err) {
     console.error(`[GitHub] Failed to comment on PR ${repo}#${prNumber}:`, err);
   }
+}
+
+/**
+ * Same as {@link commentOnPR}, but propagates failure instead of swallowing
+ * it. Fire-and-forget logging is right for a status ping a caller doesn't
+ * block on, but wrong for a caller whose whole job IS posting this comment —
+ * silently eating a `gh` auth/permission/network failure there would let it
+ * report success (or a review verdict) despite never actually telling anyone.
+ */
+export async function commentOnPROrThrow(repo: string, prNumber: number, body: string): Promise<void> {
+  await execGhComment(repo, prNumber, body);
 }
 
 /**
@@ -745,6 +760,23 @@ export async function getPRBaseBranch(repo: string, prNumber: number): Promise<s
     console.error(`[GitHub] Failed to get base branch for ${repo}#${prNumber}:`, err);
     return 'main';
   }
+}
+
+/**
+ * Get the base branch of a PR, without the `main`-on-any-failure fallback
+ * above. That fallback is fine for conflict resolution (a wrong base just
+ * fails the rebase visibly), but silently swapping in the wrong base branch
+ * for a diff computation makes the diff wrong instead of failing — the
+ * reviewer would then read the PR's changes plus every unrelated commit
+ * between the real base and `main` as if it were all part of the PR. Callers
+ * that feed the result straight into a diff should use this and propagate
+ * the failure instead.
+ */
+export async function getPRBaseBranchOrThrow(repo: string, prNumber: number): Promise<string> {
+  const stdout = await ghExec('pr', 'view', String(prNumber), '-R', repo, '--json', 'baseRefName');
+  const { baseRefName } = JSON.parse(stdout);
+  if (!baseRefName) throw new Error(`gh pr view returned no baseRefName for ${repo}#${prNumber}`);
+  return baseRefName;
 }
 
 // PR Auto-Fix Support

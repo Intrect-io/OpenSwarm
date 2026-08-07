@@ -10,13 +10,14 @@ import {
 } from './prStatus.js';
 import { loadConfig } from '../core/config.js';
 
-const { fixOneImpl, reviewOneImpl, PRProcessorCtor } = vi.hoisted(() => {
+const { fixOneImpl, reviewOneImpl, freshReviewImpl, PRProcessorCtor } = vi.hoisted(() => {
   const fixOneImpl = vi.fn(async () => ({ success: true, iterations: 1 }));
   const reviewOneImpl = vi.fn(async () => ({ success: true, iterations: 0 }));
+  const freshReviewImpl = vi.fn(async () => ({ success: true, iterations: 0 }));
   const PRProcessorCtor = vi.fn().mockImplementation(function PRProcessor(this: unknown) {
-    return { fixOne: fixOneImpl, reviewOne: reviewOneImpl };
+    return { fixOne: fixOneImpl, reviewOne: reviewOneImpl, freshReview: freshReviewImpl };
   });
-  return { fixOneImpl, reviewOneImpl, PRProcessorCtor };
+  return { fixOneImpl, reviewOneImpl, freshReviewImpl, PRProcessorCtor };
 });
 vi.mock('../automation/prProcessor.js', () => ({ PRProcessor: PRProcessorCtor }));
 
@@ -153,6 +154,7 @@ function mkDeps(over: Partial<PrCommandDeps> = {}): PrCommandDeps {
     })),
     fixOne: vi.fn(async () => ({ success: true, iterations: 1 })),
     reviewOne: vi.fn(async () => ({ success: true, iterations: 1 })),
+    freshReviewOne: vi.fn(async () => ({ success: true, iterations: 0 })),
     waitCI: vi.fn(async () => ({ status: 'success' })),
     create: vi.fn(async () => ({ url: resolved.url, message: `Created PR: ${resolved.url}` })),
     log: vi.fn(),
@@ -164,6 +166,7 @@ function mkDeps(over: Partial<PrCommandDeps> = {}): PrCommandDeps {
 beforeEach(() => {
   fixOneImpl.mockClear().mockResolvedValue({ success: true, iterations: 1 });
   reviewOneImpl.mockClear().mockResolvedValue({ success: true, iterations: 0 });
+  freshReviewImpl.mockClear().mockResolvedValue({ success: true, iterations: 0 });
   PRProcessorCtor.mockClear();
   waitForCICompletionImpl.mockClear().mockResolvedValue({ status: 'success' });
 });
@@ -244,6 +247,17 @@ describe('runPrCommand default fix/review wiring (INT-3282)', () => {
     );
     expect(result.exitCode).toBe(0);
   });
+
+  it('review --fresh builds a PRProcessor and calls its freshReview when not overridden', async () => {
+    const result = await runPrCommand('review', { fresh: true }, { resolve: async () => resolved, log: vi.fn() });
+    expect(PRProcessorCtor).toHaveBeenCalledTimes(1);
+    expect(freshReviewImpl).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: 'o/r', number: 9 }),
+      expect.any(String),
+    );
+    expect(reviewOneImpl).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(0);
+  });
 });
 
 describe('runPrCommand (INT-3282)', () => {
@@ -313,6 +327,24 @@ describe('runPrCommand (INT-3282)', () => {
     const result = await runPrCommand('review', {}, deps);
     expect(result.exitCode).toBe(1);
     expect(result.message).toMatch(/pipeline failed/);
+  });
+
+  it('review --fresh delegates to freshReviewOne instead of reviewOne', async () => {
+    const deps = mkDeps();
+    const result = await runPrCommand('review', { fresh: true }, deps);
+    expect(deps.freshReviewOne).toHaveBeenCalledWith(resolved, expect.any(String), expect.any(Object));
+    expect(deps.reviewOne).not.toHaveBeenCalled();
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toMatch(/fresh review: approved/);
+  });
+
+  it('review --fresh reports a REVISE verdict as a failure', async () => {
+    const deps = mkDeps({
+      freshReviewOne: vi.fn(async () => ({ success: false, error: 'null deref in x.ts', iterations: 0 })),
+    });
+    const result = await runPrCommand('review', { fresh: true }, deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/null deref in x.ts/);
   });
 
   it('watch returns immediately when already merge-ready', async () => {

@@ -463,6 +463,7 @@ program
   .option('--no-fix', 'create: skip local openswarm fix before publish')
   .option('--draft', 'create: open as draft')
   .option('--json', 'status: print machine-readable JSON')
+  .option('--fresh', 'review: run a brand-new code review of the PR diff instead of addressing existing feedback')
   .action(async (action: string, opts: {
     path?: string;
     number?: string;
@@ -477,6 +478,7 @@ program
     fix?: boolean;
     draft?: boolean;
     json?: boolean;
+    fresh?: boolean;
   }) => {
     try {
       const { runPrCommand } = await import('./cli/prCommand.js');
@@ -494,6 +496,7 @@ program
         noFix: opts.fix === false,
         draft: opts.draft,
         json: opts.json,
+        fresh: opts.fresh,
       });
       console.log(result.message);
       if (result.exitCode) process.exitCode = result.exitCode;
