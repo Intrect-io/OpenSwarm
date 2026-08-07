@@ -148,10 +148,11 @@ pub(crate) fn validated_server_base_url() -> Result<url::Url, String> {
 }
 
 /// vega INT-3194: this command takes an injected `WebviewWindow` (not a bare
-/// `AppHandle`) and checks it with `trusted_command_window`, so a page granted
-/// the broad remote capability cannot overwrite the persisted backend URL and
-/// redirect the main WebView to an attacker-selected origin. Only the settings
-/// window calls this — that is where settings.html lives.
+/// `AppHandle`) and checks it with `trusted_command_window`, so no remote page
+/// can overwrite the persisted backend URL and redirect the main WebView to an
+/// attacker-selected origin. Defense in depth: the capability file grants no
+/// `remote` IPC at all, so this Rust check is the second layer, not the only
+/// one. Only the settings window calls this — that is where settings.html lives.
 #[tauri::command]
 pub fn set_server_url(url: String, window: tauri::WebviewWindow) -> Result<(), String> {
     if !crate::trusted_command_window(&window, &["settings"]) {

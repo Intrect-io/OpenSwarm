@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "OpenSwarm main/settings window permissions (all platforms)",
+  "description": "OpenSwarm main/settings window permissions (all platforms). Deliberately NO `remote` block: daemon-served pages never call Tauri IPC (only the bundled settings.html does, from the tauri asset origin), so granting IPC to any http(s) origin would only widen the surface — an iframe of an arbitrary origin embedded in a trusted page would pass capability matching while Rust-side checks authenticate the top-level WebView URL.",
   "windows": ["main", "settings"],
   "permissions": [
     "core:default",
@@ -21,15 +21,5 @@
     "allow-restart-daemon",
     "allow-get-close-to-tray",
     "allow-set-close-to-tray"
-  ],
-  "remote": {
-    "urls": [
-      "http://127.0.0.1:3847",
-      "http://127.0.0.1:3847/*",
-      "http://localhost:3847",
-      "http://localhost:3847/*",
-      "http://*",
-      "https://*"
-    ]
-  }
+  ]
 }
