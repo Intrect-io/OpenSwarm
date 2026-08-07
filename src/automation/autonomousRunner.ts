@@ -51,7 +51,7 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
-import { buildTaskStateSyncComment, getTaskState } from '../taskState/store.js';
+import { getTaskState } from '../taskState/store.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -84,8 +84,8 @@ import {
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
-import type { EffectClaim, EffectInput, ImportRunInput, RunLedgerMode } from './runLedger.js';
-import type { PairCompleteStats } from './taskSource.js';
+import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
+import { buildCancellationEffect, buildCompletionEffect, deliverTrackerEffect } from './trackerEffects.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -118,43 +118,9 @@ export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
 
 export type RunnableCandidate = { task: TaskItem; projectPath: string };
 
-interface CompletionEffectPayload {
-  version: 1;
-  marker: string;
-  task: TaskItem;
-  stats: PairCompleteStats;
-  projectPath?: string;
-  costUsd?: number;
-}
-
-interface CancellationEffectPayload {
-  version: 1;
-  marker: string;
-  task: TaskItem;
-  /** Frozen at effect creation so retries reuse the same idempotent comment. */
-  comment: string;
-}
-
-function isCompletionEffectPayload(value: unknown): value is CompletionEffectPayload {
-  if (!value || typeof value !== 'object') return false;
-  const payload = value as Partial<CompletionEffectPayload>;
-  return payload.version === 1
-    && typeof payload.marker === 'string'
-    && !!payload.task
-    && typeof payload.task === 'object'
-    && !!payload.stats
-    && typeof payload.stats === 'object';
-}
-
-function isCancellationEffectPayload(value: unknown): value is CancellationEffectPayload {
-  if (!value || typeof value !== 'object') return false;
-  const payload = value as Partial<CancellationEffectPayload>;
-  return payload.version === 1
-    && typeof payload.marker === 'string'
-    && !!payload.task
-    && typeof payload.task === 'object'
-    && typeof payload.comment === 'string';
-}
+// The completion/cancellation effect payload contract (and its delivery) lives
+// in trackerEffects.ts, shared with the `openswarm work` CLI so the marker
+// format cannot drift between the two outbox writers. (INT-3387)
 
 /**
  * Conflict analysis is an admission safety check. If it is unavailable, allow
@@ -969,6 +935,12 @@ export class AutonomousRunner {
   private _nextHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private scheduleNextHeartbeat(): void {
     if (this.stopping) return;
+    // Explicit-dispatch mode: completion of a dispatched task must not
+    // re-enter the autonomous backlog scan — that is exactly the self-selected
+    // work `autonomousHeartbeat: false` promises never happens. A user-driven
+    // heartbeat() call (dashboard button) remains allowed; only this automatic
+    // re-fire is suppressed. (INT-3388)
+    if (this.config.autonomousHeartbeat === false) return;
     if (this._nextHeartbeatTimer) return; // already queued
     // Fire on the next event-loop tick so the current scheduler callback
     // returns first (avoids re-entrant heartbeat() while still in `completed`
@@ -987,51 +959,6 @@ export class AutonomousRunner {
     await this.scheduler.runAvailable(async (task, projectPath, signal) => {
       return this.executeDurably(task, projectPath, signal);
     });
-  }
-
-  private completionStats(result: PipelineResult): PairCompleteStats {
-    return {
-      attempts: result.iterations,
-      duration: Math.floor(result.totalDuration / 1000),
-      filesChanged: result.workerResult?.filesChanged || [],
-      workerSummary: result.workerResult?.summary,
-      workerCommands: result.workerResult?.commands,
-      reviewerFeedback: result.reviewResult?.feedback,
-      reviewerDecision: result.reviewResult?.decision,
-      testResults: result.testerResult ? {
-        passed: result.testerResult.testsPassed,
-        failed: result.testerResult.testsFailed,
-        coverage: result.testerResult.coverage,
-        failedTests: result.testerResult.failedTests,
-      } : undefined,
-    };
-  }
-
-  private buildCompletionEffect(task: TaskItem, result: PipelineResult, attemptNo: number): EffectInput {
-    const marker = `complete:${task.issueId || task.id}:attempt:${attemptNo}`;
-    const payload: CompletionEffectPayload = {
-      version: 1,
-      marker,
-      task,
-      stats: { ...this.completionStats(result), idempotencyMarker: marker },
-      projectPath: result.taskContext?.projectPath,
-      costUsd: result.totalCost?.costUsd,
-    };
-    return { kind: 'tracker.complete', dedupeKey: marker, payload };
-  }
-
-  private buildCancellationEffect(task: TaskItem, attemptNo: number): EffectInput {
-    const marker = `cancel:${task.issueId || task.id}:attempt:${attemptNo}`;
-    const state = execution.projectCancellationState(task);
-    const payload: CancellationEffectPayload = {
-      version: 1,
-      marker,
-      task,
-      comment: state
-        ? `${buildTaskStateSyncComment(state, 'Task cancelled')}\n\n<!-- openswarm-effect:${marker} -->`
-        : `Task cancelled\n\n<!-- openswarm-effect:${marker} -->`,
-    };
-    return { kind: 'tracker.cancel', dedupeKey: marker, payload };
   }
 
   private async executeDurably(task: TaskItem, projectPath: string, signal?: AbortSignal): Promise<PipelineResult> {
@@ -1103,8 +1030,8 @@ export class AutonomousRunner {
       ),
       {
         admission,
-        successEffect: (result, claim) => this.buildCompletionEffect(task, result, claim.attemptNo),
-        cancelEffect: (_result, claim) => this.buildCancellationEffect(task, claim.attemptNo),
+        successEffect: (result, claim) => buildCompletionEffect(task, result, claim.attemptNo),
+        cancelEffect: (_result, claim) => buildCancellationEffect(task, claim.attemptNo),
         retryCancellation: () => this.stopping,
       },
     );
@@ -1155,7 +1082,7 @@ export class AutonomousRunner {
           if (this.durableRuns.recoverPublishedRun(
             run.issueId,
             { prUrl: pr.url, headSha: pr.headSha },
-            this.buildCompletionEffect(task, recoveredResult, run.attemptNo),
+            buildCompletionEffect(task, recoveredResult, run.attemptNo),
           )) {
             console.log(`[Reconciler] Recovered published run ${run.identifier ?? run.issueId}: ${pr.url}`);
           }
@@ -1263,60 +1190,7 @@ export class AutonomousRunner {
   }
 
   private async deliverOutboxEffect(effect: EffectClaim): Promise<void> {
-    if (effect.kind === 'tracker.cancel') {
-      if (!isCancellationEffectPayload(effect.payload)) {
-        throw new Error(`Invalid automation effect payload: ${effect.kind}`);
-      }
-      await execution.syncCancellationState(
-        effect.payload.task,
-        effect.dedupeKey,
-        effect.payload.comment,
-      );
-      return;
-    }
-    if (effect.kind !== 'tracker.complete' || !isCompletionEffectPayload(effect.payload)) {
-      throw new Error(`Unsupported automation effect: ${effect.kind}`);
-    }
-    const payload = effect.payload;
-    const taskSource = getTaskSource();
-    if (!taskSource) throw new Error('Task source unavailable for outbox delivery');
-    const issueId = payload.task.issueId || payload.task.id;
-    const markerComment = `<!-- openswarm-effect:${payload.marker} -->`;
-
-    const comments = taskSource.getExecutionComments
-      ? await taskSource.getExecutionComments(issueId)
-      : [];
-    const alreadyCommented = comments.some((comment) => comment.body.includes(markerComment));
-    if (alreadyCommented) {
-      // The remote comment may have succeeded immediately before a process crash,
-      // while the following state mutation/local ack did not. Reapply the
-      // idempotent state transition but never duplicate the completion comment.
-      const accepted = await taskSource.updateState(issueId, 'Done');
-      if (!accepted) throw new Error(`Tracker refused Done reconciliation for ${issueId}`);
-    } else {
-      await taskSource.logPairComplete(issueId, effect.dedupeKey, payload.stats);
-    }
-
-    execution.projectSuccessState(payload.task);
-    await execution.reconcileCompletionState(payload.task);
-
-    if (payload.projectPath) {
-      await recordTaskOutcome(payload.projectPath, {
-        taskTitle: payload.task.title,
-        derivedFrom: payload.task.issueIdentifier ?? issueId,
-        iterations: payload.stats.attempts,
-      });
-    }
-    if (payload.task.linearProject) {
-      await updateProjectAfterTask(payload.task.linearProject.id, payload.task.linearProject.name, {
-        title: payload.task.title,
-        success: true,
-        duration: payload.stats.duration * 1000,
-        issueIdentifier: payload.task.issueIdentifier,
-        cost: payload.costUsd,
-        projectPath: payload.projectPath,
-      });
-    }
+    return deliverTrackerEffect(effect, getTaskSource());
   }
 
   private async drainDurableOutbox(): Promise<void> {
@@ -1424,29 +1298,93 @@ export class AutonomousRunner {
       }
     }
 
-    // Set up cron job
-    this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
-      await this.heartbeat();
-    });
+    const heartbeatEnabled = this.config.autonomousHeartbeat !== false;
+    if (heartbeatEnabled) {
+      // Set up cron job
+      this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
+        await this.heartbeat();
+      });
+    } else {
+      // Explicit-dispatch mode has no heartbeat to run the artifact
+      // reconciliation that unparks NEEDS_RECONCILE runs — without this,
+      // explicit work interrupted by a crash stays In Progress forever.
+      // Recovery-only: fetch feeds the reconciler; nothing is selected.
+      await this.recoverParkedRunsOnly().catch((error) =>
+        console.error('[AutonomousRunner] Explicit-mode recovery failed:', error));
+    }
 
     this.state.isRunning = true;
     this.state.startedAt = Date.now();
-    console.log(`[AutonomousRunner] Started with schedule: ${this.config.heartbeatSchedule}`);
-
-    await reportToDiscord(`🤖 ${t('runner.modeStarted')}\n` +
-      `Schedule: \`${this.config.heartbeatSchedule}\`\n` +
-      `Auto-execute: ${this.config.autoExecute ? '✅' : '❌'}\n` +
-      `Projects: ${this.config.allowedProjects.join(', ')}`
+    console.log(
+      heartbeatEnabled
+        ? `[AutonomousRunner] Started with schedule: ${this.config.heartbeatSchedule}`
+        : '[AutonomousRunner] Started in explicit-dispatch mode (no heartbeat cron)'
     );
 
+    if (heartbeatEnabled) {
+      await reportToDiscord(`🤖 ${t('runner.modeStarted')}\n` +
+        `Schedule: \`${this.config.heartbeatSchedule}\`\n` +
+        `Auto-execute: ${this.config.autoExecute ? '✅' : '❌'}\n` +
+        `Projects: ${this.config.allowedProjects.join(', ')}`
+      );
+    }
+
     // Immediate execution option
-    if (this.config.triggerNow) {
+    if (heartbeatEnabled && this.config.triggerNow) {
       console.log('[AutonomousRunner] Triggering immediate heartbeat in 10s...');
       this.startupHeartbeatTimer = setTimeout(() => {
         this.startupHeartbeatTimer = null;
         if (!this.stopping) void this.heartbeat();
       }, 10000); // Run after 10s (wait for Discord/Linear connection)
     }
+  }
+
+  /**
+   * Recovery-only startup path for explicit-dispatch mode: run the same
+   * artifact reconciliation a heartbeat would, without any task selection.
+   * The Linear fetch only feeds the reconciler's issueId→task lookup. (INT-3388)
+   */
+  private async rollbackDiscardedDispatchClaims(
+    discarded: Array<{ task: TaskItem }>,
+  ): Promise<void> {
+    const dispatched = discarded.filter(({ task }) => task.explicitDispatch === true && task.issueId);
+    if (dispatched.length === 0) return;
+    const linear = await import('../linear/linear.js');
+    if (!linear.isLinearInitialized()) return;
+    for (const { task } of dispatched) {
+      const prior = (task.linearState ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo';
+      const ok = await linear.updateIssueState(task.issueId!, prior).catch(() => false);
+      console.log(ok
+        ? `[AutonomousRunner] Rolled back queued dispatch claim: ${task.issueIdentifier ?? task.issueId} → ${prior}`
+        : `[AutonomousRunner] WARNING: could not roll back claim for ${task.issueIdentifier ?? task.issueId} — left In Progress`);
+    }
+  }
+
+  private async recoverParkedRunsOnly(): Promise<void> {
+    if (!this.durableRuns.isPrimary) return;
+    if (this.durableRuns.listRuns(['NEEDS_RECONCILE']).length === 0) return;
+    const fetchResult = await fetchLinearTasks();
+    if (fetchResult.error) {
+      console.warn(`[AutonomousRunner] Explicit-mode recovery fetch failed: ${fetchResult.error}`);
+      return;
+    }
+    await this.reconcileDurableArtifacts(fetchResult.tasks);
+  }
+
+  /**
+   * Turn the heartbeat cron on for a runner that was started in
+   * explicit-dispatch mode — the runtime activation path behind Discord's
+   * `!auto start` when startup had `autonomous.enabled: false`. No-op when a
+   * cron already exists. (INT-3388)
+   */
+  enableHeartbeat(): boolean {
+    if (this.stopping || this.cronJob) return false;
+    this.config.autonomousHeartbeat = true;
+    this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
+      await this.heartbeat();
+    });
+    console.log(`[AutonomousRunner] Heartbeat enabled at runtime (schedule: ${this.config.heartbeatSchedule})`);
+    return true;
   }
 
   stop(): Promise<void> {
@@ -1473,6 +1411,15 @@ export class AutonomousRunner {
     const deadline = Date.now() + graceMs;
     const heartbeatAtStop = this.heartbeatCompletion;
     const shutdown = await this.scheduler.shutdown(graceMs);
+    // Queued-but-never-started explicit dispatches were discarded by
+    // shutdown() with no cancellation event — roll their Linear claims back
+    // to the state they were dispatched from, or they sit In Progress forever
+    // with no worker. The discard snapshot is taken atomically inside
+    // shutdown() (same synchronous block as stopping+clearQueue), so none of
+    // these can have started. Heartbeat-selected tasks are untouched: they
+    // were never moved to In Progress at queue time. (INT-3388)
+    await this.rollbackDiscardedDispatchClaims(shutdown.discardedQueue).catch((error) =>
+      console.warn('[AutonomousRunner] Queued-dispatch claim rollback failed:', error));
     const remainingGrace = Math.max(0, deadline - Date.now());
     const activityDrained = await this.waitForRunnerActivity(heartbeatAtStop, remainingGrace);
 
@@ -2122,6 +2069,57 @@ export class AutonomousRunner {
     return true;
   }
 
+  /**
+   * Explicit dispatch: queue exactly these user-chosen tasks and start
+   * executing, bypassing the DecisionEngine's own selection entirely. This is
+   * the API surface behind `POST /api/work` (issue board) — the counterpart
+   * of the heartbeat path, usable even when the heartbeat cron is disabled
+   * (`autonomousHeartbeat: false`). Rejected entries are ones the scheduler
+   * refused (already queued/running — its issueId dedupe). (INT-3388)
+   *
+   * Throws (rather than queueing work that would never start) when the
+   * runner's configuration cannot execute scheduler-queued tasks:
+   * runAvailableTasks() is a no-op without pairMode + maxConcurrentTasks, so
+   * silently accepting the queue here would strand the issues In Progress
+   * with no worker ever picking them up.
+   */
+  async enqueueIssues(
+    tasks: TaskItem[],
+    projectPath: string,
+  ): Promise<{ queued: string[]; rejected: Array<{ id: string; reason: 'duplicate' | 'stopping' }> }> {
+    if (!this.config.pairMode || !this.config.maxConcurrentTasks) {
+      throw new Error(
+        'Explicit dispatch requires autonomous.pairMode and maxConcurrentTasks in config — ' +
+        'without them queued issues would never execute',
+      );
+    }
+    // Same provider-quota hold the heartbeat honors: dispatching during a
+    // known 429 window would claim issues that cannot run and burn more calls.
+    if (Date.now() < this.rateLimitUntil) {
+      throw new Error(
+        `Provider rate limit active until ${new Date(this.rateLimitUntil).toISOString()} — retry after it resets`,
+      );
+    }
+    const queued: string[] = [];
+    // The reason distinction matters to the caller's claim-rollback decision:
+    // 'duplicate' means the scheduler already owns this issue (another live
+    // dispatch/heartbeat is working it — its In Progress claim must stand),
+    // while 'stopping' means nobody will ever run it (rollback is safe).
+    const rejected: Array<{ id: string; reason: 'duplicate' | 'stopping' }> = [];
+    for (const task of tasks) {
+      if (this.stopping) {
+        rejected.push({ id: task.id, reason: 'stopping' });
+        continue;
+      }
+      if (this.enqueueCandidate(task, projectPath)) queued.push(task.id);
+      else rejected.push({ id: task.id, reason: 'duplicate' });
+    }
+    if (queued.length > 0 && !this.stopping) {
+      this.trackSchedulerHandler('explicitDispatch', this.runAvailableTasks());
+    }
+    return { queued, rejected };
+  }
+
   /** Execute task in pair mode */
   private async executeTaskPairMode(task: TaskItem): Promise<void> {
     if (this.stopping) return;
@@ -2629,6 +2627,11 @@ export function getRunner(config?: AutonomousConfig): AutonomousRunner {
 export async function startAutonomous(config: AutonomousConfig): Promise<AutonomousRunner> {
   const runner = getRunner(config);
   await runner.start();
+  // A runner already running in explicit-dispatch mode occupies the singleton,
+  // and start() above is a no-op on it — without this, `!auto start` after a
+  // `autonomous.enabled: false` boot would report success while changing
+  // nothing. Runtime activation flips the heartbeat on in place. (INT-3388)
+  if (config.autonomousHeartbeat !== false) runner.enableHeartbeat();
   return runner;
 }
 

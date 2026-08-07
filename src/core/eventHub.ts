@@ -104,6 +104,7 @@ export type HubEvent =
   | { type: 'pr_processor_start'; data: { repos: string[] } }
   | { type: 'pr_processor_end'; data: { lastRun: number | null; nextRun: number | null } }
   | { type: 'pr_processor_pr'; data: { pr: string; title: string } }
+  | { type: 'work:queued'; data: { workId: string; projectPath: string; taskIds: string[] } }
   | { type: 'heartbeat' };
 
 // Singleton

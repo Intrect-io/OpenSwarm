@@ -25,6 +25,13 @@ export interface AutonomousConfig {
   workerTimeoutMs?: number;
   reviewerTimeoutMs?: number;
   triggerNow?: boolean;
+  /**
+   * When false the runner starts without its heartbeat cron: no backlog is
+   * fetched and no issue is ever picked on its own. Everything else (durable
+   * recovery, worktree pruning, the scheduler, explicit enqueueIssues() calls
+   * from the CLI/dashboard) still works. Default true. (INT-3388)
+   */
+  autonomousHeartbeat?: boolean;
   maxConcurrentTasks?: number;
   maxConcurrentPerProject?: number;
   defaultRoles?: DefaultRolesConfig;

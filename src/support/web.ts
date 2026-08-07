@@ -35,20 +35,13 @@ import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
 import type { SubTask } from './planner.js';
+import { buildHealthPayload } from './healthEndpoint.js';
+import { HttpError, readBody } from './httpBody.js';
+import { tryHandleAppRoutes } from './webAppRoutes.js';
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
 let gitStatusPoller: NodeJS.Timeout | null = null;
-const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
-
-class HttpError extends Error {
-  constructor(
-    public statusCode: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 // CORS origin allowlist — hostname-strict match (no substring/prefix pitfalls)
 function isAllowedOrigin(origin: string): boolean {
@@ -429,6 +422,11 @@ export function stopReposWatcher(): void {
  * Set runner reference (call after autonomous runner is initialized).
  * Pass `undefined` to detach (tests / early boot without autonomous mode).
  */
+/** Actual bound port — for tests that start the server on an ephemeral port (0). */
+export function getWebServerPort(): number | null {
+  const address = server?.address();
+  return address && typeof address === 'object' ? address.port : null;
+}
 export function setWebRunner(runner: AutonomousRunner | undefined): void {
   runnerRef = runner;
   if (!runner) return;
@@ -437,37 +435,6 @@ export function setWebRunner(runner: AutonomousRunner | undefined): void {
 }
 
 // Read POST body helper
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    let totalBytes = 0;
-    let settled = false;
-
-    const fail = (statusCode: number, message: string) => {
-      if (settled) return;
-      settled = true;
-      reject(new HttpError(statusCode, message));
-    };
-
-    req.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_REQUEST_BODY_BYTES) {
-        fail(413, 'Request body too large');
-        return;
-      }
-      data += chunk.toString('utf-8');
-    });
-    req.on('end', () => {
-      if (settled) return;
-      settled = true;
-      resolve(data);
-    });
-    req.on('aborted', () => fail(400, 'Request body aborted'));
-    req.on('error', () => fail(400, 'Request body error'));
-  });
-}
-
 // Start web server
 export async function startWebServer(port: number = 3847): Promise<void> {
   if (server) {
@@ -495,6 +462,9 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.end();
         return;
       }
+      // Health stays ahead of both auth gates: no secrets ("diagnostics, not
+      // authentication"), and the desktop shell polls it token-less. (INT-3388)
+      if (url === '/api/health' && req.method === 'GET') { writeJson(res, 200, buildHealthPayload()); return; }
       if ((isMutatingApiRequest(url, req.method) || isMutatingGraphQLRequest(requestUrl, req.method)) && !isAuthorizedMutation(req)) {
         writeJson(res, 403, { error: 'Forbidden' });
         return;
@@ -519,6 +489,10 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         // Build buttons from the live registry so the toggle never drifts from
         // isKnownAdapter validation (INT-1901 / INT-3284).
         res.end(buildDashboardHtml(listAdapterNames()));
+
+      // ---- Desktop-app routes (/app, /static/*, /api/work*) → webAppRoutes.ts (INT-3388) ----
+      } else if (await tryHandleAppRoutes(req, res, url, requestUrl, runnerRef, readBody)) {
+        // handled
 
       // ---- SSE stream ----
       } else if (url === '/api/events') {

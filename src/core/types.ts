@@ -67,6 +67,8 @@ export type LinearIssueInfo = {
   project?: LinearProjectInfo;
   /** Issue UUIDs that block this issue (from structured relations + "블로커:" prose). */
   blockedBy?: string[];
+  /** ISO timestamp of issue creation — duplicate grooming orders peers by real age. (INT-3387) */
+  createdAt?: string;
 };
 
 /**
