@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.10 — 2026-08-07
+
+### Added
+
+- **`openswarm pr review --all`.** Reviews every open PR in the repo sequentially instead of just the current branch's PR / `--number`, combinable with `--fresh`. Fork PRs are skipped (with a per-PR note) under feedback re-application since that path can only fetch same-repo branches — use `--fresh`, which works for forks too. A `--repo` that doesn't match the checkout's own `origin` refuses upfront rather than fetching from the wrong remote.
+
 ## 0.20.9 — 2026-08-07
 
 ### Added
