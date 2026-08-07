@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.js';
 import { loadConfig } from '../core/config.js';
 import type { DefaultRolesConfig, ConflictResolverConfig } from '../core/types.js';
-import { parsePRRef, resolvePR, resolveRepoName, toPRInfo, type ResolvePROptions } from './prResolve.js';
+import { parsePRRef, resolvePR, resolveOriginRepo, toPRInfo, type ResolvePROptions } from './prResolve.js';
 import { formatPrStatus, gatherPrStatus, type PrStatusSnapshot } from './prStatus.js';
 import { createPrFromCwd, type PrCreateOptions } from './prCreate.js';
 import { getOpenPRsOrThrow } from '../github/github.js';
@@ -214,7 +214,7 @@ export async function runPrCommand(
 
     case 'review': {
       if (opts.all) {
-        const resolveRepo = deps.resolveRepo ?? resolveRepoName;
+        const resolveRepo = deps.resolveRepo ?? resolveOriginRepo;
         const repoOverride = resolveRepoOverride(opts);
         // Resolved from `cwd` alone (no explicit arg) so this is always the
         // repo this checkout's `origin` actually points at, never an
