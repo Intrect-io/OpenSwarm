@@ -21,6 +21,12 @@ vi.mock('../support/repoMetadata.js', () => ({ loadRepoMetadata: loadRepoMetadat
 const { broadcastEventImpl } = vi.hoisted(() => ({ broadcastEventImpl: vi.fn() }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: broadcastEventImpl }));
 
+// enrichTaskFromState reads ~/.openswarm/task-state.json via the REAL statSync
+// while this file mocks node:fs existsSync to true — on a CI runner with no
+// such file that contradiction throws ENOENT. The enrichment is irrelevant to
+// dispatch logic, so mock it to identity.
+vi.mock('../taskState/store.js', () => ({ enrichTaskFromState: (task: unknown) => task }));
+
 const { existsSyncImpl } = vi.hoisted(() => ({ existsSyncImpl: vi.fn(() => true) }));
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
