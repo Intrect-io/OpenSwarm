@@ -969,6 +969,12 @@ export class AutonomousRunner {
   private _nextHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private scheduleNextHeartbeat(): void {
     if (this.stopping) return;
+    // Explicit-dispatch mode: completion of a dispatched task must not
+    // re-enter the autonomous backlog scan — that is exactly the self-selected
+    // work `autonomousHeartbeat: false` promises never happens. A user-driven
+    // heartbeat() call (dashboard button) remains allowed; only this automatic
+    // re-fire is suppressed. (INT-3388)
+    if (this.config.autonomousHeartbeat === false) return;
     if (this._nextHeartbeatTimer) return; // already queued
     // Fire on the next event-loop tick so the current scheduler callback
     // returns first (avoids re-entrant heartbeat() while still in `completed`
@@ -1424,23 +1430,32 @@ export class AutonomousRunner {
       }
     }
 
-    // Set up cron job
-    this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
-      await this.heartbeat();
-    });
+    const heartbeatEnabled = this.config.autonomousHeartbeat !== false;
+    if (heartbeatEnabled) {
+      // Set up cron job
+      this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
+        await this.heartbeat();
+      });
+    }
 
     this.state.isRunning = true;
     this.state.startedAt = Date.now();
-    console.log(`[AutonomousRunner] Started with schedule: ${this.config.heartbeatSchedule}`);
-
-    await reportToDiscord(`🤖 ${t('runner.modeStarted')}\n` +
-      `Schedule: \`${this.config.heartbeatSchedule}\`\n` +
-      `Auto-execute: ${this.config.autoExecute ? '✅' : '❌'}\n` +
-      `Projects: ${this.config.allowedProjects.join(', ')}`
+    console.log(
+      heartbeatEnabled
+        ? `[AutonomousRunner] Started with schedule: ${this.config.heartbeatSchedule}`
+        : '[AutonomousRunner] Started in explicit-dispatch mode (no heartbeat cron)'
     );
 
+    if (heartbeatEnabled) {
+      await reportToDiscord(`🤖 ${t('runner.modeStarted')}\n` +
+        `Schedule: \`${this.config.heartbeatSchedule}\`\n` +
+        `Auto-execute: ${this.config.autoExecute ? '✅' : '❌'}\n` +
+        `Projects: ${this.config.allowedProjects.join(', ')}`
+      );
+    }
+
     // Immediate execution option
-    if (this.config.triggerNow) {
+    if (heartbeatEnabled && this.config.triggerNow) {
       console.log('[AutonomousRunner] Triggering immediate heartbeat in 10s...');
       this.startupHeartbeatTimer = setTimeout(() => {
         this.startupHeartbeatTimer = null;
@@ -2120,6 +2135,50 @@ export class AutonomousRunner {
     broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
     this.syslog(`✓ Queued: ${task.issueIdentifier || ''} ${task.title} → ${projectPath.split('/').slice(-2).join('/')}`);
     return true;
+  }
+
+  /**
+   * Explicit dispatch: queue exactly these user-chosen tasks and start
+   * executing, bypassing the DecisionEngine's own selection entirely. This is
+   * the API surface behind `POST /api/work` (issue board) — the counterpart
+   * of the heartbeat path, usable even when the heartbeat cron is disabled
+   * (`autonomousHeartbeat: false`). Rejected entries are ones the scheduler
+   * refused (already queued/running — its issueId dedupe). (INT-3388)
+   *
+   * Throws (rather than queueing work that would never start) when the
+   * runner's configuration cannot execute scheduler-queued tasks:
+   * runAvailableTasks() is a no-op without pairMode + maxConcurrentTasks, so
+   * silently accepting the queue here would strand the issues In Progress
+   * with no worker ever picking them up.
+   */
+  async enqueueIssues(
+    tasks: TaskItem[],
+    projectPath: string,
+  ): Promise<{ queued: string[]; rejected: Array<{ id: string; reason: 'duplicate' | 'stopping' }> }> {
+    if (!this.config.pairMode || !this.config.maxConcurrentTasks) {
+      throw new Error(
+        'Explicit dispatch requires autonomous.pairMode and maxConcurrentTasks in config — ' +
+        'without them queued issues would never execute',
+      );
+    }
+    const queued: string[] = [];
+    // The reason distinction matters to the caller's claim-rollback decision:
+    // 'duplicate' means the scheduler already owns this issue (another live
+    // dispatch/heartbeat is working it — its In Progress claim must stand),
+    // while 'stopping' means nobody will ever run it (rollback is safe).
+    const rejected: Array<{ id: string; reason: 'duplicate' | 'stopping' }> = [];
+    for (const task of tasks) {
+      if (this.stopping) {
+        rejected.push({ id: task.id, reason: 'stopping' });
+        continue;
+      }
+      if (this.enqueueCandidate(task, projectPath)) queued.push(task.id);
+      else rejected.push({ id: task.id, reason: 'duplicate' });
+    }
+    if (queued.length > 0 && !this.stopping) {
+      this.trackSchedulerHandler('explicitDispatch', this.runAvailableTasks());
+    }
+    return { queued, rejected };
   }
 
   /** Execute task in pair mode */
