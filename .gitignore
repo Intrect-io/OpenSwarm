@@ -3,6 +3,12 @@ node_modules/
 
 # Build output
 dist/
+# desktop/dist holds the Tauri shell's committed static assets, not build output
+!desktop/dist/
+
+# Desktop shell (Tauri) build artifacts
+desktop/target/
+desktop/gen/
 
 # Git worktrees
 worktree/

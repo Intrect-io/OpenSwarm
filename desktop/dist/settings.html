@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OpenSwarm Settings</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --surface2: #1c2128;
+    --border: #30363d; --text: #c9d1d9; --muted: #8b949e;
+    --accent: #58a6ff; --accent-soft: rgba(88,166,255,.12); --focus: #79c0ff;
+    --ok: #3fb950; --warning: #d29922; --error: #f85149; --on-fill: #fff;
+    --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px;
+    --radius-xl: 16px; --radius-pill: 999px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px; -webkit-user-select: none; user-select: none;
+  }
+  .titlebar {
+    height: 38px; -webkit-app-region: drag;
+    display: flex; align-items: center; justify-content: center;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px; font-weight: 600; color: var(--muted);
+  }
+  .wrap { padding: 22px 26px; }
+  .section { margin-bottom: 18px; }
+  .section h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+  }
+  .field-label { margin-bottom: 5px; font-size: 13px; }
+  .field-hint { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row.spaced { justify-content: space-between; margin-top: 8px; }
+  input[type=text] {
+    flex: 1; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); color: var(--text); padding: 8px 11px;
+    font-size: 13px; font-family: monospace;
+    -webkit-user-select: text; user-select: text;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+  .conn-status { font-size: 12px; color: var(--muted); flex: 1; margin-top: 8px; display: block; }
+  .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .info-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 11px; }
+  .info-box .lbl { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; }
+  .info-box .val { font-size: 12px; font-family: monospace; }
+  .sep { height: 1px; background: var(--border); margin: 18px 0; }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+  button.btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius-sm); padding: 7px 18px; font-size: 13px; cursor: pointer; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-fill); }
+  button.btn:hover { filter: brightness(1.12); }
+  button.btn:active { filter: brightness(.92); }
+  button.btn:disabled { opacity: .45; cursor: default; filter: none; }
+  .msg { font-size: 11px; margin-right: auto; align-self: center; }
+  .msg.ok { color: var(--ok); }
+  .msg.err { color: var(--error); }
+
+  /* Accessibility: keyboard focus ring */
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <div class="titlebar" id="t-title">OpenSwarm Settings</div>
+  <div class="wrap">
+
+    <div class="section">
+      <h2 id="t-sec-server">Daemon</h2>
+      <div class="field-label" id="t-url-label">Server URL</div>
+      <div class="row">
+        <input type="text" id="server-url" placeholder="http://127.0.0.1:3847" />
+        <button class="btn" id="test-btn" data-i="test">Test</button>
+      </div>
+      <div class="field-hint" id="t-url-hint">The OpenSwarm daemon's web server (default http://127.0.0.1:3847).</div>
+      <span class="conn-status" id="conn-status"></span>
+      <div class="info-grid" id="server-info" style="display:none">
+        <div class="info-box"><div class="lbl" id="t-ver">Version</div><div class="val" id="info-version">—</div></div>
+        <div class="info-box"><div class="lbl" id="t-uptime">Uptime</div><div class="val" id="info-uptime">—</div></div>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="section">
+      <h2 id="t-sec-app">App</h2>
+      <label class="row spaced" style="cursor:pointer">
+        <span style="color:var(--muted);font-size:12px" id="t-close-hint">Closing the window hides it to the tray instead of quitting</span>
+        <input type="checkbox" id="close-to-tray" />
+      </label>
+    </div>
+
+    <div class="actions">
+      <span class="msg ok" id="save-msg"></span>
+      <span class="msg err" id="err-msg"></span>
+      <button class="btn" id="cancel-btn" data-i="close">Close</button>
+      <button class="btn primary" id="save-btn" data-i="save">Save &amp; Go</button>
+    </div>
+  </div>
+
+<script>
+const T = Object.freeze({
+    checking:   'Checking…',
+    noUrl:      'Enter a URL first.',
+    connOk:     (version, uptime) => version
+                  ? (uptime ? `Connected · v${version} · up ${uptime}` : `Connected · v${version}`)
+                  : 'Connected',
+    connWrongApp: 'Reachable, but not an OpenSwarm daemon',
+    connErr:    (msg) => `Connection failed: ${msg}`,
+    saved:      'Saved — navigating…',
+    saveErr:    (msg) => `Save failed: ${msg}`,
+});
+
+const { invoke } = window.__TAURI__?.core ?? window.__TAURI__ ?? {};
+async function tauriCall(cmd, args) {
+  if (invoke) return invoke(cmd, args);
+  if (cmd === 'get_server_url') return 'http://127.0.0.1:3847';
+  if (cmd === 'get_close_to_tray') return true;
+  if (cmd === 'test_daemon_connection') return { reachable: false, is_openswarm: false };
+  console.log('[mock]', cmd, args);
+}
+
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// Inline SVG check icon replacing text glyphs in status lines.
+const SVG_CHECK = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px"><path d="M3 8.5l3.2 3.2L13 4.5"/></svg>';
+function okHTML(s) { return SVG_CHECK + ' ' + esc(s); }
+
+function fmtUptime(s) {
+  if (typeof s !== 'number' || !isFinite(s) || s < 0) return '';
+  if (s < 60) return Math.round(s) + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  if (s < 86400) return (s / 3600).toFixed(1) + 'h';
+  return (s / 86400).toFixed(1) + 'd';
+}
+
+// Initial load
+(async () => {
+  const url = await tauriCall('get_server_url').catch(() => 'http://127.0.0.1:3847');
+  document.getElementById('server-url').value = url;
+  const closeToTray = await tauriCall('get_close_to_tray').catch(() => true);
+  document.getElementById('close-to-tray').checked = closeToTray !== false;
+})();
+
+// Close-to-tray toggle — persisted immediately.
+document.getElementById('close-to-tray').addEventListener('change', async (e) => {
+  const errMsg = document.getElementById('err-msg');
+  errMsg.textContent = '';
+  try {
+    await tauriCall('set_close_to_tray', { value: e.target.checked });
+  } catch (err) {
+    errMsg.textContent = T.saveErr(err?.message ?? err);
+    e.target.checked = !e.target.checked;
+  }
+});
+
+// Connection test — probes /api/health through the shell (test_daemon_connection):
+// this page runs on the Tauri asset origin, which the daemon's CORS allowlist
+// does not (and should not) grant, so a direct fetch would always fail.
+document.getElementById('test-btn').addEventListener('click', async () => {
+  const base = document.getElementById('server-url').value.trim().replace(/\/$/, '');
+  const status = document.getElementById('conn-status');
+  const info = document.getElementById('server-info');
+  if (!base) { status.textContent = T.noUrl; status.style.color = 'var(--error)'; return; }
+  status.textContent = T.checking; status.style.color = 'var(--muted)';
+  document.getElementById('test-btn').disabled = true;
+  try {
+    const d = await tauriCall('test_daemon_connection', { url: base });
+    if (!d?.reachable) throw new Error('daemon unreachable');
+    if (!d.is_openswarm) {
+      status.textContent = T.connWrongApp;
+      status.style.color = 'var(--warning)';
+      info.style.display = 'none';
+      return;
+    }
+    status.innerHTML = okHTML(T.connOk(d.backend_version, fmtUptime(d.uptime_s)));
+    status.style.color = 'var(--ok)';
+    document.getElementById('info-version').textContent = d.backend_version ?? '—';
+    document.getElementById('info-uptime').textContent = fmtUptime(d.uptime_s) || '—';
+    info.style.display = 'grid';
+  } catch (e) {
+    status.textContent = T.connErr(typeof e === 'string' ? e : (e?.message || ''));
+    status.style.color = 'var(--error)';
+    info.style.display = 'none';
+  } finally {
+    document.getElementById('test-btn').disabled = false;
+  }
+});
+
+// Save
+document.getElementById('save-btn').addEventListener('click', async () => {
+  const url = document.getElementById('server-url').value.trim().replace(/\/$/, '');
+  const saveMsg = document.getElementById('save-msg');
+  const errMsg  = document.getElementById('err-msg');
+  if (!url) { errMsg.textContent = T.noUrl; return; }
+  document.getElementById('save-btn').disabled = true;
+  saveMsg.textContent = ''; errMsg.textContent = '';
+  try {
+    await tauriCall('set_server_url', { url });
+    saveMsg.innerHTML = okHTML(T.saved);
+    setTimeout(closeWin, 1200);
+  } catch (e) {
+    errMsg.textContent = T.saveErr(e?.message ?? e);
+  } finally {
+    document.getElementById('save-btn').disabled = false;
+  }
+});
+
+async function closeWin() {
+  const getCurrentWindow = window.__TAURI__?.window?.getCurrentWindow;
+  if (typeof getCurrentWindow === 'function') {
+    try {
+      await getCurrentWindow().close();
+      return;
+    } catch (e) {
+      console.error('Failed to close settings window:', e);
+    }
+  }
+  window.close();
+}
+document.getElementById('cancel-btn').addEventListener('click', closeWin);
+</script>
+</body>
+</html>

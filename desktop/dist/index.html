@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenSwarm</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        background: #0d1117; color: #8b949e;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        height: 100vh;
+        -webkit-user-select: none; user-select: none;
+      }
+      .logo {
+        font-size: 30px; font-weight: 700; color: #e6edf3;
+        letter-spacing: -1px; margin-bottom: 28px;
+      }
+      .bar {
+        width: 240px; height: 4px; border-radius: 4px;
+        background: #21262d; overflow: hidden;
+      }
+      .fill {
+        height: 100%; width: 0%;
+        background: linear-gradient(90deg, #388bfd, #58a6ff);
+        border-radius: 4px;
+        transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .row {
+        width: 240px; margin-top: 12px;
+        display: flex; justify-content: space-between; align-items: baseline;
+      }
+      .label { font-size: 12px; color: #8b949e; }
+      .pct { font-size: 12px; color: #484f58; font-variant-numeric: tabular-nums; }
+      .console {
+        width: 520px; max-width: 84vw; height: 148px;
+        margin-top: 26px; padding: 10px 12px;
+        background: #010409; border: 1px solid #21262d; border-radius: 8px;
+        overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px; line-height: 1.55; color: #6e7681;
+        -webkit-user-select: text; user-select: text;
+      }
+      .console .ln { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .console .ln:last-child { color: #9aa4b2; }
+      .console .ln .t { color: #388bfd; margin-right: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="logo">OpenSwarm</div>
+    <div class="bar"><div class="fill" id="fill"></div></div>
+    <div class="row">
+      <span class="label" id="label">Connecting…</span>
+      <span class="pct" id="pct">0%</span>
+    </div>
+    <div class="console" id="console"></div>
+    <script>
+      // Rust (wait_and_navigate) calls window.osProgress(pct, label) per boot
+      // phase. A local tween keeps the bar moving even between calls; whenever
+      // Rust supplies a higher target, the tween follows it.
+      let target = 0;       // target % set by Rust
+      let shown = 0;        // % currently rendered
+      const fill = document.getElementById('fill');
+      const pctEl = document.getElementById('pct');
+      const labelEl = document.getElementById('label');
+
+      function render() {
+        // Ease toward the target (micro interpolation against visible stalls).
+        if (shown < target) {
+          shown += Math.max(0.5, (target - shown) * 0.18);
+          if (shown > target) shown = target;
+        }
+        const v = Math.min(100, Math.round(shown));
+        fill.style.width = v + '%';
+        pctEl.textContent = v + '%';
+        requestAnimationFrame(render);
+      }
+      requestAnimationFrame(render);
+
+      // Entry point called from Rust.
+      window.osProgress = function (pct, label) {
+        if (typeof pct === 'number' && pct > target) target = Math.min(100, pct);
+        if (label) labelEl.textContent = label;
+      };
+
+      // Rust (wait_and_navigate) forwards new shell/daemon log lines verbatim.
+      // Real log tail, not a staged animation — keep the last 12 lines.
+      const consoleEl = document.getElementById('console');
+      const MAX_LINES = 12;
+      window.osLog = function (line) {
+        if (!line) return;
+        // The node daemon mostly logs plain '[Tag] message' lines; some carry an
+        // ISO timestamp prefix ('2026-08-08T01:23:45.678Z ...' or
+        // '2026-08-08 01:23:45,123 ...'). Keep only HH:MM:SS when present.
+        let t = '';
+        let body = String(line);
+        const m = body.match(/^\[?\d{4}-\d{2}-\d{2}[ T](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?Z?\]?\s*(.*)$/);
+        if (m) { t = m[1]; body = m[2]; }
+        const div = document.createElement('div');
+        div.className = 'ln';
+        if (t) {
+          const ts = document.createElement('span');
+          ts.className = 't'; ts.textContent = t;
+          div.appendChild(ts);
+        }
+        div.appendChild(document.createTextNode(body));
+        consoleEl.appendChild(div);
+        while (consoleEl.children.length > MAX_LINES) consoleEl.removeChild(consoleEl.firstChild);
+      };
+
+      // Gentle auto-progress in case Rust signals never arrive — stops at 85%.
+      let auto = 0;
+      const autoTimer = setInterval(() => {
+        auto += 1;
+        const ceil = Math.min(85, auto * 2);   // ~42 ticks (~8 s) to reach 85%
+        if (ceil > target) target = ceil;
+        if (target >= 85) clearInterval(autoTimer);
+      }, 200);
+    </script>
+  </body>
+</html>
