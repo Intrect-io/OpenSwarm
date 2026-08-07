@@ -14,7 +14,8 @@
 // 2 = nothing was deployed at all (validation failed / nothing selected),
 // 130 = interrupted.
 
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
@@ -52,14 +53,23 @@ export const WORK_EXIT_FAILED = 1;
 export const WORK_EXIT_NOT_RUN = 2;
 export const WORK_EXIT_INTERRUPTED = 130;
 
-/** The daemon's fan-out admission defaults (autonomousRunner.executeDurably):
- *  capacity-only admit — worktree isolation replaces file-scope serialization. */
-export function buildWorkAdmission(concurrency: number): RepositoryAdmissionPolicy {
+/** The daemon's fan-out admission (autonomousRunner.executeDurably) with the
+ *  repository's own openswarm.json automation policy layered in: capacity-only
+ *  admit (worktree isolation replaces file-scope serialization), but attempt/
+ *  failure/cost circuits and the repo's concurrency cap are authoritative. */
+export function buildWorkAdmission(
+  concurrency: number,
+  automation?: RepoMetadata['automation'],
+): RepositoryAdmissionPolicy {
   return {
-    maxConcurrent: concurrency,
+    maxConcurrent: automation?.maxConcurrent !== undefined
+      ? Math.min(concurrency, automation.maxConcurrent)
+      : concurrency,
     conflictScope: undefined,
-    maxFailuresPerHour: 6,
-    circuitCooldownMs: 60 * 60_000,
+    maxAttemptsPerHour: automation?.maxAttemptsPerHour,
+    maxFailuresPerHour: automation?.maxFailuresPerHour ?? 6,
+    maxCostUsdPerDay: automation?.maxCostUsdPerDay,
+    circuitCooldownMs: (automation?.circuitCooldownMinutes ?? 60) * 60_000,
   };
 }
 
@@ -98,6 +108,7 @@ export interface WorkCommandDeps {
   /** Registers the source as runnerExecution's module-global task source. */
   registerTaskSource?: (source: ITaskSource) => void;
   isValidProjectPath?: (path: string) => Promise<boolean>;
+  isGitRepo?: (path: string) => boolean;
   loadRepoMetadata?: (path: string) => Promise<RepoMetadata | null>;
   getIssue?: (idOrIdentifier: string) => Promise<LinearIssueInfo | null>;
   listIssues?: () => Promise<LinearIssueInfo[]>;
@@ -232,10 +243,36 @@ export async function runWorkCommand(
   const out = deps.out ?? ((line: string) => console.log(line));
   const repoPath = resolve(opts.path ?? process.cwd());
 
+  // In --json mode stdout carries one document. Redirection must cover the
+  // WHOLE lifecycle: loadConfig/setTaskSource/getMyIssues all console.log
+  // during bootstrap, and any of it ahead of the JSON body breaks `| jq`.
+  const restoreConsole = opts.json ? redirectConsoleLogToStderr() : null;
+  try {
+    return await runWorkCommandInner(opts, deps, { log, out, repoPath });
+  } finally {
+    restoreConsole?.();
+  }
+}
+
+async function runWorkCommandInner(
+  opts: WorkCommandOptions,
+  deps: WorkCommandDeps,
+  io: { log: (line: string) => void; out: (line: string) => void; repoPath: string },
+): Promise<number> {
+  const { log, out, repoPath } = io;
+
   // ---- Bootstrap -----------------------------------------------------------
   const validate = deps.isValidProjectPath ?? isValidProjectPath;
   if (!(await validate(repoPath))) {
     log(`Not a project directory (needs .git, package.json, or pyproject.toml): ${repoPath}`);
+    return WORK_EXIT_NOT_RUN;
+  }
+  // Worktree mode is this command's contract, and worktrees need a real git
+  // repository — a bare package.json/pyproject.toml directory would pass the
+  // generic check, then resolve issues, claim durable runs, and spend model
+  // budget on draft analysis before createWorktree inevitably fails.
+  if (!(deps.isGitRepo ?? ((p: string) => existsSync(join(p, '.git'))))(repoPath)) {
+    log(`Not a git repository (worktree fan-out requires one): ${repoPath}`);
     return WORK_EXIT_NOT_RUN;
   }
 
@@ -266,6 +303,14 @@ export async function runWorkCommand(
   }
   const projectId = meta?.linear?.projectId;
 
+  // Repository automation policy is authoritative here too — `openswarm work`
+  // spends model budget and publishes PRs exactly like the daemon does, and
+  // openswarm.json's kill switch / spend limits exist to bound that.
+  if (meta?.automation?.enabled === false) {
+    log(`Automation is disabled for this repository (openswarm.json automation.enabled: false) — remove that setting to allow \`openswarm work\`.`);
+    return WORK_EXIT_NOT_RUN;
+  }
+
   // ---- Issue resolution ----------------------------------------------------
   const directIds = [...new Set((opts.issueIds ?? []).map((id) => id.trim()).filter(Boolean))];
   const skipped: Array<{ identifier: string; reason: string }> = [];
@@ -289,6 +334,15 @@ export async function runWorkCommand(
       seen.add(issue.id);
       if ((WORK_SKIP_STATES as readonly string[]).includes(issue.state)) {
         skipped.push({ identifier: issue.identifier, reason: `state is ${issue.state}` });
+      } else if (projectId && issue.project?.id !== projectId) {
+        // An authoritative repo mapping exists and this issue belongs to a
+        // different Linear project — running it here would edit the wrong
+        // codebase, publish a PR from it, and mark the foreign issue Done.
+        // (Repos without a mapping keep the explicit-id escape hatch.)
+        skipped.push({
+          identifier: issue.identifier,
+          reason: `belongs to a different Linear project than this repo's mapping`,
+        });
       } else {
         picked.push(issue);
       }
@@ -320,23 +374,58 @@ export async function runWorkCommand(
     }
   }
 
+  // Blocked-by gate: a dependent fanned out concurrently with (or before) its
+  // blocker runs from the base branch without the blocker's changes and can
+  // publish prematurely. Any unresolved blocker skips the issue — including
+  // one selected in this same batch (it isn't finished either).
+  if (picked.some((issue) => (issue.blockedBy?.length ?? 0) > 0)) {
+    const getIssueForBlockCheck = deps.getIssue
+      ?? (async (id: string) => (await import('../linear/linear.js')).getIssue(id));
+    const blockerStates = new Map<string, string | null>();
+    const blockerIds = [...new Set(picked.flatMap((issue) => issue.blockedBy ?? []))];
+    await Promise.all(blockerIds.map(async (id) => {
+      const blocker = await getIssueForBlockCheck(id).catch(() => null);
+      blockerStates.set(id, blocker?.state ?? null);
+    }));
+    const blockerDone = (state: string | null): boolean =>
+      state === null // unknown/deleted blocker — don't dead-lock on stale relations
+      || ['done', 'canceled', 'cancelled'].includes(state.toLowerCase());
+    picked = picked.filter((issue) => {
+      const open = (issue.blockedBy ?? []).filter((id) => !blockerDone(blockerStates.get(id) ?? null));
+      if (open.length === 0) return true;
+      skipped.push({ identifier: issue.identifier, reason: `blocked by ${open.length} unresolved issue(s)` });
+      return false;
+    });
+  }
+
   for (const skip of skipped) log(`Skipping ${skip.identifier}: ${skip.reason}`);
   if (picked.length === 0) {
     log('No issues selected — nothing to deploy.');
     return WORK_EXIT_NOT_RUN;
   }
 
-  const tasks = picked.map((issue) => enrichTaskFromState(linearIssueToTask({
-    id: issue.id,
-    identifier: issue.identifier,
-    title: issue.title,
-    description: issue.description,
-    priority: issue.priority,
-    state: issue.state,
-    labels: issue.labels,
-    blockedBy: issue.blockedBy,
-    project: issue.project ? { id: issue.project.id, name: issue.project.name } : undefined,
-  })));
+  const tasks = picked.map((issue) => {
+    const task = enrichTaskFromState(linearIssueToTask({
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      description: issue.description,
+      priority: issue.priority,
+      state: issue.state,
+      labels: issue.labels,
+      blockedBy: issue.blockedBy,
+      project: issue.project ? { id: issue.project.id, name: issue.project.name } : undefined,
+    }));
+    task.explicitDispatch = true;
+    // Real issue age, not Date.now(): duplicate grooming keeps the OLDER of
+    // two overlapping issues as canonical, and fabricated timestamps let
+    // selection order cancel the genuinely older issue.
+    if (issue.createdAt) {
+      const created = Date.parse(issue.createdAt);
+      if (Number.isFinite(created)) task.createdAt = created;
+    }
+    return task;
+  });
 
   const concurrency = opts.concurrency
     ?? Math.min(tasks.length, config.autonomous?.maxConcurrentTasks ?? 4);
@@ -407,7 +496,7 @@ export async function runWorkCommand(
       maxActiveForProject: o.maxActive,
     })))({ dbPath: config.autonomous?.automationDbPath, maxActive: concurrency });
 
-  const admission = buildWorkAdmission(concurrency);
+  const admission = buildWorkAdmission(concurrency, meta?.automation);
   const exec = deps.executePipeline ?? executePipeline;
 
   const sigint = new AbortController();
@@ -424,10 +513,27 @@ export async function runWorkCommand(
     return () => process.removeListener('SIGINT', handler);
   }))(onSigint);
 
-  const restoreConsole = opts.json ? redirectConsoleLogToStderr() : null;
   let settledRows: Array<{ value?: PipelineResult; error?: unknown }>;
   try {
     settledRows = await runPool(plan, concurrency, async (row) => {
+      // Ctrl-C: runPool keeps pulling queued rows — skip them outright instead
+      // of entering coordinator.execute, which would still claim the issue and
+      // run comment refresh + draft analysis before the abort lands.
+      if (sigint.signal.aborted) {
+        return {
+          success: false,
+          sessionId: `work-interrupted-${Date.now()}`,
+          stages: [],
+          finalStatus: 'cancelled',
+          totalDuration: 0,
+          iterations: 0,
+          taskContext: {
+            issueIdentifier: row.task.issueIdentifier,
+            projectPath: repoPath,
+            taskTitle: row.task.title,
+          },
+        } satisfies PipelineResult;
+      }
       log(`[${row.task.issueIdentifier}] deploying${row.resumes ? ' (resume)' : ''}…`);
       return coordinator.execute(
         row.task,
@@ -464,16 +570,20 @@ export async function runWorkCommand(
     });
 
     // Deliver queued completion effects (Done transition + completion comment)
-    // now instead of leaving them for the next daemon start.
+    // now instead of leaving them for the next daemon start. drainOutbox's
+    // default batch is 20 — loop until a pass applies nothing, or issues past
+    // the twentieth would report success while still In Progress on Linear.
     try {
-      await coordinator.drainOutbox(
-        (effect) => (deps.deliverEffect ?? deliverWorkCompletionEffect)(effect, source),
-      );
+      const deliver = (effect: EffectClaim) =>
+        (deps.deliverEffect ?? deliverWorkCompletionEffect)(effect, source);
+      for (let pass = 0; pass < 50; pass++) {
+        const drained = await coordinator.drainOutbox(deliver) as { applied?: number } | undefined;
+        if (!drained || (drained.applied ?? 0) === 0) break;
+      }
     } catch (err) {
       log(`Completion delivery failed — the shared outbox retains it for retry (daemon or next run): ${err instanceof Error ? err.message : String(err)}`);
     }
   } finally {
-    restoreConsole?.();
     uninstallSigint();
     coordinator.close();
   }

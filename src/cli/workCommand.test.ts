@@ -6,6 +6,7 @@ import type { ITaskSource } from '../automation/taskSource.js';
 import type { ExecutionContext } from '../automation/runnerExecution.js';
 import type { ExecutionDurabilityHooks } from '../automation/durableRunCoordinator.js';
 import type { EffectClaim, EffectInput } from '../automation/runLedger.js';
+import type { RepoMetadata } from '../support/repoMetadata.js';
 import {
   buildWorkAdmission,
   formatWorkSummary,
@@ -76,7 +77,10 @@ function fakeCoordinator(): WorkCoordinator & { effects: EffectInput[]; closed: 
       return result;
     },
     async drainOutbox(deliver) {
-      for (const [index, effect] of effects.entries()) {
+      // Mirrors the real ledger: delivered effects leave the outbox, so a
+      // second pass applies zero (the command's drain loop relies on this).
+      const pending = effects.splice(0, effects.length);
+      for (const [index, effect] of pending.entries()) {
         await deliver({
           ...effect,
           id: index + 1,
@@ -87,7 +91,7 @@ function fakeCoordinator(): WorkCoordinator & { effects: EffectInput[]; closed: 
           leaseExpiresAt: Date.now() + 60_000,
         } as unknown as EffectClaim);
       }
-      return { applied: effects.length, retried: 0, dead: 0 };
+      return { applied: pending.length, retried: 0, dead: 0 };
     },
     close: () => {
       closed = true;
@@ -115,6 +119,7 @@ function baseDeps(overrides: Partial<WorkCommandDeps> = {}): WorkCommandDeps & {
     ensureTaskSource: async () => fakeSource,
     registerTaskSource: vi.fn(),
     isValidProjectPath: async () => true,
+    isGitRepo: () => true,
     loadRepoMetadata: async () => null,
     getIssue: async (id) => issue({ identifier: id, id: `uuid-${id}` }),
     hasRecoverableWorktree: async () => false,
@@ -130,6 +135,98 @@ function baseDeps(overrides: Partial<WorkCommandDeps> = {}): WorkCommandDeps & {
   } as WorkCommandDeps;
   return Object.assign(deps, { logs, outs, coordinator, exec });
 }
+
+describe('runWorkCommand — review-finding gates (INT-3387)', () => {
+  it('refuses a repo whose openswarm.json disables automation', async () => {
+    const deps = baseDeps({
+      loadRepoMetadata: async () => ({ schemaVersion: 1, automation: { enabled: false } } as unknown as RepoMetadata),
+    });
+    const code = await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_NOT_RUN);
+    expect(deps.exec).not.toHaveBeenCalled();
+    expect(deps.logs.join('\n')).toMatch(/automation\.enabled: false/);
+  });
+
+  it('layers repo automation limits into admission', () => {
+    const admission = buildWorkAdmission(8, {
+      enabled: true,
+      maxConcurrent: 2,
+      maxAttemptsPerHour: 5,
+      maxFailuresPerHour: 3,
+      maxCostUsdPerDay: 10,
+      circuitCooldownMinutes: 30,
+    });
+    expect(admission).toMatchObject({
+      maxConcurrent: 2,
+      maxAttemptsPerHour: 5,
+      maxFailuresPerHour: 3,
+      maxCostUsdPerDay: 10,
+      circuitCooldownMs: 30 * 60_000,
+    });
+    // No policy → CLI concurrency + daemon defaults.
+    expect(buildWorkAdmission(8)).toMatchObject({ maxConcurrent: 8, maxFailuresPerHour: 6 });
+  });
+
+  it("skips a direct id that belongs to a different Linear project than the repo's mapping", async () => {
+    const deps = baseDeps({
+      loadRepoMetadata: async () => ({ schemaVersion: 1, linear: { projectId: 'proj-1' } } as unknown as RepoMetadata),
+      getIssue: async (id) => issue({
+        identifier: id,
+        id: `uuid-${id}`,
+        project: id === 'INT-2' ? { id: 'other-proj', name: 'Other' } : { id: 'proj-1', name: 'OpenSwarm' },
+      }),
+    });
+    const code = await runWorkCommand({ issueIds: ['INT-1', 'INT-2'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_OK);
+    expect(deps.exec).toHaveBeenCalledTimes(1);
+    expect(deps.logs.join('\n')).toMatch(/INT-2.*different Linear project/);
+  });
+
+  it('skips an issue whose blockers are unresolved — including a blocker selected in the same batch', async () => {
+    const blockerUuid = 'uuid-INT-1';
+    const deps = baseDeps({
+      getIssue: async (id) => {
+        if (id === 'INT-1' || id === blockerUuid) return issue({ identifier: 'INT-1', id: blockerUuid, state: 'Todo' });
+        return issue({ identifier: id, id: `uuid-${id}`, blockedBy: [blockerUuid] });
+      },
+    });
+    const code = await runWorkCommand({ issueIds: ['INT-1', 'INT-2'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_OK);
+    // Only the blocker runs; the dependent is skipped with a reason.
+    expect(deps.exec).toHaveBeenCalledTimes(1);
+    expect(deps.logs.join('\n')).toMatch(/INT-2.*blocked by 1 unresolved/);
+  });
+
+  it('lets an issue through when its blockers are Done', async () => {
+    const deps = baseDeps({
+      getIssue: async (id) => {
+        if (id === 'blocker-uuid') return issue({ identifier: 'INT-9', id: 'blocker-uuid', state: 'Done' });
+        return issue({ identifier: id, id: `uuid-${id}`, blockedBy: ['blocker-uuid'] });
+      },
+    });
+    const code = await runWorkCommand({ issueIds: ['INT-2'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_OK);
+    expect(deps.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the real Linear createdAt for grooming order instead of Date.now()', async () => {
+    const deps = baseDeps({
+      getIssue: async (id) => issue({ identifier: id, id: `uuid-${id}`, createdAt: '2026-01-02T03:04:05.000Z' }),
+    });
+    await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    const task = (deps.exec as ReturnType<typeof vi.fn>).mock.calls[0][1] as TaskItem;
+    expect(task.createdAt).toBe(Date.parse('2026-01-02T03:04:05.000Z'));
+  });
+
+  it('refuses a non-git directory before resolving anything', async () => {
+    const deps = baseDeps({ isGitRepo: () => false });
+    const getIssueSpy = vi.fn();
+    deps.getIssue = getIssueSpy as unknown as WorkCommandDeps['getIssue'];
+    const code = await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_NOT_RUN);
+    expect(getIssueSpy).not.toHaveBeenCalled();
+  });
+});
 
 describe('runWorkCommand — direct issue ids (INT-3387)', () => {
   it('deploys one pipeline per issue with the work command contract in the context', async () => {

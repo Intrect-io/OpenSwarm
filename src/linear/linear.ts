@@ -75,6 +75,7 @@ interface RawIssueNode {
   title: string;
   description?: string | null;
   priority: number;
+  createdAt?: string;
   updatedAt?: string;
   state?: { name?: string } | null;
   project?: { id: string; name: string; icon?: string | null; color?: string | null } | null;
@@ -91,6 +92,7 @@ const ISSUES_QUERY = `
         title
         description
         priority
+        createdAt
         state { name }
         project { id name icon color }
         labels { nodes { name } }
@@ -673,6 +675,7 @@ export async function getMyIssues(
           labels: issue.labels?.nodes?.map((l) => l.name) ?? [],
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
+          createdAt: issue.createdAt,
         } as LinearIssueInfo);
       }
 
@@ -781,6 +784,25 @@ export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssue
       getProjectInfo(issue),
     ]);
 
+    // Blockers from BOTH sources. The bulk (slim) path only parses prose;
+    // this single-issue path can afford the structured-relations call, and
+    // `openswarm work`'s unresolved-blocker gate depends on it — without
+    // this, direct-id dispatch never saw any blocker at all.
+    const blockedBy = new Set<string>();
+    try {
+      const inverse = await issue.inverseRelations();
+      for (const rel of inverse.nodes) {
+        if (rel.type !== 'blocks') continue;
+        const blocker = await rel.issue;
+        if (blocker?.id && blocker.id !== issue.id) blockedBy.add(blocker.id);
+      }
+    } catch {
+      // relations unavailable — prose below still covers the common case
+    }
+    for (const ident of parseBlockerIdentifiers(issue.description ?? undefined)) {
+      if (ident.toUpperCase() !== issue.identifier.toUpperCase()) blockedBy.add(ident);
+    }
+
     return {
       id: issue.id,
       identifier: issue.identifier,
@@ -796,6 +818,8 @@ export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssue
         user: undefined,
       })),
       project,
+      blockedBy: blockedBy.size > 0 ? [...blockedBy] : undefined,
+      createdAt: issue.createdAt instanceof Date ? issue.createdAt.toISOString() : undefined,
     };
   } catch (error) {
     // Fixed first argument: the id is user-supplied (reachable from the
