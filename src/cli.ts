@@ -464,6 +464,7 @@ program
   .option('--draft', 'create: open as draft')
   .option('--json', 'status: print machine-readable JSON')
   .option('--fresh', 'review: run a brand-new code review of the PR diff instead of addressing existing feedback')
+  .option('--all', 'review: review every open PR in the repo instead of a single one')
   .action(async (action: string, opts: {
     path?: string;
     number?: string;
@@ -479,6 +480,7 @@ program
     draft?: boolean;
     json?: boolean;
     fresh?: boolean;
+    all?: boolean;
   }) => {
     try {
       const { runPrCommand } = await import('./cli/prCommand.js');
@@ -497,6 +499,7 @@ program
         draft: opts.draft,
         json: opts.json,
         fresh: opts.fresh,
+        all: opts.all,
       });
       console.log(result.message);
       if (result.exitCode) process.exitCode = result.exitCode;

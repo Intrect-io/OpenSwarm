@@ -14,7 +14,7 @@ vi.mock('node:child_process', () => {
   return { execFile };
 });
 
-const { parsePRRef, resolveRepoName, resolvePR, toPRInfo } = await import('./prResolve.js');
+const { parsePRRef, resolveRepoName, resolveOriginRepo, resolvePR, toPRInfo } = await import('./prResolve.js');
 
 beforeEach(() => {
   execImpl.mockReset();
@@ -50,6 +50,30 @@ describe('resolveRepoName (INT-3282)', () => {
   it('throws when gh returns something without a slash', async () => {
     execImpl.mockResolvedValueOnce({ stdout: 'garbage\n', stderr: '' });
     await expect(resolveRepoName('/tmp/proj')).rejects.toThrow(/Could not resolve repository name/);
+  });
+});
+
+describe('resolveOriginRepo (INT-3282)', () => {
+  it('hands origin\'s own URL to gh repo view, not a bare gh repo view', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'https://github.com/o/r.git\n', stderr: '' }) // git remote get-url origin
+      .mockResolvedValueOnce({ stdout: 'o/r\n', stderr: '' }); // gh repo view <url>
+    const result = await resolveOriginRepo('/tmp/proj');
+    expect(result).toBe('o/r');
+    expect(execImpl).toHaveBeenCalledWith('git', ['remote', 'get-url', 'origin']);
+    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['repo', 'view', 'https://github.com/o/r.git']));
+  });
+
+  it('throws when gh returns something without a slash for the origin URL', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'https://github.com/o/r.git\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'garbage\n', stderr: '' });
+    await expect(resolveOriginRepo('/tmp/proj')).rejects.toThrow(/Could not resolve repository name for origin/);
+  });
+
+  it('propagates a failure to determine origin\'s URL', async () => {
+    execImpl.mockRejectedValueOnce(new Error('fatal: No such remote \'origin\''));
+    await expect(resolveOriginRepo('/tmp/proj')).rejects.toThrow(/No such remote/);
   });
 });
 

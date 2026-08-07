@@ -17,7 +17,7 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
-import { checkPRCIStatus, getActiveFailures, getAllFailedRuns, getPRChecks } from './github.js';
+import { checkPRCIStatus, getActiveFailures, getAllFailedRuns, getOpenPRs, getOpenPRsOrThrow, getPRChecks } from './github.js';
 
 function mockGhJson(value: unknown): void {
   execFileMock.mockImplementationOnce((...args: unknown[]) => {
@@ -184,5 +184,64 @@ describe('getActiveFailures', () => {
     })));
     const failures = await getActiveFailures('owner/repo', 30);
     expect(failures).toHaveLength(5);
+  });
+});
+
+describe('getOpenPRs / getOpenPRsOrThrow (INT-3282)', () => {
+  beforeEach(() => {
+    execFileMock.mockReset();
+  });
+
+  it('defaults the limit to gh\'s own 30 — the daemon cron scan should not suddenly grow (INT-3282 review finding)', async () => {
+    mockGhJson([]);
+    await getOpenPRs('owner/repo');
+    const args = execFileMock.mock.calls[0]?.[1] as string[];
+    const limitIndex = args.indexOf('--limit');
+    expect(limitIndex).toBeGreaterThan(-1);
+    expect(Number(args[limitIndex + 1])).toBe(30);
+  });
+
+  it('accepts an explicit higher limit for callers that mean "every open PR" (INT-3282 review finding)', async () => {
+    mockGhJson([]);
+    await getOpenPRs('owner/repo', 1000);
+    const args = execFileMock.mock.calls[0]?.[1] as string[];
+    const limitIndex = args.indexOf('--limit');
+    expect(Number(args[limitIndex + 1])).toBe(1000);
+  });
+
+  it('getOpenPRs swallows a gh failure and returns an empty list', async () => {
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args.at(-1) as (err: Error | null, stdout: string, stderr: string) => void;
+      callback(new Error('gh: authentication required'), '', '');
+    });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(getOpenPRs('owner/repo')).resolves.toEqual([]);
+    log.mockRestore();
+  });
+
+  it('getOpenPRsOrThrow propagates a gh failure instead of masking it as zero PRs (INT-3282 review finding)', async () => {
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args.at(-1) as (err: Error | null, stdout: string, stderr: string) => void;
+      callback(new Error('gh: authentication required'), '', '');
+    });
+    await expect(getOpenPRsOrThrow('owner/repo')).rejects.toThrow(/authentication required/);
+  });
+
+  it('getOpenPRsOrThrow maps PR fields correctly, including isFork from isCrossRepository', async () => {
+    mockGhJson([
+      { number: 9, title: 'Ship it', headRefName: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9', author: { login: 'someone' }, isCrossRepository: false },
+      { number: 10, title: 'Fork contribution', headRefName: 'patch-1', createdAt: '2026-08-06T00:00:00.000Z', url: 'https://example/pr/10', author: { login: 'contributor' }, isCrossRepository: true },
+    ]);
+    const prs = await getOpenPRsOrThrow('owner/repo');
+    expect(prs).toEqual([
+      {
+        repo: 'owner/repo', number: 9, title: 'Ship it', branch: 'feat/x',
+        createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9', author: 'someone', isFork: false,
+      },
+      {
+        repo: 'owner/repo', number: 10, title: 'Fork contribution', branch: 'patch-1',
+        createdAt: '2026-08-06T00:00:00.000Z', url: 'https://example/pr/10', author: 'contributor', isFork: true,
+      },
+    ]);
   });
 });

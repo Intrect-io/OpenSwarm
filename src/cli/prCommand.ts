@@ -7,9 +7,10 @@ import { resolve } from 'node:path';
 import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.js';
 import { loadConfig } from '../core/config.js';
 import type { DefaultRolesConfig, ConflictResolverConfig } from '../core/types.js';
-import { parsePRRef, resolvePR, toPRInfo, type ResolvePROptions } from './prResolve.js';
+import { parsePRRef, resolvePR, resolveOriginRepo, toPRInfo, type ResolvePROptions } from './prResolve.js';
 import { formatPrStatus, gatherPrStatus, type PrStatusSnapshot } from './prStatus.js';
 import { createPrFromCwd, type PrCreateOptions } from './prCreate.js';
+import { getOpenPRsOrThrow } from '../github/github.js';
 
 export type PrAction = 'status' | 'fix' | 'review' | 'watch' | 'create';
 
@@ -40,6 +41,8 @@ export interface PrCommandOptions {
   json?: boolean;
   /** review: run a brand-new code review of the PR diff instead of addressing existing feedback */
   fresh?: boolean;
+  /** review: review every open PR in the repo instead of a single one (current branch's PR or --number) */
+  all?: boolean;
 }
 
 export interface PrCommandDeps {
@@ -66,6 +69,10 @@ export interface PrCommandDeps {
     options?: { timeoutMs?: number; pollIntervalMs?: number },
   ) => Promise<{ status: string }>;
   create?: (opts: PrCreateOptions) => Promise<{ url: string; message: string }>;
+  /** review --all: repo → every open PR. */
+  listOpenPRs?: (repo: string) => Promise<Array<{ repo: string; number: number; title: string; branch: string; url: string; isFork?: boolean }>>;
+  /** review --all: repo override → cwd's own repo. */
+  resolveRepo?: (cwd: string, explicitRepo?: string) => Promise<string>;
   log?: (line: string) => void;
   loadRoles?: () => DefaultRolesConfig | undefined;
 }
@@ -206,6 +213,72 @@ export async function runPrCommand(
     }
 
     case 'review': {
+      if (opts.all) {
+        const resolveRepo = deps.resolveRepo ?? resolveOriginRepo;
+        const repoOverride = resolveRepoOverride(opts);
+        // Resolved from `cwd` alone (no explicit arg) so this is always the
+        // repo this checkout's `origin` actually points at, never an
+        // unvalidated echo of --repo — reviewOne/fixOne fetch `origin
+        // <pr.branch>` straight out of `cwd`, so if --repo named a different
+        // repository, that fetch would still read from the wrong remote
+        // entirely (INT-3282 review finding).
+        const cwdRepo = await resolveRepo(cwd);
+        if (repoOverride && repoOverride !== cwdRepo) {
+          throw new Error(
+            `--repo ${repoOverride} does not match this checkout's own repo (${cwdRepo}) — ` +
+            `'pr review --all' reviews PRs by fetching into this checkout's local git state, ` +
+            `so --repo must match the repo ${cwd} is actually cloned from.`
+          );
+        }
+        const repo = repoOverride ?? cwdRepo;
+        // `getOpenPRsOrThrow` defaults its limit to gh's own 30 — the daemon
+        // cron scan's expectation — so `--all` (the "every open PR" caller)
+        // requests a much higher one explicitly rather than changing that
+        // default and inflating every cron cycle's PR scan along with it.
+        const prs = await (deps.listOpenPRs ?? ((r: string) => getOpenPRsOrThrow(r, 1000)))(repo);
+        if (!prs.length) {
+          return { message: `No open PRs in ${repo}.`, exitCode: 0 };
+        }
+        log(`Reviewing ${prs.length} open PR(s) in ${repo}…`);
+        const review =
+          deps.reviewOne ??
+          ((pr, path, o) => defaultReviewOne(pr, path, o, loadRoles));
+        const freshReview =
+          deps.freshReviewOne ??
+          ((pr, path, o) => defaultFreshReviewOne(pr, path, o, loadRoles));
+        const run = opts.fresh ? freshReview : review;
+
+        const lines: string[] = [];
+        let failures = 0;
+        let skipped = 0;
+        // Sequential, not Promise.all: reviewOne/fixOne check out pr.branch
+        // in projectPath itself (only freshReview's scratch worktree is
+        // concurrency-safe), so overlapping PRs would fight over the same
+        // working tree.
+        for (const pr of prs) {
+          // Non-fresh review re-application fetches `origin <pr.branch>`
+          // directly, which does not exist under `origin` for a fork PR —
+          // silently trying and counting it as a failure would misreport
+          // "every open PR reviewed" when fork PRs were never reachable in
+          // the first place. --fresh fetches `pull/<n>/head` instead, which
+          // works for forks too.
+          if (!opts.fresh && pr.isFork) {
+            skipped++;
+            lines.push(`⚠ #${pr.number} (${pr.title}): skipped — fork PR, not supported by feedback re-application (use --fresh)`);
+            continue;
+          }
+          const result = await run(pr, cwd, opts);
+          if (!result.success) failures++;
+          const verdict = opts.fresh
+            ? (result.success ? 'approved' : (result.error ?? 'changes requested'))
+            : (result.success ? `feedback addressed (${result.iterations} iteration(s))` : (result.error ?? 'failed'));
+          lines.push(`${result.success ? '✓' : '✗'} #${pr.number} (${pr.title}): ${verdict}`);
+        }
+        const reviewed = prs.length - skipped;
+        lines.push('', `${reviewed - failures}/${reviewed} succeeded${skipped ? ` (${skipped} fork PR(s) skipped)` : ''}.`);
+        return { message: lines.join('\n'), exitCode: failures > 0 ? 1 : 0 };
+      }
+
       const resolved = await (deps.resolve ?? resolvePR)({
         path: cwd,
         number: resolveNumber(opts),
