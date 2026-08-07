@@ -195,11 +195,16 @@ export class DurableRunCoordinator {
       },
     }, now);
 
-    // Todo is the explicit operator-reopen surface. In Progress may be owned by
-    // a human or another daemon and therefore never reactivates a terminal run.
+    // Todo is the autonomous operator-reopen surface. In Progress may be owned
+    // by a human or another daemon and therefore never reactivates a terminal
+    // run on its own — but an explicit user dispatch (issue board / `work`
+    // CLI) IS the operator saying "run this", so it reopens terminal records
+    // regardless of the Linear state it arrived in. Without this, dispatching
+    // a previously-completed issue reports "queued" and then dies as
+    // `superseded` with the issue stranded In Progress. (INT-3388)
     if (
       (record.state === 'DONE' || record.state === 'DECOMPOSED' || record.state === 'CANCELLED')
-      && task.linearState === 'Todo'
+      && (task.linearState === 'Todo' || task.explicitDispatch === true)
     ) {
       this.ledger.markReady(issueId, now);
       return this.ledger.getRun(issueId);
