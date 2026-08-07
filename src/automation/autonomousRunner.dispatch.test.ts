@@ -66,6 +66,23 @@ describe('AutonomousRunner.enqueueIssues (INT-3388)', () => {
     await expect(noConcurrency.enqueueIssues([task('1')], '/x/a')).rejects.toThrow(/maxConcurrentTasks/);
   });
 
+  it('refuses dispatch during an active provider rate-limit hold (review finding)', async () => {
+    const runner = new AutonomousRunner(cfg());
+    (runner as unknown as { rateLimitUntil: number }).rateLimitUntil = Date.now() + 60_000;
+    await expect(runner.enqueueIssues([task('1')], '/x/a')).rejects.toThrow(/rate limit active/);
+  });
+
+  it('enableHeartbeat turns the cron on for an explicit-mode runner exactly once (review finding)', () => {
+    const runner = new AutonomousRunner(cfg({ autonomousHeartbeat: false }));
+    type CronInternal = { cronJob: { stop(): void } | null };
+    expect((runner as unknown as CronInternal).cronJob ?? null).toBeNull();
+    expect(runner.enableHeartbeat()).toBe(true);
+    expect((runner as unknown as CronInternal).cronJob).not.toBeNull();
+    // Second call is a no-op — a cron already exists.
+    expect(runner.enableHeartbeat()).toBe(false);
+    (runner as unknown as CronInternal).cronJob?.stop();
+  });
+
   it('suppresses the automatic post-completion heartbeat re-fire in explicit-dispatch mode (review finding)', async () => {
     vi.useFakeTimers();
     try {
@@ -88,6 +105,36 @@ describe('AutonomousRunner.enqueueIssues (INT-3388)', () => {
       expect(autoBeat).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('AutonomousRunner shutdown claim rollback (INT-3388, review finding)', () => {
+  it('rolls back Linear claims for explicit dispatches discarded by shutdown, using the atomic discard snapshot', async () => {
+    const { updateIssueState, isLinearInitialized } = vi.hoisted(() => ({
+      updateIssueState: vi.fn(async () => true),
+      isLinearInitialized: vi.fn(() => true),
+    }));
+    vi.doMock('../linear/linear.js', () => ({ updateIssueState, isLinearInitialized }));
+    try {
+      const runner = new AutonomousRunner(cfg());
+      const runSpy = vi.fn(async () => {}); // keep queued tasks from executing
+      (runner as unknown as Internal).runAvailableTasks = runSpy;
+
+      const dispatched: TaskItem = { ...task('d1'), explicitDispatch: true, linearState: 'Backlog' };
+      const heartbeatPicked: TaskItem = task('h1'); // no explicitDispatch marker
+      await runner.enqueueIssues([dispatched], '/x/a');
+      // Simulate a heartbeat-enqueued task sharing the queue.
+      (runner as unknown as { enqueueCandidate(t: TaskItem, p: string): boolean }).enqueueCandidate(heartbeatPicked, '/x/a');
+
+      await runner.stop();
+
+      // The dispatched task's claim is restored to its recorded prior state;
+      // the heartbeat task (never claimed at queue time) is untouched.
+      expect(updateIssueState).toHaveBeenCalledWith('d1', 'Backlog');
+      expect(updateIssueState).not.toHaveBeenCalledWith('h1', expect.anything());
+    } finally {
+      vi.doUnmock('../linear/linear.js');
     }
   });
 });

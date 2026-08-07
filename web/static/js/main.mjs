@@ -49,7 +49,9 @@ events.connect();
   await pollHealth();
   setInterval(pollHealth, 10_000);
   try {
-    await picker.load(() => api.localProjects());
+    // /api/work/projects mirrors dispatchWork's allow-list — every offered
+    // path is dispatchable (unlike /api/local-projects, which scans children).
+    await picker.load(() => api.workProjects());
   } catch (err) {
     console.error('Failed to load projects', err);
   }

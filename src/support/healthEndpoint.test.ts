@@ -128,4 +128,38 @@ describe('GET /api/health over the live server', () => {
       await stopWebServer();
     }
   });
+
+  it('answers malformed /api/work requests with 400, not 500 (review finding)', async () => {
+    const { startWebServer, stopWebServer, getWebServerPort } = await import('./web.js');
+    try {
+      await startWebServer(0);
+      const port = getWebServerPort();
+      const base = `http://127.0.0.1:${port}`;
+
+      const badJson = await fetch(`${base}/api/work`, { method: 'POST', body: '{not json' });
+      expect(badJson.status).toBe(400);
+
+      const missingPath = await fetch(`${base}/api/work`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ issueIds: ['x'] }),
+      });
+      expect(missingPath.status).toBe(400);
+
+      const badIds = await fetch(`${base}/api/work`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: '/tmp', issueIds: [42] }),
+      });
+      expect(badIds.status).toBe(400);
+
+      // The picker source mirrors the dispatch boundary: no runner → empty
+      // list, still a clean 200.
+      const projects = await fetch(`${base}/api/work/projects`);
+      expect(projects.status).toBe(200);
+      expect(await projects.json()).toEqual([]);
+    } finally {
+      await stopWebServer();
+    }
+  });
 });

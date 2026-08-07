@@ -15,8 +15,13 @@ export class WorkCards {
   }
 
   seed(stageEvents) {
-    for (const event of stageEvents ?? []) {
-      if (event && typeof event.taskId === 'string') this.onStage(event);
+    for (const raw of stageEvents ?? []) {
+      // /api/stages returns hub-event wrappers ({type:'pipeline:stage', data})
+      // while live SSE handlers receive the bare data — accept both.
+      const event = raw && typeof raw.taskId === 'string'
+        ? raw
+        : (raw?.type === 'pipeline:stage' && raw.data && typeof raw.data.taskId === 'string' ? raw.data : null);
+      if (event) this.onStage(event);
     }
   }
 

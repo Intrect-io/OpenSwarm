@@ -1436,6 +1436,13 @@ export class AutonomousRunner {
       this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
         await this.heartbeat();
       });
+    } else {
+      // Explicit-dispatch mode has no heartbeat to run the artifact
+      // reconciliation that unparks NEEDS_RECONCILE runs — without this,
+      // explicit work interrupted by a crash stays In Progress forever.
+      // Recovery-only: fetch feeds the reconciler; nothing is selected.
+      await this.recoverParkedRunsOnly().catch((error) =>
+        console.error('[AutonomousRunner] Explicit-mode recovery failed:', error));
     }
 
     this.state.isRunning = true;
@@ -1464,6 +1471,54 @@ export class AutonomousRunner {
     }
   }
 
+  /**
+   * Recovery-only startup path for explicit-dispatch mode: run the same
+   * artifact reconciliation a heartbeat would, without any task selection.
+   * The Linear fetch only feeds the reconciler's issueId→task lookup. (INT-3388)
+   */
+  private async rollbackDiscardedDispatchClaims(
+    discarded: Array<{ task: TaskItem }>,
+  ): Promise<void> {
+    const dispatched = discarded.filter(({ task }) => task.explicitDispatch === true && task.issueId);
+    if (dispatched.length === 0) return;
+    const linear = await import('../linear/linear.js');
+    if (!linear.isLinearInitialized()) return;
+    for (const { task } of dispatched) {
+      const prior = (task.linearState ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo';
+      const ok = await linear.updateIssueState(task.issueId!, prior).catch(() => false);
+      console.log(ok
+        ? `[AutonomousRunner] Rolled back queued dispatch claim: ${task.issueIdentifier ?? task.issueId} → ${prior}`
+        : `[AutonomousRunner] WARNING: could not roll back claim for ${task.issueIdentifier ?? task.issueId} — left In Progress`);
+    }
+  }
+
+  private async recoverParkedRunsOnly(): Promise<void> {
+    if (!this.durableRuns.isPrimary) return;
+    if (this.durableRuns.listRuns(['NEEDS_RECONCILE']).length === 0) return;
+    const fetchResult = await fetchLinearTasks();
+    if (fetchResult.error) {
+      console.warn(`[AutonomousRunner] Explicit-mode recovery fetch failed: ${fetchResult.error}`);
+      return;
+    }
+    await this.reconcileDurableArtifacts(fetchResult.tasks);
+  }
+
+  /**
+   * Turn the heartbeat cron on for a runner that was started in
+   * explicit-dispatch mode — the runtime activation path behind Discord's
+   * `!auto start` when startup had `autonomous.enabled: false`. No-op when a
+   * cron already exists. (INT-3388)
+   */
+  enableHeartbeat(): boolean {
+    if (this.stopping || this.cronJob) return false;
+    this.config.autonomousHeartbeat = true;
+    this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
+      await this.heartbeat();
+    });
+    console.log(`[AutonomousRunner] Heartbeat enabled at runtime (schedule: ${this.config.heartbeatSchedule})`);
+    return true;
+  }
+
   stop(): Promise<void> {
     if (!this.stopPromise) this.stopPromise = this.performStop();
     return this.stopPromise;
@@ -1488,6 +1543,15 @@ export class AutonomousRunner {
     const deadline = Date.now() + graceMs;
     const heartbeatAtStop = this.heartbeatCompletion;
     const shutdown = await this.scheduler.shutdown(graceMs);
+    // Queued-but-never-started explicit dispatches were discarded by
+    // shutdown() with no cancellation event — roll their Linear claims back
+    // to the state they were dispatched from, or they sit In Progress forever
+    // with no worker. The discard snapshot is taken atomically inside
+    // shutdown() (same synchronous block as stopping+clearQueue), so none of
+    // these can have started. Heartbeat-selected tasks are untouched: they
+    // were never moved to In Progress at queue time. (INT-3388)
+    await this.rollbackDiscardedDispatchClaims(shutdown.discardedQueue).catch((error) =>
+      console.warn('[AutonomousRunner] Queued-dispatch claim rollback failed:', error));
     const remainingGrace = Math.max(0, deadline - Date.now());
     const activityDrained = await this.waitForRunnerActivity(heartbeatAtStop, remainingGrace);
 
@@ -2161,6 +2225,13 @@ export class AutonomousRunner {
         'without them queued issues would never execute',
       );
     }
+    // Same provider-quota hold the heartbeat honors: dispatching during a
+    // known 429 window would claim issues that cannot run and burn more calls.
+    if (Date.now() < this.rateLimitUntil) {
+      throw new Error(
+        `Provider rate limit active until ${new Date(this.rateLimitUntil).toISOString()} — retry after it resets`,
+      );
+    }
     const queued: string[] = [];
     // The reason distinction matters to the caller's claim-rollback decision:
     // 'duplicate' means the scheduler already owns this issue (another live
@@ -2688,6 +2759,11 @@ export function getRunner(config?: AutonomousConfig): AutonomousRunner {
 export async function startAutonomous(config: AutonomousConfig): Promise<AutonomousRunner> {
   const runner = getRunner(config);
   await runner.start();
+  // A runner already running in explicit-dispatch mode occupies the singleton,
+  // and start() above is a no-op on it — without this, `!auto start` after a
+  // `autonomous.enabled: false` boot would report success while changing
+  // nothing. Runtime activation flips the heartbeat on in place. (INT-3388)
+  if (config.autonomousHeartbeat !== false) runner.enableHeartbeat();
   return runner;
 }
 

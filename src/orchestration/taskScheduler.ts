@@ -605,10 +605,15 @@ export class TaskScheduler extends EventEmitter {
    * executor exit. A timed-out executor remains quarantined and can no longer
    * race a replacement in the same repository.
    */
-  async shutdown(graceMs = 30_000): Promise<{ drained: boolean; remaining: number; quarantined: number }> {
+  async shutdown(graceMs = 30_000): Promise<{ drained: boolean; remaining: number; quarantined: number; discardedQueue: QueuedTask[] }> {
     if (!Number.isFinite(graceMs) || graceMs < 0) throw new Error('graceMs must be a non-negative finite number');
     this.stopping = true;
     this.paused = true;
+    // Snapshotted in the same synchronous block that sets stopping and clears
+    // the queue — none of these tasks can ever start after this point, so a
+    // caller can safely roll back their external claims (Linear In Progress
+    // from explicit dispatch) without racing a freed slot. (INT-3388)
+    const discardedQueue = [...this.taskQueue];
     this.clearQueue();
 
     const running = Array.from(this.runningTasks.values());
@@ -628,6 +633,7 @@ export class TaskScheduler extends EventEmitter {
       drained: this.unsettledExecutors.size === 0 && this.runningTasks.size === 0 && this.quarantinedProjects.size === 0,
       remaining: this.unsettledExecutors.size,
       quarantined: this.quarantinedExecutorCount(),
+      discardedQueue,
     };
   }
 

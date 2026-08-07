@@ -26,8 +26,8 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request('/api/health'),
-  localProjects: () => request('/api/local-projects'),
-  projects: () => request('/api/projects'),
+  // The dispatchable repo set — matches dispatchWork's boundary check exactly.
+  workProjects: () => request('/api/work/projects'),
   workIssues: (path) => request(`/api/work/issues?path=${encodeURIComponent(path)}`),
   dispatchWork: (projectPath, issueIds) =>
     request('/api/work', { method: 'POST', body: JSON.stringify({ projectPath, issueIds }) }),

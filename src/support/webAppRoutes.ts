@@ -77,16 +77,43 @@ export async function tryHandleAppRoutes(
     return true;
   }
 
+  if (url === '/api/work/projects' && req.method === 'GET') {
+    // The dispatchable repo set — exactly what dispatchWork's boundary check
+    // accepts, so the picker can never offer a path that would 403.
+    // (/api/local-projects scans CHILDREN of allowed paths and omits the
+    // allowed repos themselves, so it disagrees with the boundary check.)
+    const paths = runner?.getAllowedProjects() ?? [];
+    writeJson(res, 200, paths.map((path) => ({ path, name: path.split('/').filter(Boolean).pop() ?? path })));
+    return true;
+  }
+
   if (url === '/api/work' && req.method === 'POST') {
+    // Malformed input is a client error, not a daemon failure: parse and
+    // shape-check explicitly (and before the runner-availability check, so a
+    // bad request is reported as such even while the daemon is starting).
+    let body: { issueIds?: unknown; projectPath?: unknown };
+    try {
+      body = JSON.parse(await readBody(req) || '{}');
+    } catch {
+      writeJson(res, 400, { error: 'Request body is not valid JSON' });
+      return true;
+    }
+    if (typeof body.projectPath !== 'string' || !body.projectPath.trim()) {
+      writeJson(res, 400, { error: 'projectPath must be a non-empty string' });
+      return true;
+    }
+    if (!Array.isArray(body.issueIds) || body.issueIds.some((id) => typeof id !== 'string')) {
+      writeJson(res, 400, { error: 'issueIds must be an array of strings' });
+      return true;
+    }
     if (!runner) {
       writeJson(res, 503, { error: 'Runner not available (daemon starting or autonomous config missing)' });
       return true;
     }
     try {
-      const body = JSON.parse(await readBody(req) || '{}');
       const { dispatchWork } = await import('../automation/workRunner.js');
       const result = await dispatchWork(runner, {
-        issueIds: body.issueIds,
+        issueIds: body.issueIds as string[],
         projectPath: body.projectPath,
       });
       writeJson(res, 202, result);

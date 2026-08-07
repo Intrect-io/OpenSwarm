@@ -236,7 +236,7 @@ export async function dispatchWork(
       claimedByUs.set(issue.id, (issue.state ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo');
     }
 
-    tasks.push(enrichTaskFromState(linearIssueToTask({
+    const task = enrichTaskFromState(linearIssueToTask({
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
@@ -245,7 +245,11 @@ export async function dispatchWork(
       state: issue.state,
       labels: issue.labels,
       project: issue.project ? { id: issue.project.id, name: issue.project.name } : undefined,
-    })));
+    }));
+    // Marks the task for durable admission (terminal-record reopen) and for
+    // the shutdown claim-rollback sweep.
+    task.explicitDispatch = true;
+    tasks.push(task);
     items.push({ issueId: issue.id, identifier: issue.identifier, title: issue.title, status: 'queued' });
   }
 
