@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the Info.plist the Tauri v2 macOS bundler generates (same-directory
+     Info.plist convention). Reserved for future usage-description keys; OpenSwarm's
+     shell currently needs no extra entries (the microphone keys vega carried here
+     were removed together with the audio-input entitlement). -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

@@ -1,0 +1,29 @@
+[[permission]]
+identifier = "allow-open-url"
+description = "Allows opening validated external URLs from trusted OpenSwarm windows."
+commands.allow = ["open_url"]
+
+[[permission]]
+identifier = "allow-open-settings"
+description = "Allows the trusted main window to open OpenSwarm settings."
+commands.allow = ["open_settings"]
+
+[[permission]]
+identifier = "allow-request-restart"
+description = "Allows the trusted main window to request a shell restart."
+commands.allow = ["request_restart"]
+
+[[permission]]
+identifier = "allow-restart-daemon"
+description = "Allows trusted OpenSwarm windows to restart the launchd-managed daemon."
+commands.allow = ["restart_daemon"]
+
+[[permission]]
+identifier = "allow-get-close-to-tray"
+description = "Allows trusted OpenSwarm windows to read the close-to-tray preference."
+commands.allow = ["get_close_to_tray"]
+
+[[permission]]
+identifier = "allow-set-close-to-tray"
+description = "Allows the trusted main/settings windows to change the close-to-tray preference."
+commands.allow = ["set_close_to_tray"]
