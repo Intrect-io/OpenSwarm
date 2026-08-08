@@ -32,4 +32,5 @@ export const api = {
   dispatchWork: (projectPath, issueIds) =>
     request('/api/work', { method: 'POST', body: JSON.stringify({ projectPath, issueIds }) }),
   stages: () => request('/api/stages'),
+  quota: () => request('/api/quota'),
 };

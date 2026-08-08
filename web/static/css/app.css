@@ -42,6 +42,15 @@ body {
   font-size: var(--text-xs);
   color: var(--muted);
 }
+
+/* Provider rate-limit gauge — hidden until the daemon observes usage headers. */
+.quota-gauge {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.quota-gauge[hidden] { display: none; }
 .daemon-status .dot {
   width: 8px; height: 8px;
   border-radius: var(--radius-pill);
