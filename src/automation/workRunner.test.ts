@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { homedir } from 'node:os';
 import type { AutonomousRunner } from './autonomousRunner.js';
 
 const linear = vi.hoisted(() => ({
@@ -104,6 +105,17 @@ describe('listWorkIssues', () => {
     linear.isLinearInitialized.mockReturnValue(false);
     await expect(listWorkIssues('/tmp/repo')).rejects.toMatchObject({ statusCode: 503 });
   });
+
+  // allowedProjects stores tilde spellings, so the picker sends them verbatim.
+  // Neither fs nor resolve() expands '~' — reading './~/dev/repo' reported every
+  // such repo as unmapped (INT-3395).
+  it('expands a tilde path before reading the repo mapping', async () => {
+    linear.fetchIssuesForStates.mockResolvedValue({ nodes: [] });
+    await listWorkIssues('~/dev/repo');
+    const readPath = loadRepoMetadataImpl.mock.calls[0][0] as unknown as string;
+    expect(readPath).toBe(`${homedir()}/dev/repo`);
+    expect(readPath).not.toContain('~');
+  });
 });
 
 describe('dispatchWork', () => {
@@ -123,6 +135,19 @@ describe('dispatchWork', () => {
     expect(broadcastEventImpl).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'work:queued' }),
     );
+  });
+
+  it('accepts a tilde projectPath against an absolute allow-list entry (INT-3395)', async () => {
+    linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`));
+    const expanded = `${homedir()}/dev/repo`;
+    const runner = mkRunner({ getAllowedProjects: vi.fn(() => [expanded]) });
+
+    const result = await dispatchWork(runner, { issueIds: ['1'], projectPath: '~/dev/repo' });
+
+    expect(result.queued).toBe(1);
+    // Everything downstream (metadata read, worktree creation) needs the real path.
+    expect(loadRepoMetadataImpl).toHaveBeenCalledWith(expanded);
+    expect(runner.enqueueIssues).toHaveBeenLastCalledWith(expect.anything(), expanded);
   });
 
   it('does not re-claim an issue already In Progress (resume path)', async () => {

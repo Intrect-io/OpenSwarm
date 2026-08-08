@@ -8,7 +8,6 @@
 // pipeline. This module owns validation and Linear-side claiming; it does not
 // run pipelines itself.
 
-import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { AutonomousRunner } from './autonomousRunner.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
@@ -66,8 +65,15 @@ export async function listWorkIssues(projectPath: string): Promise<{
     throw new WorkDispatchError(503, 'Linear is not configured on this daemon');
   }
 
+  // Filesystem reads need a real path. allowedProjects (and therefore the
+  // picker) legitimately carries tilde spellings, and neither fs nor resolve()
+  // expands '~' — '~/dev/x' would be read as './~/dev/x' and report the repo
+  // as unmapped.
+  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
+  const repoPath = normalizeProjectPath(projectPath);
+
   const { loadRepoMetadata } = await import('../support/repoMetadata.js');
-  const meta = await loadRepoMetadata(projectPath);
+  const meta = await loadRepoMetadata(repoPath);
   const projectId = meta?.linear?.projectId;
   if (!projectId) {
     throw new WorkDispatchError(
@@ -116,16 +122,19 @@ export async function dispatchWork(
   runner: AutonomousRunner,
   request: WorkDispatchRequest,
 ): Promise<WorkDispatchResult> {
-  const projectPath = resolve(request.projectPath);
+  // normalizeProjectPath, not resolve(): allowedProjects (and therefore the
+  // picker) legitimately carries tilde spellings, and resolve('~/dev/x')
+  // yields './~/dev/x' — every filesystem step below would then miss.
+  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
+  const projectPath = normalizeProjectPath(request.projectPath);
   if (!existsSync(projectPath)) {
-    throw new WorkDispatchError(400, `Project path does not exist: ${projectPath}`);
+    throw new WorkDispatchError(400, `Project path does not exist: ${request.projectPath}`);
   }
   // Dispatch stays inside the runner's configured project boundary — an
   // authorized dashboard caller must not be able to point agents at an
   // arbitrary local directory just because it exists. Same allow-list the
   // heartbeat path honors.
-  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
-  const canonical = normalizeProjectPath(projectPath);
+  const canonical = projectPath;
   const allowed = runner.getAllowedProjects().map((p) => normalizeProjectPath(p));
   if (!allowed.includes(canonical)) {
     throw new WorkDispatchError(
