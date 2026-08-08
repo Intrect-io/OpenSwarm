@@ -154,6 +154,9 @@ body {
 }
 .deploy-btn:disabled { background: var(--surface2); color: var(--muted); cursor: default; }
 .deploy-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* Two-step confirmation state (in-page consent — the Tauri WebView has no JS dialogs). */
+.deploy-btn.arm { background: var(--warning); }
+#selection-summary.error { color: var(--error); }
 
 .work-cards {
   flex: 1;
