@@ -18,6 +18,7 @@ vi.mock('../automation/runnerState.js', () => ({ getPipelineHistory: getPipeline
 const gitTracker = vi.hoisted(() => ({
   getWorkingDiffDetail: vi.fn(async () => [{ file: 'src/a.ts', added: 3, deleted: 1, isNew: false }]),
   getDiffText: vi.fn(async () => 'diff --git a/src/a.ts b/src/a.ts\n+added'),
+  isGitRepo: vi.fn(async () => true),
 }));
 vi.mock('./gitTracker.js', () => gitTracker);
 
@@ -103,6 +104,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   existsSyncImpl.mockReturnValue(true);
   getPipelineHistoryImpl.mockReturnValue([]);
+  gitTracker.getWorkingDiffDetail.mockResolvedValue([{ file: 'src/a.ts', added: 3, deleted: 1, isNew: false }]);
+  gitTracker.getDiffText.mockResolvedValue('diff --git a/src/a.ts b/src/a.ts\n+added');
+  gitTracker.isGitRepo.mockResolvedValue(true);
   __resetTaskLogsForTests();
   __resetQuotaForTests();
 });
@@ -150,6 +154,18 @@ describe('buildSessionList', () => {
         completedAt: Date.parse('2026-08-08T10:00:00.000Z'),
       }),
     ]);
+  });
+
+  it('keeps a decomposed run distinct from a completed one', () => {
+    const { recent } = buildSessionList(
+      [],
+      [],
+      [historyEntry({ issueId: 'parent-1', success: true, finalStatus: 'decomposed' })],
+      () => ({}),
+      new Map(),
+    );
+    // success:true, but the children own the work now — not a completion.
+    expect(recent[0]).toMatchObject({ status: 'decomposed', finalStatus: 'decomposed' });
   });
 
   it('drops history entries whose task id is back on the board (retry)', () => {
@@ -284,10 +300,34 @@ describe('GET /api/work/diff', () => {
     expect(gitTracker.getWorkingDiffDetail).toHaveBeenCalledWith('/repo/worktree/t1');
   });
 
-  it('caps the requested maxBytes at the hard limit', async () => {
+  it('caps the requested maxBytes at the hard limit and asks for untracked content', async () => {
     const runner = mkRunner({ getRunningTasks: vi.fn(() => [runningTask('t1')]) });
     await call('/api/work/diff?taskId=t1&maxBytes=99999999', runner);
-    expect(gitTracker.getDiffText).toHaveBeenCalledWith('/repo/worktree/t1', undefined, 262_144);
+    // includeUntracked: a brand-new file appears in `files` but `git diff HEAD`
+    // would show no patch for it (review finding).
+    expect(gitTracker.getDiffText).toHaveBeenCalledWith('/repo/worktree/t1', undefined, 262_144, {
+      includeUntracked: true,
+    });
+  });
+
+  it('409s instead of reporting a clean diff when the worktree is no longer a git repo', async () => {
+    gitTracker.getWorkingDiffDetail.mockResolvedValue([]);
+    gitTracker.getDiffText.mockResolvedValue('');
+    gitTracker.isGitRepo.mockResolvedValue(false);
+    const runner = mkRunner({ getRunningTasks: vi.fn(() => [runningTask('t1')]) });
+    const { status, body } = await call('/api/work/diff?taskId=t1', runner);
+    expect(status).toBe(409);
+    expect(body.error).toContain('no longer a valid git repository');
+  });
+
+  it('200s with an empty diff when the worktree is healthy and simply clean', async () => {
+    gitTracker.getWorkingDiffDetail.mockResolvedValue([]);
+    gitTracker.getDiffText.mockResolvedValue('');
+    const runner = mkRunner({ getRunningTasks: vi.fn(() => [runningTask('t1')]) });
+    const { status, body } = await call('/api/work/diff?taskId=t1', runner);
+    expect(status).toBe(200);
+    expect(body.files).toEqual([]);
+    expect(body.diff).toBe('');
   });
 });
 

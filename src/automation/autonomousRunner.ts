@@ -453,6 +453,10 @@ export class AutonomousRunner {
       if (task.issueId) setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
       this.saveTaskState();
       broadcastEvent({ type: 'log', data: { taskId: taskEventKey(task), stage: 'preflight', line: 'Existing open PR owns planned files; deferred for re-check' } });
+      // Terminal for this run: the other scheduler outcomes all emit it, and
+      // consumers keyed on task:completed (transcript retention) would otherwise
+      // hold this task's state forever. (INT-3402 review)
+      broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
       this.scheduleNextHeartbeat();
     });
 
@@ -749,6 +753,11 @@ export class AutonomousRunner {
         finalStatus: timeout ? 'infra_error' : 'failed', failureSignal: timeout ? 'timeout' : undefined,
         totalDuration: Math.max(0, Date.now() - startedAt), iterations: 0,
         taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectName: task.linearProject?.name, projectPath, taskTitle: task.title },
+      });
+      // Terminal for this run — see the superseded handler. (INT-3402 review)
+      broadcastEvent({
+        type: 'task:completed',
+        data: { taskId: taskEventKey(task), success: false, duration: Math.max(0, Date.now() - startedAt) },
       });
       await reportToDiscord(t('runner.pipelineError', { title: `${taskCtx} ${task.title}`, error: error.message }));
       })());

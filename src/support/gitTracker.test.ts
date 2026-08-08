@@ -35,6 +35,34 @@ describe('gitTracker', () => {
     expect(diff).toContain('+changed');
   });
 
+  it('getDiffText omits untracked files by default but includes them on request', async () => {
+    writeFileSync(join(repo, 'tracked.txt'), 'changed\n');
+    writeFileSync(join(repo, 'brand-new.txt'), 'fresh content\n');
+
+    // Default: `git diff HEAD` ignores untracked files entirely — the cockpit
+    // listed the file with no patch behind it (INT-3402 review).
+    const plain = await getDiffText(repo);
+    expect(plain).toContain('tracked.txt');
+    expect(plain).not.toContain('brand-new.txt');
+
+    const withUntracked = await getDiffText(repo, undefined, 16_000, { includeUntracked: true });
+    expect(withUntracked).toContain('brand-new.txt');
+    expect(withUntracked).toContain('+fresh content');
+    // The modified tracked file still shows, and the real index is untouched.
+    expect(withUntracked).toContain('+changed');
+    const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: repo, encoding: 'utf-8' });
+    expect(staged.trim()).toBe('');
+  });
+
+  it('getDiffText ignores gitignored files even when including untracked', async () => {
+    writeFileSync(join(repo, '.gitignore'), 'secret.txt\n');
+    writeFileSync(join(repo, 'secret.txt'), 'do not show\n');
+
+    const diff = await getDiffText(repo, undefined, 16_000, { includeUntracked: true });
+    expect(diff).not.toContain('do not show');
+    expect(diff).toContain('.gitignore');
+  });
+
   it('getDiffText diffs against a base ref when given one', async () => {
     const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf-8' }).trim();
     writeFileSync(join(repo, 'tracked.txt'), 'committed change\n');

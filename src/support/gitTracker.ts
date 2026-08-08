@@ -59,12 +59,40 @@ export async function getDiffText(
   projectPath: string,
   since?: string,
   maxBytes = 16_000,
+  opts: {
+    /**
+     * Also show brand-new untracked files as additions. `git diff` ignores
+     * them entirely, so a viewer listing changed files would show a new file
+     * with no patch behind it. Staged into a THROWAWAY index, never the
+     * worktree's own. (INT-3402)
+     */
+    includeUntracked?: boolean;
+  } = {},
 ): Promise<string> {
-  const args = since
-    ? ['diff', '--no-color', '--no-ext-diff', since]
-    : ['diff', '--no-color', '--no-ext-diff', 'HEAD'];
+  const base = since ?? 'HEAD';
   try {
-    const diff = await runGitCommand(projectPath, args);
+    let diff: string;
+    if (opts.includeUntracked) {
+      const dir = await mkdtemp(join(tmpdir(), 'osw-diff-idx-'));
+      const indexFile = join(dir, 'index');
+      try {
+        const env: NodeJS.ProcessEnv = { GIT_INDEX_FILE: indexFile };
+        // `read-tree` seeds the temp index from the base so unchanged files
+        // are not reported; `add -A` then stages the worktree (new files
+        // included, .gitignore honored) and the cached diff shows everything.
+        await runGitCommand(projectPath, ['read-tree', base], env);
+        await runGitCommand(projectPath, ['add', '-A'], env);
+        diff = await runGitCommand(
+          projectPath,
+          ['diff', '--no-color', '--no-ext-diff', '--cached', base],
+          env,
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
+    } else {
+      diff = await runGitCommand(projectPath, ['diff', '--no-color', '--no-ext-diff', base]);
+    }
     if (diff.length <= maxBytes) return diff;
     return `[diff truncated at ${maxBytes} bytes of ${diff.length}; read the files directly for the rest]\n\n${diff.slice(0, maxBytes)}`;
   } catch (error) {

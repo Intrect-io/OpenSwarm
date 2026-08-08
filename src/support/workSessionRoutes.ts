@@ -45,7 +45,14 @@ export interface WorkSessionRecent {
   issueIdentifier?: string;
   title: string;
   projectPath?: string;
-  status: 'completed' | 'failed';
+  /**
+   * 'decomposed' is NOT a completion: the run succeeded at splitting the issue
+   * and its children now own the work. Folding it into 'completed' told the
+   * cockpit a parent issue was finished. (review finding)
+   */
+  status: 'completed' | 'failed' | 'decomposed';
+  /** Raw pipeline finalStatus, for cases the three buckets flatten. */
+  finalStatus: string;
   completedAt: number;
   costUsd?: number;
   durationMs: number;
@@ -127,7 +134,8 @@ export function buildSessionList(
       issueIdentifier: entry.issueIdentifier,
       title: entry.taskTitle,
       projectPath: entry.projectPath,
-      status: entry.success ? 'completed' : 'failed',
+      status: entry.finalStatus === 'decomposed' ? 'decomposed' : entry.success ? 'completed' : 'failed',
+      finalStatus: entry.finalStatus,
       completedAt: Number.isFinite(completedAt) ? completedAt : 0,
       costUsd: entry.cost?.costUsd,
       durationMs: entry.totalDuration,
@@ -254,10 +262,28 @@ export async function tryHandleWorkSessionRoutes(
     const { getWorkingDiffDetail, getDiffText } = await import('./gitTracker.js');
     // Working tree vs HEAD — changes the worker already committed on the
     // branch are not shown; the cockpit's per-stage filesChanged covers those.
+    //
+    // `git diff HEAD` omits untracked files entirely, so a brand-new file
+    // would appear in `files` with no patch to show. `--intent-to-add` on a
+    // throwaway index makes git emit their content as an addition without
+    // touching the worktree's real index. (review finding)
     const [files, diff] = await Promise.all([
       getWorkingDiffDetail(resolved.worktreePath),
-      getDiffText(resolved.worktreePath, undefined, maxBytes),
+      getDiffText(resolved.worktreePath, undefined, maxBytes, { includeUntracked: true }),
     ]);
+    // Both helpers swallow git errors into []/'' (they are advisory elsewhere).
+    // Here that would render as "no changes" on a broken worktree — report the
+    // ambiguity instead of a clean-looking lie. (review finding)
+    if (files.length === 0 && !diff) {
+      const { isGitRepo } = await import('./gitTracker.js');
+      if (!(await isGitRepo(resolved.worktreePath))) {
+        writeJson(res, 409, {
+          error: `Worktree for task ${taskId} is no longer a valid git repository`,
+          worktreePath: resolved.worktreePath,
+        });
+        return true;
+      }
+    }
     writeJson(res, 200, {
       taskId,
       worktreePath: resolved.worktreePath,
