@@ -116,6 +116,33 @@ describe('listWorkIssues', () => {
     expect(readPath).toBe(`${homedir()}/dev/repo`);
     expect(readPath).not.toContain('~');
   });
+
+  // A backslash is an ordinary filename character on POSIX, so the expansion
+  // must not borrow normalizeProjectPath's comparison-only separator rewrite
+  // (review finding) — that would read a different directory entirely.
+  // A backslash is an ordinary filename character on POSIX, so the canonical
+  // form (which rewrites '\'→'/' as a comparison key) cannot represent such a
+  // path. Refuse it rather than read a different directory (review finding).
+  it.runIf(process.platform !== 'win32')('refuses a POSIX path containing a backslash', async () => {
+    await expect(listWorkIssues('/srv/repos/foo\\bar')).rejects.toMatchObject({ statusCode: 400 });
+    expect(loadRepoMetadataImpl).not.toHaveBeenCalled();
+  });
+
+  // Windows spells home-relative paths with the native separator; dropping
+  // that expansion would strand every '~\dev\repo' entry there.
+  it('expands the native Windows home separator when running on win32', async () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      linear.fetchIssuesForStates.mockResolvedValue({ nodes: [] });
+      await listWorkIssues('~\\dev\\repo');
+      const readPath = loadRepoMetadataImpl.mock.calls[0][0] as unknown as string;
+      expect(readPath.toLowerCase()).toContain(homedir().toLowerCase().replace(/\\/g, '/'));
+      expect(readPath).not.toContain('~');
+    } finally {
+      Object.defineProperty(process, 'platform', original);
+    }
+  });
 });
 
 describe('dispatchWork', () => {

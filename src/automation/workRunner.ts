@@ -43,6 +43,31 @@ export interface WorkIssueSummary {
   url?: string;
 }
 
+/**
+ * One canonical path for BOTH the allow-list decision and every filesystem
+ * step, so dispatch can never authorize one directory and then act on another.
+ *
+ * The expansion has to happen here because allowedProjects — and therefore the
+ * repo picker, which sends its entries verbatim — carries tilde spellings, and
+ * neither node:fs nor path.resolve expands '~' ('~/dev/x' resolves to
+ * './~/dev/x'). normalizeProjectPath does, on both platforms' separators.
+ *
+ * Its '\'→'/' rewrite is lossy on POSIX, where a backslash is an ordinary
+ * filename character. Such a path is refused rather than quietly resolved to a
+ * different directory: allowedProjects cannot faithfully represent it either,
+ * so no repo is actually reachable this way.
+ */
+async function canonicalProjectPath(input: string): Promise<string> {
+  if (process.platform !== 'win32' && input.includes('\\')) {
+    throw new WorkDispatchError(
+      400,
+      `Project path contains a backslash, which the project allow-list cannot represent: ${input}`,
+    );
+  }
+  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
+  return normalizeProjectPath(input);
+}
+
 /** States a user can sensibly dispatch from the board. */
 const DISPATCHABLE_STATES = new Set(['todo', 'backlog', 'in progress']);
 
@@ -65,15 +90,8 @@ export async function listWorkIssues(projectPath: string): Promise<{
     throw new WorkDispatchError(503, 'Linear is not configured on this daemon');
   }
 
-  // Filesystem reads need a real path. allowedProjects (and therefore the
-  // picker) legitimately carries tilde spellings, and neither fs nor resolve()
-  // expands '~' — '~/dev/x' would be read as './~/dev/x' and report the repo
-  // as unmapped.
-  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
-  const repoPath = normalizeProjectPath(projectPath);
-
   const { loadRepoMetadata } = await import('../support/repoMetadata.js');
-  const meta = await loadRepoMetadata(repoPath);
+  const meta = await loadRepoMetadata(await canonicalProjectPath(projectPath));
   const projectId = meta?.linear?.projectId;
   if (!projectId) {
     throw new WorkDispatchError(
@@ -122,21 +140,17 @@ export async function dispatchWork(
   runner: AutonomousRunner,
   request: WorkDispatchRequest,
 ): Promise<WorkDispatchResult> {
-  // normalizeProjectPath, not resolve(): allowedProjects (and therefore the
-  // picker) legitimately carries tilde spellings, and resolve('~/dev/x')
-  // yields './~/dev/x' — every filesystem step below would then miss.
-  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
-  const projectPath = normalizeProjectPath(request.projectPath);
+  const projectPath = await canonicalProjectPath(request.projectPath);
   if (!existsSync(projectPath)) {
     throw new WorkDispatchError(400, `Project path does not exist: ${request.projectPath}`);
   }
   // Dispatch stays inside the runner's configured project boundary — an
   // authorized dashboard caller must not be able to point agents at an
   // arbitrary local directory just because it exists. Same allow-list the
-  // heartbeat path honors.
-  const canonical = projectPath;
+  // heartbeat path honors, and the same string every step below uses.
+  const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
   const allowed = runner.getAllowedProjects().map((p) => normalizeProjectPath(p));
-  if (!allowed.includes(canonical)) {
+  if (!allowed.includes(projectPath)) {
     throw new WorkDispatchError(
       403,
       `Project ${projectPath} is not in the daemon's allowed projects (config autonomous.allowedProjects)`,
