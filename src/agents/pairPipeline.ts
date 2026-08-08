@@ -3,7 +3,7 @@
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 import { EventEmitter } from 'node:events';
-import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
 import type { DocumenterResult } from './documenter.js';
@@ -394,7 +394,7 @@ export class PairPipeline extends EventEmitter {
     const metadata = this.stageMetadata(context);
     console.log(`[${prefix}] Stage starting: ${stage}`);
     this.emit('stage:start', { stage, context, model: stageModel });
-    broadcastEvent({ type: 'pipeline:stage', data: { taskId: context.task.id, stage, status: 'start', model: stageModel, ...metadata } });
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId: taskEventKey(context.task), stage, status: 'start', model: stageModel, ...metadata } });
 
     if (this.config.verbose) {
       this.emit('log', { line: `[verbose] Stage: ${stage} | model: ${stageModel ?? 'default'} | iteration: ${context.currentIteration}` });
@@ -405,7 +405,7 @@ export class PairPipeline extends EventEmitter {
       switch (stage) {
         case 'worker': {
           agentPair.updateSessionStatus(context.session.id, 'working');
-          const taskId = context.task.id;
+          const taskId = taskEventKey(context.task);
           const onLog = (line: string) =>
             broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line: `[${prefix}] ${line}` } });
 
@@ -486,7 +486,7 @@ export class PairPipeline extends EventEmitter {
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
-            processContext: { taskId: context.task.id, stage: 'worker' },
+            processContext: { taskId: taskEventKey(context.task), stage: 'worker' },
             workerContext,
             signal: this.abortSignal,
           };
@@ -567,14 +567,14 @@ export class PairPipeline extends EventEmitter {
             guardWarnings: context.guardsResult?.results
               .filter(r => !r.passed && !r.blocking)
               .flatMap(r => r.issues),
-            processContext: { taskId: context.task.id, stage: 'reviewer' },
+            processContext: { taskId: taskEventKey(context.task), stage: 'reviewer' },
             // runReviewer has always accepted onLog; nothing passed one, so the
             // reviewer's turns never reached the dashboard/desktop console the
             // way the worker's do. (INT-3397)
             onLog: (line: string) =>
               broadcastEvent({
                 type: 'log',
-                data: { taskId: context.task.id, stage: 'reviewer', line: `[${prefix}] ${line}` },
+                data: { taskId: taskEventKey(context.task), stage: 'reviewer', line: `[${prefix}] ${line}` },
               }),
             signal: this.abortSignal,
           };
@@ -683,7 +683,7 @@ export class PairPipeline extends EventEmitter {
         this.emit('log', { line: `[verbose] Stage ${stage} completed in ${(stageResult.duration / 1000).toFixed(1)}s${costInfo ? ` | cost: ${formatCost(costInfo)}` : ''}` });
       }
       broadcastEvent({ type: 'pipeline:stage', data: {
-        taskId: context.task.id, stage, status: 'complete',
+        taskId: taskEventKey(context.task), stage, status: 'complete',
         ...metadata,
         model: costInfo?.model ?? stageModel,
         inputTokens: costInfo?.inputTokens,
@@ -711,7 +711,7 @@ export class PairPipeline extends EventEmitter {
       console.log(`[${prefix}] ${stage} failed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:fail', { stage, result: stageResult, context, error });
       broadcastEvent({ type: 'pipeline:stage', data: {
-        taskId: context.task.id, stage, status: 'fail',
+        taskId: taskEventKey(context.task), stage, status: 'fail',
         ...metadata,
         model: stageModel,
         durationMs: stageResult.duration,
@@ -848,7 +848,7 @@ export class PairPipeline extends EventEmitter {
         maxIterations,
         context,
       });
-      broadcastEvent({ type: 'pipeline:iteration', data: { taskId: context.task.id, iteration: context.currentIteration } });
+      broadcastEvent({ type: 'pipeline:iteration', data: { taskId: taskEventKey(context.task), iteration: context.currentIteration } });
 
       console.log(`[${context.taskPrefix}] Iteration ${context.currentIteration}/${maxIterations}`);
 
@@ -860,7 +860,7 @@ export class PairPipeline extends EventEmitter {
         iteration: context.currentIteration,
         baseModel: modelForTask(this.config, 'worker', context.task),
         signalEscalation: context.workerEscalation,
-        taskId: context.task.id,
+        taskId: taskEventKey(context.task),
         taskPrefix: context.taskPrefix,
       });
 
@@ -1184,7 +1184,7 @@ export class PairPipeline extends EventEmitter {
               console.log(`[${context.taskPrefix}] Reviewer repeated the same feedback — escalating worker (${target})`);
               this.emit('log', { line: `⬆️ Worker escalation on repeated review feedback (${target})` });
               broadcastEvent({ type: 'pipeline:escalation', data: {
-                taskId: context.task.id,
+                taskId: taskEventKey(context.task),
                 iteration: context.currentIteration,
                 reason: 'repeated-review-feedback',
                 toModel: escalation.model,
@@ -1270,7 +1270,7 @@ export class PairPipeline extends EventEmitter {
     const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
     if (totalCost) {
       console.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
-      broadcastEvent({ type: 'task:cost', data: { taskId: context.task.id, cost: totalCost } });
+      broadcastEvent({ type: 'task:cost', data: { taskId: taskEventKey(context.task), cost: totalCost } });
     }
     const result: PipelineResult = {
       success,

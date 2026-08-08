@@ -7,6 +7,12 @@ import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import type { CostInfo } from '../support/costTracker.js';
 import type { MonitorState } from './types.js';
+import {
+  appendTaskLog,
+  cancelTaskLogCleanup,
+  scheduleTaskLogCleanup,
+  __resetTaskLogsForTests,
+} from './taskLogStore.js';
 
 // Types
 
@@ -155,6 +161,16 @@ export function broadcastEvent(event: HubEvent): void {
   if (event.type !== 'heartbeat') {
     pushReplay(event);
   }
+  // Per-task transcript rings for the cockpit (INT-3402). Fed here — the one
+  // choke point every emitter already goes through — so no broadcast site
+  // changes. task:started/completed drive the retention lifecycle.
+  if (event.type === 'log') {
+    appendTaskLog(event.data.taskId, event.data.stage, event.data.line);
+  } else if (event.type === 'task:started') {
+    cancelTaskLogCleanup(event.data.taskId);
+  } else if (event.type === 'task:completed') {
+    scheduleTaskLogCleanup(event.data.taskId);
+  }
   // Per-type buffers for REST snapshot
   switch (event.type) {
     case 'log':
@@ -244,6 +260,7 @@ export function getChatBuffer(): HubEvent[] {
 export function __resetForTests(): void {
   // Clear all SSE clients
   sseClients.clear();
+  __resetTaskLogsForTests();
   // Clear all buffers
   replayBuffer.length = 0;
   logBuffer.length = 0;

@@ -28,13 +28,7 @@ import {
   type TaskState,
   type ProjectInfo,
 } from './runnerState.js';
-import {
-  DecisionEngine,
-  DecisionResult,
-  TaskItem,
-  getDecisionEngine,
-  classifyStuck,
-} from '../orchestration/decisionEngine.js';
+import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck } from '../orchestration/decisionEngine.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
@@ -354,14 +348,14 @@ export class AutonomousRunner {
     this.scheduler.on('started', (running) => {
       const taskCtx = this.formatTaskContext(running.task);
       console.log(`[Scheduler] Task started: ${taskCtx} ${running.task.title}`);
-      broadcastEvent({ type: 'task:started', data: { taskId: running.task.id, title: running.task.title, issueIdentifier: running.task.issueIdentifier } });
+      broadcastEvent({ type: 'task:started', data: { taskId: taskEventKey(running.task), title: running.task.title, issueIdentifier: running.task.issueIdentifier } });
     });
 
     this.scheduler.on('completed', ({ task, result }) => {
       this.trackSchedulerHandler('completed', (async () => {
       const taskCtx = this.formatTaskContext(task);
       console.log(`[Scheduler] Task completed: ${taskCtx} ${task.title}`);
-      broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: result.success, duration: result.totalDuration } });
+      broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: result.success, duration: result.totalDuration } });
       this.recordPipelineHistory(task, result);
       await reportToDiscord(formatPipelineResultEmbed(result));
 
@@ -458,7 +452,7 @@ export class AutonomousRunner {
       this.recordPipelineHistory(task, result);
       if (task.issueId) setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
       this.saveTaskState();
-      broadcastEvent({ type: 'log', data: { taskId: task.issueId || task.id, stage: 'preflight', line: 'Existing open PR owns planned files; deferred for re-check' } });
+      broadcastEvent({ type: 'log', data: { taskId: taskEventKey(task), stage: 'preflight', line: 'Existing open PR owns planned files; deferred for re-check' } });
       this.scheduleNextHeartbeat();
     });
 
@@ -466,7 +460,7 @@ export class AutonomousRunner {
       this.trackSchedulerHandler('cancelled', (async () => {
         const taskCtx = this.formatTaskContext(task);
         console.log(`[Scheduler] Task cancelled: ${taskCtx} ${task.title}`);
-        broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: false, duration: result.totalDuration } });
+        broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
         this.recordPipelineHistory(task, result);
         try {
           // In primary mode cancellation is already atomically parked in
@@ -488,7 +482,7 @@ export class AutonomousRunner {
       const taskCtx = this.formatTaskContext(task);
       console.log(`[Scheduler] Task decomposed: ${taskCtx} ${task.title}`);
       this.recordPipelineHistory(task, result);
-      broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: false, duration: result.totalDuration } });
+      broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
       // Child issues, rather than the parent execution, now own completion.
       // Re-run discovery without incrementing completed/failed counters.
       this.scheduleNextHeartbeat();
@@ -510,7 +504,7 @@ export class AutonomousRunner {
         console.warn(`[Scheduler] Rate limit hit for ${taskCtx} — pausing until ${resetsLabel} (~${waitSec}s)`);
         broadcastEvent({
           type: 'log',
-          data: { taskId: task.issueId || task.id, stage: 'rate_limit', line: `⏸ Rate limited — pausing ~${waitSec}s (until ${resetsLabel})` },
+          data: { taskId: taskEventKey(task), stage: 'rate_limit', line: `⏸ Rate limited — pausing ~${waitSec}s (until ${resetsLabel})` },
         });
         return;
       }
@@ -550,7 +544,7 @@ export class AutonomousRunner {
       }
 
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
-      broadcastEvent({ type: 'task:completed', data: { taskId: task.id, success: false, duration: result.totalDuration } });
+      broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
       await reportToDiscord(formatPipelineResultEmbed(result));
 
       // Structural infeasibility (⑦, INT-2521): the failure text says the DoD can't
@@ -2064,7 +2058,7 @@ export class AutonomousRunner {
   private enqueueCandidate(task: TaskItem, projectPath: string): boolean {
     this.attachPriorFeedback(task);
     if (!this.scheduler.enqueue(task, projectPath)) return false;
-    broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
+    broadcastEvent({ type: 'task:queued', data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
     this.syslog(`✓ Queued: ${task.issueIdentifier || ''} ${task.title} → ${projectPath.split('/').slice(-2).join('/')}`);
     return true;
   }
@@ -2160,7 +2154,7 @@ export class AutonomousRunner {
     // Use scheduler for parallel processing mode
     if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1) {
       if (this.scheduler.enqueue(task, projectPath)) {
-        broadcastEvent({ type: 'task:queued', data: { taskId: task.id, title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
+        broadcastEvent({ type: 'task:queued', data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
       }
       await this.runAvailableTasks();
       return;
@@ -2178,7 +2172,7 @@ export class AutonomousRunner {
       const waitSec = Math.max(0, Math.ceil((resetsAt - Date.now()) / 1000));
       const resetsLabel = new Date(resetsAt).toISOString();
       console.warn(`[AutonomousRunner] Rate limit hit for ${this.formatTaskContext(task)} — pausing until ${resetsLabel} (~${waitSec}s)`);
-      broadcastEvent({ type: 'log', data: { taskId: task.issueId || task.id, stage: 'rate_limit', line: `⏸ Rate limited — pausing ~${waitSec}s (until ${resetsLabel})` } });
+      broadcastEvent({ type: 'log', data: { taskId: taskEventKey(task), stage: 'rate_limit', line: `⏸ Rate limited — pausing ~${waitSec}s (until ${resetsLabel})` } });
       return;
     }
 
@@ -2503,6 +2497,10 @@ export class AutonomousRunner {
   getQueuedTasks() { return this.scheduler.getQueuedTasks(); }
   getRunningTasks() { return this.scheduler.getRunningTasks(); }
   getPipelineHistory(limit = 50) { return getPipelineHistory(limit); }
+  /** Epoch ms until which the scheduler holds for a provider rate limit (0 = none). */
+  getRateLimitHoldUntil(): number { return this.rateLimitUntil; }
+  /** Durable ledger record for an issue — the authoritative worktree/branch source. */
+  getDurableRun(issueId: string) { return this.durableRuns.getRun(issueId); }
   getFailureCauseSummary(limit = 50) { return aggregateFailureCauses(getPipelineHistory(limit)); }
 
   private recordPipelineHistory(task: TaskItem, result: PipelineResult): void {

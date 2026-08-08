@@ -76,6 +76,18 @@ export interface TaskItem {
  * sub-issues. `parentIds` is the set of issueIds that any fetched task points to via parentId,
  * so a fetched issue that IS such a parent is an umbrella. EPICs are also tagged in the title.
  */
+/**
+ * The ONE key every hub event about a task uses (`taskId` on log /
+ * pipeline:stage / task:queued|started|completed / task:cost / process:*).
+ * For Linear tasks `issueId === id`; TaskItem permits them to differ, and a
+ * mixed-key task splits across cockpit sessions and leaks its transcript
+ * buffer (INT-3402). Human-readable labels (issueIdentifier) ride in event
+ * payloads, never in the key.
+ */
+export function taskEventKey(task: Pick<TaskItem, 'id' | 'issueId'>): string {
+  return task.issueId || task.id;
+}
+
 export function isUmbrellaIssue(task: TaskItem, parentIds: Set<string>): boolean {
   const isEpicTitle = /\[\s*epic\s*\]/i.test(task.title) || /^\s*epic[:\s]/i.test(task.title);
   const isParent = !!task.issueId && parentIds.has(task.issueId);

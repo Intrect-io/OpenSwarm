@@ -5,7 +5,7 @@
 
 import { EmbedBuilder } from 'discord.js';
 import { createHash } from 'node:crypto';
-import type { TaskItem, DecisionResult } from '../orchestration/decisionEngine.js';
+import { taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult, PipelineRunMetadata } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, PipelineStage, JobProfile } from '../core/types.js';
@@ -575,7 +575,7 @@ export async function decomposeTask(
 ): Promise<boolean | 'no-decomp'> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
-  const taskId = task.issueId || task.id;
+  const taskId = taskEventKey(task);
   const metadata = pipelineMetadata(task, projectPath);
   const maxDepth = ctx.decompositionMaxDepth ?? 2;
   const maxChildren = ctx.decompositionMaxChildren ?? 5;
@@ -754,7 +754,8 @@ export async function executePipeline(
   try {
   if (ctx.enableDraftAnalysis !== false) {
     try {
-      const taskId = task.issueIdentifier || task.issueId || task.id;
+      // Same event key as every other emission — labels ride in metadata (INT-3402).
+      const taskId = taskEventKey(task);
       const metadata = pipelineMetadata(task, projectPath);
       broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'start', ...metadata } });
 
@@ -871,7 +872,7 @@ export async function executePipeline(
       broadcastEvent({
         type: 'log',
         data: {
-          taskId: task.issueId,
+          taskId: taskEventKey(task),
           stage: 'worktree',
           line: `Worktree: ${actualPath} (branch: ${branchName})`,
         },
