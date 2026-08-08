@@ -82,8 +82,21 @@ export async function tryHandleAppRoutes(
     // accepts, so the picker can never offer a path that would 403.
     // (/api/local-projects scans CHILDREN of allowed paths and omits the
     // allowed repos themselves, so it disagrees with the boundary check.)
-    const paths = runner?.getAllowedProjects() ?? [];
-    writeJson(res, 200, paths.map((path) => ({ path, name: path.split('/').filter(Boolean).pop() ?? path })));
+    //
+    // allowedProjects holds both tilde and absolute spellings of the same repo
+    // (repos.json writes both so the denylist matches either), which the picker
+    // would otherwise show as duplicate entries. Collapse by the same
+    // normalization the boundary check applies, keeping the first spelling.
+    const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
+    const seen = new Set<string>();
+    const projects: Array<{ path: string; name: string }> = [];
+    for (const path of runner?.getAllowedProjects() ?? []) {
+      const canonical = normalizeProjectPath(path);
+      if (seen.has(canonical)) continue;
+      seen.add(canonical);
+      projects.push({ path, name: path.split('/').filter(Boolean).pop() ?? path });
+    }
+    writeJson(res, 200, projects);
     return true;
   }
 
