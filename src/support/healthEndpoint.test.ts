@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { buildHealthPayload } from './healthEndpoint.js';
 
 const lifecycle = vi.hoisted(() => ({
@@ -161,5 +162,45 @@ describe('GET /api/health over the live server', () => {
     } finally {
       await stopWebServer();
     }
+  });
+
+  it('collapses tilde/absolute spellings of one repo in /api/work/projects (INT-3395)', async () => {
+    const { tryHandleAppRoutes } = await import('./webAppRoutes.js');
+    const { homedir } = await import('node:os');
+
+    // repos.json persists both spellings so the denylist matches either; the
+    // picker must not show the same repo twice.
+    const runner = {
+      getAllowedProjects: () => [
+        '~/dev/de-artifact',
+        '~/dev/kyte-portal',
+        `${homedir()}/dev/kyte-portal`,
+        `${homedir()}/dev/de-artifact`,
+      ],
+    } as unknown as Parameters<typeof tryHandleAppRoutes>[4];
+
+    let status = 0;
+    let payload = '';
+    const res = {
+      writeHead: (code: number) => { status = code; },
+      end: (body: string) => { payload = body; },
+    } as unknown as ServerResponse;
+
+    const handled = await tryHandleAppRoutes(
+      { method: 'GET', headers: {} } as IncomingMessage,
+      res,
+      '/api/work/projects',
+      new URL('http://127.0.0.1/api/work/projects'),
+      runner,
+      async () => '',
+    );
+
+    expect(handled).toBe(true);
+    expect(status).toBe(200);
+    // First spelling wins; each repo appears exactly once.
+    expect(JSON.parse(payload)).toEqual([
+      { path: '~/dev/de-artifact', name: 'de-artifact' },
+      { path: '~/dev/kyte-portal', name: 'kyte-portal' },
+    ]);
   });
 });

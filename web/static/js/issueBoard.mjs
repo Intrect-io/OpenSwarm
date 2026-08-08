@@ -16,6 +16,8 @@ export class IssueBoard {
   #selected = new Set();
   #projectPath = '';
   #renderSequence = 0;
+  #armed = false;
+  #armTimer = null;
 
   constructor({ listEl, countEl, summaryEl, deployBtn, fetchIssues, dispatch, onDeployed }) {
     this.#listEl = listEl;
@@ -107,33 +109,58 @@ export class IssueBoard {
   }
 
   #syncFooter() {
+    this.#disarm();
     const n = this.#selected.size;
-    this.#summaryEl.textContent = `${n} selected`;
+    this.#status(`${n} selected`);
     this.#deployBtn.disabled = n === 0;
     this.#deployBtn.textContent = n > 0 ? `Deploy ${n} agent${n > 1 ? 's' : ''}` : 'Deploy agents';
+  }
+
+  #status(text, isError = false) {
+    this.#summaryEl.textContent = text;
+    this.#summaryEl.classList.toggle('error', isError);
+  }
+
+  #disarm() {
+    if (this.#armTimer) {
+      clearTimeout(this.#armTimer);
+      this.#armTimer = null;
+    }
+    this.#armed = false;
+    this.#deployBtn.classList.remove('arm');
   }
 
   async #deploy() {
     const ids = this.selectedIds;
     if (!ids.length || !this.#projectPath) return;
-    const identifiers = this.#issues
-      .filter((issue) => this.#selected.has(issue.id))
-      .map((issue) => issue.identifier);
-    // Explicit, scoped consent before the side effect.
-    const confirmed = window.confirm(
-      `Deploy ${ids.length} agent(s) into ${this.#projectPath}?\n\n${identifiers.join(', ')}`,
-    );
-    if (!confirmed) return;
 
+    // Consent is an in-page two-step arm, NOT window.confirm: the Tauri shell's
+    // WKWebView implements no JS dialogs, so confirm()/alert() return falsy
+    // without showing anything — the deploy click was silently swallowed there.
+    if (!this.#armed) {
+      const identifiers = this.#issues
+        .filter((issue) => this.#selected.has(issue.id))
+        .map((issue) => issue.identifier);
+      this.#armed = true;
+      this.#deployBtn.classList.add('arm');
+      this.#deployBtn.textContent = `Confirm: deploy ${ids.length}?`;
+      this.#status(`${identifiers.join(', ')} → ${this.#projectPath} — click again to confirm.`);
+      this.#armTimer = setTimeout(() => this.#syncFooter(), 6000);
+      return;
+    }
+
+    this.#disarm();
     this.#deployBtn.disabled = true;
     this.#deployBtn.textContent = 'Deploying…';
     try {
       const result = await this.#dispatch(this.#projectPath, ids);
       this.#onDeployed?.(result);
       await this.loadFor(this.#projectPath);
+      // After loadFor's re-render resets the footer, surface the outcome.
+      this.#status(`Queued ${result?.queued ?? 0}, skipped ${result?.skipped ?? 0}.`);
     } catch (err) {
-      window.alert(err?.message ?? 'Dispatch failed');
       this.#syncFooter();
+      this.#status(err?.message ?? 'Dispatch failed', true);
     }
   }
 }
