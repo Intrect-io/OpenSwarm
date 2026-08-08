@@ -2160,8 +2160,28 @@ export class AutonomousRunner {
       return;
     }
 
-    // Single execution (legacy)
-    const result = await this.executeDurably(task, projectPath);
+    // Single execution (legacy serial path — maxConcurrentTasks <= 1).
+    // The scheduler emits task:started/completed for the parallel path; this
+    // path never did, so dashboards saw no lifecycle and (since INT-3402) the
+    // transcript buffer was never handed to its retention timer.
+    broadcastEvent({
+      type: 'task:started',
+      data: { taskId: taskEventKey(task), title: task.title, issueIdentifier: task.issueIdentifier },
+    });
+    let result: PipelineResult;
+    try {
+      result = await this.executeDurably(task, projectPath);
+    } catch (err) {
+      broadcastEvent({
+        type: 'task:completed',
+        data: { taskId: taskEventKey(task), success: false, duration: 0 },
+      });
+      throw err;
+    }
+    broadcastEvent({
+      type: 'task:completed',
+      data: { taskId: taskEventKey(task), success: result.success, duration: result.totalDuration },
+    });
 
     // Rate-limited: pause until quota resets. Return before any Discord/Linear
     // reporting or state change — no failure count, no card spam. Same as the
