@@ -41,8 +41,13 @@ const picker = new RepoPicker(document.getElementById('repo-picker'), {
 const events = new EventStream();
 events
   .on('pipeline:stage', (data) => workCards.onStage(data))
+  .on('log', (data) => workCards.onLog(data))
   .on('$open', () => pollHealth())
   .on('$down', () => setDaemonStatus('down', 'reconnecting…'));
+// Connect immediately — delaying SSE behind the snapshot fetch opened a
+// live-output blind window. Ordering against the async stage snapshot does
+// not matter: log lines that arrive before their card exists are parked in
+// WorkCards' bounded pending buffer and flushed when the card materializes.
 events.connect();
 
 (async () => {
@@ -55,11 +60,16 @@ events.connect();
   } catch (err) {
     console.error('Failed to load projects', err);
   }
-  // Recover in-flight work after a reload from the stage replay buffer.
+  // Recover in-flight work from the stage snapshot. Stage events are folded
+  // idempotently, so replaying them on top of the SSE replay is harmless.
+  //
+  // Console history deliberately has NO snapshot pass of its own: the SSE
+  // replay is the single source for console recovery — fewer lines than
+  // /api/logs would carry, but each line exactly once (no duplication).
   try {
     const stages = await api.stages();
     workCards.seed(Array.isArray(stages) ? stages : stages?.stages);
   } catch {
-    // stage snapshot is best-effort
+    // stage snapshot is best-effort — SSE replay still seeds recent cards
   }
 })();

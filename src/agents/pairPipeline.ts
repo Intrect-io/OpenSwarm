@@ -568,6 +568,14 @@ export class PairPipeline extends EventEmitter {
               .filter(r => !r.passed && !r.blocking)
               .flatMap(r => r.issues),
             processContext: { taskId: context.task.id, stage: 'reviewer' },
+            // runReviewer has always accepted onLog; nothing passed one, so the
+            // reviewer's turns never reached the dashboard/desktop console the
+            // way the worker's do. (INT-3397)
+            onLog: (line: string) =>
+              broadcastEvent({
+                type: 'log',
+                data: { taskId: context.task.id, stage: 'reviewer', line: `[${prefix}] ${line}` },
+              }),
             signal: this.abortSignal,
           };
 

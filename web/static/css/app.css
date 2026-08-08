@@ -211,3 +211,47 @@ body {
   white-space: pre-wrap;
 }
 .work-card a { color: var(--accent); font-size: var(--text-xs); }
+
+/* Live agent output — a terminal pane fed by the hub's `log` events. */
+.console-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.console-toggle:hover { color: var(--text); border-color: var(--muted); }
+.console-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+.work-card .console {
+  margin-top: 8px;
+  /* Deep ground against the card so the stream reads as a terminal. */
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  /* Tall enough to show context, capped so several cards stay visible. */
+  max-height: 260px;
+  overflow-y: auto;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text);
+}
+.work-card .console:empty { display: none; }
+.work-card.console-hidden .console { display: none; }
+
+.work-card .console-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.work-card .console-stage {
+  color: var(--accent);
+  margin: 6px 0 2px;
+  white-space: nowrap;
+}
+.work-card .console-stage:first-child { margin-top: 0; }
