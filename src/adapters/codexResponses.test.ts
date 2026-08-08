@@ -496,6 +496,49 @@ describe('429 throttle vs spent quota (INT-2907)', () => {
     expect(err.message).toContain('throttle-retry:');
     expect(fetchMock).toHaveBeenCalledTimes(4); // initial + 3 retries
   });
+
+  it('records healthy-quota headers from a SUCCESS response for the cockpit gauge (INT-3402)', async () => {
+    const { getQuotaSnapshot, __resetQuotaForTests } = await import('./quotaSnapshot.js');
+    __resetQuotaForTests();
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        [
+          'data: {"type":"response.output_text.delta","delta":"ok"}',
+          'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
+          'data: [DONE]',
+          '',
+        ].join('\n'),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'x-codex-primary-used-percent': '37',
+            'x-codex-primary-window-minutes': '300',
+            'x-codex-primary-reset-at': '1900000000',
+          },
+        },
+      ),
+    );
+    const callApi = callerWith(fetchMock);
+    await callApi([{ role: 'user', content: 'hi' }], []);
+
+    const obs = getQuotaSnapshot().providers.find((p) => p.provider === 'codex');
+    expect(obs).toMatchObject({
+      usedPercent: 37,
+      windowMinutes: 300,
+      resetsAt: 1900000000,
+      source: 'success-headers',
+    });
+    __resetQuotaForTests();
+  });
+
+  it('records nothing from a success response without usage headers', async () => {
+    const { getQuotaSnapshot, __resetQuotaForTests } = await import('./quotaSnapshot.js');
+    __resetQuotaForTests();
+    const callApi = callerWith(vi.fn(async () => okStream()));
+    await callApi([{ role: 'user', content: 'hi' }], []);
+    expect(getQuotaSnapshot().providers).toHaveLength(0);
+  });
 });
 
 describe('401 refresh scope', () => {

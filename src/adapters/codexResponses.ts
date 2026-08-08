@@ -20,6 +20,7 @@ import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { formatCost } from '../support/costTracker.js';
 import type { ToolDefinition } from './tools.js';
 import { RateLimitError, rateLimitFromCodexHeaders } from './rateLimitError.js';
+import { recordQuotaObservation } from './quotaSnapshot.js';
 import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 
@@ -524,6 +525,22 @@ export class CodexResponsesAdapter implements CliAdapter {
             }
           }
           throw new Error(`Codex responses error (${res.status}): ${errText.slice(0, 500)}`);
+        }
+
+        // Successful responses carry the same x-codex-* usage headers as 429s
+        // (when the account exposes them) — the only place a HEALTHY quota
+        // percentage can be observed for the cockpit gauge. (INT-3402)
+        const usedPercent = parseInt(res.headers.get('x-codex-primary-used-percent') ?? '', 10);
+        if (Number.isFinite(usedPercent)) {
+          const windowMinutes = parseInt(res.headers.get('x-codex-primary-window-minutes') ?? '', 10);
+          const resetsAt = parseInt(res.headers.get('x-codex-primary-reset-at') ?? '', 10);
+          recordQuotaObservation({
+            provider: 'codex',
+            usedPercent,
+            windowMinutes: Number.isFinite(windowMinutes) ? windowMinutes : undefined,
+            resetsAt: Number.isFinite(resetsAt) ? resetsAt : undefined,
+            source: 'success-headers',
+          });
         }
 
         return consumeResponsesStream(res, onToken, onReasoning);

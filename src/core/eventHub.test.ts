@@ -768,4 +768,37 @@ describe('eventHub', () => {
       expect(getStageBuffer().length).toBeGreaterThan(0);
     });
   });
+
+  describe('per-task transcript store hooks (INT-3402)', () => {
+    it('feeds log events into the per-task ring and lifecycles it on completion', async () => {
+      const { getTaskLog, TASK_LOG_RETENTION_MS } = await import('./taskLogStore.js');
+
+      broadcastEvent({ type: 'log', data: { taskId: 'hooked', stage: 'worker', line: 'one' } });
+      broadcastEvent({ type: 'log', data: { taskId: 'hooked', stage: 'worker', line: 'two' } });
+      expect(getTaskLog('hooked')?.lines.map((l) => l.line)).toEqual(['one', 'two']);
+
+      vi.useFakeTimers();
+      try {
+        broadcastEvent({ type: 'task:completed', data: { taskId: 'hooked', success: true, duration: 1 } });
+        vi.advanceTimersByTime(TASK_LOG_RETENTION_MS + 1);
+        expect(getTaskLog('hooked')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('task:started cancels a pending cleanup for a reused task id', async () => {
+      const { getTaskLog, TASK_LOG_RETENTION_MS } = await import('./taskLogStore.js');
+      vi.useFakeTimers();
+      try {
+        broadcastEvent({ type: 'log', data: { taskId: 'retry', stage: 'worker', line: 'attempt 1' } });
+        broadcastEvent({ type: 'task:completed', data: { taskId: 'retry', success: false, duration: 1 } });
+        broadcastEvent({ type: 'task:started', data: { taskId: 'retry', title: 'again' } });
+        vi.advanceTimersByTime(TASK_LOG_RETENTION_MS + 1);
+        expect(getTaskLog('retry')).not.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

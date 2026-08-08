@@ -19,6 +19,7 @@ import {
   matchesRateLimitMessage,
   rateLimitFromHttpResponse,
 } from './rateLimitError.js';
+import { recordQuotaObservation } from './quotaSnapshot.js';
 
 /** Escalating waits for a throttled retry. */
 export const THROTTLE_BACKOFF_MS = [5_000, 15_000, 40_000] as const;
@@ -94,12 +95,29 @@ export async function resolveLimitResponse(
 
   const cls = classifyLimitResponse(headers, body);
   if (cls.quota) {
-    throw (
+    const error =
       opts.quotaError?.(headers, body) ??
       rateLimitFromHttpResponse(status, headers, body) ??
-      new RateLimitError(undefined, `${provider}: usage limit reached`)
-    );
+      new RateLimitError(undefined, `${provider}: usage limit reached`);
+    // Every in-process adapter funnels its 429s through here — record the
+    // signals the error carries before they leave with the throw, so the
+    // cockpit quota gauge sees them. (INT-3402)
+    recordQuotaObservation({
+      provider,
+      usedPercent: error instanceof RateLimitError ? error.usedPercent ?? cls.usedPercent : cls.usedPercent,
+      windowMinutes: error instanceof RateLimitError ? error.windowMinutes : undefined,
+      resetsAt: error instanceof RateLimitError ? error.resetsAt : undefined,
+      retryAfterSeconds: cls.retryAfterSeconds,
+      source: 'quota-exhausted',
+    });
+    throw error;
   }
+  recordQuotaObservation({
+    provider,
+    usedPercent: cls.usedPercent,
+    retryAfterSeconds: cls.retryAfterSeconds,
+    source: 'throttle',
+  });
 
   const window = cls.usedPercent != null ? `, window ${cls.usedPercent}% used` : '';
   if (state.attempts < THROTTLE_BACKOFF_MS.length) {

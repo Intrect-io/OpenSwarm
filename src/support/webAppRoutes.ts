@@ -39,6 +39,13 @@ export async function tryHandleAppRoutes(
   runner: AutonomousRunner | undefined,
   readBody: (req: IncomingMessage) => Promise<string>,
 ): Promise<boolean> {
+  // Cockpit read surface (sessions/transcript/diff/quota) lives in its own
+  // module (INT-3402); web.ts's auth gates already ran before this delegation.
+  {
+    const { tryHandleWorkSessionRoutes } = await import('./workSessionRoutes.js');
+    if (await tryHandleWorkSessionRoutes(req, res, url, requestUrl, runner)) return true;
+  }
+
   if (url === '/app') {
     const shell = await readAppShell();
     if (!shell) {

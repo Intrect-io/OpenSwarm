@@ -2,7 +2,7 @@
 // OpenSwarm - Adaptive worker fan-out gate
 // ============================================
 
-import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineGuardsConfig, RoleConfig, WorkerFanoutCandidateConfig } from '../core/types.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import type { WorkerResult } from './agentPair.js';
@@ -147,7 +147,7 @@ export function emitWorkerFanoutGateDecision(input: {
   broadcastEvent({
     type: 'pipeline:fanout',
     data: {
-      taskId: context.task.id,
+      taskId: taskEventKey(context.task),
       iteration: context.currentIteration,
       enabled: decision.enabled,
       shouldFanOut: decision.shouldFanOut,
@@ -165,7 +165,7 @@ export function emitWorkerFanoutGateDecision(input: {
   const line = `[FanoutGate] ${verdict} (${decision.score}/${decision.threshold})${detail}`;
   console.log(`[${context.taskPrefix}] ${line}`);
   input.emit('log', { line });
-  broadcastEvent({ type: 'log', data: { taskId: context.task.id, stage: 'worker', line: `[${context.taskPrefix}] ${line}` } });
+  broadcastEvent({ type: 'log', data: { taskId: taskEventKey(context.task), stage: 'worker', line: `[${context.taskPrefix}] ${line}` } });
 }
 
 export async function runWorkerWithOptionalFanout(input: {

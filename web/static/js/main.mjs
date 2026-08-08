@@ -5,6 +5,7 @@ import { EventStream } from './events.mjs';
 import { RepoPicker } from './repoPicker.mjs';
 import { IssueBoard } from './issueBoard.mjs';
 import { WorkCards } from './workCards.mjs';
+import { QuotaGauge } from './quotaGauge.mjs';
 
 const statusDot = document.querySelector('#daemon-status .dot');
 const statusLabel = document.querySelector('#daemon-status .label');
@@ -49,6 +50,12 @@ events
 // not matter: log lines that arrive before their card exists are parked in
 // WorkCards' bounded pending buffer and flushed when the card materializes.
 events.connect();
+
+// Independent of the bootstrap chain: a hanging /api/health request must not
+// keep the gauge from ever starting. Usage windows move in hours, so a slow
+// poll is plenty, and the gauge stays hidden until the daemon has actually
+// observed a provider header.
+new QuotaGauge(document.getElementById('quota-gauge'), { fetchQuota: () => api.quota() }).start();
 
 (async () => {
   await pollHealth();
