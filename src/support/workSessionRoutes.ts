@@ -220,7 +220,15 @@ export async function tryHandleWorkSessionRoutes(
 
   const logMatch = url.match(/^\/api\/work\/sessions\/([^/]+)\/log$/);
   if (logMatch) {
-    const taskId = decodeURIComponent(logMatch[1]);
+    let taskId: string;
+    try {
+      taskId = decodeURIComponent(logMatch[1]);
+    } catch {
+      // A malformed escape ('%', '%zz') is a bad request, not a server fault —
+      // decodeURIComponent throws and would otherwise surface as a 500.
+      writeJson(res, 400, { error: 'Malformed taskId encoding' });
+      return true;
+    }
     const snapshot = getTaskLog(taskId);
     if (!snapshot) {
       writeJson(res, 404, { error: `No transcript for task ${taskId} (unknown, or retention expired)` });

@@ -251,6 +251,12 @@ describe('GET /api/work/sessions/:taskId/log', () => {
     expect(typeof body.lines[0].seq).toBe('number');
   });
 
+  it('400s on a malformed percent-escape instead of throwing a 500', async () => {
+    const { status, body } = await call('/api/work/sessions/%zz/log', mkRunner());
+    expect(status).toBe(400);
+    expect(body.error).toContain('Malformed');
+  });
+
   it('404s for an unknown task and decodes the id', async () => {
     appendTaskLog('weird id', 'worker', 'line');
     expect((await call('/api/work/sessions/nope/log', mkRunner())).status).toBe(404);

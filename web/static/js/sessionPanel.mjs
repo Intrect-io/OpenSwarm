@@ -22,15 +22,18 @@ export class SessionPanel {
   #store;
   #transcripts;
   #view;
+  #diff;
   #fetchLog;
   #taskId = null;
+  #tab = 'transcript';
   #seeded = new Set();
 
-  constructor(root, { store, transcripts, transcriptView, fetchLog }) {
+  constructor(root, { store, transcripts, transcriptView, diffPanel, fetchLog }) {
     this.#root = root;
     this.#store = store;
     this.#transcripts = transcripts;
     this.#view = transcriptView;
+    this.#diff = diffPanel;
     this.#fetchLog = fetchLog;
     store.addEventListener('change', (event) => {
       if (event.detail.session.taskId === this.#taskId) this.#renderHeader();
@@ -46,12 +49,17 @@ export class SessionPanel {
     this.#mount();
     this.#renderHeader();
     this.#view.show(taskId);
+    this.#diff?.clear();
+    // Selecting a session always lands on its output; the diff is one click
+    // away and fetched only when asked for.
+    this.#setTab('transcript');
     await this.#seedTranscript(taskId);
   }
 
   showEmpty(message) {
     this.#taskId = null;
     this.#view.clear();
+    this.#diff?.clear();
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = message;
@@ -93,7 +101,35 @@ export class SessionPanel {
     header.className = 'session-header';
     const meta = document.createElement('div');
     meta.className = 'session-meta';
-    this.#root.replaceChildren(header, meta, this.#view.element);
+
+    const tabs = document.createElement('div');
+    tabs.className = 'session-tabs';
+    for (const [tab, label] of [['transcript', 'Transcript'], ['diff', 'Diff']]) {
+      if (tab === 'diff' && !this.#diff) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'session-tab';
+      button.dataset.tab = tab;
+      button.textContent = label;
+      button.addEventListener('click', () => this.#setTab(tab));
+      tabs.appendChild(button);
+    }
+
+    const children = [header, meta, tabs, this.#view.element];
+    if (this.#diff) children.push(this.#diff.element);
+    this.#root.replaceChildren(...children);
+  }
+
+  #setTab(tab) {
+    this.#tab = tab;
+    for (const button of this.#root.querySelectorAll('.session-tab')) {
+      button.classList.toggle('active', button.dataset.tab === tab);
+    }
+    this.#view.element.hidden = tab !== 'transcript';
+    if (!this.#diff) return;
+    this.#diff.element.hidden = tab !== 'diff';
+    // Fetch on demand: a diff is a git call per view, not something to poll.
+    if (tab === 'diff' && this.#taskId) void this.#diff.load(this.#taskId);
   }
 
   #renderHeader() {

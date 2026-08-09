@@ -171,6 +171,47 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   text-overflow: ellipsis;
 }
 
+.session-tabs { display: flex; gap: 4px; }
+
+.session-tab {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.session-tab:hover { color: var(--text); }
+.session-tab.active { color: var(--accent); border-color: var(--border); background: var(--accent-soft); }
+.session-tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* ── Diff ────────────────────────────────────────────────────────────── */
+
+.diff-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.diff-pane[hidden] { display: none; }
+.diff-summary { color: var(--text); margin-bottom: 6px; }
+.diff-file { color: var(--muted); }
+.diff-body { margin-top: 8px; }
+.diff-line { white-space: pre; line-height: 1.45; }
+.diff-line.file { color: var(--purple); margin-top: 8px; }
+.diff-line.hunk { color: var(--accent); }
+.diff-line.meta { color: var(--muted); }
+.diff-line.add { color: var(--ok); }
+.diff-line.del { color: var(--error); }
+.diff-line.context { color: var(--muted); }
+
 /* ── Transcript ──────────────────────────────────────────────────────── */
 
 .transcript {
@@ -185,6 +226,7 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   /* NEVER smooth: it breaks stick-to-bottom detection (vega INT-1411). */
   scroll-behavior: auto;
 }
+.transcript[hidden] { display: none; }
 
 .transcript-stage { color: var(--accent); margin: 8px 0 4px; font-family: var(--font-mono); font-size: var(--text-xs); }
 .transcript-stage:first-child { margin-top: 0; }

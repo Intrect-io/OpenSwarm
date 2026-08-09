@@ -18,6 +18,8 @@ import { SessionTree } from '../../web/static/js/sessionTree.mjs';
 import { SessionPanel } from '../../web/static/js/sessionPanel.mjs';
 // @ts-expect-error — browser ESM assets without type declarations
 import { Nav, parseHash } from '../../web/static/js/nav.mjs';
+// @ts-expect-error — browser ESM assets without type declarations
+import { DiffPanel } from '../../web/static/js/diffPanel.mjs';
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -123,15 +125,52 @@ describe('TranscriptView', () => {
 });
 
 describe('SessionPanel', () => {
-  function mount(fetchLog = vi.fn(async () => null)) {
+  function mount(fetchLog = vi.fn(async () => null), fetchDiff = vi.fn(async () => null)) {
     const root = document.createElement('div');
     document.body.appendChild(root);
     const store = new SessionStore();
     const transcripts = new TranscriptModel();
     const view = new TranscriptView(document.createElement('div'), { model: transcripts });
-    const panel = new SessionPanel(root, { store, transcripts, transcriptView: view, fetchLog });
-    return { root, store, transcripts, panel, fetchLog };
+    const diffPanel = new DiffPanel(document.createElement('div'), { fetchDiff });
+    const panel = new SessionPanel(root, { store, transcripts, transcriptView: view, diffPanel, fetchLog });
+    return { root, store, transcripts, panel, fetchLog, fetchDiff, view, diffPanel };
   }
+
+  it('shows the transcript first and fetches the diff only when that tab is opened', async () => {
+    const fetchDiff = vi.fn(async () => ({ files: [{ file: 'a.ts', added: 1, deleted: 0 }], diff: '' }));
+    const { root, store, panel, view, diffPanel } = mount(vi.fn(async () => null), fetchDiff);
+    store.applyEvent('pipeline:stage', { taskId: 't1', stage: 'worker', status: 'start', title: 'T', projectPath: '/repo' });
+    await panel.show('t1');
+
+    expect(view.element.hidden).toBe(false);
+    expect(diffPanel.element.hidden).toBe(true);
+    expect(fetchDiff).not.toHaveBeenCalled(); // a diff is a git call, not a poll
+
+    const diffTab = [...root.querySelectorAll('.session-tab')].find(
+      (b) => (b as HTMLElement).dataset.tab === 'diff',
+    ) as HTMLButtonElement;
+    diffTab.click();
+    await flush();
+
+    expect(fetchDiff).toHaveBeenCalledWith('t1');
+    expect(diffPanel.element.hidden).toBe(false);
+    expect(view.element.hidden).toBe(true);
+    expect(diffTab.classList.contains('active')).toBe(true);
+  });
+
+  it('returns to the transcript tab when another session is selected', async () => {
+    const { root, store, panel, view, diffPanel } = mount();
+    store.applyEvent('pipeline:stage', { taskId: 't1', stage: 'worker', status: 'start', title: 'T', projectPath: '/repo' });
+    store.applyEvent('pipeline:stage', { taskId: 't2', stage: 'worker', status: 'start', title: 'U', projectPath: '/repo' });
+    await panel.show('t1');
+    (([...root.querySelectorAll('.session-tab')].find(
+      (b) => (b as HTMLElement).dataset.tab === 'diff',
+    )) as HTMLButtonElement).click();
+
+    await panel.show('t2');
+    expect(view.element.hidden).toBe(false);
+    expect(diffPanel.element.hidden).toBe(true);
+  });
 
   it('renders the header and usage strip from store state', async () => {
     const { root, store, panel } = mount();

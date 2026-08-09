@@ -12,6 +12,7 @@ import { TranscriptModel } from './transcriptModel.mjs';
 import { TranscriptView } from './transcriptView.mjs';
 import { SessionTree } from './sessionTree.mjs';
 import { SessionPanel } from './sessionPanel.mjs';
+import { DiffPanel } from './diffPanel.mjs';
 import { Nav } from './nav.mjs';
 import { resolveSelection } from './sessionSelection.mjs';
 
@@ -49,10 +50,16 @@ const transcriptEl = document.createElement('div');
 transcriptEl.className = 'transcript';
 const transcriptView = new TranscriptView(transcriptEl, { model: transcripts });
 
+const diffEl = document.createElement('div');
+diffEl.className = 'diff-pane';
+diffEl.hidden = true;
+const diffPanel = new DiffPanel(diffEl, { fetchDiff: (taskId) => api.workDiff(taskId) });
+
 const sessionPanel = new SessionPanel(document.getElementById('session-body'), {
   store: sessions,
   transcripts,
   transcriptView,
+  diffPanel,
   fetchLog: (taskId) => api.sessionLog(taskId),
 });
 
