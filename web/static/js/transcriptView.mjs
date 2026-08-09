@@ -58,15 +58,22 @@ export class TranscriptView {
     }
 
     // Full re-render: bounded at the model's ring size, and it keeps the DOM
-    // an exact projection of the model (no incremental drift to debug).
+    // an exact projection of the model (no incremental drift to debug). Groups
+    // the reader expanded must survive it — collapsing them on every incoming
+    // line would make an open group unreadable during live output.
+    const openGroups = new Set();
+    this.#el.querySelectorAll('details.activity-row[open]').forEach((el) => {
+      if (el.dataset.groupKey) openGroups.add(el.dataset.groupKey);
+    });
+
     const fragment = document.createDocumentFragment();
-    for (const entry of entries) fragment.appendChild(this.#renderEntry(entry));
+    entries.forEach((entry, index) => fragment.appendChild(this.#renderEntry(entry, index, openGroups)));
     this.#el.replaceChildren(fragment);
 
     if (following) this.#el.scrollTop = this.#el.scrollHeight;
   }
 
-  #renderEntry(entry) {
+  #renderEntry(entry, index, openGroups) {
     if (entry.kind === 'stage') {
       const el = document.createElement('div');
       el.className = 'transcript-stage';
@@ -76,6 +83,10 @@ export class TranscriptView {
     if (entry.kind === 'tools') {
       const details = document.createElement('details');
       details.className = 'activity-row';
+      // Index is a stable key while entries only append/evict from the front;
+      // an evicted head shifts keys, which at worst re-collapses a group.
+      details.dataset.groupKey = String(index);
+      if (openGroups?.has(String(index))) details.open = true;
       const summary = document.createElement('summary');
       // Vocabulary lives with the model so labels have one owner.
       summary.textContent = summarizeToolGroup(entry.lines);

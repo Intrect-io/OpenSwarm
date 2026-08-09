@@ -83,13 +83,23 @@ export class SessionPanel {
       // duplicate. Sequence, not timestamp: an agent emits several lines per
       // millisecond, and a ts comparison silently drops the ties.
       const lastSeq = snapshotLines.at(-1)?.seq;
+      const snapshotGen = snapshotLines.at(-1)?.gen ?? snapshot.gen;
       const live = this.#transcripts.rawLines(taskId);
-      const tail = typeof lastSeq === 'number'
-        ? live.filter((entry) => typeof entry.seq === 'number' && entry.seq > lastSeq)
+      const tail = live.filter((entry) => {
+        // A line from a DIFFERENT daemon process is strictly after this
+        // snapshot — the daemon restarted mid-request, and its sequence
+        // restarted with it, so comparing the two numbers would discard real
+        // post-restart output.
+        if (entry.gen && snapshotGen && entry.gen !== snapshotGen) return true;
         // No sequence (daemon predates the stamp): keeping live lines could
         // duplicate the overlap, so the snapshot alone is the honest answer.
-        : [];
-      this.#transcripts.replace(taskId, [...snapshotLines, ...tail]);
+        if (typeof lastSeq !== 'number' || typeof entry.seq !== 'number') return false;
+        return entry.seq > lastSeq;
+      });
+      // Carry the snapshot's generation so the model reconciles against the
+      // right process even if no live line has arrived yet.
+      const stamped = snapshotLines.map((entry) => ({ ...entry, gen: entry.gen ?? snapshot.gen }));
+      this.#transcripts.replace(taskId, [...stamped, ...tail]);
     } catch {
       // Older daemon or expired retention — live lines are all we get.
     }

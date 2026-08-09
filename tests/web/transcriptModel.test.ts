@@ -142,3 +142,66 @@ describe('TranscriptModel', () => {
     expect(model.has('t1')).toBe(false);
   });
 });
+
+describe('production line shapes (INT-3402 review)', () => {
+  // pairPipeline emits `[${prefix}] ${line}` — the bare-glyph fixtures above
+  // pass while real output would classify as plain.
+  const PREFIXED_THINK = '[INT-3402|worktree/abc] 💭 reading the file';
+  const PREFIXED_TOOL = '[INT-3402|worktree/abc] 🔧 read_file: src/a.ts';
+
+  it('classifies task-prefixed lines by their glyph', () => {
+    expect(classifyLine(PREFIXED_THINK)).toBe('thinking');
+    expect(classifyLine(PREFIXED_TOOL)).toBe('tool');
+  });
+
+  it('summarizes prefixed tool runs by verb, not by prefix', () => {
+    expect(summarizeToolGroup([PREFIXED_TOOL])).toBe('read_file: src/a.ts');
+    expect(summarizeToolGroup([PREFIXED_TOOL, '[INT-3402|worktree/abc] 🔧 read_file: b.ts']))
+      .toBe('read_file ×2');
+  });
+
+  it('collapses a prefixed tool run into one group', () => {
+    const model = new TranscriptModel();
+    model.append('t1', { stage: 'worker', line: PREFIXED_THINK });
+    model.append('t1', { stage: 'worker', line: PREFIXED_TOOL });
+    model.append('t1', { stage: 'worker', line: PREFIXED_TOOL });
+    expect(model.entries('t1').map((e: Entry) => e.kind)).toEqual(['stage', 'line', 'tools']);
+  });
+
+  it('caps one tool group so a long run cannot escape the entry limit', () => {
+    const model = new TranscriptModel({ maxGroupLines: 3 });
+    for (let i = 0; i < 7; i++) model.append('t1', { stage: 'worker', line: `🔧 read_file: ${i}.ts` });
+    const groups = model.entries('t1').filter((e: Entry) => e.kind === 'tools');
+    expect(groups).toHaveLength(3); // 3 + 3 + 1
+    expect(groups.every((g: Entry) => (g.lines?.length ?? 0) <= 3)).toBe(true);
+  });
+
+  it('drops sequence high-water marks when a line arrives from a restarted daemon', () => {
+    const model = new TranscriptModel();
+    model.append('t1', { stage: 'worker', line: 'before restart', seq: 900, gen: 'daemon-1' });
+
+    // A restarted daemon numbers from 1 again — without a reset every new line
+    // would be discarded as a duplicate. The generation rides ON the line, so
+    // this cannot lose a race with a separate health request.
+    model.append('t1', { stage: 'worker', line: 'after restart', seq: 1, gen: 'daemon-2' });
+
+    const texts = model.entries('t1').filter((e: Entry) => e.kind === 'line').map((e: Entry) => e.text);
+    expect(texts).toEqual(['before restart', 'after restart']);
+  });
+
+  it('does not reset on the first generation it learns', () => {
+    const model = new TranscriptModel();
+    model.append('t1', { stage: 'worker', line: 'one', seq: 5, gen: 'daemon-1' });
+    model.append('t1', { stage: 'worker', line: 'duplicate', seq: 5, gen: 'daemon-1' });
+    expect(model.entries('t1').filter((e: Entry) => e.kind === 'line')).toHaveLength(1);
+  });
+
+  it('still dedupes within one generation after a restart reset', () => {
+    const model = new TranscriptModel();
+    model.append('t1', { stage: 'worker', line: 'old', seq: 900, gen: 'daemon-1' });
+    model.append('t1', { stage: 'worker', line: 'new', seq: 1, gen: 'daemon-2' });
+    model.append('t1', { stage: 'worker', line: 'new', seq: 1, gen: 'daemon-2' }); // replay
+    const texts = model.entries('t1').filter((e: Entry) => e.kind === 'line').map((e: Entry) => e.text);
+    expect(texts).toEqual(['old', 'new']);
+  });
+});

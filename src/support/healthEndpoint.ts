@@ -28,6 +28,15 @@ export interface HealthPayload {
 // One id per process lifetime, minted at module load (daemon boot).
 const INSTANCE_ID = randomUUID();
 
+/**
+ * The daemon generation. Log sequences are process-local and restart at 1, so
+ * consumers that dedupe on them must know WHICH process a number belongs to —
+ * broadcastEvent stamps this alongside each line. (INT-3402)
+ */
+export function getInstanceId(): string {
+  return INSTANCE_ID;
+}
+
 function readPackageVersion(): string {
   try {
     // healthEndpoint.js lives at <pkg>/dist/support/, so package.json is two up.

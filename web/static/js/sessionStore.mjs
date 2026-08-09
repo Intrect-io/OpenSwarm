@@ -20,8 +20,30 @@ const PHASE_RANK = {
 
 export const TERMINAL_PHASES = new Set(['completed', 'failed', 'cancelled', 'decomposed']);
 
+/**
+ * The ONLY terminal→terminal move history may make. A decomposition reports
+ * `success: true`, so the live event can only say "completed" — history knows
+ * it was really a split. Everything else is a genuine outcome disagreement,
+ * where the newer live event wins (e.g. an older completed run in history must
+ * not overwrite a fresh attempt's failure).
+ */
+function refinesTerminal(from, to) {
+  return from === 'completed' && to === 'decomposed';
+}
+
 function rankOf(phase) {
   return PHASE_RANK[phase] ?? -1;
+}
+
+/**
+ * Repository root for a path that may be a worktree. Stage events report the
+ * ACTIVE directory (`{repo}/worktree/{issueId}` in worktree mode), so using it
+ * as the repository would scatter one repo's sessions across a tree node per
+ * task. Same layout the daemon creates.
+ */
+export function repoRootFromPath(path) {
+  if (typeof path !== 'string' || !path) return path;
+  return path.replace(/\/worktree\/[^/]+\/?$/, '');
 }
 
 export class SessionStore extends EventTarget {
@@ -59,16 +81,24 @@ export class SessionStore extends EventTarget {
       });
     }
     for (const entry of payload?.recent ?? []) {
-      this.#upsert(entry.taskId, {
-        phase: entry.status,
-        issueIdentifier: entry.issueIdentifier,
-        title: entry.title,
-        projectPath: entry.projectPath,
-        costUsd: entry.costUsd,
-        durationMs: entry.durationMs,
-        failureCause: entry.failureCause,
-        completedAt: entry.completedAt,
-      });
+      // History describes a run that already ENDED, so it may refine one
+      // terminal phase into a more specific one ('completed' → 'decomposed'),
+      // which the equal-rank guard would otherwise block. It must not, though,
+      // overwrite metadata a newer attempt has already reported live.
+      this.#upsert(
+        entry.taskId,
+        {
+          phase: entry.status,
+          issueIdentifier: entry.issueIdentifier,
+          title: entry.title,
+          projectPath: entry.projectPath,
+          costUsd: entry.costUsd,
+          durationMs: entry.durationMs,
+          failureCause: entry.failureCause,
+          completedAt: entry.completedAt,
+        },
+        { refineTerminal: true, fillOnly: true },
+      );
     }
   }
 
@@ -120,13 +150,18 @@ export class SessionStore extends EventTarget {
         this.#upsert(taskId, { model: data.toModel });
         break;
 
-      case 'task:completed':
+      case 'task:completed': {
+        const session = this.#sessions.get(taskId);
+        // A reviewer stage failure on the way to success must not linger in
+        // the metadata strip next to a green result.
+        if (data.success && session) session.error = undefined;
         this.#upsert(taskId, {
           phase: data.success ? 'completed' : 'failed',
           durationMs: data.duration,
           completedAt: data.completedAt,
         });
         break;
+      }
 
       case 'task:cost':
         this.#upsert(taskId, {
@@ -151,11 +186,18 @@ export class SessionStore extends EventTarget {
       currentStage: data.stage,
       issueIdentifier: data.issueIdentifier,
       title: data.title,
-      projectPath: data.projectPath,
-      worktreePath: data.worktree,
+      // `worktree` is a short NAME (the issue id), not a path — labelling only.
+      worktreeName: data.worktree,
       branch: data.branch,
       model: data.model,
     };
+    // The stage's projectPath is the active directory, which in worktree mode
+    // IS the worktree. Derive the repository for grouping, and only fill the
+    // full worktree path when the authoritative seed has not supplied one.
+    if (data.projectPath) {
+      patch.projectPath = repoRootFromPath(data.projectPath);
+      if (data.projectPath !== patch.projectPath) patch.worktreePath = data.projectPath;
+    }
     if (data.status === 'fail') {
       // A failed STAGE is not a failed TASK: the pipeline routinely fails a
       // reviewer stage and iterates to success. Only task:completed decides the
@@ -181,7 +223,7 @@ export class SessionStore extends EventTarget {
     });
   }
 
-  #upsert(taskId, patch, { restart = false } = {}) {
+  #upsert(taskId, patch, { restart = false, refineTerminal = false, fillOnly = false } = {}) {
     let session = this.#sessions.get(taskId);
     const isNew = !session;
     if (!session) {
@@ -213,17 +255,22 @@ export class SessionStore extends EventTarget {
         // Rank guard: a replayed 'started' must not resurrect a finished
         // session, and a late 'queued' must not un-run a running one. Terminal
         // is also final against ANOTHER terminal — equal rank — so a replayed
-        // outcome cannot rewrite how a session ended. An explicit restart (see
-        // task:started) is the one sanctioned exception.
+        // outcome cannot rewrite how a session ended. Two sanctioned
+        // exceptions: an explicit restart (task:started), and the daemon's
+        // own history refining one terminal into a more specific one.
         if (!reopening) {
-          const blocked = TERMINAL_PHASES.has(session.phase)
-            ? rankOf(value) <= rankOf(session.phase)
+          const terminal = TERMINAL_PHASES.has(session.phase);
+          const blocked = terminal
+            ? !(refineTerminal && refinesTerminal(session.phase, value)) && rankOf(value) <= rankOf(session.phase)
             : rankOf(value) < rankOf(session.phase);
           if (blocked) continue;
         }
         session.phase = value;
         continue;
       }
+      // A history seed fills gaps; it never overwrites what a newer attempt
+      // already reported live.
+      if (fillOnly && session[key] !== undefined && session[key] !== '') continue;
       session[key] = value;
     }
     session.updatedAt = Date.now();

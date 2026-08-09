@@ -180,3 +180,103 @@ describe('SessionStore', () => {
     expect(store.list().map((s: { taskId: string }) => s.taskId)).toEqual(['old', 'new']);
   });
 });
+
+describe('SessionStore — path and terminal semantics (INT-3402 review)', () => {
+  it('groups by REPOSITORY, not by the per-task worktree the stage reports', () => {
+    const store = new SessionStore();
+    // Stage events report the ACTIVE directory, which in worktree mode is the
+    // task's own worktree — grouping on it would give every task its own node.
+    store.applyEvent('pipeline:stage', {
+      taskId: 't1', stage: 'worker', status: 'start',
+      projectPath: '/repo/worktree/t1', worktree: 't1',
+    });
+    store.applyEvent('pipeline:stage', {
+      taskId: 't2', stage: 'worker', status: 'start',
+      projectPath: '/repo/worktree/t2', worktree: 't2',
+    });
+
+    expect(store.byProject('/repo')).toHaveLength(2);
+    expect(store.get('t1')).toMatchObject({
+      projectPath: '/repo',
+      worktreePath: '/repo/worktree/t1',
+      worktreeName: 't1', // the short label, never the path
+    });
+  });
+
+  it('keeps a non-worktree project path as-is', () => {
+    const store = new SessionStore();
+    store.applyEvent('pipeline:stage', { taskId: 't1', stage: 'worker', status: 'start', projectPath: '/repo' });
+    expect(store.get('t1').projectPath).toBe('/repo');
+    expect(store.get('t1').worktreePath).toBeUndefined();
+  });
+
+  it('does not let a stage overwrite the seeded worktree path', () => {
+    const store = new SessionStore();
+    store.seed({
+      sessions: [{ taskId: 't1', status: 'running', title: 'T', projectPath: '/repo', worktreePath: '/real/worktree/path' }],
+      recent: [],
+    });
+    store.applyEvent('pipeline:stage', { taskId: 't1', stage: 'worker', status: 'start', projectPath: '/repo' });
+    expect(store.get('t1').worktreePath).toBe('/real/worktree/path');
+  });
+
+  it('clears a stage error once the task completes successfully', () => {
+    const store = new SessionStore();
+    store.applyEvent('pipeline:stage', { taskId: 't1', stage: 'reviewer', status: 'fail', error: 'revise' });
+    store.applyEvent('task:completed', { taskId: 't1', success: true, duration: 5 });
+    expect(store.get('t1').error).toBeUndefined();
+  });
+
+  it('lets daemon history refine one terminal phase into a more specific one', () => {
+    const store = new SessionStore();
+    // A decomposition reports success, so the live event says "completed".
+    store.applyEvent('task:completed', { taskId: 'parent', success: true, duration: 5 });
+    store.seed({
+      sessions: [],
+      recent: [{ taskId: 'parent', status: 'decomposed', title: 'Parent', projectPath: '/repo' }],
+    });
+    expect(store.get('parent').phase).toBe('decomposed');
+  });
+
+  it('history never overwrites metadata a newer attempt reported live', () => {
+    const store = new SessionStore();
+    store.applyEvent('pipeline:stage', {
+      taskId: 't1', stage: 'worker', status: 'start', title: 'Live title', projectPath: '/repo',
+    });
+    store.seed({
+      sessions: [],
+      recent: [{ taskId: 't1', status: 'failed', title: 'Stale title', projectPath: '/old', failureCause: 'timeout' }],
+    });
+    const session = store.get('t1');
+    expect(session.title).toBe('Live title');
+    expect(session.projectPath).toBe('/repo');
+    expect(session.failureCause).toBe('timeout'); // gaps still get filled
+  });
+});
+
+describe('terminal refinement is narrow (INT-3402 review)', () => {
+  it('does not let older history overwrite a newer live outcome', () => {
+    const store = new SessionStore();
+    // A fresh attempt just failed…
+    store.applyEvent('task:completed', { taskId: 't1', success: false, duration: 3 });
+    // …while history still remembers the previous attempt succeeding.
+    store.seed({ sessions: [], recent: [{ taskId: 't1', status: 'completed', title: 'T', projectPath: '/repo' }] });
+    expect(store.get('t1').phase).toBe('failed');
+  });
+
+  it('only refines the completed → decomposed case', () => {
+    const store = new SessionStore();
+    store.applyEvent('task:completed', { taskId: 'a', success: true, duration: 1 });
+    store.applyEvent('task:completed', { taskId: 'b', success: false, duration: 1 });
+    store.seed({
+      sessions: [],
+      recent: [
+        { taskId: 'a', status: 'decomposed', title: 'A', projectPath: '/repo' },
+        // failed → decomposed is not a refinement; the live outcome stands.
+        { taskId: 'b', status: 'decomposed', title: 'B', projectPath: '/repo' },
+      ],
+    });
+    expect(store.get('a').phase).toBe('decomposed');
+    expect(store.get('b').phase).toBe('failed');
+  });
+});

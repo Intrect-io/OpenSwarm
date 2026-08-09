@@ -10,17 +10,36 @@
 
 export const TRANSCRIPT_MAX_ENTRIES = 500;
 
+/**
+ * A single tool group is ONE entry, so a long uninterrupted run of tool calls
+ * would escape the entry cap entirely and grow the DOM without bound (the view
+ * re-renders the whole group per line). Cap the run; the next call opens a new
+ * group, which the entry cap then governs.
+ */
+export const TRANSCRIPT_MAX_GROUP_LINES = 50;
+
 // Daemon line prefixes. Kept in one place: the emitters may change glyphs, and
 // a stale copy would silently mis-style every line.
 const THINKING_PREFIX = '💭';
 const TOOL_PREFIX = '🔧';
 
+/**
+ * pairPipeline wraps every streamed line as `[${prefix}] ${line}`, so the
+ * glyph is NOT at the start — without stripping it, real worker and reviewer
+ * output all classifies as plain and tool runs never collapse.
+ */
+const TASK_PREFIX_RE = /^\s*\[[^\]]*\]\s*/;
+
+function stripTaskPrefix(line) {
+  return line.replace(TASK_PREFIX_RE, '').trimStart();
+}
+
 /** 'thinking' | 'tool' | 'plain' — drives styling, not behavior. */
 export function classifyLine(line) {
   if (typeof line !== 'string') return 'plain';
-  const trimmed = line.trimStart();
-  if (trimmed.startsWith(THINKING_PREFIX)) return 'thinking';
-  if (trimmed.startsWith(TOOL_PREFIX)) return 'tool';
+  const body = stripTaskPrefix(line.trimStart());
+  if (body.startsWith(THINKING_PREFIX)) return 'thinking';
+  if (body.startsWith(TOOL_PREFIX)) return 'tool';
   return 'plain';
 }
 
@@ -40,7 +59,8 @@ export function summarizeToolGroup(lines) {
 }
 
 function stripToolPrefix(line) {
-  return line.trimStart().slice(TOOL_PREFIX.length).trim() || line.trim();
+  const body = stripTaskPrefix(line.trimStart());
+  return body.slice(TOOL_PREFIX.length).trim() || body || line.trim();
 }
 
 /** First token of a tool line, e.g. "🔧 read_file: src/a.ts" → "read_file". */
@@ -64,9 +84,31 @@ export class TranscriptModel extends EventTarget {
   #byTask = new Map();
   #maxEntries;
 
-  constructor({ maxEntries = TRANSCRIPT_MAX_ENTRIES } = {}) {
+  #maxGroupLines;
+  /** Daemon instance the current sequence numbers belong to. */
+  #generation = null;
+
+  constructor({ maxEntries = TRANSCRIPT_MAX_ENTRIES, maxGroupLines = TRANSCRIPT_MAX_GROUP_LINES } = {}) {
     super();
     this.#maxEntries = maxEntries;
+    this.#maxGroupLines = maxGroupLines;
+  }
+
+  /**
+   * The daemon's sequence counter is process-local and restarts at 1, so a
+   * page that kept its high-water marks across a restart would discard every
+   * new line until the fresh counter passed the old mark.
+   *
+   * The generation rides on each line, so this needs no health round trip and
+   * cannot lose a race with reconnecting SSE delivery — dropping the marks the
+   * moment a line from a different process arrives is enough. History stays.
+   */
+  #applyGeneration(generation) {
+    if (!generation || generation === this.#generation) return;
+    const first = this.#generation === null;
+    this.#generation = generation;
+    if (first) return;
+    for (const state of this.#byTask.values()) state.maxSeq = 0;
   }
 
   entries(taskId) {
@@ -99,8 +141,9 @@ export class TranscriptModel extends EventTarget {
     this.dispatchEvent(new CustomEvent('replace', { detail: { taskId } }));
   }
 
-  append(taskId, { stage, line, ts, seq }, { silent = false } = {}) {
+  append(taskId, { stage, line, ts, seq, gen }, { silent = false } = {}) {
     if (typeof line !== 'string' || !line) return;
+    this.#applyGeneration(gen);
     let state = this.#byTask.get(taskId);
     if (!state) {
       state = { entries: [], raw: [], lastStage: null, openTools: null, maxSeq: 0 };
@@ -118,7 +161,7 @@ export class TranscriptModel extends EventTarget {
       state.maxSeq = seq;
     }
 
-    state.raw.push({ stage, line, ts, seq });
+    state.raw.push({ stage, line, ts, seq, gen });
     while (state.raw.length > this.#maxEntries) state.raw.shift();
 
     if (stage && stage !== state.lastStage) {
@@ -129,6 +172,9 @@ export class TranscriptModel extends EventTarget {
 
     const type = classifyLine(line);
     if (type === 'tool') {
+      if (state.openTools && state.openTools.lines.length >= this.#maxGroupLines) {
+        state.openTools = null; // cap the run so the entry cap can govern it
+      }
       if (state.openTools) {
         state.openTools.lines.push(line);
       } else {

@@ -276,6 +276,35 @@ describe('SessionPanel', () => {
     expect(texts).toEqual(['history']); // shown once, not twice
   });
 
+  it('keeps post-restart lines when the daemon restarts during the snapshot request', async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const fetchLog = vi.fn(async () => {
+      await gate;
+      return {
+        taskId: 't1',
+        gen: 'daemon-1',
+        lines: [{ stage: 'worker', line: 'before restart', ts: 1, seq: 900, gen: 'daemon-1' }],
+        truncated: false,
+      };
+    });
+    const { store, transcripts, panel } = mount(fetchLog);
+    store.applyEvent('pipeline:stage', { taskId: 't1', stage: 'worker', status: 'start', title: 'T', projectPath: '/repo' });
+
+    const showing = panel.show('t1');
+    // The daemon restarted mid-request: its sequence restarted at 1, so a
+    // numeric comparison against the old snapshot would throw this away.
+    transcripts.append('t1', { stage: 'worker', line: 'after restart', ts: 2, seq: 1, gen: 'daemon-2' });
+    release(null);
+    await showing;
+    await flush();
+
+    const texts = transcripts.entries('t1')
+      .filter((e: { kind: string }) => e.kind === 'line')
+      .map((e: { text: string }) => e.text);
+    expect(texts).toEqual(['before restart', 'after restart']);
+  });
+
   it('survives a daemon without the transcript endpoint', async () => {
     const fetchLog = vi.fn(async () => { throw new Error('404'); });
     const { store, panel, root } = mount(fetchLog);

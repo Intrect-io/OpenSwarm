@@ -81,6 +81,14 @@ sessions.addEventListener('change', () => {
 // link is "not loaded yet", not "does not exist".
 let sessionSnapshotLoaded = false;
 
+async function reloadSessions() {
+  try {
+    sessions.seed(await api.workSessions());
+  } catch (err) {
+    console.error('Failed to load sessions', err);
+  }
+}
+
 function showSelectedSession(taskId) {
   sessionTree.select(taskId);
   const choice = resolveSelection({
@@ -110,7 +118,7 @@ let pendingDeploy = null;
 
 function followDeployedSession(session) {
   if (!pendingDeploy) return false;
-  if (session.projectPath && session.projectPath !== pendingDeploy.projectPath) return false;
+  if (pendingDeploy.taskIds && !pendingDeploy.taskIds.has(session.taskId)) return false;
   if (Date.now() - pendingDeploy.at > DEPLOY_FOLLOW_WINDOW_MS) {
     pendingDeploy = null;
     return false;
@@ -143,8 +151,12 @@ const board = new IssueBoard({
       // The daemon may have queued and broadcast before this response landed,
       // so the session:new for our own dispatch can already be behind us —
       // arming alone would wait for an event that never comes again.
-      const dispatched = new Set(result.items?.filter((i) => i.status === 'queued').map((i) => i.issueId));
-      const existing = sessions.byProject(path).find((s) => dispatched.has(s.taskId));
+      // Match on the dispatched issue ids, not the path: the picker's value
+      // may be tilde-spelled while the daemon reports an absolute path.
+      pendingDeploy.taskIds = new Set(
+        (result.items ?? []).filter((item) => item.status === 'queued').map((item) => item.issueId),
+      );
+      const existing = sessions.list().find((session) => pendingDeploy.taskIds.has(session.taskId));
       if (existing) followDeployedSession(existing);
     }
     return result;
@@ -168,7 +180,7 @@ events
   })
   .on('log', (data) => {
     workCards.onLog(data);
-    transcripts.append(data.taskId, { stage: data.stage, line: data.line, ts: data.ts, seq: data.seq });
+    transcripts.append(data.taskId, { stage: data.stage, line: data.line, ts: data.ts, seq: data.seq, gen: data.gen });
   })
   .on('task:queued', (data) => sessions.applyEvent('task:queued', data))
   .on('task:started', (data) => sessions.applyEvent('task:started', data))
@@ -176,7 +188,12 @@ events
   .on('task:cost', (data) => sessions.applyEvent('task:cost', data))
   .on('pipeline:iteration', (data) => sessions.applyEvent('pipeline:iteration', data))
   .on('pipeline:escalation', (data) => sessions.applyEvent('pipeline:escalation', data))
-  .on('$open', () => pollHealth())
+  .on('$open', () => {
+    void pollHealth();
+    // A reconnect skips the replay buffer, so anything that happened during
+    // the outage is missing. Re-read the authoritative list.
+    void reloadSessions();
+  })
   .on('$down', () => setDaemonStatus('down', 'reconnecting…'));
 // Connect immediately — delaying SSE behind the snapshot fetch opened a
 // live-output blind window. Ordering against the async stage snapshot does
@@ -190,6 +207,18 @@ events.connect();
 // poll is plenty, and the gauge stays hidden until the daemon has actually
 // observed a provider header.
 new QuotaGauge(document.getElementById('quota-gauge'), { fetchQuota: () => api.quota() }).start();
+
+// Off-canvas sidebar (narrow windows only — the button is display:none above
+// the breakpoint). Selecting anything closes it so the choice is visible.
+const sidebarToggle = document.getElementById('sidebar-toggle');
+function setSidebarOpen(open) {
+  document.body.classList.toggle('sidebar-open', open);
+  sidebarToggle.setAttribute('aria-expanded', String(open));
+}
+sidebarToggle.addEventListener('click', () => {
+  setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+});
+nav.addEventListener('change', () => setSidebarOpen(false));
 
 nav.start();
 
@@ -218,9 +247,7 @@ nav.start();
   // Authoritative session list (null on a daemon that predates the endpoint,
   // in which case the SSE-derived state above is all we have).
   try {
-    sessions.seed(await api.workSessions());
-  } catch (err) {
-    console.error('Failed to load sessions', err);
+    await reloadSessions();
   } finally {
     // The hash was read before this answered: a deep link to a session the
     // store did not know yet showed a placeholder, and an empty view never

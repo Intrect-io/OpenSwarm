@@ -259,6 +259,9 @@ body[data-view="sessions"] .view-sessions { display: flex; }
 
 /* ── Narrow windows ──────────────────────────────────────────────────── */
 
+/* Wide windows keep the sidebar pinned, so its toggle is noise. */
+.sidebar-toggle { display: none; }
+
 @media (max-width: 900px) {
   body { grid-template: "main" 1fr "statusbar" auto / minmax(0, 1fr); }
   .sidebar {
@@ -271,4 +274,25 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   }
   body.sidebar-open .sidebar { transform: none; }
   body[data-view="issues"] .view-issues { grid-template-columns: minmax(0, 1fr); }
+
+  /* Off-canvas needs a way back on-canvas — without this the repo picker and
+     session tree are unreachable at narrow widths. */
+  .sidebar-toggle {
+    display: block;
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 11;
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-md);
+    line-height: 1;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .sidebar-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  /* Keep the first view row clear of the floating button. */
+  .view { padding-top: 44px; }
 }

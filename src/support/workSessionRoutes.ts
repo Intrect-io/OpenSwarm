@@ -234,7 +234,10 @@ export async function tryHandleWorkSessionRoutes(
       writeJson(res, 404, { error: `No transcript for task ${taskId} (unknown, or retention expired)` });
       return true;
     }
-    writeJson(res, 200, snapshot);
+    // Same generation the SSE lines carry: sequences only mean anything
+    // within one daemon process.
+    const { getInstanceId } = await import('./healthEndpoint.js');
+    writeJson(res, 200, { ...snapshot, gen: getInstanceId() });
     return true;
   }
 
