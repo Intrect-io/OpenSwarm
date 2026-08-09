@@ -787,6 +787,19 @@ describe('eventHub', () => {
       }
     });
 
+    it('stamps one timestamp shared by the ring and the SSE copy of a log line', async () => {
+      const { getTaskLog } = await import('./taskLogStore.js');
+      const event: HubEvent = { type: 'log', data: { taskId: 'stamped', stage: 'worker', line: 'hello' } };
+
+      broadcastEvent(event);
+
+      // Same value on both sides — that identity is what lets a client merge a
+      // REST transcript snapshot with lines that streamed in mid-request.
+      const stored = getTaskLog('stamped')!.lines[0];
+      expect(typeof (event.data as { ts?: number }).ts).toBe('number');
+      expect(stored.ts).toBe((event.data as { ts?: number }).ts);
+    });
+
     it('task:started cancels a pending cleanup for a reused task id', async () => {
       const { getTaskLog, TASK_LOG_RETENTION_MS } = await import('./taskLogStore.js');
       vi.useFakeTimers();

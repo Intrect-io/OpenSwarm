@@ -27,15 +27,33 @@ describe('taskLogStore', () => {
     appendTaskLog('t1', 'reviewer', 'world', 222);
 
     const snapshot = getTaskLog('t1')!;
-    expect(snapshot.lines).toEqual([
+    expect(snapshot.lines).toMatchObject([
       { stage: 'worker', line: 'hello', ts: 111 },
       { stage: 'reviewer', line: 'world', ts: 222 },
     ]);
     expect(snapshot.truncated).toBe(false);
 
     // Mutating the snapshot must not touch the ring (serialization safety).
-    snapshot.lines.push({ stage: 'x', line: 'injected', ts: 0 });
+    snapshot.lines.push({ stage: 'x', line: 'injected', ts: 0, seq: 0 });
     expect(getTaskLog('t1')!.lines).toHaveLength(2);
+  });
+
+  it('assigns a strictly increasing sequence — the client merge key', () => {
+    // Same millisecond on purpose: an agent emits several lines per ms, so a
+    // timestamp cannot order them and a `> lastTs` merge drops the ties.
+    const first = appendTaskLog('t1', 'worker', 'a', 500);
+    const second = appendTaskLog('t1', 'worker', 'b', 500);
+    const otherTask = appendTaskLog('t2', 'worker', 'c', 500);
+
+    expect(second).toBeGreaterThan(first);
+    expect(otherTask).toBeGreaterThan(second); // monotonic ACROSS tasks
+    expect(getTaskLog('t1')!.lines.map((l) => l.seq)).toEqual([first, second]);
+  });
+
+  it('returns 0 without storing when the line is unusable', () => {
+    expect(appendTaskLog('', 'worker', 'x')).toBe(0);
+    expect(appendTaskLog('t1', 'worker', undefined as unknown as string)).toBe(0);
+    expect(getTaskLog('t1')).toBeNull();
   });
 
   it('returns null for an unknown task', () => {

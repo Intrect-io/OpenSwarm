@@ -5,44 +5,69 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OpenSwarm</title>
   <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/cockpit.css" />
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
-<body>
-  <header class="topbar">
+<body data-view="issues">
+  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false">☰</button>
+  <aside class="sidebar">
     <div class="brand">🐝 OpenSwarm</div>
+    <nav class="view-nav">
+      <button type="button" class="nav-item" data-view="sessions">Sessions</button>
+      <button type="button" class="nav-item" data-view="issues">Issues</button>
+    </nav>
+    <div class="sidebar-section-head">Repository</div>
     <div id="repo-picker" class="repo-picker"></div>
-    <div class="spacer"></div>
+    <div id="session-tree" class="session-tree"></div>
+  </aside>
+
+  <main class="main">
+    <section class="view view-issues" data-view-panel="issues">
+      <div class="panel issues-panel">
+        <div class="panel-head">
+          <h2>Issues</h2>
+          <span id="issue-count" class="muted"></span>
+        </div>
+        <div id="issue-list" class="issue-list">
+          <div class="empty">Select a repository to load its issues.</div>
+        </div>
+        <footer class="deploy-bar">
+          <span id="selection-summary" class="muted">0 selected</span>
+          <button id="deploy-btn" class="deploy-btn" disabled>Deploy agents</button>
+        </footer>
+      </div>
+
+      <div class="panel work-panel">
+        <div class="panel-head">
+          <h2>Active work</h2>
+        </div>
+        <div id="work-cards" class="work-cards">
+          <div class="empty">Deployed agents will report progress here.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view view-sessions" data-view-panel="sessions">
+      <div class="panel session-panel">
+        <div class="panel-head">
+          <h2>Sessions</h2>
+          <span id="session-count" class="muted"></span>
+        </div>
+        <div id="session-body" class="session-body">
+          <div class="empty">Deploy issues to start a session. Live agent output appears here.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
     <div id="quota-gauge" class="quota-gauge" title="provider rate limit — observed from usage headers" hidden></div>
+    <div class="spacer"></div>
     <div id="daemon-status" class="daemon-status" title="daemon">
       <span class="dot" data-state="unknown"></span>
       <span class="label">connecting…</span>
     </div>
-  </header>
-
-  <main class="layout">
-    <section class="panel issues-panel">
-      <div class="panel-head">
-        <h2>Issues</h2>
-        <span id="issue-count" class="muted"></span>
-      </div>
-      <div id="issue-list" class="issue-list">
-        <div class="empty">Select a repository to load its issues.</div>
-      </div>
-      <footer class="deploy-bar">
-        <span id="selection-summary" class="muted">0 selected</span>
-        <button id="deploy-btn" class="deploy-btn" disabled>Deploy agents</button>
-      </footer>
-    </section>
-
-    <section class="panel work-panel">
-      <div class="panel-head">
-        <h2>Active work</h2>
-      </div>
-      <div id="work-cards" class="work-cards">
-        <div class="empty">Deployed agents will report progress here.</div>
-      </div>
-    </section>
-  </main>
+  </footer>
 
   <script type="module" src="/static/js/main.mjs"></script>
 </body>

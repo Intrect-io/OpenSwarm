@@ -18,6 +18,13 @@ export interface TaskLogLine {
   stage: string;
   line: string;
   ts: number;
+  /**
+   * Strictly increasing across every line this process appends. A wall-clock
+   * `ts` is not enough to reconcile a snapshot with a live stream: an agent
+   * easily emits several lines inside one millisecond, and a `> lastTs` merge
+   * silently drops the ties. (INT-3402)
+   */
+  seq: number;
 }
 
 export interface TaskLogSnapshot {
@@ -45,6 +52,7 @@ interface TaskLogBuffer {
 // the first eligible entry found is the least recently used.
 const buffers = new Map<string, TaskLogBuffer>();
 const cleanupTimers = new Map<string, NodeJS.Timeout>();
+let nextSeq = 1;
 
 function evictIfNeeded(): void {
   if (buffers.size < TASK_LOG_MAX_BUFFERS) return;
@@ -64,8 +72,9 @@ function evictIfNeeded(): void {
   }
 }
 
-export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): void {
-  if (!taskId || typeof line !== 'string') return;
+/** Returns the sequence assigned to the line (0 when nothing was stored). */
+export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): number {
+  if (!taskId || typeof line !== 'string') return 0;
   let buffer = buffers.get(taskId);
   if (!buffer) {
     evictIfNeeded();
@@ -85,11 +94,13 @@ export function appendTaskLog(taskId: string, stage: string, line: string, now =
     text = `${text.slice(0, TASK_LOG_MAX_LINE_CHARS)}…`;
     buffer.truncated = true;
   }
-  buffer.lines.push({ stage, line: text, ts: now });
+  const seq = nextSeq++;
+  buffer.lines.push({ stage, line: text, ts: now, seq });
   if (buffer.lines.length > TASK_LOG_RING_SIZE) {
     buffer.lines.shift();
     buffer.truncated = true;
   }
+  return seq;
 }
 
 /** Snapshot copy (safe to serialize while appends continue). Null → 404. */

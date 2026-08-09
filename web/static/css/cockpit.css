@@ -1,0 +1,298 @@
+/* Cockpit shell: sidebar + view area + status bar. (INT-3402)
+   Consumes tokens.css only. Component styling for the Issues view stays in
+   app.css — this file owns the frame. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  height: 100vh;
+  display: grid;
+  grid-template:
+    "sidebar main" 1fr
+    "statusbar statusbar" auto
+    / var(--sidebar-w) minmax(0, 1fr);
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+
+.sidebar {
+  grid-area: sidebar;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 10px 0;
+  gap: 10px;
+}
+
+.brand { font-weight: 600; font-size: var(--text-lg); padding: 2px 4px; }
+
+.view-nav { display: flex; flex-direction: column; gap: 2px; }
+
+.nav-item {
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.nav-item:hover { background: var(--surface2); color: var(--text); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); }
+.nav-item:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.sidebar-section-head {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.session-tree {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  margin: 0 -10px;
+  padding: 0 10px 10px;
+}
+
+/* ── Main / views ────────────────────────────────────────────────────── */
+
+.main { grid-area: main; min-width: 0; min-height: 0; display: flex; }
+
+/* One attribute on <body> decides which view is mounted; the others stay in
+   the DOM (state, scroll positions, and in-flight renders survive switching). */
+.view { display: none; flex: 1; min-width: 0; min-height: 0; padding: 12px; gap: 12px; }
+body[data-view="issues"] .view-issues { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(320px, 1fr); }
+body[data-view="sessions"] .view-sessions { display: flex; }
+
+.session-panel { flex: 1; min-width: 0; }
+.session-body { flex: 1; min-height: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+
+/* ── Session tree (sidebar) ──────────────────────────────────────────── */
+
+.tree-empty { color: var(--muted); font-size: var(--text-xs); padding: 8px 4px; }
+
+.tree-project {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  padding: 8px 4px 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tree-badge {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: var(--radius-pill);
+  padding: 0 6px;
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.tree-session {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.tree-session:hover { background: var(--surface2); }
+.tree-session.selected { background: var(--accent-soft); }
+.tree-session:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.tree-session .glyph { width: 12px; text-align: center; color: var(--muted); }
+.tree-session[data-phase="running"] .glyph { color: var(--accent); }
+.tree-session[data-phase="completed"] .glyph { color: var(--ok); }
+.tree-session[data-phase="failed"] .glyph { color: var(--error); }
+.tree-session[data-phase="decomposed"] .glyph { color: var(--purple); }
+.tree-session .label {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-session .time { font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+/* ── Session panel ───────────────────────────────────────────────────── */
+
+.session-header { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.session-header .identifier {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+.session-header .title {
+  flex: 1;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-header .phase {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.session-header .phase[data-phase="running"] { color: var(--accent); border-color: var(--accent); }
+.session-header .phase[data-phase="completed"] { color: var(--ok); border-color: var(--ok); }
+.session-header .phase[data-phase="failed"] { color: var(--error); border-color: var(--error); }
+
+.session-meta {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-tabs { display: flex; gap: 4px; }
+
+.session-tab {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.session-tab:hover { color: var(--text); }
+.session-tab.active { color: var(--accent); border-color: var(--border); background: var(--accent-soft); }
+.session-tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* ── Diff ────────────────────────────────────────────────────────────── */
+
+.diff-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+.diff-pane[hidden] { display: none; }
+.diff-summary { color: var(--text); margin-bottom: 6px; }
+.diff-file { color: var(--muted); }
+.diff-body { margin-top: 8px; }
+.diff-line { white-space: pre; line-height: 1.45; }
+.diff-line.file { color: var(--purple); margin-top: 8px; }
+.diff-line.hunk { color: var(--accent); }
+.diff-line.meta { color: var(--muted); }
+.diff-line.add { color: var(--ok); }
+.diff-line.del { color: var(--error); }
+.diff-line.context { color: var(--muted); }
+
+/* ── Transcript ──────────────────────────────────────────────────────── */
+
+.transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  /* NEVER smooth: it breaks stick-to-bottom detection (vega INT-1411). */
+  scroll-behavior: auto;
+}
+.transcript[hidden] { display: none; }
+
+.transcript-stage { color: var(--accent); margin: 8px 0 4px; font-family: var(--font-mono); font-size: var(--text-xs); }
+.transcript-stage:first-child { margin-top: 0; }
+
+.transcript-line { font-size: var(--text-sm); line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-width: 760px; }
+.transcript-line.thinking { color: var(--text); }
+.transcript-line.plain { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--muted); }
+
+.activity-row { margin: 2px 0; font-family: var(--font-mono); font-size: var(--text-xs); }
+.activity-row > summary { cursor: pointer; color: var(--muted); list-style: none; }
+.activity-row > summary::before { content: '▸ '; color: var(--purple); }
+.activity-row[open] > summary::before { content: '▾ '; }
+.activity-row > summary:hover { color: var(--text); }
+.activity-line { color: var(--muted); padding-left: 14px; white-space: pre-wrap; word-break: break-word; }
+
+/* ── Status bar ──────────────────────────────────────────────────────── */
+
+.statusbar {
+  grid-area: statusbar;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.statusbar .spacer { flex: 1; }
+
+/* ── Narrow windows ──────────────────────────────────────────────────── */
+
+/* Wide windows keep the sidebar pinned, so its toggle is noise. */
+.sidebar-toggle { display: none; }
+
+@media (max-width: 900px) {
+  body { grid-template: "main" 1fr "statusbar" auto / minmax(0, 1fr); }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: var(--sidebar-w);
+    z-index: 10;
+    transform: translateX(-100%);
+    transition: transform 120ms ease-out;
+  }
+  body.sidebar-open .sidebar { transform: none; }
+  body[data-view="issues"] .view-issues { grid-template-columns: minmax(0, 1fr); }
+
+  /* Off-canvas needs a way back on-canvas — without this the repo picker and
+     session tree are unreachable at narrow widths. */
+  .sidebar-toggle {
+    display: block;
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 11;
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: var(--text-md);
+    line-height: 1;
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+  .sidebar-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  /* Keep the first view row clear of the floating button. */
+  .view { padding-top: 44px; }
+}
