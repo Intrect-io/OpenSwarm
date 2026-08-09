@@ -244,7 +244,11 @@ describe('GET /api/work/sessions/:taskId/log', () => {
     appendTaskLog('t1', 'worker', 'hello', 42);
     const { status, body } = await call('/api/work/sessions/t1/log', mkRunner());
     expect(status).toBe(200);
-    expect(body).toEqual({ taskId: 't1', lines: [{ stage: 'worker', line: 'hello', ts: 42 }], truncated: false });
+    expect(body).toMatchObject({ taskId: 't1', truncated: false });
+    // seq is the client's merge key — it must reach the wire, not just the ring.
+    expect(body.lines).toHaveLength(1);
+    expect(body.lines[0]).toMatchObject({ stage: 'worker', line: 'hello', ts: 42 });
+    expect(typeof body.lines[0].seq).toBe('number');
   });
 
   it('404s for an unknown task and decodes the id', async () => {

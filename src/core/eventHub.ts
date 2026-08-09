@@ -84,7 +84,8 @@ export type HubEvent =
       threshold: number;
       reasons: string[];
     } }
-  | { type: 'log'; data: { taskId: string; stage: string; line: string } }
+  // `ts`/`seq` are stamped by broadcastEvent, not by emitters — see its log case.
+  | { type: 'log'; data: { taskId: string; stage: string; line: string; ts?: number; seq?: number } }
   | { type: 'project:toggled'; data: { projectPath: string; enabled: boolean } }
   | { type: 'task:cost'; data: { taskId: string; cost: CostInfo } }
   | { type: 'chat:user'; data: { text: string; ts: number } }
@@ -165,7 +166,14 @@ export function broadcastEvent(event: HubEvent): void {
   // choke point every emitter already goes through — so no broadcast site
   // changes. task:started/completed drive the retention lifecycle.
   if (event.type === 'log') {
-    appendTaskLog(event.data.taskId, event.data.stage, event.data.line);
+    // The ring and the SSE copy of this line carry the SAME ts AND sequence,
+    // which is what lets a client merge a REST transcript snapshot with lines
+    // that streamed in while the request was in flight. The sequence — not the
+    // millisecond — is the join key: an agent emits several lines per ms.
+    // (INT-3402)
+    const ts = Date.now();
+    event.data.ts = ts;
+    event.data.seq = appendTaskLog(event.data.taskId, event.data.stage, event.data.line, ts);
   } else if (event.type === 'task:started') {
     cancelTaskLogCleanup(event.data.taskId);
   } else if (event.type === 'task:completed') {

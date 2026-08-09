@@ -78,6 +78,7 @@
     "@vitest/coverage-v8": "^4.0.18",
     "bun-types": "^1.1.0",
     "ink-testing-library": "^4.0.0",
+    "jsdom": "^26.1.0",
     "oxlint": "^1.43.0",
     "playwright": "^1.47.0",
     "tsx": "^4.21.0",

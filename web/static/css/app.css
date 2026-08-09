@@ -1,31 +1,9 @@
-/* OpenSwarm issue board (INT-3388). Consumes tokens.css only. */
-
-* { box-sizing: border-box; }
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: var(--text-md);
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 16px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-}
-
-.brand { font-weight: 600; font-size: var(--text-lg); }
-.spacer { flex: 1; }
+/* OpenSwarm issue board components (INT-3388). Consumes tokens.css only.
+   The shell (body grid, sidebar, views, status bar) lives in cockpit.css —
+   this file owns the Issues view's own widgets. */
 
 .repo-picker select {
+  width: 100%;
   background: var(--surface2);
   color: var(--text);
   border: 1px solid var(--border);
@@ -58,15 +36,6 @@ body {
 }
 .daemon-status .dot[data-state="ok"] { background: var(--ok); }
 .daemon-status .dot[data-state="down"] { background: var(--error); }
-
-.layout {
-  flex: 1;
-  display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(320px, 1fr);
-  gap: 12px;
-  padding: 12px;
-  min-height: 0;
-}
 
 .panel {
   background: var(--surface);
