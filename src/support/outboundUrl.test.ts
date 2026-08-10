@@ -70,4 +70,23 @@ describe('isPrivateIp IPv6 canonicalization', () => {
   ])('rejects %s (%s)', (address) => {
     expect(isPrivateIp(address)).toBe(true);
   });
+
+  // These reach a private IPv4 while looking like ordinary global unicast, so a
+  // guard that only matches the textual `::ffff:` shape lets them straight through.
+  it.each([
+    ['64:ff9b::127.0.0.1', 'NAT64, dotted form'],
+    ['64:ff9b::7f00:1', 'NAT64, hex form'],
+    ['2002:7f00:1::1', '6to4 wrapping 127.0.0.1'],
+    ['2002:0a00:0001::1', '6to4 wrapping 10.0.0.1'],
+    ['::127.0.0.1', 'v4-compatible loopback'],
+  ])('rejects %s (%s)', (address) => {
+    expect(isPrivateIp(address)).toBe(true);
+  });
+
+  it.each([
+    ['64:ff9b::8.8.8.8', 'NAT64 to a public resolver'],
+    ['2002:0808:0808::1', '6to4 wrapping 8.8.8.8'],
+  ])('still allows %s (%s)', (address) => {
+    expect(isPrivateIp(address)).toBe(false);
+  });
 });

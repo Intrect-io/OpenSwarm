@@ -14,20 +14,43 @@ function isPrivateIpv4(address: string): boolean {
     (a === 100 && b >= 64 && b <= 127) || a >= 224;
 }
 
-export function isPrivateIp(address: string): boolean {
-  const normalized = address.toLowerCase().replace(/^\[|\]$/g, '');
-  if (isIP(normalized) === 4) return isPrivateIpv4(normalized);
-  if (isIP(normalized) !== 6) return true;
-  const [head, tail] = normalized.split('::');
+/**
+ * Expand an IPv6 literal to its eight 16-bit words, folding a trailing dotted
+ * quad into the last two so every form parses the same way. Returns null for
+ * anything malformed, letting callers fail closed.
+ */
+function expandIpv6(normalized: string): number[] | null {
+  let text = normalized;
+  const dotted = text.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    const octets = dotted[1].split('.').map(Number);
+    if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null;
+    const high = ((octets[0] << 8) | octets[1]).toString(16);
+    const low = ((octets[2] << 8) | octets[3]).toString(16);
+    text = `${text.slice(0, -dotted[1].length)}${high}:${low}`;
+  }
+  const [head, tail] = text.split('::');
   const left = head ? head.split(':') : [];
   const right = tail ? tail.split(':') : [];
   const groups = tail !== undefined
     ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right]
     : left;
-  if (groups.length !== 8) return true;
+  if (groups.length !== 8) return null;
   const words = groups.map((part) => Number.parseInt(part || '0', 16));
-  if (words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff)) return true;
-  if (words.every((word) => word === 0) || words.slice(0, 7).every((word) => word === 0) && words[7] === 1) return true;
+  return words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff) ? null : words;
+}
+
+export function isPrivateIp(address: string): boolean {
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, '');
+  if (isIP(normalized) === 4) return isPrivateIpv4(normalized);
+  if (isIP(normalized) !== 6) return true;
+  const words = expandIpv6(normalized);
+  if (!words) return true;
+
+  const embeddedV4 = (high: number, low: number): string =>
+    `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+
+  if (words.every((word) => word === 0)) return true;
   // fc00::/7 unique-local, fe80::/10 link-local, fec0::/10 site-local, ff00::/8
   // multicast. The IPv4 branch folds multicast and reserved space into `a >= 224`;
   // IPv6 needs them named explicitly or a destination like ff02::1 reads as public.
@@ -35,19 +58,19 @@ export function isPrivateIp(address: string): boolean {
     (words[0] & 0xffc0) === 0xfe80 ||
     (words[0] & 0xffc0) === 0xfec0 ||
     (words[0] & 0xff00) === 0xff00) return true;
-  const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-  if (mapped) return isPrivateIpv4(mapped);
-  const hexMapped = normalized.match(/::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hexMapped) {
-    const high = Number.parseInt(hexMapped[1], 16);
-    const low = Number.parseInt(hexMapped[2], 16);
-    return isPrivateIpv4(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
+
+  // The remaining private forms hide an IPv4 destination inside the address, so
+  // the guard has to follow it. Matching only the textual `::ffff:` shape misses
+  // 6to4 (2002:7f00:1::1) and NAT64 (64:ff9b::127.0.0.1), both of which reach
+  // 127.0.0.1 while reading as ordinary global unicast.
+  if (words.slice(0, 5).every((word) => word === 0) && (words[5] === 0 || words[5] === 0xffff)) {
+    return isPrivateIpv4(embeddedV4(words[6], words[7]));
   }
-  const compatibleV4 = words.slice(0, 6).every((word) => word === 0) ||
-    (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff);
-  if (compatibleV4) {
-    return isPrivateIpv4(`${words[6] >> 8}.${words[6] & 0xff}.${words[7] >> 8}.${words[7] & 0xff}`);
+  if (words[0] === 0x0064 && words[1] === 0xff9b) {
+    return isPrivateIpv4(embeddedV4(words[6], words[7]));
   }
+  if (words[0] === 0x2002) return isPrivateIpv4(embeddedV4(words[1], words[2]));
+
   return false;
 }
 
