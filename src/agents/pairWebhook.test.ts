@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sendWebhook, type WebhookPayload } from './pairWebhook.js';
 
+// These suites cover parsing and backend selection, not the socket layer, so
+// route publicFetch onto the global fetch they stub. The real implementation —
+// including the undici dispatcher contract — is covered by outboundUrl.test.ts.
+vi.mock('../support/outboundUrl.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../support/outboundUrl.js')>();
+  return { ...actual, publicFetch: (url: string | URL, init?: RequestInit) => fetch(String(url), init) };
+});
+
+
 afterEach(() => vi.unstubAllGlobals());
 
 const payload: WebhookPayload = {
@@ -16,7 +25,7 @@ describe('sendWebhook', () => {
     const fetchMock = vi.fn(async () => response);
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(sendWebhook('https://example.test/hook', payload)).resolves.toMatchObject({ success: false, statusCode: 500 });
+    await expect(sendWebhook('https://example.com/hook', payload)).resolves.toMatchObject({ success: false, statusCode: 500 });
     expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
     expect(cancel).toHaveBeenCalledOnce();
   });

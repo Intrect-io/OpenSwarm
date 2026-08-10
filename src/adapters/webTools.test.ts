@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { webFetch, webSearch, searchBackend, WEB_TOOL_DEFINITIONS } from './webTools.js';
 
+// These suites cover parsing and backend selection, not the socket layer, so
+// route publicFetch onto the global fetch they stub. The real implementation —
+// including the undici dispatcher contract — is covered by outboundUrl.test.ts.
+vi.mock('../support/outboundUrl.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../support/outboundUrl.js')>();
+  return { ...actual, publicFetch: (url: string | URL, init?: RequestInit) => fetch(String(url), init) };
+});
+
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();

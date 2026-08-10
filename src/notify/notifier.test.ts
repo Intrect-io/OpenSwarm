@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EmbedBuilder } from 'discord.js';
+vi.mock('node:dns/promises', () => ({ lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]) }));
 import { createNotifier, messageToText } from './notifier.js';
+
+// These suites cover parsing and backend selection, not the socket layer, so
+// route publicFetch onto the global fetch they stub. The real implementation —
+// including the undici dispatcher contract — is covered by outboundUrl.test.ts.
+vi.mock('../support/outboundUrl.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../support/outboundUrl.js')>();
+  return { ...actual, publicFetch: (url: string | URL, init?: RequestInit) => fetch(String(url), init) };
+});
+
 
 afterEach(() => {
   vi.unstubAllGlobals();
