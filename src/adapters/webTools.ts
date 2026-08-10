@@ -105,15 +105,24 @@ async function fetchWithTimeout(
     return ['authorization', 'proxy-authorization', 'x-subscription-token', 'x-api-key']
       .some((name) => headers.has(name));
   })();
+  // Following redirects by hand means also reproducing the method rewrite the
+  // Fetch standard performs: 303 always becomes GET, and 301/302 downgrade POST
+  // to GET, while 307/308 replay the request as-is. Replaying a POST through a
+  // 302 would re-submit the body the server told us to stop sending.
+  let method = (init.method ?? 'GET').toUpperCase();
+  let body = init.body;
+  const headers = new Headers({ 'User-Agent': USER_AGENT, ...(init.headers as HeadersInit | undefined) });
   try {
     for (let redirects = 0; redirects <= 5; redirects++) {
       // publicFetch re-validates every hop, so a redirect cannot walk the
       // request from a public host onto a private one.
       const response = await publicFetch(current, {
         ...init,
+        method,
+        body,
         redirect: 'manual',
         signal,
-        headers: { 'User-Agent': USER_AGENT, ...init.headers },
+        headers,
       });
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location');
@@ -123,10 +132,16 @@ async function fetchWithTimeout(
         if (carriesSensitiveRequestData && next.origin !== initialOrigin) {
           throw new Error('Refusing to forward credentials or request body across origins');
         }
+        if (response.status === 303 || (method === 'POST' && (response.status === 301 || response.status === 302))) {
+          method = 'GET';
+          body = undefined;
+          headers.delete('content-type');
+          headers.delete('content-length');
+        }
         current = next.toString();
         continue;
       }
-      const body = await readBoundedBody(
+      const text = await readBoundedBody(
         response,
         options.maxBytes ?? 2 * 1024 * 1024,
         options.onOverflow ?? 'error',
@@ -136,7 +151,7 @@ async function fetchWithTimeout(
         status: response.status,
         statusText: response.statusText,
         headers: response.headers,
-        body,
+        body: text,
       };
     }
     throw new Error('Too many redirects');
