@@ -333,7 +333,7 @@ describe('Pair Mode Integration Tests', () => {
   describe('Webhook Payload', () => {
     it('should validate webhook URL', () => {
       expect(pairWebhook.isValidWebhookUrl('https://example.com/webhook')).toBe(true);
-      expect(pairWebhook.isValidWebhookUrl('http://localhost:3000/hook')).toBe(true);
+      expect(pairWebhook.isValidWebhookUrl('http://localhost:3000/hook')).toBe(false);
       expect(pairWebhook.isValidWebhookUrl('')).toBe(false);
       expect(pairWebhook.isValidWebhookUrl(undefined)).toBe(false);
       expect(pairWebhook.isValidWebhookUrl('not-a-url')).toBe(false);

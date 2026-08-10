@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { webFetch, webSearch, searchBackend, WEB_TOOL_DEFINITIONS } from './webTools.js';
 
+// These suites cover parsing and backend selection, not the socket layer, so
+// route publicFetch onto the global fetch they stub. The real implementation —
+// including the undici dispatcher contract — is covered by outboundUrl.test.ts.
+vi.mock('../support/outboundUrl.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../support/outboundUrl.js')>();
+  return { ...actual, publicFetch: (url: string | URL, init?: RequestInit) => fetch(String(url), init) };
+});
+
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -10,6 +19,44 @@ afterEach(() => {
 describe('WEB_TOOL_DEFINITIONS', () => {
   it('exposes exactly web_fetch and web_search', () => {
     expect(WEB_TOOL_DEFINITIONS.map((t) => t.function.name)).toEqual(['web_fetch', 'web_search']);
+  });
+});
+
+// Redirects are followed by hand here, so the method rewrite the Fetch standard
+// performs has to be reproduced — otherwise a 302 replays the POST body the
+// server just told us to stop sending.
+describe('redirect method rewriting', () => {
+  /** First call answers with `status`, every later call succeeds. */
+  function redirectOnce(status: number) {
+    let calls = 0;
+    return vi.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status, headers: { location: 'https://api.tavily.com/next' } })
+        : new Response(JSON.stringify({ results: [] }), { status: 200 });
+    });
+  }
+
+  async function secondHopInit(status: number): Promise<RequestInit> {
+    const f = redirectOnce(status);
+    vi.stubGlobal('fetch', f);
+    vi.stubEnv('TAVILY_KEY', 'k');
+    await webSearch('q', 1);
+    expect(f.mock.calls.length).toBeGreaterThanOrEqual(2);
+    return f.mock.calls[1][1] as RequestInit;
+  }
+
+  it.each([301, 302, 303])('downgrades POST to GET and drops the body on %i', async (status) => {
+    const second = await secondHopInit(status);
+    expect(second.method).toBe('GET');
+    expect(second.body).toBeUndefined();
+    expect(new Headers(second.headers).has('content-type')).toBe(false);
+  });
+
+  it.each([307, 308])('replays the POST unchanged on %i', async (status) => {
+    const second = await secondHopInit(status);
+    expect(second.method).toBe('POST');
+    expect(second.body).toBeTruthy();
   });
 });
 

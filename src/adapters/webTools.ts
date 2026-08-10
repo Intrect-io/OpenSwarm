@@ -10,6 +10,7 @@
 // when a key is set, else a keyless (and fragile) DuckDuckGo fallback.
 
 import type { ToolDefinition } from './tools.js';
+import { publicFetch } from '../support/outboundUrl.js';
 
 export const WEB_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
@@ -49,15 +50,111 @@ const FETCH_TIMEOUT_MS = 15_000;
 const MAX_FETCH_CHARS = 20_000;
 const USER_AGENT = 'OpenSwarm/0.6 (+https://github.com/unohee/openswarm)';
 
-async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+interface BoundedResponse {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  headers: Headers;
+  body: string;
+}
+
+/**
+ * `truncate` keeps the prefix that fits — right for page text, which webFetch
+ * shortens anyway. `error` is for JSON endpoints, where half a document parses
+ * into a confusing failure rather than a partial answer.
+ */
+type OverflowPolicy = 'truncate' | 'error';
+
+async function readBoundedBody(
+  response: Response,
+  maxBytes: number,
+  onOverflow: OverflowPolicy,
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return '';
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel('response body exceeds limit');
+      if (onOverflow === 'error') throw new Error(`Response body exceeds ${maxBytes} bytes`);
+      const keep = value.byteLength - (total - maxBytes);
+      if (keep > 0) chunks.push(value.subarray(0, keep));
+      break;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function fetchWithTimeout(
+  inputUrl: string,
+  init: RequestInit = {},
+  options: { maxBytes?: number; onOverflow?: OverflowPolicy } = {},
+): Promise<BoundedResponse> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  const signal = init.signal ? AbortSignal.any([init.signal, ac.signal]) : ac.signal;
+  let current = inputUrl;
+  const initialOrigin = new URL(inputUrl).origin;
+  const carriesSensitiveRequestData = init.body != null || (() => {
+    const headers = new Headers(init.headers);
+    return ['authorization', 'proxy-authorization', 'x-subscription-token', 'x-api-key']
+      .some((name) => headers.has(name));
+  })();
+  // Following redirects by hand means also reproducing the method rewrite the
+  // Fetch standard performs: 303 always becomes GET, and 301/302 downgrade POST
+  // to GET, while 307/308 replay the request as-is. Replaying a POST through a
+  // 302 would re-submit the body the server told us to stop sending.
+  let method = (init.method ?? 'GET').toUpperCase();
+  let body = init.body;
+  const headers = new Headers({ 'User-Agent': USER_AGENT, ...(init.headers as HeadersInit | undefined) });
   try {
-    return await fetch(url, {
-      ...init,
-      signal: ac.signal,
-      headers: { 'User-Agent': USER_AGENT, ...init.headers },
-    });
+    for (let redirects = 0; redirects <= 5; redirects++) {
+      // publicFetch re-validates every hop, so a redirect cannot walk the
+      // request from a public host onto a private one.
+      const response = await publicFetch(current, {
+        ...init,
+        method,
+        body,
+        redirect: 'manual',
+        signal,
+        headers,
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) throw new Error('Redirect response has no location');
+        await response.body?.cancel();
+        const next = new URL(location, current);
+        if (carriesSensitiveRequestData && next.origin !== initialOrigin) {
+          throw new Error('Refusing to forward credentials or request body across origins');
+        }
+        if (response.status === 303 || (method === 'POST' && (response.status === 301 || response.status === 302))) {
+          method = 'GET';
+          body = undefined;
+          headers.delete('content-type');
+          headers.delete('content-length');
+        }
+        current = next.toString();
+        continue;
+      }
+      const text = await readBoundedBody(
+        response,
+        options.maxBytes ?? 2 * 1024 * 1024,
+        options.onOverflow ?? 'error',
+      );
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+        body: text,
+      };
+    }
+    throw new Error('Too many redirects');
   } finally {
     clearTimeout(timer);
   }
@@ -120,15 +217,17 @@ export async function webFetch(url: string): Promise<string> {
   if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
     return `Invalid URL: ${url} (must start with http:// or https://)`;
   }
-  let res: Response;
+  let res: BoundedResponse;
   try {
-    res = await fetchWithTimeout(url);
+    // Real pages routinely exceed a text-sized budget, so keep a generous raw
+    // cap and shorten the extracted text below instead of failing the fetch.
+    res = await fetchWithTimeout(url, {}, { maxBytes: 2 * 1024 * 1024, onOverflow: 'truncate' });
   } catch (err) {
     return `Fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`;
   }
   if (!res.ok) return `Fetch ${url} → HTTP ${res.status} ${res.statusText}`;
   const ctype = res.headers.get('content-type') ?? '';
-  const body = await res.text();
+  const body = res.body;
   const text = ctype.includes('html') || /^\s*</.test(body) ? htmlToText(body) : body;
   return text.length > MAX_FETCH_CHARS
     ? `${text.slice(0, MAX_FETCH_CHARS)}\n... (truncated, ${text.length} chars total)`
@@ -155,7 +254,7 @@ export async function webSearch(query: string, maxResults = 5): Promise<string> 
       : backend === 'brave' ? await braveSearch(query, n)
       : await ddgSearch(query, n);
     if (results.length === 0) return `No results for "${query}".`;
-    return results.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`).join('\n\n');
+    return results.map((r, i) => `${i + 1}. ${r.title.slice(0, 500)}\n   ${r.url.slice(0, 2_000)}${r.snippet ? `\n   ${r.snippet.slice(0, 500)}` : ''}`).join('\n\n');
   } catch (err) {
     const keyed = process.env.TAVILY_KEY || process.env.BRAVE_SEARCH_KEY;
     const hint = keyed ? '' : ' (the keyless DuckDuckGo backend is fragile — set TAVILY_KEY or BRAVE_SEARCH_KEY for reliable search)';
@@ -170,7 +269,7 @@ async function tavilySearch(query: string, n: number): Promise<SearchResult[]> {
     body: JSON.stringify({ api_key: process.env.TAVILY_KEY, query, max_results: n }),
   });
   if (!res.ok) throw new Error(`Tavily HTTP ${res.status}`);
-  const data = (await res.json()) as { results?: Array<{ title?: string; url?: string; content?: string }> };
+  const data = JSON.parse(res.body) as { results?: Array<{ title?: string; url?: string; content?: string }> };
   return (data.results ?? []).slice(0, n).map((r) => ({
     title: r.title ?? '',
     url: r.url ?? '',
@@ -184,7 +283,7 @@ async function braveSearch(query: string, n: number): Promise<SearchResult[]> {
     headers: { 'X-Subscription-Token': process.env.BRAVE_SEARCH_KEY ?? '', Accept: 'application/json' },
   });
   if (!res.ok) throw new Error(`Brave HTTP ${res.status}`);
-  const data = (await res.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
+  const data = JSON.parse(res.body) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
   return (data.web?.results ?? []).slice(0, n).map((r) => ({
     title: r.title ?? '',
     url: r.url ?? '',
@@ -193,9 +292,12 @@ async function braveSearch(query: string, n: number): Promise<SearchResult[]> {
 }
 
 async function ddgSearch(query: string, n: number): Promise<SearchResult[]> {
-  const res = await fetchWithTimeout(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+  const res = await fetchWithTimeout(
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+    {},
+  );
   if (!res.ok) throw new Error(`DuckDuckGo HTTP ${res.status}`);
-  const html = await res.text();
+  const html = res.body;
 
   const results: SearchResult[] = [];
   const linkRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;

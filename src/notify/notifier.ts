@@ -8,6 +8,7 @@
 // (!status etc.) remain Discord-specific.
 
 import type { EmbedBuilder } from 'discord.js';
+import { publicFetch } from '../support/outboundUrl.js';
 
 export interface Notifier {
   /** Send one outbound notification. Implementations must not throw. */
@@ -61,11 +62,12 @@ async function postJson(url: string, body: unknown): Promise<void> {
   });
   try {
     const res = await Promise.race([
-      fetch(url, {
+      publicFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'User-Agent': 'OpenSwarm/0.7' },
         body: JSON.stringify(body),
         signal: controller.signal,
+        redirect: 'manual',
       }),
       timeout,
     ]);

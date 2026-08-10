@@ -4,6 +4,7 @@
 // ============================================
 
 import type { PairSession } from './agentPair.js';
+import { isPotentiallyPublicHttpUrl, publicFetch } from '../support/outboundUrl.js';
 
 // Types
 
@@ -44,13 +45,7 @@ export interface WebhookResult {
  * Validate Webhook URL
  */
 export function isValidWebhookUrl(url: string | undefined): url is string {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
+  return isPotentiallyPublicHttpUrl(url);
 }
 
 /**
@@ -214,7 +209,7 @@ const WEBHOOK_TIMEOUT_MS = 10_000;
 
 export async function sendWebhook(url: string, payload: WebhookPayload): Promise<WebhookResult> {
   try {
-    const response = await fetch(url, {
+    const response = await publicFetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -222,6 +217,7 @@ export async function sendWebhook(url: string, payload: WebhookPayload): Promise
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+      redirect: 'manual',
     });
     const result = response.ok
       ? {
@@ -294,13 +290,14 @@ export async function sendDiscordWebhook(
   }
 
   try {
-    const response = await fetch(webhookUrl, {
+    const response = await publicFetch(webhookUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ embeds: [embed] }),
       signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+      redirect: 'manual',
     });
     const result = {
       success: response.ok,
