@@ -6,7 +6,7 @@
 // prompt handed to every CLI adapter, and the "Add File" patch operation.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnCli } from './base.js';
@@ -242,6 +242,23 @@ describe('applyPatch "add" operation', () => {
     } finally {
       chmodSync(dest, 0o600);
     }
+  });
+
+  it('removes the newly created destination when deleting the source fails', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const source = join(repo, 'src.ts');
+    const destination = join(repo, 'dest.ts');
+    writeFileSync(source, 'v = 1\n');
+    vi.spyOn(fsPromises, 'rm').mockRejectedValueOnce(Object.assign(
+      new Error('source deletion denied'), { code: 'EPERM' },
+    ));
+
+    const result = await applyV4APatch(movePatch('src.ts', 'dest.ts', 'v = 1', 'v = 2'), repo, (f) => join(repo, f));
+
+    expect(result.errors.join('\n')).toMatch(/source deletion denied/);
+    expect(result.changed).toEqual([]);
+    expect(readFileSync(source, 'utf-8')).toContain('v = 1');
+    expect(existsSync(destination)).toBe(false);
   });
 
   // A rejected add must not leave earlier operations of the same patch applied.

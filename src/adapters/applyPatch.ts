@@ -224,9 +224,11 @@ export async function applyV4APatch(
           await targetHandle.close();
         }
         // Reserve the destination first. A concurrent creator now yields
-        // EEXIST without clobbering either side of the move.
-        await fs.rm(abs);
+        // EEXIST without clobbering either side of the move. It is ours as
+        // soon as creation succeeds: if deleting the source fails, rollback
+        // must remove this new destination rather than leave a partial move.
         created.add(target);
+        await fs.rm(abs);
         changed.push(op.moveTo);
         continue;
       }
