@@ -18,14 +18,13 @@ vi.mock('node:fs', () => ({
   unlinkSync: () => undefined,
 }));
 
-import { initTelemetry, isTelemetryEnabled, track, buildPayload } from './telemetry.js';
+import { initTelemetry, isTelemetryEnabled, track, buildPayload, serializeTelemetryPayload } from './telemetry.js';
 
 const ENV_KEYS = [
   'OPENSWARM_TELEMETRY',
   'DO_NOT_TRACK',
   'CI',
   'GITHUB_ACTIONS',
-  'OPENSWARM_TELEMETRY_URL',
 ];
 let savedEnv: Record<string, string | undefined>;
 
@@ -73,6 +72,13 @@ describe('telemetry opt-out gating', () => {
   });
 });
 
+describe('telemetry transport projection', () => {
+  it('serializes only the documented wire fields', () => {
+    const payload = buildPayload({ command: 'run', detail: ['git'] }, TEST_INSTALL_ID);
+    expect(JSON.parse(serializeTelemetryPayload({ ...payload, ignored: 'secret' } as typeof payload))).not.toHaveProperty('ignored');
+  });
+});
+
 describe('track() transport', () => {
   it('sends nothing when disabled', async () => {
     process.env.OPENSWARM_TELEMETRY = '0';
@@ -81,11 +87,10 @@ describe('track() transport', () => {
   });
 
   it('POSTs one event to the endpoint when enabled', async () => {
-    process.env.OPENSWARM_TELEMETRY_URL = 'https://t.example/x';
     await track({ command: 'start' });
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, opts] = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0];
-    expect(url).toBe('https://t.example/x');
+    expect(url).toBe('https://telemetry.intrect.io/v1/openswarm');
     expect(opts.method).toBe('POST');
     const body = JSON.parse(opts.body as string) as Record<string, unknown>;
     expect(body.command).toBe('start');

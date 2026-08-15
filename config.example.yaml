@@ -110,6 +110,12 @@ autonomous:
     blockOnNewFailures: true
     maxCommands: 4
 
+  # CodeQL security baseline-diff gate. This also applies to PR auto-remediation.
+  # CodeQL must be preinstalled on an absolute PATH; tool absence blocks an edit.
+  securityAudit:
+    enabled: true
+    maxThreads: 2
+
   # Pipeline guards
   guards:
     qualityGate: false      # deprecated whole-tree gate; prefer verify above

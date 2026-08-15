@@ -6,7 +6,7 @@
 // prompt handed to every CLI adapter, and the "Add File" patch operation.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnCli } from './base.js';
@@ -41,12 +41,17 @@ describe('spawnCli prompt file', () => {
       buildCommand: ({ prompt }: { prompt: string }) => {
         // Recorded here, not after spawnCli returns: the directory is removed
         // on the way out, so this is the only moment it can be observed.
-        seen.push({
-          path: prompt,
-          mode: statSync(prompt).mode & 0o777,
-          dirMode: statSync(dirname(prompt)).mode & 0o777,
-          content: readFileSync(prompt, 'utf-8'),
-        });
+        const promptFd = openSync(prompt, 'r');
+        try {
+          seen.push({
+            path: prompt,
+            mode: fstatSync(promptFd).mode & 0o777,
+            dirMode: statSync(dirname(prompt)).mode & 0o777,
+            content: readFileSync(promptFd, 'utf-8'),
+          });
+        } finally {
+          closeSync(promptFd);
+        }
         return { command: 'true', args: [] };
       },
     } as never;

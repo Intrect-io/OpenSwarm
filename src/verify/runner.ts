@@ -1,6 +1,7 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -343,11 +344,16 @@ async function runTrustedCommand(
     const packagePath = join(directory, 'package.json');
     let actual: string | undefined;
     try {
-      const stat = await lstat(packagePath);
-      if (stat.isSymbolicLink()) {
-        return { status: 'fail', output: `[security] verify package.json is a symlink for cwd: ${command.cwd ?? '.'}` };
+      const handle = await open(packagePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile()) {
+          return { status: 'fail', output: `[security] verify package.json is not a regular file for cwd: ${command.cwd ?? '.'}` };
+        }
+        actual = await handle.readFile('utf8');
+      } finally {
+        await handle.close();
       }
-      actual = await readFile(packagePath, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }

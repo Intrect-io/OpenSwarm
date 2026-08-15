@@ -40,6 +40,7 @@ import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
 import { rateLimitedPipelineResult } from './pipelinePreflight.js';
+import { safeConsole } from '../support/safeLog.js';
 export { rateLimitedPipelineResult } from './pipelinePreflight.js';
 
 export const PIPELINE_EFFECT_TIMEOUT_MS = 30_000;
@@ -195,8 +196,8 @@ export interface ExecutionContext {
   scheduleNextHeartbeat?: () => void;
   /** Pipeline guards configuration */
   guards?: Partial<import('../core/types.js').PipelineGuardsConfig>;
-  /** Deterministic baseline-diff verification. */
   verify?: import('../core/types.js').VerifyConfig;
+  securityAudit?: import('../core/types.js').SecurityAuditConfig;
   /** Max objective self-repair attempts (lint/bs/test) before giving up (default: 3) */
   maxReflections?: number;
   /** Fenced durable-run callbacks. Omitted for legacy/off mode. */
@@ -453,7 +454,7 @@ export async function createSubIssuesWithDependencies(
 
   if (creationErrors.length > 0 || createdSubIssues.length !== subTasks.length) {
     const detail = creationErrors.join('; ') || `${createdSubIssues.length}/${subTasks.length} children created`;
-    console.error(`[AutonomousRunner] Incomplete sub-issue creation: ${detail}`);
+    safeConsole.error(`[AutonomousRunner] Incomplete sub-issue creation: ${detail}`);
     broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail', ...metadata } });
     throw new Error(`Incomplete decomposition; retrying idempotently: ${detail}`);
   }
@@ -693,7 +694,7 @@ export async function decomposeTask(
   await ctx.reportToDiscord(planner.formatPlannerResult(result));
 
   if (!result.success) {
-    console.error(`[AutonomousRunner] Planner failed: ${result.error}`);
+    safeConsole.error(`[AutonomousRunner] Planner failed: ${result.error}`);
     broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail', ...metadata } });
     return false;
   }
@@ -786,7 +787,7 @@ export async function executePipeline(
       if (draftGate) return draftGate;
     } catch (err) {
       if (err instanceof RateLimitError) throw err; // → outer catch → rate_limited (INT-2521)
-      console.warn('[AutonomousRunner] Draft analysis failed (non-blocking):', err);
+      safeConsole.warn('[AutonomousRunner] Draft analysis failed (non-blocking):', err);
     }
   }
 
@@ -836,7 +837,7 @@ export async function executePipeline(
     // Pre-pipeline rate limit → pause the scheduler (finalStatus 'rate_limited'
     // carries the reset so the runner backs off until then, no STUCK). (INT-2521)
     if (err instanceof RateLimitError) {
-      console.warn(`[AutonomousRunner] Rate limit during pre-pipeline phase — pausing: ${err.message}`);
+      safeConsole.warn(`[AutonomousRunner] Rate limit during pre-pipeline phase — pausing: ${err.message}`);
       return rateLimitedPipelineResult(err);
     }
     throw err;
@@ -925,8 +926,7 @@ export async function executePipeline(
       } : undefined,
       ctx.maxReflections,
       pipelineMetadata(task, actualPath, worktreeInfo),
-      ctx.verify,
-      worktreeInfo?.resumedTaskFiles,
+      ctx.verify, worktreeInfo?.resumedTaskFiles, ctx.securityAudit,
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);

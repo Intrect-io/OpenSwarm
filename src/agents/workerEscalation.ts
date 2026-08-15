@@ -12,6 +12,7 @@
 
 import type { RoleConfig } from '../core/types.js';
 import { broadcastEvent } from '../core/eventHub.js';
+import { safeConsole } from '../support/safeLog.js';
 
 export type WorkerReasoningEffort = 'low' | 'medium' | 'high';
 
@@ -44,7 +45,7 @@ export function resolveWorkerStageOverrides(input: {
     : (baseModel ? { model: baseModel } : undefined);
 
   if (shouldEscalate && escalateModel) {
-    console.log(`[${input.taskPrefix}] Escalating worker model → ${escalateModel} (iteration ${iteration})`);
+    safeConsole.log(`[${input.taskPrefix}] Escalating worker model → ${escalateModel} (iteration ${iteration})`);
     broadcastEvent({ type: 'pipeline:escalation', data: {
       taskId: input.taskId,
       iteration,

@@ -8,6 +8,7 @@ import { pipeline, env as transformersEnv, type FeatureExtractionPipeline } from
 import { resolve } from 'path';
 import { homedir } from 'os';
 import { c, status } from '../support/colors.js';
+import { safeConsole as console } from '../support/safeLog.js';
 import { randomUUID } from 'node:crypto';
 import {
   characterGuard,

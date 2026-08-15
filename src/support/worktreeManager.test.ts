@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,7 +8,7 @@ import { createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWork
 
 describe('open PR planned-file preflight (INT-2568)', () => {
   it('reports only open PRs that overlap the draft file scope', async () => {
-    const root = join(tmpdir(), `openswarm-pr-preflight-${process.pid}-${Date.now()}`);
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-pr-preflight-'));
     const bin = join(root, 'bin');
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, 'gh'), `#!/bin/sh
@@ -35,7 +35,7 @@ describe('worktreeManager path safety', () => {
   let repo: string;
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-worktree-manager-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-worktree-manager-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -86,7 +86,7 @@ describe('resolveSharedPaths (INT-2415)', () => {
   let repo: string;
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-shared-paths-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-shared-paths-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -134,7 +134,7 @@ describe('createWorktree shared-path symlinks (INT-2415)', () => {
     execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-worktree-link-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-worktree-link-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -190,7 +190,7 @@ describe('preserveWorktree → createWorktree resume roundtrip (INT-2503)', () =
     execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-worktree-preserve-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-worktree-preserve-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
 
@@ -358,7 +358,7 @@ describe('removePreservedWorktreeAt (INT-2506)', () => {
     execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-wt-lifecycle-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-wt-lifecycle-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
     const originBare = join(root, 'origin.git');
@@ -455,7 +455,7 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
   }
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-baseref-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-baseref-'));
     mkdirSync(root, { recursive: true });
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -540,7 +540,7 @@ describe('unsafe binary staging guard (INT-2430)', () => {
   }
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-binary-guard-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-binary-guard-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -635,7 +635,7 @@ describe('sibling merged-PR staleness warning (INT-2421)', () => {
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-stale-sibling-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-stale-sibling-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -795,7 +795,7 @@ describe('duplicate-issue-PR guard (INT-2544)', () => {
   }
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-dup-pr-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-dup-pr-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });

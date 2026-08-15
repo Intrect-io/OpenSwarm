@@ -11,6 +11,7 @@ import { analyzeIssueImpact, getProjectHealth, suggestReviewFocus, getModuleHeal
 import type { ImpactAnalysis, ProjectSummary } from './types.js';
 import { saveCognitiveMemory, deleteMemoriesByDerivedFrom } from '../memory/index.js';
 import { repoKey } from '../memory/repoKnowledge.js';
+import { safeConsole } from '../support/safeLog.js';
 import { exportRepoGraph, hasRepoSnapshot, loadRepoSnapshot, snapshotAgeMinutes } from './graphqlExporter.js';
 
 // Re-exports
@@ -105,13 +106,13 @@ export async function scanAndCache(
     if (Date.now() - lastScan < FULL_SCAN_THROTTLE_MS) {
       const cached = await getGraph(slug);
       if (cached) {
-        console.log(`[Knowledge] Throttled: ${slug} (last scan ${Math.round((Date.now() - lastScan) / 1000)}s ago)`);
+        safeConsole.log(`[Knowledge] Throttled: ${slug} (last scan ${Math.round((Date.now() - lastScan) / 1000)}s ago)`);
         return cached;
       }
     }
   }
 
-  console.log(`[Knowledge] Full scan starting: ${slug} → ${projectPath}`);
+  safeConsole.log(`[Knowledge] Full scan starting: ${slug} → ${projectPath}`);
   const startMs = Date.now();
 
   try {
@@ -128,21 +129,21 @@ export async function scanAndCache(
     lastFullScan.set(slug, Date.now());
 
     const elapsed = Date.now() - startMs;
-    console.log(`[Knowledge] Scan complete: ${slug} (${graph.nodeCount} nodes, ${graph.edgeCount} edges, ${elapsed}ms)`);
+    safeConsole.log(`[Knowledge] Scan complete: ${slug} (${graph.nodeCount} nodes, ${graph.edgeCount} edges, ${elapsed}ms)`);
 
     // Export GraphQL schema + snapshot for agent consumption
     try {
       exportRepoGraph(graph, projectPath);
     } catch (e) {
-      console.warn('[Knowledge] GraphQL export failed for %s:', slug, e);
+      safeConsole.warn('[Knowledge] GraphQL export failed for %s:', slug, e);
     }
 
     // Save insights to cognitive memory (async, ignore failures)
-    saveGraphInsights(projectPath).catch((e) => console.warn('[Knowledge] Failed to save graph insights for %s:', slug, e));
+    saveGraphInsights(projectPath).catch((e) => safeConsole.warn('[Knowledge] Failed to save graph insights for %s:', slug, e));
 
     return graph;
   } catch (err) {
-    console.error('[Knowledge] Scan failed: %s', slug, err);
+    safeConsole.error('[Knowledge] Scan failed: %s', slug, err);
     // On failure, try returning cached graph
     const cached = await getGraph(slug);
     if (cached) return cached;
@@ -171,7 +172,7 @@ export async function refreshGraph(projectPath: string): Promise<KnowledgeGraph 
       return cached;
     }
 
-    console.log(`[Knowledge] Incremental update: ${slug} (${changedFiles.length} files changed)`);
+    safeConsole.log(`[Knowledge] Incremental update: ${slug} (${changedFiles.length} files changed)`);
     await incrementalUpdate(cached, projectPath, changedFiles);
     await enrichWithGitInfo(cached, projectPath);
     await saveGraph(cached);
@@ -180,12 +181,12 @@ export async function refreshGraph(projectPath: string): Promise<KnowledgeGraph 
     try {
       exportRepoGraph(cached, projectPath);
     } catch (e) {
-      console.warn('[Knowledge] GraphQL export failed for %s:', slug, e);
+      safeConsole.warn('[Knowledge] GraphQL export failed for %s:', slug, e);
     }
 
     return cached;
   } catch (err) {
-    console.warn('[Knowledge] Incremental update failed: %s', slug, err);
+    safeConsole.warn('[Knowledge] Incremental update failed: %s', slug, err);
     return cached;
   }
 }
@@ -235,7 +236,7 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
   const repo = repoKey(projectPath);
   const insightKey = `knowledge-graph:${repo}`;
   await deleteMemoriesByDerivedFrom(insightKey).catch((err) =>
-    console.warn('[Knowledge] insight refresh delete failed:', err instanceof Error ? err.message : err));
+    safeConsole.warn('[Knowledge] insight refresh delete failed:', err instanceof Error ? err.message : err));
   const insightOpts = (importance: number, confidence: number) =>
     ({ confidence, importance, derivedFrom: insightKey, repo });
 
@@ -248,7 +249,7 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
         insightOpts(0.6, 0.8)
       );
     } catch (err) {
-      console.warn(`[Knowledge] 메모리 저장 실패 (hot modules):`, err instanceof Error ? err.message : err);
+      safeConsole.warn(`[Knowledge] 메모리 저장 실패 (hot modules):`, err instanceof Error ? err.message : err);
     }
   }
 
@@ -262,7 +263,7 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
         insightOpts(0.7, 0.85)
       );
     } catch (err) {
-      console.warn(`[Knowledge] 메모리 저장 실패 (high risk):`, err instanceof Error ? err.message : err);
+      safeConsole.warn(`[Knowledge] 메모리 저장 실패 (high risk):`, err instanceof Error ? err.message : err);
     }
   }
 
@@ -275,7 +276,7 @@ export async function saveGraphInsights(projectPath: string): Promise<void> {
         insightOpts(0.5, 0.9)
       );
     } catch (err) {
-      console.warn(`[Knowledge] 메모리 저장 실패 (coverage):`, err instanceof Error ? err.message : err);
+      safeConsole.warn(`[Knowledge] 메모리 저장 실패 (coverage):`, err instanceof Error ? err.message : err);
     }
   }
 }

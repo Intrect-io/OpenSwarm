@@ -1510,8 +1510,9 @@ export class AutonomousRunner {
 
   /** Send system message to dashboard LIVE LOG */
   private syslog(line: string): void {
-    console.log(`[HB] ${line}`);
-    broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'heartbeat', line } });
+    const safeLine = line.replace(/[\r\n]/g, '');
+    console.log(`[HB] ${safeLine}`);
+    broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'heartbeat', line: safeLine } });
   }
 
   private lastSkipSummary = '';
@@ -1775,7 +1776,7 @@ export class AutonomousRunner {
 
     } catch (error) {
       this.state.consecutiveErrors++;
-      const msg = error instanceof Error ? error.message : String(error);
+      const msg = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]/g, '');
       console.error('[AutonomousRunner] Heartbeat error:', msg);
       this.syslog(`✗ Heartbeat error: ${msg}`);
 
@@ -2286,6 +2287,7 @@ export class AutonomousRunner {
       scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
       guards: this.config.guards,
       verify: this.config.verify,
+      securityAudit: this.config.securityAudit,
       maxReflections: this.config.maxReflections,
       durability,
       peerIssues: this.lastFetchedTasks,
@@ -2518,7 +2520,7 @@ export class AutonomousRunner {
 
     // Persist the choice so a daemon restart keeps it (in-memory switch was lost every restart).
     writeProviderOverride(adapter);
-    console.log(`[AutonomousRunner] Provider switched: ${adapter}`);
+    console.log(`[AutonomousRunner] Provider switched: ${adapter.replace(/[\r\n]/g, '')}`);
   }
 
   pauseScheduler(): void { this.scheduler.pause(); }
@@ -2559,7 +2561,7 @@ export class AutonomousRunner {
     for (const enabled of this.enabledProjects) {
       if (normalizeProjectPath(enabled) === canonicalPath) this.enabledProjects.delete(enabled);
     }
-    console.log(`[AutonomousRunner] Project disabled: ${canonicalPath}`);
+    console.log(`[AutonomousRunner] Project disabled: ${canonicalPath.replace(/[\r\n]/g, '')}`);
     // Disabling gates new selection AND cancels any in-flight pipeline for this
     // project — otherwise a running task keeps working a now-disabled repo.
     const cancelled = this.scheduler.cancelProjectTasks(canonicalPath);
@@ -2581,7 +2583,7 @@ export class AutonomousRunner {
     if (!allowed.some((allowedPath) => normalizeProjectPath(allowedPath) === canonicalPath)) {
       this.updateAllowedProjects([...allowed, canonicalPath]);
     }
-    console.log(`[AutonomousRunner] Project enabled: ${canonicalPath}`);
+    console.log(`[AutonomousRunner] Project enabled: ${canonicalPath.replace(/[\r\n]/g, '')}`);
     this.persistSelection();
   }
 

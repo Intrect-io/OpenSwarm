@@ -2,13 +2,13 @@
 // branch of isProcessAlive, stale-pid-file cleanup, the full startDaemon spawn
 // flow (success, spawn failure, missing pid), stopDaemon, and readLogTail.
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Isolate the PID/log files: daemon.ts derives its state dir from homedir() at
 // module load, so point homedir at a temp dir BEFORE importing the module.
-const TEST_HOME = join(tmpdir(), `osw-daemon-coverage-test-home-${process.pid}`);
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'osw-daemon-coverage-test-home-'));
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os');
   return { ...actual, homedir: () => TEST_HOME };

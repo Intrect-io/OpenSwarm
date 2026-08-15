@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { TaskItem } from './decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // Absolute upper bound on a single task's wall-clock time — a LAST-RESORT backstop.
 // The fast reclaiming is done by per-stage timeouts (pairPipeline: worker 20min,

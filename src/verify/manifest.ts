@@ -30,7 +30,7 @@ async function withIoTimeout<T>(operation: Promise<T>, label: string, onLate?: (
 
 async function readBoundedManifest(path: string): Promise<string> {
   const handle = await withIoTimeout(
-    open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK),
+    open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600),
     'manifest open',
     (lateHandle) => { void lateHandle.close(); },
   );

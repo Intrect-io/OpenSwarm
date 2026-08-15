@@ -26,6 +26,7 @@ import { runWorker } from '../src/agents/worker.js';
 import { setDefaultAdapter } from '../src/adapters/index.js';
 import { initLocale } from '../src/locale/index.js';
 import { loadEnvFile } from '../src/core/envFile.js';
+import { safeConsole as console } from '../src/support/safeLog.js';
 
 const exec = promisify(execFile);
 
@@ -123,7 +124,7 @@ async function solveOne(inst: SweInstance, model: string): Promise<{ pred: Recor
     // requires. The official harness applies test_patch itself at eval time.
     let protectedTestFiles: string[] = [];
     if (inst.test_patch && inst.test_patch.trim()) {
-      const tpPath = join(tmpdir(), `swe-tp-${inst.instance_id.replace(/[^a-z0-9]/gi, '-')}.diff`);
+      const tpPath = join(hostDir, '.openswarm-gold-test.patch');
       await writeFile(tpPath, inst.test_patch);
       try {
         await sh('git', ['apply', '--whitespace=nowarn', tpPath], { cwd: hostDir, timeoutMs: 30_000 });
@@ -191,7 +192,7 @@ async function solveOne(inst: SweInstance, model: string): Promise<{ pred: Recor
       await sh('git', ['checkout', '--', '.'], { cwd: hostDir, timeoutMs: 30_000 }).catch(() => {});
       const diagText = (diag.output || diag.summary || '').trim();
       log(`  stage 1 done — diagnosis ${diagText.length} chars`);
-      await writeFile(`/tmp/swe_diagnosis_${inst.instance_id}.txt`, diagText).catch(() => {});
+      await writeFile(join(hostDir, 'openswarm-diagnosis.txt'), diagText).catch(() => {});
       diagnosisSection = buildDiagnosisSection(diagText);
     }
 
@@ -250,7 +251,8 @@ async function main() {
   initLocale('en');
   setDefaultAdapter('openrouter');
   const file = process.argv[2];
-  const outPreds = process.argv[3] ?? join(tmpdir(), 'swe-preds.json');
+  const outputDir = process.argv[3] ? undefined : await mkdtemp(join(tmpdir(), 'swe-preds-'));
+  const outPreds = process.argv[3] ?? join(outputDir!, 'predictions.json');
   if (!file) { console.error('usage: sweBench.ts <instances.json> [outPreds.json]'); process.exit(1); }
   const instances: SweInstance[] = JSON.parse(await readFile(file, 'utf-8'));
   const model = process.env.SWE_MODEL ?? 'deepseek/deepseek-v4-flash';

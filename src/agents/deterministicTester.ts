@@ -32,21 +32,21 @@ export interface TrustedVerifyPlan {
 }
 
 async function capturePackageJsons(projectPath: string, commands: VerifyCommand[]): Promise<Record<string, string>> {
-  const packages: Record<string, string> = {};
+  const packages: Array<[string, string]> = [];
   const root = resolve(projectPath);
   for (const command of commands) {
     let directory = resolve(root, command.cwd ?? '.');
     while (directory === root || directory.startsWith(`${root}/`)) {
       const source = await readFile(join(directory, 'package.json'), 'utf8').catch(() => undefined);
       if (source !== undefined) {
-        packages[relative(root, directory)] = source;
+        packages.push([relative(root, directory), source]);
         break;
       }
       if (directory === root) break;
       directory = dirname(directory);
     }
   }
-  return packages;
+  return Object.fromEntries(packages);
 }
 
 export async function loadTrustedVerifyPlan(projectPath: string, config: VerifyConfig): Promise<TrustedVerifyPlan> {

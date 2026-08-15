@@ -21,6 +21,7 @@ import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
+import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import {
   loadModelCatalog,
   parseOpenAiModelList,
@@ -210,15 +211,15 @@ export class GptCliAdapter implements CliAdapter {
       if (tools.length > 0) {
         body.tools = tools;
       }
-
       const doCall = async (accessToken: string) => {
-        const res = await fetch(`${OPENAI_API_BASE}/chat/completions`, {
+        const request = prepareApprovedModelRequest(`${OPENAI_API_BASE}/chat/completions`, body);
+        const res = await fetch(request.url, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(body),
+          body: request.body,
           signal,
         });
 

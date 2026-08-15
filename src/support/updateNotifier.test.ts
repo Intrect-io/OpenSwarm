@@ -58,7 +58,7 @@ describe('maybeNotifyUpdate (INT-2270)', () => {
       writeCache,
       write,
     });
-    expect(writeCache).toHaveBeenCalledWith({ latest: '0.13.0', checkedAt: 999_999_999 });
+    expect(writeCache).toHaveBeenCalledWith({ latest: '0.12.0', checkedAt: 999_999_999 });
     expect(write).toHaveBeenCalledOnce();
   });
 

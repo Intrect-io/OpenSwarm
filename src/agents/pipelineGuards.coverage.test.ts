@@ -8,7 +8,7 @@
 // ============================================
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -28,8 +28,7 @@ describe('pipelineGuards — additional coverage', () => {
   let originalPath: string | undefined;
 
   beforeEach(() => {
-    repo = join(tmpdir(), `openswarm-guards-cov-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(repo, { recursive: true });
+    repo = mkdtempSync(join(tmpdir(), 'openswarm-guards-cov-'));
     execFileSync('git', ['init', '-b', 'main'], { cwd: repo });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
     execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repo });

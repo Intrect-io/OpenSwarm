@@ -14,6 +14,7 @@ import {
   buildFixTaskDescription,
   mergeFallback,
   mergeReReview,
+  mergeSecurityAuditFindings,
   type AuditArea,
   type AuditAreaResult,
   type AuditProgress,
@@ -190,6 +191,27 @@ describe('aggregateAuditResults (INT-2006)', () => {
     const sum = aggregateAuditResults(results);
     // t1 (bug), same-loc-diff-type (test), b (bug) = 3; t1-dup deduped
     expect(sum.recommendedActions.map((a) => a.title)).toEqual(['t1', 'same-loc-diff-type', 'b']);
+  });
+});
+
+describe('mergeSecurityAuditFindings', () => {
+  it('turns deterministic CodeQL evidence into a fixable rejection', () => {
+    const base: AuditRun = {
+      results: [{
+        area: { label: 'src', dir: 'src', files: ['src/a.ts'] },
+        review: { decision: 'approve', feedback: '', issues: [], recommendedActions: [] },
+      }],
+      summary: aggregateAuditResults([{
+        area: { label: 'src', dir: 'src', files: ['src/a.ts'] },
+        review: { decision: 'approve', feedback: '', issues: [], recommendedActions: [] },
+      }]),
+    };
+    const merged = mergeSecurityAuditFindings(base, [{
+      ruleId: 'codeql/js/file-system-race', level: 'error', message: 'race', filePath: 'src/a.ts', line: 8,
+    }]);
+    expect(merged.summary.decision).toBe('reject');
+    expect(fixTargets(merged)).toHaveLength(1);
+    expect(merged.summary.issues).toContain('[.openswarm/codeql-security] CodeQL codeql/js/file-system-race (src/a.ts:8): race');
   });
 });
 

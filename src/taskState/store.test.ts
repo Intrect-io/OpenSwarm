@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -23,6 +23,7 @@ import {
 
 describe('task state store', () => {
   let stateFile: string;
+  let stateDir: string;
 
   function taskState(
     issueId: string,
@@ -44,7 +45,8 @@ describe('task state store', () => {
   }
 
   beforeEach(() => {
-    stateFile = join(tmpdir(), `openswarm-task-state-${process.pid}-${Date.now()}-${Math.random()}.json`);
+    stateDir = mkdtempSync(join(tmpdir(), 'openswarm-task-state-'));
+    stateFile = join(stateDir, 'state.json');
     process.env.OPENSWARM_TASK_STATE_FILE = stateFile;
     resetTaskStateStoreForTests();
   });
@@ -54,6 +56,7 @@ describe('task state store', () => {
     if (existsSync(stateFile)) {
       unlinkSync(stateFile);
     }
+    rmSync(stateDir, { recursive: true, force: true });
     delete process.env.OPENSWARM_TASK_STATE_FILE;
     delete process.env.OPENSWARM_TASK_STATE_TRUSTED_COMMENT_USERS;
   });

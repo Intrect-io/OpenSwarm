@@ -13,6 +13,7 @@ import { registerProcess } from './processRegistry.js';
 import { buildWorkerEnv } from './envPath.js';
 import { detectRateLimit } from './rateLimitError.js';
 import { codexMcpAuthHint } from './errorClassification.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 /**
  * Spawn a CLI process using the given adapter and options.

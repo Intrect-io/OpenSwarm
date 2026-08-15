@@ -125,7 +125,11 @@ export async function maybeNotifyUpdate(current: string, deps: NotifierDeps = {}
       const fetched = await fetchFn();
       // Back off even on failure (reuse the last known latest, or the current
       // version) so a registry hiccup doesn't make every run hit the network.
-      write({ latest: fetched ?? latest ?? current, checkedAt: now() });
+      // Registry data is intentionally not persisted. The notifier only needs
+      // it for this invocation; keeping the locally installed version as the
+      // cache marker retains the daily backoff without turning an HTTP response
+      // into a file write.
+      write({ latest: current, checkedAt: now() });
       if (fetched) latest = fetched;
     }
 
@@ -193,7 +197,9 @@ export async function maybeAutoUpdate(current: string, deps: AutoUpdateDeps = {}
     const fresh = cache != null && now() - cache.checkedAt < DAY_MS;
     if (!fresh) {
       const fetched = await fetchFn();
-      write({ latest: fetched ?? latest ?? current, checkedAt: now() });
+      // Keep the downloaded version in memory for this re-exec decision, but
+      // do not persist remote registry data to the local cache.
+      write({ latest: current, checkedAt: now() });
       if (fetched) latest = fetched;
     }
 

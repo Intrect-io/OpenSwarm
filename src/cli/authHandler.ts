@@ -15,6 +15,7 @@ import {
 } from '../auth/openrouterPkce.js';
 import { loginAndSaveLinearProfile } from '../auth/linearPkce.js';
 import { getCodexModelIds } from '../adapters/codexModels.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 type Provider = 'gpt' | 'openrouter' | 'linear';
 

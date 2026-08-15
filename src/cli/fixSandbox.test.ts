@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -192,9 +193,15 @@ describe('runIsolatedFixBatch', () => {
 
     const { sandbox } = await cloneSandbox(repo, root, 'candidate', 'copy', snapshot);
     const copied = join(sandbox, 'node_modules', 'injected-link');
-    expect((await lstat(copied)).isSymbolicLink()).toBe(false);
-    expect(await readFile(copied, 'utf8')).toBe('external-original\n');
-    await writeFile(copied, 'sandbox-only\n');
+    const copiedHandle = await open(copied, constants.O_RDWR | constants.O_NOFOLLOW);
+    try {
+      expect((await copiedHandle.stat()).isFile()).toBe(true);
+      expect(await copiedHandle.readFile('utf8')).toBe('external-original\n');
+      await copiedHandle.truncate(0);
+      await copiedHandle.writeFile('sandbox-only\n');
+    } finally {
+      await copiedHandle.close();
+    }
     expect(await readFile(join(repo, 'external.txt'), 'utf8')).toBe('external-original\n');
   });
 

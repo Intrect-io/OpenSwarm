@@ -25,6 +25,7 @@ import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
+import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import {
   loadModelCatalog,
   parseOpenAiModelList,
@@ -214,15 +215,15 @@ export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudA
     if (tools.length > 0) {
       body.tools = tools;
     }
-
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
-      const res = await fetch(`${ATLASCLOUD_API_BASE}/chat/completions`, {
+      const request = prepareApprovedModelRequest(`${ATLASCLOUD_API_BASE}/chat/completions`, body);
+      const res = await fetch(request.url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body),
+        body: request.body,
         // The caller's signal AND this call's own deadline. Either one aborts.
         signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
       });

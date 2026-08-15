@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,8 +9,7 @@ describe('gitTracker', () => {
   let repo: string;
 
   beforeEach(() => {
-    repo = join(tmpdir(), `openswarm-git-tracker-${process.pid}-${Date.now()}`);
-    mkdirSync(repo, { recursive: true });
+    repo = mkdtempSync(join(tmpdir(), 'openswarm-git-tracker-'));
     execFileSync('git', ['init', '-b', 'main'], { cwd: repo });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
     execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repo });

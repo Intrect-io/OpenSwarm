@@ -2,13 +2,13 @@
 // memoryDir(), sqliteMirrorInfo(), and inspectMemoryStatus(). memoryCommand.test.ts
 // already covers formatMemoryStatus() and runMemoryCommand() via injected deps.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // memoryDir() derives its path from homedir() at call time — point it at an
 // isolated temp dir so this suite never touches the real ~/.openswarm/memory.
-const TEST_HOME = join(tmpdir(), `osw-memory-cmd-test-home-${process.pid}`);
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'osw-memory-cmd-test-home-'));
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os');
   return { ...actual, homedir: () => TEST_HOME };

@@ -23,6 +23,7 @@ import {
   formatAuditSummary,
   formatAuditReport,
   mergeFallback,
+  mergeSecurityAuditFindings,
   type AuditArea,
   type FixVerifyRound,
   type FixVerifyResult,
@@ -47,10 +48,11 @@ import type { AdapterName } from '../adapters/types.js';
 import { getDefaultAdapterName } from '../adapters/index.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import { loadConfig } from '../core/config.js';
-import type { VerifyConfig } from '../core/types.js';
+import type { SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import { loadTrustedVerifyPlan, runDeterministicTester } from '../agents/deterministicTester.js';
 import { buildFixRepositoryContext } from './fixPlanning.js';
 import { collectFixRuntimePreflightIssues } from './fixPreflight.js';
+import { DEFAULT_SECURITY_AUDIT_CONFIG, listTrackedSecurityFiles, runSecurityAudit, type SecurityFinding } from '../verify/securityAudit.js';
 
 /**
  * Best-effort verify config: `review --max` must still run in a repo with no —
@@ -66,6 +68,16 @@ export function loadVerifyConfigBestEffort(): VerifyConfig {
     const reason = err instanceof Error ? err.message.split('\n')[0] : String(err);
     console.log(status.warn(`[Config] Verify policy using built-in defaults — ${reason}`));
     return defaults;
+  }
+}
+
+export function loadSecurityAuditConfigBestEffort(): SecurityAuditConfig {
+  try {
+    return loadConfig().autonomous?.securityAudit ?? DEFAULT_SECURITY_AUDIT_CONFIG;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message.split('\n')[0] : String(err);
+    console.log(status.warn(`[Config] CodeQL audit using built-in defaults — ${reason}`));
+    return DEFAULT_SECURITY_AUDIT_CONFIG;
   }
 }
 
@@ -102,6 +114,8 @@ export interface ReviewMaxOptions {
   fixRounds?: number;
   /** Record the audit findings into repo knowledge (default true; --no-learn opts out). (INT-2268) */
   learn?: boolean;
+  /** Disable the default-on CodeQL audit gate. */
+  securityAudit?: boolean;
 }
 
 export interface ReviewMaxCommandResult {
@@ -491,6 +505,11 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   // can edit them. LLM approval alone is not completion evidence: the fix must
   // also leave the repository's real checks without new failures.
   const verifyConfig = loadVerifyConfigBestEffort();
+  const loadedSecurityAudit = loadSecurityAuditConfigBestEffort();
+  const securityAuditConfig: SecurityAuditConfig = {
+    ...loadedSecurityAudit,
+    ...(opts.securityAudit === false ? { enabled: false } : {}),
+  };
   const trustedVerifyPlan = opts.fix ? await loadTrustedVerifyPlan(workCwd, verifyConfig) : undefined;
 
   // Live board → stderr so the final report on stdout stays pipe-clean.
@@ -544,6 +563,19 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
 
   run = await applyHistoryDedupe(run);
 
+  const refreshSecurityAudit = async (): Promise<SecurityFinding[]> => {
+    try {
+      const result = await runSecurityAudit(workCwd, await listTrackedSecurityFiles(workCwd), securityAuditConfig);
+      console.log(c.dim(`  CodeQL refresh: ${result.status}, ${result.findings.length} finding(s).`));
+      return result.findings;
+    } catch (error) {
+      return [{ ruleId: 'openswarm/security-codeql-refresh', level: 'error', message: `CodeQL refresh failed: ${error instanceof Error ? error.message : String(error)}` }];
+    }
+  };
+  if (opts.fix && securityAuditConfig.enabled) {
+    run = mergeSecurityAuditFindings(run, await refreshSecurityAudit());
+  }
+
   console.log(formatAuditSummary(run.summary));
 
   // If a usage-limit is still unresolved (fallback also exhausted, or no fallback),
@@ -582,7 +614,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
           ...run.summary.recommendedActions.map((action) => `${action.title} ${action.location ?? ''}`),
         ].join('\n'),
       );
-      if (targets.length > 0) {
+      if (targets.length > 0 || securityAuditConfig.enabled) {
         repositoryContext.preflight.issues.push(
           ...await collectFixRuntimePreflightIssues(workCwd, verifyConfig, trustedVerifyPlan),
         );
@@ -617,6 +649,7 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
                   failedTests: result.failedTests,
                 };
               },
+          refreshSecurityAudit: securityAuditConfig.enabled ? refreshSecurityAudit : undefined,
           onRoundStart: (round, flagged) =>
             console.log(`\n${c.bold(`Round ${round}${maxRounds === undefined ? '' : `/${maxRounds}`}`)} — fixing ${flagged} area(s)...`),
           onFixProgress: (e) => {

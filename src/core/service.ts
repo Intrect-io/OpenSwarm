@@ -294,6 +294,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       // Pipeline guards
       guards: config.autonomous.guards,
       verify: config.autonomous.verify,
+      securityAudit: config.autonomous.securityAudit,
       // Bad-edit / reflection self-repair budget
       maxReflections: config.autonomous.maxReflections,
       interTaskCooldownMs: config.autonomous.interTaskCooldownMs ?? 1_800_000,
@@ -332,6 +333,9 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       ciTimeoutMs: config.prProcessor.ciTimeoutMs,
       ciPollIntervalMs: config.prProcessor.ciPollIntervalMs,
       conflictResolver: config.prProcessor.conflictResolver,
+      // PR remediation is an autonomous editing path; inherit the same
+      // baseline-diff CodeQL policy as heartbeat-dispatched work.
+      securityAudit: config.autonomous?.securityAudit,
     });
     prProcessor.start();
     const resolverStatus = config.prProcessor.conflictResolver?.enabled ? ', conflictResolver: ON' : '';

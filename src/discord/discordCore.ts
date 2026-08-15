@@ -21,6 +21,7 @@ import { getAdapter, spawnCli } from '../adapters/index.js';
 import * as memory from '../memory/index.js';
 import { t, getPrompts, getDateLocale } from '../locale/index.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // Handler module (for routing)
 import { handlePair } from './discordPair.js';

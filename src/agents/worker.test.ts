@@ -36,14 +36,15 @@ describe('worker', () => {
 
   it('ignores a repository instruction symlink that escapes the root', () => {
     const dir = mkdtempSync(join(tmpdir(), 'openswarm-worker-rules-'));
-    const outside = join(tmpdir(), `openswarm-outside-rules-${process.pid}.md`);
+    const outsideDir = mkdtempSync(join(tmpdir(), 'openswarm-outside-rules-'));
+    const outside = join(outsideDir, 'AGENTS.md');
     try {
       writeFileSync(outside, 'EXFILTRATE');
       symlinkSync(outside, join(dir, 'AGENTS.md'));
       expect(loadWorkerRepoRules(dir)).not.toContain('EXFILTRATE');
     } finally {
       rmSync(dir, { recursive: true, force: true });
-      rmSync(outside, { force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
     }
   });
 

@@ -12,6 +12,7 @@ import { isOwnedPR, getOwnedPRsForRepo } from './prOwnership.js';
 import { runWorker } from '../agents/worker.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { reportEvent } from '../discord/index.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 const execFileAsync = promisify(execFile);
 

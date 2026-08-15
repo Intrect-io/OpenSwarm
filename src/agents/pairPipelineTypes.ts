@@ -1,5 +1,5 @@
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile, VerifyConfig } from '../core/types.js';
+import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import type { CostInfo } from '../support/costTracker.js';
 import type { WorkerResult, ReviewResult, PairSession } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -36,6 +36,7 @@ export interface PipelineConfig {
   };
   guards?: Partial<PipelineGuardsConfig>;
   verify?: VerifyConfig;
+  securityAudit?: SecurityAuditConfig;
   jobProfiles?: JobProfile[];
   runMetadata?: PipelineRunMetadata;
   skipTesterIfNoCodeChange?: boolean;
@@ -124,6 +125,8 @@ export interface PipelineContext {
   trustedVerifyInputFingerprint?: string;
   /** Deferred capture error so invalid manifests retain tester-stage failure semantics. */
   trustedVerifyError?: unknown;
+  securityBaseline?: import('../verify/securityAudit.js').SecurityAuditResult;
+  newSecurityFindings?: import('../verify/securityAudit.js').SecurityFinding[];
   /** Pair-level stagnation detector reason, preserved so the scheduler does not rerun the same loop. */
   stuckReason?: string;
 }

@@ -15,6 +15,7 @@ import { expandPath } from '../core/config.js';
 import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgress.js';
 import { status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // Types
 

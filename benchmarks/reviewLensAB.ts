@@ -33,6 +33,7 @@ import { runReviewer } from '../src/agents/reviewer.js';
 import type { ReviewerOptions } from '../src/agents/reviewer.js';
 import type { ReviewResult, ReviewDecision } from '../src/agents/agentPair.js';
 import { runPool } from '../src/support/concurrencyPool.js';
+import { safeConsole as console } from '../src/support/safeLog.js';
 import { setDefaultAdapter } from '../src/adapters/index.js';
 import type { AdapterName } from '../src/adapters/types.js';
 import { initLocale } from '../src/locale/index.js';

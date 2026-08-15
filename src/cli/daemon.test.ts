@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Isolate the PID file: daemon.ts derives its state dir from homedir() at
 // module load, so point homedir at a temp dir BEFORE importing the module.
-const TEST_HOME = join(tmpdir(), `osw-daemon-test-home-${process.pid}`);
+const TEST_HOME = mkdtempSync(join(tmpdir(), 'osw-daemon-test-home-'));
 vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os');
   return { ...actual, homedir: () => TEST_HOME };

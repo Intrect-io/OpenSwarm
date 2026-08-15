@@ -25,10 +25,7 @@ import {
   DEFAULT_MAX_REFLECTIONS,
 } from './reflection.js';
 import { buildRepeatEscalation, resolveWorkerStageOverrides } from './workerEscalation.js';
-import { hasRepoSnapshot, scanAndCache, analyzeIssue } from '../knowledge/index.js';
-import { getRegistryStore } from '../registry/sqliteStore.js';
-import { recallRepoKnowledge } from '../memory/repoKnowledge.js';
-import type { WorkerContext } from '../locale/types.js';
+import { hasRepoSnapshot, scanAndCache } from '../knowledge/index.js';
 import * as workerAgent from './worker.js';
 import type { WorkerOptions } from './worker.js';
 import { buildTaskPrefix } from './pipelineTaskPrefix.js';
@@ -47,10 +44,13 @@ import * as auditorAgent from './auditor.js';
 import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
+import { safeConsole } from '../support/safeLog.js';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
+import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
+import { collectWorkerContext } from './workerContext.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
@@ -70,6 +70,7 @@ export type {
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
+
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
@@ -122,11 +123,11 @@ export class PairPipeline extends EventEmitter {
 
     // Ensure repo graph snapshot exists (first-time scan if needed)
     if (!hasRepoSnapshot(projectPath)) {
-      console.log(`[Pipeline] No repo snapshot found, scanning ${projectPath}...`);
+      safeConsole.log(`[Pipeline] No repo snapshot found, scanning ${projectPath}...`);
       try {
         await scanAndCache(projectPath);
       } catch (e) {
-        console.warn(`[Pipeline] Repo scan failed (non-blocking):`, e);
+        safeConsole.warn(`[Pipeline] Repo scan failed (non-blocking):`, e);
       }
     }
 
@@ -158,6 +159,10 @@ export class PairPipeline extends EventEmitter {
         context.trustedVerifyCommands = plan.commands; context.trustedVerifyPackageJsonByDirectory = plan.packageJsonByDirectory;
         context.trustedVerifyInputFingerprint = await captureVerifyInputFingerprint(projectPath);
       } catch (error) { context.trustedVerifyError = error; }
+      if (this.config.securityAudit?.enabled) {
+        context.securityBaseline = await captureSecurityAuditBaseline(projectPath, this.config.securityAudit);
+        safeConsole.log(`[${context.taskPrefix}] CodeQL baseline: ${context.securityBaseline.status}, ${context.securityBaseline.findings.length} finding(s)`);
+      }
       const iterationResult = await this.runFullIterationLoop(context, stages);
 
       if (!iterationResult.success) {
@@ -166,7 +171,7 @@ export class PairPipeline extends EventEmitter {
       // Run Documenter after all stages pass
       if (this.hasStage('documenter') && context.workerResult?.success) {
         if (this.config.skipDocumenterIfNoChange && !context.workerResult.filesChanged?.length) {
-          console.log(`[${context.taskPrefix}] Skipping documenter: no files changed`);
+          safeConsole.log(`[${context.taskPrefix}] Skipping documenter: no files changed`);
         } else {
           await this.runPostSuccessStage('documenter', context, stages);
         }
@@ -176,7 +181,7 @@ export class PairPipeline extends EventEmitter {
       if (this.hasStage('auditor') && context.workerResult?.success) {
         const auditorFiles = context.workerResult.filesChanged?.length ?? 0;
         if (auditorFiles < (this.config.skipAuditorUnderFileCount ?? 3)) {
-          console.log(`[${context.taskPrefix}] Skipping auditor: ${auditorFiles} files changed`);
+          safeConsole.log(`[${context.taskPrefix}] Skipping auditor: ${auditorFiles} files changed`);
         } else {
           await this.runPostSuccessStage('auditor', context, stages);
         }
@@ -202,17 +207,17 @@ export class PairPipeline extends EventEmitter {
       // An infra/CLI failure (worker/reviewer never ran: non-zero exit, auth,
       // spawn, timeout) is not a task failure — surface it distinctly so the
       // runner does a backoff retry instead of counting it toward STUCK. (INT-2010)
-      const infra = !cancelled && !rateLimited && isInfraError(error);
+      const infra = !cancelled && !rateLimited && (error instanceof SecurityAuditInfrastructureError || isInfraError(error));
       const classifiedStage = extractClassifiedStageResult(error); // INT-2424
       if (classifiedStage) stages.push(classifiedStage);
       if (cancelled) {
-        console.log(`[${context.taskPrefix}] Pipeline cancelled`);
+        safeConsole.log(`[${context.taskPrefix}] Pipeline cancelled`);
       } else if (rateLimited) {
-        console.warn(`[${context.taskPrefix}] Pipeline rate-limited: ${(error as RateLimitError).message}`);
+        safeConsole.warn(`[${context.taskPrefix}] Pipeline rate-limited: ${(error as RateLimitError).message}`);
       } else if (infra) {
-        console.warn(`[${context.taskPrefix}] Pipeline infra error (not counted toward STUCK): ${error instanceof Error ? error.message : String(error)}`);
+        safeConsole.warn(`[${context.taskPrefix}] Pipeline infra error (not counted toward STUCK): ${error instanceof Error ? error.message : String(error)}`);
       } else {
-        console.error('[%s] Error:', context.taskPrefix, error);
+        safeConsole.error('[%s] Error:', context.taskPrefix, error);
       }
       agentPair.updateSessionStatus(session.id, 'failed');
       return {
@@ -243,109 +248,6 @@ export class PairPipeline extends EventEmitter {
    * Worker에 주입할 코드 컨텍스트 수집
    * Draft 분석이 있으면 재사용, 없으면 직접 수집
    */
-  private async collectWorkerContext(context: PipelineContext): Promise<WorkerContext | undefined> {
-    try {
-      const wc: WorkerContext = {};
-      const draft = this.config.draftAnalysis;
-
-      // Draft 분석 결과가 있으면 우선 사용 (중복 API 호출 방지)
-      if (draft) {
-        wc.draftAnalysis = {
-          taskType: draft.taskType,
-          intentSummary: draft.intentSummary,
-          relevantFiles: draft.relevantFiles,
-          suggestedApproach: draft.suggestedApproach,
-          projectStats: draft.projectStats,
-          completionCriteria: draft.completionCriteria,
-          sufficient: draft.sufficient,
-        };
-
-        if (draft.impactAnalysis) {
-          wc.impactAnalysis = draft.impactAnalysis;
-        }
-        if (draft.registrySnapshot && draft.registrySnapshot.length > 0) {
-          wc.registryBriefs = draft.registrySnapshot;
-        }
-      }
-
-      // Draft에 impactAnalysis가 없으면 직접 수집
-      if (!wc.impactAnalysis) {
-        const impact = await analyzeIssue(
-          context.projectPath,
-          context.task.title,
-          context.task.description || '',
-        );
-        if (impact && (impact.directModules.length > 0 || impact.dependentModules.length > 0)) {
-          wc.impactAnalysis = impact;
-        }
-      }
-
-      // Draft에 registryBriefs가 없으면 직접 수집
-      if (!wc.registryBriefs) {
-        const affectedFiles = new Set<string>();
-        if (wc.impactAnalysis) {
-          for (const mod of wc.impactAnalysis.directModules) affectedFiles.add(mod);
-          for (const mod of wc.impactAnalysis.dependentModules.slice(0, 5)) affectedFiles.add(mod);
-        }
-
-        if (affectedFiles.size > 0) {
-          try {
-            const store = getRegistryStore();
-            const briefs: WorkerContext['registryBriefs'] = [];
-
-            for (const filePath of affectedFiles) {
-              const brief = store.fileBrief(filePath);
-              if (brief.entities.length === 0) continue;
-
-              const highlights: string[] = [];
-              for (const e of brief.entities) {
-                if (e.status === 'deprecated') highlights.push(`${e.name} (deprecated)`);
-                else if (e.status === 'broken') highlights.push(`${e.name} (broken)`);
-                const critical = e.warnings.filter(w => !w.resolved && w.severity === 'critical');
-                if (critical.length > 0) highlights.push(`${e.name} (${critical.length} critical)`);
-              }
-
-              // entity 목록 — Worker가 파일을 읽지 않고 구조 파악 (상위 15개)
-              const entities = brief.entities.slice(0, 15).map(e => ({
-                kind: e.kind,
-                name: e.name,
-                signature: e.signature?.slice(0, 80),
-                status: e.status,
-                hasTests: e.hasTests,
-              }));
-
-              briefs.push({ filePath: brief.filePath, summary: brief.summary, highlights, entities });
-            }
-
-            if (briefs.length > 0) {
-              wc.registryBriefs = briefs;
-            }
-          } catch {
-            // Registry 미초기화
-          }
-        }
-      }
-
-      // Recall repo knowledge accumulated from past tasks — the core loop that
-      // makes the worker understand this repo better over time (non-blocking on failure)
-      const memories = await recallRepoKnowledge(
-        context.projectPath,
-        context.task.title,
-        context.task.description || '',
-      );
-      if (memories.length > 0) {
-        wc.repoMemories = memories;
-        console.log(`[Pipeline] Recalled ${memories.length} repo memories for context`);
-      }
-
-      if (!wc.impactAnalysis && !wc.registryBriefs && !wc.draftAnalysis && !wc.repoMemories) return undefined;
-      return wc;
-    } catch (err) {
-      console.warn('[Pipeline] Worker context collection failed (non-blocking):', err);
-      return undefined;
-    }
-  }
-
   /** Check if a stage is enabled. */
   private hasStage(stage: PipelineStage): boolean {
     return this.config.stages.includes(stage);
@@ -356,19 +258,19 @@ export class PairPipeline extends EventEmitter {
     try { stages.push(await this.runStage(stage, context)); }
     catch (err) {
       if (err instanceof PipelineCancelledError || this.abortSignal?.aborted) throw err;
-      console.warn(`[${context.taskPrefix}] ${stage} skipped (non-blocking failure): ${err instanceof Error ? err.message : String(err)}`);
+      safeConsole.warn(`[${context.taskPrefix}] ${stage} skipped (non-blocking failure): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   private async runTester(context: PipelineContext): Promise<TesterResult> {
     if (!context.workerResult) throw new Error('Worker result required for tester');
     if (context.trustedVerifyError) throw context.trustedVerifyError;
-    return await runTesterWithVerification({
+    const testerResult = await runTesterWithVerification({
       projectPath: context.projectPath,
       verify: this.config.verify,
       trustedCommands: context.trustedVerifyCommands, trustedPackageJsonByDirectory: context.trustedVerifyPackageJsonByDirectory,
       trustedInputFingerprint: context.trustedVerifyInputFingerprint,
-      onInfra: (error) => console.warn(`[${context.taskPrefix}] Deterministic verify unavailable; falling back to LLM tester: ${error instanceof Error ? error.message : String(error)}`),
+      onInfra: (error) => safeConsole.warn(`[${context.taskPrefix}] Deterministic verify unavailable; falling back to LLM tester: ${error instanceof Error ? error.message : String(error)}`),
       fallback: () => testerAgent.runTester({
         taskTitle: context.task.title, taskDescription: context.task.description || '',
         workerResult: context.workerResult!, projectPath: context.projectPath,
@@ -377,7 +279,9 @@ export class PairPipeline extends EventEmitter {
         adapterName: this.config.roles?.tester?.adapter,
       }),
     });
+    return testerResult;
   }
+
   /** Run a single stage. */
   private async runStage(
     stage: PipelineStage,
@@ -392,7 +296,7 @@ export class PairPipeline extends EventEmitter {
       ?? await resolveAdapterDefaultModel(this.config.roles?.[stage]?.adapter, this.defaultModelCache);
     const prefix = context.taskPrefix;
     const metadata = this.stageMetadata(context);
-    console.log(`[${prefix}] Stage starting: ${stage}`);
+    safeConsole.log(`[${prefix}] Stage starting: ${stage}`);
     this.emit('stage:start', { stage, context, model: stageModel });
     broadcastEvent({ type: 'pipeline:stage', data: { taskId: taskEventKey(context.task), stage, status: 'start', model: stageModel, ...metadata } });
 
@@ -412,13 +316,13 @@ export class PairPipeline extends EventEmitter {
           // Check if fresh context should be used (after N failures)
           const useFreshContext = agentPair.shouldUseFreshContext(context.session.id);
           if (useFreshContext) {
-            console.log(`[${prefix}] Using fresh context for worker (retry with clean slate)`);
+            safeConsole.log(`[${prefix}] Using fresh context for worker (retry with clean slate)`);
             agentPair.consumeFreshContext(context.session.id);
             onLog('🔄 Using fresh context (previous attempts failed)');
           }
 
           // 코드 컨텍스트 수집 (첫 시도 정확도 향상 목적)
-          const workerContext = await this.collectWorkerContext(context);
+          const workerContext = await collectWorkerContext(context, this.config.draftAnalysis);
           if (workerContext && this.config.verbose) {
             const modCount = (workerContext.impactAnalysis?.directModules.length ?? 0)
               + (workerContext.impactAnalysis?.dependentModules.length ?? 0);
@@ -526,7 +430,7 @@ export class PairPipeline extends EventEmitter {
 
           // Check if confidence intervention is needed
           if (agentPair.needsConfidenceIntervention(context.session.id)) {
-            console.warn(`[${prefix}] Confidence intervention needed - early review triggered`);
+            safeConsole.warn(`[${prefix}] Confidence intervention needed - early review triggered`);
             const summary = agentPair.getConfidenceSummary(context.session.id);
             this.emit('log', { line: `⚠️ Low confidence detected: ${summary}` });
             // Continue to review, but reviewer should be aware of low confidence
@@ -579,7 +483,7 @@ export class PairPipeline extends EventEmitter {
             signal: this.abortSignal,
           };
 
-          console.log(`[${prefix}] Running full review...`);
+          safeConsole.log(`[${prefix}] Running full review...`);
           result = await reviewerAgent.runReviewer(reviewerOptions);
 
           agentPair.saveReviewerResult(context.session.id, result as ReviewResult);
@@ -674,7 +578,7 @@ export class PairPipeline extends EventEmitter {
         completedAt,
       };
 
-      console.log(`[${prefix}] ${stage} completed (${(stageResult.duration / 1000).toFixed(1)}s)`);
+      safeConsole.log(`[${prefix}] ${stage} completed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:complete', { stage, result: stageResult, context });
       const costInfo = (result as { costInfo?: CostInfo }).costInfo;
 
@@ -708,7 +612,7 @@ export class PairPipeline extends EventEmitter {
         completedAt,
       };
 
-      console.log(`[${prefix}] ${stage} failed (${(stageResult.duration / 1000).toFixed(1)}s)`);
+      safeConsole.log(`[${prefix}] ${stage} failed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:fail', { stage, result: stageResult, context, error });
       broadcastEvent({ type: 'pipeline:stage', data: {
         taskId: taskEventKey(context.task), stage, status: 'fail',
@@ -786,7 +690,7 @@ export class PairPipeline extends EventEmitter {
     const reason = !progressed
       ? `self-repair stagnated: identical ${source} errors repeated`
       : `self-repair budget exhausted (${context.reflection.reflectionCount}/${max} objective failures)`;
-    console.warn(`[${context.taskPrefix}] Aborting self-repair — ${reason}`);
+    safeConsole.warn(`[${context.taskPrefix}] Aborting self-repair — ${reason}`);
     this.emit('log', { line: `🛑 ${reason}` });
     this.emit('reflection:abort', {
       reason,
@@ -820,7 +724,7 @@ export class PairPipeline extends EventEmitter {
 
     // No point without a worker
     if (!hasWorker) {
-      console.log(`[${context.taskPrefix}] No worker stage configured`);
+      safeConsole.log(`[${context.taskPrefix}] No worker stage configured`);
       return { success: false };
     }
 
@@ -832,8 +736,8 @@ export class PairPipeline extends EventEmitter {
       const stuckCheck = this.stuckDetector.check();
       if (stuckCheck.isStuck) {
         context.stuckReason = stuckCheck.reason;
-        console.error(`[${context.taskPrefix}] STUCK DETECTED: ${stuckCheck.reason}`);
-        console.error(`[${context.taskPrefix}] Suggestion: ${stuckCheck.suggestion}`);
+        safeConsole.error(`[${context.taskPrefix}] STUCK DETECTED: ${stuckCheck.reason}`);
+        safeConsole.error(`[${context.taskPrefix}] Suggestion: ${stuckCheck.suggestion}`);
         this.emit('stuck', {
           reason: stuckCheck.reason,
           suggestion: stuckCheck.suggestion,
@@ -850,7 +754,7 @@ export class PairPipeline extends EventEmitter {
       });
       broadcastEvent({ type: 'pipeline:iteration', data: { taskId: taskEventKey(context.task), iteration: context.currentIteration } });
 
-      console.log(`[${context.taskPrefix}] Iteration ${context.currentIteration}/${maxIterations}`);
+      safeConsole.log(`[${context.taskPrefix}] Iteration ${context.currentIteration}/${maxIterations}`);
 
       // ========== WORKER (with escalation) ==========
       // Iteration-count escalation + one-shot signal escalation (INT-2475) —
@@ -899,7 +803,7 @@ export class PairPipeline extends EventEmitter {
           ?? failedWorker.haltReason
           ?? failedWorker.noChangesReason
           ?? failedWorker.summary;
-        console.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
+        safeConsole.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
         agentPair.trackFailure(context.session.id); // Track for fresh context decision
         this.emit('iteration:fail', {
           iteration: context.currentIteration,
@@ -911,7 +815,7 @@ export class PairPipeline extends EventEmitter {
 
       // ========== PIPELINE GUARDS (post-worker, pre-reviewer) ==========
       if (this.config.guards && context.workerResult) {
-        console.log(`[${context.taskPrefix}] Running pipeline guards...`);
+        safeConsole.log(`[${context.taskPrefix}] Running pipeline guards...`);
         const guardsResult = await runGuards(
           context.workerResult,
           context.projectPath,
@@ -924,7 +828,7 @@ export class PairPipeline extends EventEmitter {
           // drive a bounded self-repair retry with the exact errors preserved.
           const blocking = guardsResult.results.filter(r => !r.passed && r.blocking);
           const blockingIssues = blocking.flatMap(r => r.issues);
-          console.log(`[${context.taskPrefix}] Blocking guard failed: ${blockingIssues.join('; ')}`);
+          safeConsole.log(`[${context.taskPrefix}] Blocking guard failed: ${blockingIssues.join('; ')}`);
 
           // qualityGate is the lint/type bad-edit check; bsDetector is code-smell.
           const source: ReflectionSource = blocking.some(r => r.guard === 'qualityGate') ? 'lint' : 'bs';
@@ -958,11 +862,45 @@ export class PairPipeline extends EventEmitter {
         // Log non-blocking guard warnings
         const warnings = guardsResult.results.filter(r => !r.passed && !r.blocking);
         if (warnings.length > 0) {
-          console.log(`[${context.taskPrefix}] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
+          safeConsole.log(`[${context.taskPrefix}] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
           this.emit('log', {
             line: `⚠️ Guard warnings: ${warnings.flatMap(w => w.issues).join('; ')}`,
           });
         }
+      }
+
+      // CodeQL is a post-edit gate, not a tester-stage feature. Run it after a
+      // successful worker pass so every pipeline shape — including
+      // worker/reviewer-only configurations — must clear the same baseline-diff
+      // check before an approval is possible.
+      const introducedSecurityFindings = await collectIntroducedSecurityFindings(context);
+      if (introducedSecurityFindings.length > 0) {
+        const failures = introducedSecurityFindings.map(formatSecurityFinding);
+        safeConsole.log(`[${context.taskPrefix}] New CodeQL findings, retrying...`);
+        const { progressed } = recordReflection(context.reflection, {
+          iteration: context.currentIteration,
+          source: 'test',
+          errors: failures,
+        });
+        context.reviewResult = {
+          decision: 'revise',
+          feedback: `New deterministic CodeQL findings:\n${failures.join('\n')}`,
+          issues: failures,
+          suggestions: ['Resolve every new CodeQL finding without suppressing its rule or weakening the audit.'],
+        };
+        context.feedbackSource = 'objective';
+        agentPair.trackFailure(context.session.id);
+        this.emit('iteration:fail', {
+          iteration: context.currentIteration,
+          stage: 'tester',
+          context,
+        });
+        agentPair.updateSessionStatus(context.session.id, 'revising');
+
+        if (this.shouldAbortSelfRepair(context, progressed, 'test')) {
+          return { success: false };
+        }
+        continue;
       }
 
       // A code-changing worker that reports no commands is usually a low-accuracy
@@ -990,7 +928,7 @@ export class PairPipeline extends EventEmitter {
               source: 'validation',
               errors: validationIssues,
             });
-            console.log(`[${context.taskPrefix}] Missing worker validation evidence: ${validationIssues.join('; ')}`);
+            safeConsole.log(`[${context.taskPrefix}] Missing worker validation evidence: ${validationIssues.join('; ')}`);
             context.reviewResult = {
               decision: 'revise',
               feedback: `Worker validation evidence missing: ${validationIssues.join('; ')}`,
@@ -1007,7 +945,7 @@ export class PairPipeline extends EventEmitter {
             agentPair.updateSessionStatus(context.session.id, 'revising');
             continue;
           }
-          console.log(`[${context.taskPrefix}] Validation evidence still missing — deferring to reviewer (already nudged once)`);
+          safeConsole.log(`[${context.taskPrefix}] Validation evidence still missing — deferring to reviewer (already nudged once)`);
           this.emit('log', { line: '⚠️ Validation evidence missing; deferring to reviewer' });
         }
       }
@@ -1021,7 +959,7 @@ export class PairPipeline extends EventEmitter {
         if (degenerate || confidence < CONFIDENCE_THRESHOLDS.HALT) {
           const haltReason = degenerate ? 'Worker produced no changes'
             : (context.workerResult.haltReason || `Low confidence: ${confidence}%`);
-          console.warn(`[${context.taskPrefix}] HALT triggered: confidence=${confidence}%, degenerate=${degenerate}, reason=${haltReason}`);
+          safeConsole.warn(`[${context.taskPrefix}] HALT triggered: confidence=${confidence}%, degenerate=${degenerate}, reason=${haltReason}`);
           this.emit('halt', { confidence, haltReason, sessionId: context.session.id, iteration: context.currentIteration, context });
           // Degenerate no-op → escalate the next attempt (stronger effort/model) vs the same empty run to STUCK. (INT-2521)
           if (degenerate && !context.workerEscalation) {
@@ -1056,20 +994,21 @@ export class PairPipeline extends EventEmitter {
         // Skip tester if no code files changed (configurable, default true)
         const skipIfNoCode = this.config.skipTesterIfNoCodeChange ?? true;
         const changedFiles = context.workerResult?.filesChanged || [];
-        const hasCodeChange = changedFiles.some(file => this.config.verify?.enabled
+        const hasCodeChange = changedFiles.some(file => (this.config.verify?.enabled || this.config.securityAudit?.enabled)
           ? isValidationRelevantFile(file)
           : isTesterCodeFile(file));
         if (skipIfNoCode && !hasCodeChange) {
-          console.log(`[${context.taskPrefix}] Skipping tester: no code files changed (${changedFiles.length} files: ${changedFiles.join(', ') || 'none'})`);
+          safeConsole.log(`[${context.taskPrefix}] Skipping tester: no code files changed (${changedFiles.length} files: ${changedFiles.join(', ') || 'none'})`);
         } else {
         const testerResult = await this.runStage('tester', context);
         stages.push(testerResult);
 
-        const reviewerShouldJudgeFailure = context.testerResult?.deterministic === true;
+        const hasNewSecurityFindings = (context.newSecurityFindings?.length ?? 0) > 0;
+        const reviewerShouldJudgeFailure = context.testerResult?.deterministic === true && !hasNewSecurityFindings;
         if (!testerResult.success && !this.config.continueOnTestFail && !reviewerShouldJudgeFailure) {
           // Test failure is objective ground truth → record into the reflection
           // trail and drive a bounded self-repair retry (INT-1679).
-          console.log(`[${context.taskPrefix}] Tester failed, retrying...`);
+          safeConsole.log(`[${context.taskPrefix}] Tester failed, retrying...`);
           agentPair.trackFailure(context.session.id); // Track for fresh context decision
 
           const failedTests = context.testerResult?.failedTests ?? [];
@@ -1122,7 +1061,7 @@ export class PairPipeline extends EventEmitter {
           : undefined;
 
         if (shouldEscalateReviewer && reviewerEscalateModel) {
-          console.log(`[${context.taskPrefix}] Reviewer escalation → ${reviewerEscalateModel} (iteration ${context.currentIteration})`);
+          safeConsole.log(`[${context.taskPrefix}] Reviewer escalation → ${reviewerEscalateModel} (iteration ${context.currentIteration})`);
           this.emit('log', {
             line: `🔍 Reviewer spot check: escalating to ${reviewerEscalateModel}`,
           });
@@ -1145,7 +1084,7 @@ export class PairPipeline extends EventEmitter {
         if (decision === 'reject') {
           // reject = terminate immediately (keep the real feedback for the retry)
           context.lastReviseFeedback = (reviewerResult.result as ReviewResult).feedback ?? context.lastReviseFeedback;
-          console.log(`[${context.taskPrefix}] Reviewer rejected`);
+          safeConsole.log(`[${context.taskPrefix}] Reviewer rejected`);
           agentPair.updateSessionStatus(context.session.id, 'rejected');
           return { success: false };
         }
@@ -1181,7 +1120,7 @@ export class PairPipeline extends EventEmitter {
                 escalation.model ? `model→${escalation.model}` : '',
                 escalation.reasoningEffort ? `effort→${escalation.reasoningEffort}` : '',
               ].filter(Boolean).join(', ');
-              console.log(`[${context.taskPrefix}] Reviewer repeated the same feedback — escalating worker (${target})`);
+              safeConsole.log(`[${context.taskPrefix}] Reviewer repeated the same feedback — escalating worker (${target})`);
               this.emit('log', { line: `⬆️ Worker escalation on repeated review feedback (${target})` });
               broadcastEvent({ type: 'pipeline:escalation', data: {
                 taskId: taskEventKey(context.task),
@@ -1194,7 +1133,7 @@ export class PairPipeline extends EventEmitter {
               const reason = context.workerEscalation
                 ? 'reviewer repeated the same revise feedback even after worker escalation'
                 : 'reviewer repeated the same revise feedback — no escalation tier available';
-              console.log(`[${context.taskPrefix}] Aborting session early: ${reason}`);
+              safeConsole.log(`[${context.taskPrefix}] Aborting session early: ${reason}`);
               this.emit('log', { line: `🛑 ${reason}` });
               this.emit('iteration:fail', {
                 iteration: context.currentIteration,
@@ -1209,7 +1148,7 @@ export class PairPipeline extends EventEmitter {
 
           // revise = next iteration. Reviewer feedback is subjective → it travels
           // through the reviewer channel and is dropped on a fresh-context reset.
-          console.log(`[${context.taskPrefix}] Reviewer requested revision`);
+          safeConsole.log(`[${context.taskPrefix}] Reviewer requested revision`);
           context.feedbackSource = 'review';
           agentPair.trackFailure(context.session.id); // Track for fresh context decision
           this.emit('iteration:fail', {
@@ -1226,13 +1165,13 @@ export class PairPipeline extends EventEmitter {
 
       if (context.testerResult?.deterministic === true
         && context.testerResult.success === false
-        && this.config.verify?.blockOnNewFailures === true) {
-        console.log(`[${context.taskPrefix}] Deterministic verification has a blocking new failure`);
+        && (this.config.verify?.blockOnNewFailures === true || (context.newSecurityFindings?.length ?? 0) > 0)) {
+        safeConsole.log(`[${context.taskPrefix}] Deterministic verification has a blocking new failure`);
         this.emit('iteration:fail', { iteration: context.currentIteration, stage: 'tester', context });
         agentPair.updateSessionStatus(context.session.id, 'failed');
         return { success: false };
       }
-      console.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
+      safeConsole.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
       this.emit('iteration:complete', {
         iteration: context.currentIteration,
         context,
@@ -1240,7 +1179,7 @@ export class PairPipeline extends EventEmitter {
       return { success: true };
     }
 
-    console.log(`[${context.taskPrefix}] Max iterations (${maxIterations}) exceeded`);
+    safeConsole.log(`[${context.taskPrefix}] Max iterations (${maxIterations}) exceeded`);
     agentPair.updateSessionStatus(context.session.id, 'failed');
     return { success: false };
   }
@@ -1269,7 +1208,7 @@ export class PairPipeline extends EventEmitter {
     if (context.skillDocumenterResult?.costInfo) stageCosts.push(context.skillDocumenterResult.costInfo);
     const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
     if (totalCost) {
-      console.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
+      safeConsole.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
       broadcastEvent({ type: 'task:cost', data: { taskId: taskEventKey(context.task), cost: totalCost } });
     }
     const result: PipelineResult = {
@@ -1348,6 +1287,7 @@ export function createPipelineFromConfig(
   runMetadata?: PipelineRunMetadata,
   verify?: PipelineConfig['verify'],
   resumedTaskFiles?: string[],
+  securityAudit?: PipelineConfig['securityAudit'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1357,7 +1297,7 @@ export function createPipelineFromConfig(
   if (roles?.reviewer?.enabled !== false) {
     stages.push('reviewer');
   }
-  if (roles?.tester?.enabled || verify?.enabled) {
+  if (roles?.tester?.enabled || verify?.enabled || securityAudit?.enabled) {
     stages.push('tester');
   }
   if (roles?.documenter?.enabled) {
@@ -1380,6 +1320,7 @@ export function createPipelineFromConfig(
     draftAnalysis,
     runMetadata,
     verify,
+    securityAudit,
     resumedTaskFiles,
   });
 }

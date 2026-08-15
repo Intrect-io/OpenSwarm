@@ -11,5 +11,8 @@ export function buildTaskPrefix(task: TaskItem, projectPath: string): string {
   }
   const worktreeMatch = projectPath.match(/worktree\/([a-f0-9-]+)/);
   if (worktreeMatch) parts.push(`worktree/${worktreeMatch[1].slice(0, 8)}`);
-  return parts.join(' | ');
+  // This value is interpolated into daemon and terminal log entries throughout
+  // the pipeline. Linear project names and task identifiers are external input,
+  // so remove line breaks once at the boundary rather than allowing forged logs.
+  return parts.join(' | ').replace(/[\r\n]/g, '');
 }

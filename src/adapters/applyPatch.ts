@@ -5,7 +5,7 @@
 // models emit structurally-valid-but-wrong V4A (phantom context), so this tool is
 // gated to codex adapters only — others keep edit_file.
 
-import { promises as fs } from 'node:fs';
+import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
 
 export interface ApplyPatchResult {
@@ -130,13 +130,18 @@ export async function applyV4APatch(
     | { kind: 'opaque' }; // exists, but its contents could not be captured
   const snapshots = new Map<string, Snapshot>();
   for (const abs of touched) {
-    const exists = await fs.lstat(abs).then(() => true, () => false);
-    if (!exists) {
-      snapshots.set(abs, { kind: 'absent' });
-      continue;
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    try {
+      handle = await fs.open(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const info = await handle.stat();
+      if (!info.isFile()) snapshots.set(abs, { kind: 'opaque' });
+      else snapshots.set(abs, { kind: 'content', text: await handle.readFile('utf-8') });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') snapshots.set(abs, { kind: 'absent' });
+      else snapshots.set(abs, { kind: 'opaque' });
+    } finally {
+      await handle?.close();
     }
-    const text = await fs.readFile(abs, 'utf-8').catch(() => null);
-    snapshots.set(abs, text === null ? { kind: 'opaque' } : { kind: 'content', text });
   }
   // Paths this patch actually created. Removing an absent-at-snapshot path is
   // only correct for those: the snapshot is taken up front, so a path that
@@ -180,7 +185,7 @@ export async function applyV4APatch(
         // the agent believed it had created a file when it had replaced one.
         // Failing here runs the rollback below, which is recoverable.
         try {
-          await fs.writeFile(abs, op.addLines.join('\n'), { encoding: 'utf-8', flag: 'wx' });
+          await fs.writeFile(abs, op.addLines.join('\n'), { encoding: 'utf-8', flag: 'wx', mode: 0o600 });
           created.add(abs);
         } catch (err) {
           if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
@@ -211,23 +216,21 @@ export async function applyV4APatch(
       }
       const target = op.moveTo ? resolvePath(op.moveTo) : abs;
       if (op.moveTo) {
-        // Same rule as Add File, and for the same reason: a move onto an
-        // occupied path destroyed whatever was there with no error. It was
-        // worse than the add case, because a destination whose contents could
-        // not be snapshotted is skipped by rollback — the overwrite survived
-        // while the result reported that nothing had been applied.
-        const occupied = await fs.lstat(target).then(() => true, () => false);
-        if (occupied && target !== abs) {
-          throw new Error(
-            `refusing to move ${op.filePath} onto ${op.moveTo}: it already exists`,
-          );
-        }
         await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.rm(abs).catch(() => {});
-        // The move destination is written by this patch, so undoing it is ours.
+        const targetHandle = await fs.open(target, 'wx', 0o600);
+        try {
+          await targetHandle.writeFile(lines.join('\n'), 'utf-8');
+        } finally {
+          await targetHandle.close();
+        }
+        // Reserve the destination first. A concurrent creator now yields
+        // EEXIST without clobbering either side of the move.
+        await fs.rm(abs);
         created.add(target);
+        changed.push(op.moveTo);
+        continue;
       }
-      await fs.writeFile(target, lines.join('\n'), 'utf-8');
+      await fs.writeFile(target, lines.join('\n'), { encoding: 'utf-8', mode: 0o600 });
       changed.push(op.moveTo ?? op.filePath);
     } catch (err) {
       // Roll back every already-applied op so the tree is clean for a retry.

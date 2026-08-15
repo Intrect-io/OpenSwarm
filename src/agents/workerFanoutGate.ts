@@ -8,6 +8,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import type { WorkerResult } from './agentPair.js';
 import type { WorkerOptions } from './worker.js';
 import { runWorkerFanout } from './workerFanout.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 export interface WorkerFanoutGateSignal {
   code: string;

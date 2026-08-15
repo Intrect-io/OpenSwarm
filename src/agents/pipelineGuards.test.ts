@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,8 +18,7 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
   let repo: string;
 
   beforeEach(() => {
-    repo = join(tmpdir(), `openswarm-guards-${process.pid}-${Date.now()}`);
-    mkdirSync(repo, { recursive: true });
+    repo = mkdtempSync(join(tmpdir(), 'openswarm-guards-'));
     execFileSync('git', ['init', '-b', 'main'], { cwd: repo });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
     execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: repo });
@@ -210,7 +209,8 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     });
 
     it('does not accept project-external file references as contract evidence', async () => {
-      const outside = join(tmpdir(), `openswarm-outside-contract-${process.pid}-${Date.now()}.py`);
+      const outsideDir = mkdtempSync(join(tmpdir(), 'openswarm-outside-contract-'));
+      const outside = join(outsideDir, 'contract.py');
       writeFileSync(outside, "KEY_PREFIX = 'stockapi:foreign_summary:'\n");
       writeFileSync(
         join(repo, 'contract.test.ts'),
@@ -229,7 +229,7 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
         expect(issues.some(i => i.includes('stockapi:foreign_summary:'))).toBe(true);
         expect(res.allPassed).toBe(false);
       } finally {
-        rmSync(outside, { force: true });
+        rmSync(outsideDir, { recursive: true, force: true });
       }
     });
 

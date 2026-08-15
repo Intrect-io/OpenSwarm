@@ -3,7 +3,8 @@
 // Directory walking + TS/Python import parsing + test file mapping
 // ============================================
 
-import { readdir, readFile, stat, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { readdir, readFile, open, realpath } from 'node:fs/promises';
 import { join, relative, dirname, extname, basename, isAbsolute, resolve, sep } from 'node:path';
 import { KnowledgeGraph } from './graph.js';
 import type { GraphNode, Language, ModuleMetrics } from './types.js';
@@ -33,6 +34,18 @@ const SOURCE_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.pyw',
 ]);
+
+async function readBoundedRegularFile(filePath: string, maxBytes: number): Promise<string> {
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW, 0o600);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error('source must be a regular file');
+    if (info.size > maxBytes) throw new Error(`Source file exceeds ${maxBytes} bytes: ${filePath}`);
+    return await handle.readFile('utf-8');
+  } finally {
+    await handle.close();
+  }
+}
 const MAX_INCREMENTAL_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_INCREMENTAL_UPDATE_MS = 15_000;
 
@@ -148,8 +161,7 @@ export async function incrementalUpdate(
       // Recalculate metrics
       try {
         const fullPath = join(projectPath, relPath);
-        if ((await stat(fullPath)).size > MAX_INCREMENTAL_FILE_BYTES) throw new Error(`Source file exceeds ${MAX_INCREMENTAL_FILE_BYTES} bytes: ${relPath}`);
-        const content = await readFile(fullPath, 'utf-8');
+        const content = await readBoundedRegularFile(fullPath, MAX_INCREMENTAL_FILE_BYTES);
         const metrics = computeMetrics(content, detectLanguage(ext));
         node.metrics = metrics;
       } catch {
@@ -163,8 +175,7 @@ export async function incrementalUpdate(
       // New file: add node
       try {
         const fullPath = join(projectPath, relPath);
-        if ((await stat(fullPath)).size > MAX_INCREMENTAL_FILE_BYTES) throw new Error(`Source file exceeds ${MAX_INCREMENTAL_FILE_BYTES} bytes: ${relPath}`);
-        const content = await readFile(fullPath, 'utf-8');
+        const content = await readBoundedRegularFile(fullPath, MAX_INCREMENTAL_FILE_BYTES);
         const language = detectLanguage(ext);
         const isTest = isTestFile(relPath);
 
@@ -239,20 +250,12 @@ async function walkDirectory(
       const ext = extname(entry.name);
       if (!SOURCE_EXTENSIONS.has(ext)) continue;
 
-      // File size check
-      try {
-        const fileStat = await stat(entryPath);
-        if (fileStat.size > MAX_FILE_SIZE) continue;
-      } catch {
-        continue;
-      }
-
       const language = detectLanguage(ext);
       const isTest = isTestFile(entry.name);
 
       let content: string;
       try {
-        content = await readFile(entryPath, 'utf-8');
+        content = await readBoundedRegularFile(entryPath, MAX_FILE_SIZE);
       } catch {
         continue;
       }
