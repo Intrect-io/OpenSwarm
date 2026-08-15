@@ -177,6 +177,53 @@ describe('applyPatch "add" operation', () => {
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 
+  it('refuses to update through a pre-existing symlink', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const outside = tempRoot('openswarm-outside-');
+    const target = join(outside, 'protected.ts');
+    const link = join(repo, 'link.ts');
+    writeFileSync(target, 'export const protectedValue = true;\n');
+    symlinkSync(target, link);
+
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: link.ts',
+      '@@',
+      '-export const protectedValue = true;',
+      '+export const protectedValue = false;',
+      '*** End Patch',
+    ].join('\n');
+    const result = await applyV4APatch(patch, repo, (f) => join(repo, f));
+
+    expect(result.changed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/symbolic link/);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, 'utf-8')).toContain('protectedValue = true');
+  });
+
+  it('restores a deleted regular file when a later operation fails', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const removed = join(repo, 'removed.ts');
+    const invalid = join(repo, 'invalid.ts');
+    writeFileSync(removed, 'export const keep = true;\n');
+    writeFileSync(invalid, 'export const current = true;\n');
+
+    const patch = [
+      '*** Begin Patch',
+      '*** Delete File: removed.ts',
+      '*** Update File: invalid.ts',
+      '@@',
+      '-export const missing = true;',
+      '+export const changed = true;',
+      '*** End Patch',
+    ].join('\n');
+    const result = await applyV4APatch(patch, repo, (f) => join(repo, f));
+
+    expect(result.changed).toEqual([]);
+    expect(readFileSync(removed, 'utf-8')).toContain('keep = true');
+    expect(readFileSync(invalid, 'utf-8')).toContain('current = true');
+  });
+
   // The snapshot is taken up front, so a path that appears afterwards was
   // written by someone else. Rollback must not remove it just because it was
   // absent when the patch started — that is data loss reported as a clean

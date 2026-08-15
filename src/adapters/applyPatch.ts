@@ -28,6 +28,95 @@ interface FileOp {
 const BEGIN = '*** Begin Patch';
 const END = '*** End Patch';
 
+/**
+ * Patch paths are repository-relative, and a pre-existing symlink must never
+ * turn one into a write outside that repository. `resolvePath` validates the
+ * path for the tool layer, but it may canonicalize an existing symlink before
+ * this applier sees it. Inspect the uncanonicalized patch path first so the
+ * applier retains this boundary even when called directly in tests or by a
+ * future caller.
+ */
+async function rejectSymlinkPath(cwd: string, patchPath: string): Promise<void> {
+  const root = path.resolve(cwd);
+  const candidate = path.resolve(root, patchPath);
+  const relative = path.relative(root, candidate);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`refusing path outside patch root: ${patchPath}`);
+  }
+
+  let current = root;
+  for (const segment of relative ? relative.split(path.sep) : []) {
+    current = path.join(current, segment);
+    try {
+      if ((await fs.lstat(current)).isSymbolicLink()) {
+        throw new Error(`refusing ${patchPath}: path contains a symbolic link`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw error;
+    }
+  }
+}
+
+async function openRegularFileNoFollow(abs: string, patchPath: string) {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(abs, constants.O_RDWR | constants.O_NOFOLLOW);
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(`refusing ${patchPath}: not a regular file`);
+    }
+    return handle;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new Error(`refusing ${patchPath}: path contains a symbolic link`);
+    }
+    throw error;
+  }
+}
+
+async function readRegularFileNoFollow(abs: string, patchPath: string): Promise<string> {
+  const handle = await openRegularFileNoFollow(abs, patchPath);
+  try {
+    return await handle.readFile('utf-8');
+  } finally {
+    await handle.close();
+  }
+}
+
+async function replaceRegularFileNoFollow(abs: string, patchPath: string, text: string): Promise<void> {
+  const handle = await openRegularFileNoFollow(abs, patchPath);
+  try {
+    await handle.truncate(0);
+    await handle.write(text, 0, 'utf-8');
+  } finally {
+    await handle.close();
+  }
+}
+
+async function restoreRegularFileNoFollow(abs: string, patchPath: string, text: string): Promise<void> {
+  try {
+    await replaceRegularFileNoFollow(abs, patchPath, text);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  // The patch deleted this regular file after the snapshot. Recreate it without
+  // following a replacement symlink or overwriting a file another writer added
+  // while rollback was in progress.
+  const handle = await fs.open(
+    abs,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await handle.write(text, 0, 'utf-8');
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Parse a V4A patch envelope into file operations. Throws on malformed envelope. */
 export function parseV4A(patchText: string): FileOp[] {
   const lines = patchText.replace(/\r\n/g, '\n').split('\n');
@@ -109,6 +198,17 @@ export async function applyV4APatch(
   const changed: string[] = [];
   const errors: string[] = [];
 
+  // Do this before snapshotting: `resolvePath` can intentionally return a
+  // canonical path, which would otherwise hide the symlink named in the patch.
+  try {
+    for (const op of ops) {
+      await rejectSymlinkPath(cwd, op.filePath);
+      if (op.moveTo) await rejectSymlinkPath(cwd, op.moveTo);
+    }
+  } catch (error) {
+    return { changed: [], errors: [error instanceof Error ? error.message : String(error)] };
+  }
+
   // Snapshot every path the patch touches BEFORE applying, so a mid-patch failure
   // rolls the tree back to clean. A partial apply (op 1 ok, op 2 fails) used to
   // leave files modified while the tool reported is_error (editToolCount stays 0),
@@ -162,8 +262,9 @@ export async function applyV4APatch(
           if (!created.has(abs)) continue;
           await fs.rm(abs).catch(() => {});
         } else {
-          await fs.mkdir(path.dirname(abs), { recursive: true });
-          await fs.writeFile(abs, snapshot.text, 'utf-8');
+          // The original path was a regular file. Do not turn a concurrent
+          // symlink replacement into an out-of-tree rollback write.
+          await restoreRegularFileNoFollow(abs, abs, snapshot.text);
         }
       } catch { /* best-effort restore */ }
     }
@@ -205,7 +306,7 @@ export async function applyV4APatch(
         continue;
       }
       // update
-      const original = await fs.readFile(abs, 'utf-8');
+      const original = await readRegularFileNoFollow(abs, op.filePath);
       let lines = original.split('\n');
       for (const hunk of op.hunks) {
         const at = findBlock(lines, hunk.oldBlock);
@@ -232,7 +333,9 @@ export async function applyV4APatch(
         changed.push(op.moveTo);
         continue;
       }
-      await fs.writeFile(target, lines.join('\n'), { encoding: 'utf-8', mode: 0o600 });
+      // O_NOFOLLOW is repeated at the mutation point. The preflight above
+      // rejects existing symlinks, while this closes the final-component race.
+      await replaceRegularFileNoFollow(target, op.filePath, lines.join('\n'));
       changed.push(op.moveTo ?? op.filePath);
     } catch (err) {
       // Roll back every already-applied op so the tree is clean for a retry.
