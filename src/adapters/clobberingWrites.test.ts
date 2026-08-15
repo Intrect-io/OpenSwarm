@@ -6,7 +6,7 @@
 // prompt handed to every CLI adapter, and the "Add File" patch operation.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnCli } from './base.js';
@@ -201,6 +201,39 @@ describe('applyPatch "add" operation', () => {
     expect(readFileSync(target, 'utf-8')).toContain('protectedValue = true');
   });
 
+  it('rejects an intermediate symlink swapped in after preflight', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const outside = tempRoot('openswarm-outside-');
+    const nested = join(repo, 'nested');
+    const target = join(outside, 'protected.ts');
+    mkdirSync(nested);
+    writeFileSync(join(nested, 'protected.ts'), 'export const value = true;\n');
+    writeFileSync(target, 'export const value = true;\n');
+    let resolves = 0;
+    const resolveWithSwap = (file: string) => {
+      resolves++;
+      if (file === 'nested/protected.ts' && resolves === 2) {
+        renameSync(nested, join(repo, 'nested-before-swap'));
+        symlinkSync(outside, nested);
+      }
+      return join(repo, file);
+    };
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: nested/protected.ts',
+      '@@',
+      '-export const value = true;',
+      '+export const value = false;',
+      '*** End Patch',
+    ].join('\n');
+
+    const result = await applyV4APatch(patch, repo, resolveWithSwap);
+
+    expect(result.changed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/symbolic link/);
+    expect(readFileSync(target, 'utf-8')).toContain('value = true');
+  });
+
   it('restores a deleted regular file when a later operation fails', async () => {
     const repo = tempRoot('openswarm-patch-');
     const removed = join(repo, 'removed.ts');
@@ -289,23 +322,6 @@ describe('applyPatch "add" operation', () => {
     } finally {
       chmodSync(dest, 0o600);
     }
-  });
-
-  it('removes the newly created destination when deleting the source fails', async () => {
-    const repo = tempRoot('openswarm-patch-');
-    const source = join(repo, 'src.ts');
-    const destination = join(repo, 'dest.ts');
-    writeFileSync(source, 'v = 1\n');
-    vi.spyOn(fsPromises, 'rm').mockRejectedValueOnce(Object.assign(
-      new Error('source deletion denied'), { code: 'EPERM' },
-    ));
-
-    const result = await applyV4APatch(movePatch('src.ts', 'dest.ts', 'v = 1', 'v = 2'), repo, (f) => join(repo, f));
-
-    expect(result.errors.join('\n')).toMatch(/source deletion denied/);
-    expect(result.changed).toEqual([]);
-    expect(readFileSync(source, 'utf-8')).toContain('v = 1');
-    expect(existsSync(destination)).toBe(false);
   });
 
   // A rejected add must not leave earlier operations of the same patch applied.

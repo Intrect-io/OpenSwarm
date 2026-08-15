@@ -5,8 +5,11 @@
 // models emit structurally-valid-but-wrong V4A (phantom context), so this tool is
 // gated to codex adapters only — others keep edit_file.
 
+import { execFile } from 'node:child_process';
 import { constants, promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 export interface ApplyPatchResult {
   changed: string[]; // paths touched (as written in the patch)
@@ -27,6 +30,19 @@ interface FileOp {
 
 const BEGIN = '*** Begin Patch';
 const END = '*** End Patch';
+const execFileAsync = promisify(execFile);
+const GIT_OUTPUT_LIMIT = 16 * 1024 * 1024;
+
+type Snapshot =
+  | { kind: 'absent' }
+  | { kind: 'content'; text: string }
+  | { kind: 'opaque' };
+
+interface TrackedPath {
+  patchPath: string;
+  initial: Snapshot;
+  current: Snapshot;
+}
 
 /**
  * Patch paths are repository-relative, and a pre-existing symlink must never
@@ -58,63 +74,59 @@ async function rejectSymlinkPath(cwd: string, patchPath: string): Promise<void> 
   }
 }
 
-async function openRegularFileNoFollow(abs: string, patchPath: string) {
+async function readRegularFileNoFollow(abs: string): Promise<Snapshot> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
-    handle = await fs.open(abs, constants.O_RDWR | constants.O_NOFOLLOW);
+    handle = await fs.open(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
     if (!(await handle.stat()).isFile()) {
-      throw new Error(`refusing ${patchPath}: not a regular file`);
+      return { kind: 'opaque' };
     }
-    return handle;
+    return { kind: 'content', text: await handle.readFile('utf-8') };
   } catch (error) {
-    await handle?.close().catch(() => {});
-    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
-      throw new Error(`refusing ${patchPath}: path contains a symbolic link`);
-    }
-    throw error;
-  }
-}
-
-async function readRegularFileNoFollow(abs: string, patchPath: string): Promise<string> {
-  const handle = await openRegularFileNoFollow(abs, patchPath);
-  try {
-    return await handle.readFile('utf-8');
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
+    return { kind: 'opaque' };
   } finally {
-    await handle.close();
+    await handle?.close();
   }
 }
 
-async function replaceRegularFileNoFollow(abs: string, patchPath: string, text: string): Promise<void> {
-  const handle = await openRegularFileNoFollow(abs, patchPath);
-  try {
-    await handle.truncate(0);
-    await handle.write(text, 0, 'utf-8');
-  } finally {
-    await handle.close();
+function normalizedPatchPath(cwd: string, patchPath: string): string {
+  const root = path.resolve(cwd);
+  const candidate = path.resolve(root, patchPath);
+  const relative = path.relative(root, candidate);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`refusing path outside patch root: ${patchPath}`);
   }
+  return relative.split(path.sep).join('/');
 }
 
-async function restoreRegularFileNoFollow(abs: string, patchPath: string, text: string): Promise<void> {
+function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
+  return a.kind === b.kind && (a.kind !== 'content' || b.kind !== 'content' || a.text === b.text);
+}
+
+async function runGit(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
-    await replaceRegularFileNoFollow(abs, patchPath, text);
-    return;
+    const { stdout, stderr } = await execFileAsync('git', args, { cwd, encoding: 'utf-8', maxBuffer: GIT_OUTPUT_LIMIT });
+    return { exitCode: 0, stdout, stderr };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
+    return {
+      exitCode: typeof failure.code === 'number' ? failure.code : 1,
+      stdout: failure.stdout ?? '',
+      stderr: failure.stderr ?? failure.message,
+    };
   }
+}
 
-  // The patch deleted this regular file after the snapshot. Recreate it without
-  // following a replacement symlink or overwriting a file another writer added
-  // while rollback was in progress.
-  const handle = await fs.open(
-    abs,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    await handle.write(text, 0, 'utf-8');
-  } finally {
-    await handle.close();
+async function writeScratchFile(root: string, patchPath: string, text: string): Promise<string> {
+  const target = path.resolve(root, patchPath);
+  const relative = path.relative(root, target);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`refusing unsafe scratch path: ${patchPath}`);
   }
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+  await fs.writeFile(target, text, { encoding: 'utf-8', mode: 0o600 });
+  return target;
 }
 
 /** Parse a V4A patch envelope into file operations. Throws on malformed envelope. */
@@ -196,7 +208,6 @@ export async function applyV4APatch(
 ): Promise<ApplyPatchResult> {
   const ops = parseV4A(patchText);
   const changed: string[] = [];
-  const errors: string[] = [];
 
   // Do this before snapshotting: `resolvePath` can intentionally return a
   // canonical path, which would otherwise hide the symlink named in the patch.
@@ -209,105 +220,46 @@ export async function applyV4APatch(
     return { changed: [], errors: [error instanceof Error ? error.message : String(error)] };
   }
 
-  // Snapshot every path the patch touches BEFORE applying, so a mid-patch failure
-  // rolls the tree back to clean. A partial apply (op 1 ok, op 2 fails) used to
-  // leave files modified while the tool reported is_error (editToolCount stays 0),
-  // so the model's retry double-applied the same patch onto already-changed files
-  // → "context not found". Atomic apply makes is_error mean "nothing changed". (INT-1926)
-  const touched = new Set<string>();
-  for (const op of ops) {
-    touched.add(resolvePath(op.filePath));
-    if (op.moveTo) touched.add(resolvePath(op.moveTo));
-  }
-  // Existence and readability are recorded separately. Collapsing them into
-  // "content, or null" made rollback treat a file it could not read as one that
-  // had never existed, and rollback deletes those to restore absence — so a
-  // mode-000 file, a dangling symlink or a path owned by another user could be
-  // removed by a patch that only ever refused to touch it.
-  type Snapshot =
-    | { kind: 'absent' }
-    | { kind: 'content'; text: string }
-    | { kind: 'opaque' }; // exists, but its contents could not be captured
-  const snapshots = new Map<string, Snapshot>();
-  for (const abs of touched) {
-    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
-    try {
-      handle = await fs.open(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
-      const info = await handle.stat();
-      if (!info.isFile()) snapshots.set(abs, { kind: 'opaque' });
-      else snapshots.set(abs, { kind: 'content', text: await handle.readFile('utf-8') });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') snapshots.set(abs, { kind: 'absent' });
-      else snapshots.set(abs, { kind: 'opaque' });
-    } finally {
-      await handle?.close();
+  // Build the complete desired tree state in memory first. A failed hunk or
+  // collision therefore has no filesystem side effect to roll back.
+  const paths = new Map<string, TrackedPath>();
+  const getPath = async (rawPath: string): Promise<TrackedPath> => {
+    const patchPath = normalizedPatchPath(cwd, rawPath);
+    const existing = paths.get(patchPath);
+    if (existing) return existing;
+    const resolvedBeforeSnapshot = resolvePath(rawPath);
+    const initial = await readRegularFileNoFollow(resolvedBeforeSnapshot);
+    // The caller owns policy validation. Resolve once more after the snapshot
+    // so a changing resolver cannot silently point the generated Git patch at
+    // a different file than the one whose preimage we checked.
+    const resolvedAfterSnapshot = resolvePath(rawPath);
+    if (resolvedAfterSnapshot !== resolvedBeforeSnapshot) {
+      throw new Error(`refusing ${rawPath}: resolved path changed during patch preparation`);
     }
-  }
-  // Paths this patch actually created. Removing an absent-at-snapshot path is
-  // only correct for those: the snapshot is taken up front, so a path that
-  // appeared afterwards belongs to whoever wrote it, and an add that was
-  // refused because the path exists never created anything. Deleting either
-  // would be data loss dressed up as a clean rollback.
-  const created = new Set<string>();
-
-  const rollback = async () => {
-    for (const [abs, snapshot] of snapshots) {
-      try {
-        if (snapshot.kind === 'opaque') {
-          // Nothing can be restored and nothing should be destroyed: leaving it
-          // as-is is the only option that cannot make the tree worse.
-          continue;
-        }
-        if (snapshot.kind === 'absent') {
-          if (!created.has(abs)) continue;
-          await fs.rm(abs).catch(() => {});
-        } else {
-          // The original path was a regular file. Do not turn a concurrent
-          // symlink replacement into an out-of-tree rollback write.
-          await restoreRegularFileNoFollow(abs, abs, snapshot.text);
-        }
-      } catch { /* best-effort restore */ }
-    }
+    const tracked = { patchPath, initial, current: initial };
+    paths.set(patchPath, tracked);
+    return tracked;
   };
 
-  for (const op of ops) {
-    try {
-      const abs = resolvePath(op.filePath);
+  try {
+    for (const op of ops) {
+      const source = await getPath(op.filePath);
       if (op.kind === 'delete') {
-        await fs.rm(abs);
+        if (source.current.kind !== 'content') throw new Error(`refusing to delete ${op.filePath}: not a readable regular file`);
+        source.current = { kind: 'absent' };
         changed.push(op.filePath);
         continue;
       }
       if (op.kind === 'add') {
-        await fs.mkdir(path.dirname(abs), { recursive: true });
-        // 'wx' fails when the path already exists. An "Add File" op naming an
-        // existing file used to overwrite it outright — the previous contents
-        // were gone with no error raised and nothing recorded as an update, so
-        // the agent believed it had created a file when it had replaced one.
-        // Failing here runs the rollback below, which is recoverable.
-        try {
-          await fs.writeFile(abs, op.addLines.join('\n'), { encoding: 'utf-8', flag: 'wx', mode: 0o600 });
-          created.add(abs);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') {
-            // Deliberately NOT recorded as created: the file is someone else's,
-            // whether it predates the patch or appeared after the snapshot.
-            // Marking it here would have rollback delete it.
-            throw new Error(
-              `refusing to add ${op.filePath}: it already exists — use an update op to change it`,
-            );
-          }
-          // Any other failure may have left a partial file that this patch did
-          // create, so it is ours to clean up.
-          created.add(abs);
-          throw err;
+        if (source.current.kind !== 'absent') {
+          throw new Error(`refusing to add ${op.filePath}: it already exists — use an update op to change it`);
         }
+        source.current = { kind: 'content', text: op.addLines.join('\n') };
         changed.push(op.filePath);
         continue;
       }
-      // update
-      const original = await readRegularFileNoFollow(abs, op.filePath);
-      let lines = original.split('\n');
+      if (source.current.kind !== 'content') throw new Error(`refusing to update ${op.filePath}: not a readable regular file`);
+      let lines = source.current.text.split('\n');
       for (const hunk of op.hunks) {
         const at = findBlock(lines, hunk.oldBlock);
         if (at < 0) {
@@ -315,34 +267,60 @@ export async function applyV4APatch(
         }
         lines = [...lines.slice(0, at), ...hunk.newBlock, ...lines.slice(at + hunk.oldBlock.length)];
       }
-      const target = op.moveTo ? resolvePath(op.moveTo) : abs;
+      const updated = { kind: 'content' as const, text: lines.join('\n') };
       if (op.moveTo) {
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        const targetHandle = await fs.open(target, 'wx', 0o600);
-        try {
-          await targetHandle.writeFile(lines.join('\n'), 'utf-8');
-        } finally {
-          await targetHandle.close();
-        }
-        // Reserve the destination first. A concurrent creator now yields
-        // EEXIST without clobbering either side of the move. It is ours as
-        // soon as creation succeeds: if deleting the source fails, rollback
-        // must remove this new destination rather than leave a partial move.
-        created.add(target);
-        await fs.rm(abs);
+        const target = await getPath(op.moveTo);
+        if (target.current.kind !== 'absent') throw new Error(`refusing to move to ${op.moveTo}: it already exists`);
+        source.current = { kind: 'absent' };
+        target.current = updated;
         changed.push(op.moveTo);
-        continue;
+      } else {
+        source.current = updated;
+        changed.push(op.filePath);
       }
-      // O_NOFOLLOW is repeated at the mutation point. The preflight above
-      // rejects existing symlinks, while this closes the final-component race.
-      await replaceRegularFileNoFollow(target, op.filePath, lines.join('\n'));
-      changed.push(op.moveTo ?? op.filePath);
-    } catch (err) {
-      // Roll back every already-applied op so the tree is clean for a retry.
-      errors.push(`${op.filePath}: ${err instanceof Error ? err.message : String(err)}`);
-      await rollback();
-      return { changed: [], errors };
     }
+  } catch (error) {
+    return { changed: [], errors: [error instanceof Error ? error.message : String(error)] };
   }
-  return { changed, errors };
+
+  const changedPaths = [...paths.values()].filter((entry) => !sameSnapshot(entry.initial, entry.current));
+  if (changedPaths.length === 0) return { changed, errors: [] };
+
+  const scratch = await fs.mkdtemp(path.join(tmpdir(), 'openswarm-v4a-'));
+  try {
+    const beforeRoot = path.join(scratch, 'before');
+    const afterRoot = path.join(scratch, 'after');
+    const diffs: string[] = [];
+    for (const entry of changedPaths) {
+      const before = entry.initial.kind === 'content'
+        ? await writeScratchFile(beforeRoot, entry.patchPath, entry.initial.text)
+        : '/dev/null';
+      const after = entry.current.kind === 'content'
+        ? await writeScratchFile(afterRoot, entry.patchPath, entry.current.text)
+        : '/dev/null';
+      const diff = await runGit(['diff', '--no-index', '--no-ext-diff', '--binary', before, after], scratch);
+      if (diff.exitCode === 1) diffs.push(diff.stdout);
+      else if (diff.exitCode !== 0) throw new Error(diff.stderr || 'git could not generate the patch');
+    }
+    const patch = path.join(scratch, 'patch.diff');
+    await fs.writeFile(patch, diffs.join(''), { encoding: 'utf-8', mode: 0o600 });
+    // The generated files live below equally deep before/after roots. Strip
+    // their absolute-prefix components so Git applies only repository-relative
+    // paths. Git rejects any path that traverses a symlink at check *and* write
+    // time, which closes the intermediate-directory replacement race that a
+    // sequence of Node pathname calls cannot safely represent.
+    const strip = 1 + path.resolve(afterRoot).split(path.sep).filter(Boolean).length;
+    for (const args of [
+      ['apply', '--check', '--whitespace=nowarn', `-p${strip}`, patch],
+      ['apply', '--whitespace=nowarn', `-p${strip}`, patch],
+    ]) {
+      const result = await runGit(args, cwd);
+      if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout || 'git rejected the patch');
+    }
+    return { changed, errors: [] };
+  } catch (error) {
+    return { changed: [], errors: [error instanceof Error ? error.message : String(error)] };
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true });
+  }
 }
