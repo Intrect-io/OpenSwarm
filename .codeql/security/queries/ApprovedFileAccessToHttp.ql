@@ -19,15 +19,28 @@ import semmle.javascript.security.dataflow.FileAccessToHttpCustomizations
  * loopback OpenAI-compatible endpoint. `serializeTelemetryPayload`
  * independently projects an object onto the documented telemetry schema. All
  * three are deliberate egress boundaries, not arbitrary outbound file disclosure.
+ *
+ * A name alone is never sufficient here: a target repository could introduce a
+ * function with the same name and thereby suppress a real finding. Bind the
+ * sanitizer to CodeQL's statically resolved declaration and its exact shipped
+ * source location.
  */
+private predicate isApprovedEgressFunction(Function f) {
+  (
+    f.getName() in ["prepareApprovedModelRequest", "prepareApprovedLocalModelRequest"] and
+    f.getFile().getRelativePath() = "src/support/approvedEgress.ts"
+  ) or
+  (
+    f.getName() = "serializeTelemetryPayload" and
+    f.getFile().getRelativePath() = "src/telemetry/telemetry.ts"
+  )
+}
+
 private class ApprovedModelEgressSanitizer extends FileAccessToHttp::Sanitizer {
   ApprovedModelEgressSanitizer() {
-    exists(CallExpr call |
-      call.getCallee().(Identifier).getName() in [
-        "prepareApprovedModelRequest",
-        "prepareApprovedLocalModelRequest",
-        "serializeTelemetryPayload"
-      ] and
+    exists(CallExpr call, Function f |
+      call.getResolvedCallee() = f and
+      isApprovedEgressFunction(f) and
       this.asExpr() = call
     )
   }
