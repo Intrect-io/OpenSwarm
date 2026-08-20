@@ -41,7 +41,7 @@ Findings from a survey of the repository on 2026-08-19.
 
 | ID | Gap | Evidence |
 |----|-----|----------|
-| G1 | The inspection engine is not in git | `qualityHarness.ts` exists on no branch (dirty working tree only); `securityAudit.ts` only on the open PR #406 branch |
+| G1 | The deterministic inspection engine is incomplete | `qualityHarness.ts` exists on no branch (dirty working tree only); the CodeQL security audit landed in #406 but has no inspection CLI or scheduler integration |
 | G2 | No unattended periodic inspection | Nothing in the repository schedules `review`, `review --max`, `check --scan`, or the quality harness. The only automated review triggers are the PR processor cron and a manual-dispatch workflow |
 | G3 | The scheduler does not run OpenSwarm | `src/automation/scheduler.ts` spawns `claude -p <prompt> --permission-mode bypassPermissions --max-turns 15`. It bypasses the adapter and verify layers entirely, requires the `claude` CLI, and grants unattended jobs full write permission |
 | G4 | The scheduler has zero real usage | No `~/.openswarm/schedules.json` exists — not one job registered |
@@ -127,14 +127,14 @@ into the work API.
 
 | Milestone | Content | Issues |
 |-----------|---------|--------|
-| **M0** | Land the inspection engine in git; triage the dirty working tree | INT-3765, INT-3766 |
+| **M0** | Land the deterministic quality harness and connect the existing CodeQL audit; triage the dirty working tree | INT-3765, INT-3766 |
 | **M1** | `openswarm inspect`: profiles, baselines, multi-repo isolation | INT-3767, INT-3768, INT-3769 |
 | **M2** | Unattended execution: typed jobs, daemon cron, tracker routing | INT-3770, INT-3771, INT-3772 |
 | **M3** | CI and PR surfaces: a zero-LLM Action mode, merged PR reporting | INT-3773, INT-3774 |
 | **M4** | Positioning: README, package metadata, this document | INT-3776, INT-3777 |
 | **M5** | VSCode extension (deferred) | INT-3778, INT-3779, INT-3780 |
 
-M0 blocks everything else: the modules M1–M3 build on are not yet versioned.
+M0 blocks everything else: the deterministic quality-harness module M1–M3 build on is not yet versioned.
 
 ## 5. UI policy: frozen, not removed
 
