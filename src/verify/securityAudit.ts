@@ -252,6 +252,7 @@ export async function runSecurityAudit(
     }
 
     const findings: SecurityFinding[] = [];
+    let infrastructureFailure = false;
     for (const language of codeqlLanguages) {
       const pack = QUERY_PACK_BY_LANGUAGE[language];
       if (!pack) continue;
@@ -262,6 +263,7 @@ export async function runSecurityAudit(
         `--source-root=${snapshot.root}`, `--threads=${config.maxThreads}`,
       ], snapshot.root);
       if (create.exitCode !== 0) {
+        infrastructureFailure = true;
         findings.push({ ruleId: `openswarm/security-codeql-${language}-database`, level: 'error', message: 'CodeQL could not create its no-build security database.' });
         continue;
       }
@@ -273,16 +275,18 @@ export async function runSecurityAudit(
         '--format=sarifv2.1.0', `--output=${sarif}`, `--threads=${config.maxThreads}`,
       ], snapshot.root);
       if (analyze.exitCode !== 0) {
+        infrastructureFailure = true;
         findings.push({ ruleId: `openswarm/security-codeql-${language}-analysis`, level: 'error', message: 'CodeQL security analysis did not complete.' });
         continue;
       }
       try {
         findings.push(...parseSarif(await readFile(sarif, 'utf8'), snapshot.root));
       } catch (error) {
+        infrastructureFailure = true;
         findings.push({ ruleId: `openswarm/security-codeql-${language}-sarif`, level: 'error', message: `CodeQL SARIF was invalid: ${shortened(error instanceof Error ? error.message : String(error))}` });
       }
     }
-    return { status: findings.length === 0 ? 'passed' : 'findings', codeqlLanguages, findings };
+    return { status: infrastructureFailure ? 'failed' : findings.length === 0 ? 'passed' : 'findings', codeqlLanguages, findings };
   } catch (error) {
     return { status: 'failed', codeqlLanguages, findings: [{
       ruleId: 'openswarm/security-codeql-runtime', level: 'error', message: `CodeQL security audit failed: ${shortened(error instanceof Error ? error.message : String(error))}`,

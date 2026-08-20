@@ -165,6 +165,7 @@ import { reportEvent } from '../discord/index.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { DefaultRolesConfig, ConflictResolverConfig, SecurityAuditConfig } from '../core/types.js';
 import { ConflictResolver } from './conflictResolver.js';
+import { DEFAULT_SECURITY_AUDIT_CONFIG } from '../verify/securityAudit.js';
 
 // Types
 
@@ -246,7 +247,7 @@ export class PRProcessor {
       undefined,
       undefined,
       undefined,
-      this.config.securityAudit,
+      this.config.securityAudit ?? DEFAULT_SECURITY_AUDIT_CONFIG,
     );
   }
 

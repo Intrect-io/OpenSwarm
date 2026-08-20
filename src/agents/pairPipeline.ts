@@ -1297,7 +1297,7 @@ export function createPipelineFromConfig(
   if (roles?.reviewer?.enabled !== false) {
     stages.push('reviewer');
   }
-  if (roles?.tester?.enabled || verify?.enabled || securityAudit?.enabled) {
+  if (roles?.tester?.enabled || verify?.enabled) {
     stages.push('tester');
   }
   if (roles?.documenter?.enabled) {

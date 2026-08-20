@@ -135,12 +135,12 @@ describe('runSecurityAudit', () => {
     ]));
   });
 
-  it('makes malformed SARIF an explicit finding instead of accepting the audit', async () => {
+  it('fails closed when SARIF cannot be parsed', async () => {
     fsMock.readFile.mockResolvedValue('{not json');
 
     const audit = await runSecurityAudit('/repo', ['src/a.ts']);
 
-    expect(audit).toMatchObject({ status: 'findings' });
+    expect(audit).toMatchObject({ status: 'failed' });
     expect(audit.findings[0]?.ruleId).toBe('openswarm/security-codeql-javascript-sarif');
   });
 
