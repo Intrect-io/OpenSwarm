@@ -82,6 +82,21 @@ describe('review history', () => {
     expect(afterChange.review.recommendedActions).toHaveLength(1);
   });
 
+  it('changes the review fingerprint when a symlink target changes without following it', async () => {
+    const root = await repo();
+    const link = join(root, 'src', 'linked.ts');
+    await symlink('a.ts', link);
+    const first = await captureReviewFileHashes(root, ['src/linked.ts']);
+
+    await rm(link);
+    await symlink('other.ts', link);
+    const second = await captureReviewFileHashes(root, ['src/linked.ts']);
+
+    expect(first['src/linked.ts']).toMatch(/^symlink:/);
+    expect(second['src/linked.ts']).toMatch(/^symlink:/);
+    expect(second['src/linked.ts']).not.toBe(first['src/linked.ts']);
+  });
+
   it('ignores a corrupt structured history entry', async () => {
     const root = await repo();
     await mkdir(join(root, '.openswarm', 'review-history'), { recursive: true });

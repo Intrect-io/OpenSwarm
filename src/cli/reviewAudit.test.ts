@@ -651,6 +651,20 @@ describe('runFixVerifyLoop (INT-2443)', () => {
     expect(result.verificationStatus).not.toBe('passed');
   });
 
+  it('returns the post-review result when a CodeQL refresh exceeds the loop budget', async () => {
+    let refreshes = 0;
+    const result = await runFixVerifyLoop(initial(), '/repo', { concurrency: 1, maxDurationMs: 10 }, {
+      fix: async (unit) => ({ success: true, filesChanged: unit.primaryFiles }),
+      review: async () => ({ decision: 'approve', feedback: '' }),
+      refreshSecurityAudit: async () => ++refreshes === 1
+        ? []
+        : await new Promise<never>(() => {}),
+    });
+
+    expect(result.stopReason).toBe('time-budget');
+    expect(result.finalRun.results.every((entry) => entry.review?.decision === 'approve')).toBe(true);
+  });
+
   it('reports all-approved before consulting an expired time budget', async () => {
     const clean: AuditRun = {
       results: [{ area: area('src/a'), review: { decision: 'approve', feedback: '' } }],

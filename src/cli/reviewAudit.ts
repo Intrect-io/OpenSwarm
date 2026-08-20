@@ -1024,7 +1024,15 @@ export async function runFixVerifyLoop(
         throw error;
       }
       run = mergeReReview(run, reReview);
-      run = await refreshSecurityGate(run);
+      try {
+        run = await refreshSecurityGate(run);
+      } catch (error) {
+        if (error instanceof FixLoopTimeBudgetError) {
+          stopReason = 'time-budget';
+          break;
+        }
+        throw error;
+      }
       try {
         run = await applyVerificationGate(run, new Set(targets.map((target) => target.area.label)));
       } catch (error) {
@@ -1067,7 +1075,15 @@ export async function runFixVerifyLoop(
       throw error;
     }
     run = mergeReReview(run, reReview);
-    run = await refreshSecurityGate(run);
+    try {
+      run = await refreshSecurityGate(run);
+    } catch (error) {
+      if (error instanceof FixLoopTimeBudgetError) {
+        stopReason = 'time-budget';
+        break;
+      }
+      throw error;
+    }
     try {
       run = await applyVerificationGate(run, new Set(edited.flatMap((fix) => fix.targetLabels)));
     } catch (error) {

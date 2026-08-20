@@ -4,7 +4,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readlink, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReviewResult } from '../agents/agentPair.js';
 
@@ -55,9 +55,14 @@ async function hashReviewFile(projectPath: string, relativePath: string): Promis
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
-    // `O_NOFOLLOW` rejects a symlink before opening its target. A stable
-    // marker makes a replacement visible without trusting the link target.
-    if ((error as NodeJS.ErrnoException).code === 'ELOOP') return 'symlink';
+    // `O_NOFOLLOW` rejects a symlink before opening its target. Hash its link
+    // text rather than following it, so a retargeted symlink is visible to
+    // review-history dedupe without allowing a repository-controlled link to
+    // read outside the repository.
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      const target = await readlink(path);
+      return `symlink:${createHash('sha256').update(target).digest('hex')}`;
+    }
     throw error;
   }
 }
