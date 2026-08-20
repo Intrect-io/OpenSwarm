@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -162,8 +163,9 @@ import {
 import { getScheduler } from '../orchestration/taskScheduler.js';
 import { reportEvent } from '../discord/index.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import type { DefaultRolesConfig, ConflictResolverConfig } from '../core/types.js';
+import type { DefaultRolesConfig, ConflictResolverConfig, SecurityAuditConfig } from '../core/types.js';
 import { ConflictResolver } from './conflictResolver.js';
+import { DEFAULT_SECURITY_AUDIT_CONFIG } from '../verify/securityAudit.js';
 
 // Types
 
@@ -178,6 +180,8 @@ export interface PRProcessorConfig {
   ciPollIntervalMs?: number;    // CI polling interval (default: 30s)
   conflictResolver?: ConflictResolverConfig;
   repoMappings?: Record<string, string>; // Custom repo → local path mappings
+  /** Inherited autonomous CodeQL policy for every PR remediation pipeline. */
+  securityAudit?: SecurityAuditConfig;
 }
 
 type PRStateEntry = {
@@ -225,6 +229,26 @@ export class PRProcessor {
       this.conflictResolver = new ConflictResolver(config.conflictResolver);
       console.log(`[PRProcessor] ConflictResolver enabled (mode: ${config.conflictResolver.ownershipMode}, maxAttempts: ${config.conflictResolver.maxResolutionAttempts})`);
     }
+  }
+
+  /**
+   * CI-failure and review-feedback repairs must use the same CodeQL policy as
+   * ordinary autonomous work. Keeping the construction in one helper avoids a
+   * future PR remediation path accidentally omitting the final argument.
+   */
+  private createRemediationPipeline() {
+    return createPipelineFromConfig(
+      this.config.roles,
+      this.config.maxIterations,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      this.config.securityAudit ?? DEFAULT_SECURITY_AUDIT_CONFIG,
+    );
   }
 
   /**
@@ -806,12 +830,7 @@ export class PRProcessor {
         };
 
         // 4b. Run pipeline
-        const pipeline = createPipelineFromConfig(
-          this.config.roles,
-          this.config.maxIterations,
-          undefined,
-          undefined
-        );
+        const pipeline = this.createRemediationPipeline();
         const result = await pipeline.run(task, projectPath);
         totalIterations += result.iterations;
 
@@ -1131,12 +1150,7 @@ export class PRProcessor {
 
       // Run pipeline to address feedback
       console.log(`[PRProcessor] ${key}: Running pipeline to address review feedback...`);
-      const pipeline = createPipelineFromConfig(
-        this.config.roles,
-        this.config.maxIterations,
-        undefined,
-        undefined
-      );
+      const pipeline = this.createRemediationPipeline();
       const result = await pipeline.run(task, projectPath);
       totalIterations += result.iterations;
 

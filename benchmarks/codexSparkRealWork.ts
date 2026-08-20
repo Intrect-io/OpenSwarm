@@ -23,6 +23,7 @@ import { runWorker } from '../src/agents/worker.js';
 import { initLocale } from '../src/locale/index.js';
 import { loadEnvFile } from '../src/core/envFile.js';
 import type { WorkerResult } from '../src/agents/agentPair.js';
+import { safeConsole as console } from '../src/support/safeLog.js';
 
 const exec = promisify(execFile);
 

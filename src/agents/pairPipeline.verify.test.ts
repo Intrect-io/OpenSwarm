@@ -9,6 +9,8 @@ const loadVerifyManifest = vi.fn();
 const discoverVerifyCommands = vi.fn();
 const runVerify = vi.fn();
 const resolveBaseRef = vi.fn();
+const listTrackedSecurityFiles = vi.fn();
+const runSecurityAudit = vi.fn();
 
 vi.mock('./worker.js', async () => ({
   ...(await vi.importActual<typeof import('./worker.js')>('./worker.js')),
@@ -28,6 +30,11 @@ vi.mock('../verify/manifest.js', async () => ({
 }));
 vi.mock('../verify/discover.js', () => ({ discoverVerifyCommands }));
 vi.mock('../verify/runner.js', () => ({ runVerify }));
+vi.mock('../verify/securityAudit.js', async () => ({
+  ...(await vi.importActual<typeof import('../verify/securityAudit.js')>('../verify/securityAudit.js')),
+  listTrackedSecurityFiles,
+  runSecurityAudit,
+}));
 vi.mock('../support/worktreeManager.js', async () => ({
   ...(await vi.importActual<typeof import('../support/worktreeManager.js')>('../support/worktreeManager.js')),
   resolveBaseRef,
@@ -68,6 +75,7 @@ async function runPipeline(options: {
   skipTesterIfNoCodeChange?: boolean;
   verbose?: boolean;
   verify?: { enabled: boolean; blockOnNewFailures: boolean; maxCommands: number };
+  securityAudit?: { enabled: boolean; maxThreads: number };
 } = {}) {
   const { PairPipeline } = await import('./pairPipeline.js');
   const pipeline = new PairPipeline({
@@ -100,6 +108,8 @@ beforeEach(() => {
   loadVerifyManifest.mockResolvedValue({ manifest: null });
   discoverVerifyCommands.mockResolvedValue([]);
   resolveBaseRef.mockResolvedValue({ remote: 'origin', branch: 'main', ref: 'origin/main' });
+  listTrackedSecurityFiles.mockResolvedValue(['src/example.ts']);
+  runSecurityAudit.mockResolvedValue({ status: 'passed', codeqlLanguages: ['javascript'], findings: [] });
 });
 
 afterEach(() => {
@@ -107,6 +117,28 @@ afterEach(() => {
 });
 
 describe('PairPipeline deterministic tester (INT-2662)', () => {
+  it('blocks new CodeQL findings even when the tester stage is not configured', async () => {
+    runSecurityAudit
+      .mockResolvedValueOnce({ status: 'passed', codeqlLanguages: ['javascript'], findings: [] })
+      .mockResolvedValueOnce({
+        status: 'findings',
+        codeqlLanguages: ['javascript'],
+        findings: [{
+          ruleId: 'codeql/js/file-access-to-http', level: 'error', message: 'outbound file data', filePath: 'src/new.ts', line: 12,
+        }],
+      });
+
+    const { result } = await runPipeline({
+      stages: ['worker', 'reviewer'],
+      securityAudit: { enabled: true, maxThreads: 2 },
+    });
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'failed' });
+    expect(runSecurityAudit).toHaveBeenCalledTimes(2);
+    expect(runTester).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+  });
+
   it('reaches deterministic verify for a package-only change with a one-iteration budget', async () => {
     runWorker.mockResolvedValue({
       success: true, summary: 'updated package config', filesChanged: ['package.json'],

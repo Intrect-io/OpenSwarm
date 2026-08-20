@@ -265,6 +265,11 @@ const VerifyConfigSchema = z.object({
   maxCommands: z.number().int().min(1).max(20).default(4),
 }).default({ enabled: true, blockOnNewFailures: true, maxCommands: 4 });
 
+const SecurityAuditConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxThreads: z.number().int().min(1).max(16).default(2),
+}).default({ enabled: true, maxThreads: 2 });
+
 const AutonomousConfigSchema = z.object({
   /** Auto-enable on service start */
   enabled: z.boolean().default(false),
@@ -313,6 +318,8 @@ const AutonomousConfigSchema = z.object({
   guards: PipelineGuardsConfigSchema,
   /** Deterministic baseline-diff verification (default ON). */
   verify: VerifyConfigSchema,
+  /** CodeQL baseline-diff gate for autonomous code edits (default ON). */
+  securityAudit: SecurityAuditConfigSchema,
   /** Max objective self-repair attempts (lint/bs/test) before giving up */
   maxReflections: z.number().min(1).max(10).default(3),
   /** Cooldown between task completions in ms (default: 1800000 = 30min) */
@@ -650,6 +657,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       allowSameProjectConcurrent: raw.autonomous.allowSameProjectConcurrent,
       guards: raw.autonomous.guards,
       verify: raw.autonomous.verify,
+      securityAudit: raw.autonomous.securityAudit,
       maxReflections: raw.autonomous.maxReflections,
       interTaskCooldownMs: raw.autonomous.interTaskCooldownMs,
       // jobProfiles was validated by the schema but dropped here, so per-task

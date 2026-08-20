@@ -10,6 +10,7 @@ import { KnowledgeGraph } from './graph.js';
 import { SerializedGraphSchema } from './types.js';
 import type { SerializedGraph } from './types.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // Constants
 

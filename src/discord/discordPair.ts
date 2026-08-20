@@ -22,6 +22,7 @@ import {
   pairModeConfig,
 } from './discordCore.js';
 import { t, getDateLocale } from '../locale/index.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 /**
  * !pair command handler

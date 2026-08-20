@@ -14,6 +14,7 @@ import path from 'node:path';
 import { webFetch, webSearch } from './webTools.js';
 import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -527,7 +528,7 @@ export async function executeTool(
         }
         // 디렉토리 자동 생성
         await fs.mkdir(path.dirname(filePath), { recursive: true });
-        await fs.writeFile(filePath, args.content, 'utf-8');
+        await atomicWriteFile(filePath, args.content);
         invalidateCache(cache, filePath);
         return { tool_call_id: callId, content: `Written: ${filePath}`, is_error: false };
       }
@@ -566,7 +567,7 @@ export async function executeTool(
           fuzzy = true;
         }
         const updated = original.slice(0, editStart) + args.new_string + original.slice(editEnd);
-        await fs.writeFile(filePath, updated, 'utf-8');
+        await atomicWriteFile(filePath, updated);
         invalidateCache(cache, filePath);
         // Return the changed region so the model can verify without a re-read.
         // editStart is the exact offset in the ORIGINAL (exact or fuzzy), so the

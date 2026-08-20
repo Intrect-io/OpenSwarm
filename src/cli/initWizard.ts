@@ -9,7 +9,7 @@
 // + config.yaml + an openswarm.json repo→Linear mapping, then prints next steps.
 // `--yes` keeps the config-only path for CI (handled by the caller in cli.ts).
 
-import { existsSync, writeFileSync, lstatSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { select, input, password, confirm } from '@inquirer/prompts';
@@ -20,6 +20,8 @@ import { getAdapter } from '../adapters/index.js';
 import { type LinearCredential } from '../linear/index.js';
 import { pickAndSaveLinearMapping } from './linearMapping.js';
 import { banner } from '../support/banner.js';
+import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 type ProviderId = 'codex-responses' | 'openrouter' | 'atlascloud' | 'gpt' | 'lmstudio' | 'local' | 'codex' | 'claude';
 type TaskBackend = 'linear' | 'local';
@@ -290,7 +292,7 @@ export async function runInitWizard(opts: InitWizardOptions = {}): Promise<void>
     writeEnvVars(envPath, envVars);
     console.log(`\nWrote ${envPath} (${Object.keys(envVars).join(', ')}) — chmod 600.`);
   }
-  writeFileSync(configPath, buildWizardConfig(provider, notify, { name: basename(cwd), projectPath: cwd }), 'utf-8');
+  atomicWriteFileSync(configPath, buildWizardConfig(provider, notify, { name: basename(cwd), projectPath: cwd }), 0o600);
   console.log(`Wrote ${configPath}.`);
 
   // Inline auth last (browser OAuth) — after all prompts.

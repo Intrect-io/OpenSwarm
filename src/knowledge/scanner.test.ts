@@ -64,13 +64,14 @@ describe('knowledge scanner', () => {
   it('rejects incremental paths that escape through traversal or symlinks', async () => {
     const graph = await scanProject(tmp, 'test-project');
     await expect(incrementalUpdate(graph, tmp, ['../outside.ts'])).rejects.toThrow(/escapes repository root/);
-    const outside = join(tmpdir(), `openswarm-scanner-outside-${process.pid}.ts`);
+    const outsideDir = await mkdtemp(join(tmpdir(), 'openswarm-scanner-outside-'));
+    const outside = join(outsideDir, 'outside.ts');
     await writeFile(outside, 'export const secret = 1;\n');
     await symlink(outside, join(tmp, 'linked.ts'));
     try {
       await expect(incrementalUpdate(graph, tmp, ['linked.ts'])).rejects.toThrow(/symlink/);
     } finally {
-      await rm(outside, { force: true });
+      await rm(outsideDir, { recursive: true, force: true });
     }
   });
 

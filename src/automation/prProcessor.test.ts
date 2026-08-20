@@ -88,24 +88,27 @@ vi.mock('./conflictResolver.js', () => ({
   ConflictResolver: vi.fn().mockImplementation(function ConflictResolverMock() { return conflictResolverImpl; }),
 }));
 
-const pipelineRunImpl = vi.hoisted(() => ({
-  run: vi.fn(async () => ({
-    success: true,
-    iterations: 1,
-    workerResult: { summary: 'did the thing', filesChanged: ['a.ts'] },
-    reviewResult: { feedback: 'looks good' },
-  })),
-}));
+const { pipelineRunImpl, createPipelineFromConfigImpl } = vi.hoisted(() => {
+  const pipelineRunImpl = {
+    run: vi.fn(async () => ({
+      success: true,
+      iterations: 1,
+      workerResult: { summary: 'did the thing', filesChanged: ['a.ts'] },
+      reviewResult: { feedback: 'looks good' },
+    })),
+  };
+  return { pipelineRunImpl, createPipelineFromConfigImpl: vi.fn(() => pipelineRunImpl) };
+});
 vi.mock('../agents/pairPipeline.js', () => ({
-  createPipelineFromConfig: vi.fn(() => pipelineRunImpl),
+  createPipelineFromConfig: createPipelineFromConfigImpl,
 }));
 
 const { PRProcessor } = await import('./prProcessor.js');
 
 const pr = { repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9' };
 
-function newProcessor() {
-  return new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3 });
+function newProcessor(overrides: Partial<import('./prProcessor.js').PRProcessorConfig> = {}) {
+  return new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3, ...overrides });
 }
 
 beforeEach(() => {
@@ -161,6 +164,23 @@ describe('PRProcessor.getStatus', () => {
 });
 
 describe('PRProcessor.fixOne (INT-3282)', () => {
+  it('passes the CodeQL policy to every CI-remediation pipeline', async () => {
+    const securityAudit = { enabled: true, maxThreads: 1 };
+    const result = await newProcessor({ securityAudit }).fixOne(pr, '/tmp/proj');
+
+    expect(result.success).toBe(true);
+    const args = createPipelineFromConfigImpl.mock.calls.at(-1);
+    expect(args).toHaveLength(10);
+    expect(args?.[9]).toBe(securityAudit);
+  });
+
+  it('enables the default CodeQL policy when no autonomous configuration exists', async () => {
+    await newProcessor().fixOne(pr, '/tmp/proj');
+
+    const args = createPipelineFromConfigImpl.mock.calls.at(-1);
+    expect(args?.[9]).toEqual({ enabled: true, maxThreads: 2 });
+  });
+
   it('succeeds when there are no conflicts, the pipeline succeeds, and CI passes', async () => {
     const processor = newProcessor();
     const result = await processor.fixOne(pr, '/tmp/proj');

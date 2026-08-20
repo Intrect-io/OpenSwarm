@@ -318,7 +318,7 @@ describe('PairPipeline coverage extension', () => {
     expect(result.success).toBe(true);
     expect(console.warn).toHaveBeenCalledWith(
       expect.stringContaining('Worker context collection failed'),
-      expect.any(Error),
+      'Error: analyzer exploded',
     );
     // Falls back to undefined worker context rather than failing the run.
     const workerCall = runWorker.mock.calls[0][0] as WorkerOptions;
@@ -463,7 +463,11 @@ describe('PairPipeline coverage extension', () => {
 
     expect(result.success).toBe(false);
     expect(result.finalStatus).toBe('failed');
-    expect(console.error).toHaveBeenCalledWith('[%s] Error:', expect.any(String), expect.any(Error));
+    expect(console.error).toHaveBeenCalledWith(
+      '[%s] Error:',
+      expect.any(String),
+      'Error: guard evaluation exploded unexpectedly',
+    );
   });
 
   // ============================================

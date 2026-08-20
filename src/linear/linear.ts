@@ -14,6 +14,7 @@ import { homedir, tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { atomicWriteFile } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 /**
  * Extract project info from an issue

@@ -4,7 +4,7 @@
 // `openswarm run`, `openswarm init`, `openswarm validate`, `openswarm chat`, `openswarm start`
 
 import { Command } from 'commander';
-import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runCli } from './runners/cliRunner.js';
@@ -14,6 +14,8 @@ import { loadConfig, validateConfig, generateSampleConfig } from './core/config.
 import { loadEnvFile } from './core/envFile.js';
 import { initTelemetry, track } from './telemetry/telemetry.js';
 import { maybeAutoUpdate } from './support/updateNotifier.js';
+import { safeConsole } from './support/safeLog.js';
+import { atomicWriteFileSync } from './support/atomicFile.js';
 import { parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionParsers.js';
 
 // Load .env so CLI commands (e.g. `auth login --provider linear` reading
@@ -140,11 +142,25 @@ program
     // Non-interactive: keep the original config-only behavior for CI / scripting.
     if (opts.yes || opts.nonInteractive) {
       const configPath = join(process.cwd(), 'config.yaml');
-      if (existsSync(configPath) && !opts.force) {
-        console.error(`config.yaml already exists. Use --force to overwrite.`);
-        process.exit(1);
+      if (!opts.force) {
+        try {
+          const { openSync, closeSync, writeFileSync } = await import('node:fs');
+          const fd = openSync(configPath, 'wx', 0o600);
+          try {
+            writeFileSync(fd, generateSampleConfig(), 'utf-8');
+          } finally {
+            closeSync(fd);
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            console.error(`config.yaml already exists. Use --force to overwrite.`);
+            process.exit(1);
+          }
+          throw error;
+        }
+      } else {
+        atomicWriteFileSync(configPath, generateSampleConfig(), 0o600);
       }
-      writeFileSync(configPath, generateSampleConfig(), 'utf-8');
       console.log(`Created ${configPath}`);
       console.log('');
       console.log('Next steps:');
@@ -338,12 +354,13 @@ program
   .option('--fix', 'For --max: apply dependency-aware fixes in isolated sandboxes; publish a PR only after re-review and deterministic verification pass')
   .option('--in-place', 'For --max --fix: edit the current working tree instead of an isolated worktree (no branch, no PR)')
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
+  .option('--no-security-audit', 'For --max --fix: disable the default CodeQL audit gate')
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
     path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
     maxTurns?: number; timeout?: number;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
-    out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean;
+    out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean; securityAudit?: boolean;
   }) => {
     try {
       // --json/--sarif are declared on the shared `review` command but only the
@@ -384,6 +401,7 @@ program
           inPlace: opts.inPlace,
           fixRounds: opts.fixRounds,
           learn: opts.learn,
+          securityAudit: opts.securityAudit,
         });
         // Exit contract (INT-3100): 2 = the gate did not run at all (no area
         // reviewed — quota/infra), 1 = it ran and failed. CI reads only this.
@@ -400,7 +418,7 @@ program
       // never 0/1, so CI can distinguish "couldn't review" from "reviewed and
       // rejected" and neither reads as a pass. (INT-3100)
       const { REVIEW_EXIT_GATE_NOT_RUN, describeReviewGateFailure } = await import('./cli/reviewExit.js');
-      console.error(describeReviewGateFailure(e));
+      safeConsole.error(describeReviewGateFailure(e));
       // Emit the documented gate-not-run document rather than nothing. Without
       // this, `--json` produced no parseable output in exactly the case a CI
       // step most needs one, and the advertised `gateRan: false` state was
@@ -501,7 +519,7 @@ program
         fresh: opts.fresh,
         all: opts.all,
       });
-      console.log(result.message);
+      safeConsole.log(result.message);
       if (result.exitCode) process.exitCode = result.exitCode;
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e));

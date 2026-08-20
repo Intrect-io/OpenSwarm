@@ -431,7 +431,7 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(result.finalStatus).toBe('approved');
       expect(console.warn).toHaveBeenCalledWith(
         expect.stringContaining('Draft analysis failed'),
-        expect.any(Error),
+        'Error: draft analyzer crashed',
       );
     });
 

@@ -148,6 +148,10 @@ agents:
         blockOnNewFailures: true,
         maxCommands: 4,
       });
+      expect(config.autonomous?.securityAudit).toEqual({
+        enabled: true,
+        maxThreads: 2,
+      });
     });
 
     it('should preserve explicit autonomous.verify overrides', () => {
@@ -163,6 +167,21 @@ agents:
         enabled: false,
         blockOnNewFailures: false,
         maxCommands: 2,
+      });
+    });
+
+    it('should preserve explicit autonomous.securityAudit overrides', () => {
+      const jsonContent = JSON.stringify({
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: { enabled: true, securityAudit: { enabled: false, maxThreads: 1 } },
+      });
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(jsonContent);
+      expect(loadConfig('/tmp/config.json').autonomous?.securityAudit).toEqual({
+        enabled: false,
+        maxThreads: 1,
       });
     });
 

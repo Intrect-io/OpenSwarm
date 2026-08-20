@@ -7,7 +7,7 @@
 // fs shell. Node is fully supported; Python/Rust/Go are recognized and emit a
 // sensible setup+test template.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'generic';
@@ -118,10 +118,22 @@ export function runDesignPipeline(opts: DesignPipelineOptions = {}): { wrote: bo
   const outPath = join(cwd, '.github', 'workflows', 'ci.yml');
 
   if (opts.dryRun) return { wrote: false, path: outPath, yaml };
-  if (existsSync(outPath) && !opts.force) {
-    throw new Error(`${outPath} already exists — pass --force to overwrite`);
-  }
   mkdirSync(dirname(outPath), { recursive: true });
-  writeFileSync(outPath, yaml);
+  if (opts.force) {
+    writeFileSync(outPath, yaml);
+  } else {
+    let fd: number | undefined;
+    try {
+      fd = openSync(outPath, 'wx', 0o644);
+      writeFileSync(fd, yaml);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`${outPath} already exists — pass --force to overwrite`);
+      }
+      throw error;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
   return { wrote: true, path: outPath, yaml };
 }

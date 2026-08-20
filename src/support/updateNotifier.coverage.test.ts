@@ -189,7 +189,7 @@ describe('maybeAutoUpdate - real install/reexec + stale-fetch branch', () => {
     exitSpy.mockRestore();
   });
 
-  it('fetches on a stale cache, writes it, and updates `latest` before comparing (deps-level)', async () => {
+  it('fetches on a stale cache, retains the local cache marker, and compares in memory (deps-level)', async () => {
     const writeCache = vi.fn();
     const install = vi.fn(() => true);
     const reexec = vi.fn();
@@ -206,7 +206,7 @@ describe('maybeAutoUpdate - real install/reexec + stale-fetch branch', () => {
       reexec,
     });
 
-    expect(writeCache).toHaveBeenCalledWith({ latest: '0.13.0', checkedAt: 1_000 });
+    expect(writeCache).toHaveBeenCalledWith({ latest: '0.12.0', checkedAt: 1_000 });
     expect(install).toHaveBeenCalledWith('@intrect/openswarm');
     expect(reexec).toHaveBeenCalledOnce();
   });

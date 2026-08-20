@@ -2,10 +2,12 @@
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
+import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // GraphQL 스키마 (고정 — 데이터 구조 정의)
 const REPO_SCHEMA = `# OpenSwarm Repository Graph Schema
@@ -413,10 +415,10 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   const schemaPath = join(dir, 'repo.graphql');
   const snapshotPath = join(dir, 'repo-snapshot.json');
 
-  writeFileSync(schemaPath, REPO_SCHEMA, 'utf8');
+  atomicWriteFileSync(schemaPath, REPO_SCHEMA);
 
   const snapshot = buildSnapshot(graph, projectPath);
-  writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), 'utf8');
+  atomicWriteFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
 
   console.log(`[Knowledge] Exported repo graph: ${schemaPath} (schema) + ${snapshotPath} (${snapshot.modules.length} modules, ${snapshot.circularDeps.length} cycles)`);
 

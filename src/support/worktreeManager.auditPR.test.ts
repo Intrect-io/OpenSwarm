@@ -5,7 +5,7 @@
 // repos, a fake `gh` binary on PATH, tmp root removed in afterEach.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -37,7 +37,7 @@ async function withFakeGh<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 beforeEach(() => {
-  root = join(tmpdir(), `openswarm-audit-pr-${process.pid}-${Date.now()}`);
+  root = mkdtempSync(join(tmpdir(), 'openswarm-audit-pr-'));
   repo = join(root, 'repo');
   originBare = join(root, 'origin.git');
   mkdirSync(repo, { recursive: true });

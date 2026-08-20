@@ -54,6 +54,18 @@ describe('atomicFile', () => {
       expect(readFileSync(path, 'utf8')).toBe('new');
     });
 
+    it('preserves an existing file mode unless the caller explicitly replaces it', async () => {
+      const executable = join(dir, 'script.sh');
+      writeFileSync(executable, '#!/bin/sh\necho old\n', { mode: 0o755 });
+      chmodSync(executable, 0o755);
+
+      await write(executable, '#!/bin/sh\necho new\n');
+      expect(statSync(executable).mode & 0o777).toBe(0o755);
+
+      await write(executable, '#!/bin/sh\necho private\n', 0o600);
+      expect(statSync(executable).mode & 0o777).toBe(0o600);
+    });
+
     it('surfaces the write failure and leaves no scratch file behind', async () => {
       // The directory exists but denies writes, so creating the temp file fails
       // after mkdir succeeds — the path that must still clean up after itself.

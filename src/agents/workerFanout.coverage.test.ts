@@ -13,8 +13,8 @@
 
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readlinkSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants, existsSync, lstatSync, readlinkSync } from 'node:fs';
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { WorkerOptions } from './worker.js';
@@ -320,9 +320,13 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
     cleanupDirs.push(root);
     // Copy mode: a real, independent file — not a symlink.
     const copiedMarker = path.join(root, 'primary', 'node_modules', 'marker.txt');
-    expect(existsSync(copiedMarker)).toBe(true);
-    expect(lstatSync(copiedMarker).isSymbolicLink()).toBe(false);
-    expect(await readFile(copiedMarker, 'utf8')).toBe('shared-dep\n');
+    const copiedHandle = await open(copiedMarker, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      expect((await copiedHandle.stat()).isFile()).toBe(true);
+      expect(await copiedHandle.readFile('utf8')).toBe('shared-dep\n');
+    } finally {
+      await copiedHandle.close();
+    }
   });
 
   it('symlinks shared paths into every sandbox when linkSharedPaths is true', async () => {

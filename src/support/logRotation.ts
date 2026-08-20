@@ -2,15 +2,16 @@ import {
   chmodSync,
   closeSync,
   constants,
-  copyFileSync,
-  existsSync,
+  fstatSync,
+  ftruncateSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   renameSync,
-  truncateSync,
+  readFileSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -44,52 +45,58 @@ function configuredMaxBytes(): number {
 
 function safeUnlink(path: string): void {
   try {
-    if (existsSync(path)) unlinkSync(path);
+    unlinkSync(path);
   } catch {
     // A competing startup may already have moved/removed the exact lock/temp.
   }
 }
 
 function rotateOne(logPath: string, maxBytes: number, generations: number): boolean {
-  if (!existsSync(logPath)) return false;
-  const info = lstatSync(logPath);
-  if (!info.isFile() || info.size < maxBytes) return false;
-
-  const oldest = `${logPath}.${generations}`;
-  safeUnlink(oldest);
-  for (let generation = generations - 1; generation >= 1; generation--) {
-    const source = `${logPath}.${generation}`;
-    if (existsSync(source) && lstatSync(source).isFile()) {
-      renameSync(source, `${logPath}.${generation + 1}`);
-    }
-  }
-
-  const temporary = `${logPath}.rotate-${process.pid}-${randomUUID()}`;
+  let activeFd: number | undefined;
   try {
-    copyFileSync(logPath, temporary, constants.COPYFILE_EXCL);
-    chmodSync(temporary, 0o600);
-    const archiveFd = openSync(temporary, constants.O_RDONLY);
-    try {
-      fsyncSync(archiveFd);
-    } finally {
-      closeSync(archiveFd);
-    }
-    renameSync(temporary, `${logPath}.1`);
-
-    // launchd opens stdout/stderr before Node starts. Copy-truncate keeps that
-    // inode (and inherited file descriptor) valid; rename-and-create would make
-    // the daemon continue writing forever into the archived inode.
-    truncateSync(logPath, 0);
-    const activeFd = openSync(logPath, constants.O_WRONLY);
-    try {
-      fsyncSync(activeFd);
-    } finally {
-      closeSync(activeFd);
-    }
-    return true;
+    activeFd = openSync(logPath, constants.O_RDWR | constants.O_NOFOLLOW);
   } catch (error) {
-    safeUnlink(temporary);
+    if (['ENOENT', 'EISDIR', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
     throw error;
+  }
+  try {
+    const info = fstatSync(activeFd);
+    if (!info.isFile() || info.size < maxBytes) return false;
+
+    const oldest = `${logPath}.${generations}`;
+    safeUnlink(oldest);
+    for (let generation = generations - 1; generation >= 1; generation--) {
+      const source = `${logPath}.${generation}`;
+      try {
+        if (lstatSync(source).isFile()) renameSync(source, `${logPath}.${generation + 1}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+
+    const temporary = `${logPath}.rotate-${process.pid}-${randomUUID()}`;
+    try {
+      const archiveFd = openSync(temporary, 'wx', 0o600);
+      try {
+        writeFileSync(archiveFd, readFileSync(activeFd));
+        fsyncSync(archiveFd);
+      } finally {
+        closeSync(archiveFd);
+      }
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, `${logPath}.1`);
+
+      // launchd opens stdout/stderr before Node starts. Truncating the already
+      // opened descriptor keeps that inode (and inherited descriptors) valid.
+      ftruncateSync(activeFd, 0);
+      fsyncSync(activeFd);
+      return true;
+    } catch (error) {
+      safeUnlink(temporary);
+      throw error;
+    }
+  } finally {
+    if (activeFd !== undefined) closeSync(activeFd);
   }
 }
 

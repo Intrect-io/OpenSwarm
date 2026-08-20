@@ -15,6 +15,7 @@ import type {
 } from '../core/types.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // Constants
 

@@ -500,6 +500,11 @@ export type VerifyConfig = {
   maxCommands: number;
 };
 
+export type SecurityAuditConfig = {
+  enabled: boolean;
+  maxThreads: number;
+};
+
 export type AutonomousStartupConfig = {
   /** Auto-enable on service start */
   enabled: boolean;
@@ -549,6 +554,8 @@ export type AutonomousStartupConfig = {
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */
   verify?: VerifyConfig;
+  /** CodeQL baseline-diff gate for autonomous worker edits, enabled by default. */
+  securityAudit?: SecurityAuditConfig;
   /**
    * Max objective self-repair attempts (lint/bs/test failures) tolerated before
    * the bad-edit/reflection loop gives up. Independent of maxAttempts so it can

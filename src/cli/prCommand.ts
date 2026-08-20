@@ -6,7 +6,8 @@
 import { resolve } from 'node:path';
 import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.js';
 import { loadConfig } from '../core/config.js';
-import type { DefaultRolesConfig, ConflictResolverConfig } from '../core/types.js';
+import type { DefaultRolesConfig, ConflictResolverConfig, SecurityAuditConfig } from '../core/types.js';
+import { DEFAULT_SECURITY_AUDIT_CONFIG } from '../verify/securityAudit.js';
 import { parsePRRef, resolvePR, resolveOriginRepo, toPRInfo, type ResolvePROptions } from './prResolve.js';
 import { formatPrStatus, gatherPrStatus, type PrStatusSnapshot } from './prStatus.js';
 import { createPrFromCwd, type PrCreateOptions } from './prCreate.js';
@@ -99,7 +100,20 @@ export function loadRolesBestEffort(): DefaultRolesConfig | undefined {
   }
 }
 
-export function buildProcessorConfig(opts: PrCommandOptions, roles?: DefaultRolesConfig): PRProcessorConfig {
+/** Keep explicitly invoked PR remediation subject to the autonomous CodeQL policy. */
+export function loadSecurityAuditBestEffort(): SecurityAuditConfig {
+  try {
+    return loadConfig().autonomous?.securityAudit ?? DEFAULT_SECURITY_AUDIT_CONFIG;
+  } catch {
+    return DEFAULT_SECURITY_AUDIT_CONFIG;
+  }
+}
+
+export function buildProcessorConfig(
+  opts: PrCommandOptions,
+  roles?: DefaultRolesConfig,
+  securityAudit: SecurityAuditConfig = DEFAULT_SECURITY_AUDIT_CONFIG,
+): PRProcessorConfig {
   const conflictResolver: ConflictResolverConfig | undefined = opts.noConflicts
     ? undefined
     : {
@@ -118,6 +132,7 @@ export function buildProcessorConfig(opts: PrCommandOptions, roles?: DefaultRole
     maxRetries: opts.maxRetries ?? 3,
     roles,
     conflictResolver,
+    securityAudit,
   };
 }
 
@@ -128,7 +143,7 @@ async function defaultFixOne(
   loadRoles: () => DefaultRolesConfig | undefined,
 ): Promise<{ success: boolean; error?: string; iterations: number }> {
   const roles = loadRoles();
-  const processor = new PRProcessor(buildProcessorConfig(opts, roles));
+  const processor = new PRProcessor(buildProcessorConfig(opts, roles, loadSecurityAuditBestEffort()));
   return processor.fixOne(toPRInfo({ ...pr, author: undefined }), projectPath);
 }
 
@@ -142,7 +157,7 @@ async function defaultReviewOne(
   // review-only: conflictResolver is built but unused — processReviewFeedback
   // never touches conflicts — maxIterations/maxRetries still apply to the
   // pipeline run it fires for each round of feedback.
-  const processor = new PRProcessor(buildProcessorConfig(opts, roles));
+  const processor = new PRProcessor(buildProcessorConfig(opts, roles, loadSecurityAuditBestEffort()));
   return processor.reviewOne(toPRInfo({ ...pr, author: undefined }), projectPath);
 }
 
@@ -153,7 +168,7 @@ async function defaultFreshReviewOne(
   loadRoles: () => DefaultRolesConfig | undefined,
 ): Promise<{ success: boolean; error?: string; iterations: number }> {
   const roles = loadRoles();
-  const processor = new PRProcessor(buildProcessorConfig(opts, roles));
+  const processor = new PRProcessor(buildProcessorConfig(opts, roles, loadSecurityAuditBestEffort()));
   return processor.freshReview(toPRInfo({ ...pr, author: undefined }), projectPath);
 }
 

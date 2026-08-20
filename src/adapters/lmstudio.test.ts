@@ -97,7 +97,7 @@ describe('LmStudioAdapter', () => {
     let primaryHealthChecks = 0;
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
-      if (url === 'http://primary/v1/models') {
+      if (url === 'http://127.0.0.1:11434/v1/models') {
         primaryHealthChecks += 1;
         if (primaryHealthChecks > 1) throw new TypeError('primary offline');
       }
@@ -107,12 +107,12 @@ describe('LmStudioAdapter', () => {
       return new Response(JSON.stringify({ data: [{ id: 'local-model' }] }), { status: 200 });
     });
     vi.stubGlobal('fetch', fetchMock);
-    const adapter = new LocalModelAdapter({ endpoints: ['http://primary', 'http://fallback'] });
+    const adapter = new LocalModelAdapter({ endpoints: ['http://127.0.0.1:11434', 'http://127.0.0.1:1234'] });
     await expect(adapter.isAvailable()).resolves.toBe(true);
-    expect(adapter.getActiveUrl()).toBe('http://primary');
+    expect(adapter.getActiveUrl()).toBe('http://127.0.0.1:11434');
 
     await expect(adapter.run({ prompt: 'hello', cwd: process.cwd() })).resolves.toMatchObject({ exitCode: 0 });
-    expect(adapter.getActiveUrl()).toBe('http://fallback');
-    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('http://fallback/v1/chat/completions');
+    expect(adapter.getActiveUrl()).toBe('http://127.0.0.1:1234');
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('http://127.0.0.1:1234/v1/chat/completions');
   });
 });

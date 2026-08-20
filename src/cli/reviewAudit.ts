@@ -22,6 +22,34 @@ import {
   type FixUnit,
 } from './fixPlanning.js';
 import { runIsolatedFixBatch } from './fixSandbox.js';
+import type { SecurityFinding } from '../verify/securityAudit.js';
+
+const SECURITY_AUDIT_AREA = '.openswarm/codeql-security';
+
+/** Add deterministic CodeQL findings as a fixable, synthetic review area. */
+export function mergeSecurityAuditFindings(run: AuditRun, findings: readonly SecurityFinding[]): AuditRun {
+  const results = run.results.filter((result) => result.area.label !== SECURITY_AUDIT_AREA);
+  if (findings.length === 0) return { ...run, results, summary: aggregateAuditResults(results) };
+  const files = [...new Set(findings.map((finding) => finding.filePath).filter((file): file is string => Boolean(file)))].sort();
+  const issues = findings.map((finding) => {
+    const location = finding.filePath ? `${finding.filePath}${finding.line ? `:${finding.line}` : ''}` : 'repository';
+    return `CodeQL ${finding.ruleId} (${location}): ${finding.message}`;
+  });
+  const decision: ReviewResult['decision'] = findings.some((finding) => finding.level === 'error') ? 'reject' : 'revise';
+  results.push({
+    area: { label: SECURITY_AUDIT_AREA, dir: '.', files },
+    review: {
+      decision,
+      feedback: `Deterministic CodeQL findings must be fixed before approval:\n${issues.join('\n')}`,
+      issues,
+      recommendedActions: findings.map((finding) => ({
+        type: 'security',
+        title: `Fix CodeQL ${finding.ruleId}${finding.filePath ? ` at ${finding.filePath}${finding.line ? `:${finding.line}` : ''}` : ''}`,
+      })),
+    },
+  });
+  return { ...run, results, summary: aggregateAuditResults(results) };
+}
 
 // Source extensions and test patterns mirror src/knowledge/scanner.ts. Kept
 // local (not imported) because those are unexported module consts; the audit
@@ -764,6 +792,8 @@ export interface RunFixVerifyLoopDeps {
   now?: () => number;
   /** Deterministic repository verification captured before workers edit files. */
   verify?: () => Promise<{ success: boolean; output?: string; failedTests?: string[] } | null>;
+  /** Fresh CodeQL evidence injected before fixing and after every re-review. */
+  refreshSecurityAudit?: () => Promise<SecurityFinding[]>;
 }
 
 class FixLoopTimeBudgetError extends Error {
@@ -847,7 +877,7 @@ export async function runFixVerifyLoop(
   };
   const reviewDeps: RunMaxReviewDeps = { review: deps.review, onProgress: deps.onReviewProgress };
   const fixDeps: RunAreaFixesDeps = { fix: deps.fix, worker: deps.fixWorker, onProgress: deps.onFixProgress };
-  const allAreas = initial.results.map((result) => result.area);
+  const allAreas = initial.results.filter((result) => result.area.label !== SECURITY_AUDIT_AREA).map((result) => result.area);
 
   let run = initial;
   const rounds: FixVerifyRound[] = [];
@@ -911,6 +941,10 @@ export async function runFixVerifyLoop(
       : result);
     return { ...current, results, summary: aggregateAuditResults(results) };
   };
+  const refreshSecurityGate = async (current: AuditRun): Promise<AuditRun> => {
+    if (!deps.refreshSecurityAudit) return current;
+    return mergeSecurityAuditFindings(current, await withinFixLoopBudget(deps.refreshSecurityAudit(), budgetSignal));
+  };
 
   if (opts.repositoryContext && !opts.repositoryContext.preflight.ready) {
     return {
@@ -923,6 +957,15 @@ export async function runFixVerifyLoop(
       stopReason: 'dependency-preflight',
       filesChanged: [],
     };
+  }
+
+  try {
+    run = await refreshSecurityGate(run);
+  } catch (error) {
+    if (error instanceof FixLoopTimeBudgetError) {
+      return { rounds, finalRun: run, resolved: false, verified: false, verificationStatus: verificationState.status, stopReason: 'time-budget', filesChanged: [] };
+    }
+    throw error;
   }
 
   for (let round = 1; round <= maxRounds; round++) {
@@ -982,6 +1025,15 @@ export async function runFixVerifyLoop(
       }
       run = mergeReReview(run, reReview);
       try {
+        run = await refreshSecurityGate(run);
+      } catch (error) {
+        if (error instanceof FixLoopTimeBudgetError) {
+          stopReason = 'time-budget';
+          break;
+        }
+        throw error;
+      }
+      try {
         run = await applyVerificationGate(run, new Set(targets.map((target) => target.area.label)));
       } catch (error) {
         if (error instanceof FixLoopTimeBudgetError) {
@@ -1023,6 +1075,15 @@ export async function runFixVerifyLoop(
       throw error;
     }
     run = mergeReReview(run, reReview);
+    try {
+      run = await refreshSecurityGate(run);
+    } catch (error) {
+      if (error instanceof FixLoopTimeBudgetError) {
+        stopReason = 'time-budget';
+        break;
+      }
+      throw error;
+    }
     try {
       run = await applyVerificationGate(run, new Set(edited.flatMap((fix) => fix.targetLabels)));
     } catch (error) {

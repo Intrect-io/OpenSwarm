@@ -2,11 +2,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { loadProjectSelection, saveProjectSelection } from './runnerState.js';
 
 describe('project selection persistence (INT-2208)', () => {
-  const tmp = join(tmpdir(), `os-proj-sel-${process.pid}.json`);
+  const tmp = join(mkdtempSync(join(tmpdir(), 'os-proj-sel-')), 'project-selection.json');
   afterEach(() => {
     try {
       rmSync(tmp);

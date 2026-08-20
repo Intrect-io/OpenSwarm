@@ -20,6 +20,7 @@ import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
+import { approvedLocalModelEndpoint, prepareApprovedLocalModelRequest } from '../support/approvedEgress.js';
 
 // 로컬 프로바이더 기본 URL 후보 (우선순위 순)
 const DEFAULT_ENDPOINTS = [
@@ -84,7 +85,8 @@ export class LocalModelAdapter implements CliAdapter {
 
     for (const url of candidates) {
       try {
-        const res = await fetch(`${url}/v1/models`, {
+        const endpoint = approvedLocalModelEndpoint(url, '/v1/models');
+        const res = await fetch(endpoint, {
           headers: this.buildHeaders(),
           signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
         });
@@ -112,7 +114,8 @@ export class LocalModelAdapter implements CliAdapter {
     }
 
     try {
-      const res = await fetch(`${this.activeUrl}/v1/models`, {
+      const endpoint = approvedLocalModelEndpoint(this.activeUrl!, '/v1/models');
+      const res = await fetch(endpoint, {
         headers: this.buildHeaders(),
         signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
       });
@@ -245,15 +248,16 @@ export class LocalModelAdapter implements CliAdapter {
 
     // 알 수 없는 모델 → 1회 probe 시도
     try {
-      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+      const request = prepareApprovedLocalModelRequest(baseUrl, {
+        model,
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{ type: 'function', function: { name: 'test', description: 'test', parameters: { type: 'object', properties: {} } } }],
+        max_tokens: 1,
+      });
+      const res = await fetch(request.url, {
         method: 'POST',
         headers: this.buildHeaders(),
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: 'hi' }],
-          tools: [{ type: 'function', function: { name: 'test', description: 'test', parameters: { type: 'object', properties: {} } } }],
-          max_tokens: 1,
-        }),
+        body: request.body,
         signal: AbortSignal.timeout(5000),
       });
       // 200이면 tool 지원, 에러면 미지원
@@ -282,10 +286,11 @@ export class LocalModelAdapter implements CliAdapter {
       }
 
       const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
-        const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+        const request = prepareApprovedLocalModelRequest(baseUrl, body);
+        const res = await fetch(request.url, {
           method: 'POST',
           headers: this.buildHeaders(),
-          body: JSON.stringify(body),
+          body: request.body,
           signal,
         });
 

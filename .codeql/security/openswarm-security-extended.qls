@@ -1,0 +1,6 @@
+- description: OpenSwarm security-extended suite with approved model egress enforcement
+- import: codeql-suites/javascript-security-extended.qls
+  from: codeql/javascript-queries
+- exclude:
+    id: js/file-access-to-http
+- query: queries/ApprovedFileAccessToHttp.ql

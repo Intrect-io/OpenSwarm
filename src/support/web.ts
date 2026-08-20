@@ -8,6 +8,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { atomicWriteFileSync } from './atomicFile.js';
+import { safeConsole as console } from './safeLog.js';
 import { execFile } from 'node:child_process';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent, getLogBuffer, getStageBuffer, getChatBuffer } from '../core/eventHub.js';

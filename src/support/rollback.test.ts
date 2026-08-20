@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -14,7 +14,7 @@ describe('rollback checkpoint safety', () => {
   let checkpointFiles: string[] = [];
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-rollback-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-rollback-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
     execFileSync('git', ['init', '-b', 'main'], { cwd: repo });

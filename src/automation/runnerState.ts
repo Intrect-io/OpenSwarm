@@ -3,11 +3,12 @@
 // Task state persistence + project info query
 // ============================================
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
+import { atomicWriteFileSync } from '../support/atomicFile.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -17,12 +18,6 @@ import type { PipelineResult } from '../agents/pairPipelineTypes.js';
  * (service.ts, INT-2570) is the primary defense against concurrent writers on
  * these specific files; this is the cheap defense-in-depth for the crash case.
  */
-function atomicWriteFileSync(path: string, content: string): void {
-  const tmpPath = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmpPath, content, 'utf8');
-  renameSync(tmpPath, path);
-}
-
 /** Check if a resolved path matches or is under any enabled project path */
 export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
   for (const enabled of enabledProjects) {

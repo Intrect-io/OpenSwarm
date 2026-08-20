@@ -3,7 +3,8 @@
 // ============================================
 
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, readlink, rename, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, readdir, readlink, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ReviewResult } from '../agents/agentPair.js';
 
@@ -44,14 +45,24 @@ function normalizePath(path: string): string {
 async function hashReviewFile(projectPath: string, relativePath: string): Promise<string> {
   const path = join(projectPath, relativePath);
   try {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) {
-      return `symlink:${createHash('sha256').update(await readlink(path, { encoding: 'buffer' })).digest('hex')}`;
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW, 0o600);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return `type:${info.mode}`;
+      return `file:${createHash('sha256').update(await handle.readFile()).digest('hex')}`;
+    } finally {
+      await handle.close();
     }
-    if (!info.isFile()) return `type:${info.mode}`;
-    return `file:${createHash('sha256').update(await readFile(path)).digest('hex')}`;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    // `O_NOFOLLOW` rejects a symlink before opening its target. Hash its link
+    // text rather than following it, so a retargeted symlink is visible to
+    // review-history dedupe without allowing a repository-controlled link to
+    // read outside the repository.
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      const target = await readlink(path);
+      return `symlink:${createHash('sha256').update(target).digest('hex')}`;
+    }
     throw error;
   }
 }
@@ -117,11 +128,16 @@ function legacyReportExcerpt(markdown: string): string {
 }
 
 async function readRegularHistoryFile(path: string): Promise<string | undefined> {
-  const info = await lstat(path);
-  // Never follow repository-controlled symlinks into files outside the repo,
-  // and cap reads before parsing so a bogus log cannot exhaust the CLI.
-  if (!info.isFile() || info.size > MAX_HISTORY_FILE_BYTES) return undefined;
-  return readFile(path, 'utf8');
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW, 0o600);
+  try {
+    const info = await handle.stat();
+    // Never follow repository-controlled symlinks into files outside the repo,
+    // and cap reads before parsing so a bogus log cannot exhaust the CLI.
+    if (!info.isFile() || info.size > MAX_HISTORY_FILE_BYTES) return undefined;
+    return await handle.readFile('utf8');
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Load structured history plus compact excerpts from older `review --max` reports. */

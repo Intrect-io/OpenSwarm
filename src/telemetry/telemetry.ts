@@ -24,7 +24,8 @@ const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
 
 // Collection endpoint (Cloudflare Worker → D1 intrect-telemetry.openswarm_events).
-// Overridable via env so the worker route can move without a client release.
+// Kept fixed in the client so a local environment variable cannot redirect even
+// the deliberately minimal telemetry payload to an arbitrary host.
 const DEFAULT_ENDPOINT = 'https://telemetry.intrect.io/v1/openswarm';
 const SEND_TIMEOUT_MS = 2500;
 
@@ -176,6 +177,27 @@ export interface TelemetryPayload {
   durationMs?: number;
 }
 
+/**
+ * Rebuild the wire payload from the privacy allowlist immediately before
+ * transport. This prevents future in-memory fields (including paths or source
+ * text) from becoming telemetry merely because a caller extends an object.
+ */
+export function serializeTelemetryPayload(payload: TelemetryPayload): string {
+  return JSON.stringify({
+    installId: payload.installId,
+    event: payload.event,
+    version: payload.version,
+    platform: payload.platform,
+    arch: payload.arch,
+    nodeVersion: payload.nodeVersion,
+    ...(payload.command ? { command: payload.command } : {}),
+    ...(payload.adapter ? { adapter: payload.adapter } : {}),
+    isError: payload.isError,
+    ...(payload.detail ? { detail: payload.detail } : {}),
+    ...(payload.durationMs !== undefined ? { durationMs: payload.durationMs } : {}),
+  });
+}
+
 const ALLOWED_EVENTS = new Set(['invoke', 'complete', 'error', 'start', 'stop', 'engage']);
 
 /**
@@ -256,17 +278,19 @@ export async function track(opts: TrackOptions): Promise<void> {
   try {
     maybeShowNotice();
     const payload = buildPayload(opts, getInstallId());
-    const endpoint = process.env.OPENSWARM_TELEMETRY_URL || DEFAULT_ENDPOINT;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
     if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
       timer.unref();
     }
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch(DEFAULT_ENDPOINT, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'User-Agent': `OpenSwarm/${version}` },
-        body: JSON.stringify(payload),
+        // The payload already carries the allowlisted version. Keep transport
+        // headers static so package-file content cannot enter an HTTP request
+        // through a future version-loading change.
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'OpenSwarm' },
+        body: serializeTelemetryPayload(payload),
         signal: controller.signal,
       });
       await response.body?.cancel().catch(() => {});

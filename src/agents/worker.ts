@@ -17,6 +17,7 @@ import { resolveEditFormat, SEARCH_REPLACE_PROMPT, WHOLE_FILE_PROMPT, type EditF
 import { loadSandboxBashTimeoutMs } from '../support/repoMetadata.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { safeConsole as console } from '../support/safeLog.js';
 
 // Types
 

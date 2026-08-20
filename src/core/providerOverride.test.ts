@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
 
-const homedirMock = vi.fn(() => '/tmp/openswarm-home');
+const TEST_HOME = mkdtempSync('/tmp/openswarm-home-');
 
-vi.mock('node:os', () => ({ homedir: homedirMock }));
+vi.mock('node:os', () => ({ homedir: () => process.env.OPENSWARM_TEST_HOME! }));
+process.env.OPENSWARM_TEST_HOME = TEST_HOME;
 
 describe('providerOverride', () => {
   beforeEach(() => {
@@ -16,33 +19,33 @@ describe('providerOverride', () => {
 
   it('reads and writes a valid override', async () => {
     const fs = await import('node:fs');
-    fs.rmSync('/tmp/openswarm-home', { recursive: true, force: true });
+    fs.rmSync(TEST_HOME, { recursive: true, force: true });
 
     const { writeProviderOverride, readProviderOverride } = await import('./providerOverride.js');
     writeProviderOverride('codex');
 
     expect(readProviderOverride()).toBe('codex');
-    expect(fs.readFileSync('/tmp/openswarm-home/.config/openswarm/provider-override.json', 'utf8')).toContain('"provider": "codex"');
+    expect(fs.readFileSync(join(TEST_HOME, '.config', 'openswarm', 'provider-override.json'), 'utf8')).toContain('"provider": "codex"');
   });
 
   it('returns undefined for missing or invalid files', async () => {
     const fs = await import('node:fs');
-    fs.rmSync('/tmp/openswarm-home', { recursive: true, force: true });
+    fs.rmSync(TEST_HOME, { recursive: true, force: true });
 
     const { readProviderOverride } = await import('./providerOverride.js');
     expect(readProviderOverride()).toBeUndefined();
 
-    fs.mkdirSync('/tmp/openswarm-home/.config/openswarm', { recursive: true });
-    fs.writeFileSync('/tmp/openswarm-home/.config/openswarm/provider-override.json', '{not json', 'utf8');
+    fs.mkdirSync(join(TEST_HOME, '.config', 'openswarm'), { recursive: true });
+    fs.writeFileSync(join(TEST_HOME, '.config', 'openswarm', 'provider-override.json'), '{not json', 'utf8');
     expect(readProviderOverride()).toBeUndefined();
 
-    fs.writeFileSync('/tmp/openswarm-home/.config/openswarm/provider-override.json', JSON.stringify({ provider: 'unknown' }), 'utf8');
+    fs.writeFileSync(join(TEST_HOME, '.config', 'openswarm', 'provider-override.json'), JSON.stringify({ provider: 'unknown' }), 'utf8');
     expect(readProviderOverride()).toBeUndefined();
   });
 
   it('persists and reads back a claude override — an explicit operator switch must not silently no-op', async () => {
     const fs = await import('node:fs');
-    fs.rmSync('/tmp/openswarm-home', { recursive: true, force: true });
+    fs.rmSync(TEST_HOME, { recursive: true, force: true });
 
     const { writeProviderOverride, readProviderOverride } = await import('./providerOverride.js');
     writeProviderOverride('claude');

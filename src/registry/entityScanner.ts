@@ -6,7 +6,8 @@
 // Supported: TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, C#
 // ============================================
 
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { readdir, open, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, extname, dirname, resolve } from 'node:path';
@@ -28,6 +29,18 @@ const SKIP_DIRS = new Set([
 const SKIP_DIR_PREFIXES = ['.venv'];
 
 const MAX_FILE_SIZE = 512 * 1024;
+
+async function readBoundedRegularFile(filePath: string): Promise<string> {
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error('source must be a regular file');
+    if (info.size > MAX_FILE_SIZE) throw new Error(`Source file exceeds ${MAX_FILE_SIZE} bytes: ${filePath}`);
+    return await handle.readFile('utf-8');
+  } finally {
+    await handle.close();
+  }
+}
 const MAX_DEPTH = 15;
 const SCAN_TIMEOUT_MS = 60_000;
 
@@ -697,16 +710,7 @@ export async function scanRepository(
         if (!language) continue;
 
         try {
-          const fileStat = await stat(fullPath);
-          if (fileStat.size > MAX_FILE_SIZE) continue;
-        } catch (err) {
-          errors.push(`${entryRelPath}: ${err instanceof Error ? err.message : 'access denied'}`);
-          if (verbose) console.log(`  [scan] skip stat ${entryRelPath}: ${err instanceof Error ? err.message : 'access denied'}`);
-          continue;
-        }
-
-        try {
-          const content = await readFile(fullPath, 'utf-8');
+          const content = await readBoundedRegularFile(fullPath);
 
           if (isTestFile(entryRelPath, language)) {
             testFiles.push(parseTestFile(content, entryRelPath, language));

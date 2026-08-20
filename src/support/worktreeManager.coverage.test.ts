@@ -8,7 +8,7 @@
 // report's real gh+git integration, and defensive fs-permission fallbacks.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -60,7 +60,7 @@ describe('buildBranchName (pure)', () => {
 
 describe('resolveWorktreePath escape check', () => {
   it('accepts a literal "..." issueId because it remains inside the worktree root', async () => {
-    const root = join(tmpdir(), `openswarm-escape-falsepos-${process.pid}-${Date.now()}`);
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-escape-falsepos-'));
     const repo = join(root, 'repo');
     const originBare = join(root, 'origin.git');
     mkdirSync(repo, { recursive: true });
@@ -89,7 +89,7 @@ describe('resolveSharedPaths dedup (INT-2415)', () => {
   let repo: string;
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-shared-dedup-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-shared-dedup-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -109,7 +109,7 @@ describe('resolveBaseRef on a directory with no git remote at all', () => {
   let root: string;
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-baseref-noremote-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-baseref-noremote-'));
     mkdirSync(root, { recursive: true });
   });
 
@@ -134,7 +134,7 @@ describe('linkSharedPaths edge cases (INT-2415)', () => {
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-link-edge-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-link-edge-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });
@@ -209,7 +209,7 @@ describe('createWorktree retry/resume error paths', () => {
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-retry-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-retry-'));
     repo = join(root, 'repo');
     originBare = join(root, 'origin.git');
     mkdirSync(repo, { recursive: true });
@@ -381,7 +381,7 @@ describe('preserveWorktree — worktree directory already gone when git status f
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-preserve-gone-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-preserve-gone-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
     const originBare = join(root, 'origin.git');
@@ -416,7 +416,7 @@ describe('removePreservedWorktreeAt — foreign/stray worktree path', () => {
   let repo: string;
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-removepreserved-stray-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-removepreserved-stray-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
     execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
@@ -452,8 +452,7 @@ describe('pruneWorktrees (INT-1810 R4 / INT-2503 / INT-2506)', () => {
     // of git's reported worktree paths and nothing would ever be identified
     // as prunable. Canonicalize up front so the two sides agree, exactly as
     // a caller would if it resolved its configured repo path once at startup.
-    const rawRoot = join(tmpdir(), `openswarm-prune-${process.pid}-${Date.now()}`);
-    mkdirSync(rawRoot, { recursive: true });
+    const rawRoot = mkdtempSync(join(tmpdir(), 'openswarm-prune-'));
     root = realpathSync(rawRoot);
     repo = join(root, 'repo');
     originBare = join(root, 'origin.git');
@@ -559,7 +558,7 @@ describe('collectActiveScopes / buildFileOverlapSection real gh+git integration 
   }
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-overlap-integration-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-overlap-integration-'));
     repo = join(root, 'repo');
     originBare = join(root, 'origin.git');
     mkdirSync(repo, { recursive: true });
@@ -710,7 +709,7 @@ describe('commitAndCreatePR additional branches', () => {
   }
 
   beforeEach(() => {
-    root = join(tmpdir(), `openswarm-commitpr-extra-${process.pid}-${Date.now()}`);
+    root = mkdtempSync(join(tmpdir(), 'openswarm-commitpr-extra-'));
     repo = join(root, 'repo');
     mkdirSync(repo, { recursive: true });
   });

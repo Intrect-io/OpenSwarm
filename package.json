@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    ".codeql/security",
     "config.example.yaml",
     "templates",
     "README.md",

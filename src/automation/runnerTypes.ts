@@ -4,7 +4,7 @@
 
 import type { DecisionResult, TaskItem } from '../orchestration/decisionEngine.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
-import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, JobProfile, VerifyConfig } from '../core/types.js';
+import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 
 export interface AutonomousConfig {
   defaultAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude';
@@ -47,6 +47,7 @@ export interface AutonomousConfig {
   allowSameProjectConcurrent?: boolean;
   guards?: Partial<import('../core/types.js').PipelineGuardsConfig>;
   verify?: VerifyConfig;
+  securityAudit?: SecurityAuditConfig;
   /** Max objective self-repair attempts (lint/bs/test) before giving up (default: 3) */
   maxReflections?: number;
   /** Cooldown between task completions in ms (default: 1800000 = 30min) */

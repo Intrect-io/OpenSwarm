@@ -31,7 +31,7 @@ const { waitForCICompletionImpl, getOpenPRsImpl } = vi.hoisted(() => ({
 }));
 vi.mock('../github/github.js', () => ({ waitForCICompletion: waitForCICompletionImpl, getOpenPRsOrThrow: getOpenPRsImpl }));
 
-const { runPrCommand, resolveNumber, resolveRepoOverride, loadRolesBestEffort, buildProcessorConfig } = await import('./prCommand.js');
+const { runPrCommand, resolveNumber, resolveRepoOverride, loadRolesBestEffort, loadSecurityAuditBestEffort, buildProcessorConfig } = await import('./prCommand.js');
 type PrCommandDeps = Parameters<typeof runPrCommand>[2];
 
 describe('parsePRRef (INT-3282)', () => {
@@ -200,6 +200,10 @@ describe('resolveNumber / resolveRepoOverride (INT-3282)', () => {
 describe('loadRolesBestEffort / buildProcessorConfig (INT-3282)', () => {
   it('reads defaultRoles from config', () => {
     expect(loadRolesBestEffort()).toEqual({ worker: { model: 'x' } });
+  });
+
+  it('defaults PR remediation to the enabled CodeQL policy', () => {
+    expect(loadSecurityAuditBestEffort()).toEqual({ enabled: true, maxThreads: 2 });
   });
 
   it('enables the conflict resolver by default', () => {

@@ -4,7 +4,8 @@
 // Purpose: 소스 코드에서 BS 패턴을 탐지하는 정적 분석 엔진
 // ============================================
 
-import { readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { extname } from 'node:path';
 
 // ============ 타입 ============
@@ -261,8 +262,7 @@ export async function scanFile(filePath: string): Promise<BsIssue[]> {
   const language = detectLanguageForBs(ext);
   if (!language) return [];
 
-  if ((await stat(filePath)).size > MAX_FILE_SIZE) return [];
-  const content = await readFile(filePath, 'utf-8');
+  const content = await readBoundedRegularFile(filePath);
   return scanFileContent(content, filePath, language);
 }
 
@@ -281,7 +281,7 @@ export function aggregateResults(issues: BsIssue[], filesScanned: number): BsSca
 
 // ============ 레포 전체 스캔 ============
 
-import { readdir, stat } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const SKIP_DIRS = new Set([
@@ -298,6 +298,18 @@ const SOURCE_EXTENSIONS = new Set([
 ]);
 
 const MAX_FILE_SIZE = 512 * 1024;
+
+async function readBoundedRegularFile(filePath: string): Promise<string> {
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error('source must be a regular file');
+    if (info.size > MAX_FILE_SIZE) throw new Error(`Source file exceeds ${MAX_FILE_SIZE} bytes: ${filePath}`);
+    return await handle.readFile('utf-8');
+  } finally {
+    await handle.close();
+  }
+}
 
 function makeFilesystemIssue(operation: string, filePath: string, err: unknown): BsIssue {
   const message = err instanceof Error ? err.message : String(err);
@@ -347,16 +359,7 @@ export async function scanRepository(
         if (!language) continue;
 
         try {
-          const fileStat = await stat(fullPath);
-          if (fileStat.size > MAX_FILE_SIZE) continue;
-        } catch (err) {
-          allIssues.push(makeFilesystemIssue('stat', entryRelPath, err));
-          if (verbose) console.log(`  [bs] stat failed ${entryRelPath}: ${err instanceof Error ? err.message : String(err)}`);
-          continue;
-        }
-
-        try {
-          const content = await readFile(fullPath, 'utf-8');
+          const content = await readBoundedRegularFile(fullPath);
           const issues = scanFileContent(content, entryRelPath, language);
           allIssues.push(...issues);
           filesScanned++;

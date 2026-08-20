@@ -23,6 +23,7 @@ import { RateLimitError, rateLimitFromCodexHeaders } from './rateLimitError.js';
 import { recordQuotaObservation } from './quotaSnapshot.js';
 import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
+import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 
 import { getCodexModelIds } from './codexModels.js';
 
@@ -468,9 +469,9 @@ export class CodexResponsesAdapter implements CliAdapter {
       // uses low effort to stay cheap; other roles use medium. effort ∈ low|medium|high.
       body.reasoning = { effort: resolveReasoningEffort(reasoningEffort, disableReasoning), summary: 'auto' };
       // NOTE: never set max_output_tokens — the Codex backend rejects it with HTTP 400.
-
       const doCall = async (accessToken: string): Promise<ChatLikeResponse> => {
-        const res = await fetch(CODEX_RESPONSES_URL, {
+        const request = prepareApprovedModelRequest(CODEX_RESPONSES_URL, body);
+        const res = await fetch(request.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -480,7 +481,7 @@ export class CodexResponsesAdapter implements CliAdapter {
             'originator': 'openswarm',
             'OpenAI-Beta': 'responses=experimental',
           },
-          body: JSON.stringify(body),
+          body: request.body,
           // The caller's signal AND this call's own deadline. Either aborts.
           signal: abortSignalWithDeadline(signal, timeoutMs),
         });

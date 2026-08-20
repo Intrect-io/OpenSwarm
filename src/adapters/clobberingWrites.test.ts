@@ -6,7 +6,7 @@
 // prompt handed to every CLI adapter, and the "Add File" patch operation.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnCli } from './base.js';
@@ -41,12 +41,17 @@ describe('spawnCli prompt file', () => {
       buildCommand: ({ prompt }: { prompt: string }) => {
         // Recorded here, not after spawnCli returns: the directory is removed
         // on the way out, so this is the only moment it can be observed.
-        seen.push({
-          path: prompt,
-          mode: statSync(prompt).mode & 0o777,
-          dirMode: statSync(dirname(prompt)).mode & 0o777,
-          content: readFileSync(prompt, 'utf-8'),
-        });
+        const promptFd = openSync(prompt, 'r');
+        try {
+          seen.push({
+            path: prompt,
+            mode: fstatSync(promptFd).mode & 0o777,
+            dirMode: statSync(dirname(prompt)).mode & 0o777,
+            content: readFileSync(promptFd, 'utf-8'),
+          });
+        } finally {
+          closeSync(promptFd);
+        }
         return { command: 'true', args: [] };
       },
     } as never;
@@ -170,6 +175,86 @@ describe('applyPatch "add" operation', () => {
 
     expect(result.errors.length).toBeGreaterThan(0);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
+  it('refuses to update through a pre-existing symlink', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const outside = tempRoot('openswarm-outside-');
+    const target = join(outside, 'protected.ts');
+    const link = join(repo, 'link.ts');
+    writeFileSync(target, 'export const protectedValue = true;\n');
+    symlinkSync(target, link);
+
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: link.ts',
+      '@@',
+      '-export const protectedValue = true;',
+      '+export const protectedValue = false;',
+      '*** End Patch',
+    ].join('\n');
+    const result = await applyV4APatch(patch, repo, (f) => join(repo, f));
+
+    expect(result.changed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/symbolic link/);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, 'utf-8')).toContain('protectedValue = true');
+  });
+
+  it('rejects an intermediate symlink swapped in after preflight', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const outside = tempRoot('openswarm-outside-');
+    const nested = join(repo, 'nested');
+    const target = join(outside, 'protected.ts');
+    mkdirSync(nested);
+    writeFileSync(join(nested, 'protected.ts'), 'export const value = true;\n');
+    writeFileSync(target, 'export const value = true;\n');
+    let resolves = 0;
+    const resolveWithSwap = (file: string) => {
+      resolves++;
+      if (file === 'nested/protected.ts' && resolves === 2) {
+        renameSync(nested, join(repo, 'nested-before-swap'));
+        symlinkSync(outside, nested);
+      }
+      return join(repo, file);
+    };
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: nested/protected.ts',
+      '@@',
+      '-export const value = true;',
+      '+export const value = false;',
+      '*** End Patch',
+    ].join('\n');
+
+    const result = await applyV4APatch(patch, repo, resolveWithSwap);
+
+    expect(result.changed).toEqual([]);
+    expect(result.errors.join('\n')).toMatch(/symbolic link/);
+    expect(readFileSync(target, 'utf-8')).toContain('value = true');
+  });
+
+  it('restores a deleted regular file when a later operation fails', async () => {
+    const repo = tempRoot('openswarm-patch-');
+    const removed = join(repo, 'removed.ts');
+    const invalid = join(repo, 'invalid.ts');
+    writeFileSync(removed, 'export const keep = true;\n');
+    writeFileSync(invalid, 'export const current = true;\n');
+
+    const patch = [
+      '*** Begin Patch',
+      '*** Delete File: removed.ts',
+      '*** Update File: invalid.ts',
+      '@@',
+      '-export const missing = true;',
+      '+export const changed = true;',
+      '*** End Patch',
+    ].join('\n');
+    const result = await applyV4APatch(patch, repo, (f) => join(repo, f));
+
+    expect(result.changed).toEqual([]);
+    expect(readFileSync(removed, 'utf-8')).toContain('keep = true');
+    expect(readFileSync(invalid, 'utf-8')).toContain('current = true');
   });
 
   // The snapshot is taken up front, so a path that appears afterwards was

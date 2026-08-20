@@ -33,6 +33,7 @@ import { promisify } from 'node:util';
 import { runReviewer } from '../src/agents/reviewer.js';
 import { setDefaultAdapter } from '../src/adapters/index.js';
 import type { AdapterName } from '../src/adapters/types.js';
+import { safeConsole as console } from '../src/support/safeLog.js';
 import { initLocale } from '../src/locale/index.js';
 import { loadEnvFile } from '../src/core/envFile.js';
 import { LENS_FIXTURES, type LensFixture } from './tasks/reviewLensFixtures.js';

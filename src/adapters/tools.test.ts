@@ -23,7 +23,7 @@ try {
 } catch { /* rg not installed as a binary */ }
 
 // Shared temp directory for all tests
-const TMP_DIR = '/tmp/openswarm-tools-test-' + process.pid;
+const TMP_DIR = await fs.mkdtemp('/tmp/openswarm-tools-test-');
 
 /** Helper to build a ToolCall object */
 function makeCall(name: string, args: Record<string, unknown>, id = 'tc-1'): ToolCall {
