@@ -32,8 +32,8 @@ unattended execution path.
   handling on Linux CI.
 - CodeQL/Ruff SAST (`src/verify/securityAudit.ts`) and a whole-codebase deterministic quality
   harness (`src/verify/qualityHarness.ts`) are written.
-- A zero-LLM deterministic path already exists behind
-  `openswarm review --max --harness-only`.
+- The deterministic quality harness is the M0 implementation target. It is not yet committed,
+  so `openswarm review --max --harness-only` is not currently a supported command.
 
 ## 2. Measured gaps
 
@@ -52,8 +52,9 @@ Findings from a survey of the repository on 2026-08-19.
 
 ### AD-1 — `openswarm inspect` is the first-class unattended command
 
-`review --max --harness-only` already performs the deterministic inspection. What is new is
-the orchestration around it: profiles, multiple repositories, baselines, and routing.
+M0 supplies the deterministic inspection engine and M1 exposes it through `openswarm inspect`.
+Until then, neither `openswarm inspect` nor `openswarm review --max --harness-only` is an
+available command. The new surface adds profiles, multiple repositories, baselines, and routing.
 
 ```
 openswarm inspect [--repo <path>...] [--profile hygiene|security|review|full]
@@ -78,8 +79,10 @@ practical at all. Agent review stays an opt-in escalation.
 The dominant failure mode of scheduled scanning is reporting the same eight hundred findings
 every night. The rule is: **every finding goes in the report, only new findings get routed.**
 
-A per-repository baseline (`.openswarm/inspect-baseline.json`) stores finding fingerprints.
-The first run establishes the baseline and routes nothing. Fingerprinting reuses
+A daemon-owned baseline, keyed by the registered repository's canonical path, stores finding
+fingerprints outside every inspected checkout. The first successful run establishes the baseline
+and routes nothing. It is invalidated when either the repository revision or the profile/analyzer
+fingerprint changes; failed scans never advance it. Fingerprinting reuses
 `securityFindingFingerprint` / `newSecurityFindings`; writes are serialised with the existing
 `withFileLock` helper. A corrupt baseline fails closed rather than silently reporting "zero
 new findings".
@@ -94,8 +97,9 @@ uses. It never mutates a working tree, and `git stash` round-trips are prohibite
 ### AD-4 — Routing goes through `ITaskSource`, never Linear directly
 
 Findings are filed through the `ITaskSource` interface so that users on the built-in SQLite
-tracker get the same behaviour as Linear users. Issue synthesis reuses the existing audit PM
-path: one master issue plus a bounded set of sub-issues.
+tracker get the same behaviour as Linear users. `hygiene` and `security` use deterministic
+grouping and issue templates so their routing remains zero-LLM; the existing audit PM path
+remains available only to the paid `review` and `full` profiles.
 
 This is what closes the loop: **inspect → tracker issue → daemon pickup → worker/reviewer →
 fix→verify → pull request.**
@@ -103,8 +107,9 @@ fix→verify → pull request.**
 ### AD-5 — Typed scheduled jobs
 
 `ScheduledJob` becomes a discriminated union. The legacy free-text `prompt` job is preserved;
-a new `inspect` job runs in-process, read-only, with no child process and no permission
-bypass. The security characteristics of the legacy job are documented and surfaced by
+a new `inspect` job runs in-process, read-only, with no LLM/agent child process and no permission
+bypass. Its CodeQL, Ruff, and configured deterministic scanners run only through a constrained
+subprocess executor. The security characteristics of the legacy job are documented and surfaced by
 `openswarm doctor`.
 
 The daemon's own periodic inspection is wired as a cron in `src/core/service.ts` alongside the
