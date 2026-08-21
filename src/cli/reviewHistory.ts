@@ -22,10 +22,14 @@ export interface ReviewHistoryArea {
   error?: string;
 }
 
+/** Every record kind, and the runtime guard's allow-list. (INT-3914) */
+export const REVIEW_HISTORY_KINDS = ['direct', 'max', 'pr'] as const;
+export type ReviewHistoryKind = (typeof REVIEW_HISTORY_KINDS)[number];
+
 export interface ReviewHistoryRecord {
   version: typeof HISTORY_VERSION;
   createdAt: string;
-  kind: 'direct' | 'max';
+  kind: ReviewHistoryKind;
   base?: string;
   files: string[];
   fileHashes: Record<string, string>;
@@ -109,7 +113,8 @@ function isHistoryArea(value: unknown): value is ReviewHistoryArea {
 function parseRecord(value: unknown): ReviewHistoryRecord | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const record = value as Partial<ReviewHistoryRecord>;
-  if (record.version !== HISTORY_VERSION || (record.kind !== 'direct' && record.kind !== 'max')) return undefined;
+  if (record.version !== HISTORY_VERSION
+    || !REVIEW_HISTORY_KINDS.includes(record.kind as ReviewHistoryKind)) return undefined;
   if (typeof record.createdAt !== 'string' || !Array.isArray(record.files) || !record.fileHashes) return undefined;
   if (!record.files.every((file) => typeof file === 'string')) return undefined;
   if (typeof record.fileHashes !== 'object'

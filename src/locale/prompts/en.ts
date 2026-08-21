@@ -283,6 +283,9 @@ coverage only when the code or diff provides concrete evidence of that gap.
 2. Cite concrete file:line evidence for every blocking issue
 3. Do not use unavailable command history itself as a revise reason
 4. Make the final decision in the JSON format below
+5. Emit that JSON as the text of your FINAL message. Do not deliver the verdict
+   through a plan, todo, or any other tool call — a verdict submitted that way
+   never reaches the caller, and the review is discarded as having no conclusion
 
 \`\`\`json
 {

@@ -158,6 +158,12 @@ import {
 } from '../github/index.js';
 import { runReviewCommand, formatReviewOutput } from '../cli/reviewCommand.js';
 import {
+  captureReviewFileHashes,
+  loadReviewHistory,
+  renderReviewHistoryContext,
+  saveReviewHistory,
+} from '../cli/reviewHistory.js';
+import {
   createPipelineFromConfig,
 } from '../agents/pairPipeline.js';
 import { getScheduler } from '../orchestration/taskScheduler.js';
@@ -357,14 +363,23 @@ export class PRProcessor {
    * already-detached HEAD by branch name is unreliable. A worktree sidesteps
    * all of it: nothing under `projectPath` is ever touched, so there is
    * nothing to preserve or restore. (INT-3282)
+   *
+   * `gateRan: false` marks the outcomes where NO verdict was produced — the
+   * reviewer crashed, timed out, or returned nothing parseable. Callers must not
+   * read those as "the reviewer requested changes"; conflating the two is what
+   * made a broken review indistinguishable from a rejecting one. (INT-3914)
    */
   async freshReview(
     pr: PRInfo,
     projectPath: string,
-  ): Promise<{ success: boolean; error?: string; iterations: number }> {
+  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean }> {
     const key = `${pr.repo}#${pr.number}`;
     this.currentPR = key;
 
+    // Set the moment a verdict exists, so the catch below can tell "the reviewer
+    // produced nothing" from "the reviewer concluded and a later step failed".
+    // (INT-3914)
+    let verdictProduced = false;
     let worktreePath: string | null = null;
     let prHeadRef: string | null = null;
     let baseRef: string | null = null;
@@ -422,22 +437,51 @@ export class PRProcessor {
       // base` step.
       const mergeBase = (await gitExec(projectPath, 'merge-base', prHeadRef, baseRef)).trim();
 
-      worktreePath = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
-      await gitExec(projectPath, 'worktree', 'add', '--detach', worktreePath, reviewedSha);
+      const scratchWorktree = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
+      worktreePath = scratchWorktree;
+      await gitExec(projectPath, 'worktree', 'add', '--detach', scratchWorktree, reviewedSha);
 
       const review = await runReviewCommand({
-        path: worktreePath,
+        path: scratchWorktree,
         base: mergeBase,
         // The checked-out content is another PR's diff — untrusted the same
         // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
         // including bash, keeps a malicious PR from using the reviewer's
         // shell access and provider credential as an attack surface.
         readOnly: true,
+      }, {
+        // Both overrides exist for the same reason: the review's cwd is the
+        // scratch worktree that `finally` deletes, so the default paths write
+        // history into a directory about to vanish and read it from one that was
+        // just created empty. Every PR review was therefore unrecorded AND blind
+        // to earlier ones. Point both at the real repository, while hashes keep
+        // coming from the checkout actually under review. (INT-3914)
+        loadHistory: async (_cwd, files) => {
+          const [loaded, currentHashes] = await Promise.all([
+            loadReviewHistory(projectPath),
+            captureReviewFileHashes(scratchWorktree, files),
+          ]);
+          const rendered = renderReviewHistoryContext(loaded, files, currentHashes);
+          return { context: rendered.context, records: rendered.matchingRecords, currentHashes };
+        },
+        saveHistory: (_cwd, files, reviewResult, base) =>
+          saveReviewHistory(projectPath, {
+            kind: 'pr',
+            base,
+            files,
+            review: reviewResult,
+            hashProjectPath: scratchWorktree,
+          }),
       });
 
       if (!review) {
-        return { success: false, error: `No diff found against ${base}`, iterations: 0 };
+        // Deliberately gate-not-run rather than `openswarm review`'s exit-0
+        // "nothing to review": for an OPEN PR an empty diff against the
+        // merge-base is anomalous, not a clean pass, and reporting it as one
+        // would be the same silent-approval failure this issue is about.
+        return { success: false, error: `No diff found against ${base}`, iterations: 0, gateRan: false };
       }
+      verdictProduced = true;
 
       // Names the exact commit reviewed: a long-running review racing a new
       // push must not read as an approval of commits it never saw.
@@ -455,11 +499,12 @@ export class PRProcessor {
         success: review.decision === 'approve',
         error: review.decision === 'approve' ? undefined : (review.feedback || 'Reviewer requested changes'),
         iterations: 0,
+        gateRan: true,
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} fresh review error:`, errorMsg);
-      return { success: false, error: errorMsg, iterations: 0 };
+      return { success: false, error: errorMsg, iterations: 0, gateRan: verdictProduced };
     } finally {
       if (worktreePath) {
         try {

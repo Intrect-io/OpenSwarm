@@ -12,6 +12,7 @@ import { parsePRRef, resolvePR, resolveOriginRepo, toPRInfo, type ResolvePROptio
 import { formatPrStatus, gatherPrStatus, type PrStatusSnapshot } from './prStatus.js';
 import { createPrFromCwd, type PrCreateOptions } from './prCreate.js';
 import { getOpenPRsOrThrow } from '../github/github.js';
+import { REVIEW_EXIT_GATE_NOT_RUN } from './reviewExit.js';
 
 export type PrAction = 'status' | 'fix' | 'review' | 'watch' | 'create';
 
@@ -63,7 +64,7 @@ export interface PrCommandDeps {
     pr: { repo: string; number: number; title: string; branch: string; url: string },
     projectPath: string,
     opts: PrCommandOptions,
-  ) => Promise<{ success: boolean; error?: string; iterations: number }>;
+  ) => Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean }>;
   waitCI?: (
     repo: string,
     prNumber: number,
@@ -166,7 +167,7 @@ async function defaultFreshReviewOne(
   projectPath: string,
   opts: PrCommandOptions,
   loadRoles: () => DefaultRolesConfig | undefined,
-): Promise<{ success: boolean; error?: string; iterations: number }> {
+): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean }> {
   const roles = loadRoles();
   const processor = new PRProcessor(buildProcessorConfig(opts, roles, loadSecurityAuditBestEffort()));
   return processor.freshReview(toPRInfo({ ...pr, author: undefined }), projectPath);
@@ -266,6 +267,7 @@ export async function runPrCommand(
         const lines: string[] = [];
         let failures = 0;
         let skipped = 0;
+        let gateNotRun = 0;
         // Sequential, not Promise.all: reviewOne/fixOne check out pr.branch
         // in projectPath itself (only freshReview's scratch worktree is
         // concurrency-safe), so overlapping PRs would fight over the same
@@ -284,14 +286,24 @@ export async function runPrCommand(
           }
           const result = await run(pr, cwd, opts);
           if (!result.success) failures++;
+          const prGateNotRun = 'gateRan' in result && result.gateRan === false;
+          if (prGateNotRun) gateNotRun++;
           const verdict = opts.fresh
-            ? (result.success ? 'approved' : (result.error ?? 'changes requested'))
+            ? (result.success ? 'approved' : prGateNotRun
+              ? `review did NOT run: ${result.error ?? 'no verdict produced'}`
+              : (result.error ?? 'changes requested'))
             : (result.success ? `feedback addressed (${result.iterations} iteration(s))` : (result.error ?? 'failed'));
           lines.push(`${result.success ? '✓' : '✗'} #${pr.number} (${pr.title}): ${verdict}`);
         }
         const reviewed = prs.length - skipped;
-        lines.push('', `${reviewed - failures}/${reviewed} succeeded${skipped ? ` (${skipped} fork PR(s) skipped)` : ''}.`);
-        return { message: lines.join('\n'), exitCode: failures > 0 ? 1 : 0 };
+        lines.push('', `${reviewed - failures}/${reviewed} succeeded${skipped ? ` (${skipped} fork PR(s) skipped)` : ''}`
+          + `${gateNotRun ? `, ${gateNotRun} without a verdict` : ''}.`);
+        // A batch where nothing produced a verdict reports gate-not-run; a mix
+        // still reports 1, because at least one real rejection stands.
+        return {
+          message: lines.join('\n'),
+          exitCode: failures === 0 ? 0 : (gateNotRun === failures ? REVIEW_EXIT_GATE_NOT_RUN : 1),
+        };
       }
 
       const resolved = await (deps.resolve ?? resolvePR)({
@@ -311,9 +323,17 @@ export async function runPrCommand(
             exitCode: 0,
           };
         }
+        // Exit 2 = the gate did NOT run, matching `openswarm review`'s contract.
+        // A caller that cannot tell "the reviewer produced nothing" from "the
+        // reviewer wants changes" has to treat every REVISE as suspect, which is
+        // how nine false REVISEs trained a human to stop believing the tenth.
+        // (INT-3914)
+        const gateNotRun = result.gateRan === false;
         return {
-          message: `PR ${resolved.repo}#${resolved.number} fresh review: ${result.error ?? 'changes requested'}\n${resolved.url}`,
-          exitCode: 1,
+          message: gateNotRun
+            ? `PR ${resolved.repo}#${resolved.number} fresh review did NOT run: ${result.error ?? 'no verdict produced'}\n${resolved.url}`
+            : `PR ${resolved.repo}#${resolved.number} fresh review: ${result.error ?? 'changes requested'}\n${resolved.url}`,
+          exitCode: gateNotRun ? REVIEW_EXIT_GATE_NOT_RUN : 1,
         };
       }
       log(`Checking review feedback on ${resolved.repo}#${resolved.number} (${resolved.title})…`);

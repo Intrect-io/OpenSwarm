@@ -99,8 +99,14 @@ function parseRecommendedActions(raw: unknown): ReviewResult['recommendedActions
   return actions.length ? actions : undefined;
 }
 
-/** Text fallback when no JSON reviewer result is present. */
-function extractReviewerFromText(text: string): ReviewResult {
+/**
+ * Text fallback when no JSON reviewer result is present.
+ *
+ * Returns whether the verdict was DECLARED or merely defaulted, because the two
+ * are not interchangeable downstream: a defaulted verdict is the parser's guess,
+ * not the reviewer's conclusion, and must not be presented as one. (INT-3914)
+ */
+function extractReviewerFromText(text: string): { result: ReviewResult; explicit: boolean } {
   // Prefer the reviewer's EXPLICIT verdict ("Decision: revise") over scattered
   // keyword matching. A task whose domain is about "reject"/"approve" (e.g. a
   // financial hard-reject bug, an approval-flow feature) makes prose keyword
@@ -117,10 +123,13 @@ function extractReviewerFromText(text: string): ReviewResult {
     decision = verdict.startsWith('approv') ? 'approve' : verdict.startsWith('reject') ? 'reject' : 'revise';
   }
   return {
-    decision,
-    feedback: extractSummary(text),
-    issues: extractBulletsAfter(text, /issues?:/i),
-    suggestions: extractBulletsAfter(text, /suggestions?:/i),
+    result: {
+      decision,
+      feedback: extractSummary(text),
+      issues: extractBulletsAfter(text, /issues?:/i),
+      suggestions: extractBulletsAfter(text, /suggestions?:/i),
+    },
+    explicit: explicit !== null,
   };
 }
 
@@ -210,7 +219,15 @@ function hasSubstance(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text.replace(CONTROL_TOKEN, ''));
 }
 
-export function parseReviewerResult(text: string): ReviewResult {
+/**
+ * @param opts.jsonOnly Accept a verdict only from a JSON block, never from the
+ * prose fallback. Callers that consider a message OTHER than the reviewer's last
+ * one must pass this: mid-stream prose like "my decision: approve, pending a
+ * final check" matches the verdict regex, and honouring it would turn a merge
+ * gate into a silent pass. A JSON block is something the reviewer only emits
+ * when reporting a result. (INT-3914)
+ */
+export function parseReviewerResult(text: string, opts: { jsonOnly?: boolean } = {}): ReviewResult {
   // An empty reviewer result is a harness failure, not a quality verdict. Falling
   // through to the safe text default would fabricate REVISE with no findings and
   // leave the user with an unactionable gate result. (INT-2879)
@@ -227,14 +244,29 @@ export function parseReviewerResult(text: string): ReviewResult {
   }
 
   const json = extractReviewerResultJson(text);
-  const result = json ?? extractReviewerFromText(text);
+  // Branch on `null` explicitly, not on truthiness: a falsy check would silently
+  // build a fallback while `fromJson` still read true if this ever returns
+  // `undefined`, flipping the verdict-declared test to the wrong answer.
+  const fromJson = json !== null;
+  if (opts.jsonOnly && !fromJson) {
+    throw new Error('Reviewer output carried no JSON verdict: prose is not accepted from a non-final message');
+  }
+  const fallback = fromJson ? null : extractReviewerFromText(text);
+  const result = json ?? fallback!.result;
+  const explicit = fromJson || fallback!.explicit;
 
   // A non-approving verdict with nothing to act on is not a verdict — it is a
   // failed review that would send the worker round the loop with no guidance.
   // `approve` is exempt: having no findings is the correct shape for it.
-  if (result.decision !== 'approve' && !isSubstantiated(result, json !== null, text)) {
+  if (result.decision !== 'approve' && !isSubstantiated(result, fromJson, text, explicit)) {
+    // Distinguish the two failures, because they point at different fixes: the
+    // reviewer declared a verdict but gave nothing to act on, versus the stream
+    // never carried a verdict at all and this text is some other utterance.
     throw new Error(
-      `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`,
+      explicit
+        ? `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`
+        : 'Reviewer output carried no verdict: no JSON result and no explicit decision — '
+          + 'the final message was not a review conclusion',
     );
   }
 
@@ -254,13 +286,25 @@ const DECISION_PHRASE =
  * usually the "Decision: revise" line itself — so a populated feedback field there
  * proves nothing. For that path the question is whether the message holds anything
  * once the control tokens and the verdict declaration are removed.
+ *
+ * Residual prose only counts when the reviewer actually DECLARED a verdict. Without
+ * one, "text remains after stripping" is satisfied by any sentence at all — and the
+ * sentence a truncated stream leaves behind is the reviewer's opening narration
+ * ("I will read the diff first…"), which then shipped as `Decision: REVISE` with the
+ * narration as its feedback. Measured 9 consecutive times on `pr review --fresh`
+ * where the real conclusion was approve. (INT-3914)
  */
-function isSubstantiated(result: ReviewResult, fromJson: boolean, sourceText: string): boolean {
+function isSubstantiated(
+  result: ReviewResult,
+  fromJson: boolean,
+  sourceText: string,
+  explicit: boolean,
+): boolean {
   if ((result.issues ?? []).some(hasSubstance) || (result.suggestions ?? []).some(hasSubstance)) {
     return true;
   }
   if (fromJson) {
     return hasSubstance(result.feedback ?? '');
   }
-  return hasSubstance(sourceText.replace(DECISION_PHRASE, ''));
+  return explicit && hasSubstance(sourceText.replace(DECISION_PHRASE, ''));
 }
