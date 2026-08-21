@@ -20,8 +20,13 @@ describe('parseReviewerResult text-fallback decision (INT-2485 false-reject)', (
     expect(parseReviewerResult('Decision: approve\nLooks good, ships.').decision).toBe('approve');
   });
 
-  it('defaults to the safe revise when no explicit verdict is present', () => {
-    expect(parseReviewerResult('The code rejects invalid input and approves valid tokens.').decision).toBe('revise');
+  it('refuses to invent a verdict from prose that never declared one', () => {
+    // Used to default to a "safe" revise. That default is exactly what let a
+    // stream carrying no conclusion ship as Decision: REVISE. (INT-3914)
+    // The INT-2485 property this case guarded — prose keywords must not become
+    // the verdict — still holds, and more strongly: no verdict is produced at all.
+    expect(() => parseReviewerResult('The code rejects invalid input and approves valid tokens.'))
+      .toThrow(/carried no verdict/);
   });
 
   it('rejects an empty result instead of fabricating a finding-less REVISE', () => {
@@ -117,5 +122,54 @@ describe('parseReviewerResult rejects unsubstantiated verdicts (INT-3182)', () =
   it('rejects a JSON verdict that is empty in every actionable field', () => {
     expect(() => parseReviewerResult(wrap({ decision: 'revise', feedback: '', issues: [], suggestions: [] })))
       .toThrow(/no findings/);
+  });
+});
+
+
+describe('parseReviewerResult refuses a verdict the reviewer never gave (INT-3914)', () => {
+  // `pr review --fresh` reported Decision: REVISE nine consecutive times on PRs
+  // whose real conclusion was approve. The stream's last agent_message was the
+  // reviewer's OPENING narration, not its conclusion; the parser defaulted the
+  // decision to revise and quoted that narration as the feedback.
+  it('throws on the opening narration that shipped as a REVISE verdict', () => {
+    // Verbatim shape of the feedback posted to vega-plugins PR #29.
+    expect(() => parseReviewerResult('커밋된 변경사항을 기준 커밋과 비교해 전체 diff와 관련 파일을 확인합니다.'))
+      .toThrow(/carried no verdict/);
+  });
+
+  it('throws on the English narration shapes seen in the same runs', () => {
+    expect(() => parseReviewerResult('I will read the full diff and the related files first.'))
+      .toThrow(/carried no verdict/);
+    expect(() => parseReviewerResult('Let me review the committed changes against the base commit.'))
+      .toThrow(/carried no verdict/);
+  });
+
+  it('names the missing verdict rather than the missing findings', () => {
+    // The two failures have different fixes, so they must not share a message:
+    // one means the reviewer said nothing actionable, the other means the stream
+    // never carried a conclusion.
+    expect(() => parseReviewerResult('I will start by reading the diff.')).toThrow(/no explicit decision/);
+    expect(() => parseReviewerResult('Decision: revise')).toThrow(/no findings/);
+  });
+
+  it('still accepts a declared verdict backed by prose', () => {
+    const r = parseReviewerResult('Decision: revise\nThe retry path drops the last attempt.');
+    expect(r.decision).toBe('revise');
+  });
+
+  it('still accepts structured findings even when the verdict line is missing', () => {
+    // Findings ARE the conclusion here — the reviewer did the work and only
+    // skipped the ceremonial line. Unchanged behaviour, pinned so the INT-3914
+    // guard cannot widen into it.
+    const r = parseReviewerResult('Issues:\n- src/a.ts:1 add() subtracts instead of adding');
+    expect(r.decision).toBe('revise');
+    expect(r.issues).toEqual(['src/a.ts:1 add() subtracts instead of adding']);
+  });
+
+  it('still accepts a JSON verdict regardless of the narration around it', () => {
+    const r = parseReviewerResult(
+      'I will read the diff first.\n' + wrap({ decision: 'approve', feedback: 'Coherent and well-tested.' }),
+    );
+    expect(r.decision).toBe('approve');
   });
 });

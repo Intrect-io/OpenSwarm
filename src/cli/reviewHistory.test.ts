@@ -156,4 +156,37 @@ describe('review history', () => {
 
     await expect(loadReviewHistory(root)).resolves.toEqual({ records: [], legacyExcerpts: [] });
   });
+
+  // `kind: 'pr'` was added to the TypeScript union but not to parseRecord's
+  // runtime allow-list, so every PR review record was written and then silently
+  // dropped on load — the persistence it was added for never happened.
+  // (INT-3914 review finding)
+  it('round-trips a kind: "pr" record through save and load', async () => {
+    const root = await repo();
+    await saveReviewHistory(root, {
+      kind: 'pr',
+      base: 'mergebasesha123',
+      files: ['src/a.ts'],
+      review: { decision: 'approve', feedback: 'Coherent and well-tested.' },
+    });
+
+    const loaded = await loadReviewHistory(root);
+    expect(loaded.records).toHaveLength(1);
+    expect(loaded.records[0].kind).toBe('pr');
+    expect(loaded.records[0].review).toEqual({ decision: 'approve', feedback: 'Coherent and well-tested.' });
+  });
+
+  it('still rejects a record whose kind is not a known one', async () => {
+    const root = await repo();
+    const historyRoot = join(root, '.openswarm', 'review-history');
+    await mkdir(historyRoot, { recursive: true });
+    await writeFile(join(historyRoot, 'bogus.json'), JSON.stringify({
+      version: 1,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      kind: 'not-a-kind',
+      files: ['src/a.ts'],
+      fileHashes: { 'src/a.ts': 'file:x' },
+    }));
+    await expect(loadReviewHistory(root)).resolves.toEqual({ records: [], legacyExcerpts: [] });
+  });
 });

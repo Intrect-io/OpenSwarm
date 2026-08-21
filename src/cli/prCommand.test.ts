@@ -355,6 +355,56 @@ describe('runPrCommand (INT-3282)', () => {
     expect(result.message).toMatch(/null deref in x.ts/);
   });
 
+  // A review that produced no verdict and a review that rejected used to be the
+  // same outcome to a caller. Nine consecutive no-verdict runs reported as REVISE
+  // is what taught a human to stop believing the verdict at all. (INT-3914)
+  it('review --fresh exits 2, not 1, when no verdict was produced', async () => {
+    const deps = mkDeps({
+      freshReviewOne: vi.fn(async () => ({
+        success: false,
+        error: 'reviewer-stage: produced no parseable verdict: Reviewer output carried no verdict',
+        iterations: 0,
+        gateRan: false,
+      })),
+    });
+    const result = await runPrCommand('review', { fresh: true }, deps);
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toMatch(/did NOT run/);
+    expect(result.message).toMatch(/carried no verdict/);
+  });
+
+  it('review --fresh still exits 1 when the reviewer actually asked for changes', async () => {
+    const deps = mkDeps({
+      freshReviewOne: vi.fn(async () => ({ success: false, error: 'null deref in x.ts', iterations: 0, gateRan: true })),
+    });
+    const result = await runPrCommand('review', { fresh: true }, deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.message).not.toMatch(/did NOT run/);
+  });
+
+  it('review --all --fresh exits 2 only when every failure was a missing verdict', async () => {
+    const prA = { ...resolved, number: 1, title: 'A' };
+    const prB = { ...resolved, number: 2, title: 'B' };
+    const allNoVerdict = mkDeps({
+      listOpenPRs: vi.fn(async () => [prA, prB]),
+      freshReviewOne: vi.fn(async () => ({ success: false, error: 'no verdict', iterations: 0, gateRan: false })),
+    });
+    const noVerdictRun = await runPrCommand('review', { fresh: true, all: true }, allNoVerdict);
+    expect(noVerdictRun.exitCode).toBe(2);
+    expect(noVerdictRun.message).toMatch(/2 without a verdict/);
+
+    // Mixed: one real rejection stands, so the batch is a rejection, not a
+    // gate-not-run — retrying it would not be the right response.
+    const mixed = mkDeps({
+      listOpenPRs: vi.fn(async () => [prA, prB]),
+      freshReviewOne: vi.fn(async (pr: { number: number }) => (pr.number === 1
+        ? { success: false, error: 'no verdict', iterations: 0, gateRan: false }
+        : { success: false, error: 'real defect', iterations: 0, gateRan: true })),
+    });
+    const mixedRun = await runPrCommand('review', { fresh: true, all: true }, mixed);
+    expect(mixedRun.exitCode).toBe(1);
+  });
+
   it('review --all resolves the repo, lists every open PR, and reviews each one (not just current branch\'s)', async () => {
     const prA = { ...resolved, number: 1, title: 'Fix A' };
     const prB = { ...resolved, number: 2, title: 'Fix B' };

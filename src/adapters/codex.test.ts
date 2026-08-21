@@ -201,3 +201,94 @@ describe('CodexCliAdapter read-only mode (INT-3189)', () => {
     expect(adapter.capabilities.enforcesReadOnly).toBe(true);
   });
 });
+
+
+describe('CodexCliAdapter reviewer verdict loss (INT-3914)', () => {
+  const adapter = new CodexCliAdapter();
+
+  // Event shapes below are verbatim from a live `codex exec --json --sandbox
+  // read-only` run of the real reviewer prompt (codex-cli 0.148.0).
+  const NARRATION =
+    '{"type":"item.completed","item":{"type":"agent_message","text":'
+    + '"실제 저장소의 diff와 관련 파일을 확인한 뒤 결론을 내리겠습니다."}}';
+  const TODO_LIST =
+    '{"type":"item.completed","item":{"id":"item_1","type":"todo_list","items":'
+    + '[{"text":"diff 확인","completed":true},{"text":"판정 제공","completed":true}]}}';
+  const VERDICT =
+    '{"type":"item.completed","item":{"type":"agent_message","text":'
+    + '"{\\"decision\\":\\"approve\\",\\"feedback\\":\\"Coherent and well-tested.\\"}"}}';
+
+  const stream = (...lines: string[]) => ({
+    exitCode: 0,
+    stdout: ['{"type":"thread.started","thread_id":"1"}', '{"type":"turn.started"}', ...lines,
+      '{"type":"turn.completed"}'].join('\n'),
+    stderr: '',
+    durationMs: 1,
+  });
+
+  it('throws when the turn ends without a verdict message, instead of quoting the narration', () => {
+    // The turn ended on a todo_list, so the last agent_message is still the
+    // reviewer's opening line. That line used to become `Decision: REVISE` with
+    // the narration as its feedback — nine consecutive times on PRs whose real
+    // conclusion was approve.
+    expect(() => adapter.parseReviewerOutput(stream(NARRATION, TODO_LIST)))
+      .toThrow(/carried no verdict/);
+  });
+
+  it('does not treat a trailing todo_list as a conclusion on its own', () => {
+    expect(() => adapter.parseReviewerOutput(stream(TODO_LIST))).toThrow(/Reviewer output was empty/);
+  });
+
+  it('still parses the verdict when the reviewer narrates first and concludes after', () => {
+    // The normal shape, measured in the same probe: narration, tool calls, then
+    // the JSON verdict as the final message. Must stay unaffected.
+    const result = adapter.parseReviewerOutput(stream(NARRATION, TODO_LIST, VERDICT));
+    expect(result.decision).toBe('approve');
+    expect(result.feedback).toBe('Coherent and well-tested.');
+  });
+
+  it('finds the verdict even when the reviewer signs off after delivering it', () => {
+    // Refusing to invent a verdict means a trailing pleasantry would otherwise
+    // discard a conclusion the reviewer actually reached. Scan backwards.
+    const SIGN_OFF =
+      '{"type":"item.completed","item":{"type":"agent_message","text":'
+      + '"Let me know if you want me to dig into the test coverage further."}}';
+    const result = adapter.parseReviewerOutput(stream(NARRATION, VERDICT, SIGN_OFF));
+    expect(result.decision).toBe('approve');
+    expect(result.feedback).toBe('Coherent and well-tested.');
+  });
+
+  it('reports the LAST message\'s failure, not an earlier one', () => {
+    // The two messages fail for different reasons, so the message proves which
+    // one was reported: the final narration yields "carried no verdict", while
+    // the earlier one is rejected by the stricter JSON-only bar.
+    const DECLARED_NO_FINDINGS =
+      '{"type":"item.completed","item":{"type":"agent_message","text":"Decision: revise"}}';
+    const CLOSING =
+      '{"type":"item.completed","item":{"type":"agent_message","text":"계속 확인하겠습니다."}}';
+    expect(() => adapter.parseReviewerOutput(stream(DECLARED_NO_FINDINGS, CLOSING)))
+      .toThrow(/carried no verdict/);
+  });
+
+  it('does not accept a verdict-shaped sentence from a non-final message', () => {
+    // A truncated turn can leave mid-stream prose that matches the verdict
+    // regex. Honouring it would ship a silent APPROVE through a merge gate —
+    // strictly worse than the noisy REVISE this change removes.
+    const THINKING_ALOUD =
+      '{"type":"item.completed","item":{"type":"agent_message","text":'
+      + '"My decision: approve, pending one final check of the test suite."}}';
+    const CLOSING =
+      '{"type":"item.completed","item":{"type":"agent_message","text":"이어서 확인하겠습니다."}}';
+    expect(() => adapter.parseReviewerOutput(stream(THINKING_ALOUD, CLOSING)))
+      .toThrow(/carried no verdict/);
+  });
+
+  it('still accepts a JSON verdict from a non-final message', () => {
+    // JSON is the shape a reviewer only emits when reporting a result, so the
+    // sign-off case keeps working.
+    const CLOSING =
+      '{"type":"item.completed","item":{"type":"agent_message","text":"Happy to dig further if useful."}}';
+    const result = adapter.parseReviewerOutput(stream(NARRATION, VERDICT, CLOSING));
+    expect(result.decision).toBe('approve');
+  });
+});

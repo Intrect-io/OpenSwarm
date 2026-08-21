@@ -126,10 +126,32 @@ export class CodexCliAdapter implements CliAdapter {
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {
-    const resultText = extractCodexMessageText(raw.stdout);
     // Event extraction is Codex-specific; reviewer parsing and the empty-output
     // contract belong to the shared parser used by every in-process adapter.
-    return parseReviewerResult(resultText);
+    const { messages, sawStructuredEvent } = extractCodexMessages(raw.stdout);
+    if (messages.length === 0) return parseReviewerResult(sawStructuredEvent ? '' : raw.stdout);
+
+    // Scan backwards rather than reading only the final message. The verdict is
+    // normally last, but a model that signs off after it ("Let me know if you
+    // want me to dig further") would otherwise bury a conclusion it did reach —
+    // and since the parser now refuses to invent a verdict, that would be a hard
+    // failure instead of the old fabricated REVISE.
+    //
+    // Earlier messages are held to the stricter JSON-only bar. Prose mid-stream
+    // ("my decision: approve, pending one more check") satisfies the verdict
+    // regex, and accepting it on a truncated turn would turn this merge gate
+    // into a silent pass — a worse failure than the noisy REVISE being fixed
+    // here. The first error kept is the LAST message's, the one to report.
+    // (INT-3914)
+    let lastMessageError: unknown;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      try {
+        return parseReviewerResult(messages[i], { jsonOnly: i !== messages.length - 1 });
+      } catch (error) {
+        if (lastMessageError === undefined) lastMessageError = error;
+      }
+    }
+    throw lastMessageError;
   }
 }
 
@@ -193,8 +215,9 @@ function extractCodexExecutedCommands(output: string): string[] {
   return commands;
 }
 
-function extractCodexMessageText(output: string): string {
-  let lastMessage = '';
+/** Every agent_message in order, and whether stdout was a Codex event stream at all. */
+function extractCodexMessages(output: string): { messages: string[]; sawStructuredEvent: boolean } {
+  const messages: string[] = [];
   let sawStructuredEvent = false;
 
   for (const line of output.split('\n')) {
@@ -209,17 +232,22 @@ function extractCodexMessageText(output: string): string {
         event.item?.type === 'agent_message' &&
         typeof event.item.text === 'string'
       ) {
-        lastMessage = event.item.text;
+        messages.push(event.item.text);
       }
     } catch {
       // Ignore non-JSON lines.
     }
   }
 
+  return { messages, sawStructuredEvent };
+}
+
+function extractCodexMessageText(output: string): string {
+  const { messages, sawStructuredEvent } = extractCodexMessages(output);
   // Keep the legacy plain-text fallback only when stdout was not a Codex event
   // stream. Returning reasoning/tool NDJSON as if it were the final message makes
   // a reasoning-only run look non-empty and fabricates a reviewer verdict. (INT-2879)
-  return lastMessage || (sawStructuredEvent ? '' : output);
+  return messages.at(-1) || (sawStructuredEvent ? '' : output);
 }
 
 function emitCodexStreamEvent(line: string, onLog: (line: string) => void): void {

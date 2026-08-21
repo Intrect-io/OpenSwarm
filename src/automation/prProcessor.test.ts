@@ -63,6 +63,20 @@ vi.mock('../cli/reviewCommand.js', () => ({
   formatReviewOutput: formatReviewOutputImpl,
 }));
 
+const { saveReviewHistoryImpl, loadReviewHistoryImpl, captureReviewFileHashesImpl, renderReviewHistoryContextImpl } =
+  vi.hoisted(() => ({
+    saveReviewHistoryImpl: vi.fn(async () => '/tmp/proj/.openswarm/review-history/rec.json'),
+    loadReviewHistoryImpl: vi.fn(async () => ({ records: [], legacyExcerpts: [] })),
+    captureReviewFileHashesImpl: vi.fn(async () => ({ 'src/a.ts': 'file:abc' })),
+    renderReviewHistoryContextImpl: vi.fn(() => ({ context: 'prior context', matchingRecords: [] })),
+  }));
+vi.mock('../cli/reviewHistory.js', () => ({
+  saveReviewHistory: saveReviewHistoryImpl,
+  loadReviewHistory: loadReviewHistoryImpl,
+  captureReviewFileHashes: captureReviewFileHashesImpl,
+  renderReviewHistoryContext: renderReviewHistoryContextImpl,
+}));
+
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 vi.mock('../discord/index.js', () => ({ reportEvent: vi.fn(async () => undefined) }));
 const { schedulerImpl } = vi.hoisted(() => ({
@@ -503,7 +517,9 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
   it('reviews inside a scratch worktree at the merge-base, posts the reviewed SHA as a comment, and reports approve as success', async () => {
     const processor = newProcessor();
     const result = await processor.freshReview(pr, '/tmp/proj');
-    expect(result).toEqual({ success: true, error: undefined, iterations: 0 });
+    // gateRan distinguishes a real verdict from a review that produced none, so
+    // the caller can exit 2 rather than reporting a rejection. (INT-3914)
+    expect(result).toEqual({ success: true, error: undefined, iterations: 0, gateRan: true });
 
     // Origin must match the PR's own repo before anything is fetched — a
     // `--repo`/`--number owner/repo#n` override could otherwise point this
@@ -551,6 +567,7 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
         base: 'mergebasesha123',
         readOnly: true,
       }),
+      expect.objectContaining({ saveHistory: expect.any(Function) }),
     );
     expect(gitExecImpl).toHaveBeenCalledWith(
       ['worktree', 'remove', '--force', expect.stringMatching(scratchDirPattern)],
@@ -572,6 +589,9 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     const result = await processor.freshReview(pr, '/tmp/proj');
     expect(result.success).toBe(false);
     expect(result.error).toBe('null deref in x.ts');
+    // A rejection is a verdict — it must not be reported as a gate that failed
+    // to run, or a caller would retry instead of acting on it. (INT-3914)
+    expect(result.gateRan).toBe(true);
   });
 
   it('reports failure without posting a comment when there is no diff against base, and still cleans up the worktree', async () => {
@@ -618,6 +638,22 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     // read as success just because the (unposted) verdict was "approve".
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/gh pr comment exited with code 4/);
+    // The reviewer DID reach a verdict — only publishing it failed. Reporting
+    // gate-not-run here would send the caller to re-run a completed review.
+    // (INT-3914 review finding)
+    expect(result.gateRan).toBe(true);
+  });
+
+  it('marks a thrown reviewer as gate-not-run rather than a change request (INT-3914)', async () => {
+    // What an unparseable verdict now looks like from the parser's throw.
+    runReviewCommandImpl.mockRejectedValueOnce(
+      new Error('reviewer-stage: produced no parseable verdict: Reviewer output carried no verdict'),
+    );
+    const processor = newProcessor();
+    const result = await processor.freshReview(pr, '/tmp/proj');
+    expect(result.success).toBe(false);
+    expect(result.gateRan).toBe(false);
+    expect(result.error).toMatch(/carried no verdict/);
   });
 
   it('still removes the scratch worktree when the reviewer itself throws', async () => {
@@ -658,6 +694,53 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     expect(fetchCalls[0][2]).not.toBe(fetchCalls[1][2]);
     const worktreeAddCalls = gitExecImpl.mock.calls.map((c) => c[0] as string[]).filter((a) => a[0] === 'worktree' && a[1] === 'add');
     expect(worktreeAddCalls[0][3]).not.toBe(worktreeAddCalls[1][3]);
+  });
+
+  // The verdict was only ever visible in the streaming output: history defaulted
+  // to the review's cwd, which is the scratch worktree `finally` deletes. Miss the
+  // stream and the result was gone. (INT-3914)
+  it('records the verdict in the real repository, not in the scratch worktree it deletes', async () => {
+    const processor = newProcessor();
+    await processor.freshReview(pr, '/tmp/proj');
+
+    const deps = runReviewCommandImpl.mock.calls[0][1] as {
+      saveHistory: (cwd: string, files: string[], review: unknown, base?: string) => Promise<unknown>;
+    };
+    const scratch = (runReviewCommandImpl.mock.calls[0][0] as { path: string }).path;
+    // runReviewCommand hands its own cwd (the worktree) as the first argument —
+    // the override must ignore it and write to the project instead.
+    await deps.saveHistory(scratch, ['src/a.ts'], { decision: 'approve', feedback: 'ok' }, 'mergebasesha123');
+
+    expect(saveReviewHistoryImpl).toHaveBeenCalledWith('/tmp/proj', expect.objectContaining({
+      kind: 'pr',
+      base: 'mergebasesha123',
+      files: ['src/a.ts'],
+      review: { decision: 'approve', feedback: 'ok' },
+      // Hashes still come from the checkout that was actually reviewed.
+      hashProjectPath: scratch,
+    }));
+    expect(scratch).toMatch(scratchDirPattern);
+    expect(saveReviewHistoryImpl.mock.calls[0][0]).not.toMatch(scratchDirPattern);
+  });
+
+  // Writing history the next run cannot read leaves the persistence half-wired:
+  // saved PR records would never reach dedupeReviewActions or priorReviewContext.
+  // (INT-3914 review finding)
+  it('reads prior history from the repository while hashing the worktree under review', async () => {
+    const processor = newProcessor();
+    await processor.freshReview(pr, '/tmp/proj');
+
+    const deps = runReviewCommandImpl.mock.calls[0][1] as {
+      loadHistory: (cwd: string, files: string[]) => Promise<{ context?: string; currentHashes: unknown }>;
+    };
+    const scratch = (runReviewCommandImpl.mock.calls[0][0] as { path: string }).path;
+    const loaded = await deps.loadHistory(scratch, ['src/a.ts']);
+
+    expect(loadReviewHistoryImpl).toHaveBeenCalledWith('/tmp/proj');
+    // Hashes describe the code that was actually reviewed, so a record only
+    // matches when the file contents genuinely match.
+    expect(captureReviewFileHashesImpl).toHaveBeenCalledWith(scratch, ['src/a.ts']);
+    expect(loaded.context).toBe('prior context');
   });
 });
 
