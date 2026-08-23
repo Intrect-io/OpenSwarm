@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.1 — 2026-08-23
+
+### Fixed
+
+- **`openswarm pr review --fresh` no longer reports a verdict the reviewer never gave.** When a review turn ended without a concluding message, the parser took the reviewer's *opening narration* ("I'll read the diff first…") as its final output, defaulted the decision to `revise`, and posted that narration as the feedback — observed nine consecutive times on PRs whose real conclusion was `approve`. The text fallback now refuses to produce a verdict that was never declared, and the codex adapter scans agent messages backward for the last parseable verdict so a sign-off after the verdict no longer discards it (non-final messages are held to a JSON-only bar, since mid-stream prose like "my decision: approve, pending one check" would otherwise turn the gate into a silent pass).
+- **"The review did not run" is no longer indistinguishable from "the reviewer requested changes".** `pr review --fresh` now exits **2** when no verdict was produced — matching `openswarm review`'s exit contract — and keeps exit 1 for an actual rejection. A failure after the verdict (for example, posting the PR comment) correctly stays a real verdict rather than being reported as a gate that never ran.
+- **PR review results are recorded again.** History was written to the scratch worktree that the command deletes on exit, so every PR review was unrecorded and blind to earlier ones; a verdict missed in the streaming output was unrecoverable. It now persists to the repository as `kind: "pr"` and is read back from there, with file hashes still taken from the checkout actually reviewed.
+
 ## 0.21.0 — 2026-08-08
 
 ### Added
