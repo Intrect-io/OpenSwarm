@@ -27,7 +27,9 @@ async function runConfiguredSecurityAudit(projectPath: string, config: SecurityA
   } catch (error) {
     throw new SecurityAuditInfrastructureError(undefined, error instanceof Error ? error.message : String(error));
   }
-  if (result.status === 'failed' || result.status === 'unavailable') throw new SecurityAuditInfrastructureError(result);
+  if (result.status === 'failed' || result.status === 'unavailable' || result.status === 'partial') {
+    throw new SecurityAuditInfrastructureError(result);
+  }
   return result;
 }
 

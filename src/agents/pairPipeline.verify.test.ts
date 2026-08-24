@@ -109,7 +109,12 @@ beforeEach(() => {
   discoverVerifyCommands.mockResolvedValue([]);
   resolveBaseRef.mockResolvedValue({ remote: 'origin', branch: 'main', ref: 'origin/main' });
   listTrackedSecurityFiles.mockResolvedValue(['src/example.ts']);
-  runSecurityAudit.mockResolvedValue({ status: 'passed', codeqlLanguages: ['javascript'], findings: [] });
+  runSecurityAudit.mockResolvedValue({
+    status: 'passed',
+    codeqlLanguages: ['javascript'],
+    skippedCodeqlLanguages: [],
+    findings: [],
+  });
 });
 
 afterEach(() => {
@@ -117,12 +122,38 @@ afterEach(() => {
 });
 
 describe('PairPipeline deterministic tester (INT-2662)', () => {
+  it('fails closed when a detected CodeQL language has only partial coverage', async () => {
+    runSecurityAudit.mockResolvedValueOnce({
+      status: 'partial',
+      codeqlLanguages: ['javascript', 'swift'],
+      skippedCodeqlLanguages: ['swift'],
+      findings: [],
+      detail: 'Swift does not support build-mode=none.',
+    });
+
+    const { result } = await runPipeline({
+      stages: ['worker', 'reviewer'],
+      securityAudit: { enabled: true, maxThreads: 2 },
+    });
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
+    expect(runSecurityAudit).toHaveBeenCalledOnce();
+    expect(runWorker).not.toHaveBeenCalled();
+    expect(runReviewer).not.toHaveBeenCalled();
+  });
+
   it('blocks new CodeQL findings even when the tester stage is not configured', async () => {
     runSecurityAudit
-      .mockResolvedValueOnce({ status: 'passed', codeqlLanguages: ['javascript'], findings: [] })
+      .mockResolvedValueOnce({
+        status: 'passed',
+        codeqlLanguages: ['javascript'],
+        skippedCodeqlLanguages: [],
+        findings: [],
+      })
       .mockResolvedValueOnce({
         status: 'findings',
         codeqlLanguages: ['javascript'],
+        skippedCodeqlLanguages: [],
         findings: [{
           ruleId: 'codeql/js/file-access-to-http', level: 'error', message: 'outbound file data', filePath: 'src/new.ts', line: 12,
         }],

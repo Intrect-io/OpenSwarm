@@ -84,9 +84,9 @@ describe('security audit primitives', () => {
 describe('runSecurityAudit', () => {
   it('does not require CodeQL for a disabled or source-free audit', async () => {
     await expect(runSecurityAudit('/repo', ['src/a.ts'], { enabled: false, maxThreads: 2 }))
-      .resolves.toEqual({ status: 'disabled', codeqlLanguages: [], findings: [] });
+      .resolves.toEqual({ status: 'disabled', codeqlLanguages: [], skippedCodeqlLanguages: [], findings: [] });
     await expect(runSecurityAudit('/repo', ['README.md'], DEFAULT_SECURITY_AUDIT_CONFIG))
-      .resolves.toEqual({ status: 'passed', codeqlLanguages: [], findings: [] });
+      .resolves.toEqual({ status: 'passed', codeqlLanguages: [], skippedCodeqlLanguages: [], findings: [] });
     expect(execFileMock).not.toHaveBeenCalled();
   });
 
@@ -133,6 +133,100 @@ describe('runSecurityAudit', () => {
       expect.arrayContaining(['database', 'create']),
       expect.arrayContaining(['database', 'analyze']),
     ]));
+  });
+
+  it('preserves contained file URI locations and rejects locations outside the snapshot', async () => {
+    fsMock.readFile.mockResolvedValue(JSON.stringify({
+      version: '2.1.0',
+      runs: [{ results: [
+        {
+          ruleId: 'js/xss-through-dom',
+          message: { text: 'contained location' },
+          locations: [{ physicalLocation: {
+            artifactLocation: { uri: 'file:///snapshot/web/main.js' },
+            region: { startLine: 85 },
+          } }],
+        },
+        {
+          ruleId: 'js/path-injection',
+          message: { text: 'external location' },
+          locations: [{ physicalLocation: {
+            artifactLocation: { uri: 'file:///etc/passwd' },
+            region: { startLine: 1 },
+          } }],
+        },
+      ] }],
+    }));
+
+    const audit = await runSecurityAudit('/repo', ['web/main.js']);
+
+    expect(audit.findings).toEqual([
+      expect.objectContaining({ filePath: 'web/main.js', line: 85 }),
+      expect.objectContaining({ filePath: undefined, line: 1 }),
+    ]);
+  });
+
+  it('records an exact unsupported none-build response as an explicit coverage skip', async () => {
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockRejectedValueOnce(Object.assign(new Error('unsupported build mode'), {
+        code: 2,
+        stderr: 'Swift does not support the none build mode. Please try using one of the following build modes instead: autobuild, manual.',
+      }));
+
+    const audit = await runSecurityAudit('/repo', ['host/App.swift']);
+
+    expect(audit).toMatchObject({
+      status: 'partial',
+      codeqlLanguages: ['swift'],
+      skippedCodeqlLanguages: ['swift'],
+      findings: [],
+    });
+    expect(audit.detail).toContain('build-mode=none: swift');
+  });
+
+  it('keeps unrelated database creation failures fail-closed', async () => {
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockRejectedValueOnce(Object.assign(new Error('database failed'), {
+        code: 1,
+        stderr: 'extractor crashed while importing source',
+      }));
+
+    const audit = await runSecurityAudit('/repo', ['host/App.swift']);
+
+    expect(audit).toMatchObject({
+      status: 'failed',
+      skippedCodeqlLanguages: [],
+      findings: [{ ruleId: 'openswarm/security-codeql-swift-database' }],
+    });
+  });
+
+  it('keeps partial coverage visible when another language also has findings', async () => {
+    fsMock.readFile.mockResolvedValue(JSON.stringify({
+      version: '2.1.0',
+      runs: [{ results: [{
+        ruleId: 'js/xss-through-dom',
+        message: { text: 'untrusted data reaches a DOM sink' },
+      }] }],
+    }));
+    execFileMock
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockRejectedValueOnce(Object.assign(new Error('unsupported build mode'), {
+        code: 2,
+        stderr: 'Swift does not support the none build mode. Please try using one of the following build modes instead: autobuild, manual.',
+      }));
+
+    const audit = await runSecurityAudit('/repo', ['web/main.js', 'host/App.swift']);
+
+    expect(audit).toMatchObject({
+      status: 'partial',
+      codeqlLanguages: ['javascript', 'swift'],
+      skippedCodeqlLanguages: ['swift'],
+      findings: [{ ruleId: 'codeql/js/xss-through-dom' }],
+    });
   });
 
   it('fails closed when SARIF cannot be parsed', async () => {
