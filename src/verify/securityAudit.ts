@@ -47,8 +47,10 @@ export interface SecurityFinding {
 }
 
 export interface SecurityAuditResult {
-  status: 'passed' | 'findings' | 'unavailable' | 'failed' | 'disabled';
+  status: 'passed' | 'partial' | 'findings' | 'unavailable' | 'failed' | 'disabled';
   codeqlLanguages: string[];
+  /** Languages detected in the repository but not scanned because the installed extractor rejects build-mode=none. */
+  skippedCodeqlLanguages: string[];
   findings: SecurityFinding[];
   detail?: string;
 }
@@ -91,9 +93,27 @@ function shortened(value: string, limit = 700): string {
   return compact.length <= limit ? compact : `${compact.slice(0, limit)}…`;
 }
 
+function rejectsNoBuildMode(output: string, language: string): boolean {
+  const escapedLanguage = language.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(
+    `(?:^|\\s)${escapedLanguage} does not support the none build mode\\. Please try using one of the following build modes instead:`,
+    'i',
+  ).test(output);
+}
+
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+}
+
+function sarifArtifactPath(snapshotRoot: string, uri: string | undefined): string | undefined {
+  if (!uri) return undefined;
+  try {
+    const candidate = uri.startsWith('file:') ? fileURLToPath(uri) : resolve(snapshotRoot, uri);
+    return inside(snapshotRoot, candidate) ? relative(snapshotRoot, candidate).split(sep).join('/') : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function findSystemExecutable(name: string): Promise<string | undefined> {
@@ -187,8 +207,7 @@ function parseSarif(text: string, snapshotRoot: string): SecurityFinding[] {
       const physical = ((result.locations as Array<Record<string, unknown>> | undefined)?.[0]?.physicalLocation ?? {}) as Record<string, unknown>;
       const artifact = (physical.artifactLocation ?? {}) as Record<string, unknown>;
       const uri = typeof artifact.uri === 'string' ? artifact.uri : undefined;
-      const candidate = uri && !uri.startsWith('file:') ? resolve(snapshotRoot, uri) : undefined;
-      const filePath = candidate && inside(snapshotRoot, candidate) ? relative(snapshotRoot, candidate).split(sep).join('/') : undefined;
+      const filePath = sarifArtifactPath(snapshotRoot, uri);
       const region = (physical.region ?? {}) as Record<string, unknown>;
       const line = typeof region.startLine === 'number' && Number.isSafeInteger(region.startLine) && region.startLine > 0
         ? region.startLine
@@ -209,12 +228,12 @@ export async function runSecurityAudit(
   sourceFiles: readonly string[],
   config: SecurityAuditConfig = DEFAULT_SECURITY_AUDIT_CONFIG,
 ): Promise<SecurityAuditResult> {
-  if (!config.enabled) return { status: 'disabled', codeqlLanguages: [], findings: [] };
+  if (!config.enabled) return { status: 'disabled', codeqlLanguages: [], skippedCodeqlLanguages: [], findings: [] };
   const codeqlLanguages = detectCodeqlLanguages(sourceFiles);
-  if (codeqlLanguages.length === 0) return { status: 'passed', codeqlLanguages, findings: [] };
+  if (codeqlLanguages.length === 0) return { status: 'passed', codeqlLanguages, skippedCodeqlLanguages: [], findings: [] };
   const executable = await findSystemExecutable('codeql');
   if (!executable) {
-    return { status: 'unavailable', codeqlLanguages, findings: [{
+    return { status: 'unavailable', codeqlLanguages, skippedCodeqlLanguages: [], findings: [{
       ruleId: 'openswarm/security-codeql-unavailable', level: 'error', message: 'CodeQL is not installed or available on an absolute PATH entry.',
     }] };
   }
@@ -225,7 +244,7 @@ export async function runSecurityAudit(
     const packs = codeqlLanguages.map((language) => QUERY_PACK_BY_LANGUAGE[language]).filter((pack): pack is string => Boolean(pack));
     const download = await run(executable, ['pack', 'download', '--', ...packs], snapshot.root);
     if (download.exitCode !== 0) {
-      return { status: 'failed', codeqlLanguages, findings: [{
+      return { status: 'failed', codeqlLanguages, skippedCodeqlLanguages: [], findings: [{
         ruleId: 'openswarm/security-codeql-query-pack', level: 'error', message: 'CodeQL query packs could not be prepared.',
       }], detail: shortened(download.stderr || download.stdout) };
     }
@@ -239,19 +258,20 @@ export async function runSecurityAudit(
       try {
         await access(OPENSWARM_SECURITY_SUITE, constants.R_OK);
       } catch {
-        return { status: 'failed', codeqlLanguages, findings: [{
+        return { status: 'failed', codeqlLanguages, skippedCodeqlLanguages: [], findings: [{
           ruleId: 'openswarm/security-codeql-suite', level: 'error', message: 'OpenSwarm CodeQL security suite is unavailable from this installation.',
         }] };
       }
       const install = await run(executable, ['pack', 'install'], dirname(OPENSWARM_SECURITY_SUITE));
       if (install.exitCode !== 0) {
-        return { status: 'failed', codeqlLanguages, findings: [{
+        return { status: 'failed', codeqlLanguages, skippedCodeqlLanguages: [], findings: [{
           ruleId: 'openswarm/security-codeql-suite', level: 'error', message: 'OpenSwarm CodeQL security suite dependencies could not be prepared.',
         }], detail: shortened(install.stderr || install.stdout) };
       }
     }
 
     const findings: SecurityFinding[] = [];
+    const skippedCodeqlLanguages: string[] = [];
     let infrastructureFailure = false;
     for (const language of codeqlLanguages) {
       const pack = QUERY_PACK_BY_LANGUAGE[language];
@@ -263,6 +283,10 @@ export async function runSecurityAudit(
         `--source-root=${snapshot.root}`, `--threads=${config.maxThreads}`,
       ], snapshot.root);
       if (create.exitCode !== 0) {
+        if (rejectsNoBuildMode(create.stderr || create.stdout, language)) {
+          skippedCodeqlLanguages.push(language);
+          continue;
+        }
         infrastructureFailure = true;
         findings.push({ ruleId: `openswarm/security-codeql-${language}-database`, level: 'error', message: 'CodeQL could not create its no-build security database.' });
         continue;
@@ -286,9 +310,23 @@ export async function runSecurityAudit(
         findings.push({ ruleId: `openswarm/security-codeql-${language}-sarif`, level: 'error', message: `CodeQL SARIF was invalid: ${shortened(error instanceof Error ? error.message : String(error))}` });
       }
     }
-    return { status: infrastructureFailure ? 'failed' : findings.length === 0 ? 'passed' : 'findings', codeqlLanguages, findings };
+    return {
+      status: infrastructureFailure
+        ? 'failed'
+        : skippedCodeqlLanguages.length > 0
+          ? 'partial'
+          : findings.length > 0
+            ? 'findings'
+            : 'passed',
+      codeqlLanguages,
+      skippedCodeqlLanguages,
+      findings,
+      ...(skippedCodeqlLanguages.length > 0
+        ? { detail: `Skipped languages whose installed CodeQL extractor does not support build-mode=none: ${skippedCodeqlLanguages.join(', ')}.` }
+        : {}),
+    };
   } catch (error) {
-    return { status: 'failed', codeqlLanguages, findings: [{
+    return { status: 'failed', codeqlLanguages, skippedCodeqlLanguages: [], findings: [{
       ruleId: 'openswarm/security-codeql-runtime', level: 'error', message: `CodeQL security audit failed: ${shortened(error instanceof Error ? error.message : String(error))}`,
     }] };
   } finally {

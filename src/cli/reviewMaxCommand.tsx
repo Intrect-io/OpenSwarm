@@ -566,8 +566,16 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
   const refreshSecurityAudit = async (): Promise<SecurityFinding[]> => {
     try {
       const result = await runSecurityAudit(workCwd, await listTrackedSecurityFiles(workCwd), securityAuditConfig);
-      console.log(c.dim(`  CodeQL refresh: ${result.status}, ${result.findings.length} finding(s).`));
-      return result.findings;
+      const skipped = result.skippedCodeqlLanguages.length > 0
+        ? `; skipped no-build-unsupported language(s): ${result.skippedCodeqlLanguages.join(', ')}`
+        : '';
+      console.log(c.dim(`  CodeQL refresh: ${result.status}, ${result.findings.length} finding(s)${skipped}.`));
+      if (result.status !== 'partial') return result.findings;
+      return [...result.findings, {
+        ruleId: 'openswarm/security-codeql-coverage',
+        level: 'error',
+        message: result.detail ?? `CodeQL coverage is partial for: ${result.skippedCodeqlLanguages.join(', ')}.`,
+      }];
     } catch (error) {
       return [{ ruleId: 'openswarm/security-codeql-refresh', level: 'error', message: `CodeQL refresh failed: ${error instanceof Error ? error.message : String(error)}` }];
     }
