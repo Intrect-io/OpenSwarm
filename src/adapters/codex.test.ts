@@ -2,10 +2,10 @@ import { describe, it, expect, vi } from 'vitest';
 import { CodexCliAdapter, coerceCodexModel } from './codex.js';
 
 describe('CodexCliAdapter', () => {
-  const adapter = new CodexCliAdapter();
+  const adapter = new CodexCliAdapter(async () => []);
 
-  it('builds a codex exec command with sandbox json mode', () => {
-    const { command, args, stdinFile } = adapter.buildCommand({
+  it('builds a codex exec command with sandbox json mode', async () => {
+    const { command, args, stdinFile } = await adapter.buildCommand({
       prompt: '/tmp/prompt.txt',
       cwd: '/tmp/project',
       model: 'gpt-5-codex',
@@ -20,13 +20,17 @@ describe('CodexCliAdapter', () => {
     expect(args).toContain('--skip-git-repo-check');
     expect(args.slice(args.indexOf('-m'), args.indexOf('-m') + 2)).toEqual(['-m', 'gpt-5-codex']);
     // Memory MCP server is registered so codex can call search_memory (INT-1855)
-    expect(args.some((arg) => arg.startsWith('mcp_servers.openswarm_memory.command='))).toBe(true);
-    expect(args.some((arg) => arg.startsWith('mcp_servers.openswarm_memory.args=['))).toBe(true);
+    const memoryName = args
+      .find((arg) => /^mcp_servers\.openswarm_memory_[a-f0-9]{32}\.command=/.test(arg))
+      ?.match(/^mcp_servers\.(openswarm_memory_[a-f0-9]{32})\.command=/)?.[1];
+    expect(memoryName).toBeDefined();
+    expect(args.some((arg) => arg.startsWith(`mcp_servers.${memoryName}.args=[`))).toBe(true);
+    expect(args).toContain(`mcp_servers.${memoryName}.enabled=true`);
     expect(stdinFile).toBe('/tmp/prompt.txt');
   });
 
-  it('omits the memory MCP flags when memoryTools=false', () => {
-    const { args } = adapter.buildCommand({
+  it('omits the memory MCP flags when memoryTools=false', async () => {
+    const { args } = await adapter.buildCommand({
       prompt: '/tmp/prompt.txt',
       cwd: '/tmp/project',
       model: 'gpt-5-codex',
@@ -37,10 +41,21 @@ describe('CodexCliAdapter', () => {
     expect(args.join(' ')).not.toContain('openswarm_memory');
   });
 
-  it('substitutes a claude model with the codex default and warns', () => {
+  it('switches off inherited MCP servers before adding its own server (AGT-3990)', async () => {
+    const isolated = new CodexCliAdapter(async (_env, cwd) => {
+      expect(cwd).toBe('/tmp/project');
+      return ['-c', 'mcp_servers.linear.enabled=false'];
+    });
+    const { args } = await isolated.buildCommand({ prompt: '/tmp/prompt.txt', cwd: '/tmp/project' });
+    expect(args.join(' ')).toContain('mcp_servers.linear.enabled=false');
+    // OpenSwarm's own server is still registered — isolation, not a blanket ban.
+    expect(args.join(' ')).toContain('openswarm_memory_');
+  });
+
+  it('substitutes a claude model with the codex default and warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const { args } = adapter.buildCommand({
+      const { args } = await adapter.buildCommand({
         prompt: '/tmp/prompt.txt',
         cwd: '/tmp/project',
         model: 'claude-sonnet-4-20250514',
@@ -181,10 +196,10 @@ describe('CodexCliAdapter', () => {
 });
 
 describe('CodexCliAdapter read-only mode (INT-3189)', () => {
-  const adapter = new CodexCliAdapter();
+  const adapter = new CodexCliAdapter(async () => []);
 
-  it('drops to the read-only sandbox policy and unregisters memory', () => {
-    const { args } = adapter.buildCommand({
+  it('drops to the read-only sandbox policy and unregisters memory', async () => {
+    const { args } = await adapter.buildCommand({
       prompt: '/tmp/prompt.txt',
       cwd: '/tmp/project',
       model: 'gpt-5-codex',
@@ -204,7 +219,7 @@ describe('CodexCliAdapter read-only mode (INT-3189)', () => {
 
 
 describe('CodexCliAdapter reviewer verdict loss (INT-3914)', () => {
-  const adapter = new CodexCliAdapter();
+  const adapter = new CodexCliAdapter(async () => []);
 
   // Event shapes below are verbatim from a live `codex exec --json --sandbox
   // read-only` run of the real reviewer prompt (codex-cli 0.148.0).

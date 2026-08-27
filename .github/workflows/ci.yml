@@ -96,6 +96,22 @@ jobs:
       # never actually enforced.
       - run: npm run test:coverage
 
+  windows-process-tree:
+    # POSIX process groups cannot exercise the Windows ownership contract. This
+    # integration test proves the Job Object kills supervised descendants while
+    # an outside sibling remains alive, guarding against PID-reuse regressions.
+    name: Windows process-tree ownership
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test -- --run src/adapters/processTree.windows.test.ts
+
   loc-gate:
     name: LOC Warning (800 lines)
     runs-on: ubuntu-latest

@@ -5,6 +5,7 @@
 
 import type { ChildProcess } from 'node:child_process';
 import { broadcastEvent } from '../core/eventHub.js';
+import { signalCliProcessTree, terminateCliProcessTree } from './processTree.js';
 
 // Types
 
@@ -21,6 +22,7 @@ export interface ProcessInfo {
 // Registry (singleton)
 
 const registry = new Map<number, ProcessInfo>();
+const processHandles = new Map<number, ChildProcess>();
 let healthCheckTimer: NodeJS.Timeout | null = null;
 
 // Throttle activity broadcasts: PID → last broadcast timestamp
@@ -34,6 +36,7 @@ const ACTIVITY_THROTTLE_MS = 5000;
  */
 export function registerProcess(info: ProcessInfo, proc: ChildProcess): void {
   registry.set(info.pid, info);
+  processHandles.set(info.pid, proc);
 
   // Broadcast spawn event
   broadcastEvent({
@@ -69,6 +72,7 @@ export function registerProcess(info: ProcessInfo, proc: ChildProcess): void {
     const entry = registry.get(info.pid);
     const durationMs = entry ? Date.now() - entry.spawnedAt : 0;
     registry.delete(info.pid);
+    processHandles.delete(info.pid);
     activityThrottle.delete(info.pid);
 
     broadcastEvent({
@@ -109,12 +113,25 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
   if (!entry) return false;
 
   try {
+    const proc = processHandles.get(pid);
+    if (proc) {
+      if (force) {
+        terminateCliProcessTree(proc);
+      } else {
+        signalCliProcessTree(proc, 'SIGTERM');
+        // Escalate the same process group. The npm wrapper may exit before its
+        // native CLI/MCP descendants, so checking only proc.exitCode is unsafe.
+        const escalation = setTimeout(() => terminateCliProcessTree(proc), 5000);
+        escalation.unref();
+      }
+      return true;
+    }
     if (force) {
       process.kill(pid, 'SIGKILL');
     } else {
       process.kill(pid, 'SIGTERM');
       // Escalate to SIGKILL after 5s if still alive
-      setTimeout(() => {
+      const escalation = setTimeout(() => {
         try {
           process.kill(pid, 0); // Check if alive
           process.kill(pid, 'SIGKILL');
@@ -122,11 +139,13 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
           // Already dead — good
         }
       }, 5000);
+      escalation.unref();
     }
     return true;
   } catch {
     // Process already gone
     registry.delete(pid);
+    processHandles.delete(pid);
     activityThrottle.delete(pid);
     return false;
   }
@@ -146,6 +165,7 @@ export function startHealthChecker(intervalMs = 30000): void {
         // Process is dead but wasn't cleaned up
         const durationMs = Date.now() - info.spawnedAt;
         registry.delete(pid);
+        processHandles.delete(pid);
         activityThrottle.delete(pid);
         broadcastEvent({
           type: 'process:exit',

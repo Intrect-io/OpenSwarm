@@ -3,13 +3,155 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CliAdapter } from './types.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 
-import { spawnCli } from './base.js';
+import { spawnCli, terminateCliProcessTree } from './base.js';
+import {
+  prepareCliProcessTreeSpawn,
+  trackCliProcessTree,
+} from './processTree.js';
+
+beforeEach(() => spawnMock.mockReset());
+afterEach(() => vi.restoreAllMocks());
+
+describe('CLI process tree termination', () => {
+  it('kills the whole POSIX process group so native CLI and MCP children cannot survive a timeout', () => {
+    const processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const directKill = vi.fn(() => true);
+
+    terminateCliProcessTree({ pid: 7654, kill: directKill } as never, 'linux');
+
+    expect(processKill).toHaveBeenCalledWith(-7654, 'SIGKILL');
+    expect(directKill).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the direct child when the POSIX process group is already gone', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('no such process group'), { code: 'ESRCH' });
+    });
+    const directKill = vi.fn(() => true);
+
+    terminateCliProcessTree({ pid: 7655, kill: directKill } as never, 'linux');
+
+    expect(directKill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('terminates the retained Windows supervisor handle without a PID lookup', () => {
+    const directKill = vi.fn(() => true);
+
+    terminateCliProcessTree({ pid: 7656, kill: directKill } as never, 'win32');
+
+    expect(directKill).toHaveBeenCalledWith('SIGKILL');
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('creates the Windows Job Object before launching an argv-safe target', () => {
+    const originalEnv = { SystemRoot: 'D:\\Windows', KEEP_ME: 'yes' };
+    const targetArgs = ['exec', '--model', 'gpt 5', 'quote"and&shell'];
+
+    const prepared = prepareCliProcessTreeSpawn(
+      'C:\\Tools\\codex.exe',
+      targetArgs,
+      originalEnv,
+      'win32',
+    );
+    const encodedSpec = prepared.env.OPENSWARM_WINDOWS_JOB_SPEC;
+    const decodedSpec = JSON.parse(Buffer.from(encodedSpec!, 'base64').toString('utf8'));
+    const supervisor = Buffer.from(prepared.args.at(-1)!, 'base64').toString('utf16le');
+    const assignment = supervisor.indexOf(
+      'AssignProcessToJobObject($job, [OpenSwarmJobObject]::GetCurrentProcess())',
+    );
+    const targetLaunch = supervisor.indexOf('& ([string]$spec.command) @targetArgs');
+
+    expect(prepared.command).toBe(
+      'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    );
+    expect(prepared.args).toEqual([
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      expect.any(String),
+    ]);
+    expect(decodedSpec).toEqual({ command: 'C:\\Tools\\codex.exe', args: targetArgs });
+    expect(originalEnv).not.toHaveProperty('OPENSWARM_WINDOWS_JOB_SPEC');
+    expect(supervisor).toContain('LimitFlags = 0x00002000');
+    expect(assignment).toBeGreaterThan(-1);
+    expect(targetLaunch).toBeGreaterThan(assignment);
+  });
+
+  it('cannot target a reused Windows PID after the wrapper has exited', () => {
+    const exitedWrapperKill = vi.fn(() => false);
+    const unrelatedReusedPidKill = vi.fn(() => true);
+
+    terminateCliProcessTree({ pid: 7657, kill: exitedWrapperKill } as never, 'win32');
+
+    expect(exitedWrapperKill).toHaveBeenCalledWith('SIGKILL');
+    expect(unrelatedReusedPidKill).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === 'win32')('preserves a pre-existing one-shot graceful SIGINT handler', () => {
+    const processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const gracefulShutdown = vi.fn();
+    process.once('SIGINT', gracefulShutdown);
+
+    trackCliProcessTree({ pid: 7659, kill: vi.fn() } as never);
+    process.emit('SIGINT', 'SIGINT');
+
+    expect(gracefulShutdown).toHaveBeenCalledOnce();
+    expect(processKill).toHaveBeenCalledWith(-7659, 'SIGKILL');
+    expect(processKill).not.toHaveBeenCalledWith(process.pid, 'SIGINT');
+  });
+
+  it.skipIf(process.platform === 'win32')('kills the POSIX process group on AbortSignal and removes parent hooks', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 7658,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+      kill: vi.fn(),
+    });
+    spawnMock.mockReturnValueOnce(proc);
+    const processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const beforeSigint = process.listenerCount('SIGINT');
+    const beforeSigterm = process.listenerCount('SIGTERM');
+    const controller = new AbortController();
+    const adapter: CliAdapter = {
+      name: 'fixture',
+      capabilities: {
+        supportsStreaming: false,
+        supportsJsonOutput: false,
+        supportsModelSelection: false,
+        managedGit: false,
+        supportedSkills: [],
+      },
+      isAvailable: async () => true,
+      getDefaultModel: async () => 'fixture',
+      buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+      parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+      parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+    };
+
+    const running = spawnCli(adapter, { prompt: 'hello', cwd: process.cwd(), signal: controller.signal });
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalled());
+    expect(process.listenerCount('SIGINT')).toBe(beforeSigint + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(beforeSigterm + 1);
+
+    controller.abort(new Error('cancelled by test'));
+
+    await expect(running).rejects.toThrow('cancelled by test');
+    expect(processKill).toHaveBeenCalledWith(-7658, 'SIGKILL');
+    expect(process.listenerCount('SIGINT')).toBe(beforeSigint);
+    expect(process.listenerCount('SIGTERM')).toBe(beforeSigterm);
+  });
+});
 
 describe('argv-safe adapter spawning', () => {
   it('passes metacharacters as one argv value with shell disabled', async () => {
@@ -45,7 +187,10 @@ describe('argv-safe adapter spawning', () => {
     expect(spawnMock).toHaveBeenCalledWith(
       'fixture-cli',
       ['--model', injected],
-      expect.objectContaining({ shell: false }),
+      expect.objectContaining({
+        shell: false,
+        detached: process.platform !== 'win32',
+      }),
     );
   });
 
@@ -79,6 +224,7 @@ describe('argv-safe adapter spawning', () => {
   });
 
   it('settles after child exit when an inherited stdio descriptor prevents close', async () => {
+    const processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const proc = Object.assign(new EventEmitter(), {
         pid: 125,
         stdout: new PassThrough(),
@@ -104,6 +250,57 @@ describe('argv-safe adapter spawning', () => {
     await expect(spawnCli(adapter, { prompt: 'hello', cwd: process.cwd() }))
       .resolves.toMatchObject({ exitCode: 0 });
     expect(Date.now() - started).toBeLessThan(2_000);
+    expect(processKill).toHaveBeenCalledWith(-125, 'SIGKILL');
+  });
+
+  it('hard-times-out command construction that ignores AbortSignal and handles its late rejection', async () => {
+    const adapter = {
+      name: 'fixture',
+      capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
+      isAvailable: async () => true,
+      getDefaultModel: async () => 'fixture',
+      buildCommand: () => new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('late command failure')), 300);
+      }),
+      parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+      parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
+    } as unknown as CliAdapter;
+
+    const started = Date.now();
+    await expect(spawnCli(adapter, {
+      prompt: 'hello',
+      cwd: process.cwd(),
+      timeoutMs: 25,
+    })).rejects.toThrow('fixture timeout after 25ms');
+    expect(Date.now() - started).toBeLessThan(150);
+    expect(spawnMock).not.toHaveBeenCalled();
+    // Let the abandoned operation reject. Vitest will fail this test if it
+    // escapes as an unhandled rejection.
+    await new Promise((resolve) => setTimeout(resolve, 325));
+  });
+
+  it('hard-times-out adapter.run when the adapter ignores AbortSignal', async () => {
+    const adapter = {
+      name: 'fixture',
+      capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
+      isAvailable: async () => true,
+      getDefaultModel: async () => 'fixture',
+      buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+      run: () => new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('late run failure')), 300);
+      }),
+      parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+      parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
+    } satisfies CliAdapter;
+
+    const started = Date.now();
+    await expect(spawnCli(adapter, {
+      prompt: 'hello',
+      cwd: process.cwd(),
+      timeoutMs: 25,
+    })).rejects.toThrow('fixture timeout after 25ms');
+    expect(Date.now() - started).toBeLessThan(150);
+    await new Promise((resolve) => setTimeout(resolve, 325));
   });
 });
 
