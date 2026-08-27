@@ -682,6 +682,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <div class="empty">no monitors or processes</div>
         </div>
       </div>
+      <div class="panel" id="coordination-panel">
+        <div class="panel-hdr">
+          <span class="panel-hdr-title">AGENT COORDINATION</span>
+          <span class="panel-hdr-badge" id="coordination-count"></span>
+        </div>
+        <div class="panel-body" id="coordination-list">
+          <div class="empty">no coordination events</div>
+        </div>
+      </div>
     </div>
 
     <!-- REPO PICKER OVERLAY -->
@@ -817,6 +826,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     let stageRows = [];
     let chatBusy = false;
     let totalCostUsd = 0;
+    const coordinationById = new Map();
     const taskProjectMap = new Map();
     // taskId → { title, issueIdentifier } for pipeline display
     const taskTitleMap = new Map();
@@ -860,6 +870,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           break;
         }
         case "pipeline:stage": addStageRow(ev.data); break;
+        case "coordination:event": addCoordinationEvent(ev.data); break;
         case "pipeline:fanout":
           addStageRow({
             taskId: ev.data.taskId,
@@ -893,6 +904,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           break;
         case "process:spawn":
           fetchProcesses();
+      fetchCoordination();
           addLogLine({ taskId: ev.data.taskId || "system", stage: ev.data.stage || "spawn", line: "Process spawned PID=" + ev.data.pid + " stage=" + ev.data.stage + (ev.data.model ? " model=" + ev.data.model : "") });
           break;
         case "process:exit":
@@ -2193,6 +2205,40 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       el.innerHTML = html;
     }
 
+    function addCoordinationEvent(event) {
+      if (!event || typeof event.id !== "string") return;
+      const previous = coordinationById.get(event.id);
+      if (!previous || Number(event.seq || 0) >= Number(previous.seq || 0)) coordinationById.set(event.id, event);
+      renderCoordination();
+    }
+
+    function renderCoordination() {
+      const el = document.getElementById("coordination-list");
+      const events = Array.from(coordinationById.values()).sort(function(a, b) { return Number(b.seq || 0) - Number(a.seq || 0); }).slice(0, 50);
+      document.getElementById("coordination-count").textContent = events.length ? String(events.length) : "";
+      if (!events.length) { el.innerHTML = '<div class="empty">no coordination events</div>'; return; }
+      el.innerHTML = events.map(function(ev) {
+        const pending = ["open", "waiting", "running"].includes(ev.status);
+        const color = pending ? "var(--amber)" : ev.status === "failed" || ev.status === "expired" ? "var(--red)" : "var(--green)";
+        const route = escapeHtml((ev.actorName || ev.actor || "?") + " → " + (ev.recipientName || ev.recipient || "all"));
+        const meta = escapeHtml((ev.kind || "event") + " · #" + (ev.seq || 0));
+        return '<div style="padding:6px;border-bottom:1px solid var(--border2)">' +
+          '<div style="display:flex;gap:6px;align-items:center"><span style="color:' + color + ';font-size:10px;font-weight:700">' + escapeHtml(String(ev.status || "")) + '</span><span style="color:var(--cyan);font-size:10px">' + meta + '</span></div>' +
+          '<div style="font-size:11px;color:var(--white);margin-top:2px">' + escapeHtml(ev.summary || "") + '</div>' +
+          '<div style="font-size:9px;color:var(--dim);margin-top:2px">' + route + ' · ' + escapeHtml(ev.correlationId || "") + '</div>' +
+        '</div>';
+      }).join("");
+    }
+
+    async function fetchCoordination() {
+      try {
+        const response = await fetch("/api/coordination");
+        if (!response.ok) return;
+        const snapshot = await response.json();
+        for (const event of snapshot.events || []) addCoordinationEvent(event);
+      } catch {}
+    }
+
     // ---- Init ----
     async function loadInitial() {
       try {
@@ -2234,6 +2280,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         // Restore pipeline/task events
         const stages = await stagesRes.json();
         for (const ev of stages) handleEvent(ev);
+        await fetchCoordination();
       } catch(e) {
         console.error("Supplemental data load failed:", e);
       }
@@ -2298,6 +2345,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     setInterval(fetchKnowledgeData, 60000);
     setInterval(fetchMonitors, 60000);
     setInterval(fetchProcesses, 30000);
+    setInterval(fetchCoordination, 30000);
 
     // 2단계: 렌더링 안정화 후 비필수 데이터 로드 (3초 지연)
     setTimeout(function() {

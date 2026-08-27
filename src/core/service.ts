@@ -223,7 +223,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // verbatim — slim mode (1 resolver call/issue vs 3) + comment hydration +
     // task-state enrichment — and only used by LinearTaskSource.
     const linearConfigured = !!(config.linearApiKey && config.linearTeamId);
-    autonomous.setTaskSource(selectTaskSource(linearConfigured, async () => {
+    const selectedTaskSource = selectTaskSource(linearConfigured, async () => {
       await linear.ensureLinearAuthFresh(); // refresh OAuth token (no-op for API key) each heartbeat
       const issues = await linear.getMyIssues({ slim: true, timeoutMs: 300000 });
       const { linearIssueToTask } = await import('../orchestration/decisionEngine.js');
@@ -245,7 +245,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
           } : undefined,
         }));
       });
-    }));
+    });
+    autonomous.setTaskSource(selectedTaskSource);
     console.log(`[Service] Task source registered (${linearConfigured ? 'linear' : 'local'})`);
 
     // Register the notifier for the configured channel (Discord/Slack/Telegram/
@@ -299,7 +300,23 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       maxReflections: config.autonomous.maxReflections,
       interTaskCooldownMs: config.autonomous.interTaskCooldownMs ?? 1_800_000,
       jobProfiles: config.autonomous.jobProfiles,
+      coordinationBoardIssueId: config.autonomous.coordinationBoardIssueId,
+      mcpPolicies: config.autonomous.mcpPolicies,
+      adapterRouting: config.autonomous.adapterRouting,
+      periodicReviews: config.autonomous.periodicReviews,
+      orchestratorSchedule: config.autonomous.orchestratorSchedule,
     });
+    if (config.autonomous.coordinationBoardIssueId) {
+      const { TrackerCoordinationBoard } = await import('../coordination/linearBoard.js');
+      const board = new TrackerCoordinationBoard(selectedTaskSource, config.autonomous.coordinationBoardIssueId);
+      const store = (await import('../coordination/coordinationStore.js')).getCoordinationStore();
+      const hub = (await import('./eventHub.js')).getEventHub();
+      hub.on('coordination:published', (event) => { void board.publish(event).catch((error) => console.error('[CoordinationBoard] publish failed:', error)); });
+      // Import messages posted by another host/session. Local fingerprinting makes this idempotent.
+      const remote = await board.read().catch((error) => { console.error('[CoordinationBoard] initial read failed:', error); return []; });
+      for (const event of remote) await store.publish(event);
+      console.log(`[Service] Coordination board registered (${config.autonomous.coordinationBoardIssueId})`);
+    }
     web.setWebRunner(runnerInstance);
     // Re-apply the persisted provider toggle: switchProvider() is in-memory only, so without this a
     // restart silently reverts to config.yaml's adapter. Reusing switchProvider keeps the role +

@@ -3,7 +3,7 @@ import { isKnownAdapter, listAdapterNames } from './index.js';
 
 describe('isKnownAdapter', () => {
   it('accepts currently-registered adapters (incl. claude, the opt-in claude -p delegate)', () => {
-    for (const name of ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude']) {
+    for (const name of ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude', 'cc-router', 'cursor']) {
       expect(isKnownAdapter(name)).toBe(true);
     }
   });
@@ -19,7 +19,7 @@ describe('isKnownAdapter', () => {
 
   it('listAdapterNames returns every registered adapter', () => {
     expect([...listAdapterNames()].sort()).toEqual(
-      ['atlascloud', 'claude', 'codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter'].sort(),
+      ['atlascloud', 'cc-router', 'claude', 'codex', 'cursor', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter'].sort(),
     );
   });
 });

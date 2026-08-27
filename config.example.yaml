@@ -3,7 +3,7 @@
 # Copy this file to config.yaml to use
 
 # Default CLI adapter for worker/reviewer stages
-# Options: codex-responses, codex, gpt, local, lmstudio, openrouter, atlascloud, claude
+# Options: codex, codex-responses, cc-router, cursor, gpt, local, lmstudio, openrouter, atlascloud, claude
 # For ChatGPT OAuth: run `openswarm auth login --provider gpt`
 #   `codex-responses` runs OpenSwarm's native tool loop with the same login.
 # For OpenRouter: run `openswarm auth login --provider openrouter`
@@ -54,6 +54,46 @@ autonomous:
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
   shutdownGraceMs: 30000         # Wait for real executor exit before service teardown
+
+  # Durable agent board + human/operator coordination. Use one project-scoped
+  # issue whose comments form the append-only Linear board.
+  coordinationBoardIssueId: AGT-3993
+
+  # `primary` must name the same adapter this file selects above (adapter:), or
+  # routing silently disables — the worker only consults a policy whose primary
+  # is the adapter it is actually running.
+  # Only typed failures may route to CC-Router or an authenticated Cursor CLI;
+  # a failing test or a reviewer verdict never does.
+  #   quota      — provider usage limit / 429 on the primary
+  #   infra      — spawn, auth, or timeout failure before the agent ran
+  #   capability — the primary is not installed or not serving on this machine
+  adapterRouting:
+    primary: codex-responses
+    fallbacks: [cc-router, cursor]
+    allowReasons: [quota, infra, capability]
+
+  # Exact role-scoped MCP grants. Reads are allowed from listed servers; writes
+  # and destructive operations require exact tool names.
+  mcpPolicies:
+    orchestrator:
+      servers: [github, linear, cloudflare]
+      writeTools: [linear__save_comment]
+    worker:
+      servers: [github, linear]
+      writeTools: [linear__save_comment]
+    reviewer:
+      servers: [github, linear]
+
+  # Periodic review agents are read-only and leased per repository/profile.
+  periodicReviews:
+    - { profile: permissions, schedule: "17 */6 * * *" }
+    - { profile: hygiene, schedule: "43 */6 * * *" }
+    - { profile: security, schedule: "11 2 * * *", adapter: codex }
+
+  # MCP-connected orchestrator sweep. Fires only for repositories whose board
+  # has open items the orchestrator can actually act on — questions waiting on
+  # the operator are left for Discord. Omit the key to disable it entirely.
+  orchestratorSchedule: "17 */2 * * *"
 
   allowedProjects:
     - ~/dev/your-project
@@ -184,3 +224,16 @@ prProcessor:
 # OPENSWARM_TELEMETRY=0 / DO_NOT_TRACK=1. CI environments are excluded automatically.
 telemetry:
   enabled: true
+
+# MCP servers available to the daemon. Role policies below decide which tools
+# each autonomous role actually sees; no policy means no MCP access.
+mcp:
+  servers:
+    github:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-github"]
+    linear:
+      preset: linear
+    cloudflare:
+      command: npx
+      args: ["-y", "@cloudflare/mcp-server-cloudflare"]

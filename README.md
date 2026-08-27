@@ -313,15 +313,17 @@ DISCORD_CHANNEL_ID=your-channel-id
 ### CLI Adapter (Provider)
 
 ```yaml
-adapter: codex   # one of: codex · codex-responses · gpt · openrouter · atlascloud · lmstudio · local  (default: codex)
+adapter: codex   # codex · codex-responses · cc-router · cursor · gpt · openrouter · atlascloud · lmstudio · local · claude
 ```
 
-`adapter` accepts one of the seven values below (validated by Zod). For a ChatGPT subscription, `codex-responses` is the smoothest first-run choice — it runs OpenSwarm's native loop over the Responses API with no extra binary. Switch at runtime via Discord, e.g. `!provider codex-responses` / `!provider openrouter`.
+`adapter` accepts one of the registered values below (validated by Zod). For a ChatGPT subscription, `codex-responses` is the smoothest first-run choice — it runs OpenSwarm's native loop over the Responses API with no extra binary. Switch at runtime via Discord, e.g. `!provider codex-responses` / `!provider openrouter`.
 
 | Adapter | Backend | Models | Auth |
 |---------|---------|--------|------|
 | `codex-responses` | OpenAI Responses API (native loop, no CLI binary) | gpt-5.6-terra (default), gpt-5.6-sol, gpt-5.6-luna | ChatGPT OAuth |
 | `codex` | OpenAI Codex CLI (delegated) | gpt-5-codex (default), o3, o4-mini | ChatGPT OAuth / `codex` CLI auth |
+| `cc-router` | Local CC-Router Responses endpoint (native loop) | Router's live model catalog | Existing CC-Router account pool |
+| `cursor` | Cursor Agent CLI (delegated, sandbox enabled) | Cursor account model catalog | Existing `cursor-agent login` session |
 | `gpt` | OpenAI Chat API | gpt-4o (default), o3, … | OAuth PKCE |
 | `openrouter` | OpenRouter API (native agentic loop) | any OpenRouter model — gpt-5, gemini-2.5, deepseek, glm, qwen, … | `OPENROUTER_API_KEY` or OAuth PKCE |
 | `atlascloud` | Atlas Cloud API (native agentic loop) · [sponsor](#sponsors) | Atlas models — deepseek-v4-pro (default), qwen3.5-flash, … | `ATLASCLOUD_API_KEY` |
@@ -331,6 +333,36 @@ adapter: codex   # one of: codex · codex-responses · gpt · openrouter · atla
 > **Claude Code (`claude -p`)** is supported as an **opt-in fallback** (and powers the `claude -p` chat path) — install the `claude` CLI and authenticate it; `openswarm init` and `openswarm doctor` detect it. It is a valid `adapter:` value, but opt-in: nothing falls back to it automatically. Switch to it when another provider runs out of quota with `openswarm provider claude`.
 
 The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edit/bash with verification guards), enables ZDR (`data_collection: deny`) for non-OpenAI models, and applies Anthropic prompt caching automatically. Local backends are auto-detected on standard ports (Ollama `:11434`, LM Studio `:1234`); use `lmstudio` for a dedicated LM Studio endpoint (`LMSTUDIO_BASE_URL`, default `http://localhost:1234`).
+
+### Autonomous coordination and supervision
+
+Each autonomous run snapshots the current Claude Code instruction hierarchy (`~/.claude/CLAUDE.md`, user rules, repository `CLAUDE.md`/`AGENTS.md`, and matching `.claude/rules`) once and applies the same capsule to orchestrator, worker, reviewer, Codex, CC-Router, and Cursor. The dashboard shows the capsule digest and source/error counts, not the rule bodies.
+
+`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_publish`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; OpenSwarm logs a warning rather than pretending they applied.
+
+A configured `coordinationBoardIssueId` turns one project-scoped tracker issue into the durable agent board. Worker advice/delegation, Discord questions, adapter routes, periodic reviews, and MCP denials are visible through `GET /api/coordination`, SSE, and the **AGENT COORDINATION** dashboard panel. Tool arguments, prompts, credentials, and rule bodies are redacted or omitted.
+
+```yaml
+autonomous:
+  coordinationBoardIssueId: AGT-3993
+  adapterRouting:
+    primary: codex-responses
+    fallbacks: [cc-router, cursor]
+    allowReasons: [quota, infra, capability]
+  mcpPolicies:
+    orchestrator:
+      servers: [github, linear, cloudflare]
+      writeTools: [linear__save_comment]
+  periodicReviews:
+    - { profile: hygiene, schedule: "43 */6 * * *" }
+  # MCP-connected orchestrator sweep. Runs only where the board has open items
+  # it can act on; questions waiting on the operator are left for Discord.
+  orchestratorSchedule: "17 */2 * * *"
+```
+
+Every agent has a call sign — `Magos Corvax-Vigilis`, `Adept Ferrus-Umbra` — and messages are addressed to it. The name is derived from the repository, task, and role rather than randomly assigned, so it is stable across a restart or a retry and doubles as the agent's mailbox address; the worker and the reviewer on one task never share one. Call signs appear in the dashboard, in board comments, and in each agent's own prompt.
+
+Blocking questions are sent to the configured Discord channel as `!answer <correlation-id> <answer>`. Only users in `DISCORD_ALLOWED_USERS` can settle them. The asking run stops and reports rather than guessing a default, and the question stays open on the board until someone answers — the answer is addressed back to the call sign that raised it, so the next run of that agent reads it from its inbox. When Discord is not configured the tool says so instead of claiming the operator was paged.
 
 Per-role adapter overrides (each role may pick its own valid adapter + model):
 

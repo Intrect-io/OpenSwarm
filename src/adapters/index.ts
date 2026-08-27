@@ -23,6 +23,8 @@ export { LmStudioAdapter } from './lmstudio.js';
 export { OpenRouterCliAdapter } from './openrouter.js';
 export { AtlasCloudCliAdapter } from './atlascloud.js';
 export { ClaudeCliAdapter } from './claude.js';
+export { CcRouterAdapter } from './ccRouter.js';
+export { CursorCliAdapter } from './cursor.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
 import { CodexCliAdapter } from './codex.js';
@@ -33,6 +35,8 @@ import { LmStudioAdapter } from './lmstudio.js';
 import { OpenRouterCliAdapter } from './openrouter.js';
 import { AtlasCloudCliAdapter } from './atlascloud.js';
 import { ClaudeCliAdapter } from './claude.js';
+import { CcRouterAdapter } from './ccRouter.js';
+import { CursorCliAdapter } from './cursor.js';
 import type { AdapterName, CliAdapter } from './types.js';
 
 const adapters: Record<string, CliAdapter> = {
@@ -46,6 +50,8 @@ const adapters: Record<string, CliAdapter> = {
   // claude -p CLI delegate — opt-in fallback (Anthropic hasn't blocked it). Offered
   // by `openswarm init` and the dashboard provider switch, so it must be registered.
   claude: new ClaudeCliAdapter(),
+  'cc-router': new CcRouterAdapter(),
+  cursor: new CursorCliAdapter(),
 };
 
 let defaultAdapter: AdapterName = 'codex';

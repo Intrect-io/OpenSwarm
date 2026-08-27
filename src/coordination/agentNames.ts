@@ -1,0 +1,75 @@
+// ============================================
+// OpenSwarm - Warhammer 40k style agent call signs
+// ============================================
+//
+// Workers address each other by name, so a name must be stable: the same
+// worker in the same repository resolves to the same call sign across
+// restarts. Derived deterministically from the repository and execution
+// identity rather than randomly assigned, and disambiguated only when two
+// distinct identities would otherwise collide.
+
+import { createHash } from 'node:crypto';
+
+const TITLES = [
+  'Adept', 'Archmagos', 'Artificer', 'Castellan', 'Enginseer', 'Inquisitor',
+  'Lexmechanic', 'Magos', 'Preceptor', 'Primaris', 'Techmarine', 'Vindicator',
+] as const;
+
+const NAMES = [
+  'Aurelian', 'Corvax', 'Dominus', 'Ferrus', 'Galvanis', 'Helion', 'Ignatus',
+  'Kaledon', 'Lumen', 'Mordax', 'Nemetor', 'Orthrus', 'Praetor', 'Quintus',
+  'Rhodanis', 'Sabbat', 'Talon', 'Ultor', 'Varrus', 'Xanthus', 'Ymir', 'Zetheus',
+] as const;
+
+const EPITHETS = [
+  'Ferrum', 'Vigilis', 'Sanctus', 'Cognitor', 'Invictus', 'Astra', 'Novum',
+  'Rubicon', 'Tertius', 'Umbra', 'Vector', 'Kappa', 'Sigma', 'Theta',
+] as const;
+
+/** The role a call sign carries, so a name also states what the agent does. */
+export type AgentRole = 'worker' | 'reviewer' | 'orchestrator' | 'review-agent';
+
+export interface AgentCallSign {
+  /** Human-facing call sign, e.g. `Magos Corvax-Vigilis`. */
+  name: string;
+  /** Lowercase, punctuation-free address used for mailbox routing. */
+  address: string;
+  role: AgentRole;
+}
+
+function digestOf(parts: readonly string[]): Buffer {
+  return createHash('sha256').update(parts.join('\0')).digest();
+}
+
+function compose(digest: Buffer, salt: number): string {
+  const title = TITLES[(digest[0] + salt) % TITLES.length];
+  const name = NAMES[(digest[1] + salt * 7) % NAMES.length];
+  const epithet = EPITHETS[(digest[2] + salt * 13) % EPITHETS.length];
+  return `${title} ${name}-${epithet}`;
+}
+
+/** Normalize a call sign into its routable address form. */
+export function callSignAddress(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+/**
+ * Resolve a stable call sign for one agent identity.
+ *
+ * `taken` holds the addresses already in use by other live identities in this
+ * repository; a collision advances to the next candidate rather than letting
+ * two active agents answer to one name.
+ */
+export function assignCallSign(
+  input: { repository: string; executionId: string; role: AgentRole },
+  taken: ReadonlySet<string> = new Set(),
+): AgentCallSign {
+  const digest = digestOf([input.repository, input.executionId, input.role]);
+  for (let salt = 0; salt < TITLES.length * NAMES.length; salt += 1) {
+    const name = compose(digest, salt);
+    const address = callSignAddress(name);
+    if (!taken.has(address)) return { name, address, role: input.role };
+  }
+  const fallback = `${compose(digest, 0)} ${digest.toString('hex').slice(0, 6)}`;
+  return { name: fallback, address: callSignAddress(fallback), role: input.role };
+}

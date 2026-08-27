@@ -39,9 +39,12 @@ function isAtlasCloudModel(id: string): boolean {
 export function mapModelForProvider(adapter: AdapterName, model: string | undefined): string | undefined {
   const current = (model || '').trim();
   if (!current) return undefined;
-  if (adapter === 'codex' || adapter === 'codex-responses') {
+  if (adapter === 'codex' || adapter === 'codex-responses' || adapter === 'cc-router') {
     // ChatGPT-account Codex only runs gpt-* slugs; anything else → adapter default.
     return current.startsWith('gpt-') ? current : undefined;
+  }
+  if (adapter === 'cursor') {
+    return current;
   }
   if (adapter === 'claude') {
     // The claude CLI accepts claude-* ids and version-agnostic aliases.

@@ -133,6 +133,63 @@ describe('PairPipeline model selection', () => {
     }));
   });
 
+  it('stops without retrying when the worker is waiting on an operator decision', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    runWorker.mockResolvedValue({
+      success: false,
+      summary: 'asked the operator',
+      filesChanged: [],
+      commands: [],
+      output: '',
+      blockedOnOperator: true,
+      haltReason: 'Blocked on an operator decision (ask_human posted to Discord)',
+    });
+
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 3,
+      roles: {
+        worker: { enabled: true, model: 'w', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'r', timeoutMs: 0 },
+      },
+    });
+    const result = await pipeline.run(task(), process.cwd());
+
+    // Retrying re-runs the same worker into the same unanswered question, and
+    // anything but the first-class status gets failure-counted by the scheduler.
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('waiting_on_operator');
+    expect(result.workerResult?.blockedOnOperator).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(1);
+    expect(runReviewer).not.toHaveBeenCalled();
+  });
+
+  it('names the worker and the reviewer distinctly, and keeps the name across a retry', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const config = {
+      stages: ['worker', 'reviewer'] as const,
+      maxIterations: 1,
+      roles: {
+        worker: { enabled: true, model: 'w', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'r', timeoutMs: 0 },
+      },
+    };
+
+    await new PairPipeline({ ...config, stages: [...config.stages] }).run(task(), process.cwd());
+    const firstWorker = runWorker.mock.calls[0][0].coordinationContext;
+    const reviewerContext = runReviewer.mock.calls[0][0].coordinationContext;
+
+    // Two agents on one task must never answer to the same call sign.
+    expect(firstWorker.actorName).toBeTruthy();
+    expect(reviewerContext.actorName).toBeTruthy();
+    expect(reviewerContext.actor).not.toBe(firstWorker.actor);
+
+    // A retry gets a fresh session but must keep the name, or an answer
+    // addressed to the first attempt is stranded in an inbox nobody reads.
+    await new PairPipeline({ ...config, stages: [...config.stages] }).run(task(), process.cwd());
+    expect(runWorker.mock.calls.at(-1)?.[0].coordinationContext.actor).toBe(firstWorker.actor);
+  });
+
   it('drops incompatible profile and escalation models at the Claude execution boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
     const pipeline = new PairPipeline({

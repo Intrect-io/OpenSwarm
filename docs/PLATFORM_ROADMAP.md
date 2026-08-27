@@ -136,19 +136,20 @@ into the work API.
 
 M0 blocks everything else: the deterministic quality-harness module M1–M3 build on is not yet versioned.
 
-## 5. UI policy: frozen, not removed
+## 5. UI policy: consolidate and evolve
 
-Three web generations and a desktop shell ship today. The policy is **freeze**: they keep
-working and are not deleted, but they receive no new features. The daemon's read API layer is
-explicitly excluded from the freeze — it is the backend the VSCode extension will reuse, so it
-continues to be maintained and extended.
+The previous UI freeze decision was cancelled on 2026-08-27. The daemon dashboard and desktop
+shell remain active product surfaces for supervising autonomous work. New capabilities should
+extend the daemon read APIs and converge on existing surfaces instead of introducing another UI
+generation. Observability is read-only by default; state-changing controls require explicit
+authorization and auditable server-side policy.
 
 | Surface | Size | Disposition |
 |---------|------|-------------|
-| Legacy dashboard (`src/support/dashboardHtml.ts`) | ~2.3k lines | Frozen; still the default landing page for `openswarm dash` and the desktop shell |
-| Cockpit SPA (`web/static/`) | ~2.8k lines | Frozen |
-| Issue board (`src/issues/issueBoardHtml.ts`) | ~0.7k lines | Frozen |
-| Tauri desktop shell (`desktop/`) | ~1.8k lines of Rust | Frozen prototype |
+| Legacy dashboard (`src/support/dashboardHtml.ts`) | ~2.3k lines | Active operations dashboard; receives coordination monitoring |
+| Cockpit SPA (`web/static/`) | ~2.8k lines | Active; converge with daemon operations APIs |
+| Issue board (`src/issues/issueBoardHtml.ts`) | ~0.7k lines | Maintained; avoid duplicating coordination state |
+| Tauri desktop shell (`desktop/`) | ~1.8k lines of Rust | Active shell for the operations surfaces |
 | Daemon read APIs | — | **Maintained** — extension backend |
 
 One open question is tracked in INT-3777: whether the desktop shell's default entry path
@@ -158,7 +159,7 @@ should flip from the legacy dashboard to the cockpit SPA.
 
 - **LSP integration.** Rejected on measured evidence (N=48, no uplift). The VSCode extension
   consumes SARIF; it does not become a language server.
-- **Removing the web or desktop UI.** Frozen, not deleted.
+- **Removing the web or desktop UI.** They remain active operations surfaces.
 - **Demoting the autonomous daemon.** It remains a first-class pillar.
 - **Notification-channel digests** of inspection results. Out of scope for this epic; reports,
   tracker issues, and PR comments are the routing targets.

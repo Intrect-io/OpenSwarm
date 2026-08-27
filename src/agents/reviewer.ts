@@ -13,6 +13,8 @@ import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
+import type { InstructionCapsule } from './instructionCapsule.js';
+import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 // Types
 
@@ -74,6 +76,23 @@ export interface ReviewerOptions {
    * there is nothing in the working tree to read. (INT-3101)
    */
   diff?: string;
+  /** Run-scoped Claude Code instruction and runbook snapshot. */
+  instructionCapsule?: InstructionCapsule;
+  /**
+   * This reviewer's board identity — its call sign and mailbox address.
+   *
+   * Distinct from the worker's on the same task: two agents answering to one
+   * name make advice and operator answers unroutable. Coordination tools stay
+   * withheld while `readOnly` is set (INT-3189); the identity is still carried
+   * so reports and the dashboard name the reviewer.
+   */
+  coordinationContext?: CoordinationToolContext;
+}
+
+/** Tell the reviewer the call sign other agents and the operator address it by. */
+function reviewerIdentityHeader(callSign: string | undefined): string {
+  if (!callSign) return '';
+  return `\n\n## Your identity\nYou are **${callSign}**. Sign your review with that call sign so the worker and the operator know who reviewed the change.\n`;
 }
 
 export interface PreCheckResult {
@@ -296,13 +315,16 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       model: options.model,
       maxTurns: options.maxTurns,
       processContext: options.processContext,
-      systemPrompt: getPrompts().systemPrompt,
+      systemPrompt: getPrompts().systemPrompt
+        + reviewerIdentityHeader(options.coordinationContext?.actorName)
+        + (options.instructionCapsule?.text ?? ''),
       reasoningEffort: options.reasoningEffort,
       mcpTools: options.mcpTools,
       onLog: options.onLog,
       onToken: options.onToken,
       signal: options.signal,
       readOnly: options.readOnly,
+      coordinationContext: options.coordinationContext,
     });
 
     // Parse result via adapter

@@ -38,6 +38,7 @@ export interface WorkerResult {
   confidence?: ConfidenceLevel; // Legacy quality/reliability of the result
   confidencePercent?: number;   // Agent self-reported 0-100
   haltReason?: string;          // Why the agent halted
+  blockedOnOperator?: boolean;  // ask_human posted; wait for the Discord answer, do not retry
   noChangesReason?: string;     // Explicit justification for a successful no-edit outcome
   uncertaintySignals?: string[]; // Detected uncertainty phrases
   costInfo?: CostInfo;
@@ -104,7 +105,8 @@ export type PairSessionStatus =
   | 'approved'     // Approved
   | 'rejected'     // Rejected
   | 'failed'       // Failed
-  | 'cancelled';   // Cancelled
+  | 'cancelled'    // Cancelled
+  | 'waiting_on_operator'; // Stopped on an ask_human decision; resumes after the Discord answer
 
 /**
  * Pair session
@@ -208,7 +210,7 @@ export function getPairSession(sessionId: string): PairSession | undefined {
  */
 export function getActiveSessions(): PairSession[] {
   return Array.from(sessions.values()).filter(
-    (s) => !['approved', 'rejected', 'failed', 'cancelled'].includes(s.status)
+    (s) => !['approved', 'rejected', 'failed', 'cancelled', 'waiting_on_operator'].includes(s.status)
   );
 }
 
@@ -225,7 +227,7 @@ export function updateSessionStatus(
   session.status = status;
 
   // Record finish time for completed states
-  if (['approved', 'rejected', 'failed', 'cancelled'].includes(status)) {
+  if (['approved', 'rejected', 'failed', 'cancelled', 'waiting_on_operator'].includes(status)) {
     session.finishedAt = Date.now();
     archiveSession(session);
   }
@@ -419,6 +421,7 @@ export function formatSessionSummary(session: PairSession): string {
     rejected: '❌',
     failed: '💥',
     cancelled: '🚫',
+    waiting_on_operator: '🙋',
   }[session.status];
 
   const duration = session.finishedAt

@@ -162,6 +162,22 @@ describe('TaskScheduler.handleTaskComplete branches', () => {
     expect(sched.getStats()).toMatchObject({ completed: 0, failed: 0 });
   });
 
+  it('does not failure-count a run waiting on an operator decision', async () => {
+    // The only blocker is a human answering in Discord; counting the run
+    // failed burns the task's failure/STUCK budget while nobody can act.
+    const sched = new TaskScheduler({ maxConcurrent: 4, worktreeMode: true });
+    const d = deferredExecutor();
+    const events: string[] = [];
+    sched.on('waiting_on_operator', () => events.push('waiting_on_operator'));
+    sched.on('failed', () => events.push('failed'));
+    sched.startTask(task('blocked'), '/repo', d.exec);
+    d.resolve({ ...failResult(), finalStatus: 'waiting_on_operator' });
+    await flush();
+
+    expect(events).toEqual(['waiting_on_operator']);
+    expect(sched.getStats()).toMatchObject({ completed: 0, failed: 0 });
+  });
+
   it("refuses to overwrite a running generation with the same task id", async () => {
     const sched = new TaskScheduler({ maxConcurrent: 4, worktreeMode: true });
     const current = deferredExecutor();

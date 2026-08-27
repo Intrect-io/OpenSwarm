@@ -4,7 +4,7 @@
 // ============================================
 
 import { EmbedBuilder } from 'discord.js';
-import { createHash } from 'node:crypto';
+import { decompositionChildId, reviewerFollowupId } from './decompositionIds.js';
 import { taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult, PipelineRunMetadata } from '../agents/pairPipeline.js';
@@ -204,6 +204,8 @@ export interface ExecutionContext {
   durability?: ExecutionDurabilityHooks;
   /** Current open issue snapshot for same-project duplicate grooming in draft. */
   peerIssues?: TaskItem[];
+  mcpPolicies?: import('../automation/runnerTypes.js').AutonomousConfig['mcpPolicies'];
+  adapterRouting?: import('../automation/runnerTypes.js').AutonomousConfig['adapterRouting'];
 }
 
 // Project Path Resolution
@@ -306,34 +308,9 @@ export async function isValidProjectPath(path: string): Promise<boolean> {
   }
 }
 
-// Task Decomposition
+// Task Decomposition — stable artifact IDs live in decompositionIds.ts.
 
-function stableArtifactUuid(seed: string): string {
-  const bytes = createHash('sha256')
-    .update(seed)
-    .digest()
-    .subarray(0, 16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.toString('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-/** Stable child identity makes a partial decomposition restart converge on the
- * first remote artifacts instead of creating a second set of sub-issues. */
-export function decompositionChildId(parentIssueId: string, index: number): string {
-  return stableArtifactUuid(`openswarm-decomposition:${parentIssueId}:child:${index}`);
-}
-
-function reviewerFollowupId(
-  parentIssueId: string,
-  index: number,
-  action: { type: string; title: string; location?: string },
-): string {
-  return stableArtifactUuid(
-    `openswarm-review-followup:${parentIssueId}:${index}:${action.type}:${action.title}:${action.location ?? ''}`,
-  );
-}
+export { decompositionChildId };
 
 /**
  * Create Linear sub-issues from an (approved) decomposition: create each
@@ -908,6 +885,12 @@ export async function executePipeline(
 
   try {
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
+    const { prepareRunCoordination, normalizeAdapterRouting } = await import('../coordination/runCoordination.js');
+    const { instructionCapsule, roleMcpTools } = await prepareRunCoordination({
+      repository: projectPath, taskId: taskEventKey(task), executionPath: actualPath,
+      relevantFiles: task.fileScope ?? draftResult?.relevantFiles ?? [],
+      policies: { worker: ctx.mcpPolicies?.worker, reviewer: ctx.mcpPolicies?.reviewer },
+    });
     const pipeline = createPipelineFromConfig(
       roles,
       ctx.pairMaxAttempts ?? 3,
@@ -927,6 +910,9 @@ export async function executePipeline(
       ctx.maxReflections,
       pipelineMetadata(task, actualPath, worktreeInfo),
       ctx.verify, worktreeInfo?.resumedTaskFiles, ctx.securityAudit,
+      instructionCapsule,
+      roleMcpTools,
+      normalizeAdapterRouting(ctx.adapterRouting),
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);

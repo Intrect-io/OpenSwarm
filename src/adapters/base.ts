@@ -40,6 +40,27 @@ export async function spawnCli(
     return adapter.run(options);
   }
 
+  // Below this line the adapter runs its own tool loop inside its own CLI, so
+  // anything OpenSwarm assembles for *our* loop is dropped. Silence there is
+  // how a configured MCP grant or an `ask_human` escape hatch turns into an
+  // agent that quietly never had it — say it out loud instead.
+  if (options.mcpTools?.length || options.coordinationContext) {
+    const dropped = [
+      options.mcpTools?.length ? `${options.mcpTools.length} MCP tool(s)` : '',
+      options.coordinationContext ? 'coordination tools' : '',
+    ].filter(Boolean).join(' and ');
+    console.warn(
+      `[Adapter] '${adapter.name}' delegates to its own CLI tool loop; ${dropped} will not be available to this run. `
+      + `Use an adapter that runs OpenSwarm's loop (codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, local) if they are required.`,
+    );
+  }
+  if (options.shellTools === false) {
+    throw new Error(
+      `Adapter '${adapter.name}' delegates to its own CLI and cannot withhold shell access; refusing to run an agent that requires it. `
+      + `Use an adapter that runs OpenSwarm's tool loop instead.`,
+    );
+  }
+
   // The prompt goes in a private per-call directory rather than a predictable
   // path in the shared /tmp. Three things were wrong with
   // `/tmp/openswarm-prompt-${Date.now()}.txt`:

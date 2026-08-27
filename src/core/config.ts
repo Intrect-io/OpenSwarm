@@ -43,7 +43,7 @@ function getConfigSearchPaths(): string[] {
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const AdapterNameSchema = z.enum(['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude']);
+const AdapterNameSchema = z.enum(['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude', 'cc-router', 'cursor']);
 
 // Zod Schemas
 
@@ -324,6 +324,29 @@ const AutonomousConfigSchema = z.object({
   maxReflections: z.number().min(1).max(10).default(3),
   /** Cooldown between task completions in ms (default: 1800000 = 30min) */
   interTaskCooldownMs: z.number().min(0).default(1800000),
+  coordinationBoardIssueId: z.string().min(1).optional(),
+  mcpPolicies: z.record(z.string(), z.object({
+    servers: z.array(z.string()).default([]),
+    allowTools: z.array(z.string()).optional(),
+    writeTools: z.array(z.string()).optional(),
+    destructiveTools: z.array(z.string()).optional(),
+  })).optional(),
+  adapterRouting: z.object({
+    // Must be expressible for anything `adapter:` can select as the worker's
+    // primary — a policy whose primary the schema rejects cannot match the
+    // running adapter, which silently disables routing (README documents the
+    // equality requirement).
+    primary: z.enum(['codex', 'codex-responses', 'cc-router', 'cursor', 'gpt', 'openrouter', 'atlascloud', 'lmstudio', 'local', 'claude']).default('codex'),
+    fallbacks: z.array(z.enum(['cc-router', 'cursor', 'codex', 'codex-responses'])).default(['cc-router', 'cursor']),
+    allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
+  }).optional(),
+  periodicReviews: z.array(z.object({
+    profile: z.enum(['permissions', 'hygiene', 'security', 'review']),
+    schedule: z.string().min(1),
+    adapter: z.enum(['codex', 'cc-router', 'cursor']).optional(),
+  })).optional(),
+  /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
+  orchestratorSchedule: z.string().min(1).optional(),
 }).optional();
 
 // Long-Running Monitor schemas
@@ -663,6 +686,11 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       // jobProfiles was validated by the schema but dropped here, so per-task
       // model selection silently fell back to defaultRoles. Carry it through.
       jobProfiles: raw.autonomous.jobProfiles,
+      coordinationBoardIssueId: raw.autonomous.coordinationBoardIssueId,
+      mcpPolicies: raw.autonomous.mcpPolicies,
+      adapterRouting: raw.autonomous.adapterRouting,
+      periodicReviews: raw.autonomous.periodicReviews,
+      orchestratorSchedule: raw.autonomous.orchestratorSchedule,
     } : undefined,
     prProcessor: raw.prProcessor ? {
       enabled: raw.prProcessor.enabled,

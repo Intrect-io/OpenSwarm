@@ -6,11 +6,12 @@
 import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 import type { ToolDefinition } from './tools.js';
 import type { CostInfo } from '../support/costTracker.js';
+import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude';
+export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
 
 /**
  * Raw result from a CLI process execution
@@ -28,6 +29,13 @@ export interface CliRunResult {
    * validation-evidence gate and reviewers see the real checks. (INT-2485)
    */
   executedCommands?: string[];
+  /**
+   * The run ended because the agent posted a blocking question to the operator
+   * (`ask_human`). Not a failure and not a success: the pipeline must stop this
+   * task and wait rather than retry — a retry re-runs the same worker straight
+   * back into the same unanswered question.
+   */
+  blockedOnOperator?: boolean;
   /**
    * Token/duration usage measured by the adapter's own loop (codex-responses,
    * gpt, …). parseWorkerOutput/parseReviewerOutput attach it to the stage result
@@ -87,6 +95,8 @@ export interface CliRunOptions {
   webTools?: boolean;
   /** Expose repository memory search (default true). Set false for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
+  /** Expose the `bash` tool. Default true; off for agents that must stay out of the working tree. */
+  shellTools?: boolean;
   /** Expose the inline `diagnostics` tool (project tsc/ruff inside the loop). Spike opt-in (INT-3105). */
   diagnosticsTool?: boolean;
   /** Enforce read-only tool exposure/execution where the adapter supports OpenSwarm's tool layer. */
@@ -106,6 +116,8 @@ export interface CliRunOptions {
   onToken?: (delta: string) => void;
   /** MCP tools (named `server__tool`) to expose to the agentic loop, from mcp.json. */
   mcpTools?: ToolDefinition[];
+  /** Run-scoped identity for the worker coordination tools. */
+  coordinationContext?: CoordinationToolContext;
   /** Abort the run (and in-flight API/stream) — e.g. Esc/Ctrl+C in chat. */
   signal?: AbortSignal;
   /**
