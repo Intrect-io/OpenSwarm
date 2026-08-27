@@ -51,6 +51,7 @@ import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRol
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
+import { assignCallSign, type AgentRole } from '../coordination/agentNames.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
@@ -70,6 +71,22 @@ export type {
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
+
+
+/**
+ * Resolve the coordination identity for one stage of a task.
+ *
+ * Keyed on the task rather than the session so a call sign survives a retry:
+ * an operator's answer, or another agent's advice, is addressed to the name
+ * that asked, and a fresh session ID on the next attempt would strand it in an
+ * inbox nobody reads. Role is part of the key so the worker and the reviewer on
+ * one task never answer to the same name.
+ */
+function coordinationContextFor(context: PipelineContext, role: AgentRole) {
+  const taskId = taskEventKey(context.task);
+  const callSign = assignCallSign({ repository: context.projectPath, executionId: taskId, role });
+  return { repository: context.projectPath, taskId, actor: callSign.address, actorName: callSign.name };
+}
 
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
@@ -393,6 +410,10 @@ export class PairPipeline extends EventEmitter {
             processContext: { taskId: taskEventKey(context.task), stage: 'worker' },
             workerContext,
             signal: this.abortSignal,
+            instructionCapsule: this.config.instructionCapsule,
+            mcpTools: this.config.roleMcpTools?.worker,
+            adapterRouting: this.config.adapterRouting,
+            coordinationContext: coordinationContextFor(context, 'worker'),
           };
 
           result = await runWorkerWithOptionalFanout({
@@ -481,6 +502,9 @@ export class PairPipeline extends EventEmitter {
                 data: { taskId: taskEventKey(context.task), stage: 'reviewer', line: `[${prefix}] ${line}` },
               }),
             signal: this.abortSignal,
+            instructionCapsule: this.config.instructionCapsule,
+            mcpTools: this.config.roleMcpTools?.reviewer,
+            coordinationContext: coordinationContextFor(context, 'reviewer'),
           };
 
           safeConsole.log(`[${prefix}] Running full review...`);
@@ -799,6 +823,22 @@ export class PairPipeline extends EventEmitter {
 
       if (!workerResult.success) {
         const failedWorker = workerResult.result as WorkerResult;
+        // Blocked-on-operator is terminal for this run, not a retryable
+        // failure: every further iteration re-runs the same worker into the
+        // same unanswered question, burning the iteration budget to end up
+        // where we already are. The question stays open on the board; the task
+        // resumes when the Discord answer lands.
+        if (failedWorker.blockedOnOperator) {
+          safeConsole.log(`[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
+          this.emit('halt', {
+            confidence: failedWorker.confidencePercent ?? 0,
+            haltReason: failedWorker.haltReason ?? 'Blocked on an operator decision',
+            sessionId: context.session.id,
+            iteration: context.currentIteration,
+            context,
+          });
+          return { success: false };
+        }
         const detail = failedWorker.error
           ?? failedWorker.haltReason
           ?? failedWorker.noChangesReason
@@ -1288,6 +1328,9 @@ export function createPipelineFromConfig(
   verify?: PipelineConfig['verify'],
   resumedTaskFiles?: string[],
   securityAudit?: PipelineConfig['securityAudit'],
+  instructionCapsule?: PipelineConfig['instructionCapsule'],
+  roleMcpTools?: PipelineConfig['roleMcpTools'],
+  adapterRouting?: PipelineConfig['adapterRouting'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1322,6 +1365,9 @@ export function createPipelineFromConfig(
     verify,
     securityAudit,
     resumedTaskFiles,
+    instructionCapsule,
+    roleMcpTools,
+    adapterRouting,
   });
 }
 

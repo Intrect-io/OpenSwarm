@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import type { CostInfo } from '../support/costTracker.js';
 import type { MonitorState } from './types.js';
+import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import {
   appendTaskLog,
   cancelTaskLogCleanup,
@@ -120,6 +121,7 @@ export type HubEvent =
   | { type: 'pr_processor_end'; data: { lastRun: number | null; nextRun: number | null } }
   | { type: 'pr_processor_pr'; data: { pr: string; title: string } }
   | { type: 'work:queued'; data: { workId: string; projectPath: string; taskIds: string[] } }
+  | { type: 'coordination:event'; data: CoordinationEvent }
   | { type: 'heartbeat' };
 
 // Singleton
@@ -212,6 +214,7 @@ export function broadcastEvent(event: HubEvent): void {
     case 'conflict:resolving':
     case 'conflict:resolved':
     case 'conflict:failed':
+    case 'coordination:event':
       stageBuffer.push(event);
       if (stageBuffer.length > STAGE_BUFFER_MAX) stageBuffer.shift();
       break;

@@ -383,6 +383,18 @@ async function handleMessage(msg: Message): Promise<void> {
 
   try {
     switch (command) {
+      case 'answer': {
+        const correlationId = args.shift();
+        const answer = args.join(' ').trim();
+        if (!correlationId || !answer) {
+          await msg.reply('Usage: !answer <correlation-id> <answer>');
+          break;
+        }
+        const { answerHumanQuestion } = await import('../coordination/humanQuestions.js');
+        const result = await answerHumanQuestion(correlationId, answer, `discord:${msg.author.id}`);
+        await msg.reply(result.accepted ? `Answer accepted for ${correlationId}.` : `Answer not accepted: ${result.reason}`);
+        break;
+      }
       case 'status':
         await handleStatus(msg, args[0]);
         break;
@@ -591,6 +603,17 @@ export async function stopDiscord(): Promise<void> {
     await client.destroy();
     client = null;
   }
+}
+
+/**
+ * Whether an outbound Discord channel is actually available.
+ *
+ * `sendToChannel` returns silently when Discord is unconfigured, so callers that
+ * must report delivery honestly — an agent asking the operator a blocking
+ * question, for one — check here first rather than assuming the send landed.
+ */
+export function hasDiscordChannel(): boolean {
+  return Boolean(client && reportChannelId);
 }
 
 /**

@@ -142,6 +142,8 @@ export class AutonomousRunner {
   /** Adapter default-model cache for the dashboard PAIR bar (INT-2393). */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
   private cronJob: Cron | null = null;
+  private periodicReviewJobs: Cron[] = [];
+  private orchestratorJob: Cron | null = null;
   private startupHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private stopping = false;
   private state: RunnerState = {
@@ -1317,6 +1319,8 @@ export class AutonomousRunner {
     }
 
     this.state.isRunning = true;
+    this.startPeriodicReviews();
+    this.startOrchestrator();
     this.state.startedAt = Date.now();
     console.log(
       heartbeatEnabled
@@ -1397,6 +1401,11 @@ export class AutonomousRunner {
 
   private async performStop(): Promise<void> {
     this.stopping = true;
+    for (const job of this.periodicReviewJobs) job.stop();
+    this.periodicReviewJobs = [];
+    this.orchestratorJob?.stop();
+    this.orchestratorJob = null;
+
     if (this.cronJob) {
       this.cronJob.stop();
       this.cronJob = null;
@@ -2291,6 +2300,8 @@ export class AutonomousRunner {
       maxReflections: this.config.maxReflections,
       durability,
       peerIssues: this.lastFetchedTasks,
+      mcpPolicies: this.config.mcpPolicies,
+      adapterRouting: this.config.adapterRouting,
     };
   }
 
@@ -2363,6 +2374,104 @@ export class AutonomousRunner {
       turboMode: this.turboMode,
       turboExpiresAt: this.turboExpiresAt,
       dailyPace: getDailyPaceInfo(),
+    };
+  }
+
+  private startPeriodicReviews(): void {
+    for (const job of this.periodicReviewJobs) job.stop();
+    this.periodicReviewJobs = [];
+    for (const review of this.config.periodicReviews ?? []) {
+      const cron = new Cron(review.schedule, () => {
+        void this.runPeriodicReviewAcrossProjects(review).catch((error) =>
+          console.error(`[PeriodicReview] ${review.profile} failed:`, error));
+      });
+      this.periodicReviewJobs.push(cron);
+    }
+  }
+
+  private async runPeriodicReviewAcrossProjects(review: NonNullable<AutonomousConfig['periodicReviews']>[number]): Promise<void> {
+    const { runPeriodicReview } = await import('../coordination/periodicReview.js');
+    const projects = this.getEnabledProjects().length > 0 ? this.getEnabledProjects() : this.getAllowedProjects();
+    for (const repository of projects) {
+      await runPeriodicReview({
+        repository,
+        taskId: `periodic:${review.profile}`,
+        profile: review.profile,
+        adapter: review.adapter,
+      });
+    }
+  }
+
+  private startOrchestrator(): void {
+    this.orchestratorJob?.stop();
+    this.orchestratorJob = null;
+    const schedule = this.config.orchestratorSchedule;
+    if (!schedule) return;
+    this.orchestratorJob = new Cron(schedule, () => {
+      void this.runOrchestratorAcrossProjects().catch((error) =>
+        console.error('[Orchestrator] sweep failed:', error));
+    });
+  }
+
+  /**
+   * Let the MCP-connected orchestrator act on whatever the board is waiting on.
+   *
+   * Only runs where there is something to coordinate: a sweep with an empty
+   * pending list would spend a provider call to conclude nothing, and the
+   * orchestrator's whole job is unblocking work that already exists.
+   */
+  private async runOrchestratorAcrossProjects(): Promise<void> {
+    const policy = this.config.mcpPolicies?.orchestrator;
+    if (!policy) {
+      console.warn('[Orchestrator] no mcpPolicies.orchestrator configured — skipping sweep');
+      return;
+    }
+    // Imported one at a time: concurrent dynamic imports of mocked modules have
+    // raced here before, with the second call resolving the real module.
+    // A delegated CLI adapter runs its own tool loop: it would receive none of
+    // the MCP tools the orchestrator exists to use, and spawnCli refuses to run
+    // it with shell access withheld. Skip with one clear line instead of
+    // throwing once per repository, every sweep.
+    const { getAdapter } = await import('../adapters/index.js');
+    const adapter = getAdapter();
+    if (!adapter.run) {
+      console.warn(
+        `[Orchestrator] adapter '${adapter.name}' delegates to its own CLI tool loop and cannot use MCP — skipping sweep. `
+        + `Use codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, or local.`,
+      );
+      return;
+    }
+    const { buildOrchestratorObjective, runOrchestrator } = await import('../coordination/orchestratorAgent.js');
+    const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
+    const store = getCoordinationStore();
+    const projects = this.getEnabledProjects().length > 0 ? this.getEnabledProjects() : this.getAllowedProjects();
+
+    for (const repository of projects) {
+      const objective = buildOrchestratorObjective(store.snapshot(repository).pending);
+      if (!objective) continue;
+      // Same rule snapshot the workers get, so the orchestrator coordinates
+      // under the runbook it is coordinating against rather than an empty one.
+      const { buildInstructionCapsule } = await import('../agents/instructionCapsule.js');
+      await runOrchestrator({
+        repository,
+        taskId: 'orchestrator:sweep',
+        objective,
+        policy,
+        instructionCapsule: buildInstructionCapsule(repository),
+        // No adapter override: the orchestrator runs on the daemon's configured
+        // provider, the same one the workers it coordinates use.
+      }).catch((error) => console.error(`[Orchestrator] ${repository} failed:`, error));
+    }
+  }
+
+  getCoordinationConfig() {
+    return {
+      boardIssueId: this.config.coordinationBoardIssueId,
+      routing: this.config.adapterRouting,
+      mcpPolicies: this.config.mcpPolicies,
+      adapterRouting: this.config.adapterRouting,
+      periodicReviews: this.config.periodicReviews ?? [],
+      orchestratorSchedule: this.config.orchestratorSchedule,
     };
   }
 

@@ -38,7 +38,7 @@ export function prepareApprovedModelRequest(endpoint: string, payload: unknown):
  */
 export function approvedLocalModelEndpoint(
   baseUrl: string,
-  path: '/v1/models' | '/v1/chat/completions',
+  path: '/v1/models' | '/v1/chat/completions' | '/v1/responses',
 ): string {
   let base: URL;
   try {
@@ -71,6 +71,14 @@ export function approvedLocalModelEndpoint(
 export function prepareApprovedLocalModelRequest(baseUrl: string, payload: unknown): ApprovedEgressRequest {
   return {
     url: approvedLocalModelEndpoint(baseUrl, '/v1/chat/completions'),
+    body: JSON.stringify(payload),
+  };
+}
+
+/** Responses-compatible loopback providers such as CC-Router. */
+export function prepareApprovedLocalResponsesRequest(baseUrl: string, payload: unknown): ApprovedEgressRequest {
+  return {
+    url: approvedLocalModelEndpoint(baseUrl, '/v1/responses'),
     body: JSON.stringify(payload),
   };
 }

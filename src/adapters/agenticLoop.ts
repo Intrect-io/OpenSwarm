@@ -13,6 +13,7 @@ import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
 import type { CliRunResult } from './types.js';
+import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 // ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
 
@@ -126,6 +127,14 @@ export interface AgenticLoopOptions {
   webTools?: boolean;
   /** Expose search_memory (default true). Disabled for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
+  /**
+   * Expose the `bash` tool. Default true.
+   *
+   * `bash` is not path-confined the way the file tools are, so an agent that
+   * must stay out of the working tree needs this off — an isolated `cwd` alone
+   * does not stop `cd /repo && ...`.
+   */
+  shellTools?: boolean;
   /** Read-only mode: hide mutation/shell tools and refuse response-text edits. */
   readOnly?: boolean;
   /** Expose the apply_patch (V4A) tool — codex adapters only (codex models are
@@ -136,6 +145,7 @@ export interface AgenticLoopOptions {
   diagnosticsTool?: boolean;
   /** MCP tools (named `server__tool`) discovered from mcp.json, exposed alongside the native tools. */
   mcpTools?: ToolDefinition[];
+  coordinationContext?: CoordinationToolContext;
   /** Abort the loop (checked each turn) — Esc/Ctrl+C in chat. */
   signal?: AbortSignal;
   /**
@@ -164,6 +174,8 @@ export interface AgenticLoopResult {
   outputTokens: number;
   /** 캐시 적중 입력 토큰 누적 (totalTokens의 부분집합) — prompt-cache 효율 측정용 */
   cachedTokens: number;
+  /** A blocking ask_human ended the run; the operator now owns the next step. */
+  blockedOnOperator?: boolean;
   /** 소요 시간 (ms) */
   durationMs: number;
   /** Shell commands the worker actually ran via the `bash` tool — ground truth
@@ -202,10 +214,12 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
+    shellTools = true,
     readOnly = false,
     applyPatch = false,
     diagnosticsTool = false,
     mcpTools,
+    coordinationContext,
     signal,
     editFormat = 'json',
   } = options;
@@ -237,15 +251,18 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const memoryFilteredTools = memoryTools
     ? baseTools
     : baseTools.filter((t) => t.function.name !== 'search_memory');
+  const shellFilteredTools = shellTools
+    ? memoryFilteredTools
+    : memoryFilteredTools.filter((t) => t.function.name !== 'bash');
   const visibleBaseTools = readOnly
-    ? memoryFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash'].includes(t.function.name))
-    : memoryFilteredTools;
+    ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash'].includes(t.function.name))
+    : shellFilteredTools;
   const tools = enableTools
     ? [
         ...visibleBaseTools,
         ...(applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
         // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
-        ...(diagnosticsTool && !readOnly ? [DIAGNOSTICS_TOOL] : []),
+        ...(diagnosticsTool && !readOnly && shellTools ? [DIAGNOSTICS_TOOL] : []),
         // Both are withheld in readOnly. A read-only run exists because the
         // material under inspection is untrusted, and a fetch is an outbound
         // channel for anything the agent can read — the provider credential
@@ -254,6 +271,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         // something behind for a later run. (INT-3189)
         ...(webTools && !readOnly ? WEB_TOOL_DEFINITIONS : []),
         ...(readOnly ? [] : mcpTools ?? []),
+        ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
       ]
     : [];
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
@@ -264,6 +282,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // 없는 반복이다. N턴 연속이면 루프로 보고 조기 종료한다 — 고정 turn 한도(작업 제한)가
   // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
   const seenToolCalls = new Set<string>();
+  let blockedOnOperator = false;
   let noProgressTurns = 0;
   const NO_PROGRESS_LIMIT = 3;
   // Two independent nudge budgets — they fire for different reasons and must NOT
@@ -488,7 +507,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       }
     }
 
-    const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, { protectedFiles, bashTimeoutMs, readOnly });
+    const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, { protectedFiles, bashTimeoutMs, readOnly, coordinationContext });
     toolCallCount += toolCalls.length;
     // Count only SUCCESSFUL edits — a model whose edit_file calls all fail
     // (old_string not found, protected file) has not modified anything, and
@@ -535,6 +554,31 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       if (result.is_error) {
         onLog?.(`  ✖ ${content.slice(0, 100)}`);
       }
+    }
+
+    // A blocking decision belongs to the operator, so end the run here rather
+    // than trusting the model to honour the tool's instruction. Nothing after
+    // this point can be decided without the answer, and continuing is how an
+    // agent invents one.
+    const blockingQuestion = toolCalls.findIndex((tc, i) => {
+      if (tc.function.name !== 'ask_human' || results[i]?.is_error) return false;
+      try {
+        return (JSON.parse(results[i].content) as { blocked?: boolean }).blocked === true;
+      } catch {
+        return false;
+      }
+    });
+    if (blockingQuestion >= 0) {
+      blockedOnOperator = true;
+      onLog?.('⏸ Blocking decision sent to the operator — stopping this run');
+      messages.push({
+        role: 'user',
+        content:
+          'That decision is the operator\'s to make and they have been asked. Stop now and '
+          + 'report what you completed, the exact question you raised, and what stays blocked '
+          + 'until it is answered. Do not answer it yourself and do not continue past it.',
+      });
+      break;
     }
 
     // Early read-loop nudge (ported from stranded feat/v0.7.0 8a1420f): a read-heavy
@@ -625,6 +669,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     cachedTokens,
     durationMs: Date.now() - startTime,
     executedCommands,
+    blockedOnOperator,
   };
 }
 
@@ -643,6 +688,7 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     stderr: '',
     durationMs: result.durationMs,
     executedCommands: result.executedCommands,
+    blockedOnOperator: result.blockedOnOperator,
     costInfo: {
       costUsd: 0,
       inputTokens: result.inputTokens,

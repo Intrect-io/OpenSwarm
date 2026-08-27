@@ -284,7 +284,7 @@ async function consumeResponsesStream(
 // ---- Adapter ----
 
 export class CodexResponsesAdapter implements CliAdapter {
-  readonly name = 'codex-responses';
+  readonly name: string = 'codex-responses';
 
   readonly capabilities: AdapterCapabilities = {
     supportsStreaming: false, // the loop sees a single aggregated response per call
@@ -327,6 +327,24 @@ export class CodexResponsesAdapter implements CliAdapter {
     return selectDefaultCodexResponseModel(ids);
   }
 
+  protected responsesUrl(): string { return CODEX_RESPONSES_URL; }
+
+  protected authHeaders(_options: CliRunOptions, token: string): Record<string, string> {
+    return { Authorization: `Bearer ${token}` };
+  }
+
+  protected async credentials(_options: CliRunOptions): Promise<{ accessToken: string; accountId: string }> {
+    const store = new AuthProfileStore();
+    const accessToken = await ensureValidToken(store, PROFILE_KEY);
+    const accountId = store.getProfile(PROFILE_KEY)?.accountId ?? '';
+    if (!accountId) throw new Error('No chatgpt-account-id on the OAuth profile. Re-run: openswarm auth login --provider gpt');
+    return { accessToken, accountId };
+  }
+
+  protected prepareRequest(payload: unknown) {
+    return prepareApprovedModelRequest(this.responsesUrl(), payload);
+  }
+
   async run(options: CliRunOptions): Promise<CliRunResult> {
     const store = new AuthProfileStore();
     const startTime = Date.now();
@@ -334,13 +352,7 @@ export class CodexResponsesAdapter implements CliAdapter {
     let accessToken: string;
     let accountId: string;
     try {
-      accessToken = await ensureValidToken(store, PROFILE_KEY);
-      accountId = store.getProfile(PROFILE_KEY)?.accountId ?? '';
-      if (!accountId) {
-        throw new Error(
-          'No chatgpt-account-id on the OAuth profile. Re-run: openswarm auth login --provider gpt',
-        );
-      }
+      ({ accessToken, accountId } = await this.credentials(options));
     } catch (err) {
       return {
         exitCode: 1,
@@ -365,7 +377,7 @@ export class CodexResponsesAdapter implements CliAdapter {
     const cacheKey = `osw-${options.processContext?.taskId ?? 'cli'}-${options.processContext?.stage ?? 'run'}-${model}`;
     const callApi = this.createApiCaller(
       accessToken, accountId, store, model, options.onToken, options.signal, onReasoning, options.disableReasoning, options.reasoningEffort, cacheKey,
-      options.timeoutMs ?? 300000,
+      options.timeoutMs ?? 300000, options,
     );
 
     const loopOptions: AgenticLoopOptions = {
@@ -383,8 +395,10 @@ export class CodexResponsesAdapter implements CliAdapter {
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
+      shellTools: options.shellTools,
       diagnosticsTool: options.diagnosticsTool,
       mcpTools: options.mcpTools,
+      coordinationContext: options.coordinationContext,
       readOnly: options.readOnly,
       // codex models are RLHF-trained on the V4A apply_patch format — expose it as
       // the primary edit tool (edit_file stays as fallback). Verified: gpt-5.3-codex-spark
@@ -436,6 +450,7 @@ export class CodexResponsesAdapter implements CliAdapter {
      * request and then went silent hung with nothing to interrupt it.
      */
     timeoutMs?: number,
+    runOptions?: CliRunOptions,
   ) {
     let token = initialToken;
     let modelRetried = false;
@@ -470,14 +485,14 @@ export class CodexResponsesAdapter implements CliAdapter {
       body.reasoning = { effort: resolveReasoningEffort(reasoningEffort, disableReasoning), summary: 'auto' };
       // NOTE: never set max_output_tokens — the Codex backend rejects it with HTTP 400.
       const doCall = async (accessToken: string): Promise<ChatLikeResponse> => {
-        const request = prepareApprovedModelRequest(CODEX_RESPONSES_URL, body);
+        const request = this.prepareRequest(body);
         const res = await fetch(request.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Accept': 'text/event-stream',
-            'Authorization': `Bearer ${accessToken}`,
-            'chatgpt-account-id': accountId,
+            ...this.authHeaders(runOptions ?? { prompt: '', cwd: process.cwd() }, accessToken),
+            ...(accountId ? { 'chatgpt-account-id': accountId } : {}),
             'originator': 'openswarm',
             'OpenAI-Beta': 'responses=experimental',
           },

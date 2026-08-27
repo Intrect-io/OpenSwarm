@@ -10,6 +10,9 @@ import type { GuardsRunResult } from './pipelineGuards.js';
 import type { ReflectionState } from './reflection.js';
 import type { WorkerFanoutGateDecision } from './workerFanoutGate.js';
 import type { VerifyCommand } from '../verify/manifest.js';
+import type { ToolDefinition } from '../adapters/tools.js';
+import type { AdapterRoutePolicy } from '../coordination/routingPolicy.js';
+import type { InstructionCapsule } from './instructionCapsule.js';
 
 export interface PipelineRunMetadata {
   repository?: string;
@@ -44,6 +47,10 @@ export interface PipelineConfig {
   verbose?: boolean;
   /** Task-owned files already committed in a preserved WIP chain before this run. */
   resumedTaskFiles?: string[];
+  /** Claude Code instructions/runbooks captured before the run starts. */
+  instructionCapsule?: InstructionCapsule;
+  roleMcpTools?: { worker?: ToolDefinition[]; reviewer?: ToolDefinition[] };
+  adapterRouting?: AdapterRoutePolicy;
   draftAnalysis?: {
     taskType: string;
     intentSummary: string;

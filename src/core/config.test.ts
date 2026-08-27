@@ -209,6 +209,29 @@ agents:
       expect(config.autonomous?.jobProfiles?.[0]?.roles).toEqual({ worker: 'm1', reviewer: 'm2' });
     });
 
+    it('should wire autonomous coordination, routing, MCP policy, and periodic reviews', () => {
+      const jsonContent = JSON.stringify({
+        language: 'en',
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: {
+          enabled: true,
+          coordinationBoardIssueId: 'AGT-3993',
+          adapterRouting: { primary: 'codex', fallbacks: ['cc-router', 'cursor'], allowReasons: ['quota', 'infra'] },
+          mcpPolicies: { orchestrator: { servers: ['github', 'linear'], writeTools: ['linear__save_comment'] } },
+          periodicReviews: [{ profile: 'hygiene', schedule: '43 */6 * * *' }],
+          orchestratorSchedule: '17 */2 * * *',
+        },
+      });
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(jsonContent);
+      const config = loadConfig('/tmp/config.json');
+      expect(config.autonomous?.coordinationBoardIssueId).toBe('AGT-3993');
+      expect(config.autonomous?.adapterRouting?.fallbacks).toEqual(['cc-router', 'cursor']);
+      expect(config.autonomous?.mcpPolicies?.orchestrator.servers).toEqual(['github', 'linear']);
+      expect(config.autonomous?.periodicReviews?.[0]).toMatchObject({ profile: 'hygiene' });
+      expect(config.autonomous?.orchestratorSchedule).toBe('17 */2 * * *');
+    });
+
     it('should wire mcp.servers through to runtime config (INT-1949)', () => {
       const jsonContent = JSON.stringify({
         language: 'en',

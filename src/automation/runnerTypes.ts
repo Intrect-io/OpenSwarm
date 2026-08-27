@@ -5,9 +5,10 @@
 import type { DecisionResult, TaskItem } from '../orchestration/decisionEngine.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
+import type { RoleMcpPolicy } from '../coordination/mcpPolicy.js';
 
 export interface AutonomousConfig {
-  defaultAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude';
+  defaultAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
   linearTeamId: string;
   allowedProjects: string[];
   heartbeatSchedule: string;
@@ -61,6 +62,16 @@ export interface AutonomousConfig {
   automationLeaseMs?: number;
   /** Grace period for real executor exit during service shutdown. */
   shutdownGraceMs?: number;
+  /** Project-scoped coordination issue ID used as the durable Linear agent board. */
+  coordinationBoardIssueId?: string;
+  /** Role-scoped MCP policies; orchestrator defaults to no tools. */
+  mcpPolicies?: Partial<Record<'orchestrator' | 'worker' | 'reviewer', RoleMcpPolicy>>;
+  /** Typed execution adapter routing policy. */
+  adapterRouting?: { primary?: 'codex' | 'codex-responses'; fallbacks?: Array<'cc-router' | 'cursor'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
+  /** Periodic read-only repository review jobs. */
+  periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
+  /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
+  orchestratorSchedule?: string;
 }
 
 export interface RunnerState {

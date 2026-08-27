@@ -39,6 +39,11 @@ export async function tryHandleAppRoutes(
   runner: AutonomousRunner | undefined,
   readBody: (req: IncomingMessage) => Promise<string>,
 ): Promise<boolean> {
+  {
+    const { tryHandleCoordinationRoutes } = await import('../coordination/coordinationRoutes.js');
+    if (tryHandleCoordinationRoutes(req, res, url, requestUrl)) return true;
+  }
+
   // Cockpit read surface (sessions/transcript/diff/quota) lives in its own
   // module (INT-3402); web.ts's auth gates already ran before this delegation.
   {

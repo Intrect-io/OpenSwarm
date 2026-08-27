@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -11,6 +11,7 @@ import { DEFAULT_MODEL as CODEX_RESPONSES_DEFAULT_MODEL } from '../adapters/code
 import { DEFAULT_MODEL as GPT_DEFAULT_MODEL } from '../adapters/gpt.js';
 import { DEFAULT_MODEL as LOCAL_DEFAULT_MODEL } from '../adapters/local.js';
 import { DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL } from '../adapters/openrouter.js';
+import { extractCursorFinalText } from '../adapters/cursor.js';
 import { ATLASCLOUD_DEFAULT_MODEL } from '../adapters/atlascloud.js';
 import { CLAUDE_DEFAULT_MODEL } from '../adapters/claude.js';
 
@@ -100,6 +101,14 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     opus: 'opus',
     haiku: 'haiku',
   },
+  'cc-router': {
+    big: 'gpt-5.6-sol',
+    medium: 'gpt-5.6-terra',
+    small: 'gpt-5.6-luna',
+  },
+  cursor: {
+    auto: 'auto',
+  },
 };
 
 export function inferProviderFromModel(model?: string): AdapterName {
@@ -135,6 +144,8 @@ export function getDefaultChatModel(provider: AdapterName): string {
   if (provider === 'openrouter') return OPENROUTER_DEFAULT_MODEL;
   if (provider === 'atlascloud') return ATLASCLOUD_DEFAULT_MODEL;
   if (provider === 'claude') return CLAUDE_DEFAULT_MODEL;
+  if (provider === 'cc-router') return process.env.CC_ROUTER_MODEL ?? 'gpt-5.6-terra';
+  if (provider === 'cursor') return 'auto';
   return CODEX_DEFAULT_MODEL;
 }
 
@@ -325,19 +336,27 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
 
   try {
     await writeFile(promptFile, options.prompt, { mode: 0o600 });
-    const { command, args } = adapter.buildCommand({
+    const { command, args, stdinFile } = adapter.buildCommand({
       prompt: promptFile,
       cwd,
       model,
     });
+    // Some CLIs (cursor-agent) take the prompt on stdin rather than as a path
+    // argument; ignoring stdinFile leaves them waiting for input that never
+    // arrives. spawnCli() in base.ts already honours this on the daemon path.
+    const stdin = stdinFile ? await readFile(stdinFile) : undefined;
 
     return await new Promise<ChatCompletionResult>((resolve, reject) => {
       const proc = spawn(command, args, {
         shell: false,
         cwd,
         env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
+      if (stdin) {
+        proc.stdin?.on('error', () => { /* the child may exit before the write drains */ });
+        proc.stdin?.end(stdin);
+      }
 
       let stdout = '';
       let stderr = '';
@@ -390,6 +409,18 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
         for (const raw of force ? lines.concat(buffer ? [buffer] : []) : lines) {
           const line = raw.trim();
           if (!line) continue;
+          // Each CLI streams its own event shape; parsing every provider as
+          // Codex NDJSON left non-Codex chat turns with no live output at all,
+          // only a final answer once the process exited.
+          if (adapter.name === 'cursor') {
+            const text = extractCursorFinalText(line);
+            if (text && text !== line) {
+              startedStreaming = true;
+              options.onText?.(text, false);
+              resetThinkingTimer();
+            }
+            continue;
+          }
           try {
             const event = JSON.parse(line);
             if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') {
@@ -437,7 +468,7 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
           return;
         }
 
-        const response = extractCodexChatResponse(stdout);
+        const response = extractChatResponse(adapter.name, stdout);
         const cost = undefined;
         const tokens = undefined;
 
@@ -467,6 +498,18 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
       // Ignore temp cleanup errors.
     }
   }
+}
+
+/**
+ * Pull the assistant's final message out of a CLI's streamed output.
+ *
+ * Each CLI streams its own event shape, so the extractor is chosen by adapter
+ * rather than assumed to be Codex NDJSON — running Cursor through the Codex
+ * parser yields an empty response for every turn.
+ */
+export function extractChatResponse(adapterName: string, stdout: string): string {
+  if (adapterName === 'cursor') return extractCursorFinalText(stdout);
+  return extractCodexChatResponse(stdout);
 }
 
 function extractCodexChatResponse(stdout: string): string {
