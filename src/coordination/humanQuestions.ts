@@ -18,6 +18,7 @@ export interface HumanQuestionInput {
   /** Board address of the agent asking, so the answer can be routed back. */
   actor: string;
   actorName?: string;
+  actorRole?: string;
   question: string;
   /** Overridable for tests; defaults to the configured Discord channel. */
   notify?: (message: string) => Promise<boolean>;
@@ -79,7 +80,9 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
       taskId: input.taskId,
       actor: input.actor,
       actorName: input.actorName,
+      actorRole: input.actorRole,
       recipient: 'human',
+      recipientRole: 'human',
       kind: 'human-question',
       status: 'waiting',
       correlationId,
@@ -138,8 +141,10 @@ export async function answerHumanQuestion(
     repository: question.repository,
     taskId: question.taskId,
     actor,
+    actorRole: 'human',
     recipient: question.actor,
     recipientName: question.actorName,
+    recipientRole: question.actorRole,
     kind: 'human-answer',
     status: 'completed',
     correlationId,

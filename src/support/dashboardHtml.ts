@@ -687,9 +687,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <span class="panel-hdr-title">AGENT COORDINATION</span>
           <span class="panel-hdr-badge" id="coordination-count"></span>
         </div>
-        <div class="panel-body" id="coordination-list">
+        <div class="panel-body" id="coordination-summary">
           <div class="empty">no coordination events</div>
         </div>
+        <a href="/orchestration" style="display:block;text-align:center;padding:8px;color:var(--cyan);font-size:11px;text-decoration:none;border-top:1px solid var(--border2)">⚙ Open orchestration graph →</a>
       </div>
     </div>
 
@@ -2213,21 +2214,29 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }
 
     function renderCoordination() {
-      const el = document.getElementById("coordination-list");
-      const events = Array.from(coordinationById.values()).sort(function(a, b) { return Number(b.seq || 0) - Number(a.seq || 0); }).slice(0, 50);
+      // The per-event list lives on /orchestration now; this card answers one
+      // question at a glance — how many agents are placed and what is waiting.
+      var el = document.getElementById("coordination-summary");
+      var events = Array.from(coordinationById.values());
       document.getElementById("coordination-count").textContent = events.length ? String(events.length) : "";
       if (!events.length) { el.innerHTML = '<div class="empty">no coordination events</div>'; return; }
-      el.innerHTML = events.map(function(ev) {
-        const pending = ["open", "waiting", "running"].includes(ev.status);
-        const color = pending ? "var(--amber)" : ev.status === "failed" || ev.status === "expired" ? "var(--red)" : "var(--green)";
-        const route = escapeHtml((ev.actorName || ev.actor || "?") + " → " + (ev.recipientName || ev.recipient || "all"));
-        const meta = escapeHtml((ev.kind || "event") + " · #" + (ev.seq || 0));
-        return '<div style="padding:6px;border-bottom:1px solid var(--border2)">' +
-          '<div style="display:flex;gap:6px;align-items:center"><span style="color:' + color + ';font-size:10px;font-weight:700">' + escapeHtml(String(ev.status || "")) + '</span><span style="color:var(--cyan);font-size:10px">' + meta + '</span></div>' +
-          '<div style="font-size:11px;color:var(--white);margin-top:2px">' + escapeHtml(ev.summary || "") + '</div>' +
-          '<div style="font-size:9px;color:var(--dim);margin-top:2px">' + route + ' · ' + escapeHtml(ev.correlationId || "") + '</div>' +
+      var agents = {};
+      var latestByCorrelation = {};
+      events.forEach(function(ev) {
+        if (ev.actor && ev.actor !== 'human') agents[ev.actor] = ev.actorRole || 'agent';
+        var prev = latestByCorrelation[ev.correlationId];
+        if (!prev || Number(ev.seq || 0) > Number(prev.seq || 0)) latestByCorrelation[ev.correlationId] = ev;
+      });
+      var pending = Object.values(latestByCorrelation).filter(function(ev) { return ["open", "waiting", "running"].includes(ev.status); });
+      var questions = pending.filter(function(ev) { return ev.kind === "human-question"; }).length;
+      var roles = {};
+      Object.values(agents).forEach(function(role) { roles[role] = (roles[role] || 0) + 1; });
+      var roleLine = Object.keys(roles).sort().map(function(role) { return roles[role] + " " + escapeHtml(role); }).join(" · ");
+      el.innerHTML =
+        '<div style="padding:8px 6px;font-size:11px">' +
+        '<div style="color:var(--white)"><b style="font-size:15px">' + Object.keys(agents).length + '</b> agents placed <span style="color:var(--dim)">(' + roleLine + ')</span></div>' +
+        '<div style="margin-top:4px;color:' + (questions > 0 ? 'var(--amber)' : 'var(--dim)') + '">' + questions + ' question(s) waiting on you · ' + pending.length + ' open exchange(s)</div>' +
         '</div>';
-      }).join("");
     }
 
     async function fetchCoordination() {

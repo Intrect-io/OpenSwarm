@@ -32,8 +32,12 @@ export interface CoordinationEvent {
   taskId: string;
   actor: string;
   actorName?: string;
+  /** Role the actor was running as (worker/reviewer/orchestrator/review-agent/daemon/human). Absent on legacy events. */
+  actorRole?: string;
   recipient?: string;
   recipientName?: string;
+  /** Role of the addressee, when the publisher knows it. */
+  recipientRole?: string;
   kind: CoordinationKind;
   status: CoordinationStatus;
   correlationId: string;
@@ -56,8 +60,10 @@ export interface PublishCoordinationEvent {
   taskId: string;
   actor: string;
   actorName?: string;
+  actorRole?: string;
   recipient?: string;
   recipientName?: string;
+  recipientRole?: string;
   kind: CoordinationKind;
   status: CoordinationStatus;
   correlationId?: string;
@@ -198,8 +204,12 @@ export class CoordinationStore {
         taskId: normalized.taskId,
         actor: normalized.actor,
         actorName: normalized.actorName,
+        // Deliberately outside the fingerprint: roles describe the identity,
+        // and a role-only difference must not defeat content dedup.
+        actorRole: normalized.actorRole,
         recipient: normalized.recipient,
         recipientName: normalized.recipientName,
+        recipientRole: normalized.recipientRole,
         kind: normalized.kind,
         status: normalized.status,
         correlationId: normalized.correlationId!,
