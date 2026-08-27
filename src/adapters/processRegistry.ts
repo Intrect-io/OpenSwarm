@@ -126,22 +126,16 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
       }
       return true;
     }
-    if (force) {
-      process.kill(pid, 'SIGKILL');
-    } else {
-      process.kill(pid, 'SIGTERM');
-      // Escalate to SIGKILL after 5s if still alive
-      const escalation = setTimeout(() => {
-        try {
-          process.kill(pid, 0); // Check if alive
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // Already dead — good
-        }
-      }, 5000);
-      escalation.unref();
-    }
-    return true;
+    // No handle means we cannot prove this PID is still the child we spawned.
+    // Signalling it anyway is the ownership hazard this registry exists to
+    // remove: PIDs are recycled, and a delayed escalation in particular would
+    // land on whatever unrelated process inherited the number. Registration and
+    // handle are written and cleared together, so this is a defensive branch —
+    // report it rather than guessing.
+    console.warn(`[ProcessRegistry] No process handle for pid ${pid}; refusing to signal by PID`);
+    registry.delete(pid);
+    activityThrottle.delete(pid);
+    return false;
   } catch {
     // Process already gone
     registry.delete(pid);
