@@ -41,7 +41,7 @@ export async function tryHandleAppRoutes(
 ): Promise<boolean> {
   {
     const { tryHandleCoordinationRoutes } = await import('../coordination/coordinationRoutes.js');
-    if (tryHandleCoordinationRoutes(req, res, url, requestUrl)) return true;
+    if (await tryHandleCoordinationRoutes(req, res, url, requestUrl, readBody)) return true;
   }
 
   // Cockpit read surface (sessions/transcript/diff/quota) lives in its own

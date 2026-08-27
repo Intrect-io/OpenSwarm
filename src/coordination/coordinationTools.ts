@@ -10,6 +10,8 @@ import { callSignAddress } from './agentNames.js';
 export interface CoordinationToolContext {
   repository: string;
   taskId: string;
+  /** Issue identifier for `taskId`, carried onto everything this agent publishes. */
+  taskLabel?: string;
   /** Routable address other agents send to. */
   actor: string;
   /** Human-facing call sign shown in reports and the dashboard. */
@@ -50,6 +52,23 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'coordination_history',
+      description: 'Search the permanent coordination trace — every message ever exchanged on this repository, including ones already dropped from the live board. Use it to find what was decided earlier on this task or in a past exchange, instead of re-asking. Unlike coordination_read this consumes nothing and returns messages regardless of who they were addressed to.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string', description: 'Restrict to one task. Defaults to the current task; pass "*" for the whole repository.' },
+          task_label: { type: 'string', description: 'Restrict to an issue identifier, for example "AGT-4001".' },
+          correlation_id: { type: 'string', description: 'Restrict to one exchange.' },
+          participant: { type: 'string', description: 'Restrict to messages sent to or from this agent address.' },
+          limit: { type: 'number', description: 'Maximum messages to return (default 50, max 200).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'ask_human',
       description: 'Page the operator on Discord with one blocking decision. Returns a correlation ID; the operator answers later, so stop this run and report the open decision rather than inventing an answer or continuing past it.',
       parameters: {
@@ -71,6 +90,23 @@ export async function executeCoordinationTool(
     const events = await store.consume(context.actor, { repository: context.repository, taskId: context.taskId });
     return { content: JSON.stringify(events), isError: false };
   }
+  if (name === 'coordination_history') {
+    const { queryTrace } = await import('./coordinationTrace.js');
+    // Default to this run's own task: an agent asking for history almost always
+    // means "what happened on what I am working on", and returning the whole
+    // repository by default would bury that in unrelated traffic.
+    const requestedTask = typeof args.task_id === 'string' ? args.task_id : undefined;
+    const taskId = requestedTask === '*' ? undefined : requestedTask ?? context.taskId;
+    const events = queryTrace({
+      repository: context.repository,
+      taskId,
+      taskLabel: typeof args.task_label === 'string' ? args.task_label : undefined,
+      correlationId: typeof args.correlation_id === 'string' ? args.correlation_id : undefined,
+      actor: typeof args.participant === 'string' ? args.participant : undefined,
+      limit: typeof args.limit === 'number' ? Math.min(Math.max(Math.trunc(args.limit), 1), 200) : 50,
+    });
+    return { content: JSON.stringify(events), isError: false };
+  }
   if (name === 'coordination_publish') {
     const kinds = new Set<CoordinationKind>(['advice-request', 'advice-response', 'delegation-request', 'delegation-result']);
     const kind = typeof args.kind === 'string' ? args.kind as CoordinationKind : undefined;
@@ -80,6 +116,7 @@ export async function executeCoordinationTool(
     const event = await store.publish({
       repository: context.repository,
       taskId: context.taskId,
+      taskLabel: context.taskLabel,
       actor: context.actor,
       actorName: context.actorName,
       actorRole: context.actorRole,

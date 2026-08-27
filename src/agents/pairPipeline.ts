@@ -85,7 +85,14 @@ import { stageTimeoutMs } from './stageTimeouts.js';
 function coordinationContextFor(context: PipelineContext, role: AgentRole) {
   const taskId = taskEventKey(context.task);
   const callSign = assignCallSign({ repository: context.projectPath, executionId: taskId, role });
-  return { repository: context.projectPath, taskId, actor: callSign.address, actorName: callSign.name, actorRole: role };
+  return {
+    repository: context.projectPath,
+    taskId,
+    taskLabel: context.task.issueIdentifier,
+    actor: callSign.address,
+    actorName: callSign.name,
+    actorRole: role,
+  };
 }
 
 export class PairPipeline extends EventEmitter {
