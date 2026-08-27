@@ -60,7 +60,7 @@ export async function prepareRunCoordination(input: {
   relevantFiles: string[];
   policies?: { worker?: RoleMcpPolicy; reviewer?: RoleMcpPolicy };
 }): Promise<RunCoordinationSetup> {
-  const daemonActor = { actor: 'openswarm-daemon', actorName: 'OpenSwarm daemon' } as const;
+  const daemonActor = { actor: 'openswarm-daemon', actorName: 'OpenSwarm daemon', actorRole: 'daemon' } as const;
   const instructionCapsule = (await import('../agents/instructionCapsule.js')).buildInstructionCapsule(
     input.executionPath,
     input.relevantFiles,

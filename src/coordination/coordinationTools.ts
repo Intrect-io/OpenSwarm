@@ -14,6 +14,8 @@ export interface CoordinationToolContext {
   actor: string;
   /** Human-facing call sign shown in reports and the dashboard. */
   actorName?: string;
+  /** Role this agent runs as; stamped on everything it publishes. */
+  actorRole?: string;
   /** Overridable operator notifier; defaults to the configured Discord channel. */
   notifyOperator?: (message: string) => Promise<boolean>;
 }
@@ -80,6 +82,7 @@ export async function executeCoordinationTool(
       taskId: context.taskId,
       actor: context.actor,
       actorName: context.actorName,
+      actorRole: context.actorRole,
       recipient: callSignAddress(args.recipient),
       recipientName: args.recipient,
       kind,
@@ -99,6 +102,7 @@ export async function executeCoordinationTool(
       taskId: context.taskId,
       actor: context.actor,
       actorName: context.actorName,
+      actorRole: context.actorRole,
       question: args.question,
       notify: context.notifyOperator,
     });

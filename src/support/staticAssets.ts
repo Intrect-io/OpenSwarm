@@ -92,6 +92,17 @@ export async function readStaticAsset(urlPath: string): Promise<{ body: Buffer; 
 }
 
 /** The /app entry document, or null when assets are not present. */
+/** The /orchestration page shell, from the same static root as /app. */
+export async function readOrchestrationShell(): Promise<Buffer | null> {
+  const root = resolveStaticRoot();
+  if (!root) return null;
+  try {
+    return await readFile(join(root, 'orchestration.html'));
+  } catch {
+    return null;
+  }
+}
+
 export async function readAppShell(): Promise<Buffer | null> {
   const root = resolveStaticRoot();
   if (!root) return null;

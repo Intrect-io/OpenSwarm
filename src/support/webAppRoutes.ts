@@ -51,6 +51,18 @@ export async function tryHandleAppRoutes(
     if (await tryHandleWorkSessionRoutes(req, res, url, requestUrl, runner)) return true;
   }
 
+  if (url === '/orchestration') {
+    const { readOrchestrationShell } = await import('./staticAssets.js');
+    const shell = await readOrchestrationShell();
+    if (!shell) {
+      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(shell);
+    }
+    return true;
+  }
+
   if (url === '/app') {
     const shell = await readAppShell();
     if (!shell) {

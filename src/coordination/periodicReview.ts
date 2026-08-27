@@ -103,13 +103,13 @@ export async function runPeriodicReview(input: PeriodicReviewInput): Promise<Per
     return await withFileLock(lockPath(input), async () => {
       const callSign = assignCallSign({ repository: input.repository, executionId: input.profile, role: 'review-agent' });
       await getCoordinationStore().publish({
-        repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, kind: 'review-run', status: 'running', correlationId: leaseKey, summary: `Periodic ${input.profile} review started`,
+        repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, actorRole: 'review-agent', kind: 'review-run', status: 'running', correlationId: leaseKey, summary: `Periodic ${input.profile} review started`,
       });
       const result = await execute(input);
       const summary = result.output.slice(-4_000) || `${input.profile} review produced no output`;
       const fingerprint = createHash('sha256').update(`${input.profile}\0${summary}`).digest('hex');
       await getCoordinationStore().publish({
-        repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, kind: 'review-run', status: result.success ? 'completed' : 'failed', correlationId: leaseKey, summary, metadata: { profile: input.profile, fingerprint, agent: callSign.name },
+        repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, actorRole: 'review-agent', kind: 'review-run', status: result.success ? 'completed' : 'failed', correlationId: leaseKey, summary, metadata: { profile: input.profile, fingerprint, agent: callSign.name },
       });
       return { success: result.success, profile: input.profile, summary, fingerprint };
     }, { timeoutMs: 50 });
