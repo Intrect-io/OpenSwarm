@@ -18,6 +18,15 @@ import { loadSandboxBashTimeoutMs } from '../support/repoMetadata.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeConsole as console } from '../support/safeLog.js';
+import type { InstructionCapsule } from './instructionCapsule.js';
+import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
+import {
+  isRouteReasonAllowed,
+  planAdapterAttempts,
+  type AdapterAttemptPlan,
+  type AdapterRoutePolicy,
+} from '../coordination/routingPolicy.js';
+import { getCoordinationStore } from '../coordination/coordinationStore.js';
 
 // Types
 
@@ -65,6 +74,12 @@ export interface WorkerOptions {
    * Set explicitly to pin a format (e.g. roll back a regressing model to 'json').
    */
   editFormat?: EditFormat;
+  /** Run-scoped Claude Code instruction and runbook snapshot. */
+  instructionCapsule?: InstructionCapsule;
+  /** Identity and mailbox scope for inter-worker coordination. */
+  coordinationContext?: CoordinationToolContext;
+  /** Typed fallback policy; semantic task failures never trigger it. */
+  adapterRouting?: AdapterRoutePolicy;
 }
 
 // Bash timeout policy (INT-2415)
@@ -173,13 +188,31 @@ function buildWorkerPrompt(options: WorkerOptions): string {
   });
 }
 
-function getWorkerFallbackAdapters(primary: AdapterName): AdapterName[] {
-  // No cross-provider fallback to claude: it's opt-in and usually rate-limited /
-  // out-of-credits, so switching to it on a codex quota error just turns a pause
-  // into a hard `claude CLI failed code 1`. A codex/codex-responses quota error
-  // now surfaces as RateLimitError → scheduler pause (INT-1906) instead of a
-  // silent provider switch. Single adapter only. (INT-1979 follow-up)
-  return [primary];
+/**
+ * Probe what this machine can actually run, then let the shared policy order it.
+ *
+ * The primary is probed only when capability routing could act on the answer:
+ * an availability check spawns the provider CLI, and paying for one whose
+ * result nothing can use would slow every task for nothing.
+ */
+async function planWorkerAdapters(primary: AdapterName, policy?: AdapterRoutePolicy): Promise<AdapterAttemptPlan> {
+  if (!policy) return { attempts: [primary] };
+  // A policy written for a different adapter is not a policy for this run. Say
+  // so: the config looks configured, the fallbacks are listed, and nothing
+  // routes — which reads as "routing is broken" rather than "routing is off".
+  if (policy.primary !== primary) {
+    console.warn(
+      `[Worker] adapterRouting.primary is '${policy.primary}' but this run uses '${primary}' — `
+      + `fallbacks ${JSON.stringify(policy.fallbacks ?? [])} are inactive. Align the two to enable routing.`,
+    );
+    return { attempts: [primary] };
+  }
+  const available: Partial<Record<AdapterName, boolean>> = {};
+  const candidates = new Set<AdapterName>(policy.fallbacks ?? []);
+  candidates.delete(primary);
+  if (isRouteReasonAllowed(policy, 'capability')) candidates.add(primary);
+  for (const candidate of candidates) available[candidate] = await getAdapter(candidate).isAvailable();
+  return planAdapterAttempts({ policy, primary, available });
 }
 
 export function isProviderQuotaError(message?: string): boolean {
@@ -241,7 +274,45 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
   const prompt = buildWorkerPrompt(options);
   const cwd = expandPath(options.projectPath);
   const primaryAdapterName = options.adapterName ?? getDefaultAdapterName();
-  const adaptersToTry = [...new Set(getWorkerFallbackAdapters(primaryAdapterName))];
+  const routingPlan = await planWorkerAdapters(primaryAdapterName, options.adapterRouting);
+  const adaptersToTry = [...routingPlan.attempts];
+
+  const routeAllowed = (reason: 'quota' | 'infra' | 'capability'): boolean =>
+    isRouteReasonAllowed(options.adapterRouting, reason);
+  // Recording the route is observability. It runs inside the adapter loop's try
+  // block, so letting a board write throw here would surface as an adapter
+  // failure and route the worker again for a reason that has nothing to do with
+  // the provider.
+  const recordRoute = async (from: AdapterName, to: AdapterName, reason: string): Promise<void> => {
+    if (!options.coordinationContext) return;
+    try {
+      await getCoordinationStore().publish({
+        repository: options.coordinationContext.repository,
+        taskId: options.coordinationContext.taskId,
+        actor: 'adapter-router',
+        actorRole: 'daemon',
+        recipient: options.coordinationContext.actor,
+        recipientName: options.coordinationContext.actorName,
+        recipientRole: options.coordinationContext.actorRole,
+        kind: 'adapter-route',
+        status: 'completed',
+        summary: `${from} → ${to}: ${reason}`,
+        metadata: { from, to, reason },
+      });
+    } catch (error) {
+      console.warn('[Worker] adapter-route not recorded:', error instanceof Error ? error.message : error);
+    }
+  };
+
+  // A primary the machine cannot run — cursor-agent not installed, cc-router
+  // not serving — is neither a quota nor an infra failure: the tool is simply
+  // absent, and every attempt on it would fail the same way.
+  if (routingPlan.skipped) {
+    const line = `[Worker] capability on ${routingPlan.skipped.adapter} (adapter unavailable), routing to ${adaptersToTry[0]}`;
+    await recordRoute(routingPlan.skipped.adapter, adaptersToTry[0], routingPlan.skipped.reason);
+    console.log(line);
+    options.onLog?.(line);
+  }
 
   // Git snapshot (pre-work state)
   let snapshotHash = '';
@@ -266,7 +337,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     // or whole-file instruction is appended to the worker's system prompt so the
     // model emits the format the agentic loop expects.
     const editFormat = options.editFormat ?? resolveEditFormat(adapterName);
-    let systemPrompt = getPrompts().systemPrompt + loadWorkerRepoRules(cwd);
+    const callSignHeader = options.coordinationContext?.actorName
+      ? `\n\n## Your identity\nYou are **${options.coordinationContext.actorName}**. Other agents address you by that call sign, and you address them by theirs.\n`
+      : '';
+    let systemPrompt = getPrompts().systemPrompt + callSignHeader
+      + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd));
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;
     else if (editFormat === 'whole-file') systemPrompt += WHOLE_FILE_PROMPT;
 
@@ -292,10 +367,22 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       memoryTools: options.memoryTools,
       mcpTools: options.mcpTools,
       signal: options.signal,
+      coordinationContext: options.coordinationContext,
     });
 
     // Parse result via adapter
     const parsedResult = adapter.parseWorkerOutput(raw);
+
+    // A blocking ask_human is neither success nor failure: the operator owns
+    // the next step. Mark it before the git-diff heuristics below — a run that
+    // edited two files and then hit the question must still stop and wait, not
+    // be promoted to success or retried into the same unanswered question.
+    if (raw.blockedOnOperator) {
+      parsedResult.success = false;
+      parsedResult.blockedOnOperator = true;
+      parsedResult.haltReason = parsedResult.haltReason
+        ?? 'Blocked on an operator decision (ask_human posted to Discord)';
+    }
 
     // Backfill usage measured by the adapter's own loop (codex-responses/gpt/
     // openrouter/local) so per-stage cost logs work on every provider; adapters
@@ -356,6 +443,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     return parsedResult;
   };
 
+  let fallbackReason = 'policy';
   for (let i = 0; i < adaptersToTry.length; i += 1) {
     const adapterName = adaptersToTry[i];
     const isFallbackAttempt = i > 0;
@@ -363,13 +451,15 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     try {
       if (isFallbackAttempt) {
         const prev = adaptersToTry[i - 1];
-        const logLine = `[Worker] Usage limit on ${prev}, fallback to ${adapterName}`;
+        const logLine = `[Worker] ${fallbackReason} on ${prev}, fallback to ${adapterName}`;
+        await recordRoute(prev, adapterName, fallbackReason);
         console.log(logLine);
         options.onLog?.(logLine);
       }
 
       const result = await runAttempt(adapterName, isFallbackAttempt);
-      if (!isFallbackAttempt && isWorkerQuotaFailure(result) && adaptersToTry.length > 1) {
+      if (!isFallbackAttempt && isWorkerQuotaFailure(result) && adaptersToTry.length > 1 && routeAllowed('quota')) {
+        fallbackReason = 'quota';
         continue;
       }
       if (isFallbackAttempt && result.error) {
@@ -380,7 +470,10 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       // A 429/usage-limit must STOP the run and propagate so the scheduler can
       // pause — never fall back to another adapter (it shares the same quota
       // window) and never get swallowed as a generic worker failure. (INT-1906)
-      if (error instanceof RateLimitError) throw error;
+      if (error instanceof RateLimitError) {
+        if (!isFallbackAttempt && adaptersToTry.length > 1 && routeAllowed('quota')) { fallbackReason = 'quota'; continue; }
+        throw error;
+      }
 
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[Worker] Execution failed (${adapterName}): ${errMsg}`);
@@ -390,7 +483,8 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
         console.error('[Worker] CLI exited with non-zero code — check adapter auth and permissions');
       }
 
-      if (!isFallbackAttempt && isProviderQuotaError(errMsg) && adaptersToTry.length > 1) {
+      if (!isFallbackAttempt && isProviderQuotaError(errMsg) && adaptersToTry.length > 1 && routeAllowed('quota')) {
+        fallbackReason = 'quota';
         continue;
       }
 
@@ -398,7 +492,10 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       // got to actually run, so this is NOT a task failure. Propagate so the
       // pipeline marks it 'infra_error' → backoff retry instead of a STUCK-counting
       // failure. (INT-2010)
-      if (isInfraError(error)) throw error;
+      if (isInfraError(error)) {
+        if (!isFallbackAttempt && adaptersToTry.length > 1 && routeAllowed('infra')) { fallbackReason = 'infra'; continue; }
+        throw error;
+      }
 
       return {
         success: false,

@@ -1,0 +1,61 @@
+# Build and publish the OpenSwarm daemon image to GHCR.
+#
+# Triggered by the GitHub release that release.yml creates after an npm
+# publish, so the image version always matches a published npm version.
+# workflow_dispatch exists for rebuilding an image (base-image CVE, Dockerfile
+# fix) without cutting a new release.
+name: Docker Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/openswarm
+          # On a release event this yields the semver tags (0.21.1 / 0.21 / latest);
+          # a manual dispatch from a branch yields a branch tag instead of
+          # clobbering latest.
+          # latest=auto attaches `latest` to semver tags only — pinned here so
+          # a future metadata-action default change cannot silently stop
+          # updating `latest` on releases.
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

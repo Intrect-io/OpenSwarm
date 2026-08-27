@@ -118,7 +118,7 @@ export type McpConfig = {
  */
 export type SwarmConfig = {
   /** Default CLI adapter */
-  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude';
+  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
   /** UI language: 'en' | 'ko' (default: 'en') */
   language: 'en' | 'ko';
   /** Discord bot token */
@@ -284,7 +284,7 @@ export type ModelConfig = {
 /**
  * Per-role configuration
  */
-export type AgentAdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude';
+export type AgentAdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
 
 export type WorkerFanoutCandidateConfig = {
   /** Stable display/id for logs and scoring. */
@@ -567,6 +567,12 @@ export type AutonomousStartupConfig = {
   interTaskCooldownMs?: number;
   /** Job profiles used to select models based on task traits */
   jobProfiles?: JobProfile[];
+  coordinationBoardIssueId?: string;
+  mcpPolicies?: Record<string, { servers: string[]; allowTools?: string[]; writeTools?: string[]; destructiveTools?: string[] }>;
+  adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
+  periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
+  /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
+  orchestratorSchedule?: string;
 };
 
 /**

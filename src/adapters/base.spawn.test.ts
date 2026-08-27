@@ -406,3 +406,53 @@ describe('stdin EPIPE must not take the process down (INT-2961)', () => {
     expect(logged.join('\n')).toContain('EPIPE');
   });
 });
+
+describe('delegated-CLI capability guards', () => {
+  /** An adapter with no `run()` — spawnCli shells out to its CLI, which brings its own tool loop. */
+  const delegated = (): CliAdapter => ({
+    name: 'fixture-cli',
+    capabilities: {
+      supportsStreaming: false,
+      supportsJsonOutput: false,
+      supportsModelSelection: false,
+      managedGit: false,
+      supportedSkills: [],
+      enforcesReadOnly: true,
+    },
+    isAvailable: async () => true,
+    getDefaultModel: async () => 'fixture',
+    buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+    parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+    parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+  });
+
+  it('refuses to run an agent that requires the shell withheld', async () => {
+    // The orchestrator's containment depends on this: it holds GitHub, Linear,
+    // and Cloudflare credentials, and a delegated CLI would hand it a shell.
+    await expect(
+      spawnCli(delegated(), { prompt: 'p', cwd: process.cwd(), shellTools: false }),
+    ).rejects.toThrow(/cannot withhold shell access/);
+  });
+
+  it('warns rather than silently dropping MCP and coordination tools', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 1, stdout: new PassThrough(), stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }), kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => proc.emit('close', 0));
+      return proc;
+    });
+
+    await spawnCli(delegated(), {
+      prompt: 'p',
+      cwd: process.cwd(),
+      mcpTools: [{ type: 'function', function: { name: 'github__get_issue', description: '', parameters: { type: 'object' } } }],
+      coordinationContext: { repository: '/repo', taskId: 't1', actor: 'magos-test' },
+    });
+
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/1 MCP tool\(s\) and coordination tools will not be available/);
+    warn.mockRestore();
+  });
+});

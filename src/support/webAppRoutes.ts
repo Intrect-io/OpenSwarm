@@ -39,11 +39,28 @@ export async function tryHandleAppRoutes(
   runner: AutonomousRunner | undefined,
   readBody: (req: IncomingMessage) => Promise<string>,
 ): Promise<boolean> {
+  {
+    const { tryHandleCoordinationRoutes } = await import('../coordination/coordinationRoutes.js');
+    if (tryHandleCoordinationRoutes(req, res, url, requestUrl)) return true;
+  }
+
   // Cockpit read surface (sessions/transcript/diff/quota) lives in its own
   // module (INT-3402); web.ts's auth gates already ran before this delegation.
   {
     const { tryHandleWorkSessionRoutes } = await import('./workSessionRoutes.js');
     if (await tryHandleWorkSessionRoutes(req, res, url, requestUrl, runner)) return true;
+  }
+
+  if (url === '/orchestration') {
+    const { readOrchestrationShell } = await import('./staticAssets.js');
+    const shell = await readOrchestrationShell();
+    if (!shell) {
+      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(shell);
+    }
+    return true;
   }
 
   if (url === '/app') {

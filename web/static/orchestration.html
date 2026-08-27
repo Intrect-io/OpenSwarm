@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenSwarm Orchestration</title>
+  <style>
+    :root {
+      --bg: #0b0e14; --panel: #11151d; --border: #1f2633; --white: #e6e9ef;
+      --dim: #6c7086; --cyan: #3b9eff; --green: #4cc38a; --amber: #e8b339;
+      --red: #e5484d; --purple: #9d7cd8;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body { background: var(--bg); color: var(--white); font: 13px/1.45 "SF Mono", ui-monospace, Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 14px; letter-spacing: 1px; }
+    header a { color: var(--dim); text-decoration: none; font-size: 11px; }
+    header a:hover { color: var(--cyan); }
+    #stats { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+    .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 11px; color: var(--dim); }
+    .stat b { color: var(--white); font-size: 13px; margin-right: 4px; }
+    .stat.warn b { color: var(--amber); }
+    main { flex: 1; display: flex; min-height: 0; }
+    #graph-wrap { flex: 1; position: relative; min-width: 0; }
+    #graph { width: 100%; height: 100%; display: block; }
+    #legend { position: absolute; left: 12px; bottom: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 10px; color: var(--dim); }
+    #legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+    #legend .swatch { width: 10px; height: 10px; border-radius: 50%; }
+    #legend .line { width: 14px; height: 2px; }
+    aside { width: 340px; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+    aside h2 { font-size: 11px; letter-spacing: 1px; color: var(--dim); padding: 10px 12px 6px; }
+    #detail { border-bottom: 1px solid var(--border); padding: 0 12px 10px; font-size: 12px; min-height: 84px; }
+    #detail .name { color: var(--cyan); font-weight: 700; }
+    #detail .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+    #feed { flex: 1; overflow-y: auto; padding: 0 6px 10px; }
+    .ev { padding: 6px; border-bottom: 1px solid var(--border); }
+    .ev .head { display: flex; gap: 6px; font-size: 10px; }
+    .ev .status { font-weight: 700; }
+    .ev .kind { color: var(--cyan); }
+    .ev .summary { font-size: 11px; margin-top: 2px; }
+    .ev .route { font-size: 9px; color: var(--dim); margin-top: 2px; }
+    .empty { color: var(--dim); padding: 14px; font-size: 12px; }
+    .tier-label { fill: var(--dim); font-size: 10px; letter-spacing: 2px; font-weight: 700; }
+    .tier-count { fill: #3d4454; font-size: 9px; }
+    .node { cursor: pointer; }
+    .node text { fill: var(--white); font-size: 10px; text-anchor: middle; pointer-events: none; }
+    .node .role-label { fill: var(--dim); font-size: 8px; }
+    .node.dimmed { opacity: 0.25; }
+    .edge { fill: none; opacity: 0.55; }
+    .edge.dimmed { opacity: 0.08; }
+    .pulse { animation: pulse 1.6s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 0.25; } 50% { opacity: 0.9; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>⚙ ORCHESTRATION</h1>
+    <a href="/">← dashboard</a>
+    <div id="stats"></div>
+  </header>
+  <main>
+    <div id="graph-wrap">
+      <svg id="graph" role="img" aria-label="Agent interaction graph"></svg>
+      <div id="legend"></div>
+    </div>
+    <aside>
+      <h2>AGENT DETAIL</h2>
+      <div id="detail"><div class="empty">Select a node</div></div>
+      <h2>EVENT FEED</h2>
+      <div id="feed"><div class="empty">Loading…</div></div>
+    </aside>
+  </main>
+  <script type="module">
+    import { startOrchestrationView } from '/static/js/orchestrationView.mjs';
+    startOrchestrationView(document);
+  </script>
+</body>
+</html>

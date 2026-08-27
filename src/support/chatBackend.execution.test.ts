@@ -16,9 +16,9 @@ vi.mock('../mcp/mcpClient.js', () => ({ getMcpTools }));
 
 import { runChatCompletion } from './chatBackend.js';
 
-function cliAdapter(buildCommand: CliAdapter['buildCommand']): CliAdapter {
+function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['name'] = 'codex'): CliAdapter {
   return {
-    name: 'codex',
+    name,
     capabilities: {
       supportsStreaming: true,
       supportsJsonOutput: true,
@@ -63,6 +63,35 @@ describe('runChatCompletion CLI fallback', () => {
     expect(promptPath).toMatch(/openswarm-chat-[^/]+\/prompt\.txt$/);
     expect(existsSync(promptPath)).toBe(false);
     expect(existsSync(dirname(promptPath))).toBe(false);
+  });
+
+  it('feeds a stdin-driven CLI its prompt and parses its own event shape', async () => {
+    // cursor-agent takes the prompt on stdin and streams its own stream-json
+    // events; running it through the Codex path fed it nothing and parsed
+    // nothing back, so every chat turn came back empty.
+    getAdapter.mockReturnValue(cliAdapter((options) => {
+      const script = [
+        "let input = ''",
+        "process.stdin.on('data', (chunk) => { input += chunk })",
+        "process.stdin.on('end', () => {",
+        "  console.log(JSON.stringify({ type: 'assistant', message: { content: 'partial' } }))",
+        "  console.log(JSON.stringify({ type: 'result', result: 'answered: ' + input.trim() }))",
+        '})',
+      ].join(';');
+      return { command: process.execPath, args: ['-e', script], stdinFile: options.prompt };
+    }, 'cursor'));
+
+    const streamed: string[] = [];
+    const result = await runChatCompletion({
+      prompt: 'what changed?',
+      provider: 'cursor',
+      timeoutMs: 5000,
+      onText: (text) => { if (text) streamed.push(text); },
+    });
+
+    expect(result.response).toBe('answered: what changed?');
+    // Live output, not just the final answer once the process exits.
+    expect(streamed).toContain('partial');
   });
 
   it('terminates the spawned CLI process when the caller aborts', async () => {

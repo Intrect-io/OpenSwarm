@@ -311,6 +311,60 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).toContain('bash');
     expect(toolNames).not.toContain('search_memory');
   });
+
+  it('withholds bash when shellTools=false while leaving the path-checked file tools', async () => {
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      shellTools: false,
+      maxTurns: 1,
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).not.toContain('bash');
+    // run_diagnostics spawns compilers, so it goes with the shell.
+    expect(toolNames).not.toContain('run_diagnostics');
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('write_file');
+  });
+});
+
+describe('runAgenticLoop blocking human decision', () => {
+  it('stops the run instead of letting the model continue past the question', async () => {
+    const calls: string[] = [];
+    let turn = 0;
+
+    const result = await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      maxTurns: 5,
+      coordinationContext: {
+        repository: process.cwd(),
+        taskId: 't1',
+        actor: 'magos-test',
+        actorName: 'Magos Test-Vector',
+        notifyOperator: async () => true,
+      },
+      callApi: async () => {
+        turn += 1;
+        calls.push(`turn-${turn}`);
+        if (turn === 1) return toolCallResp('c1', 'ask_human', { question: 'Ship v2?' });
+        return finalResp('Blocked on the operator decision; nothing else to do.');
+      },
+    });
+
+    // One turn asks, one salvage turn reports. The model never gets a third
+    // turn in which it could answer its own question.
+    expect(calls).toEqual(['turn-1', 'turn-2']);
+    expect(result.text).toContain('Blocked');
+  });
 });
 
 describe('runAgenticLoop read cache vs compaction (INT-1929)', () => {

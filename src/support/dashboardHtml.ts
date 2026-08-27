@@ -682,6 +682,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <div class="empty">no monitors or processes</div>
         </div>
       </div>
+      <div class="panel" id="coordination-panel">
+        <div class="panel-hdr">
+          <span class="panel-hdr-title">AGENT COORDINATION</span>
+          <span class="panel-hdr-badge" id="coordination-count"></span>
+        </div>
+        <div class="panel-body" id="coordination-summary">
+          <div class="empty">no coordination events</div>
+        </div>
+        <a href="/orchestration" style="display:block;text-align:center;padding:8px;color:var(--cyan);font-size:11px;text-decoration:none;border-top:1px solid var(--border2)">⚙ Open orchestration graph →</a>
+      </div>
     </div>
 
     <!-- REPO PICKER OVERLAY -->
@@ -817,6 +827,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     let stageRows = [];
     let chatBusy = false;
     let totalCostUsd = 0;
+    const coordinationById = new Map();
     const taskProjectMap = new Map();
     // taskId → { title, issueIdentifier } for pipeline display
     const taskTitleMap = new Map();
@@ -860,6 +871,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           break;
         }
         case "pipeline:stage": addStageRow(ev.data); break;
+        case "coordination:event": addCoordinationEvent(ev.data); break;
         case "pipeline:fanout":
           addStageRow({
             taskId: ev.data.taskId,
@@ -893,6 +905,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           break;
         case "process:spawn":
           fetchProcesses();
+      fetchCoordination();
           addLogLine({ taskId: ev.data.taskId || "system", stage: ev.data.stage || "spawn", line: "Process spawned PID=" + ev.data.pid + " stage=" + ev.data.stage + (ev.data.model ? " model=" + ev.data.model : "") });
           break;
         case "process:exit":
@@ -2193,6 +2206,48 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       el.innerHTML = html;
     }
 
+    function addCoordinationEvent(event) {
+      if (!event || typeof event.id !== "string") return;
+      const previous = coordinationById.get(event.id);
+      if (!previous || Number(event.seq || 0) >= Number(previous.seq || 0)) coordinationById.set(event.id, event);
+      renderCoordination();
+    }
+
+    function renderCoordination() {
+      // The per-event list lives on /orchestration now; this card answers one
+      // question at a glance — how many agents are placed and what is waiting.
+      var el = document.getElementById("coordination-summary");
+      var events = Array.from(coordinationById.values());
+      document.getElementById("coordination-count").textContent = events.length ? String(events.length) : "";
+      if (!events.length) { el.innerHTML = '<div class="empty">no coordination events</div>'; return; }
+      var agents = {};
+      var latestByCorrelation = {};
+      events.forEach(function(ev) {
+        if (ev.actor && ev.actor !== 'human') agents[ev.actor] = ev.actorRole || 'agent';
+        var prev = latestByCorrelation[ev.correlationId];
+        if (!prev || Number(ev.seq || 0) > Number(prev.seq || 0)) latestByCorrelation[ev.correlationId] = ev;
+      });
+      var pending = Object.values(latestByCorrelation).filter(function(ev) { return ["open", "waiting", "running"].includes(ev.status); });
+      var questions = pending.filter(function(ev) { return ev.kind === "human-question"; }).length;
+      var roles = {};
+      Object.values(agents).forEach(function(role) { roles[role] = (roles[role] || 0) + 1; });
+      var roleLine = Object.keys(roles).sort().map(function(role) { return roles[role] + " " + escapeHtml(role); }).join(" · ");
+      el.innerHTML =
+        '<div style="padding:8px 6px;font-size:11px">' +
+        '<div style="color:var(--white)"><b style="font-size:15px">' + Object.keys(agents).length + '</b> agents placed <span style="color:var(--dim)">(' + roleLine + ')</span></div>' +
+        '<div style="margin-top:4px;color:' + (questions > 0 ? 'var(--amber)' : 'var(--dim)') + '">' + questions + ' question(s) waiting on you · ' + pending.length + ' open exchange(s)</div>' +
+        '</div>';
+    }
+
+    async function fetchCoordination() {
+      try {
+        const response = await fetch("/api/coordination");
+        if (!response.ok) return;
+        const snapshot = await response.json();
+        for (const event of snapshot.events || []) addCoordinationEvent(event);
+      } catch {}
+    }
+
     // ---- Init ----
     async function loadInitial() {
       try {
@@ -2234,6 +2289,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         // Restore pipeline/task events
         const stages = await stagesRes.json();
         for (const ev of stages) handleEvent(ev);
+        await fetchCoordination();
       } catch(e) {
         console.error("Supplemental data load failed:", e);
       }
@@ -2298,6 +2354,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     setInterval(fetchKnowledgeData, 60000);
     setInterval(fetchMonitors, 60000);
     setInterval(fetchProcesses, 30000);
+    setInterval(fetchCoordination, 30000);
 
     // 2단계: 렌더링 안정화 후 비필수 데이터 로드 (3초 지연)
     setTimeout(function() {

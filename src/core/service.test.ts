@@ -238,6 +238,34 @@ describe('service', () => {
     expect(runner.switchProvider).toHaveBeenCalledWith('gpt');
   });
 
+  it('hands the runner every coordination setting the config declares', async () => {
+    // Each of these was parsed by config.ts and consumed by the runner, and a
+    // key missing from this one payload is silent: the feature is configured,
+    // documented, and simply never runs. orchestratorSchedule shipped that way.
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+    const config = {
+      ...mockAutonomousConfig,
+      autonomous: {
+        ...mockAutonomousConfig.autonomous!,
+        coordinationBoardIssueId: 'AGT-1',
+        adapterRouting: { primary: 'codex-responses' as const, fallbacks: ['cc-router' as const], allowReasons: ['quota' as const] },
+        mcpPolicies: { orchestrator: { servers: ['github'] } },
+        periodicReviews: [{ profile: 'hygiene' as const, schedule: '43 */6 * * *' }],
+        orchestratorSchedule: '17 */2 * * *',
+      },
+    } as SwarmConfig;
+
+    await startService(config);
+
+    expect(vi.mocked(startAutonomous).mock.calls[0][0]).toMatchObject({
+      coordinationBoardIssueId: 'AGT-1',
+      adapterRouting: { primary: 'codex-responses' },
+      mcpPolicies: { orchestrator: { servers: ['github'] } },
+      periodicReviews: [{ profile: 'hygiene', schedule: '43 */6 * * *' }],
+      orchestratorSchedule: '17 */2 * * *',
+    });
+  });
+
   it('does not reapply provider override when it matches the configured adapter', async () => {
     const { readProviderOverride } = await import('./providerOverride.js');
     const { setDefaultAdapter } = await import('../adapters/index.js');

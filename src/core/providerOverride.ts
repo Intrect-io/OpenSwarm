@@ -17,7 +17,7 @@ const OVERRIDE_PATH = join(OVERRIDE_DIR, 'provider-override.json');
 // zero feedback (observed 2026-07-05: override={"provider":"claude"} → no switch, no log). Honor
 // the operator's choice; the startup mismatch warning still prints loudly, and a credit-less pin
 // surfaces as visible worker failures rather than a silent revert.
-const VALID: readonly AdapterName[] = ['claude', 'codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud'];
+const VALID: readonly AdapterName[] = ['claude', 'codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'cc-router', 'cursor'];
 const VALID_SET = new Set<AdapterName>(VALID);
 
 /** The provider the user last selected via the dashboard, or undefined if never toggled. */
