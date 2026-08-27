@@ -81,6 +81,8 @@ describe('CLI process tree termination', () => {
     ]);
     expect(decodedSpec).toEqual({ command: 'C:\\Tools\\codex.exe', args: targetArgs });
     expect(originalEnv).not.toHaveProperty('OPENSWARM_WINDOWS_JOB_SPEC');
+    expect(supervisor).toContain('[Console]::OutputEncoding = $utf8NoBom');
+    expect(supervisor).toContain('$OutputEncoding = $utf8NoBom');
     expect(supervisor).toContain('LimitFlags = 0x00002000');
     expect(assignment).toBeGreaterThan(-1);
     expect(targetLaunch).toBeGreaterThan(assignment);

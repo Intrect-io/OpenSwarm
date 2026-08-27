@@ -35,6 +35,35 @@ afterEach(() => {
 });
 
 describe.runIf(process.platform === 'win32')('Windows Job Object process ownership', () => {
+  it('round-trips non-ASCII JSON from a native target as UTF-8', async () => {
+    const expected = JSON.stringify({ name: '리니어-서버', status: '정상' });
+    const target = `process.stdout.write(${JSON.stringify(expected)})`;
+    const prepared = prepareCliProcessTreeSpawn(process.execPath, ['-e', target], process.env);
+    const supervisor = spawn(prepared.command, prepared.args, {
+      env: prepared.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    liveProcesses.add(supervisor);
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    supervisor.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    supervisor.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      supervisor.once('error', reject);
+      supervisor.once('close', resolve);
+    });
+
+    expect(Buffer.concat(stderr).toString('utf8')).toBe('');
+    expect(code).toBe(0);
+    expect(Buffer.concat(stdout).toString('utf8')).toBe(expected);
+    expect(JSON.parse(Buffer.concat(stdout).toString('utf8'))).toEqual({
+      name: '리니어-서버',
+      status: '정상',
+    });
+  }, 15_000);
+
   it('kills only supervised descendants and leaves an outside sibling alive', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openswarm-windows-job-'));
     tempDirs.push(dir);

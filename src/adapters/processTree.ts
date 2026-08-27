@@ -13,6 +13,10 @@ const WINDOWS_JOB_SPEC_ENV = 'OPENSWARM_WINDOWS_JOB_SPEC';
 // without looking up a possibly-reused PID or walking stale PPID relationships.
 const WINDOWS_JOB_SUPERVISOR = String.raw`
 $ErrorActionPreference = 'Stop'
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
 
 Add-Type -TypeDefinition @'
 using System;
