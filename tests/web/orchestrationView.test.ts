@@ -59,6 +59,14 @@ describe('startOrchestrationView', () => {
     expect(nodes).toContain('enginseer-rhodanis-novum');
     expect(nodes).toContain('adept-helion-cognitor');
     expect(nodes).toContain('human');
+
+    // The hierarchy is stated by the drawing: all four tier bands labeled, and
+    // the operator seated above the worker.
+    const labels = [...doc.querySelectorAll('.tier-label')].map((el) => el.textContent);
+    expect(labels).toEqual(['OPERATOR', 'CONTROL PLANE', 'COORDINATION', 'EXECUTION']);
+    const yOf = (id: string) => Number(/translate\(\S+ (\S+)\)/.exec(
+      doc.querySelector(`[data-node="${id}"]`)!.getAttribute('transform')!)![1]);
+    expect(yOf('human')).toBeLessThan(yOf('enginseer-rhodanis-novum'));
     expect(doc.getElementById('stats')!.textContent).toContain('pending questions');
     expect(doc.getElementById('feed')!.textContent).toContain('Reuse the auth helper?');
     // The worker node is painted with the worker role color.

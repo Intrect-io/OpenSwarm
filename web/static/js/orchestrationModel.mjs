@@ -36,7 +36,7 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
   const edges = new Map();
   const latestByCorrelation = new Map();
 
-  const touch = (id, name, role, timestamp) => {
+  const touch = (id, name, role, timestamp, taskId) => {
     if (!id) return null;
     const existing = nodes.get(id);
     if (!existing) {
@@ -47,6 +47,7 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
         eventCount: 0,
         lastSeen: timestamp,
         pendingCount: 0,
+        taskId,
       });
       return nodes.get(id);
     }
@@ -55,13 +56,19 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
     if (name && existing.name === existing.id) existing.name = name;
     if (role && existing.role === 'agent') existing.role = role;
     if (timestamp > existing.lastSeen) existing.lastSeen = timestamp;
+    // >= for task adoption: a node first sighted as a recipient in the same
+    // millisecond as its own acting event must still join its task cluster.
+    if (taskId && timestamp >= existing.lastSeen) existing.taskId = taskId;
     return existing;
   };
 
   for (const event of events) {
-    const from = touch(event.actor, event.actorName, event.actorRole, event.timestamp);
+    // Only the actor is acting inside event.taskId — a recipient may be
+    // getting cross-task advice, and adopting the sender's task would drag it
+    // into the wrong execution cluster.
+    const from = touch(event.actor, event.actorName, event.actorRole, event.timestamp, event.taskId);
     if (from) from.eventCount += 1;
-    const to = touch(event.recipient, event.recipientName, event.recipientRole, event.timestamp);
+    const to = touch(event.recipient, event.recipientName, event.recipientRole, event.timestamp, undefined);
 
     if (from && to && from.id !== to.id) {
       const key = `${from.id}→${to.id}`;
