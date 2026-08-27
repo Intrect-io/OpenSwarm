@@ -76,6 +76,16 @@ describe('buildOrchestrationModel', () => {
     expect(roles['adapter-router']).toBe('daemon');
   });
 
+  it('tracks the task a node last ACTED in, ignoring tasks it merely received from', () => {
+    const model = buildOrchestrationModel([
+      event({ taskId: 'task-1' }),
+      // Cross-task advice TO this node must not drag it into task-9.
+      event({ actor: 'other', actorRole: 'worker', taskId: 'task-9', recipient: 'enginseer-rhodanis-novum' }),
+    ]);
+    const node = model.nodes.find((candidate: { id: string }) => candidate.id === 'enginseer-rhodanis-novum');
+    expect(node!.taskId).toBe('task-1');
+  });
+
   it('computes activity against the injected clock, not wall time', () => {
     const model = buildOrchestrationModel(
       [event({ timestamp: 1_000 })],

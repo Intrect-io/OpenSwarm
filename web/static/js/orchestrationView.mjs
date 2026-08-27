@@ -2,13 +2,13 @@
 // OpenSwarm - Orchestration view (rendering + live wiring)
 // ============================================
 //
-// Thin over the pure modules: orchestrationModel aggregates, forceLayout
+// Thin over the pure modules: orchestrationModel aggregates, tierLayout
 // places, this file draws SVG and keeps the picture live. Rendering reads the
 // full current event set every time — the model is cheap at board scale
 // (≤2000 events) and idempotent redraw avoids incremental-DOM drift.
 
 import { buildOrchestrationModel, dominantKind, KIND_COLORS } from './orchestrationModel.mjs';
-import { layoutGraph } from './forceLayout.mjs';
+import { layoutTiers } from './tierLayout.mjs';
 
 export const ROLE_COLORS = {
   worker: '#3b9eff',
@@ -54,12 +54,46 @@ export function renderStats(doc, stats) {
     .join('');
 }
 
-export function renderGraph(doc, model, positions, selected, onSelect) {
+export function renderGraph(doc, model, layout, selected, onSelect) {
+  const { positions, bands, labelGutter } = layout;
   const svg = doc.getElementById('graph');
   const width = svg.clientWidth || 900;
   const height = svg.clientHeight || 600;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.innerHTML = '';
+
+  // Hierarchy furniture below everything: alternating band fills, separators,
+  // and a tier label with its head-count — the pyramid reading at a glance.
+  const bandLayer = el(doc, 'g');
+  bands.forEach((band, index) => {
+    if (index % 2 === 1) {
+      bandLayer.appendChild(el(doc, 'rect', {
+        x: 0, y: band.y0, width, height: band.y1 - band.y0,
+        fill: '#ffffff', 'fill-opacity': 0.025, 'data-band': band.id,
+      }));
+    }
+    if (index > 0) {
+      bandLayer.appendChild(el(doc, 'line', {
+        x1: 0, y1: band.y0, x2: width, y2: band.y0,
+        stroke: '#1f2633', 'stroke-dasharray': '4 6',
+      }));
+    }
+    const label = el(doc, 'text', {
+      x: 12, y: (band.y0 + band.y1) / 2, class: 'tier-label', 'data-tier-label': band.id,
+    });
+    label.textContent = band.label;
+    bandLayer.appendChild(label);
+    const count = el(doc, 'text', {
+      x: 12, y: (band.y0 + band.y1) / 2 + 13, class: 'tier-count',
+    });
+    count.textContent = band.count === 0 ? 'none' : `${band.count} placed`;
+    bandLayer.appendChild(count);
+  });
+  bandLayer.appendChild(el(doc, 'line', {
+    x1: labelGutter - 14, y1: bands[0].y0, x2: labelGutter - 14, y2: bands[bands.length - 1].y1,
+    stroke: '#1f2633',
+  }));
+  svg.appendChild(bandLayer);
 
   const neighbors = new Set();
   if (selected) {
@@ -183,12 +217,12 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     const model = buildOrchestrationModel(events);
     if (selected && !model.nodes.some((node) => node.id === selected)) selected = null;
     const svg = doc.getElementById('graph');
-    const positions = layoutGraph(model.nodes, model.edges, {
+    const layout = layoutTiers(model.nodes, {
       width: svg.clientWidth || 900,
       height: svg.clientHeight || 600,
     });
     renderStats(doc, model.stats);
-    renderGraph(doc, model, positions, selected, (id) => {
+    renderGraph(doc, model, layout, selected, (id) => {
       selected = selected === id ? null : id;
       redraw();
     });
