@@ -15,8 +15,9 @@
 // The trace is an archive, not a control path: a failure to record must never
 // fail the publish that produced the event.
 
+import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { defaultAutomationDbPath } from '../automation/automationDbPath.js';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
 import type Database from 'better-sqlite3';
@@ -88,7 +89,13 @@ export function getTraceDb(): Database.Database | null {
   if (unavailable) return null;
   try {
     const Sqlite = require('better-sqlite3') as typeof Database;
-    const handle = new Sqlite(defaultAutomationDbPath());
+    const path = defaultAutomationDbPath();
+    // better-sqlite3 will not create the parent directory, and the state
+    // directory does not exist on a fresh install — without this the trace
+    // silently degrades to unavailable on exactly the deployments that have
+    // never recorded anything.
+    mkdirSync(dirname(path), { recursive: true });
+    const handle = new Sqlite(path);
     handle.pragma('busy_timeout = 5000');
     enableWalWithRetry(handle, 5000);
     migrate(handle);
