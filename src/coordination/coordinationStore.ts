@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { coordinationFilePath, coordinationStateDir } from './coordinationPaths.js';
+import { recordTraceEvent } from './coordinationTrace.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -30,6 +31,12 @@ export interface CoordinationEvent {
   timestamp: number;
   repository: string;
   taskId: string;
+  /**
+   * Human-readable name for `taskId`, which is an issue UUID. Publishers stamp
+   * the issue identifier (e.g. `AGT-4001`) when they know it so the dashboard
+   * can say which issue an event belongs to instead of printing a UUID.
+   */
+  taskLabel?: string;
   actor: string;
   actorName?: string;
   /** Role the actor was running as (worker/reviewer/orchestrator/review-agent/daemon/human). Absent on legacy events. */
@@ -58,6 +65,7 @@ export interface PublishCoordinationEvent {
   id?: string;
   repository: string;
   taskId: string;
+  taskLabel?: string;
   actor: string;
   actorName?: string;
   actorRole?: string;
@@ -202,6 +210,9 @@ export class CoordinationStore {
         timestamp: input.timestamp ?? Date.now(),
         repository: normalized.repository,
         taskId: normalized.taskId,
+        // Outside the fingerprint with the roles below: a label is a display
+        // name for the same task, so it must not split content dedup.
+        taskLabel: normalized.taskLabel,
         actor: normalized.actor,
         actorName: normalized.actorName,
         // Deliberately outside the fingerprint: roles describe the identity,
@@ -231,6 +242,10 @@ export class CoordinationStore {
     // Linear board mirror listens on 'coordination:published' — echo an event
     // imported *from* that board straight back to it.
     if (isNew) {
+      // Archive before announcing. The board evicts old events; the trace does
+      // not, so this is the only record that survives the ring buffer. It is
+      // best-effort by construction — recordTraceEvent never throws.
+      recordTraceEvent(event);
       broadcastEvent({ type: 'coordination:event', data: event });
       const { getEventHub } = await import('../core/eventHub.js');
       getEventHub().emit('coordination:published', event);

@@ -887,7 +887,8 @@ export async function executePipeline(
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
     const { prepareRunCoordination, normalizeAdapterRouting } = await import('../coordination/runCoordination.js');
     const { instructionCapsule, roleMcpTools } = await prepareRunCoordination({
-      repository: projectPath, taskId: taskEventKey(task), executionPath: actualPath,
+      repository: projectPath, taskId: taskEventKey(task), taskLabel: task.issueIdentifier,
+      executionPath: actualPath,
       relevantFiles: task.fileScope ?? draftResult?.relevantFiles ?? [],
       policies: { worker: ctx.mcpPolicies?.worker, reviewer: ctx.mcpPolicies?.reviewer },
     });

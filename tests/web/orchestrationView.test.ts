@@ -14,7 +14,8 @@ function shell(): Document {
     <svg id="graph"></svg>
     <div id="legend"></div>
     <div id="detail"></div>
-    <div id="feed"></div>`;
+    <div id="feed"></div>
+    <div id="thread"></div>`;
   return document;
 }
 
@@ -136,5 +137,158 @@ describe('startOrchestrationView', () => {
   it('scales node radius with activity but caps it readable', () => {
     expect(nodeRadius({ eventCount: 0 })).toBe(10);
     expect(nodeRadius({ eventCount: 10_000 })).toBe(26);
+  });
+});
+
+describe('feed legibility', () => {
+  it('says when, on what task, who spoke and to whom', async () => {
+    const doc = shell();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ events: [boardEvent({ id: 'e1', taskLabel: 'AGT-4001' })], pending: [], lastSeq: 1 }),
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.getElementById('feed')!.textContent).toContain('Enginseer'));
+
+    const row = doc.querySelector('#feed .ev')!;
+    expect(row.textContent).toContain('AGT-4001');
+    expect(row.querySelector('.ev-line')!.textContent)
+      .toBe('Enginseer Rhodanis-Novum (worker) asked for advice → Adept Helion-Cognitor (reviewer)');
+    expect(row.querySelector('.clock')!.textContent).toBeTruthy();
+    view.stop();
+  });
+
+  it('renders detail and metadata that the old feed dropped', async () => {
+    const doc = shell();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        events: [boardEvent({
+          id: 'sys', actor: 'openswarm-daemon', actorName: 'OpenSwarm daemon', actorRole: 'daemon',
+          recipient: undefined, recipientName: undefined, recipientRole: undefined,
+          kind: 'instruction-snapshot', status: 'completed',
+          summary: 'Claude Code rules c480ceccd832 (0 sources)',
+          metadata: { digest: 'c480ceccd832', sourceCount: 0 },
+        })],
+        pending: [], lastSeq: 1,
+      }),
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.getElementById('feed')!.textContent).toContain('daemon'));
+
+    const row = doc.querySelector('#feed .ev')!;
+    expect(row.querySelector('.ev-line')!.textContent).toBe('OpenSwarm daemon (daemon) loaded the rule set');
+    expect(row.querySelector('.ev-meta')!.textContent).toContain('digest');
+    // The chip truncates visually, so the full value has to survive somewhere
+    // the operator can still reach — otherwise a digest is unreadable.
+    expect(row.querySelector('.chip')!.getAttribute('title')).toBe('digest: c480ceccd832');
+    view.stop();
+  });
+
+  it('escapes event-fed markup in every rendered field', async () => {
+    const doc = shell();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        events: [boardEvent({
+          id: 'x', taskLabel: '<img src=x onerror=alert(1)>',
+          summary: '<script>alert(1)</script>',
+          detail: '<iframe src="javascript:alert(1)"></iframe>',
+        })],
+        pending: [], lastSeq: 1,
+      }),
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.getElementById('feed')!.textContent).toContain('alert(1)'));
+
+    const feed = doc.getElementById('feed')!;
+    expect(feed.querySelector('script')).toBeNull();
+    expect(feed.querySelector('img')).toBeNull();
+    expect(feed.querySelector('iframe')).toBeNull();
+    view.stop();
+  });
+
+  it('escapes metadata that reaches the chip tooltip', async () => {
+    const doc = shell();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        events: [boardEvent({ id: 'm', metadata: { 'a"b': '"><img src=x onerror=alert(1)>' } })],
+        pending: [], lastSeq: 1,
+      }),
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelector('#feed .chip')).not.toBeNull());
+
+    expect(doc.getElementById('feed')!.querySelector('img')).toBeNull();
+    expect(doc.querySelector('#feed .chip')!.getAttribute('title'))
+      .toBe('a"b: "><img src=x onerror=alert(1)>');
+    view.stop();
+  });
+});
+
+describe('clicking a feed row', () => {
+  async function withThread() {
+    const doc = shell();
+    const events = [
+      boardEvent({ id: 'q', seq: 1, summary: 'Retry in adapter or scheduler?' }),
+      boardEvent({
+        id: 'a', seq: 2, kind: 'advice-response', status: 'completed',
+        actor: 'adept-helion-cognitor', actorName: 'Adept Helion-Cognitor', actorRole: 'reviewer',
+        recipient: 'enginseer-rhodanis-novum', recipientName: 'Enginseer Rhodanis-Novum', recipientRole: 'worker',
+        summary: 'Scheduler owns retries.',
+      }),
+    ];
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (typeof url === 'string' && url.startsWith('/api/coordination/message')) {
+        return { ok: true, json: async () => ({ delivered: true }) };
+      }
+      return { ok: true, json: async () => ({ events, pending: [], lastSeq: 2 }) };
+    });
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#feed .ev').length).toBe(2));
+    return { doc, view, fetchImpl };
+  }
+
+  it('highlights the speaker and marks the addressee', async () => {
+    const { doc, view } = await withThread();
+    // Rows render newest-first, so the last row is the opening question.
+    const rows = [...doc.querySelectorAll('#feed .ev')] as HTMLElement[];
+    rows[rows.length - 1].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    const speaking = doc.querySelector('[data-speaking="true"]');
+    const spokenTo = doc.querySelector('[data-spoken-to="true"]');
+    expect(speaking!.getAttribute('data-node')).toBe('enginseer-rhodanis-novum');
+    expect(spokenTo!.getAttribute('data-node')).toBe('adept-helion-cognitor');
+    view.stop();
+  });
+
+  it('opens the whole exchange as a transcript', async () => {
+    const { doc, view } = await withThread();
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    const messages = doc.querySelectorAll('#thread .msg');
+    expect(messages).toHaveLength(2);
+    expect(messages[0].textContent).toContain('Retry in adapter or scheduler?');
+    expect(messages[1].textContent).toContain('Scheduler owns retries.');
+    view.stop();
+  });
+
+  it('sends an operator reply addressed to the last agent speaker', async () => {
+    const { doc, view, fetchImpl } = await withThread();
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    input.value = 'Keep it in the scheduler.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchImpl.mock.calls.some((call) => call[0] === '/api/coordination/message')).toBe(true));
+    const [, init] = fetchImpl.mock.calls.find((call) => call[0] === '/api/coordination/message')!;
+    expect(JSON.parse((init as { body: string }).body)).toMatchObject({
+      correlationId: 'c1',
+      recipient: 'adept-helion-cognitor',
+      text: 'Keep it in the scheduler.',
+    });
+    view.stop();
   });
 });
