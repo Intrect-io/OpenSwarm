@@ -9,7 +9,8 @@ import { useState, useEffect } from 'react';
 import type { EventEmitter } from 'node:events';
 import { theme, ICON } from '../theme.js';
 import { Spinner } from './Status.js';
-import type { AuditArea, AuditProgress, FixProgress } from '../../cli/reviewAudit.js';
+import type { AuditArea, AuditProgress } from '../../cli/reviewAudit.js';
+import type { FixProgress } from '../../cli/reviewFixPass.js';
 import type { ReviewResult } from '../../agents/agentPair.js';
 import { sanitizeTerminalText } from '../sanitize.js';
 
@@ -65,6 +66,9 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
   const entries = Object.values(statuses);
   const done = entries.filter((s) => s.status === 'done' || s.status === 'error').length;
   const running = Object.entries(statuses).filter(([, s]) => s.status === 'running');
+  // Cap the failure list: a wholly broken adapter fails every area, and an
+  // unbounded list would push the counter row off a short terminal.
+  const errored = Object.entries(statuses).filter(([, s]) => s.status === 'error').slice(0, 5);
   const approved = entries.filter((s) => s.decision === 'approve').length;
   const revised = entries.filter((s) => s.decision === 'revise').length;
   const rejected = entries.filter((s) => s.decision === 'reject').length;
@@ -85,6 +89,14 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
           <Spinner />
           {` ${sanitizeTerminalText(label)}`}
           {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 48)}` : ''}
+        </Text>
+      ))}
+      {/* Failures carry the reason they failed. Showing only the counter left the
+          operator with "16 failed" and nothing to act on. (AGT-3990) */}
+      {errored.map(([label, s]) => (
+        <Text key={label} color={theme.warn}>
+          {`  ${ICON.warn} ${sanitizeTerminalText(label)}`}
+          {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 64)}` : ''}
         </Text>
       ))}
       <Text color={theme.dim}>

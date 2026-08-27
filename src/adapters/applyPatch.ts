@@ -233,6 +233,11 @@ export async function applyV4APatch(
     // so a changing resolver cannot silently point the generated Git patch at
     // a different file than the one whose preimage we checked.
     const resolvedAfterSnapshot = resolvePath(rawPath);
+    // An ancestor may have been swapped for a symlink after the up-front
+    // preflight and while the no-follow snapshot was being read. Re-check the
+    // repository-relative path here so the refusal is stable and does not
+    // depend on `git apply`'s locale-specific diagnostic.
+    await rejectSymlinkPath(cwd, rawPath);
     if (resolvedAfterSnapshot !== resolvedBeforeSnapshot) {
       throw new Error(`refusing ${rawPath}: resolved path changed during patch preparation`);
     }

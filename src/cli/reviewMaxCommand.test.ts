@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReviewResult } from '../agents/agentPair.js';
-import { aggregateAuditResults, runFixVerifyLoop, type AuditRun, type AuditSummary } from './reviewAudit.js';
+import { aggregateAuditResults, type AuditRun, type AuditSummary } from './reviewAudit.js';
+import { runFixVerifyLoop } from './reviewFixPass.js';
 
 const ensureTaskSourceMock = vi.fn();
 const ensureProjectMappingMock = vi.fn();

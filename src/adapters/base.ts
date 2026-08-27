@@ -14,6 +14,15 @@ import { buildWorkerEnv } from './envPath.js';
 import { detectRateLimit } from './rateLimitError.js';
 import { codexMcpAuthHint } from './errorClassification.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import {
+  prepareCliProcessTreeSpawn,
+  terminateCliProcessTree,
+  trackCliProcessTree,
+  untrackCliProcessTree,
+} from './processTree.js';
+import { raceWithAbort } from './abortRace.js';
+
+export { terminateCliProcessTree } from './processTree.js';
 
 /**
  * Spawn a CLI process using the given adapter and options.
@@ -34,10 +43,46 @@ export async function spawnCli(
         `Use an adapter that declares enforcesReadOnly, or drop the read-only requirement.`,
     );
   }
+  if (options.signal?.aborted) {
+    const reason = options.signal.reason;
+    throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
+  }
+
+  // The caller's timeout is a wall-clock budget for the whole adapter run,
+  // including asynchronous command construction (Codex enumerates the
+  // effective MCP configuration here). Starting it only after buildCommand()
+  // let a nominal 1 ms review area spend another 5 seconds in MCP discovery.
+  const startTime = Date.now();
+  const timeoutMs = options.timeoutMs ?? 300000;
+  const lifecycleController = new AbortController();
+  const timeoutError = new Error(`${adapter.name} timeout after ${timeoutMs}ms`);
+  let deadlineTimer: NodeJS.Timeout | null = null;
+  const relayCallerAbort = (): void => {
+    const reason = options.signal?.reason;
+    lifecycleController.abort(reason instanceof Error ? reason : new Error(`${adapter.name} aborted`));
+  };
+  if (timeoutMs > 0) {
+    deadlineTimer = setTimeout(() => lifecycleController.abort(timeoutError), timeoutMs);
+  }
+  options.signal?.addEventListener('abort', relayCallerAbort, { once: true });
+  if (options.signal?.aborted) relayCallerAbort();
+  const runOptions: CliRunOptions = { ...options, signal: lifecycleController.signal };
+  const cleanupDeadline = (): void => {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    options.signal?.removeEventListener('abort', relayCallerAbort);
+  };
 
   // 어댑터가 직접 실행을 지원하면 shell spawn 대신 사용
   if (adapter.run) {
-    return adapter.run(options);
+    try {
+      return await raceWithAbort(
+        adapter.run(runOptions),
+        lifecycleController.signal,
+        `${adapter.name} aborted`,
+      );
+    } finally {
+      cleanupDeadline();
+    }
   }
 
   // Below this line the adapter runs its own tool loop inside its own CLI, so
@@ -72,37 +117,56 @@ export async function spawnCli(
   //     user can pre-create as a symlink before the write lands.
   // mkdtemp answers all three at once: a unique 0700 directory, created
   // atomically by the OS.
-  const promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-prompt-'));
-  const promptFile = join(promptDir, 'prompt.txt');
+  let promptDir: string | undefined;
   let cleanupPaths: string[] = [];
 
   try {
+    promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-prompt-'));
+    const promptFile = join(promptDir, 'prompt.txt');
+    if (lifecycleController.signal.aborted) {
+      const reason = lifecycleController.signal.reason;
+      throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
+    }
     // Inside the try, so a write that fails partway — a full temp filesystem,
     // say — still gets the directory removed rather than leaving a fragment of
     // the prompt behind.
     await fs.writeFile(promptFile, options.prompt, { mode: 0o600 });
 
-    const commandSpec = adapter.buildCommand({
-      ...options,
-      // Pass the temp file path as the prompt so buildCommand can reference it
-      prompt: promptFile,
-    });
+    const commandSpec = await raceWithAbort(
+      adapter.buildCommand({
+        ...runOptions,
+        // Pass the temp file path as the prompt so buildCommand can reference it
+        prompt: promptFile,
+      }),
+      lifecycleController.signal,
+      `${adapter.name} aborted`,
+    );
+    if (lifecycleController.signal.aborted) {
+      const reason = lifecycleController.signal.reason;
+      throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
+    }
     const { command, args, stdinFile } = commandSpec;
     cleanupPaths = commandSpec.cleanupPaths ?? [];
 
     const stdin = stdinFile ? await fs.readFile(stdinFile) : undefined;
-    const startTime = Date.now();
-
+    if (lifecycleController.signal.aborted) {
+      const reason = lifecycleController.signal.reason;
+      throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
+    }
     return await new Promise<CliRunResult>((resolve, reject) => {
-      const proc = spawn(command, args, {
+      const cliSpawn = prepareCliProcessTreeSpawn(command, args, buildWorkerEnv(process.env));
+      const proc = spawn(cliSpawn.command, cliSpawn.args, {
         shell: false,
-        cwd: options.cwd,
+        detached: process.platform !== 'win32',
+        cwd: runOptions.cwd,
         // Inject OpenSwarm's bundled node_modules/.bin (gives workers access
         // to `cxt` and other shipped CLIs) without touching the user's shell
         // PATH or ~/.claude/ config.
-        env: buildWorkerEnv(process.env),
+        env: cliSpawn.env,
         stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
+      trackCliProcessTree(proc);
 
       // The stdin 'error' listener is not optional, for the same reason it is
       // not optional in github.ts: if the CLI exits before draining the pipe —
@@ -121,13 +185,13 @@ export async function spawnCli(
       if (stdin) proc.stdin?.end(stdin);
 
       // Register process for tracking if context provided
-      if (options.processContext && proc.pid) {
+      if (runOptions.processContext && proc.pid) {
         registerProcess({
           pid: proc.pid,
-          taskId: options.processContext.taskId,
-          stage: options.processContext.stage,
-          model: options.model,
-          projectPath: options.cwd,
+          taskId: runOptions.processContext.taskId,
+          stage: runOptions.processContext.stage,
+          model: runOptions.model,
+          projectPath: runOptions.cwd,
           spawnedAt: startTime,
           lastActivityAt: startTime,
         }, proc);
@@ -151,24 +215,26 @@ export async function spawnCli(
         stderr += data.toString();
       });
 
-      const timeoutMs = options.timeoutMs ?? 300000;
-      let timer: NodeJS.Timeout | null = null;
       let exitDrainTimer: NodeJS.Timeout | null = null;
       let settled = false;
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          proc.kill('SIGKILL');
-          reject(new Error(`${adapter.name} timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }
+      const cleanupLifecycle = (): void => {
+        if (exitDrainTimer) clearTimeout(exitDrainTimer);
+        lifecycleController.signal.removeEventListener('abort', onAbort);
+        untrackCliProcessTree(proc);
+      };
+      const onAbort = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanupLifecycle();
+        terminateCliProcessTree(proc);
+        const reason = lifecycleController.signal.reason;
+        reject(reason instanceof Error ? reason : new Error(`${adapter.name} aborted`));
+      };
 
       const finish = (code: number | null) => {
         if (settled) return;
         settled = true;
-        if (timer) clearTimeout(timer);
-        if (exitDrainTimer) clearTimeout(exitDrainTimer);
+        cleanupLifecycle();
         const durationMs = Date.now() - startTime;
 
         if (options.onLog && adapter.capabilities.supportsStreaming && streamBuffer.trim()) {
@@ -212,7 +278,15 @@ export async function spawnCli(
         resolve({ exitCode: code ?? 0, stdout, stderr, durationMs });
       };
 
-      proc.on('close', finish);
+      proc.on('close', (code) => {
+        if (settled) return;
+        // `close` only proves that the wrapper and its inherited stdio handles
+        // are gone. A detached descendant with stdio redirected to /dev/null
+        // can still remain in the wrapper's POSIX process group, so tear down
+        // that group before reporting a completed stage.
+        terminateCliProcessTree(proc);
+        finish(code);
+      });
       // `close` waits for every inherited stdio descriptor to close. Some CLIs
       // launch MCP/tool grandchildren that briefly retain those descriptors
       // after the direct child has exited, leaving an otherwise-finished stage
@@ -220,21 +294,32 @@ export async function spawnCli(
       // allow a short drain window, then finalize with the bytes received so far.
       proc.on('exit', (code) => {
         if (settled || exitDrainTimer) return;
-        exitDrainTimer = setTimeout(() => finish(code), 1_000);
+        exitDrainTimer = setTimeout(() => {
+          if (settled) return;
+          // `exit` only proves the wrapper is gone. If `close` still has not
+          // arrived, a descendant owns one of its stdio descriptors. Kill the
+          // detached group before reporting success so no MCP/native child can
+          // outlive a completed OpenSwarm stage.
+          terminateCliProcessTree(proc);
+          finish(code);
+        }, 1_000);
       });
 
       proc.on('error', (err) => {
         if (settled) return;
         settled = true;
-        if (timer) clearTimeout(timer);
-        if (exitDrainTimer) clearTimeout(exitDrainTimer);
+        cleanupLifecycle();
         reject(new Error(`${adapter.name} spawn error: ${err.message}`));
       });
+
+      if (lifecycleController.signal.aborted) onAbort();
+      else lifecycleController.signal.addEventListener('abort', onAbort, { once: true });
     });
   } finally {
+    cleanupDeadline();
     try {
       // Remove the whole private directory, not just the file inside it.
-      await fs.rm(promptDir, { recursive: true, force: true });
+      if (promptDir) await fs.rm(promptDir, { recursive: true, force: true });
     } catch {
       // Ignore cleanup errors
     }

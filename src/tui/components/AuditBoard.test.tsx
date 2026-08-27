@@ -56,6 +56,25 @@ describe('AuditBoard (INT-2006)', () => {
     expect(r.lastFrame()).toContain('1 failed');
   });
 
+  it('shows why an area failed, not just the tally (AGT-3990)', async () => {
+    const events = new EventEmitter();
+    const r = render(<AuditBoard areas={areas} concurrency={2} events={events} />);
+    await act(tick); // effect subscribes
+    await act(async () => {
+      events.emit('progress', {
+        type: 'error',
+        label: 'src/a',
+        error: 'codex timeout after 300000ms',
+        done: 1,
+        total: 2,
+      });
+      await tick();
+    });
+    const f = r.lastFrame()!;
+    expect(f).toContain('src/a');
+    expect(f).toContain('codex timeout after 300000ms');
+  });
+
   it('renders fix-pass progress with edited file tally', async () => {
     const events = new EventEmitter();
     const r = render(<AuditBoard areas={areas} concurrency={2} events={events} mode="fix" />);

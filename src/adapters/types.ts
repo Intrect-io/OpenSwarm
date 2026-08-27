@@ -192,7 +192,7 @@ export interface CliAdapter {
   listModels?(): Promise<string[]>;
 
   /** Build an executable + argv. Shell interpretation is never applied. */
-  buildCommand(options: CliRunOptions): CliCommandSpec;
+  buildCommand(options: CliRunOptions): CliCommandSpec | Promise<CliCommandSpec>;
 
   /**
    * Parse incremental stdout chunks for live log streaming.

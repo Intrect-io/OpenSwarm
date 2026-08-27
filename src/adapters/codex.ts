@@ -4,6 +4,7 @@
 // ============================================
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type {
   CliAdapter,
@@ -18,6 +19,7 @@ import { t } from '../locale/index.js';
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { getCodexModelIds } from './codexModels.js';
 import { codexMcpConfigArgs } from './memoryMcp.js';
+import { codexUserMcpDisableArgs } from './codexUserMcp.js';
 import { parseReviewerResult } from './resultParsing.js';
 
 const execFileAsync = promisify(execFile);
@@ -28,6 +30,10 @@ const CODEX_PROFILE_KEY = 'openai-gpt:default';
 
 export class CodexCliAdapter implements CliAdapter {
   readonly name = 'codex';
+
+  constructor(
+    private readonly inheritedMcpDisableArgs: typeof codexUserMcpDisableArgs = codexUserMcpDisableArgs,
+  ) {}
 
   readonly capabilities: AdapterCapabilities = {
     supportsStreaming: true,
@@ -71,7 +77,7 @@ export class CodexCliAdapter implements CliAdapter {
     return first ?? CODEX_DEFAULT_MODEL;
   }
 
-  buildCommand(options: CliRunOptions): CliCommandSpec {
+  async buildCommand(options: CliRunOptions): Promise<CliCommandSpec> {
     const promptFile = options.prompt;
     const resolvedModel = options.model ? coerceCodexModel(options.model) : undefined;
     // `--full-auto` was deprecated in codex 0.137 (warns, still runs). Its documented
@@ -84,10 +90,21 @@ export class CodexCliAdapter implements CliAdapter {
     // has nothing to write to and nowhere to send what it read. (INT-3189)
     const sandbox = options.readOnly ? 'read-only' : 'workspace-write';
     const args = ['exec', '--json', '--sandbox', sandbox, '--skip-git-repo-check'];
+    // codex has no `--strict-mcp-config`, so an OpenSwarm run would otherwise
+    // inherit every MCP server in the operator's own config — one of which
+    // blocking on an interactive OAuth prompt hangs `exec` until the adapter
+    // timeout kills it, with no verdict and no reason. Switch them off. (AGT-3990)
+    args.push(...await this.inheritedMcpDisableArgs(process.env, options.cwd, undefined, options.signal));
     if (resolvedModel) args.push('-m', resolvedModel);
     // See the claude adapter: the memory server exposes writes, and a read-only
     // review is exactly where injected content must not reach them.
-    if (options.memoryTools !== false && !options.readOnly) args.push(...codexMcpConfigArgs());
+    if (options.memoryTools !== false && !options.readOnly) {
+      // A fixed name can collide with an inherited entry whose extra env/cwd
+      // fields survive config merging. A per-run bare TOML key cannot be
+      // preconfigured by the reviewed repository. (AGT-3990)
+      const memoryServerName = `openswarm_memory_${randomUUID().replaceAll('-', '')}`;
+      args.push(...codexMcpConfigArgs(memoryServerName));
+    }
     return { command: 'codex', args, stdinFile: promptFile };
   }
 
