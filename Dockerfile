@@ -43,9 +43,14 @@ FROM node:22-slim AS production
 # git + gh: workers commit and open PRs. bubblewrap: the verify sandbox —
 # fail-closed under Docker's default seccomp profile; see README for the flags
 # that enable it. curl: healthcheck. dumb-init: PID-1 signal handling.
+# python3 is a runtime dependency, not a build one: the security-audit gate runs
+# CodeQL over every language present in the analysed repository, and CodeQL's
+# Python extractor shells out to an interpreter. Without it a single tracked
+# .py file makes `codeql database create --build-mode=none` fail, which the
+# pipeline reports as an infra error and parks the task.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        dumb-init ca-certificates curl git bubblewrap gnupg && \
+        dumb-init ca-certificates curl git bubblewrap gnupg python3 && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
@@ -64,6 +69,13 @@ COPY --from=builder --chown=openswarm:openswarm /app/node_modules ./node_modules
 COPY --from=builder --chown=openswarm:openswarm /app/dist ./dist
 COPY --chown=openswarm:openswarm package.json config.example.yaml ./
 COPY --chown=openswarm:openswarm templates ./templates
+# The repository's CodeQL *configuration*. The CodeQL CLI itself is not shipped:
+# the bundle is roughly a gigabyte and would be carried by every pull, so the
+# image expects it to be provided by the deployment. Without it the security
+# audit reports `unavailable` and the pipeline parks the task rather than
+# skipping the gate — mount a bundle and put it on PATH, e.g.
+#   volumes: [ /opt/codeql-bundle:/opt/codeql:ro ]
+#   environment: [ "PATH=/opt/codeql:/usr/local/bin:/usr/bin:/bin" ]
 COPY --chown=openswarm:openswarm .codeql ./.codeql
 
 # The CLI on PATH; node resolves modules from the symlink target, so this is
