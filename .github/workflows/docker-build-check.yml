@@ -1,0 +1,41 @@
+# Build (never push) the production image when the Docker packaging changes.
+#
+# The packaging rotted silently once before — a pre-rename Dockerfile kept
+# "working" in the repo for months while npx tsc drifted from npm run build and
+# the image stopped containing the dashboard. Scoped to packaging paths so
+# ordinary PRs do not pay the multi-minute image build.
+name: Docker Build Check
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'docker-compose.yml'
+      - '.github/workflows/docker-build-check.yml'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          push: false
+          load: true
+          tags: openswarm:pr-check
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke — CLI and bundled assets
+        run: |
+          docker run --rm openswarm:pr-check openswarm --version
+          docker run --rm openswarm:pr-check sh -c 'test -d /app/dist/web-static && test -x /app/dist/cli.js'

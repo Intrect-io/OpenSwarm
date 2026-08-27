@@ -1,62 +1,45 @@
-# Dependencies
+# Dependencies (rebuilt inside the image)
 node_modules/
 
-# Build artifacts
+# Host build artifacts — the image builds its own dist; a stale host dist
+# copied over it would mask build failures.
+dist/
 build/
 *.tgz
 
-# Environment & secrets
+# Secrets and local state. config.yaml routinely embeds tokens via env
+# interpolation defaults; the runtime mounts it instead.
 .env
 .env.*
+config.yaml
+config.yml
+config.json
+.openswarm/
+.coverage/
 
-# IDE & OS
+# VCS / editor / OS
+.git/
+.gitignore
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
 .DS_Store
-Thumbs.db
 
-# Git & Docker (self-referential)
-.git/
-.gitignore
+# Docker (self-referential)
 Dockerfile*
 docker-compose*
 .dockerignore
 
-# Logs & runtime
+# Tests, docs, CI — not part of the runtime image
+coverage/
+docs/
+benchmarks/
+desktop/
+web-e2e/
+.github/
+.claude/
+testing/
+trash/
 logs/
 *.log
-pids/
-*.pid
-*.pid.lock
-*.seed
-
-# Testing & coverage
-coverage/
-.nyc_output/
-__tests__/
-*.test.js
-*.test.ts
-
-# Documentation
-README.md
-docs/
-CHANGELOG.md
-
-# Claude Code
-.claude/
-
-# Development config
-.github/
-vitest.config.ts
-
-# Data (mounted as volumes)
-data/
-tmp/
-temp/
-trash/
-
-# Subprojects
-openclaw/
+plan.md

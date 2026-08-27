@@ -1,3 +1,6 @@
+# OpenSwarm daemon — single instance per state volume. Two containers sharing
+# one openswarm-state volume would fight over the daemon's pid/lock files and
+# double-process the same tracker issues.
 services:
   openswarm:
     build:
@@ -8,83 +11,65 @@ services:
     container_name: openswarm
     restart: unless-stopped
 
-    # Environment variables
     environment:
-      - NODE_ENV=production
-      - ONNX_WEB=1
-      - USE_ONNXRUNTIME_WEB=1
       - TZ=Asia/Seoul
-      - HOME=/home/claude
-      - PROJECT_PATH=/app
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # The dashboard binds 127.0.0.1 (container-internal) unless a token is
+      # set — an unauthenticated 0.0.0.0 bind is refused by design. Without
+      # this, the published port below answers nothing; the daemon itself and
+      # the in-container healthcheck still work. Reads/mutations from outside
+      # then require the X-OpenSwarm-Token header (/api/health stays open).
+      - OPENSWARM_WEB_TOKEN=${OPENSWARM_WEB_TOKEN:-}
+      # Provider/API keys come from .env (see env_file) or the shell:
+      #   LINEAR_API_KEY, LINEAR_TEAM_ID, DISCORD_TOKEN, DISCORD_CHANNEL_ID,
+      #   ATLASCLOUD_API_KEY, OPENROUTER_API_KEY, ...
 
-    # Load environment from file
+    # Optional: create .env next to this file. Missing file is not an error.
     env_file:
-      - .env
+      - path: .env
+        required: false
 
-    # Port mapping
     ports:
-      - "3002:3847"
+      - "3847:3847"
 
-    # Volume mounts
     volumes:
-      # Configuration files (read-only)
-      - ./config:/app/config:ro
-      # Logs directory (read-write)
-      - ./logs:/app/logs:rw
-      # Data persistence
-      - openswarm-data:/app/data:rw
-      # Config file (if exists)
+      # Daemon configuration — run `cp config.example.yaml config.yaml` BEFORE
+      # `docker compose up`: if the file does not exist, Docker creates a
+      # directory at this path and the daemon fails with an unreadable-config
+      # error instead of a clear "file missing" one.
       - ./config.yaml:/app/config.yaml:ro
-      # Claude CLI auth and git config (uncomment and configure as needed)
-      # - ~/.claude:/home/claude/.claude:ro
-      # - ~/.gitconfig:/home/claude/.gitconfig:ro
+      # Daemon state: task state, auth profiles, coordination board, logs.
+      # Must persist or every restart forgets everything.
+      - openswarm-state:/home/openswarm/.openswarm
+      # Repositories the daemon works on. Point allowedProjects at /work/<repo>.
+      - ${OPENSWARM_WORKSPACE:-./workspace}:/work
+      # Git identity for worker commits (or set GIT_AUTHOR_* env instead).
+      # - ~/.gitconfig:/home/openswarm/.gitconfig:ro
+      # ChatGPT-OAuth (codex-responses adapter) state from a host login:
+      # - ~/.codex:/home/openswarm/.codex
 
-    # Resource limits
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
-
-    # Health check
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3847/api/stats"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3847/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
 
-    # Logging configuration
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-    # Network
-    networks:
-      - openswarm-network
-
-    # Security options
     security_opt:
       - no-new-privileges:true
 
-    # Read-only root filesystem (except for volumes)
-    read_only: false  # Set to true if app doesn't need to write to filesystem
+    # The verify sandbox (bubblewrap) is fail-closed under Docker's default
+    # seccomp profile. To enable it, uncomment — and understand — the following:
+    # security_opt:
+    #   - seccomp=unconfined
+    # cap_add:
+    #   - SYS_ADMIN
 
-# Named volumes
 volumes:
-  openswarm-data:
+  openswarm-state:
     driver: local
-
-# Networks
-networks:
-  openswarm-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.25.0.0/24

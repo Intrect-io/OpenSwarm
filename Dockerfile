@@ -1,102 +1,97 @@
-# Multi-stage build for OpenSwarm
-# Stage 1: Builder (using Alpine for smaller image)
-FROM node:22-alpine AS builder
+# ============================================
+# OpenSwarm - deployable daemon image
+# ============================================
+#
+# Two stages on the SAME libc (node:22-slim / glibc): the native addons
+# (better-sqlite3, lancedb) are compiled once in the builder and copied into
+# the runtime, so the runtime stage needs no toolchain and cannot drift from
+# what was built. The previous Alpine(musl) builder + slim(glibc) runtime pair
+# forced a second, toolchain-less rebuild in the runtime stage that only worked
+# while every native dependency happened to ship a prebuilt binary.
+#
+# The image runs the headless daemon (web dashboard on 3847) and bundles the
+# `openswarm` CLI. Provider CLIs (claude/codex/cursor) are NOT baked in — the
+# default codex-responses adapter runs OpenSwarm's own tool loop against
+# mounted OAuth state (~/.openswarm, ~/.codex). See README "Run with Docker".
 
-# Install build dependencies for native modules
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    cairo-dev \
-    jpeg-dev \
-    pango-dev \
-    musl-dev \
-    giflib-dev \
-    pixman-dev \
-    pangomm-dev \
-    libjpeg-turbo-dev \
-    freetype-dev
+# ---- Stage 1: build ----
+FROM node:22-slim AS builder
+
+# Toolchain for native-addon source builds when a prebuilt binary is missing.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 make g++ ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy package files for dependency installation
 COPY package*.json ./
-
-# Install dependencies (including devDependencies for build)
 RUN npm ci --include=dev
 
-# Copy all source code
 COPY . .
 
-# Build the TypeScript project
-RUN npx tsc
+# Full build script, not bare tsc: postbuild sets the CLI exec bit and copies
+# web/static into dist/web-static — without it the dashboard serves nothing.
+RUN npm run build
 
-# Stage 2: Production (use slim instead of alpine for better compatibility)
+# Drop devDependencies in place so the runtime copies exactly the node_modules
+# the build compiled (natives included), nothing more.
+RUN npm prune --omit=dev && npm cache clean --force
+
+# ---- Stage 2: runtime ----
 FROM node:22-slim AS production
 
-# Install runtime dependencies for native modules and ONNX
+# git + gh: workers commit and open PRs. bubblewrap: the verify sandbox —
+# fail-closed under Docker's default seccomp profile; see README for the flags
+# that enable it. curl: healthcheck. dumb-init: PID-1 signal handling.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        dumb-init \
-        python3 \
-        ca-certificates \
-        curl \
-        gnupg \
-        git \
-        && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
-        dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+        dumb-init ca-certificates curl git bubblewrap gnupg && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
-        tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
-    apt-get install -y gh && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends gh && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Claude CLI
-RUN npm install -g @anthropic-ai/claude-code && \
-    npm cache clean --force
-
-# Create app user for security
-RUN groupadd --gid 1001 nodejs && \
-    useradd --uid 1001 --gid nodejs --shell /bin/bash --create-home claude
+RUN groupadd --gid 1001 openswarm && \
+    useradd --uid 1001 --gid openswarm --shell /bin/bash --create-home openswarm
 
 WORKDIR /app
 
-# Copy package files and install production dependencies
-COPY package*.json ./
-RUN npm ci --omit=dev --include=optional && \
-    npm cache clean --force
+COPY --from=builder --chown=openswarm:openswarm /app/node_modules ./node_modules
+COPY --from=builder --chown=openswarm:openswarm /app/dist ./dist
+COPY --chown=openswarm:openswarm package.json config.example.yaml ./
+COPY --chown=openswarm:openswarm templates ./templates
+COPY --chown=openswarm:openswarm .codeql ./.codeql
 
-# Copy built application from builder stage
-COPY --from=builder /app/dist ./dist
+# The CLI on PATH; node resolves modules from the symlink target, so this is
+# equivalent to a global install without a second copy of the package.
+RUN ln -s /app/dist/cli.js /usr/local/bin/openswarm
 
-# Copy example config (actual config.yaml should be mounted as volume)
-COPY config.example.yaml ./config.example.yaml
+# /work is where repositories are mounted; ~/.openswarm holds daemon state and
+# must be a volume or every restart forgets task state, auth profiles, and the
+# coordination board.
+RUN mkdir -p /work /home/openswarm/.openswarm && \
+    chown -R openswarm:openswarm /work /home/openswarm
 
-# Create necessary directories and set permissions
-RUN mkdir -p /app/config /app/logs /app/data /home/claude/dev && \
-    ln -sf /app /home/claude/dev/openswarm && \
-    chown -R claude:nodejs /app && \
-    chown -R claude:nodejs /home/claude
+USER openswarm
+ENV HOME=/home/openswarm \
+    NODE_ENV=production
 
-# Switch to non-root user
-USER claude
+# Mounted repositories belong to arbitrary host UIDs; without this every git
+# operation inside /work dies with "dubious ownership". The container's whole
+# job is operating on mounted repos, so the blanket opt-in is the intent.
+RUN git config --global safe.directory '*'
 
-# Expose web dashboard port
 EXPOSE 3847
 
-# Health check via web API
+# /api/health is the token-less diagnostics endpoint (INT-3388) — /api/* reads
+# are otherwise auth-gated, so a healthcheck against them reports auth policy,
+# not process health.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:3847/api/stats || exit 1
+    CMD curl -fsS http://localhost:3847/api/health || exit 1
 
-# Use dumb-init for proper signal handling
 ENTRYPOINT ["dumb-init", "--"]
-
-# Start the application
 CMD ["node", "dist/index.js"]
