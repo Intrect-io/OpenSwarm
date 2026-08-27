@@ -218,9 +218,12 @@ function messageBody(event) {
   const detail = event.detail && event.detail !== event.summary
     ? `<div class="ev-detail">${escapeHtml(event.detail)}</div>`
     : '';
+  // Metadata values are frequently long opaque tokens (a content digest, a
+  // correlation id). Rendered raw they force the whole feed to scroll
+  // sideways, so the chip truncates and keeps the full value in its tooltip.
   const meta = pairs.length
     ? `<div class="ev-meta">${pairs.map(([key, value]) =>
-        `<span class="chip"><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join('')}</div>`
+        `<span class="chip" title="${escapeHtml(`${key}: ${value}`)}"><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join('')}</div>`
     : '';
   return `<div class="ev-summary">${escapeHtml(event.summary)}</div>${detail}${meta}`;
 }

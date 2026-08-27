@@ -179,6 +179,9 @@ describe('feed legibility', () => {
     const row = doc.querySelector('#feed .ev')!;
     expect(row.querySelector('.ev-line')!.textContent).toBe('OpenSwarm daemon (daemon) loaded the rule set');
     expect(row.querySelector('.ev-meta')!.textContent).toContain('digest');
+    // The chip truncates visually, so the full value has to survive somewhere
+    // the operator can still reach — otherwise a digest is unreadable.
+    expect(row.querySelector('.chip')!.getAttribute('title')).toBe('digest: c480ceccd832');
     view.stop();
   });
 
@@ -202,6 +205,24 @@ describe('feed legibility', () => {
     expect(feed.querySelector('script')).toBeNull();
     expect(feed.querySelector('img')).toBeNull();
     expect(feed.querySelector('iframe')).toBeNull();
+    view.stop();
+  });
+
+  it('escapes metadata that reaches the chip tooltip', async () => {
+    const doc = shell();
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        events: [boardEvent({ id: 'm', metadata: { 'a"b': '"><img src=x onerror=alert(1)>' } })],
+        pending: [], lastSeq: 1,
+      }),
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelector('#feed .chip')).not.toBeNull());
+
+    expect(doc.getElementById('feed')!.querySelector('img')).toBeNull();
+    expect(doc.querySelector('#feed .chip')!.getAttribute('title'))
+      .toBe('a"b: "><img src=x onerror=alert(1)>');
     view.stop();
   });
 });
