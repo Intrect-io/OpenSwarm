@@ -247,6 +247,12 @@ $targetExitCode = [OpenSwarmJobObject]::RunTarget([string]$spec.nodePath, $super
 const WINDOWS_JOB_SUPERVISOR_ENCODED = Buffer
   .from(WINDOWS_JOB_SUPERVISOR, 'utf16le')
   .toString('base64');
+// Windows PowerShell 5.1 serializes redirected stderr as CLIXML whenever
+// -EncodedCommand is used, even with -OutputFormat Text. Decode the fixed,
+// user-data-free supervisor inside a regular -Command invocation instead.
+const WINDOWS_JOB_SUPERVISOR_COMMAND =
+  `[ScriptBlock]::Create([Text.Encoding]::Unicode.GetString(`
+  + `[Convert]::FromBase64String('${WINDOWS_JOB_SUPERVISOR_ENCODED}'))).Invoke()`;
 
 export interface CliProcessTreeSpawnSpec {
   command: string;
@@ -288,8 +294,8 @@ export function prepareCliProcessTreeSpawn(
       'Text',
       '-ExecutionPolicy',
       'Bypass',
-      '-EncodedCommand',
-      WINDOWS_JOB_SUPERVISOR_ENCODED,
+      '-Command',
+      WINDOWS_JOB_SUPERVISOR_COMMAND,
     ],
     env: { ...env, [WINDOWS_JOB_SPEC_ENV]: encodedSpec },
   };

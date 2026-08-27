@@ -61,7 +61,9 @@ describe('CLI process tree termination', () => {
     );
     const encodedSpec = prepared.env.OPENSWARM_WINDOWS_JOB_SPEC;
     const decodedSpec = JSON.parse(Buffer.from(encodedSpec!, 'base64').toString('utf8'));
-    const supervisor = Buffer.from(prepared.args.at(-1)!, 'base64').toString('utf16le');
+    const supervisorCommand = prepared.args.at(-1)!;
+    const encodedSupervisor = supervisorCommand.match(/FromBase64String\('([^']+)'\)/)?.[1];
+    const supervisor = Buffer.from(encodedSupervisor!, 'base64').toString('utf16le');
     const assignment = supervisor.indexOf(
       'AssignProcessToJobObject($job, [OpenSwarmJobObject]::GetCurrentProcess())',
     );
@@ -80,9 +82,10 @@ describe('CLI process tree termination', () => {
       'Text',
       '-ExecutionPolicy',
       'Bypass',
-      '-EncodedCommand',
-      expect.any(String),
+      '-Command',
+      expect.stringContaining("[ScriptBlock]::Create("),
     ]);
+    expect(encodedSupervisor).toBeTruthy();
     expect(decodedSpec).toMatchObject({
       command: 'C:\\Tools\\codex.exe',
       args: targetArgs,
