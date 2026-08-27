@@ -51,7 +51,7 @@ import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRol
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
-import { assignCallSign, type AgentRole } from '../coordination/agentNames.js';
+import { coordinationContextFor, publishStageToBoard } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
@@ -82,19 +82,6 @@ import { stageTimeoutMs } from './stageTimeouts.js';
  * inbox nobody reads. Role is part of the key so the worker and the reviewer on
  * one task never answer to the same name.
  */
-function coordinationContextFor(context: PipelineContext, role: AgentRole) {
-  const taskId = taskEventKey(context.task);
-  const callSign = assignCallSign({ repository: context.projectPath, executionId: taskId, role });
-  return {
-    repository: context.projectPath,
-    taskId,
-    taskLabel: context.task.issueIdentifier,
-    actor: callSign.address,
-    actorName: callSign.name,
-    actorRole: role,
-  };
-}
-
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
@@ -323,6 +310,7 @@ export class PairPipeline extends EventEmitter {
     safeConsole.log(`[${prefix}] Stage starting: ${stage}`);
     this.emit('stage:start', { stage, context, model: stageModel });
     broadcastEvent({ type: 'pipeline:stage', data: { taskId: taskEventKey(context.task), stage, status: 'start', model: stageModel, ...metadata } });
+    void publishStageToBoard(context, stage, 'running', `Started on ${context.task.title}`, stageModel);
 
     if (this.config.verbose) {
       this.emit('log', { line: `[verbose] Stage: ${stage} | model: ${stageModel ?? 'default'} | iteration: ${context.currentIteration}` });
@@ -611,6 +599,14 @@ export class PairPipeline extends EventEmitter {
 
       safeConsole.log(`[${prefix}] ${stage} completed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:complete', { stage, result: stageResult, context });
+      void publishStageToBoard(
+        context,
+        stage,
+        stageResult.success ? 'completed' : 'failed',
+        stageResult.success
+          ? `Finished in ${(stageResult.duration / 1000).toFixed(1)}s`
+          : `Did not pass in ${(stageResult.duration / 1000).toFixed(1)}s`,
+      );
       const costInfo = (result as { costInfo?: CostInfo }).costInfo;
 
       if (this.config.verbose) {
