@@ -10,7 +10,11 @@ import type { PipelineContext } from './pairPipelineTypes.js';
 
 export class SecurityAuditInfrastructureError extends Error {
   constructor(result: SecurityAuditResult | undefined, detail?: string) {
-    super(`security-audit-infra: ${result?.detail ?? detail ?? result?.status ?? 'no result'}`);
+    // Fall through to the findings before giving up on a cause: a failing audit
+    // records why it failed as a finding, and reporting only `status` told the
+    // operator "failed" with nothing to act on.
+    const fromFindings = result?.findings?.find((finding) => finding.level === 'error')?.message;
+    super(`security-audit-infra: ${result?.detail ?? detail ?? fromFindings ?? result?.status ?? 'no result'}`);
     this.name = 'SecurityAuditInfrastructureError';
   }
 }

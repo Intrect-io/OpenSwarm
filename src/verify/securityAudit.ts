@@ -326,9 +326,14 @@ export async function runSecurityAudit(
         : {}),
     };
   } catch (error) {
+    // Carry the cause in `detail` as well as the finding: callers that gate on
+    // this result report `detail`, so leaving it unset turned every unexpected
+    // failure into a bare "failed" with no way to tell a missing extractor from
+    // an unreadable source file.
+    const cause = shortened(error instanceof Error ? error.message : String(error));
     return { status: 'failed', codeqlLanguages, skippedCodeqlLanguages: [], findings: [{
-      ruleId: 'openswarm/security-codeql-runtime', level: 'error', message: `CodeQL security audit failed: ${shortened(error instanceof Error ? error.message : String(error))}`,
-    }] };
+      ruleId: 'openswarm/security-codeql-runtime', level: 'error', message: `CodeQL security audit failed: ${cause}`,
+    }], detail: cause };
   } finally {
     await snapshot?.cleanup();
   }
