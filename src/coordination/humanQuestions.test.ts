@@ -63,6 +63,27 @@ describe('human questions', () => {
     expect(posted.answer).toBeUndefined();
   });
 
+  it('pages the operator once per open question, but retries an undelivered page', async () => {
+    const h = await modules();
+    const question = { repository: '/repo', taskId: 't5', actor: 'a', question: 'Ship?' };
+
+    // First ask: Discord down — no page landed.
+    await h.postHumanQuestion({ ...question, notify: async () => false });
+
+    // Re-dispatch while still undelivered: the page is retried and lands.
+    const paged = vi.fn(async () => true);
+    const second = await h.postHumanQuestion({ ...question, notify: paged });
+    expect(second.delivered).toBe(true);
+    expect(paged).toHaveBeenCalledTimes(1);
+
+    // Further re-dispatches must not ping the operator again for the same
+    // open question — that trains them to ignore the bot.
+    const rePaged = vi.fn(async () => true);
+    const third = await h.postHumanQuestion({ ...question, notify: rePaged });
+    expect(third.delivered).toBe(true);
+    expect(rePaged).not.toHaveBeenCalled();
+  });
+
   it('records one waiting question even when the agent asks repeatedly', async () => {
     const h = await modules();
     const store = (await import('./coordinationStore.js')).getCoordinationStore();

@@ -87,12 +87,34 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
     });
   }
 
+  // Page the operator at most once per open question. A re-dispatched task asks
+  // again, but the person has already been pinged — re-paging trains them to
+  // ignore the bot. The one exception is a question whose page never landed
+  // (Discord down/unconfigured): that one is retried until a page succeeds.
+  // Delivery is recorded on the board so the state survives the asking process.
+  const alreadyPaged = prior.some((event) =>
+    event.kind === 'human-question' && event.status === 'running');
+  if (alreadyPaged) return { correlationId, delivered: true };
+
   const notify = input.notify ?? notifyOperatorViaDiscord;
   const delivered = await notify(
     `OpenSwarm needs a decision for ${input.taskId}` +
       `${input.actorName ? ` (asked by ${input.actorName})` : ''}.\n${input.question}\n\n` +
       `Reply with: !answer ${correlationId} <your answer>`,
   );
+  if (delivered) {
+    await store.publish({
+      repository: input.repository,
+      taskId: input.taskId,
+      actor: 'openswarm-daemon',
+      actorName: 'OpenSwarm daemon',
+      recipient: 'human',
+      kind: 'human-question',
+      status: 'running',
+      correlationId,
+      summary: 'Operator paged on Discord',
+    });
+  }
   return { correlationId, delivered };
 }
 

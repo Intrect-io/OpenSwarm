@@ -67,7 +67,7 @@ export interface AutonomousConfig {
   /** Role-scoped MCP policies; orchestrator defaults to no tools. */
   mcpPolicies?: Partial<Record<'orchestrator' | 'worker' | 'reviewer', RoleMcpPolicy>>;
   /** Typed execution adapter routing policy. */
-  adapterRouting?: { primary?: 'codex' | 'codex-responses'; fallbacks?: Array<'cc-router' | 'cursor'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
+  adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
   /** Periodic read-only repository review jobs. */
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */

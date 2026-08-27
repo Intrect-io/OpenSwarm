@@ -569,7 +569,7 @@ export type AutonomousStartupConfig = {
   jobProfiles?: JobProfile[];
   coordinationBoardIssueId?: string;
   mcpPolicies?: Record<string, { servers: string[]; allowTools?: string[]; writeTools?: string[]; destructiveTools?: string[] }>;
-  adapterRouting?: { primary?: 'codex' | 'codex-responses'; fallbacks?: Array<'cc-router' | 'cursor'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
+  adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
   orchestratorSchedule?: string;

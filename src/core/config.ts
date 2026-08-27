@@ -332,8 +332,12 @@ const AutonomousConfigSchema = z.object({
     destructiveTools: z.array(z.string()).optional(),
   })).optional(),
   adapterRouting: z.object({
-    primary: z.enum(['codex', 'codex-responses']).default('codex'),
-    fallbacks: z.array(z.enum(['cc-router', 'cursor'])).default(['cc-router', 'cursor']),
+    // Must be expressible for anything `adapter:` can select as the worker's
+    // primary — a policy whose primary the schema rejects cannot match the
+    // running adapter, which silently disables routing (README documents the
+    // equality requirement).
+    primary: z.enum(['codex', 'codex-responses', 'cc-router', 'cursor', 'gpt', 'openrouter', 'atlascloud', 'lmstudio', 'local', 'claude']).default('codex'),
+    fallbacks: z.array(z.enum(['cc-router', 'cursor', 'codex', 'codex-responses'])).default(['cc-router', 'cursor']),
     allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
   }).optional(),
   periodicReviews: z.array(z.object({
