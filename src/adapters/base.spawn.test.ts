@@ -65,7 +65,7 @@ describe('CLI process tree termination', () => {
     const assignment = supervisor.indexOf(
       'AssignProcessToJobObject($job, [OpenSwarmJobObject]::GetCurrentProcess())',
     );
-    const targetLaunch = supervisor.indexOf('& ([string]$spec.command) @targetArgs');
+    const targetLaunch = supervisor.indexOf('[OpenSwarmJobObject]::RunTarget');
 
     expect(prepared.command).toBe(
       'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
@@ -79,10 +79,21 @@ describe('CLI process tree termination', () => {
       '-EncodedCommand',
       expect.any(String),
     ]);
-    expect(decodedSpec).toEqual({ command: 'C:\\Tools\\codex.exe', args: targetArgs });
+    expect(decodedSpec).toMatchObject({
+      command: 'C:\\Tools\\codex.exe',
+      args: targetArgs,
+      nodePath: process.execPath,
+      nodeSupervisor: expect.any(String),
+      crossSpawnPath: expect.stringContaining('cross-spawn'),
+    });
     expect(originalEnv).not.toHaveProperty('OPENSWARM_WINDOWS_JOB_SPEC');
     expect(supervisor).toContain('[Console]::OutputEncoding = $utf8NoBom');
     expect(supervisor).toContain('$OutputEncoding = $utf8NoBom');
+    expect(supervisor).toContain('Arguments = BuildCommandLine(arguments)');
+    expect(supervisor).toContain('BaseStream.CopyToAsync(Console.OpenStandardOutput())');
+    expect(supervisor).toContain('Task.WaitAll(new Task[] { stdout, stderr });');
+    expect(decodedSpec.nodeSupervisor).toContain('const crossSpawn = require(spec.crossSpawnPath)');
+    expect(decodedSpec.nodeSupervisor).toContain("stdio: ['pipe', 'pipe', 'pipe']");
     expect(supervisor).toContain('LimitFlags = 0x00002000');
     expect(assignment).toBeGreaterThan(-1);
     expect(targetLaunch).toBeGreaterThan(assignment);

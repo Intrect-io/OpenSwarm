@@ -58,6 +58,7 @@
     "better-sqlite3": "^12.8.0",
     "cli-highlight": "^2.1.11",
     "commander": "^12.1.0",
+    "cross-spawn": "^7.0.6",
     "croner": "^8.0.0",
     "discord.js": "^14.14.1",
     "fullscreen-ink": "^0.1.0",

@@ -1,9 +1,64 @@
 import type { ChildProcess } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { win32 } from 'node:path';
 
 type KillableProcess = Pick<ChildProcess, 'pid' | 'kill'>;
 
 const WINDOWS_JOB_SPEC_ENV = 'OPENSWARM_WINDOWS_JOB_SPEC';
+const require = createRequire(import.meta.url);
+const CROSS_SPAWN_PATH = require.resolve('cross-spawn');
+
+// The Node supervisor owns the target's stdio pipes, so target descendants do
+// not inherit the PowerShell/C# relay handles. cross-spawn preserves npm .cmd
+// shim support while keeping target arguments out of a command shell string.
+const WINDOWS_NODE_SUPERVISOR = String.raw`
+const specEnv = '${WINDOWS_JOB_SPEC_ENV}';
+const encodedSpec = process.env[specEnv];
+if (!encodedSpec) throw new Error('OpenSwarm Windows Node supervisor received no command specification');
+delete process.env[specEnv];
+const spec = JSON.parse(Buffer.from(encodedSpec, 'base64').toString('utf8'));
+const crossSpawn = require(spec.crossSpawnPath);
+const target = crossSpawn(spec.command, spec.args, {
+  env: process.env,
+  shell: false,
+  stdio: ['pipe', 'pipe', 'pipe'],
+  windowsHide: true,
+});
+let settled = false;
+let exitDrainTimer = null;
+
+target.stdin?.on('error', () => {});
+process.stdin.on('error', () => {});
+if (target.stdin) process.stdin.pipe(target.stdin);
+if (target.stdout) target.stdout.pipe(process.stdout, { end: false });
+if (target.stderr) target.stderr.pipe(process.stderr, { end: false });
+
+function finish(code) {
+  if (settled) return;
+  settled = true;
+  if (exitDrainTimer) clearTimeout(exitDrainTimer);
+  if (target.stdin) process.stdin.unpipe(target.stdin);
+  process.stdin.pause();
+  target.stdout?.unpipe(process.stdout);
+  target.stderr?.unpipe(process.stderr);
+  target.stdin?.destroy();
+  target.stdout?.destroy();
+  target.stderr?.destroy();
+  process.exitCode = Number.isInteger(code) ? code : 1;
+}
+
+target.once('error', (error) => {
+  process.stderr.write('OpenSwarm supervised CLI spawn failed: ' + error.message + '\n');
+  finish(1);
+});
+target.once('exit', (code) => {
+  process.exitCode = Number.isInteger(code) ? code : 1;
+  // close waits for stdio. If a descendant retained the target-facing pipe,
+  // stop waiting after the same bounded drain used by the POSIX caller.
+  exitDrainTimer = setTimeout(() => finish(code), 1000);
+});
+target.once('close', (code) => finish(code));
+`;
 
 // Windows has no POSIX-style process groups. Run the requested command inside
 // a small supervisor that joins a Job Object *before* it launches the real CLI.
@@ -20,7 +75,11 @@ $OutputEncoding = $utf8NoBom
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
 
 public static class OpenSwarmJobObject {
     [StructLayout(LayoutKind.Sequential)]
@@ -75,6 +134,75 @@ public static class OpenSwarmJobObject {
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool CloseHandle(IntPtr handle);
+
+    // Match libuv's Windows argv quoting instead of letting Windows PowerShell
+    // 5.1 reinterpret quotes and backslashes for a native command.
+    private static string QuoteArgument(string argument) {
+        if (argument.Length > 0 && argument.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0)
+            return argument;
+
+        StringBuilder quoted = new StringBuilder(argument.Length + 2);
+        quoted.Append('"');
+        int backslashes = 0;
+        foreach (char character in argument) {
+            if (character == '\\') {
+                backslashes++;
+            } else if (character == '"') {
+                quoted.Append('\\', backslashes * 2 + 1);
+                quoted.Append('"');
+                backslashes = 0;
+            } else {
+                quoted.Append('\\', backslashes);
+                quoted.Append(character);
+                backslashes = 0;
+            }
+        }
+        quoted.Append('\\', backslashes * 2);
+        quoted.Append('"');
+        return quoted.ToString();
+    }
+
+    private static string BuildCommandLine(string[] arguments) {
+        StringBuilder commandLine = new StringBuilder();
+        foreach (string argument in arguments) {
+            if (commandLine.Length > 0) commandLine.Append(' ');
+            commandLine.Append(QuoteArgument(argument));
+        }
+        return commandLine.ToString();
+    }
+
+    public static int RunTarget(string command, string[] arguments) {
+        using (Process target = new Process()) {
+            target.StartInfo = new ProcessStartInfo {
+                FileName = command,
+                Arguments = BuildCommandLine(arguments),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            if (!target.Start()) throw new InvalidOperationException("Failed to start the supervised CLI");
+
+            // Relay bytes rather than PowerShell strings. This preserves native
+            // UTF-8 JSON exactly and drains both output pipes while stdin copies.
+            Task stdout = target.StandardOutput.BaseStream.CopyToAsync(Console.OpenStandardOutput());
+            Task stderr = target.StandardError.BaseStream.CopyToAsync(Console.OpenStandardError());
+            try {
+                Console.OpenStandardInput().CopyTo(target.StandardInput.BaseStream);
+            } catch (IOException) {
+                // The target can legitimately close stdin before consuming it.
+            } finally {
+                try { target.StandardInput.Close(); } catch (IOException) { }
+            }
+
+            target.WaitForExit();
+            // The Node supervisor owns the target-facing pipes and closes its
+            // own relay handles only after normal output has drained.
+            Task.WaitAll(new Task[] { stdout, stderr });
+            return target.ExitCode;
+        }
+    }
 }
 '@
 
@@ -83,7 +211,6 @@ if ([String]::IsNullOrWhiteSpace($encodedSpec)) {
     throw 'OpenSwarm Windows job supervisor received no command specification'
 }
 $specJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedSpec))
-[Environment]::SetEnvironmentVariable('${WINDOWS_JOB_SPEC_ENV}', $null, 'Process')
 $spec = $specJson | ConvertFrom-Json
 if ([String]::IsNullOrWhiteSpace([string]$spec.command)) {
     throw 'OpenSwarm Windows job supervisor received an empty command'
@@ -108,13 +235,12 @@ if (-not [OpenSwarmJobObject]::AssignProcessToJobObject($job, [OpenSwarmJobObjec
     throw "AssignProcessToJobObject failed: $errorCode"
 }
 
-# The target and every child it creates now inherit this job. Do not close the
-# handle manually: process exit closes the final handle, and KILL_ON_JOB_CLOSE
-# then removes any descendant that tried to outlive the target.
-[string[]]$targetArgs = @($spec.args)
-& ([string]$spec.command) @targetArgs
-$targetExitCode = $LASTEXITCODE
-if ($null -eq $targetExitCode) { $targetExitCode = 0 }
+# Start the Node supervisor inside the job. It clears the encoded target spec
+# before launching the real CLI, supports npm command shims, and owns the
+# target-facing pipes. Do not close the job handle manually: process exit closes
+# the final handle and reaps descendants.
+$supervisorArgs = [string[]]@('-e', [string]$spec.nodeSupervisor)
+$targetExitCode = [OpenSwarmJobObject]::RunTarget([string]$spec.nodePath, $supervisorArgs)
 [Environment]::Exit([int]$targetExitCode)
 `;
 
@@ -142,7 +268,13 @@ export function prepareCliProcessTreeSpawn(
 ): CliProcessTreeSpawnSpec {
   if (platform !== 'win32') return { command, args, env };
 
-  const encodedSpec = Buffer.from(JSON.stringify({ command, args }), 'utf8').toString('base64');
+  const encodedSpec = Buffer.from(JSON.stringify({
+    command,
+    args,
+    nodePath: process.execPath,
+    nodeSupervisor: WINDOWS_NODE_SUPERVISOR,
+    crossSpawnPath: CROSS_SPAWN_PATH,
+  }), 'utf8').toString('base64');
   const systemRoot = env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows';
   return {
     command: win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
