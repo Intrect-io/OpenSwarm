@@ -155,8 +155,11 @@ describe('PairPipeline model selection', () => {
     });
     const result = await pipeline.run(task(), process.cwd());
 
-    // Retrying re-runs the same worker into the same unanswered question.
+    // Retrying re-runs the same worker into the same unanswered question, and
+    // anything but the first-class status gets failure-counted by the scheduler.
     expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('waiting_on_operator');
+    expect(result.workerResult?.blockedOnOperator).toBe(true);
     expect(runWorker).toHaveBeenCalledTimes(1);
     expect(runReviewer).not.toHaveBeenCalled();
   });

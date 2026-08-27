@@ -830,6 +830,12 @@ export class PairPipeline extends EventEmitter {
         // resumes when the Discord answer lands.
         if (failedWorker.blockedOnOperator) {
           safeConsole.log(`[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
+          // First-class status: buildResult derives finalStatus from the
+          // session, and anything else here surfaces as a plain 'failed' the
+          // scheduler failure-counts and backoff-retries into the same
+          // unanswered question.
+          context.workerResult = failedWorker;
+          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
           this.emit('halt', {
             confidence: failedWorker.confidencePercent ?? 0,
             haltReason: failedWorker.haltReason ?? 'Blocked on an operator decision',

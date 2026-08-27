@@ -494,6 +494,25 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
+    this.scheduler.on('waiting_on_operator', ({ task, result }) => {
+      const taskCtx = this.formatTaskContext(task);
+      const question = result.workerResult?.haltReason ?? 'Blocked on an operator decision';
+      console.log(`[Scheduler] Task waiting on operator: ${taskCtx} ${task.title} — ${question}`);
+      this.recordPipelineHistory(task, result);
+      broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
+      // Park without touching failure/STUCK accounting: the only blocker is a
+      // human. The backoff re-admit is also the resume path — on the retried
+      // run, ask_human finds the recorded answer on the board and returns it
+      // instead of blocking, so the task continues the moment a re-dispatch
+      // lands after the operator replies.
+      if (task.issueId) {
+        const nextRetryTime = setRetryTime(task.issueId, 4, this.failedTaskRetryTimes);
+        this.saveTaskState();
+        console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)} to check for the operator's answer`);
+      }
+      this.scheduleNextHeartbeat();
+    });
+
     this.scheduler.on('failed', ({ task, result }) => {
       this.trackSchedulerHandler('failed', (async () => {
       const taskCtx = this.formatTaskContext(task);

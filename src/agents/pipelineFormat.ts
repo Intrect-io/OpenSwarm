@@ -24,6 +24,7 @@ export function formatPipelineResult(result: PipelineResult): string {
     cancelled: '🚫',
     decomposed: '🔀',
     superseded: '♻️',
+    waiting_on_operator: '🙋',
     rate_limited: '⏸',
     infra_error: '🔌',
   }[result.finalStatus];
@@ -82,6 +83,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     cancelled: { emoji: '🚫', color: 0xFFAA00, label: 'CANCELLED' },
     decomposed: { emoji: '🔀', color: 0x00AAFF, label: 'DECOMPOSED' },
     superseded: { emoji: '♻️', color: 0x00AAFF, label: 'SUPERSEDED' },
+    waiting_on_operator: { emoji: '🙋', color: 0xFFC300, label: 'WAITING ON OPERATOR' },
     rate_limited: { emoji: '⏸', color: 0xFFAA00, label: 'RATE LIMITED' },
     infra_error: { emoji: '🔌', color: 0xFFAA00, label: 'INFRA ERROR' },
   }[result.finalStatus] || { emoji: '❓', color: 0x808080, label: 'UNKNOWN' };

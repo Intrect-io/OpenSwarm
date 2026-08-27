@@ -467,11 +467,14 @@ export class TaskScheduler extends EventEmitter {
       // failed; free the slot and let the runner schedule a delayed re-check.
       console.log(`[Scheduler] Task superseded: ${running.task.title}`);
       this.emit('superseded', { task: running.task, result });
-    } else if (result.finalStatus === 'cancelled' || result.finalStatus === 'decomposed') {
+    } else if (result.finalStatus === 'cancelled' || result.finalStatus === 'decomposed'
+        || result.finalStatus === 'waiting_on_operator') {
       // These are coordination outcomes, not completed implementations. In
       // particular, a decomposed parent can carry success=true even though only
       // child issues were created; counting it as completed races the durable
-      // child workflow and makes capacity/pace telemetry lie.
+      // child workflow and makes capacity/pace telemetry lie. A run waiting on
+      // an operator decision likewise neither failed nor finished — counting it
+      // failed would failure-budget a task whose only blocker is a human.
       console.log(`[Scheduler] Task ${result.finalStatus}: ${running.task.title}`);
       this.emit(result.finalStatus, { task: running.task, result });
     } else if (result.success) {
