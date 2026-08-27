@@ -1,9 +1,9 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
+import { defaultAutomationDbPath } from './automationDbPath.js';
 import { ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION, CLAIMABLE_STATES, RUN_STATES } from './runLedgerTypes.js';
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
@@ -119,11 +119,7 @@ function assertRunState(value: string): asserts value is RunState {
   }
 }
 
-export function defaultAutomationDbPath(): string {
-  return process.env.OPENSWARM_AUTOMATION_DB
-    ? resolve(process.env.OPENSWARM_AUTOMATION_DB)
-    : resolve(homedir(), '.openswarm', 'automation.db');
-}
+export { defaultAutomationDbPath } from './automationDbPath.js';
 
 /**
  * Durable execution truth for the issue-driven loop.

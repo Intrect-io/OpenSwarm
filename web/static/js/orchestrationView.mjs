@@ -9,6 +9,9 @@
 
 import { buildOrchestrationModel, dominantKind, KIND_COLORS } from './orchestrationModel.mjs';
 import { layoutTiers } from './tierLayout.mjs';
+import {
+  buildThreads, describeEvent, metadataPairs, speakerOf, addresseeOf, taskLabelOf, threadFor,
+} from './conversationModel.mjs';
 
 export const ROLE_COLORS = {
   worker: '#3b9eff',
@@ -54,7 +57,7 @@ export function renderStats(doc, stats) {
     .join('');
 }
 
-export function renderGraph(doc, model, layout, selected, onSelect) {
+export function renderGraph(doc, model, layout, selected, onSelect, spotlight = null) {
   const { positions, bands, labelGutter } = layout;
   const svg = doc.getElementById('graph');
   const width = svg.clientWidth || 900;
@@ -103,6 +106,10 @@ export function renderGraph(doc, model, layout, selected, onSelect) {
       if (edge.to === selected) neighbors.add(edge.from);
     }
   }
+  // Clicking a feed row asks "who said this": the speaker gets the loud ring,
+  // the addressee a quieter one, so a single message reads off the hierarchy.
+  const speaking = spotlight?.actor ?? null;
+  const spokenTo = spotlight?.recipient ?? null;
 
   const edgeLayer = el(doc, 'g');
   for (const edge of model.edges) {
@@ -136,6 +143,18 @@ export function renderGraph(doc, model, layout, selected, onSelect) {
     const radius = nodeRadius(node);
     if (node.pendingCount > 0) {
       group.appendChild(el(doc, 'circle', { r: radius + 6, fill: 'none', stroke: '#e8b339', 'stroke-width': 2, class: 'pulse' }));
+    }
+    if (node.id === speaking) {
+      group.setAttribute('data-speaking', 'true');
+      group.appendChild(el(doc, 'circle', {
+        r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 2.5, class: 'speaking',
+      }));
+    } else if (node.id === spokenTo) {
+      group.setAttribute('data-spoken-to', 'true');
+      group.appendChild(el(doc, 'circle', {
+        r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 1.5,
+        'stroke-opacity': 0.45, 'stroke-dasharray': '3 4', class: 'spoken-to',
+      }));
     }
     group.appendChild(el(doc, 'circle', {
       r: radius,
@@ -184,7 +203,33 @@ export function renderDetail(doc, model, events, selected) {
     <div class="meta">last seen ${new Date(node.lastSeen).toLocaleTimeString()}</div>`;
 }
 
-export function renderFeed(doc, events, selected) {
+function statusColor(status) {
+  if (PENDING.has(status)) return '#e8b339';
+  return status === 'failed' || status === 'expired' ? '#e5484d' : '#4cc38a';
+}
+
+function clockOf(timestamp) {
+  return new Date(timestamp).toLocaleTimeString();
+}
+
+/** Body of one message: the summary, its long form, and any metadata. */
+function messageBody(event) {
+  const pairs = metadataPairs(event);
+  const detail = event.detail && event.detail !== event.summary
+    ? `<div class="ev-detail">${escapeHtml(event.detail)}</div>`
+    : '';
+  const meta = pairs.length
+    ? `<div class="ev-meta">${pairs.map(([key, value]) =>
+        `<span class="chip"><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join('')}</div>`
+    : '';
+  return `<div class="ev-summary">${escapeHtml(event.summary)}</div>${detail}${meta}`;
+}
+
+/**
+ * The feed. Every row says when it happened, which task it belongs to, who
+ * spoke and to whom — the raw summary alone was unreadable for system events.
+ */
+export function renderFeed(doc, events, selected, focusedEventId, onFocus) {
   const feed = doc.getElementById('feed');
   const shown = (selected
     ? events.filter((event) => event.actor === selected || event.recipient === selected)
@@ -195,15 +240,80 @@ export function renderFeed(doc, events, selected) {
     return;
   }
   feed.innerHTML = shown.map((event) => {
-    const color = PENDING.has(event.status) ? '#e8b339'
-      : event.status === 'failed' || event.status === 'expired' ? '#e5484d' : '#4cc38a';
-    return `<div class="ev">
-      <div class="head"><span class="status" style="color:${color}">${escapeHtml(event.status)}</span>
-        <span class="kind">${escapeHtml(event.kind)}</span><span style="color:#6c7086">#${event.seq}</span></div>
-      <div class="summary">${escapeHtml(event.summary)}</div>
-      <div class="route">${escapeHtml(event.actorName || event.actor)} → ${escapeHtml(event.recipientName || event.recipient || 'all')}</div>
+    const task = taskLabelOf(event);
+    return `<div class="ev${event.id === focusedEventId ? ' focused' : ''}" data-event="${escapeHtml(event.id)}" role="button" tabindex="0">
+      <div class="ev-head">
+        <span class="status" style="color:${statusColor(event.status)}">${escapeHtml(event.status)}</span>
+        ${task ? `<span class="task-chip">${escapeHtml(task)}</span>` : ''}
+        <span class="clock">${escapeHtml(clockOf(event.timestamp))}</span>
+      </div>
+      <div class="ev-line">${escapeHtml(describeEvent(event))}</div>
+      ${messageBody(event)}
     </div>`;
   }).join('');
+
+  if (!onFocus) return;
+  for (const row of feed.querySelectorAll('[data-event]')) {
+    const id = row.getAttribute('data-event');
+    row.addEventListener('click', () => onFocus(id));
+    row.addEventListener('keydown', (keyEvent) => {
+      if (keyEvent.key === 'Enter' || keyEvent.key === ' ') { keyEvent.preventDefault(); onFocus(id); }
+    });
+  }
+}
+
+/**
+ * The conversation the focused event belongs to, rendered as a transcript with
+ * a composer. Speaking here is not decoration: the message is addressed to the
+ * agent, which picks it up on its next `coordination_read`.
+ */
+export function renderThread(doc, thread, onSend) {
+  const holder = doc.getElementById('thread');
+  if (!holder) return;
+  if (!thread) {
+    holder.innerHTML = '<div class="empty">Select an event to read its conversation</div>';
+    return;
+  }
+  const task = thread.taskLabel ? `<span class="task-chip">${escapeHtml(thread.taskLabel)}</span>` : '';
+  const waiting = thread.awaitingOperator
+    ? '<span class="await-chip">awaiting your answer</span>'
+    : '';
+  const transcript = thread.events.map((event) => `
+    <div class="msg${event.actorRole === 'human' ? ' from-operator' : ''}">
+      <div class="msg-head">
+        <span class="who" style="color:${ROLE_COLORS[event.actorRole] ?? ROLE_COLORS.agent}">${escapeHtml(speakerOf(event))}</span>
+        ${addresseeOf(event) ? `<span class="to">to ${escapeHtml(addresseeOf(event))}</span>` : ''}
+        <span class="clock">${escapeHtml(clockOf(event.timestamp))}</span>
+      </div>
+      ${messageBody(event)}
+    </div>`).join('');
+
+  const target = thread.replyTo ? escapeHtml(thread.replyTo.name) : null;
+  const composer = target
+    ? `<form class="composer" id="composer">
+        <input id="composer-text" type="text" autocomplete="off"
+          placeholder="Reply to ${target}…" aria-label="Reply to ${target}" />
+        <button type="submit">Send</button>
+       </form>`
+    : '<div class="empty">No agent in this exchange can be addressed</div>';
+
+  holder.innerHTML = `
+    <div class="thread-head">${task}${waiting}
+      <span class="participants">${escapeHtml(thread.participants.map((p) => p.name).join(' · '))}</span>
+    </div>
+    <div class="transcript">${transcript}</div>
+    ${composer}`;
+
+  const form = doc.getElementById('composer');
+  if (!form || !onSend) return;
+  form.addEventListener('submit', (submitEvent) => {
+    submitEvent.preventDefault();
+    const input = doc.getElementById('composer-text');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    onSend(thread, text);
+  });
 }
 
 /** Entry point: fetch, render, then keep live via SSE with a polling backstop. */
@@ -211,11 +321,34 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   const fetcher = fetchImpl ?? ((url) => fetch(url));
   const byId = new Map();
   let selected = null;
+  let focusedEventId = null;
+
+  const send = async (thread, text) => {
+    try {
+      await fetcher('/api/coordination/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          correlationId: thread.correlationId,
+          recipient: thread.replyTo?.address,
+          repository: thread.events[0]?.repository,
+          taskId: thread.taskId,
+          text,
+        }),
+      });
+    } catch { /* the next poll shows whether it landed */ }
+    // Re-read rather than echoing locally: the board decides what was actually
+    // published (an answer to a blocking question looks different from a note).
+    await refresh();
+  };
 
   const redraw = () => {
     const events = [...byId.values()].sort((a, b) => a.seq - b.seq);
     const model = buildOrchestrationModel(events);
     if (selected && !model.nodes.some((node) => node.id === selected)) selected = null;
+    const focused = focusedEventId ? byId.get(focusedEventId) ?? null : null;
+    if (focusedEventId && !focused) focusedEventId = null;
+    const threads = buildThreads(events);
     const svg = doc.getElementById('graph');
     const layout = layoutTiers(model.nodes, {
       width: svg.clientWidth || 900,
@@ -225,9 +358,13 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     renderGraph(doc, model, layout, selected, (id) => {
       selected = selected === id ? null : id;
       redraw();
-    });
+    }, focused ? { actor: focused.actor, recipient: focused.recipient ?? null } : null);
     renderDetail(doc, model, events, selected);
-    renderFeed(doc, events, selected);
+    renderFeed(doc, events, selected, focusedEventId, (id) => {
+      focusedEventId = focusedEventId === id ? null : id;
+      redraw();
+    });
+    renderThread(doc, threadFor(threads, focused), send);
   };
 
   const absorb = (event) => {
@@ -235,7 +372,7 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     return false;
   };
 
-  const refresh = async () => {
+  async function refresh() {
     try {
       const response = await fetcher('/api/coordination');
       if (!response.ok) return;
@@ -244,7 +381,7 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
       for (const event of snapshot.events ?? []) changed = absorb(event) || changed;
       if (changed || byId.size === 0) redraw();
     } catch { /* transient; the next poll retries */ }
-  };
+  }
 
   refresh().then(() => redraw());
   const timer = setInterval(refresh, pollMs);
