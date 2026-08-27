@@ -69,6 +69,13 @@ COPY --from=builder --chown=openswarm:openswarm /app/node_modules ./node_modules
 COPY --from=builder --chown=openswarm:openswarm /app/dist ./dist
 COPY --chown=openswarm:openswarm package.json config.example.yaml ./
 COPY --chown=openswarm:openswarm templates ./templates
+# The repository's CodeQL *configuration*. The CodeQL CLI itself is not shipped:
+# the bundle is roughly a gigabyte and would be carried by every pull, so the
+# image expects it to be provided by the deployment. Without it the security
+# audit reports `unavailable` and the pipeline parks the task rather than
+# skipping the gate — mount a bundle and put it on PATH, e.g.
+#   volumes: [ /opt/codeql-bundle:/opt/codeql:ro ]
+#   environment: [ "PATH=/opt/codeql:/usr/local/bin:/usr/bin:/bin" ]
 COPY --chown=openswarm:openswarm .codeql ./.codeql
 
 # The CLI on PATH; node resolves modules from the symlink target, so this is
