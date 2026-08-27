@@ -451,6 +451,36 @@ openswarm dash                # open the web dashboard (:3847)
 
 > **From source / development** (contributors): clone the repo and use the `npm run …` scripts (`npm run dev`, `npm start`, `npm run service:install` for a macOS launchd service, `docker compose up -d`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Run with Docker
+
+The repository ships a production image for the headless daemon (web dashboard on `:3847`, `openswarm` CLI on `PATH`). Published images live at `ghcr.io/unohee/openswarm` (tagged per release); building locally works the same way:
+
+```bash
+# Pull a release, or build from the repo
+docker pull ghcr.io/unohee/openswarm:latest   # or: docker compose build
+
+cp config.example.yaml config.yaml            # edit adapter/projects/keys
+export OPENSWARM_WEB_TOKEN=$(openssl rand -hex 24)  # required to expose the dashboard
+docker compose up -d
+curl http://localhost:3847/api/health         # daemon health (token-less)
+```
+
+Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated `0.0.0.0` bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
+
+The compose file wires the three mounts that matter:
+
+| Mount | Purpose |
+|---|---|
+| `./config.yaml → /app/config.yaml` | daemon configuration (read-only) |
+| `openswarm-state → /home/openswarm/.openswarm` | task state, auth profiles, coordination board — **must persist**, and one container per state volume (two daemons sharing it would fight over locks and double-process issues) |
+| `./workspace → /work` | the repositories the daemon works on; point `autonomous.allowedProjects` at `/work/<repo>` |
+
+Notes:
+
+- **Provider CLIs are not baked in.** The default `codex-responses` adapter runs OpenSwarm's own tool loop against OAuth state — log in on the host (`openswarm auth login`) and mount `~/.codex` / reuse the state volume. For the delegated CLI adapters (`claude`, `codex`, `cursor`), derive your own image: `FROM ghcr.io/unohee/openswarm` + `npm install -g <cli>`.
+- **Git identity**: mount `~/.gitconfig` or set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` (and `GH_TOKEN` for `gh`) so worker commits and PRs attribute correctly.
+- **Verify sandbox**: `bubblewrap` is installed but fail-closed under Docker's default seccomp profile. Enabling it requires `security_opt: [seccomp=unconfined]` + `cap_add: [SYS_ADMIN]` (commented in `docker-compose.yml`) — weigh that against your threat model.
+
 ---
 
 ## Architecture
