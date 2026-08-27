@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -38,8 +38,12 @@ describe.runIf(process.platform === 'win32')('Windows Job Object process ownersh
   it('round-trips quoted Unicode arguments and JSON through an npm-style .cmd shim', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'openswarm-windows-shim-'));
     tempDirs.push(dir);
-    const script = join(dir, 'fixture.cjs');
-    const shim = join(dir, 'fixture.cmd');
+    // cross-spawn deliberately applies a second metacharacter-escaping pass
+    // only to npm-style shims under node_modules/.bin.
+    const binDir = join(dir, 'node_modules', '.bin');
+    mkdirSync(binDir, { recursive: true });
+    const script = join(binDir, 'fixture.cjs');
+    const shim = join(binDir, 'fixture.cmd');
     const expectedArgs = ['plain', 'space value', 'quote"value', 'slash\\', '메타&값'];
     writeFileSync(script, "process.stdout.write(JSON.stringify(process.argv.slice(2)))\n");
     writeFileSync(shim, `@echo off\r\n"${process.execPath}" "%~dp0\\fixture.cjs" %*\r\n`);
