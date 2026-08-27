@@ -43,9 +43,14 @@ FROM node:22-slim AS production
 # git + gh: workers commit and open PRs. bubblewrap: the verify sandbox —
 # fail-closed under Docker's default seccomp profile; see README for the flags
 # that enable it. curl: healthcheck. dumb-init: PID-1 signal handling.
+# python3 is a runtime dependency, not a build one: the security-audit gate runs
+# CodeQL over every language present in the analysed repository, and CodeQL's
+# Python extractor shells out to an interpreter. Without it a single tracked
+# .py file makes `codeql database create --build-mode=none` fail, which the
+# pipeline reports as an infra error and parks the task.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        dumb-init ca-certificates curl git bubblewrap gnupg && \
+        dumb-init ca-certificates curl git bubblewrap gnupg python3 && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
