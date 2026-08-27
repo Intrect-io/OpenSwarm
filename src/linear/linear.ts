@@ -748,13 +748,48 @@ export async function getMyIssues(
 }
 
 /**
+ * Outcome of an issue lookup, separating "this issue does not exist" from "the
+ * lookup could not be performed".
+ *
+ * `getIssue` collapses both into `null`, which reads as "no such issue" at
+ * every call site. An expired Linear token then surfaced to the operator as
+ * `skipped: not found` on dispatch — a report that points at the issue instead
+ * of at the credential that actually failed.
+ */
+export type IssueLookup =
+  | { ok: true; issue: LinearIssueInfo | null }
+  | { ok: false; error: string };
+
+/**
+ * Get a specific issue by ID or identifier, reporting lookup failures instead
+ * of folding them into a missing issue. Prefer this over `getIssue` wherever
+ * the distinction reaches a human.
+ */
+export async function lookupIssue(issueIdOrIdentifier: string): Promise<IssueLookup> {
+  if (!isLinearInitialized()) return { ok: false, error: 'Linear client is not initialized' };
+  try {
+    return { ok: true, issue: await fetchIssue(issueIdOrIdentifier) };
+  } catch (error) {
+    // Fixed first argument: the id is user-supplied (reachable from the
+    // /api/work HTTP surface), and console's printf-style formatting must
+    // never receive a tainted format string (CodeQL js/tainted-format-string).
+    console.error('[Linear] getIssue error:', issueIdOrIdentifier, error);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * Get a specific issue by ID or identifier
  */
 export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo | null> {
-  if (!isLinearInitialized()) return null;
+  const result = await lookupIssue(issueIdOrIdentifier);
+  return result.ok ? result.issue : null;
+}
+
+async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo | null> {
   const linear = getClient();
 
-  try {
+  {
     // Check if it's an identifier format (e.g., LIN-123)
     const isIdentifier = /^[A-Z]+-\d+$/.test(issueIdOrIdentifier);
 
@@ -822,12 +857,6 @@ export async function getIssue(issueIdOrIdentifier: string): Promise<LinearIssue
       blockedBy: blockedBy.size > 0 ? [...blockedBy] : undefined,
       createdAt: issue.createdAt instanceof Date ? issue.createdAt.toISOString() : undefined,
     };
-  } catch (error) {
-    // Fixed first argument: the id is user-supplied (reachable from the
-    // /api/work HTTP surface), and console's printf-style formatting must
-    // never receive a tainted format string (CodeQL js/tainted-format-string).
-    console.error('[Linear] getIssue error:', issueIdOrIdentifier, error);
-    return null;
   }
 }
 

@@ -2,13 +2,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { homedir } from 'node:os';
 import type { AutonomousRunner } from './autonomousRunner.js';
 
-const linear = vi.hoisted(() => ({
+const linear = vi.hoisted(() => {
+  const getIssue = vi.fn(async (_id: string): Promise<Record<string, unknown> | null> => null);
+  return {
   isLinearInitialized: vi.fn(() => true),
-  getIssue: vi.fn(async (_id: string): Promise<Record<string, unknown> | null> => null),
+  getIssue,
+  // Dispatch resolves issues through `lookupIssue` so a failed lookup is
+  // reported as such rather than as a missing issue. These cases all exercise
+  // successful lookups, so delegate and keep asserting on `getIssue`; the
+  // failure branch has its own suite.
+  lookupIssue: vi.fn(async (id: string) => ({ ok: true as const, issue: await getIssue(id) })),
   updateIssueState: vi.fn(async () => true),
   fetchIssuesForStates: vi.fn(async () => ({ nodes: [] as Array<Record<string, unknown>> })),
   getClient: vi.fn(() => ({}) as never),
-}));
+  };
+});
 vi.mock('../linear/linear.js', () => linear);
 
 const { loadRepoMetadataImpl } = vi.hoisted(() => ({
