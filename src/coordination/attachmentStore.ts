@@ -193,14 +193,16 @@ async function write(
   try {
     const attachment = await streamToDisk();
     // The bytes stop being a reservation and become part of the store in one
-    // step, so no other upload can observe a moment where they are in neither
-    // count and both believe there is room.
-    inFlightBytes = Math.max(0, inFlightBytes - bytes);
-    settledBytes += bytes;
+    // step, and not while a sweep is measuring, so no other upload can observe a
+    // moment where they are in neither count and conclude there is room.
+    await runSerialized(() => {
+      inFlightBytes = Math.max(0, inFlightBytes - bytes);
+      settledBytes += bytes;
+    });
     return attachment;
   } catch (error) {
     // Refused or failed: the file is gone, so the reservation simply lapses.
-    inFlightBytes = Math.max(0, inFlightBytes - bytes);
+    await runSerialized(() => { inFlightBytes = Math.max(0, inFlightBytes - bytes); });
     throw error;
   }
 
@@ -373,11 +375,21 @@ interface BudgetOutcome {
 }
 
 async function enforceTotalBudget(now = Date.now()): Promise<BudgetOutcome> {
-  // Serialized: two uploads finishing together would each measure the store
-  // before the other's bytes were counted, both conclude they fit, and the
-  // ceiling would hold for neither. Chaining makes the measurement and the
-  // reclamation one step, so every upload sees the store the previous one left.
-  const run = budgetQueue.then(() => reclaimOverBudget(now), () => reclaimOverBudget(now));
+  return runSerialized(() => reclaimOverBudget(now));
+}
+
+/**
+ * Run a step with exclusive access to the byte counters.
+ *
+ * Both things that touch them take time or are read-modify-write: a sweep walks
+ * the whole store before it can say what is left, and an upload settling moves
+ * its bytes from one counter to the other. Interleaved, a sweep would publish a
+ * total measured before an upload settled and silently drop those bytes, and the
+ * ceiling would stop meaning anything. Chaining makes each one atomic with
+ * respect to the other.
+ */
+function runSerialized<T>(step: () => Promise<T> | T): Promise<T> {
+  const run = budgetQueue.then(step, step);
   budgetQueue = run.catch(() => undefined);
   return run;
 }
