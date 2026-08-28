@@ -517,19 +517,30 @@ export class AutonomousRunner {
         // mode only — without a ledger there is nowhere to put a stop that
         // survives a restart, so legacy mode keeps the fixed-backoff ladder.
         //
-        // The project path comes off the run's own ledger row, not the
-        // in-memory path cache: `execute()` registers it durably before the
-        // pipeline ever runs, so it survives a restart the cache would not.
-        const durableProjectPath = this.durableRuns.getRun(task.issueId)?.projectPath;
-        const openAskCount = durableProjectPath
-          ? getCoordinationStore().openQuestionCount(durableProjectPath, task.issueId)
-          : 0;
-        if (this.durableRuns.isPrimary && openAskCount >= 2) {
+        // Counted as consecutive ATTEMPTS, not distinct board correlation
+        // IDs: a worker that asks with identical wording every time never
+        // mints a second correlation ID (the paging gate above collapses it
+        // to one), so a count keyed on wording would never see more than 1 no
+        // matter how many times it was actually re-dispatched and asked.
+        //
+        // Bounded by the task's last operator answer: a resumed run that
+        // immediately asks a new, distinct question shares this same error
+        // code with the answered attempt before it, and an unbounded walk
+        // would count the two together — parking the new question on its
+        // first ask instead of its second (AGT-4042).
+        const projectPath = this.durableRuns.getRun(task.issueId)?.projectPath;
+        const lastAnsweredAt = projectPath
+          ? getCoordinationStore().lastAnsweredAt(projectPath, task.issueId)
+          : undefined;
+        const consecutiveAsks = this.durableRuns.consecutiveAttemptsWithErrorCode(
+          task.issueId, 'waiting_on_operator', lastAnsweredAt,
+        );
+        if (this.durableRuns.isPrimary && consecutiveAsks >= 2) {
           this.durableRuns.markNeedsHuman(
             task.issueId,
-            `${OPERATOR_QUESTION_PARK_MARKER} asked ${openAskCount} times with no answer — stopped retrying automatically`,
+            `${OPERATOR_QUESTION_PARK_MARKER} asked ${consecutiveAsks} times with no answer — stopped retrying automatically`,
           );
-          console.log(`[Scheduler] Parking ${taskCtx} — asked ${openAskCount}x with no answer, stopped auto-retry until the operator answers or reopens it`);
+          console.log(`[Scheduler] Parking ${taskCtx} — asked ${consecutiveAsks}x with no answer, stopped auto-retry until the operator answers or reopens it`);
         } else {
           const nextRetryTime = setRetryTime(task.issueId, 4, this.failedTaskRetryTimes);
           this.saveTaskState();
@@ -850,20 +861,27 @@ export class AutonomousRunner {
       }
 
       if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
-        const linearReopened = ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '');
-        // The operator-question park (AGT-4042) resumes on its own condition —
-        // the question got answered — which needs no Linear touch at all. Scoped
-        // to runs this file parked for exactly that reason (the marker prefix),
-        // so the rejection-limit and PR-closed-without-merge parks elsewhere in
-        // this file, which share the same NEEDS_HUMAN state, are untouched by it
-        // and keep resuming only on a Linear state change.
+        // The two resume conditions are mutually exclusive by why the run was
+        // parked, not layered as "either one fires it." An ask_human park
+        // (marker prefix) leaves the Linear card exactly where it already was
+        // — the pipeline never touches it — which for an active task is
+        // routinely 'Todo' or 'In Progress' already; the pre-existing
+        // linearState check would then resume it on the very next heartbeat
+        // regardless of an answer, undoing the park before it did anything.
+        // So it resumes ONLY on its own condition — the question got
+        // answered — and the rejection-limit / PR-closed-without-merge parks
+        // elsewhere in this file, which share NEEDS_HUMAN but DO move the
+        // card (a STUCK label / Backlog), keep resuming only on that Linear
+        // change.
+        const isOperatorQuestionPark = durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false;
+        const linearReopened = !isOperatorQuestionPark
+          && ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '');
         // The project path comes off the run's own row, not the in-memory
         // path cache: durable, so this still finds an answer that arrived
         // while the daemon was down, once the row is fetched again after
         // restart.
-        const questionAnswered = Boolean(
+        const questionAnswered = isOperatorQuestionPark && Boolean(
           durableRun.projectPath
-          && durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER)
           && getCoordinationStore().openQuestionCount(durableRun.projectPath, id) === 0,
         );
         if (linearReopened || questionAnswered) {

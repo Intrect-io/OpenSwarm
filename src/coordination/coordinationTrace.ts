@@ -21,7 +21,7 @@ import { dirname, resolve } from 'node:path';
 import { defaultAutomationDbPath } from '../automation/automationDbPath.js';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
 import type Database from 'better-sqlite3';
-import type { CoordinationEvent } from './coordinationStore.js';
+import type { CoordinationEvent, CoordinationKind, CoordinationStatus } from './coordinationStore.js';
 
 // This package is ESM, so `require` does not exist here. The trace loads its
 // native dependency lazily — a missing or ABI-mismatched better-sqlite3 must
@@ -205,6 +205,40 @@ export function queryTrace(query: TraceQuery = {}): CoordinationEvent[] {
   } catch (error) {
     console.warn('[CoordinationTrace] Query failed:', error);
     return [];
+  }
+}
+
+/**
+ * The single most recent trace event of one kind for one task, or undefined.
+ *
+ * Filtered by `kind` (and optionally `status`) in SQL, not read out of a
+ * generic `limit`-bounded window: a task's trace stream is shared by every
+ * kind it produces (`adapter-route`, `review-run`, `mcp-audit`, ...), so a
+ * task busy enough on those can crowd a `human-answer` out of even a
+ * thousand-row `queryTrace` slice while this, needing only the one row SQL
+ * already filtered to the right kind, never sees that competition.
+ */
+export function lastTraceEventOfKind(query: {
+  repository: string; taskId: string; kind: CoordinationKind; status?: CoordinationStatus;
+}): CoordinationEvent | undefined {
+  const handle = getTraceDb();
+  if (!handle) return undefined;
+  const where = ['repository = ?', 'task_id = ?', 'kind = ?'];
+  const params: string[] = [resolve(query.repository), query.taskId, query.kind];
+  if (query.status) {
+    where.push('status = ?');
+    params.push(query.status);
+  }
+  try {
+    const row = handle.prepare(`
+      SELECT * FROM coordination_trace
+      WHERE ${where.join(' AND ')}
+      ORDER BY id DESC LIMIT 1
+    `).get(...params) as TraceRow | undefined;
+    return row ? toEvent(row) : undefined;
+  } catch (error) {
+    console.warn('[CoordinationTrace] Query failed:', error);
+    return undefined;
   }
 }
 

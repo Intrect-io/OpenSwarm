@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { coordinationFilePath, coordinationStateDir } from './coordinationPaths.js';
-import { recordTraceEvent } from './coordinationTrace.js';
+import { lastTraceEventOfKind, recordTraceEvent } from './coordinationTrace.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -308,6 +308,30 @@ export class CoordinationStore {
         && (event.status === 'waiting' || event.status === 'running')
         && !settled.has(event.correlationId))
       .map((event) => event.correlationId)).size;
+  }
+
+  /**
+   * When this task's most recent operator answer landed, or undefined if it
+   * has never had one.
+   *
+   * Bounds how far back a caller may read an "unanswered streak" of the same
+   * kind: an attempt from before this timestamp was already resolved by that
+   * answer, so it must not be folded into a *new* question's count just
+   * because it happens to share the same outcome (AGT-4042).
+   *
+   * Reads the permanent trace, not the live board: the board is a bounded
+   * ring buffer (`MAX_EVENTS`) shared by every task, and a busy board can
+   * evict an old answer long before this method needs it. And within the
+   * trace, this asks for the row filtered by kind in SQL rather than reading
+   * a generic recent-events window: a task's trace stream also carries every
+   * `adapter-route` / `review-run` / `mcp-audit` event it produces, so a
+   * `limit`-bounded scan of "recent events for this task" can still push an
+   * old answer out before this ever sees it. Either loss silently returns
+   * `undefined` and un-bounds the caller's walk — right back to the bug this
+   * exists to fix.
+   */
+  lastAnsweredAt(repository: string, taskId: string): number | undefined {
+    return lastTraceEventOfKind({ repository, taskId, kind: 'human-answer', status: 'completed' })?.timestamp;
   }
 
   findOpenQuestionFor(

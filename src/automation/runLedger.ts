@@ -1274,6 +1274,17 @@ export class RunLedger {
     return finalize.immediate();
   }
 
+  /** Attempts in a row (most recent first) sharing this error code, stopped at
+   * the first that doesn't or at `sinceMs` — the last operator-answer time (AGT-4042). */
+  consecutiveAttemptsWithErrorCode(issueId: string, errorCode: string, sinceMs?: number): number {
+    const rows = this.db.prepare(
+      'SELECT error_code, started_at FROM automation_attempts WHERE issue_id = ? ORDER BY attempt_no DESC',
+    ).all(issueId) as { error_code: string | null; started_at: number }[];
+    const stopped = rows.findIndex((row) =>
+      row.error_code !== errorCode || (sinceMs !== undefined && row.started_at <= sinceMs));
+    return stopped === -1 ? rows.length : stopped;
+  }
+
   getMetrics(now = Date.now()): LedgerMetrics {
     const byState: Record<string, number> = {};
     for (const row of this.db.prepare('SELECT state, COUNT(*) AS count FROM automation_runs GROUP BY state').all() as { state: string; count: number }[]) {
