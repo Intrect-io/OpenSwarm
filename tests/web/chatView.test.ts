@@ -12,9 +12,12 @@ function shell(): Document {
   document.body.innerHTML = `
     <div id="room"></div>
     <form id="composer">
+      <input id="composer-file" type="file" multiple hidden />
+      <button type="button" id="composer-attach">📎</button>
       <input id="composer-text" type="text" />
       <button type="submit">Send</button>
-    </form>`;
+    </form>
+    <div id="composer-files"></div>`;
   return document;
 }
 
@@ -172,7 +175,7 @@ describe('startChatView', () => {
     const view = startChatView(doc, { fetchImpl: fetchWith([]), eventSourceImpl: null });
     await vi.waitFor(() => expect(doc.getElementById('room')!.textContent).toContain('No one has said anything yet.'));
     expect((doc.getElementById('composer-text') as HTMLInputElement).disabled).toBe(true);
-    expect((doc.querySelector('#composer button') as HTMLButtonElement).disabled).toBe(true);
+    expect((doc.querySelector('#composer button[type="submit"]') as HTMLButtonElement).disabled).toBe(true);
     view.stop();
   });
 
@@ -370,6 +373,183 @@ describe('answering a parked agent from chat (AGT-4030)', () => {
     await vi.waitFor(() => expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(true));
     const [, init] = fetchImpl.mock.calls.find((c) => c[0] === '/api/coordination/message')!;
     expect(JSON.parse((init as { body: string }).body).correlationId).toBe('c-plain');
+    view.stop();
+  });
+});
+
+describe('chat attachments (AGT-4031)', () => {
+  // Handing an agent a file used to mean placing it on the host by hand and
+  // describing the path in prose. The message must carry paths that already
+  // exist, or the agent reads it and finds nothing there.
+  function fetchWithUpload(stored: unknown, uploadOk = true) {
+    return vi.fn(async (url: string) => {
+      if (url.startsWith('/api/coordination/attachment')) {
+        return uploadOk
+          ? { ok: true, json: async () => stored }
+          : { ok: false, status: 413, json: async () => ({ error: 'Attachment exceeds 67108864 bytes' }) };
+      }
+      if (url.startsWith('/api/coordination/message')) return { ok: true, json: async () => ({ delivered: true }) };
+      if (url.startsWith('/api/coordination/history')) {
+        return { ok: true, json: async () => ({ events: [boardEvent({ id: 'a', seq: 1 })], traceSize: 1 }) };
+      }
+      return { ok: true, json: async () => ({ events: [], pending: [], lastSeq: 0 }) };
+    });
+  }
+
+  const dropFile = (doc: Document, file: File) => {
+    const dropEvent = new window.Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(dropEvent, 'dataTransfer', { value: { files: [file] } });
+    doc.getElementById('room')!.dispatchEvent(dropEvent);
+  };
+
+  it('uploads a dropped file and tells the agent where to read it', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWithUpload({
+      id: 'abc.csv', filename: 'A2-bank.csv', bytes: 21,
+      path: '/home/openswarm/.openswarm/attachments/t1/abc.csv',
+    });
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    dropFile(doc, new File(['rows'], 'A2-bank.csv', { type: 'text/csv' }));
+    await vi.waitFor(() => expect(doc.querySelectorAll('#composer-files .chip').length).toBe(1));
+
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'Here is the export.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(true));
+    const [uploadUrl, uploadInit] = fetchImpl.mock.calls.find((c) => String(c[0]).startsWith('/api/coordination/attachment'))!;
+    expect(String(uploadUrl)).toContain('filename=A2-bank.csv');
+    expect((uploadInit as RequestInit).method).toBe('POST');
+
+    const [, init] = fetchImpl.mock.calls.find((c) => c[0] === '/api/coordination/message')!;
+    const sent = JSON.parse((init as { body: string }).body).text;
+    expect(sent).toContain('Here is the export.');
+    expect(sent).toContain('/home/openswarm/.openswarm/attachments/t1/abc.csv');
+    // Staged files are cleared only after the send is accepted.
+    expect(doc.querySelectorAll('#composer-files .chip').length).toBe(0);
+    view.stop();
+  });
+
+  it('reuses an upload that already landed when the publish is retried', async () => {
+    // Uploads happen one at a time and the message naming them is published
+    // last, so a refusal there leaves the bytes on disk. Re-uploading on the
+    // retry would duplicate them, and the duplicates count against the store's
+    // ceiling — making the retry likelier to fail than the attempt before it.
+    const doc = shell();
+    let publishAccepts = false;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).startsWith('/api/coordination/attachment')) {
+        return { ok: true, json: async () => ({ id: 'i', filename: 'a.csv', bytes: 4, path: '/p/a.csv' }) };
+      }
+      if (String(url).startsWith('/api/coordination/message')) {
+        return publishAccepts
+          ? { ok: true, json: async () => ({ delivered: true }) }
+          : { ok: false, status: 400, json: async () => ({ error: 'Cannot address the message' }) };
+      }
+      if (String(url).startsWith('/api/coordination/history')) {
+        return { ok: true, json: async () => ({ events: [boardEvent({ id: 'a', seq: 1 })], traceSize: 1 }) };
+      }
+      return { ok: true, json: async () => ({ events: [], pending: [], lastSeq: 0 }) };
+    });
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    dropFile(doc, new File(['rows'], 'a.csv', { type: 'text/csv' }));
+    await vi.waitFor(() => expect(doc.querySelectorAll('#composer-files .chip').length).toBe(1));
+
+    const submit = () => doc.getElementById('composer')!
+      .dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'here it is';
+    submit();
+    await vi.waitFor(() => expect(doc.getElementById('composer-status')?.textContent).toContain('Cannot address'));
+
+    publishAccepts = true;
+    submit();
+    await vi.waitFor(() => expect(doc.querySelectorAll('#composer-files .chip').length).toBe(0));
+
+    const uploads = fetchImpl.mock.calls.filter((c) => String(c[0]).startsWith('/api/coordination/attachment'));
+    expect(uploads).toHaveLength(1);
+    // Reuse is scoped to the task it landed under: a path carrying one task must
+    // never ride a message addressed to another.
+    expect(String(uploads[0][0])).toContain('taskId=t1');
+    // The retried message still carries the path from that one upload.
+    const publishes = fetchImpl.mock.calls.filter((c) => String(c[0]).startsWith('/api/coordination/message'));
+    expect(JSON.parse((publishes.at(-1)![1] as { body: string }).body).text).toContain('/p/a.csv');
+    view.stop();
+  });
+
+  it('keeps the file staged and says why when the upload is refused', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWithUpload(null, false);
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    dropFile(doc, new File(['x'], 'huge.bin'));
+    await vi.waitFor(() => expect(doc.querySelectorAll('#composer-files .chip').length).toBe(1));
+
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'take this';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(doc.getElementById('composer-status')?.textContent).toContain('exceeds');
+    });
+    // Nothing was published, and neither the words nor the file were thrown away.
+    expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(false);
+    expect((doc.getElementById('composer-text') as HTMLInputElement).value).toBe('take this');
+    expect(doc.querySelectorAll('#composer-files .chip').length).toBe(1);
+    view.stop();
+  });
+
+  it('keeps a file staged mid-send instead of clearing it with the sent one', async () => {
+    // A publish takes seconds under load, and the operator keeps working.
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const doc = shell();
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (String(url).startsWith('/api/coordination/attachment')) {
+        return { ok: true, json: async () => ({ id: 'i', filename: 'first.txt', bytes: 1, path: '/p/first.txt' }) };
+      }
+      if (String(url).startsWith('/api/coordination/message')) {
+        await gate;
+        return { ok: true, json: async () => ({ delivered: true }) };
+      }
+      if (String(url).startsWith('/api/coordination/history')) {
+        return { ok: true, json: async () => ({ events: [boardEvent({ id: 'a', seq: 1 })], traceSize: 1 }) };
+      }
+      return { ok: true, json: async () => ({ events: [], pending: [], lastSeq: 0 }) };
+    });
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    dropFile(doc, new File(['1'], 'first.txt'));
+    await vi.waitFor(() => expect(doc.querySelectorAll('#composer-files .chip').length).toBe(1));
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'first';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    // Staged while the send is still in flight.
+    await vi.waitFor(() => expect(doc.getElementById('composer-status')?.textContent).toBe('Sending…'));
+    dropFile(doc, new File(['2'], 'second.txt'));
+    release(null);
+
+    await vi.waitFor(() => expect(doc.getElementById('composer-status')?.textContent).toBe(''));
+    const chips = [...doc.querySelectorAll('#composer-files .chip')].map((c) => c.textContent ?? '');
+    expect(chips.some((text) => text.includes('second.txt'))).toBe(true);
+    expect(chips.some((text) => text.includes('first.txt'))).toBe(false);
+    view.stop();
+  });
+
+  it('lets a file be sent with no words at all', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWithUpload({ id: 'i', filename: 'note.txt', bytes: 2, path: '/p/note.txt' });
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    dropFile(doc, new File(['hi'], 'note.txt'));
+    await vi.waitFor(() => expect(doc.querySelectorAll('#composer-files .chip').length).toBe(1));
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(true));
     view.stop();
   });
 });
