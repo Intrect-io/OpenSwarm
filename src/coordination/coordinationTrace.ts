@@ -36,6 +36,12 @@ export interface TraceQuery {
   actor?: string;
   /** Only events at or after this epoch-ms timestamp. */
   since?: number;
+  /**
+   * Only these kinds. Narrows what the limit applies to, so a caller after one
+   * conversation is not pushed out of the window by unrelated traffic on the
+   * same task.
+   */
+  kinds?: Array<CoordinationEvent['kind']>;
   limit?: number;
 }
 
@@ -43,6 +49,7 @@ const MAX_LIMIT = 1_000;
 const DEFAULT_LIMIT = 200;
 
 let db: Database.Database | null = null;
+let openedPath: string | null = null;
 let unavailable = false;
 
 function migrate(handle: Database.Database): void {
@@ -85,11 +92,27 @@ function migrate(handle: Database.Database): void {
  * callers degrade to a board-only view instead of crashing the daemon.
  */
 export function getTraceDb(): Database.Database | null {
+  const path = defaultAutomationDbPath();
+  // The archive can be opened before the daemon has said where automation state
+  // lives — a dashboard read is enough to do it. Rebinding here makes the
+  // co-location with the run ledger hold whatever the order was, instead of
+  // answering from a file the runs are not in. Safe to close between calls:
+  // every read prepares its statement from a handle it took in the same call,
+  // so nothing outlives one.
+  if (openedPath !== null && openedPath !== path) {
+    try {
+      db?.close();
+    } catch { // cxt-ignore: error_swallow — a handle being replaced anyway
+      // Nothing to do: the handle is going away either way.
+    }
+    db = null;
+    unavailable = false; // a different file may well open where that one did not
+  }
   if (db) return db;
   if (unavailable) return null;
+  openedPath = path;
   try {
     const Sqlite = require('better-sqlite3') as typeof Database;
-    const path = defaultAutomationDbPath();
     // better-sqlite3 will not create the parent directory, and the state
     // directory does not exist on a fresh install — without this the trace
     // silently degrades to unavailable on exactly the deployments that have
@@ -194,6 +217,10 @@ export function queryTrace(query: TraceQuery = {}): CoordinationEvent[] {
   if (query.correlationId) { where.push('correlation_id = ?'); params.push(query.correlationId); }
   if (query.actor) { where.push('(actor = ? OR recipient = ?)'); params.push(query.actor, query.actor); }
   if (typeof query.since === 'number') { where.push('timestamp >= ?'); params.push(query.since); }
+  if (query.kinds?.length) {
+    where.push(`kind IN (${query.kinds.map(() => '?').join(', ')})`);
+    params.push(...query.kinds);
+  }
   const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
   try {
     const rows = handle.prepare(`
@@ -218,16 +245,16 @@ export function queryTrace(query: TraceQuery = {}): CoordinationEvent[] {
  * thousand-row `queryTrace` slice while this, needing only the one row SQL
  * already filtered to the right kind, never sees that competition.
  */
-export function lastTraceEventOfKind(query: {
-  repository: string; taskId: string; kind: CoordinationKind; status?: CoordinationStatus;
-}): CoordinationEvent | undefined {
+export function lastTraceEventOfKind(
+  taskId: string, kind: CoordinationKind, status?: CoordinationStatus,
+): CoordinationEvent | undefined {
   const handle = getTraceDb();
   if (!handle) return undefined;
-  const where = ['repository = ?', 'task_id = ?', 'kind = ?'];
-  const params: string[] = [resolve(query.repository), query.taskId, query.kind];
-  if (query.status) {
+  const where = ['task_id = ?', 'kind = ?'];
+  const params: string[] = [taskId, kind];
+  if (status) {
     where.push('status = ?');
-    params.push(query.status);
+    params.push(status);
   }
   try {
     const row = handle.prepare(`
@@ -239,6 +266,41 @@ export function lastTraceEventOfKind(query: {
   } catch (error) {
     console.warn('[CoordinationTrace] Query failed:', error);
     return undefined;
+  }
+}
+
+/**
+ * How a task's questions stand, counted in the database rather than fetched.
+ *
+ * A limit is the wrong tool for this decision: whatever the window, a task that
+ * has asked more than it holds loses its oldest unanswered question from view
+ * and the caller reads "all answered" — releasing a run that is still blocked.
+ * Both columns this joins on are indexed, so the count is cheap.
+ *
+ * Returns null when the trace is unavailable, so the caller can fall back to the
+ * in-memory board rather than treat "cannot tell" as "nothing is waiting".
+ */
+export function questionStandings(taskId: string): { asked: number; unanswered: number } | null {
+  const handle = getTraceDb();
+  if (!handle) return null;
+  try {
+    const row = handle.prepare(`
+      SELECT
+        COUNT(*) AS asked,
+        SUM(CASE WHEN NOT EXISTS (
+          SELECT 1 FROM coordination_trace a
+          WHERE a.correlation_id = q.correlation_id
+            AND a.task_id = q.task_id
+            AND a.kind = 'human-answer'
+            AND a.status = 'completed'
+        ) THEN 1 ELSE 0 END) AS unanswered
+      FROM coordination_trace q
+      WHERE q.task_id = ? AND q.kind = 'human-question'
+    `).get(taskId) as { asked: number; unanswered: number | null };
+    return { asked: row.asked, unanswered: row.unanswered ?? 0 };
+  } catch (error) {
+    console.warn('[CoordinationTrace] Question standings failed:', error);
+    return null;
   }
 }
 
@@ -261,5 +323,6 @@ export function resetTraceDbForTests(): void {
     // Closing a broken handle is not worth failing a test teardown over.
   }
   db = null;
+  openedPath = null;
   unavailable = false;
 }

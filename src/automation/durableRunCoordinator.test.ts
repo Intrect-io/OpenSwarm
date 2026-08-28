@@ -269,6 +269,32 @@ describe('DurableRunCoordinator', () => {
     coordinator.close();
   });
 
+  it("keeps an operator park as the run's own retry reason", async () => {
+    // Everything downstream reads the park off `lastErrorCode`: it is what says a
+    // backoff may be cut short once the answer lands, and it expires with its own
+    // attempt because the next transition overwrites it. Recorded as a plain
+    // failure — by a branch added above the default below, or by the pipeline
+    // stopping naming the status — the task sits out its full backoff with the
+    // answer already on the board, and nothing here would say so.
+    //
+    // The literal is deliberate on both sides: it pins that the pipeline's
+    // `finalStatus` and the code stored on the run are the same wire value.
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'park-owner',
+    });
+
+    await coordinator.execute(task('AGT-PARK'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'waiting_on_operator',
+    }));
+
+    expect(coordinator.getRun('AGT-PARK')).toMatchObject({
+      state: 'RETRY_AT',
+      lastErrorCode: 'waiting_on_operator',
+    });
+    coordinator.close();
+  });
+
   it('reconciles a published PR before any retry when publication attachment throws', async () => {
     const path = dbPath();
     const ledger = new RunLedger(path);

@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { coordinationFilePath, coordinationStateDir } from './coordinationPaths.js';
-import { lastTraceEventOfKind, recordTraceEvent } from './coordinationTrace.js';
+import { lastTraceEventOfKind, questionStandings, queryTrace, recordTraceEvent } from './coordinationTrace.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -270,9 +270,44 @@ export class CoordinationStore {
    * operator answering an old question must not be told it does not exist just
    * because the board has been busy since it was asked.
    */
+  /**
+   * Whether every question this task has asked now has an answer.
+   *
+   * Asked of the durable store, which counts rather than fetches, so no window
+   * can hide an older unanswered question and make a still-blocked run look
+   * ready. When that store is unavailable the answer is no: the in-memory board
+   * is a ring and would give exactly the false "all answered" this exists to
+   * prevent. Saying no costs a task its early re-admission and it waits out the
+   * backoff — which is what happened before any of this existed.
+   */
+  allQuestionsAnswered(taskId: string): boolean {
+    const standings = questionStandings(taskId);
+    if (!standings) return false;
+    return standings.asked > 0 && standings.unanswered === 0;
+  }
+
+  /**
+   * One exchange, whole, from both the durable trace and the board.
+   *
+   * Scoped by correlation id rather than task: an exchange is a question and its
+   * answer, so nothing else on a busy task can push either out of view.
+   */
+  exchange(correlationId: string): CoordinationEvent[] {
+    const merged = new Map<string, CoordinationEvent>();
+    for (const event of queryTrace({ correlationId, limit: 1_000 })) merged.set(event.id, event);
+    for (const event of this.load().events) {
+      if (event.correlationId === correlationId) merged.set(event.id, event);
+    }
+    return [...merged.values()].sort((a, b) => a.seq - b.seq);
+  }
+
   findQuestion(correlationId: string): CoordinationEvent | undefined {
-    return this.load().events.find((event) =>
-      event.correlationId === correlationId && event.kind === 'human-question' && event.status === 'waiting');
+    // The exchange, not the board: a question that has been pushed out of the
+    // ring is still a question someone is parked on, and resolving it only from
+    // memory means the operator is told their pending question does not exist —
+    // on exactly the busy tasks that produce the most of them.
+    return this.exchange(correlationId).find((event) =>
+      event.kind === 'human-question' && event.status === 'waiting');
   }
 
   /**
@@ -312,26 +347,17 @@ export class CoordinationStore {
 
   /**
    * When this task's most recent operator answer landed, or undefined if it
-   * has never had one.
+   * never had one. Bounds how far back a caller may read an "unanswered
+   * streak" of the same kind, so a pre-answer attempt cannot be folded into a
+   * new question's count just because it shares the same outcome (AGT-4042).
    *
-   * Bounds how far back a caller may read an "unanswered streak" of the same
-   * kind: an attempt from before this timestamp was already resolved by that
-   * answer, so it must not be folded into a *new* question's count just
-   * because it happens to share the same outcome (AGT-4042).
-   *
-   * Reads the permanent trace, not the live board: the board is a bounded
-   * ring buffer (`MAX_EVENTS`) shared by every task, and a busy board can
-   * evict an old answer long before this method needs it. And within the
-   * trace, this asks for the row filtered by kind in SQL rather than reading
-   * a generic recent-events window: a task's trace stream also carries every
-   * `adapter-route` / `review-run` / `mcp-audit` event it produces, so a
-   * `limit`-bounded scan of "recent events for this task" can still push an
-   * old answer out before this ever sees it. Either loss silently returns
-   * `undefined` and un-bounds the caller's walk — right back to the bug this
-   * exists to fix.
+   * SQL-filtered by kind against the durable trace, not the live board: the
+   * board evicts, and a task's trace stream also carries every other kind it
+   * produces, so even a wide recent-events window can push an old answer out
+   * of view before this ever sees it — silently un-bounding the caller's walk.
    */
-  lastAnsweredAt(repository: string, taskId: string): number | undefined {
-    return lastTraceEventOfKind({ repository, taskId, kind: 'human-answer', status: 'completed' })?.timestamp;
+  lastAnsweredAt(taskId: string): number | undefined {
+    return lastTraceEventOfKind(taskId, 'human-answer', 'completed')?.timestamp;
   }
 
   findOpenQuestionFor(

@@ -162,6 +162,10 @@ export class DurableRunCoordinator {
     return this.ledger?.consecutiveAttemptsWithErrorCode(issueId, errorCode, sinceMs) ?? 0;
   }
 
+  readmitParkedRun(issueId: string, parkCode: string, now = Date.now()): boolean {
+    return this.ledger?.readmitParkedRun(issueId, parkCode, now) ?? false;
+  }
+
   recoverPublishedRun(
     issueId: string,
     publication: { prUrl: string; headSha?: string },

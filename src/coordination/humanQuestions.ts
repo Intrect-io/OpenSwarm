@@ -74,8 +74,16 @@ export interface HumanQuestionPost {
 export async function postHumanQuestion(input: HumanQuestionInput): Promise<HumanQuestionPost> {
   const store = getCoordinationStore();
   const correlationId = humanQuestionCorrelation(input);
+  // The whole exchange, from the durable trace as well as the board: reading a
+  // recency window would lose sight of this task's own answer once it has talked
+  // enough, and it would ask again — spending an attempt to arrive back at the
+  // question the operator has already answered.
+  const prior = store.exchange(correlationId);
+  // Board-only, unlike `prior` above: this backs only the "already paged"
+  // check below, which is a rate-limit on re-paging, not a correctness gate —
+  // losing sight of an old page on a very chatty task just risks one extra
+  // page, not a stuck run.
   const taskEvents = store.list({ repository: input.repository, taskId: input.taskId, limit: 500 });
-  const prior = taskEvents.filter((event) => event.correlationId === correlationId);
 
   const answered = prior.find((event) => event.kind === 'human-answer' && event.status === 'completed');
   if (answered) {
@@ -168,8 +176,10 @@ export async function answerHumanQuestion(
   // not exist.
   const question = store.findQuestion(correlationId);
   if (!question) return { accepted: false, reason: 'No pending question with that correlation ID' };
-  const terminal = store.list({ repository: question.repository, taskId: question.taskId, limit: 500 })
-    .find((event) => event.correlationId === correlationId && ['completed', 'expired', 'failed'].includes(event.status));
+  // Same reach as `findQuestion` above: a recency window here would stop seeing
+  // the answer this question already has and let the operator answer it twice.
+  const terminal = store.exchange(correlationId)
+    .find((event) => ['completed', 'expired', 'failed'].includes(event.status));
   if (terminal) return { accepted: false, reason: `Question is already ${terminal.status}` };
 
   const event = await store.publish({

@@ -4,7 +4,10 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
-import { ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION, CLAIMABLE_STATES, RUN_STATES } from './runLedgerTypes.js';
+import {
+  ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION,
+  CLAIMABLE_STATES, NON_FAILURE_RESULT_STATUSES, RUN_STATES,
+} from './runLedgerTypes.js';
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import type {
@@ -24,29 +27,7 @@ import type {
   TransitionPatch,
 } from './runLedgerTypes.js';
 
-export { AUTOMATION_SCHEMA_VERSION, RUN_STATES } from './runLedgerTypes.js';
-
-/**
- * Outcomes that are not the repository failing, and so must not trip its circuit.
- *
- * `waiting_on_operator` is the one that matters most and was missing: an agent
- * that stops to ask a question has not broken anything, and counting it as a
- * failure means a run of polite questions closes the whole repository to every
- * other task — measured on vela, six questions and one real failure opened the
- * circuit at 7/6 and idled the daemon for an hour. The better the human-in-the-
- * loop path works, the faster that would happen.
- *
- * Kept in one place because the three call sites had already drifted: the
- * in-memory guard was missing `operator_remediated` that both SQL copies had.
- */
-export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
-  'cancelled',
-  'superseded',
-  'rate_limited',
-  'publication_reconcile',
-  'operator_remediated',
-  'waiting_on_operator',
-];
+export { AUTOMATION_SCHEMA_VERSION, RUN_STATES, NON_FAILURE_RESULT_STATUSES } from './runLedgerTypes.js';
 
 export type {
   AttemptResultInput,
@@ -287,6 +268,18 @@ export class RunLedger {
       'NEEDS_HUMAN', 'NEEDS_RECONCILE', 'DONE', 'DECOMPOSED', 'CANCELLED',
     ];
     return this.unfencedTransition(issueId, eligible, 'READY', {}, now);
+  }
+
+  /**
+   * Promote a run only while it is still parked on the operator.
+   *
+   * The park is re-read inside the promoting transaction rather than trusted from
+   * the caller. Between a caller's read and this write the parked attempt can end
+   * and a new one fail for its own reasons, and pulling *that* one forward is the
+   * fast-retry loop the backoff exists to prevent.
+   */
+  readmitParkedRun(issueId: string, parkCode: string, now = Date.now()): boolean {
+    return this.unfencedTransition(issueId, ['RETRY_AT'], 'READY', {}, now, parkCode);
   }
 
   /** Release a lost lease only after its executor has actually returned. */
@@ -1365,10 +1358,14 @@ export class RunLedger {
     to: RunState,
     patch: TransitionPatch,
     now: number,
+    requireErrorCode?: string,
   ): boolean {
     const transition = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || !from.includes(row.state as RunState)) return false;
+      // Read under the transaction's write lock, so what is checked here is what
+      // the UPDATE below acts on.
+      if (requireErrorCode !== undefined && row.last_error_code !== requireErrorCode) return false;
       assertRunState(row.state);
       if (row.owner_instance_id != null || row.lease_token != null) return false;
       if (!ALLOWED_TRANSITIONS[row.state].includes(to)) return false;

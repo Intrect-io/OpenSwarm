@@ -13,6 +13,101 @@ function message(over: Record<string, unknown> = {}) {
 }
 
 describe('CoordinationStore', () => {
+  it('knows a question is answered after the ring has evicted it', async () => {
+    // The in-memory board is a ring. A task that has been chatty pushes its own
+    // exchange out of it, and a decision read only from memory would call a
+    // still-blocked run ready — or a resolved one blocked. The durable trace is a
+    // table, not a ring, and it is counted rather than fetched so no window
+    // applies. Eviction is simulated by dropping the event from the file, which
+    // is the same end state as publishing two thousand more.
+    const s = store();
+    const taskId = `thread-${Math.random().toString(16).slice(2)}`;
+    // A correlation id of its own for the same reason as the task id: the trace
+    // outlives one store instance, so a shared id matches another suite's answer.
+    const exchangeId = `${taskId}-q1`;
+    await s.publish(message({
+      taskId, kind: 'human-question', status: 'waiting', correlationId: exchangeId, summary: 'Which credentials?',
+    }));
+    expect(s.allQuestionsAnswered(taskId)).toBe(false);
+
+    const answer = await s.publish(message({
+      taskId, kind: 'human-answer', status: 'completed', correlationId: exchangeId,
+      summary: 'answered', detail: 'The mounted ones.',
+    }));
+    const file = join(dir, 'events.json');
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    state.events = state.events.filter((event: { kind: string }) => event.kind === 'human-answer');
+    writeFileSync(file, JSON.stringify(state));
+
+    expect(s.allQuestionsAnswered(taskId)).toBe(true);
+    // And the exchange itself is still whole, which is what a retry replays from.
+    expect(s.exchange(exchangeId).map((event) => event.kind)).toEqual(['human-question', 'human-answer']);
+    expect(new Set(s.exchange(exchangeId).map((event) => event.id)).size).toBe(2);
+    expect(answer.correlationId).toBe(exchangeId);
+  });
+
+  it('says no rather than guessing when the durable store is unavailable', async () => {
+    // The in-memory board is a ring, so falling back to it would give exactly the
+    // false "everything is answered" this query exists to prevent. Saying no
+    // costs a task its early re-admission and it waits out its backoff, which is
+    // what happened before any of this existed.
+    const s = store();
+    const taskId = `nodb-${Math.random().toString(16).slice(2)}`;
+    await s.publish(message({ taskId, kind: 'human-question', status: 'waiting', correlationId: `${taskId}-q` }));
+    await s.publish(message({ taskId, kind: 'human-answer', status: 'completed', correlationId: `${taskId}-q` }));
+    expect(s.allQuestionsAnswered(taskId)).toBe(true);
+
+    // Point the trace at a path it cannot open, the way a broken deployment would.
+    const previous = process.env.OPENSWARM_AUTOMATION_DB;
+    const blocked = join(dir, 'events.json', 'automation.db'); // a file, not a directory
+    process.env.OPENSWARM_AUTOMATION_DB = blocked;
+    const trace = await import('./coordinationTrace.js');
+    trace.resetTraceDbForTests();
+    try {
+      expect(s.allQuestionsAnswered(taskId)).toBe(false);
+    } finally {
+      process.env.OPENSWARM_AUTOMATION_DB = previous;
+      trace.resetTraceDbForTests();
+    }
+  });
+
+  it('does not count an answer that never landed', async () => {
+    // The replay in `askHuman` accepts a completed answer and nothing else, so
+    // counting a failed or expired one here would release the run into the same
+    // open question and park it again, an attempt spent for nothing.
+    const s = store();
+    const taskId = `failed-${Math.random().toString(16).slice(2)}`;
+    await s.publish(message({ taskId, kind: 'human-question', status: 'waiting', correlationId: `${taskId}-q` }));
+    await s.publish(message({ taskId, kind: 'human-answer', status: 'failed', correlationId: `${taskId}-q` }));
+
+    expect(s.allQuestionsAnswered(taskId)).toBe(false);
+  });
+
+  it('does not accept another task\'s answer as this one\'s', async () => {
+    // Correlation ids are content-derived and unique in practice, but nothing in
+    // the schema says so — and pairing on the id alone would let one task's
+    // answer release a run parked on another's identical question.
+    const s = store();
+    const shared = `shared-${Math.random().toString(16).slice(2)}`;
+    await s.publish(message({ taskId: `${shared}-mine`, kind: 'human-question', status: 'waiting', correlationId: shared }));
+    await s.publish(message({ taskId: `${shared}-theirs`, kind: 'human-answer', status: 'completed', correlationId: shared }));
+
+    expect(s.allQuestionsAnswered(`${shared}-mine`)).toBe(false);
+  });
+
+  it('does not call a task with a second unanswered question ready', async () => {
+    // Several agents can run on one task, so an answer to one does not release a
+    // run parked on another's question.
+    const s = store();
+    const taskId = `two-${Math.random().toString(16).slice(2)}`;
+    await s.publish(message({ taskId, kind: 'human-question', status: 'waiting', correlationId: `${taskId}-a` }));
+    await s.publish(message({ taskId, kind: 'human-answer', status: 'completed', correlationId: `${taskId}-a` }));
+    expect(s.allQuestionsAnswered(taskId)).toBe(true);
+
+    await s.publish(message({ taskId, kind: 'human-question', status: 'waiting', correlationId: `${taskId}-b` }));
+    expect(s.allQuestionsAnswered(taskId)).toBe(false);
+  });
+
   it('deduplicates publications and assigns monotonic sequences', async () => {
     const s = store();
     const first = await s.publish(message());
