@@ -423,6 +423,39 @@ function processAppearsAlive(pid: number): boolean {
   }
 }
 
+/** This container assigns the daemon process the same pid every restart, so
+ * a marker from a dead prior generation makes `processAppearsAlive` hit the
+ * *current* daemon and read "alive" forever (reference_container_pid_reuse_lock.md,
+ * occurrence #3). Unlike a ledger lease, this marker is written once at
+ * createWorktree() and never touched again by a single in-flight execution,
+ * so there's no per-heartbeat renewal to fall back on — the threshold must
+ * instead outlast the longest a genuinely still-alive same-generation owner
+ * could hold it.
+ *
+ * `stageTimeoutMs()` only FLOORS an unset/zero stage timeout up to a default
+ * ceiling (worker 20min, reviewer/tester/documenter/auditor 6min each —
+ * "Never allow 0", INT-2521) — it does not cap a deliberately configured
+ * longer value. With defaults and `maxIterations` (default 3), a continuous
+ * single-attempt execution is on the order of a couple hours, giving the
+ * 24h default here roughly a 10x margin — every *retried* attempt on the
+ * same worktree also calls createWorktree()'s resume path, which rewrites
+ * this marker (resetting its age) before that attempt starts. A deployment
+ * that deliberately configures per-stage timeouts far beyond the defaults
+ * can override the default via OPENSWARM_ACTIVE_MARKER_ABANDON_MS. */
+const DEFAULT_ACTIVE_MARKER_ABANDON_MS = 24 * 60 * 60 * 1000;
+
+function activeMarkerAbandonMs(): number {
+  const parsed = Number(process.env.OPENSWARM_ACTIVE_MARKER_ABANDON_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ACTIVE_MARKER_ABANDON_MS;
+}
+
+/** Null on an unreadable/unparseable timestamp — callers must treat that as
+ * "not provably abandoned" (mirrors preserveMarkerAgeMs's fail-safe null). */
+function activeMarkerAgeMs(marker: ActiveWorktreeMarker): number | null {
+  const at = Date.parse(marker.createdAt);
+  return Number.isFinite(at) ? Date.now() - at : null;
+}
+
 /** Fail-closed recovery evidence for an expired run. A live marker owner may
  * still be writing after losing its lease, so only a preserved tree or a dead
  * owner is safe to resume automatically. */
@@ -436,7 +469,9 @@ export async function inspectWorktreeRecovery(
     : resolveWorktreePath(repoPath, issueId);
   if (!existsSync(worktreePath)) return { state: 'missing', worktreePath };
   const active = await readActiveWorktreeMarkers(repoPath, worktreePath);
-  const liveMarker = active.markers.find((marker) => processAppearsAlive(marker.ownerPid));
+  const liveMarker = active.markers.find(
+    (marker) => processAppearsAlive(marker.ownerPid) && (activeMarkerAgeMs(marker) ?? 0) < activeMarkerAbandonMs(),
+  );
   if (liveMarker) return { state: 'active_owner', worktreePath, marker: liveMarker };
   if (existsSync(join(worktreePath, PRESERVE_MARKER))) {
     return preserveMarkerAgeMs(worktreePath) === null
@@ -1249,7 +1284,10 @@ export async function pruneWorktrees(
           // owner either writes its marker first (and is retained), or waits
           // until this proven-orphan cleanup has finished.
           const active = await readActiveWorktreeMarkers(repoPath, p);
-          const liveMarker = active.markers.find((candidate) => processAppearsAlive(candidate.ownerPid));
+          const liveMarker = active.markers.find(
+            (candidate) => processAppearsAlive(candidate.ownerPid)
+              && (activeMarkerAgeMs(candidate) ?? 0) < activeMarkerAbandonMs(),
+          );
           if (liveMarker) {
             console.log(`[Worktree] Retaining live owner ${liveMarker.ownerPid}: ${p}`);
             return;

@@ -244,6 +244,48 @@ describe('createWorktree retry/resume error paths', () => {
     expect(readFileSync(join(worktreePath, 'stray.txt'), 'utf8')).toBe('leftover');
   });
 
+  // AGT-4053: this container assigns the daemon the same pid every restart,
+  // so a marker from a dead prior generation makes processAppearsAlive hit
+  // the *current* process's own pid and read "alive" forever. Age must be
+  // able to reclassify it as orphaned even while the pid probe insists the
+  // marker's owner is alive.
+  it('reclassifies a very old active marker as orphaned even when its pid still appears alive (AGT-4053)', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-pid-reuse');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    // ownerPid stays process.pid (genuinely alive right now) — simulating a
+    // container that reused this same pid for a new, unrelated daemon.
+    marker.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'orphaned',
+    });
+  });
+
+  it('honors OPENSWARM_ACTIVE_MARKER_ABANDON_MS for deployments with unusually long stage timeouts (AGT-4053)', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-abandon-override');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    marker.createdAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2h old — well under the 24h default
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    const prev = process.env.OPENSWARM_ACTIVE_MARKER_ABANDON_MS;
+    process.env.OPENSWARM_ACTIVE_MARKER_ABANDON_MS = String(60 * 60 * 1000); // 1h override
+    try {
+      await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+        state: 'orphaned',
+      });
+    } finally {
+      if (prev === undefined) delete process.env.OPENSWARM_ACTIVE_MARKER_ABANDON_MS;
+      else process.env.OPENSWARM_ACTIVE_MARKER_ABANDON_MS = prev;
+    }
+  });
+
   it('distinguishes a live owner, a dead owner, and a safely preserved worktree', async () => {
     const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-recovery');
     await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
@@ -509,6 +551,24 @@ describe('pruneWorktrees (INT-1810 R4 / INT-2503 / INT-2506)', () => {
     // The expired tree's partial work was committed to its branch before removal (INT-2506).
     const show = execFileSync('git', ['-C', repo, 'show', 'swarm/INT-4-expired:app.py'], { encoding: 'utf8' });
     expect(show).toBe('base\nexpired-wip\n');
+  });
+
+  // AGT-4053: a container-reused pid makes processAppearsAlive report true
+  // forever for a marker from a dead prior generation. A proven orphan must
+  // still sweep once its marker is old enough, even though its pid probe
+  // alone can never disprove the (unrelated, container-reused) live pid.
+  it('sweeps a proven orphan whose stale marker still has a live-looking pid, once old enough (AGT-4053)', async () => {
+    const orphan = await createWorktree(repo, 'INT-6', 'swarm/INT-6-pid-reuse');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-6', `${orphan.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    marker.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await pruneWorktrees(repo, new Set(), new Set([orphan.worktreePath]));
+
+    expect(existsSync(orphan.worktreePath)).toBe(false);
   });
 
   it('does not throw when the repo path is not a git repository at all (both internal sweeps fail cleanly)', async () => {
