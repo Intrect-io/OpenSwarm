@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -85,9 +85,23 @@ describe('coordination trace', () => {
     expect(queryTrace({ actor: 'worker-a' }).map((item) => item.id).sort()).toEqual(['a', 'b']);
   });
 
+  it('creates the state directory rather than degrading on a fresh install', () => {
+    // better-sqlite3 will not create the parent directory, and ~/.openswarm
+    // does not exist before the first run — without the mkdir the trace was
+    // silently unavailable on exactly the deployments that had recorded
+    // nothing yet.
+    resetTraceDbForTests();
+    process.env.OPENSWARM_AUTOMATION_DB = join(root, 'never-created', 'automation.db');
+    recordTraceEvent(event({ id: 'fresh' }));
+    expect(queryTrace().map((item) => item.id)).toEqual(['fresh']);
+  });
+
   it('returns an empty trace instead of throwing when the database cannot open', () => {
     resetTraceDbForTests();
-    process.env.OPENSWARM_AUTOMATION_DB = join(root, 'missing-dir', 'automation.db');
+    // A path whose parent is a regular file: mkdir cannot fix that, so the
+    // trace has to degrade rather than take the publish down with it.
+    writeFileSync(join(root, 'blocker'), 'not a directory');
+    process.env.OPENSWARM_AUTOMATION_DB = join(root, 'blocker', 'automation.db');
     expect(() => recordTraceEvent(event())).not.toThrow();
     expect(queryTrace()).toEqual([]);
   });

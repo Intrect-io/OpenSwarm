@@ -67,7 +67,10 @@ describe.runIf(process.platform === 'win32')('Windows Job Object process ownersh
     expect(Buffer.concat(stderr).toString('utf8')).toBe('');
     expect(code).toBe(0);
     expect(JSON.parse(Buffer.concat(stdout).toString('utf8'))).toEqual(expectedArgs);
-  }, 15_000);
+  // Three process starts deep (supervisor -> .cmd shim -> node) on a Windows
+  // runner: 15s is the observed edge, not a budget. This timed out at 15017ms
+  // in CI and passed on rerun, blocking unrelated pull requests each time.
+  }, 60_000);
 
   it('drains a large native stdout stream without truncating its tail', async () => {
     const outputBytes = 2 * 1024 * 1024;
