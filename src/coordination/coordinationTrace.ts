@@ -49,6 +49,7 @@ const MAX_LIMIT = 1_000;
 const DEFAULT_LIMIT = 200;
 
 let db: Database.Database | null = null;
+let openedPath: string | null = null;
 let unavailable = false;
 
 function migrate(handle: Database.Database): void {
@@ -91,11 +92,27 @@ function migrate(handle: Database.Database): void {
  * callers degrade to a board-only view instead of crashing the daemon.
  */
 export function getTraceDb(): Database.Database | null {
+  const path = defaultAutomationDbPath();
+  // The archive can be opened before the daemon has said where automation state
+  // lives — a dashboard read is enough to do it. Rebinding here makes the
+  // co-location with the run ledger hold whatever the order was, instead of
+  // answering from a file the runs are not in. Safe to close between calls:
+  // every read prepares its statement from a handle it took in the same call,
+  // so nothing outlives one.
+  if (openedPath !== null && openedPath !== path) {
+    try {
+      db?.close();
+    } catch { // cxt-ignore: error_swallow — a handle being replaced anyway
+      // Nothing to do: the handle is going away either way.
+    }
+    db = null;
+    unavailable = false; // a different file may well open where that one did not
+  }
   if (db) return db;
   if (unavailable) return null;
+  openedPath = path;
   try {
     const Sqlite = require('better-sqlite3') as typeof Database;
-    const path = defaultAutomationDbPath();
     // better-sqlite3 will not create the parent directory, and the state
     // directory does not exist on a fresh install — without this the trace
     // silently degrades to unavailable on exactly the deployments that have
@@ -272,5 +289,6 @@ export function resetTraceDbForTests(): void {
     // Closing a broken handle is not worth failing a test teardown over.
   }
   db = null;
+  openedPath = null;
   unavailable = false;
 }

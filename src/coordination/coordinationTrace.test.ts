@@ -179,6 +179,27 @@ describe('where the trace stores what it knows', () => {
     expect(existsSync(configured)).toBe(false);
   });
 
+  it('rebinds an archive that was already open before the daemon said where to store it', () => {
+    // A dashboard read is enough to open the trace, and it can happen before the
+    // runner is constructed. Left bound to the first file it saw, the answers a
+    // parked run needs would be written where its runs are not — so the
+    // co-location has to survive the ordering, not depend on it.
+    const early = join(root, 'home', '.openswarm', 'automation.db');
+    recordTraceEvent(event({ id: 'before-config' }));
+    expect(existsSync(early)).toBe(true);
+    expect(traceSize()).toBe(1);
+
+    const configured = join(root, 'relocated', 'automation.db');
+    setAutomationDbPath(configured);
+    recordTraceEvent(event({ id: 'after-config' }));
+
+    expect(existsSync(configured)).toBe(true);
+    // Reading through the same seam the daemon does: one row, the one written
+    // after the move — not the archive it was answering from a moment ago.
+    expect(traceSize()).toBe(1);
+    expect(queryTrace({ limit: 10 }).map((e) => e.id)).toEqual(['after-config']);
+  });
+
   it('prefers a configured path over the home-directory default', () => {
     const configured = join(root, 'runner', 'automation.db');
     setAutomationDbPath(configured);
