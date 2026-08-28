@@ -60,6 +60,25 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# The docker CLI and its compose plugin, for repositories whose gates validate a
+# compose file. `docker compose config` renders and interpolates the YAML from
+# disk and never opens a socket, so the CLI alone is what those gates need.
+#
+# Deliberately no /var/run/docker.sock: mounting it would give every agent
+# control of the host's containers, which is a container escape by another name.
+# Subcommands that do need a daemon (up, build, ps) will fail to connect — that
+# is the boundary, not a bug to be fixed by mounting the socket.
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg \
+        -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # uv, for repositories that are uv projects. Copied from the official image
 # rather than piped from an installer, and pinned by digest rather than tag —
 # a tag can be repointed, so only the digest makes this build reproducible.
