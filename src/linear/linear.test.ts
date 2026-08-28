@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, initLinear, parseBlockerIdentifiers } from './linear.js';
+import { addComment, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, initLinear, parseBlockerIdentifiers } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -203,5 +203,39 @@ describe('createSubIssue idempotent recovery (AGT-4048)', () => {
     });
 
     expect(result).toHaveProperty('error');
+  });
+});
+
+// AGT-4051: same shape as AGT-4048, one call deeper — a stable commentId is
+// the identity guarantee; the body (which callers bake a timestamp into) can
+// legitimately differ on every retry and must not block convergence.
+describe('addComment idempotent recovery (AGT-4051)', () => {
+  it('converges on an existing comment by id+issue alone, even when the body differs (a timestamp changed)', async () => {
+    const fakeClient = {
+      createComment: vi.fn(async () => {
+        throw new Error('Conflict on insert of Comment - Entity Comment with id comment-1 already exists.');
+      }),
+      comment: vi.fn(async ({ id }: { id: string }) =>
+        id === 'comment-1'
+          ? { body: 'stale body with an old timestamp', issue: Promise.resolve({ id: 'issue-1' }) }
+          : (() => { throw new Error(`unexpected comment() call: ${id}`); })()),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+
+    await expect(addComment('issue-1', 'fresh body with a new timestamp', 'comment-1')).resolves.toBeUndefined();
+  });
+
+  it('rejects convergence when the existing comment belongs to a different issue', async () => {
+    const fakeClient = {
+      createComment: vi.fn(async () => {
+        throw new Error('Conflict on insert of Comment - Entity Comment with id comment-1 already exists.');
+      }),
+      comment: vi.fn(async () => ({ body: 'body', issue: Promise.resolve({ id: 'some-other-issue' }) })),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+
+    await expect(addComment('issue-1', 'body', 'comment-1')).rejects.toThrow('already exists');
   });
 });
