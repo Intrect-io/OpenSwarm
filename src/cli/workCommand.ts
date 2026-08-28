@@ -36,6 +36,7 @@ import {
   type RepositoryAdmissionPolicy,
 } from '../automation/durableRunCoordinator.js';
 import type { EffectClaim } from '../automation/runLedger.js';
+import { setAutomationDbPath } from '../automation/automationDbPath.js';
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
 import { buildBranchName, hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
@@ -489,6 +490,8 @@ async function runWorkCommandInner(
   }
 
   // ---- Execution -----------------------------------------------------------
+  // Same file for the ledger and the coordination trace — see setAutomationDbPath.
+  setAutomationDbPath(config.autonomous?.automationDbPath);
   const coordinator = (deps.createCoordinator
     ?? ((o: { dbPath?: string; maxActive: number }) => new DurableRunCoordinator({
       mode: 'primary',

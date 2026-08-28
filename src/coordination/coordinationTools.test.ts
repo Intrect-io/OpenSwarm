@@ -7,17 +7,26 @@ import { assignCallSign } from './agentNames.js';
 // vitest.setup.ts points this at a temp path; restore it rather than deleting,
 // so a later suite in this worker never falls back to the real ~/.openswarm store.
 const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
+// `ask_human` reads the durable trace so an answer survives the board's ring,
+// and that trace lives in the automation database vitest.setup points at one
+// path for the whole run — without a database per test, these suites see each
+// other's questions already answered.
+const ORIGINAL_AUTOMATION_DB = process.env.OPENSWARM_AUTOMATION_DB;
 let dir = '';
 afterEach(async () => {
   (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+  (await import('./coordinationTrace.js')).resetTraceDbForTests();
   process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE;
+  process.env.OPENSWARM_AUTOMATION_DB = ORIGINAL_AUTOMATION_DB;
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
 async function tools() {
   dir = mkdtempSync(join(tmpdir(), 'osw-coordination-tools-'));
   process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+  process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'automation.db');
   (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+  (await import('./coordinationTrace.js')).resetTraceDbForTests();
   return import('./coordinationTools.js');
 }
 

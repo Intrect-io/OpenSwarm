@@ -29,6 +29,8 @@ import {
   type ProjectInfo,
 } from './runnerState.js';
 import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck } from '../orchestration/decisionEngine.js';
+import { getCoordinationStore } from '../coordination/coordinationStore.js';
+import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
@@ -45,7 +47,8 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
-import { getTaskState } from '../taskState/store.js';
+import { getTaskState, upsertTaskState } from '../taskState/store.js';
+import { setAutomationDbPath } from './automationDbPath.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -130,6 +133,25 @@ export function decisionSelectionBudget(availableSlots: number, candidateCount: 
   const candidates = Math.max(0, Math.floor(candidateCount));
   if (slots === 0 || candidates === 0) return 0;
   return Math.min(candidates, Math.max(slots, slots * DECISION_SELECTION_OVERSAMPLE));
+}
+
+/**
+ * Record, or retire, the stand-in park signal for a task whose park cannot be
+ * carried by the run ledger.
+ *
+ * Best effort in both directions, and deliberately so. Failing to record leaves
+ * the task on its backoff, which is only a delay. Failing to retire costs at
+ * most one early retry, still capped by MAX_RETRY_COUNT — whereas refusing to
+ * admit the task until the write succeeds could stall it for good.
+ */
+function setOperatorPark(issueId: string, parked: boolean): void {
+  try {
+    upsertTaskState(issueId, {
+      execution: { blockedReason: parked ? OPERATOR_PARK_REASON : undefined },
+    } as Parameters<typeof upsertTaskState>[1]);
+  } catch (error) { // cxt-ignore: error_swallow — the backoff is the fallback
+    console.warn(`[AutonomousRunner] Could not record the operator park for ${issueId}:`, error);
+  }
 }
 
 export class AutonomousRunner {
@@ -254,6 +276,65 @@ export class AutonomousRunner {
   private completedTaskIds = new Set<string>();
   private failedTaskCounts = new Map<string, number>();
   private failedTaskRetryTimes = new Map<string, number>(); // issueId → next retry timestamp (ms)
+
+  /**
+   * Bring a durably backed-off run forward because its answer landed.
+   *
+   * Both halves are required: the ledger refuses to claim a `RETRY_AT` row whose
+   * time has not come, so letting the task past the heartbeat filter without
+   * promoting it would select it and then fail to claim it, every cycle.
+   *
+   * The promotion re-checks the park itself, so what `answerArrivedFor` reads is
+   * only a filter — a second daemon can end the parked attempt in between, and
+   * the failure that replaces it must keep its own backoff.
+   */
+  private readmitAnsweredRun(issueId: string): boolean {
+    if (!this.answerArrivedFor(issueId)) return false;
+    if (!this.durableRuns.readmitParkedRun(issueId, OPERATOR_PARK_REASON)) return false;
+    clearRetryTime(issueId, this.failedTaskRetryTimes);
+    return true;
+  }
+
+  /**
+   * Whether a task parked on the operator now has its answer.
+   *
+   * Scoped by task id — the Linear issue id, unique per task — so an answer meant
+   * for one agent can never spring another that happens to share a display name
+   * (the guard added in AGT-4030 is upheld, not bypassed).
+   *
+   * The park is read off the run's own ledger row rather than a flag kept beside
+   * it, so it expires with the attempt that caused it: a task that waited out its
+   * backoff and then failed for its own reasons carries that failure's code here,
+   * and an answer from a park it has left cannot pull it forward.
+   */
+  /**
+   * Whether the task is stopped waiting on the operator, read from whichever
+   * store is authoritative for it — the same split the selection filter makes.
+   *
+   * With the ledger in charge the park is the run's own error code, so it expires
+   * with the attempt that caused it. Elsewhere no such code is written (`shadow`
+   * noops its transitions, `off` has no ledger at all), so a task-state signal
+   * stands in — retired by the filter when the task is admitted, to give it the
+   * same lifetime rather than one nobody maintains.
+   */
+  private parkedOnOperator(issueId: string): boolean {
+    const durableRun = this.durableRuns.getRun(issueId);
+    if (this.durableRuns.isPrimary && durableRun) {
+      return durableRun.lastErrorCode === OPERATOR_PARK_REASON;
+    }
+    return getTaskState(issueId)?.execution?.blockedReason === OPERATOR_PARK_REASON;
+  }
+
+  private answerArrivedFor(issueId: string): boolean {
+    try {
+      return shouldReadmitEarly({
+        parkedOnOperator: this.parkedOnOperator(issueId),
+        allQuestionsAnswered: getCoordinationStore().allQuestionsAnswered(issueId),
+      });
+    } catch { // cxt-ignore: error_swallow — an unreadable board must not stall the heartbeat
+      return false;
+    }
+  }
   // Last failure feedback per issue — re-injected into the next attempt's worker
   // prompt so re-picked tasks don't restart blind and repeat the same mistake
   // the reviewer already called out (INT-2474). Persisted; cleared on success.
@@ -491,10 +572,18 @@ export class AutonomousRunner {
       // run, ask_human finds the recorded answer on the board and returns it
       // instead of blocking, so the task continues the moment a re-dispatch
       // lands after the operator replies.
-      if (task.issueId) {
-        const nextRetryTime = setRetryTime(task.issueId, 4, this.failedTaskRetryTimes);
+      // `issueId || id` is what the heartbeat, the ledger and the coordination
+      // context all key on. Parking under a narrower id than the one that later
+      // looks it up arms nothing: the task keeps its durable backoff and the
+      // operator's answer cannot shorten it.
+      const parkedId = task.issueId || task.id;
+      if (parkedId) {
+        // Without an authoritative ledger there is no error code to carry the
+        // park, so record the stand-in signal the heartbeat reads instead.
+        if (!this.durableRuns.isPrimary) setOperatorPark(parkedId, true);
+        const nextRetryTime = setRetryTime(parkedId, 4, this.failedTaskRetryTimes);
         this.saveTaskState();
-        console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)} to check for the operator's answer`);
+        console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)}, or sooner if the operator answers`);
       }
       this.scheduleNextHeartbeat();
     });
@@ -787,6 +876,7 @@ export class AutonomousRunner {
     let recovered = 0;
     let stuckSkipped = 0;
     let backoffSkipped = 0;
+    let answered = 0;
     let noProject = 0;
     let unresolvable = 0;
     const toUnstick: string[] = [];
@@ -825,8 +915,18 @@ export class AutonomousRunner {
         if (['DONE', 'DECOMPOSED', 'CANCELLED', 'NEEDS_HUMAN'].includes(durableRun.state)) return false;
         if (['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING', 'SYNC_PENDING', 'NEEDS_RECONCILE'].includes(durableRun.state)) return false;
         if (durableRun.state === 'RETRY_AT' && (durableRun.retryAt ?? 0) > Date.now()) {
-          backoffSkipped++;
-          return false;
+          // Unless the only thing it was waiting for has arrived. A task parked
+          // on `ask_human` sits here, and this backoff is also its resume path,
+          // so left alone it makes the operator's reply land up to two hours
+          // after they sent it. `markReady` is what actually unblocks it: the
+          // ledger refuses to claim a RETRY_AT row whose time has not come, so
+          // passing this filter alone would change nothing.
+          if (!this.readmitAnsweredRun(id)) {
+            backoffSkipped++;
+            return false;
+          }
+          durableRun = this.durableRuns.getRun(id);
+          answered++;
         }
       }
 
@@ -898,10 +998,26 @@ export class AutonomousRunner {
         }
       }
 
-      // Check if task is in exponential backoff period
-      if (legacyIsAuthority && !canRetryNow(id, this.failedTaskRetryTimes)) {
-        backoffSkipped++;
-        return false; // Skip tasks still in backoff period
+      if (legacyIsAuthority) {
+        // Check if task is in exponential backoff period — unless the only thing
+        // it was waiting for has arrived. The backoff is also the resume path for
+        // an `ask_human` park, so left alone it makes the operator's reply land
+        // up to two hours after they sent it.
+        if (!canRetryNow(id, this.failedTaskRetryTimes)) {
+          if (!this.answerArrivedFor(id)) {
+            backoffSkipped++;
+            return false; // Skip tasks still in backoff period
+          }
+          clearRetryTime(id, this.failedTaskRetryTimes);
+          answered++;
+        }
+        // Admitted, so the park is spent — retire it here and it expires with the
+        // attempt that caused it, the way the ledger's error code does. Left set,
+        // an answer from a park the task has long since left would pull it
+        // forward past every later backoff.
+        if (getTaskState(id)?.execution?.blockedReason === OPERATOR_PARK_REASON) {
+          setOperatorPark(id, false);
+        }
       }
 
       return true;
@@ -921,6 +1037,9 @@ export class AutonomousRunner {
     }
     if (backoffSkipped > 0) {
       this.syslog(`⏰ Skipped ${backoffSkipped} tasks in exponential backoff period`);
+    }
+    if (answered > 0) {
+      this.syslog(`🙋 Re-admitted ${answered} task(s) early — the operator answered`);
     }
     if (noProject > 0) {
       this.syslog(`— Skipped ${noProject} issue(s) with no Linear project (assign a project in Linear to enable)`);
@@ -2742,6 +2861,11 @@ export class AutonomousRunner {
 
 export function getRunner(config?: AutonomousConfig): AutonomousRunner {
   if (!runnerInstance && config) {
+    // Declared once, where the process gets its one runner. The coordination
+    // trace resolves its own path and has to land on the ledger's file; saying
+    // so from the constructor instead would let two runners built in one process
+    // redirect each other's archive, which is a shape only a test has.
+    setAutomationDbPath(config.automationDbPath);
     runnerInstance = new AutonomousRunner(config);
   }
   if (!runnerInstance) {
