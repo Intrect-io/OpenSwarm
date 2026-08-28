@@ -54,6 +54,35 @@ describe('stage lifecycle on the coordination board', () => {
     expect(published.events[0].correlationId).not.toBe(published.events[1].correlationId);
   });
 
+  it('persists a stage start before its terminal even when the publishes race', async () => {
+    // Both publishes are fire-and-forget and each awaits a dynamic import, so
+    // without per-exchange chaining the terminal could persist first — and a
+    // consumer deriving state from the newest event would show the finished
+    // stage as running forever.
+    const { publishCoordination } = await import('../coordination/runCoordination.js');
+    const gate: Array<() => void> = [];
+    vi.mocked(publishCoordination).mockImplementation(async (event: Record<string, unknown>) => {
+      await new Promise<void>((resolve) => gate.push(resolve));
+      published.events.push(event);
+    });
+    try {
+      const start = publishStageToBoard(context() as never, 'worker', 'running', 'start');
+      const terminal = publishStageToBoard(context() as never, 'worker', 'failed', 'boom');
+      // Only the start may be in flight until it lands.
+      await vi.waitFor(() => expect(gate.length).toBe(1));
+      expect(published.events).toHaveLength(0);
+      gate.shift()?.();
+      await vi.waitFor(() => expect(gate.length).toBe(1));
+      gate.shift()?.();
+      await Promise.all([start, terminal]);
+      expect(published.events.map((event) => event.status)).toEqual(['running', 'failed']);
+    } finally {
+      vi.mocked(publishCoordination).mockImplementation(
+        async (event: Record<string, unknown>) => { published.events.push(event); },
+      );
+    }
+  });
+
   it('reports a failed stage as a failed delegation result', async () => {
     await publishStageToBoard(context() as never, 'worker', 'failed', 'Did not pass in 9.0s');
     expect(published.events[0]).toMatchObject({ kind: 'delegation-result', status: 'failed' });

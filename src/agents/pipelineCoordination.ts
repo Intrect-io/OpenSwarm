@@ -39,13 +39,6 @@ export function coordinationContextFor(context: PipelineContext, role: AgentRole
 }
 
 /**
- * Record a stage on the coordination board so the orchestration view shows
- * which agents are deployed and what they are doing.
- *
- * Best-effort by design: the board is an observation surface, and a failure to
- * record must never fail the stage it describes.
- */
-/**
  * Terminal board event for a stage that threw instead of returning a failed
  * result. Without it the agent's delegation-request never gets its
  * delegation-result and the orchestration view shows it running forever —
@@ -61,14 +54,45 @@ export function publishStageFailureToBoard(
   void publishStageToBoard(context, stage, 'failed', `Failed in ${(durationMs / 1000).toFixed(1)}s: ${detail}`);
 }
 
-export async function publishStageToBoard(
+// Call sites publish fire-and-forget, and each publish awaits a dynamic import
+// before persisting — so two publishes for the same exchange can land out of
+// program order, persisting the terminal event BEFORE its start. A consumer
+// deriving current state from the newest event would then show a finished
+// stage as running forever. Chain publishes per correlation id instead.
+const exchangeQueues = new Map<string, Promise<void>>();
+
+/**
+ * Record a stage on the coordination board so the orchestration view shows
+ * which agents are deployed and what they are doing.
+ *
+ * Best-effort by design: the board is an observation surface, and a failure to
+ * record must never fail the stage it describes.
+ */
+export function publishStageToBoard(
   context: PipelineContext,
   stage: string,
   status: 'running' | 'completed' | 'failed',
   summary: string,
   model?: string,
 ): Promise<void> {
-  if (!BOARD_STAGES.has(stage)) return;
+  if (!BOARD_STAGES.has(stage)) return Promise.resolve();
+  const key = stageCorrelationId(context, stage);
+  const chained = (exchangeQueues.get(key) ?? Promise.resolve())
+    .then(() => publishStageEvent(context, stage, status, summary, model));
+  exchangeQueues.set(key, chained);
+  void chained.finally(() => {
+    if (exchangeQueues.get(key) === chained) exchangeQueues.delete(key);
+  });
+  return chained;
+}
+
+async function publishStageEvent(
+  context: PipelineContext,
+  stage: string,
+  status: 'running' | 'completed' | 'failed',
+  summary: string,
+  model?: string,
+): Promise<void> {
   try {
     const actor = coordinationContextFor(context, stage as AgentRole);
     const { publishCoordination } = await import('../coordination/runCoordination.js');
