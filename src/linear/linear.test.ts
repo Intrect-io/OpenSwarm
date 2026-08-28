@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { effectCommentId, fetchIssuesForStates, parseBlockerIdentifiers } from './linear.js';
+import { drainLinearConnection, effectCommentId, fetchIssuesForStates, parseBlockerIdentifiers } from './linear.js';
 import type { LinearClient } from '@linear/sdk';
 
 describe('effectCommentId', () => {
@@ -83,5 +83,50 @@ describe('parseBlockerIdentifiers', () => {
     expect(parseBlockerIdentifiers(undefined)).toEqual([]);
     expect(parseBlockerIdentifiers('No dependencies here.')).toEqual([]);
     expect(parseBlockerIdentifiers('블로커: 없음')).toEqual([]);
+  });
+});
+
+describe('drainLinearConnection', () => {
+  function connection(pages: Array<Array<{ id: string }>>) {
+    // Mirrors the SDK contract: fetchNext() appends the next page onto the
+    // same connection's nodes and resolves the connection itself.
+    let page = 0;
+    const conn = {
+      nodes: [...pages[0]],
+      pageInfo: { hasNextPage: pages.length > 1 },
+      fetchNext: async () => {
+        page += 1;
+        conn.nodes.push(...pages[page]);
+        conn.pageInfo.hasNextPage = page < pages.length - 1;
+        return conn;
+      },
+    };
+    return conn;
+  }
+
+  it('follows the connection past the first page instead of truncating', async () => {
+    // Discovery used a single `first: 250` read, silently dropping every team
+    // or project past the first page in larger workspaces.
+    const conn = connection([[{ id: 'a' }, { id: 'b' }], [{ id: 'c' }], [{ id: 'd' }]]);
+    await expect(drainLinearConnection(conn)).resolves.toEqual([
+      { id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' },
+    ]);
+  });
+
+  it('returns a single page untouched', async () => {
+    await expect(drainLinearConnection(connection([[{ id: 'only' }]]))).resolves.toEqual([{ id: 'only' }]);
+  });
+
+  it('stops on a pagination cursor that never terminates', async () => {
+    const conn = {
+      nodes: [{ id: 'x' }],
+      pageInfo: { hasNextPage: true },
+      fetchNext: async () => conn,
+    };
+    await expect(drainLinearConnection(conn)).resolves.toEqual([{ id: 'x' }]);
+  });
+
+  it('tolerates a connection with no pageInfo', async () => {
+    await expect(drainLinearConnection({ nodes: [{ id: 'n' }] })).resolves.toEqual([{ id: 'n' }]);
   });
 });

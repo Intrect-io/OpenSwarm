@@ -49,6 +49,11 @@ vi.mock('../core/eventHub.js', () => ({
   broadcastEvent,
 }));
 
+const boardEvents = vi.hoisted(() => ({ list: [] as Array<Record<string, unknown>> }));
+vi.mock('../coordination/runCoordination.js', () => ({
+  publishCoordination: vi.fn(async (event: Record<string, unknown>) => { boardEvents.list.push(event); }),
+}));
+
 vi.mock('../adapters/index.js', async () => {
   const actual = await vi.importActual<typeof import('../adapters/index.js')>('../adapters/index.js');
   return { ...actual, getAdapter: () => ({ getDefaultModel }) };
@@ -100,6 +105,40 @@ describe('PairPipeline model selection', () => {
     execFileSync('git', ['add', '-A'], { cwd: dir });
     execFileSync('git', ['commit', '-qm', 'init'], { cwd: dir });
   }
+
+  it('closes the board exchange with a failed result when a stage throws', async () => {
+    // Reviewer finding on AGT-4013: normal failed results published a terminal
+    // board event, but a stage that THREW (adapter crash, classified infra
+    // failure) never did — the agent stayed "running" on the orchestration
+    // view forever.
+    boardEvents.list = [];
+    runWorker.mockRejectedValueOnce(new Error('adapter exploded'));
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 1,
+      roles: {
+        worker: { enabled: true, model: 'w', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'r', timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(false);
+    // publishStageToBoard is deliberately fire-and-forget; give its dynamic
+    // import + publish a beat to flush before asserting.
+    const workerEvents = () => boardEvents.list.filter((event) => event.actorRole === 'worker');
+    await vi.waitFor(() => {
+      expect(workerEvents().find((event) => event.kind === 'delegation-result')).toBeTruthy();
+    });
+    const running = workerEvents().find((event) => event.status === 'running');
+    const terminal = workerEvents().find((event) => event.kind === 'delegation-result');
+    expect(running).toBeTruthy();
+    expect(terminal).toMatchObject({ status: 'failed' });
+    expect(String((terminal as { summary?: string }).summary)).toContain('adapter exploded');
+    expect(terminal?.correlationId).toBe(running?.correlationId);
+  });
 
   it('passes matched jobProfile models to worker and reviewer calls', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');

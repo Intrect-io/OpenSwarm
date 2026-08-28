@@ -365,7 +365,23 @@ function linearClientFor(cred?: LinearCredential): LinearClient {
 export async function listTeams(cred?: LinearCredential): Promise<LinearTeamInfo[]> {
   const c = linearClientFor(cred);
   const res: any = await withRateLimit('linear', () => c.teams({ first: 250 })); // cxt-ignore: type_safety — SDK TeamConnection
-  return (res?.nodes ?? []).map((t: any) => ({ id: t.id, key: t.key, name: t.name }));
+  return (await drainLinearConnection(res)).map((t: any) => ({ id: t.id, key: t.key, name: t.name }));
+}
+
+/**
+ * Follow a Linear SDK connection to its last page and return every node.
+ * The SDK's fetchNext() appends each fetched page onto the same connection,
+ * so a single `first: N` read silently truncates larger workspaces. The page
+ * guard only bounds a misbehaving pagination cursor, not real data.
+ */
+export async function drainLinearConnection(connection: any): Promise<any[]> { // cxt-ignore: type_safety — SDK connection
+  let conn: any = connection;
+  let guard = 0;
+  while (conn?.pageInfo?.hasNextPage && typeof conn.fetchNext === 'function' && guard < 40) {
+    conn = await withRateLimit('linear', () => conn.fetchNext());
+    guard += 1;
+  }
+  return conn?.nodes ?? [];
 }
 
 /**
@@ -376,7 +392,7 @@ export async function listProjects(teamId: string, cred?: LinearCredential): Pro
   const c = linearClientFor(cred);
   const team: any = await withRateLimit('linear', () => c.team(teamId)); // cxt-ignore: type_safety — SDK Team
   const res: any = await withRateLimit('linear', () => team.projects({ first: 250 }));
-  return (res?.nodes ?? []).map((p: any) => ({
+  return (await drainLinearConnection(res)).map((p: any) => ({
     id: p.id,
     name: p.name,
     icon: p.icon ?? undefined,
