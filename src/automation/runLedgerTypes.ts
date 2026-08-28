@@ -188,3 +188,25 @@ export interface RunLedgerOptions {
   /** Operations override; production defaults to five seconds. */
   busyTimeoutMs?: number;
 }
+
+/**
+ * Outcomes that are not the repository failing, and so must not trip its circuit.
+ *
+ * `waiting_on_operator` is the one that matters most and was missing: an agent
+ * that stops to ask a question has not broken anything, and counting it as a
+ * failure means a run of polite questions closes the whole repository to every
+ * other task — measured on vela, six questions and one real failure opened the
+ * circuit at 7/6 and idled the daemon for an hour. The better the human-in-the-
+ * loop path works, the faster that would happen.
+ *
+ * Kept in one place because the three call sites had already drifted: the
+ * in-memory guard was missing `operator_remediated` that both SQL copies had.
+ */
+export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
+  'cancelled',
+  'superseded',
+  'rate_limited',
+  'publication_reconcile',
+  'operator_remediated',
+  'waiting_on_operator',
+];

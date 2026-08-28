@@ -4,7 +4,10 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
-import { ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION, CLAIMABLE_STATES, RUN_STATES } from './runLedgerTypes.js';
+import {
+  ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION,
+  CLAIMABLE_STATES, NON_FAILURE_RESULT_STATUSES, RUN_STATES,
+} from './runLedgerTypes.js';
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import type {
@@ -24,29 +27,7 @@ import type {
   TransitionPatch,
 } from './runLedgerTypes.js';
 
-export { AUTOMATION_SCHEMA_VERSION, RUN_STATES } from './runLedgerTypes.js';
-
-/**
- * Outcomes that are not the repository failing, and so must not trip its circuit.
- *
- * `waiting_on_operator` is the one that matters most and was missing: an agent
- * that stops to ask a question has not broken anything, and counting it as a
- * failure means a run of polite questions closes the whole repository to every
- * other task — measured on vela, six questions and one real failure opened the
- * circuit at 7/6 and idled the daemon for an hour. The better the human-in-the-
- * loop path works, the faster that would happen.
- *
- * Kept in one place because the three call sites had already drifted: the
- * in-memory guard was missing `operator_remediated` that both SQL copies had.
- */
-export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
-  'cancelled',
-  'superseded',
-  'rate_limited',
-  'publication_reconcile',
-  'operator_remediated',
-  'waiting_on_operator',
-];
+export { AUTOMATION_SCHEMA_VERSION, RUN_STATES, NON_FAILURE_RESULT_STATUSES } from './runLedgerTypes.js';
 
 export type {
   AttemptResultInput,
@@ -1284,6 +1265,17 @@ export class RunLedger {
       return issueIds.filter((issueId) => this.finalizeSyncedRunInTransaction(issueId, now));
     });
     return finalize.immediate();
+  }
+
+  /** Attempts in a row (most recent first) sharing this error code, stopped at
+   * the first that doesn't or at `sinceMs` — the last operator-answer time (AGT-4042). */
+  consecutiveAttemptsWithErrorCode(issueId: string, errorCode: string, sinceMs?: number): number {
+    const rows = this.db.prepare(
+      'SELECT error_code, started_at FROM automation_attempts WHERE issue_id = ? ORDER BY attempt_no DESC',
+    ).all(issueId) as { error_code: string | null; started_at: number }[];
+    const stopped = rows.findIndex((row) =>
+      row.error_code !== errorCode || (sinceMs !== undefined && row.started_at <= sinceMs));
+    return stopped === -1 ? rows.length : stopped;
   }
 
   getMetrics(now = Date.now()): LedgerMetrics {

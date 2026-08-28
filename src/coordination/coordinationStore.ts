@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { coordinationFilePath, coordinationStateDir } from './coordinationPaths.js';
-import { recordTraceEvent, queryTrace, questionStandings } from './coordinationTrace.js';
+import { lastTraceEventOfKind, questionStandings, queryTrace, recordTraceEvent } from './coordinationTrace.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -323,6 +323,73 @@ export class CoordinationStore {
    * the question it asked, so the latest is what the agent is parked on and
    * what the operator is reading.
    */
+  /**
+   * How many blocking questions this task has asked and not yet had answered,
+   * regardless of exact wording. 0 means nothing is outstanding.
+   *
+   * Counts distinct correlation IDs, not raw events: a paged question carries
+   * two events (the `waiting` ask, the `running` page confirmation) under the
+   * same correlation ID, and a re-dispatch that rephrases the same blocker
+   * mints a different one for the same underlying wait (AGT-4042).
+   */
+  openQuestionCount(repository: string, taskId: string): number {
+    const events = this.list({ repository, taskId, limit: 500 });
+    const settled = new Set(events
+      .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+      .map((event) => event.correlationId));
+    return new Set(events
+      .filter((event) =>
+        event.kind === 'human-question'
+        && (event.status === 'waiting' || event.status === 'running')
+        && !settled.has(event.correlationId))
+      .map((event) => event.correlationId)).size;
+  }
+
+  /**
+   * One event per still-open (not yet completed/expired/failed) question
+   * correlation ID for a task, durable trace merged with the board.
+   *
+   * Unlike `openQuestionCount`, this is not a display counter — it backs the
+   * answer fan-out that settles every differently-worded re-ask of the same
+   * blocker. A board-only read there would leave an older sibling permanently
+   * unanswered in the durable trace once enough other traffic evicted it from
+   * the board, and `allQuestionsAnswered` would never see that task as
+   * answered again (AGT-4042).
+   */
+  openQuestions(repository: string, taskId: string): CoordinationEvent[] {
+    const merged = new Map<string, CoordinationEvent>();
+    for (const event of queryTrace({ repository, taskId, kinds: ['human-question', 'human-answer'], limit: 1_000 })) {
+      merged.set(event.id, event);
+    }
+    for (const event of this.list({ repository, taskId, limit: 500 })) merged.set(event.id, event);
+    const events = [...merged.values()];
+    const settled = new Set(events
+      .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+      .map((event) => event.correlationId));
+    const open = new Map<string, CoordinationEvent>();
+    for (const event of events) {
+      if (event.kind === 'human-question'
+        && (event.status === 'waiting' || event.status === 'running')
+        && !settled.has(event.correlationId)) open.set(event.correlationId, event);
+    }
+    return [...open.values()];
+  }
+
+  /**
+   * When this task's most recent operator answer landed, or undefined if it
+   * never had one. Bounds how far back a caller may read an "unanswered
+   * streak" of the same kind, so a pre-answer attempt cannot be folded into a
+   * new question's count just because it shares the same outcome (AGT-4042).
+   *
+   * SQL-filtered by kind against the durable trace, not the live board: the
+   * board evicts, and a task's trace stream also carries every other kind it
+   * produces, so even a wide recent-events window can push an old answer out
+   * of view before this ever sees it — silently un-bounding the caller's walk.
+   */
+  lastAnsweredAt(taskId: string): number | undefined {
+    return lastTraceEventOfKind(taskId, 'human-answer', 'completed')?.timestamp;
+  }
+
   findOpenQuestionFor(
     actor: string,
     scope: { repository?: string; taskId?: string } = {},

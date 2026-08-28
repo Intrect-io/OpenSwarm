@@ -55,6 +55,14 @@ export interface HumanQuestionPost {
   delivered: boolean;
   /** Set when the operator already answered this exact question. */
   answer?: string;
+  /**
+   * How many open (unanswered) questions this task has asked, this one
+   * included. 1 on a first ask; higher when a re-dispatch rephrased the same
+   * blocker rather than getting an answer — the count a log or dashboard needs
+   * to tell "still waiting, asked once" from "still waiting, asked repeatedly"
+   * (AGT-4042).
+   */
+  openAskCount: number;
 }
 
 /**
@@ -66,19 +74,21 @@ export interface HumanQuestionPost {
 export async function postHumanQuestion(input: HumanQuestionInput): Promise<HumanQuestionPost> {
   const store = getCoordinationStore();
   const correlationId = humanQuestionCorrelation(input);
-  // Read the whole exchange, not the tail of the board. `list` returns the last
-  // events for a task, so a chatty run loses sight of its own answer and asks
-  // again — spending an attempt to arrive back at the question the operator has
-  // already answered. Scoping by task alone is enough: the correlation id is
-  // derived from the repository as well, so a match implies both.
   // The whole exchange, from the durable trace as well as the board: reading a
   // recency window would lose sight of this task's own answer once it has talked
   // enough, and it would ask again — spending an attempt to arrive back at the
   // question the operator has already answered.
   const prior = store.exchange(correlationId);
+  // Board-only, unlike `prior` above: this backs only the "already paged"
+  // check below, which is a rate-limit on re-paging, not a correctness gate —
+  // losing sight of an old page on a very chatty task just risks one extra
+  // page, not a stuck run.
+  const taskEvents = store.list({ repository: input.repository, taskId: input.taskId, limit: 500 });
 
   const answered = prior.find((event) => event.kind === 'human-answer' && event.status === 'completed');
-  if (answered) return { correlationId, delivered: true, answer: answered.detail ?? answered.summary };
+  if (answered) {
+    return { correlationId, delivered: true, answer: answered.detail ?? answered.summary, openAskCount: 0 };
+  }
 
   const alreadyWaiting = prior.some((event) => event.kind === 'human-question' && event.status === 'waiting');
   if (!alreadyWaiting) {
@@ -97,14 +107,40 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
     });
   }
 
-  // Page the operator at most once per open question. A re-dispatched task asks
-  // again, but the person has already been pinged — re-paging trains them to
-  // ignore the bot. The one exception is a question whose page never landed
-  // (Discord down/unconfigured): that one is retried until a page succeeds.
-  // Delivery is recorded on the board so the state survives the asking process.
-  const alreadyPaged = prior.some((event) =>
-    event.kind === 'human-question' && event.status === 'running');
-  if (alreadyPaged) return { correlationId, delivered: true };
+  // Task-scoped, not question-scoped. A re-dispatched task is a fresh worker
+  // session that writes its own ask_human call, and it paraphrases the same
+  // blocker differently every time — hashed into the correlation ID, that would
+  // mint a new one on every attempt and defeat the "page once" rule below. What
+  // the operator has open is a thread for this TASK, not for one exact wording
+  // of it: the newest ask is what is visible on the board and in the page
+  // already sent, so a reworded repeat of an unanswered ask does not warrant a
+  // second ping (AGT-4042). This does mean a genuinely new, unrelated question
+  // from the same task while one is still outstanding will not page either —
+  // accepted for now; distinguishing "reworded" from "unrelated" needs more
+  // than a text diff and is not attempted here.
+  // Re-reads the board rather than trusting `taskEvents`: this call just
+  // published a new `waiting` event for `correlationId` above, and the count
+  // has to include it — a fresh store query stays correct in a way a variable
+  // captured before that publish would not.
+  const openAskCount = Math.max(1, store.openQuestionCount(input.repository, input.taskId));
+
+  // Page the operator at most once per open (unanswered) question the task
+  // has outstanding — same correlation ID or not. `taskEvents` was read before
+  // this ask's own `waiting` event was published, so it cannot self-match; it
+  // is exactly the prior state the gate needs.
+  const answeredCorrelations = new Set(taskEvents
+    .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+    .map((event) => event.correlationId));
+  const alreadyPaged = taskEvents.some((event) =>
+    event.kind === 'human-question'
+    && event.status === 'running'
+    && !answeredCorrelations.has(event.correlationId));
+  if (alreadyPaged) {
+    if (openAskCount > 1) {
+      console.log(`[Coordination] ${input.taskId} asked its operator-blocking question a ${openAskCount}th time (reworded) without an answer — not re-paging`);
+    }
+    return { correlationId, delivered: true, openAskCount };
+  }
 
   const notify = input.notify ?? notifyOperatorViaDiscord;
   const delivered = await notify(
@@ -125,7 +161,7 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
       summary: 'Operator paged on Discord',
     });
   }
-  return { correlationId, delivered };
+  return { correlationId, delivered, openAskCount };
 }
 
 export async function answerHumanQuestion(
@@ -160,5 +196,39 @@ export async function answerHumanQuestion(
     summary: 'Human answered the blocking question',
     detail: answer,
   });
+
+  // A re-dispatch that rephrased this same blocker minted its own correlation
+  // ID (the paging gate above only ever surfaces the FIRST one to the
+  // operator), so the reply is necessarily addressed to that first ID — the
+  // only one the operator ever saw. Settle every other still-open ask for this
+  // task too, or the task's openQuestionCount never reaches zero and a run
+  // parked on the repeat-ask stop (AGT-4042) never sees itself as answered.
+  // Durable, not board-only: a task chatty enough to push an older sibling
+  // out of the board's own retention window would otherwise leave it
+  // permanently unanswered in the trace, and `allQuestionsAnswered` would
+  // never see that task as answered again.
+  const siblings = store
+    .openQuestions(question.repository, question.taskId)
+    .filter((e) => e.correlationId !== correlationId);
+  const seenSiblingIds = new Set<string>();
+  for (const sibling of siblings) {
+    if (seenSiblingIds.has(sibling.correlationId)) continue;
+    seenSiblingIds.add(sibling.correlationId);
+    await store.publish({
+      repository: question.repository,
+      taskId: question.taskId,
+      actor,
+      actorRole: 'human',
+      recipient: sibling.actor,
+      recipientName: sibling.actorName,
+      recipientRole: sibling.actorRole,
+      kind: 'human-answer',
+      status: 'completed',
+      correlationId: sibling.correlationId,
+      summary: 'Answered via a differently-worded ask for the same blocker',
+      detail: answer,
+    });
+  }
+
   return { accepted: true, event };
 }

@@ -158,6 +158,10 @@ export class DurableRunCoordinator {
     return this.ledger?.markReady(issueId, now) ?? false;
   }
 
+  consecutiveAttemptsWithErrorCode(issueId: string, errorCode: string, sinceMs?: number): number {
+    return this.ledger?.consecutiveAttemptsWithErrorCode(issueId, errorCode, sinceMs) ?? 0;
+  }
+
   readmitParkedRun(issueId: string, parkCode: string, now = Date.now()): boolean {
     return this.ledger?.readmitParkedRun(issueId, parkCode, now) ?? false;
   }
