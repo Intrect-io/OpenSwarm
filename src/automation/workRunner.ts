@@ -203,7 +203,15 @@ export async function dispatchWork(
   const claimedByUs = new Map<string, 'Todo' | 'Backlog'>();
 
   for (const rawId of request.issueIds) {
-    const issue = await linear.getIssue(rawId);
+    // Distinguish a missing issue from a failed lookup: an expired Linear
+    // token used to be reported as `not found`, pointing the operator at the
+    // issue instead of at the credential.
+    const lookup = await linear.lookupIssue(rawId);
+    if (!lookup.ok) {
+      items.push({ issueId: rawId, status: 'skipped', reason: `Linear lookup failed: ${lookup.error}` });
+      continue;
+    }
+    const issue = lookup.issue;
     if (!issue) {
       items.push({ issueId: rawId, status: 'skipped', reason: 'not found' });
       continue;
