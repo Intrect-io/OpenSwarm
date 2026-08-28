@@ -137,6 +137,12 @@ export interface TransitionPatch {
 export interface AttemptResultInput {
   success: boolean;
   finalStatus: string;
+  /**
+   * Only meaningful when `finalStatus === 'infra_error'`: whether the cause was
+   * the repository itself, not an adapter timeout, tooling failure, or network
+   * blip. The repository failure circuit counts only the former (AGT-4038).
+   */
+  repositoryInfra?: boolean;
   costUsd?: number;
   result?: unknown;
   maxFailuresPerHour?: number;

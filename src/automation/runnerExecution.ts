@@ -33,6 +33,7 @@ import {
   hasRecoverableWorktree,
   preserveWorktree,
   removeWorktree,
+  WorktreeCoordinationError,
 } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
@@ -872,12 +873,19 @@ export async function executePipeline(
         await preserveWorktree(worktreeInfo, 'worktree setup or durable attachment failed')
           .catch((cleanupError) => console.warn('[Worktree] Setup cleanup failed:', cleanupError));
       }
+      // Only some of createWorktree's throws are the repository's own fault.
+      // `WorktreeCoordinationError` covers a busy lifecycle lock and a stale
+      // preserved/crash-recovered tree — bookkeeping this daemon resolves on
+      // its own, not disk/git health. `instanceof`, not a message match, so
+      // it stays correct if worktreeManager.ts's wording changes (AGT-4038).
+      const isCoordinationFailure = err instanceof WorktreeCoordinationError;
       return {
         success: false,
         sessionId: `worktree-fail-${Date.now()}`,
         iterations: 0,
         totalDuration: 0,
         finalStatus: 'infra_error',
+        repositoryInfra: !worktreeInfo && !isCoordinationFailure,
         stages: [],
       };
     }

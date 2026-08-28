@@ -361,6 +361,7 @@ export class DurableRunCoordinator {
       // This is coordination debt, not a repository implementation failure.
       // Keep it out of the failure circuit while NEEDS_RECONCILE blocks claims.
       finalStatus: publishedNeedsReconcile ? 'publication_reconcile' : result.finalStatus,
+      repositoryInfra: result.repositoryInfra,
       costUsd: result.totalCost?.costUsd,
       result: {
         sessionId: result.sessionId,

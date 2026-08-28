@@ -532,6 +532,7 @@ describe('RunLedger claim and fencing races', () => {
     expect(ledger.recordAttemptResult(first, {
       success: false,
       finalStatus: 'infra_error',
+      repositoryInfra: true, // a failed git worktree add — the repository's own fault (AGT-4038)
       maxFailuresPerHour: 1,
       circuitCooldownMs: 60_000,
     }, 2_100)).toBe(true);
@@ -586,6 +587,7 @@ describe('RunLedger claim and fencing races', () => {
     expect(ledger.recordAttemptResult(first, {
       success: false,
       finalStatus: 'infra_error',
+      repositoryInfra: true, // a failed git worktree add — the repository's own fault (AGT-4038)
     }, 2_100)).toBe(true);
     expect(ledger.transition(first, 'RETRY_AT', { retryAt: 9_000 }, 2_101)).toBe(true);
 
@@ -646,6 +648,54 @@ describe('RunLedger claim and fencing races', () => {
     ledger.close();
   });
 
+  it('does not let an adapter timeout, tooling failure, or network blip close the repository (AGT-4038)', () => {
+    // infra_error is overloaded: a failed git worktree add (disk full, a stale
+    // .git lock, a corrupt repo) is the repository's own fault and should trip
+    // the circuit, but an adapter timeout or CodeQL/network failure is not —
+    // measured on vela, 5 adapter timeouts plus 1 real failure and 1
+    // executor_throw opened the circuit at 7/6 for a healthy repository.
+    const ledger = new RunLedger(createDbPath());
+    for (const id of ['ADAPTER-1', 'ADAPTER-2']) register(ledger, id, '/adapter-flaky-repo');
+    const held = claim(ledger, 'ADAPTER-1', 'daemon', 2_000, 2);
+    expect(ledger.recordAttemptResult(held, {
+      success: false,
+      finalStatus: 'infra_error', // codex-responses timeout after 360000ms — not repositoryInfra
+      maxFailuresPerHour: 1,
+      circuitCooldownMs: 60_000,
+    }, 2_100)).toBe(true);
+
+    expect(ledger.getMetrics(2_100).openCircuits).toBe(0);
+    expect(ledger.claimRun('ADAPTER-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
+      maxActiveForProject: 2, maxFailuresPerHour: 1,
+    })).not.toBeNull();
+    ledger.close();
+  });
+
+  it('opens the circuit for a git worktree add failure regardless of admission-check timing (AGT-4038)', () => {
+    // The two circuit checks — inline in claimRun's own budget check, and in
+    // recordAttemptResult right after the attempt that trips it — must agree
+    // on the same repositoryInfra distinction, or one path silently ignores
+    // what the other enforces.
+    const ledger = new RunLedger(createDbPath());
+    for (const id of ['WT-1', 'WT-2']) register(ledger, id, '/worktree-broken-repo');
+    const held = claim(ledger, 'WT-1', 'daemon', 2_000, 2);
+    expect(ledger.recordAttemptResult(held, {
+      success: false,
+      finalStatus: 'infra_error',
+      repositoryInfra: true, // disk full / .git lock / corrupt repo
+      maxFailuresPerHour: 1,
+      circuitCooldownMs: 60_000,
+    }, 2_100)).toBe(true);
+
+    expect(ledger.getMetrics(2_100).openCircuits).toBe(1);
+    expect(ledger.claimRun('WT-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
+      maxActiveForProject: 2, maxFailuresPerHour: 1,
+    })).toBeNull();
+    ledger.close();
+  });
+
   it('preserves remediated attempts while excluding them from the failure circuit', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'FIXED-1', '/fixed-repo');
@@ -654,6 +704,7 @@ describe('RunLedger claim and fencing races', () => {
     expect(ledger.recordAttemptResult(first, {
       success: false,
       finalStatus: 'infra_error',
+      repositoryInfra: true, // a failed git worktree add — would open the circuit if not remediated
       maxFailuresPerHour: 1,
       circuitCooldownMs: 60_000,
     }, 2_100)).toBe(true);

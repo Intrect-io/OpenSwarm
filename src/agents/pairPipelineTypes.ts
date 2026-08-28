@@ -78,6 +78,16 @@ export interface PipelineResult {
   sessionId: string;
   stages: StageResult[];
   finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'superseded' | 'rate_limited' | 'infra_error' | 'waiting_on_operator';
+  /**
+   * Set only when `finalStatus === 'infra_error'` and the cause is the
+   * repository itself (disk full, `.git` lock, corrupt repo — a failed
+   * `git worktree add`), not an adapter timeout, tooling failure, or network
+   * blip. The repository failure circuit reads this to count only the former:
+   * an adapter retrying on a fixed clock is not the repository failing, and
+   * lumping the two together can close a healthy repository to every other
+   * task over transient LLM/network noise (AGT-4038).
+   */
+  repositoryInfra?: boolean;
   failureSignal?: 'gate-fail' | 'timeout' | 'stuck';
   stuckReason?: string;
   rateLimitResetsAt?: number;

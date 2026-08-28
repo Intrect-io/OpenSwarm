@@ -124,6 +124,11 @@ export function migrateAutomationSchema(db: Database.Database): void {
       if (!attemptColumns.has('result_status')) db.exec('ALTER TABLE automation_attempts ADD COLUMN result_status TEXT');
       if (!attemptColumns.has('success')) db.exec('ALTER TABLE automation_attempts ADD COLUMN success INTEGER');
       if (!attemptColumns.has('cost_usd')) db.exec('ALTER TABLE automation_attempts ADD COLUMN cost_usd REAL');
+      // Distinguishes an infra_error caused by the repository itself (disk
+      // full, a stale .git lock, a corrupt repo) from one caused by an
+      // adapter timeout, tooling failure, or network blip — only the former
+      // should count toward the repository failure circuit (AGT-4038).
+      if (!attemptColumns.has('repository_infra')) db.exec('ALTER TABLE automation_attempts ADD COLUMN repository_infra INTEGER');
       db.exec(`CREATE INDEX IF NOT EXISTS idx_automation_attempts_budget
         ON automation_attempts(started_at, success, cost_usd)`);
 
