@@ -280,6 +280,19 @@ async function activeMarkerPath(repoPath: string, issueId: string, ownerToken: s
   return join(await activeMarkerDirectory(repoPath), issueId, `${ownerToken}.json`);
 }
 
+/** A `createWorktree()` failure that is a coordination/staleness problem the
+ *  daemon resolves on its own reconciliation pass (a concurrent lease holding
+ *  the lifecycle lock, a preserved or crash-recovered tree needing
+ *  reconciliation) — never the target repository's own disk/git health.
+ *  Callers use `instanceof` rather than matching `.message` text, which stays
+ *  correct if the wording above ever changes (AGT-4038). */
+export class WorktreeCoordinationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'WorktreeCoordinationError';
+  }
+}
+
 async function withWorktreeLifecycleLock<T>(
   repoPath: string,
   issueId: string,
@@ -300,7 +313,7 @@ async function withWorktreeLifecycleLock<T>(
   } catch (error) {
     lockDb.close();
     if ((error as { code?: string }).code?.startsWith('SQLITE_BUSY')) {
-      throw new Error(`Worktree lifecycle is busy for ${issueId}`, { cause: error });
+      throw new WorktreeCoordinationError(`Worktree lifecycle is busy for ${issueId}`, { cause: error });
     }
     throw error;
   }
@@ -589,7 +602,7 @@ export async function createWorktree(
       console.log(`[Worktree] Resuming preserved worktree: ${worktreePath} (branch: ${branchName})`);
       return resumed;
     }
-    throw new Error(`Preserved worktree requires reconciliation (valid=${valid}, branch=${branch}): ${worktreePath}`);
+    throw new WorktreeCoordinationError(`Preserved worktree requires reconciliation (valid=${valid}, branch=${branch}): ${worktreePath}`);
   }
 
   // Crash recovery: never delete an existing tree before the durable reconciler
@@ -599,7 +612,7 @@ export async function createWorktree(
     const valid = await git(worktreePath, 'status', '--porcelain').then(() => true).catch(() => false);
     const branch = await git(worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD').then((b) => b.trim()).catch(() => '');
     if (!valid || branch !== branchName) {
-      throw new Error(`Existing worktree requires reconciliation (valid=${valid}, branch=${branch}): ${worktreePath}`);
+      throw new WorktreeCoordinationError(`Existing worktree requires reconciliation (valid=${valid}, branch=${branch}): ${worktreePath}`);
     }
     const resumed: WorktreeInfo = {
       worktreePath, branchName, originalPath: repoPath, issueId,

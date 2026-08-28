@@ -42,6 +42,9 @@ const plannerRunPlanner = vi.fn();
 const plannerFormatPlannerResult = vi.fn();
 const buildBranchName = vi.fn();
 const createWorktree = vi.fn();
+// Stand-in for the real class — the instanceof check under test resolves
+// through this same mock, so identity (not origin) is what matters (AGT-4038).
+const WorktreeCoordinationError = class extends Error {};
 const commitAndCreatePR = vi.fn();
 const findOpenPRFileOverlaps = vi.fn();
 const hasRecoverableWorktree = vi.fn();
@@ -103,6 +106,7 @@ vi.mock('../support/worktreeManager.js', () => ({
   hasRecoverableWorktree,
   preserveWorktree,
   removeWorktree,
+  WorktreeCoordinationError,
 }));
 
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent }));
@@ -429,10 +433,7 @@ describe('runnerExecution.ts coverage extension', () => {
       const result = await executePipeline(makeCtx(), task(), '/repo');
 
       expect(result.finalStatus).toBe('approved');
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Draft analysis failed'),
-        'Error: draft analyzer crashed',
-      );
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Draft analysis failed'), 'Error: draft analyzer crashed');
     });
 
     it('mirrors draft analysis onLog lines to stdout and the event hub', async () => {
@@ -780,11 +781,14 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
     });
 
-    it('does not blame the repository when a preserved worktree just needs reconciliation (AGT-4038)', async () => {
-      createWorktree.mockRejectedValue(new Error('Preserved worktree requires reconciliation (valid=false, branch=main): /wt'));
+    it.each([
+      ['a preserved worktree just needs reconciliation', 'Preserved worktree requires reconciliation (valid=false, branch=main): /wt'],
+      ['the worktree lifecycle lock is busy', 'Worktree lifecycle is busy for issue-1'],
+    ])('does not blame the repository when %s (AGT-4038)', async (_label, message) => {
+      createWorktree.mockRejectedValue(new WorktreeCoordinationError(message));
       const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
       expect(result).toMatchObject({ finalStatus: 'infra_error', success: false });
-      expect(result.repositoryInfra).toBeFalsy(); // stale bookkeeping, not disk/git health
+      expect(result.repositoryInfra).toBeFalsy(); // coordination, not disk/git health
     });
 
     it('preserves an acquired worktree when durable attachment throws during setup, without blaming the repository (AGT-4038)', async () => {
@@ -872,10 +876,7 @@ describe('runnerExecution.ts coverage extension', () => {
       await expect(executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo'))
         .rejects.toThrow('adapter process crashed');
 
-      expect(preserveWorktree).toHaveBeenCalledWith(
-        expect.objectContaining({ issueId: 'issue-1' }),
-        'session did not succeed',
-      );
+      expect(preserveWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-1' }), 'session did not succeed');
       expect(removeWorktree).not.toHaveBeenCalled();
     });
 
@@ -976,10 +977,7 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(removeWorktree).not.toHaveBeenCalled();
       const runOptions = fp.run.mock.calls[0][2] as { signal: AbortSignal };
       expect(runOptions.signal.aborted).toBe(true);
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining('Durable stage transition failed'),
-        expect.any(Error),
-      );
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Durable stage transition failed'), expect.any(Error));
     });
 
     it('posts a worker-start audit comment only for the worker stage on a task with an issueId', async () => {

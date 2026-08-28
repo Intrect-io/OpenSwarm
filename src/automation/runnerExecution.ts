@@ -33,6 +33,7 @@ import {
   hasRecoverableWorktree,
   preserveWorktree,
   removeWorktree,
+  WorktreeCoordinationError,
 } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
@@ -872,23 +873,19 @@ export async function executePipeline(
         await preserveWorktree(worktreeInfo, 'worktree setup or durable attachment failed')
           .catch((cleanupError) => console.warn('[Worktree] Setup cleanup failed:', cleanupError));
       }
-      // `createWorktree` itself is internally multi-step, and only some of its
-      // throws are the repository's own fault. "requires reconciliation" means
-      // a preserved or crash-recovered worktree's local state is stale or on
-      // the wrong branch — a coordination/bookkeeping problem this daemon can
-      // resolve on its own reconciliation pass, not disk full, a stale `.git`
-      // lock, or a corrupt repo. `linkSharedPaths`/`ensureLfsSmudged` are
-      // self-contained best-effort (never throw), so what remains — the `git
-      // worktree add` call itself, and the active-marker file write — are
-      // genuine repo/filesystem failures (AGT-4038).
-      const needsReconciliation = err instanceof Error && /requires reconciliation/.test(err.message);
+      // Only some of createWorktree's throws are the repository's own fault.
+      // `WorktreeCoordinationError` covers a busy lifecycle lock and a stale
+      // preserved/crash-recovered tree — bookkeeping this daemon resolves on
+      // its own, not disk/git health. `instanceof`, not a message match, so
+      // it stays correct if worktreeManager.ts's wording changes (AGT-4038).
+      const isCoordinationFailure = err instanceof WorktreeCoordinationError;
       return {
         success: false,
         sessionId: `worktree-fail-${Date.now()}`,
         iterations: 0,
         totalDuration: 0,
         finalStatus: 'infra_error',
-        repositoryInfra: !worktreeInfo && !needsReconciliation,
+        repositoryInfra: !worktreeInfo && !isCoordinationFailure,
         stages: [],
       };
     }
