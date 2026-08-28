@@ -51,17 +51,16 @@ describe('task state store', () => {
     resetTaskStateStoreForTests();
   });
 
-  it('keeps an operator park across a reload, and clears it again (AGT-4033)', () => {
-    // The operator's answer is durable — it lives on the coordination board — so
-    // the flag that says a backoff may be cut short has to be durable too, or a
-    // restart is the one thing that turns a two-minute reply back into a
-    // two-hour one.
+  it('carries a block reason across a reload and clears it again', () => {
+    // A dependency block outlives the process that noticed it, so the reason has
+    // to survive a reload — and clearing it has to survive one too, or a task
+    // stays labelled as blocked after the thing it waited for is done.
     upsertTaskState('AGT-1', { execution: { status: 'in_progress', retryCount: 0 } });
-    upsertTaskState('AGT-1', { execution: { blockedReason: 'waiting_on_operator' } });
+    upsertTaskState('AGT-1', { execution: { blockedReason: 'Waiting on dependencies: AGT-2' } });
 
     resetTaskStateStoreForTests();
-    expect(getTaskState('AGT-1')?.execution.blockedReason).toBe('waiting_on_operator');
-    // Merged, not replaced: the park must not cost the task its execution status.
+    expect(getTaskState('AGT-1')?.execution.blockedReason).toBe('Waiting on dependencies: AGT-2');
+    // Merged, not replaced: recording the block must not cost the task its status.
     expect(getTaskState('AGT-1')?.execution.status).toBe('in_progress');
 
     upsertTaskState('AGT-1', { execution: { blockedReason: undefined } });

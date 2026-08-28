@@ -137,6 +137,57 @@ describe('RunLedger operator re-admission (AGT-4033)', () => {
 
     ledger.close();
   });
+
+  it('does not let a park outlive the attempt that caused it', () => {
+    // The runner reads `lastErrorCode` to decide whether an operator's answer may
+    // cut a backoff short, so the park has to expire with its own attempt. If a
+    // transition preserved the previous code the way this UPDATE preserves a
+    // branch or a PR url, a task that waited out its backoff and then failed for
+    // its own reasons would be pulled forward on every heartbeat by an answer
+    // from a park it has long since left.
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'AGT-3');
+
+    const parked = claim(ledger, 'AGT-3', 'daemon');
+    expect(ledger.transition(parked, 'RETRY_AT', {
+      retryAt: 9_000,
+      errorCode: 'waiting_on_operator',
+    }, 2_100)).toBe(true);
+    expect(ledger.getRun('AGT-3')?.lastErrorCode).toBe('waiting_on_operator');
+
+    // The next attempt ends without naming a reason at all — the weakest case,
+    // and the one a `COALESCE` would silently turn back into a park.
+    expect(ledger.markReady('AGT-3', 2_200)).toBe(true);
+    const retried = claim(ledger, 'AGT-3', 'daemon', 2_300);
+    expect(ledger.transition(retried, 'RETRY_AT', { retryAt: 9_000 }, 2_400)).toBe(true);
+
+    expect(ledger.getRun('AGT-3')?.lastErrorCode).toBeUndefined();
+
+    ledger.close();
+  });
+
+  it('promotes only a run that is still parked when the promotion runs', () => {
+    // The caller reads the park on one heartbeat and promotes on the next
+    // statement. In between, a second daemon can end the parked attempt and back
+    // the run off again for its own reasons — so the park is re-read here, under
+    // this transaction's write lock, instead of trusted from the caller.
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'AGT-4');
+    const parked = claim(ledger, 'AGT-4', 'daemon');
+    ledger.transition(parked, 'RETRY_AT', { retryAt: 9_000, errorCode: 'waiting_on_operator' }, 2_100);
+
+    expect(ledger.readmitParkedRun('AGT-4', 'waiting_on_operator', 2_200)).toBe(true);
+    expect(ledger.getRun('AGT-4')?.state).toBe('READY');
+
+    // That attempt now fails on its own account.
+    const retried = claim(ledger, 'AGT-4', 'daemon', 2_300);
+    ledger.transition(retried, 'RETRY_AT', { retryAt: 9_000, errorCode: 'failed' }, 2_400);
+
+    expect(ledger.readmitParkedRun('AGT-4', 'waiting_on_operator', 2_500)).toBe(false);
+    expect(ledger.getRun('AGT-4')?.state).toBe('RETRY_AT');
+
+    ledger.close();
+  });
 });
 
 describe('RunLedger claim and fencing races', () => {

@@ -158,6 +158,10 @@ export class DurableRunCoordinator {
     return this.ledger?.markReady(issueId, now) ?? false;
   }
 
+  readmitParkedRun(issueId: string, parkCode: string, now = Date.now()): boolean {
+    return this.ledger?.readmitParkedRun(issueId, parkCode, now) ?? false;
+  }
+
   recoverPublishedRun(
     issueId: string,
     publication: { prUrl: string; headSha?: string },

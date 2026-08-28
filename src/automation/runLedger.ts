@@ -266,6 +266,18 @@ export class RunLedger {
     return this.unfencedTransition(issueId, eligible, 'READY', {}, now);
   }
 
+  /**
+   * Promote a run only while it is still parked on the operator.
+   *
+   * The park is re-read inside the promoting transaction rather than trusted from
+   * the caller. Between a caller's read and this write the parked attempt can end
+   * and a new one fail for its own reasons, and pulling *that* one forward is the
+   * fast-retry loop the backoff exists to prevent.
+   */
+  readmitParkedRun(issueId: string, parkCode: string, now = Date.now()): boolean {
+    return this.unfencedTransition(issueId, ['RETRY_AT'], 'READY', {}, now, parkCode);
+  }
+
   /** Release a lost lease only after its executor has actually returned. */
   confirmExecutorExit(
     ownership: Pick<RunClaim,
@@ -1337,10 +1349,14 @@ export class RunLedger {
     to: RunState,
     patch: TransitionPatch,
     now: number,
+    requireErrorCode?: string,
   ): boolean {
     const transition = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || !from.includes(row.state as RunState)) return false;
+      // Read under the transaction's write lock, so what is checked here is what
+      // the UPDATE below acts on.
+      if (requireErrorCode !== undefined && row.last_error_code !== requireErrorCode) return false;
       assertRunState(row.state);
       if (row.owner_instance_id != null || row.lease_token != null) return false;
       if (!ALLOWED_TRANSITIONS[row.state].includes(to)) return false;
