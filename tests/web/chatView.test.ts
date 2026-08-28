@@ -470,6 +470,9 @@ describe('chat attachments (AGT-4031)', () => {
 
     const uploads = fetchImpl.mock.calls.filter((c) => String(c[0]).startsWith('/api/coordination/attachment'));
     expect(uploads).toHaveLength(1);
+    // Reuse is scoped to the task it landed under: a path carrying one task must
+    // never ride a message addressed to another.
+    expect(String(uploads[0][0])).toContain('taskId=t1');
     // The retried message still carries the path from that one upload.
     const publishes = fetchImpl.mock.calls.filter((c) => String(c[0]).startsWith('/api/coordination/message'));
     expect(JSON.parse((publishes.at(-1)![1] as { body: string }).body).text).toContain('/p/a.csv');

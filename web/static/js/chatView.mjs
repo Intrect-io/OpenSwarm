@@ -65,8 +65,11 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   // out so a refused send does not silently discard them (AGT-4026's rule,
   // applied to attachments).
   let pendingFiles = [];
-  // Where each staged file landed, once it has. Keyed by the File itself, which
-  // survives a failed send because the staging list does.
+  // Where each staged file landed, once it has, and which task it landed under.
+  // Keyed by the File itself, which survives a failed send because the staging
+  // list does — but the operator can switch exchanges between the failure and
+  // the retry, and a path carrying the old task must not ride a message going to
+  // a new one.
   const uploaded = new Map();
 
   const renderFiles = () => {
@@ -110,8 +113,8 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       // orphans then count against the store's ceiling and make the retry more
       // likely to be refused than the attempt that failed.
       const landed = uploaded.get(file);
-      if (landed) {
-        lines.push(landed);
+      if (landed && landed.taskId === taskId) {
+        lines.push(landed.line);
         continue;
       }
       const query = `?taskId=${encodeURIComponent(taskId)}&filename=${encodeURIComponent(file.name)}`;
@@ -126,7 +129,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       }
       const stored = await response.json();
       const line = `- ${stored.filename} → ${stored.path}`;
-      uploaded.set(file, line);
+      uploaded.set(file, { taskId, line });
       lines.push(line);
     }
     return lines;
