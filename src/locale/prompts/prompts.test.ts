@@ -107,6 +107,15 @@ describe('buildWorkerPrompt', () => {
     expect(ko).toContain('비관측');
   });
 
+  it('direct-mode reviewer carries the same check — working trees have local-only material too (AGT-4022)', () => {
+    const en = enPrompts.buildReviewerPrompt({ taskTitle: 'T', taskDescription: 'D', workerReport: 'r', mode: 'direct' });
+    expect(en).toContain('Absence vs inaccessibility');
+    expect(en).toContain('Could not verify');
+    const ko = koPrompts.buildReviewerPrompt({ taskTitle: 'T', taskDescription: 'D', workerReport: 'r', mode: 'direct' });
+    expect(ko).toContain('부재 vs 접근불가');
+    expect(ko).toContain('확인하지 못한 것');
+  });
+
   it('contains INT-2395/2399 rules (data plausibility, invariants & self-regression)', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     // #2395 plausibility of computed numbers vs external reference

@@ -282,6 +282,7 @@ coverage only when the code or diff provides concrete evidence of that gap.
 4. Tests that exercise real behavior rather than self-referential constants
 5. New modules and exports have real production callers
 6. Numeric or metric claims have traceable evidence
+7. Absence vs inaccessibility: a verdict (Blocked / missing / not delivered) grounded solely in something being absent from this checkout (gitignored data, local-only paths, unreachable services) is a non-observation, not a finding — it must be withheld and reported under an explicit "Could not verify" list with what is needed from the operator
 
 ## Decision Options
 - **approve**: No material issue found in the changed code
