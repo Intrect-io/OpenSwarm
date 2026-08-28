@@ -14,6 +14,13 @@ import { DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL } from '../adapters/openroute
 import { extractCursorFinalText } from '../adapters/cursor.js';
 import { ATLASCLOUD_DEFAULT_MODEL } from '../adapters/atlascloud.js';
 import { CLAUDE_DEFAULT_MODEL } from '../adapters/claude.js';
+import {
+  prepareCliProcessTreeSpawn,
+  terminateCliProcessTree,
+  trackCliProcessTree,
+  untrackCliProcessTree,
+} from '../adapters/processTree.js';
+import { raceWithAbort } from '../adapters/abortRace.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -265,6 +272,19 @@ async function runChatViaAdapter(
   cwd: string,
   options: ChatCompletionOptions,
 ): Promise<ChatCompletionResult> {
+  const timeoutMs = options.timeoutMs ?? 300000;
+  const lifecycleController = new AbortController();
+  const timeoutError = new Error('Chat response timeout');
+  let deadlineTimer: NodeJS.Timeout | null = null;
+  const relayCallerAbort = () => lifecycleController.abort(chatAbortError(options.signal));
+  if (timeoutMs > 0) {
+    deadlineTimer = setTimeout(() => lifecycleController.abort(timeoutError), timeoutMs);
+  }
+  options.signal?.addEventListener('abort', relayCallerAbort, { once: true });
+  if (options.signal?.aborted) relayCallerAbort();
+  const runSignal = lifecycleController.signal;
+
+  try {
   // run() adapters take the prompt as TEXT (it becomes the agentic-loop user
   // message) — unlike the codex CLI path, which treats options.prompt as a file
   // path to `cat`. Pass the message text directly.
@@ -274,39 +294,52 @@ async function runChatViaAdapter(
   // onToken; tool executions surface through onLog.
   // Expose any MCP servers configured in ~/.openswarm/mcp.json as tools (cached).
   const { getMcpTools } = await import('../mcp/mcpClient.js');
-  const mcpTools = await getMcpTools().catch(() => []);
+  const mcpTools = await raceWithAbort(
+    getMcpTools().catch(() => []),
+    runSignal,
+    'Chat response cancelled',
+  );
 
   // Tell the agent which repo/branch it's in and surface the project's own rules
   // so chat/plan/goal work in the launch cwd, not a guessed one. (INT-2005)
   const repoContext = buildRepoContext(cwd);
 
   let streamed = false;
-  const raw = await adapter.run!({
-    prompt: options.prompt,
-    cwd,
-    model,
-    systemPrompt: repoContext
-      ? `${BASE_CHAT_SYSTEM_PROMPT}\n\n${repoContext}`
-      : BASE_CHAT_SYSTEM_PROMPT,
-    enableTools: true,
-    webTools: true,
-    mcpTools,
-    // A high safety ceiling, not a task limit — normal work ends when the model
-    // stops calling tools; the progress-based stop catches stuck loops earlier.
-    maxTurns: options.maxTurns ?? 80,
-    timeoutMs: options.timeoutMs ?? 300000,
-    // Stream tokens live when the adapter supports it (codex-responses / chat
-    // completions); the chat TUI renders each delta as it arrives.
-    onToken: options.onText
-      ? (delta) => {
-          streamed = true;
-          options.onText!(delta, false);
-        }
-      : undefined,
-    // Tool executions (🔧 …) surface to the chat UI.
-    onLog: options.onLog,
-    signal: options.signal,
-  });
+  const raw = await raceWithAbort(
+    adapter.run!({
+      prompt: options.prompt,
+      cwd,
+      model,
+      systemPrompt: repoContext
+        ? `${BASE_CHAT_SYSTEM_PROMPT}\n\n${repoContext}`
+        : BASE_CHAT_SYSTEM_PROMPT,
+      enableTools: true,
+      webTools: true,
+      mcpTools,
+      // A high safety ceiling, not a task limit — normal work ends when the model
+      // stops calling tools; the progress-based stop catches stuck loops earlier.
+      maxTurns: options.maxTurns ?? 80,
+      timeoutMs,
+      // Stream tokens live when the adapter supports it (codex-responses / chat
+      // completions); the chat TUI renders each delta as it arrives.
+      onToken: options.onText
+        ? (delta) => {
+            if (runSignal.aborted) return;
+            streamed = true;
+            options.onText!(delta, false);
+          }
+        : undefined,
+      // Tool executions (🔧 …) surface to the chat UI.
+      onLog: options.onLog
+        ? (line) => {
+            if (!runSignal.aborted) options.onLog!(line);
+          }
+        : undefined,
+      signal: runSignal,
+    }),
+    runSignal,
+    'Chat response cancelled',
+  );
   if (raw.exitCode !== 0 && !raw.stdout.trim()) {
     throw new Error(raw.stderr.trim() || `${provider} exited with code ${raw.exitCode}`);
   }
@@ -314,6 +347,10 @@ async function runChatViaAdapter(
   // Non-streaming adapters emit nothing via onToken — flush the full reply once.
   if (!streamed) options.onText?.(text, false);
   return { response: text || '[No response]', provider, model };
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    options.signal?.removeEventListener('abort', relayCallerAbort);
+  }
 }
 
 export async function runChatCompletion(options: ChatCompletionOptions): Promise<ChatCompletionResult> {
@@ -328,31 +365,66 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
     return runChatViaAdapter(adapter, provider, model, cwd, options);
   }
 
+  // CLI command construction can itself perform I/O (Codex enumerates the
+  // effective MCP list). The chat timeout is a wall-clock deadline for that
+  // work and the spawned process together, not a second timer that begins only
+  // after command construction has already consumed several seconds.
+  const timeoutMs = options.timeoutMs ?? 300000;
+  const lifecycleController = new AbortController();
+  const timeoutError = new Error('Chat response timeout');
+  let deadlineTimer: NodeJS.Timeout | null = null;
+  const relayCallerAbort = () => lifecycleController.abort(chatAbortError(options.signal));
+  if (timeoutMs > 0) {
+    deadlineTimer = setTimeout(() => lifecycleController.abort(timeoutError), timeoutMs);
+  }
+  options.signal?.addEventListener('abort', relayCallerAbort, { once: true });
+  if (options.signal?.aborted) relayCallerAbort();
+  const runSignal = lifecycleController.signal;
+  const cleanupDeadline = () => {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    options.signal?.removeEventListener('abort', relayCallerAbort);
+  };
+
   // CLI adapters consume a prompt path. Use a private, unpredictable directory
   // and owner-only file instead of exposing prompt contents in a predictable
   // world-readable /tmp filename.
-  const promptDir = await mkdtemp(join(tmpdir(), 'openswarm-chat-'));
-  const promptFile = join(promptDir, 'prompt.txt');
+  let promptDir: string | undefined;
+  let promptFile: string | undefined;
 
   try {
+    promptDir = await mkdtemp(join(tmpdir(), 'openswarm-chat-'));
+    promptFile = join(promptDir, 'prompt.txt');
+    if (runSignal.aborted) throw chatAbortError(runSignal);
     await writeFile(promptFile, options.prompt, { mode: 0o600 });
-    const { command, args, stdinFile } = adapter.buildCommand({
-      prompt: promptFile,
-      cwd,
-      model,
-    });
+    const { command, args, stdinFile } = await raceWithAbort(
+      adapter.buildCommand({
+        prompt: promptFile,
+        cwd,
+        model,
+        timeoutMs,
+        signal: runSignal,
+      }),
+      runSignal,
+      'Chat response cancelled',
+    );
+    if (runSignal.aborted) throw chatAbortError(runSignal);
     // Some CLIs (cursor-agent) take the prompt on stdin rather than as a path
     // argument; ignoring stdinFile leaves them waiting for input that never
     // arrives. spawnCli() in base.ts already honours this on the daemon path.
     const stdin = stdinFile ? await readFile(stdinFile) : undefined;
+    if (runSignal.aborted) throw chatAbortError(runSignal);
 
     return await new Promise<ChatCompletionResult>((resolve, reject) => {
-      const proc = spawn(command, args, {
+      const cliSpawn = prepareCliProcessTreeSpawn(command, args, process.env);
+      const proc = spawn(cliSpawn.command, cliSpawn.args, {
         shell: false,
+        detached: process.platform !== 'win32',
         cwd,
-        env: process.env,
+        env: cliSpawn.env,
         stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
+      trackCliProcessTree(proc);
       if (stdin) {
         proc.stdin?.on('error', () => { /* the child may exit before the write drains */ });
         proc.stdin?.end(stdin);
@@ -364,15 +436,12 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
       let capturedSessionId = options.sessionId || '';
       let startedStreaming = false;
       let thinkingTimer: NodeJS.Timeout | null = null;
-      let timeout: NodeJS.Timeout | null = null;
-      let abortKillTimer: NodeJS.Timeout | null = null;
       let settled = false;
 
       const cleanupProcessHooks = () => {
-        if (timeout) clearTimeout(timeout);
         if (thinkingTimer) clearTimeout(thinkingTimer);
-        if (abortKillTimer) clearTimeout(abortKillTimer);
-        options.signal?.removeEventListener('abort', onAbort);
+        runSignal.removeEventListener('abort', onAbort);
+        untrackCliProcessTree(proc);
       };
 
       const settle = (action: () => void) => {
@@ -383,17 +452,15 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
       };
 
       const onAbort = () => {
-        proc.kill('SIGTERM');
-        // A child can trap/ignore SIGTERM. Do not let cancellation leave an
-        // orphaned model process behind indefinitely.
-        abortKillTimer = setTimeout(() => {
-          if (proc.exitCode === null) proc.kill('SIGKILL');
-        }, 1000);
-        abortKillTimer.unref();
+        terminateCliProcessTree(proc);
+        settle(() => reject(chatAbortError(runSignal)));
       };
 
-      if (options.signal?.aborted) onAbort();
-      else options.signal?.addEventListener('abort', onAbort, { once: true });
+      if (runSignal.aborted) {
+        onAbort();
+        return;
+      }
+      runSignal.addEventListener('abort', onAbort, { once: true });
 
       const resetThinkingTimer = () => {
         if (!options.onText) return;
@@ -448,18 +515,17 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
         stderr += chunk.toString();
       });
 
-      if ((options.timeoutMs ?? 300000) > 0) {
-        timeout = setTimeout(() => {
-          proc.kill('SIGKILL');
-          settle(() => reject(new Error('Chat response timeout')));
-        }, options.timeoutMs ?? 300000);
-      }
-
       proc.on('close', (code) => {
+        if (settled) return;
+        // A wrapper can exit cleanly after launching a detached-stdio child.
+        // `close` then arrives immediately even though that child still lives
+        // in the wrapper's private POSIX process group. Always reap the group
+        // before resolving the chat request.
+        terminateCliProcessTree(proc);
         flushLines(true);
 
-        if (options.signal?.aborted) {
-          settle(() => reject(chatAbortError(options.signal)));
+        if (runSignal.aborted) {
+          settle(() => reject(chatAbortError(runSignal)));
           return;
         }
 
@@ -483,17 +549,18 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
       });
 
       proc.on('error', (error) => {
-        settle(() => reject(options.signal?.aborted ? chatAbortError(options.signal) : error));
+        settle(() => reject(runSignal.aborted ? chatAbortError(runSignal) : error));
       });
     });
   } finally {
+    cleanupDeadline();
     try {
-      await unlink(promptFile);
+      if (promptFile) await unlink(promptFile);
     } catch {
       // Ignore temp cleanup errors.
     }
     try {
-      await rmdir(promptDir);
+      if (promptDir) await rmdir(promptDir);
     } catch {
       // Ignore temp cleanup errors.
     }

@@ -387,6 +387,8 @@ program
           concurrency: opts.concurrency,
           maxFilesPerArea: opts.maxFilesPerArea,
           adapter: opts.adapter,
+          maxTurns: opts.maxTurns,
+          timeoutMs: opts.timeout,
           fileIssue: opts.issues ?? opts.file,
           issuesPerArea: opts.issuesPerArea,
           yes: opts.yes,

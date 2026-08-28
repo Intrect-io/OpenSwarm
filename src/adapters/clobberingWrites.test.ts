@@ -104,6 +104,48 @@ describe('spawnCli prompt file', () => {
     await expect(spawnCli(failing, { prompt: 'x', cwd: process.cwd() } as never)).rejects.toThrow();
     expect(() => statSync(dirname(seen[0].path))).toThrow();
   }, 30_000);
+
+  it.skipIf(process.platform === 'win32')('kills a detached-stdio descendant after its wrapper exits', async () => {
+    const root = tempRoot('openswarm-wrapper-exit-');
+    const pidFile = join(root, 'descendant.pid');
+    let descendantPid = 0;
+    const adapter = {
+      name: 'wrapper-fixture',
+      capabilities: { supportsStreaming: false },
+      buildCommand: () => ({
+        command: process.execPath,
+        args: [
+          '-e',
+          [
+            "const { spawn } = require('node:child_process')",
+            "const { writeFileSync } = require('node:fs')",
+            "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+            'writeFileSync(process.argv[1], String(child.pid))',
+            'child.unref()',
+          ].join(';'),
+          pidFile,
+        ],
+      }),
+    } as never;
+
+    try {
+      await expect(spawnCli(adapter, {
+        prompt: 'wrapper exits first',
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+      } as never)).resolves.toMatchObject({ exitCode: 0 });
+      descendantPid = Number.parseInt(readFileSync(pidFile, 'utf-8'), 10);
+      await vi.waitFor(() => expect(() => process.kill(descendantPid, 0)).toThrow(), { timeout: 1_000 });
+    } finally {
+      if (descendantPid) {
+        try {
+          process.kill(descendantPid, 'SIGKILL');
+        } catch {
+          // Expected: the exit-drain cleanup already removed the descendant.
+        }
+      }
+    }
+  }, 10_000);
 });
 
 describe('applyPatch "add" operation', () => {

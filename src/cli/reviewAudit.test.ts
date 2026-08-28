@@ -8,12 +8,7 @@ import {
   formatAuditReport,
   formatAuditSummary,
   runMaxReview,
-  runAreaFixes,
-  runFixVerifyLoop,
-  fixTargets,
-  buildFixTaskDescription,
   mergeFallback,
-  mergeReReview,
   mergeSecurityAuditFindings,
   type AuditArea,
   type AuditAreaResult,
@@ -21,6 +16,13 @@ import {
   type AuditRun,
   type AuditSummary,
 } from './reviewAudit.js';
+import {
+  runAreaFixes,
+  runFixVerifyLoop,
+  fixTargets,
+  buildFixTaskDescription,
+  mergeReReview,
+} from './reviewFixPass.js';
 import type { ReviewResult } from '../agents/agentPair.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { planFixUnits, type FixRepositoryContext } from './fixPlanning.js';
@@ -224,7 +226,7 @@ describe('formatAuditReport (INT-2022)', () => {
       failed: 1,
       areas: [
         { label: 'src/a', decision: 'revise', issueCount: 2, actionCount: 1 },
-        { label: 'src/b', decision: 'error', issueCount: 0, actionCount: 0 },
+        { label: 'src/b', decision: 'error', issueCount: 0, actionCount: 0, error: 'codex timeout after 300000ms' },
       ],
       issues: ['[src/a] missing null check'],
       recommendedActions: [
@@ -236,7 +238,8 @@ describe('formatAuditReport (INT-2022)', () => {
     expect(md).toContain('# Codebase audit — myrepo');
     expect(md).toContain('Verdict: REVISE');
     expect(md).toContain('## ⚠ Reviewer failures (1)');
-    expect(md).toContain('- src/b');
+    // The reason, not just the label — a bare label is unactionable. (AGT-3990)
+    expect(md).toContain('- src/b — `codex timeout after 300000ms`');
     expect(md).toContain('### bug (1)');
     expect(md).toContain('Fix X — `src/a: src/a/f.ts:1`');
     expect(md).toContain('## Issues (1)');
@@ -332,6 +335,7 @@ describe('runMaxReview orchestration (INT-2006)', () => {
     expect(run.rateLimit?.usedPercent).toBe(100);
     expect(calls).toBeLessThan(5); // m2..m4 skipped, not attempted against the dead quota
   });
+
 });
 
 describe('mergeFallback (INT-2192)', () => {

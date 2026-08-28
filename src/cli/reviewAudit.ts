@@ -11,20 +11,17 @@
 import { execFileSync } from 'node:child_process';
 import { dirname } from 'node:path';
 import type { ReviewResult, RecommendedAction } from '../agents/agentPair.js';
+import type { ReviewerOptions } from '../agents/reviewer.js';
 import type { AdapterName } from '../adapters/types.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
+import { isInfraError } from '../adapters/errorClassification.js';
 import { c, status } from '../support/colors.js';
-import {
-  planFixUnits,
-  workerContextForFixUnit,
-  type FixRepositoryContext,
-  type FixUnit,
-} from './fixPlanning.js';
-import { runIsolatedFixBatch } from './fixSandbox.js';
+import { sanitizeTerminalText } from '../tui/sanitize.js';
 import type { SecurityFinding } from '../verify/securityAudit.js';
 
-const SECURITY_AUDIT_AREA = '.openswarm/codeql-security';
+/** Synthetic area label carrying deterministic CodeQL findings into a review run. */
+export const SECURITY_AUDIT_AREA = '.openswarm/codeql-security';
 
 /** Add deterministic CodeQL findings as a fixable, synthetic review area. */
 export function mergeSecurityAuditFindings(run: AuditRun, findings: readonly SecurityFinding[]): AuditRun {
@@ -103,6 +100,13 @@ export interface AuditAreaSummary {
   decision: ReviewResult['decision'] | 'error';
   issueCount: number;
   actionCount: number;
+  /**
+   * Why this area failed, when `decision` is 'error'. Carried through to the
+   * console summary and the markdown report: a bare "(subagent failed)" left the
+   * operator with no way to tell a hung MCP server from an exhausted quota, and
+   * the string was already in hand. (AGT-3990)
+   */
+  error?: string;
 }
 
 export interface AuditSummary {
@@ -234,7 +238,7 @@ export function aggregateAuditResults(results: AuditAreaResult[]): AuditSummary 
   for (const { area, review, error } of results) {
     if (error || !review) {
       failed++;
-      areas.push({ label: area.label, decision: 'error', issueCount: 0, actionCount: 0 });
+      areas.push({ label: area.label, decision: 'error', issueCount: 0, actionCount: 0, error: error ?? 'no result' });
       continue;
     }
     completed++;
@@ -274,6 +278,17 @@ export function aggregateAuditResults(results: AuditAreaResult[]): AuditSummary 
  * Render the audit as a persistable markdown report. Pure — timestamp is injected
  * (no Date.now() inside) so it's deterministic and testable. (INT-2022)
  */
+/**
+ * Collapse a thrown error into one report-safe line. Adapter errors arrive with
+ * stacks and embedded stderr, and a multi-line string breaks both the markdown
+ * bullet list and the terminal's one-row-per-area layout. (AGT-3990)
+ */
+export function oneLineError(error: string | undefined, max = 300): string {
+  const flat = sanitizeTerminalText(error ?? 'no result').replace(/\s+/g, ' ').trim();
+  if (!flat) return 'no result';
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
 export function formatAuditReport(summary: AuditSummary, repoName: string, timestamp: string): string {
   const mark = (d: AuditAreaSummary['decision']) =>
     d === 'approve' ? '✓' : d === 'revise' ? '✎' : d === 'reject' ? '✗' : '⚠';
@@ -296,7 +311,7 @@ export function formatAuditReport(summary: AuditSummary, repoName: string, times
   if (failedAreas.length) {
     lines.push(`## ⚠ Reviewer failures (${failedAreas.length})`);
     lines.push('These areas were NOT audited (subagent error). Re-run to cover them.');
-    failedAreas.forEach((a) => lines.push(`- ${a.label}`));
+    failedAreas.forEach((a) => lines.push(`- ${a.label} — \`${oneLineError(a.error)}\``));
     lines.push('');
   }
 
@@ -352,7 +367,9 @@ export function formatAuditSummary(summary: AuditSummary): string {
 
   for (const a of summary.areas) {
     const counts =
-      a.decision === 'error' ? '(subagent failed)' : `${a.issueCount} issue(s), ${a.actionCount} follow-up(s)`;
+      a.decision === 'error'
+        ? `(subagent failed: ${oneLineError(a.error, 160)})`
+        : `${a.issueCount} issue(s), ${a.actionCount} follow-up(s)`;
     lines.push(`  ${mark(a.decision)} ${a.label}  ${counts}`);
   }
 
@@ -423,13 +440,19 @@ export type AuditProgress =
   | { type: 'start'; label: string; done: number; total: number }
   | { type: 'log'; label: string; line: string }
   | { type: 'done'; label: string; decision: ReviewResult['decision']; done: number; total: number }
-  | { type: 'error'; label: string; error: string; done: number; total: number };
+  | { type: 'error'; label: string; error: string; done: number; total: number }
+  /** Batch-level note that belongs to no single area (e.g. the give-up decision). */
+  | { type: 'notice'; line: string };
 
 export interface RunMaxReviewOptions {
   /** Max reviewer subagents in flight at once. */
   concurrency: number;
   /** Adapter override for the reviewers. */
   adapter?: AdapterName;
+  /** Per-area reviewer agentic-loop turn ceiling. */
+  maxTurns?: number;
+  /** Per-area reviewer wall-clock budget in milliseconds. */
+  timeoutMs?: number;
   /** Abort the whole audit (Ctrl+C) — propagated to every subagent. */
   signal?: AbortSignal;
   /** Repository-local prior review log context, keyed by deterministic area label. */
@@ -449,9 +472,60 @@ export interface AuditRun {
   results: AuditAreaResult[];
   /** Set when a codex usage-limit aborted the run early (remaining areas skipped). (INT-2192) */
   rateLimit?: RateLimitError;
+  /**
+   * Set when the adapter never once produced a verdict and the run gave up early.
+   * Holds the first infra error, which is the one worth reporting. (AGT-3990)
+   */
+  infraAbort?: string;
 }
 
+/**
+ * Consecutive adapter-level failures, with no area having succeeded, that mean
+ * the adapter itself is broken rather than one area being unlucky. A hung MCP
+ * server in the user's `~/.codex/config.toml` took every area to its 5-minute
+ * timeout; there is nothing to learn from spending that budget N more times.
+ *
+ * Reaching it withholds new launches only. Reviews already running are never
+ * cancelled: at concurrency > 1 the failures report first precisely because they
+ * are fast, so a healthy review is often still in flight when the streak lands.
+ * (AGT-3990)
+ */
+const INFRA_ABORT_THRESHOLD = 3;
+
 /** Default area reviewer: spawn an independent reviewer subagent over the area's files. */
+export function buildAuditReviewerOptions(
+  area: AuditArea,
+  cwd: string,
+  opts: RunMaxReviewOptions,
+  onLog: (line: string) => void,
+): ReviewerOptions {
+  return {
+    mode: 'audit',
+    taskTitle: `Codebase audit: ${area.label}`,
+    taskDescription:
+      `Audit the ${area.files.length} existing source file(s) under ${area.label} for correctness bugs, ` +
+      `security issues, resource leaks, and quality problems.`,
+    workerResult: buildAuditWorkerResult(area),
+    projectPath: cwd,
+    adapterName: opts.adapter,
+    maxTurns: opts.maxTurns,
+    timeoutMs: opts.timeoutMs,
+    signal: opts.signal,
+    priorReviewContext: opts.priorReviewContextByArea?.[area.label],
+    onLog,
+  };
+}
+
+function buildAuditWorkerResult(area: AuditArea) {
+  return {
+    success: true,
+    summary: `Codebase audit of ${area.label}`,
+    filesChanged: area.files,
+    commands: [],
+    output: '',
+  };
+}
+
 async function defaultReviewArea(
   area: AuditArea,
   cwd: string,
@@ -459,20 +533,7 @@ async function defaultReviewArea(
   onLog: (line: string) => void,
 ): Promise<ReviewResult> {
   const { runReviewer } = await import('../agents/reviewer.js');
-  const { buildReviewWorkerResult } = await import('./reviewCommand.js');
-  return runReviewer({
-    mode: 'audit',
-    taskTitle: `Codebase audit: ${area.label}`,
-    taskDescription:
-      `Audit the ${area.files.length} existing source file(s) under ${area.label} for correctness bugs, ` +
-      `security issues, resource leaks, and quality problems.`,
-    workerResult: buildReviewWorkerResult(area.files, `Codebase audit of ${area.label}`),
-    projectPath: cwd,
-    adapterName: opts.adapter as never,
-    signal: opts.signal,
-    priorReviewContext: opts.priorReviewContextByArea?.[area.label],
-    onLog,
-  });
+  return runReviewer(buildAuditReviewerOptions(area, cwd, opts, onLog));
 }
 
 /**
@@ -494,27 +555,98 @@ export async function runMaxReview(
   // fail against the same exhausted quota (the STONKS "5/16 → end" wipeout). Keep
   // the typed error so the caller can report the reset time. (INT-2192)
   let rateLimit: RateLimitError | null = null;
+  // Give-up state: withholds NEW launches only. Reviews already in flight are
+  // left to finish, and a verdict from any of them revokes the give-up — at
+  // concurrency > 1 the fast failures report first, so a slow healthy review is
+  // routinely still running when the streak hits its threshold. (AGT-3990)
+  let infraAbort: string | null = null;
+  let infraStreak = 0;
+  let firstInfraError: string | null = null;
+  let reviewed = 0;
+  let settledCount = 0;
+  let running = 0;
+  // Wakes every parked worker each time an area settles, so the give-up barrier
+  // below re-evaluates against fresh state.
+  let waiters: Array<() => void> = [];
+  const settleTick = (): Promise<void> => new Promise<void>((resolve) => waiters.push(resolve));
+  const wakeAll = (): void => {
+    const pending = waiters;
+    waiters = [];
+    for (const resolve of pending) resolve();
+  };
+  // runPool's own clamp: how many areas are in flight at once, and therefore how
+  // many must have reported before "every attempt so far failed" means anything.
+  const inFlight = Math.max(1, Math.min(Math.floor(opts.concurrency) || 1, areas.length));
 
   const settled = await runPool(
     areas,
     opts.concurrency,
     async (area) => {
       if (rateLimit) throw new Error('skipped: codex usage limit already hit this run');
+      // Park, don't skip. The give-up was decided while other reviews were still
+      // running, and any one of them producing a verdict revokes it — so wait for
+      // them to report rather than discarding this area on a verdict that may be
+      // about to arrive. When nothing is left in flight, the give-up is final.
+      while (infraAbort && running > 0 && reviewed === 0) await settleTick();
+      if (rateLimit) throw new Error('skipped: codex usage limit already hit this run');
+      if (infraAbort) throw new Error(`skipped: ${infraAbort}`);
+      running++;
       deps.onProgress?.({ type: 'start', label: area.label, done, total });
       try {
         return await review(area, (line) => deps.onProgress?.({ type: 'log', label: area.label, line }));
       } catch (e) {
         if (e instanceof RateLimitError) rateLimit = e;
         throw e;
+      } finally {
+        running--;
       }
     },
     (s) => {
       done++;
+      settledCount++;
       const area = areas[s.index];
-      if (s.error) {
-        deps.onProgress?.({ type: 'error', label: area.label, error: String(s.error), done, total });
-      } else if (s.value) {
-        deps.onProgress?.({ type: 'done', label: area.label, decision: s.value.decision, done, total });
+      try {
+        if (s.value) {
+          reviewed++;
+          infraStreak = 0;
+          firstInfraError = null;
+          // A verdict proves the adapter works, so a give-up decided while this
+          // review was still running was wrong — revoke it and resume launching.
+          infraAbort = null;
+          deps.onProgress?.({ type: 'done', label: area.label, decision: s.value.decision, done, total });
+          return;
+        }
+        deps.onProgress?.({ type: 'error', label: area.label, error: String(s.error ?? 'no result'), done, total });
+        // Rate limits have their own guard and reset time; they are not evidence
+        // that the adapter is broken. Neither is a failure on a run that has
+        // already produced a verdict — that area was simply unlucky.
+        if (reviewed > 0 || s.error instanceof RateLimitError) return;
+        if (!isInfraError(s.error)) {
+          // "Consecutive" is literal: an area-level/model-output failure proves
+          // the adapter made progress far enough to break the infra streak. It
+          // may be a slow member of the first wave arriving after faster workers
+          // tentatively set infraAbort, so revoke that decision too.
+          infraStreak = 0;
+          firstInfraError = null;
+          infraAbort = null;
+          return;
+        }
+        if (infraAbort) return;
+        if (infraStreak === 0) firstInfraError = String(s.error ?? 'no result');
+        infraStreak++;
+        // Wait for the whole first wave to report. With N reviews in flight, the
+        // first N-1 settles can all be quick failures while a slow, healthy one is
+        // still working — concluding "the adapter is dead" there would skip the
+        // rest of a perfectly good audit.
+        if (infraStreak < INFRA_ABORT_THRESHOLD || settledCount < inFlight) return;
+        infraAbort =
+          `adapter never produced a verdict — ${INFRA_ABORT_THRESHOLD} consecutive infrastructure failures, ` +
+          `first: ${firstInfraError ?? String(s.error ?? 'no result')}`;
+        deps.onProgress?.({ type: 'notice', line: infraAbort });
+      } finally {
+        // Parked workers re-check the give-up against this settle's outcome — after
+        // it has been folded into the state above, not before.
+        wakeAll();
       }
     },
   );
@@ -522,7 +654,12 @@ export async function runMaxReview(
   const results: AuditAreaResult[] = settled.map((s, i) =>
     s.error || !s.value ? { area: areas[i], error: s.error ? String(s.error) : 'no result' } : { area: areas[i], review: s.value },
   );
-  return { summary: aggregateAuditResults(results), results, rateLimit: rateLimit ?? undefined };
+  return {
+    summary: aggregateAuditResults(results),
+    results,
+    rateLimit: rateLimit ?? undefined,
+    infraAbort: infraAbort ?? undefined,
+  };
 }
 
 /**
@@ -533,594 +670,8 @@ export async function runMaxReview(
 export function mergeFallback(primary: AuditRun, fallback: AuditRun): AuditRun {
   const fb = new Map(fallback.results.map((r) => [r.area.label, r]));
   const results = primary.results.map((r) => (r.error && fb.has(r.area.label) ? fb.get(r.area.label)! : r));
-  return { summary: aggregateAuditResults(results), results, rateLimit: fallback.rateLimit };
-}
-
-// ── Fix pass (--fix) ─────────────────────────────────────────────────────────
-
-/** Outcome of applying a reviewer's findings to one area. */
-export interface FixAreaResult {
-  label: string;
-  /** Every original audit area covered by this dependency-aware fix unit. */
-  targetLabels: string[];
-  /** true when the worker ran and reported success. */
-  applied: boolean;
-  filesChanged: string[];
-  error?: string;
-}
-
-/** Live fix-pass progress — mirrors AuditProgress for the same board/logging. */
-export type FixProgress =
-  | { type: 'start'; label: string; done: number; total: number }
-  | { type: 'log'; label: string; line: string }
-  /** Batch-level note that belongs to no single area (e.g. baseline exclusions). */
-  | { type: 'notice'; line: string }
-  | { type: 'done'; label: string; filesChanged: number; done: number; total: number }
-  | { type: 'error'; label: string; error: string; done: number; total: number };
-
-export interface RunAreaFixesOptions {
-  concurrency: number;
-  adapter?: AdapterName;
-  timeoutMs?: number;
-  reasoningEffort?: 'low' | 'medium' | 'high';
-  signal?: AbortSignal;
-  repositoryContext?: FixRepositoryContext;
-}
-
-export interface RunAreaFixesDeps {
-  /** Apply one dependency-aware fix unit. Default uses an isolated sandbox. */
-  fix?: (unit: FixUnit, onLog: (line: string) => void) => Promise<{ success: boolean; filesChanged: string[]; error?: string }>;
-  /** Injectable sandbox worker for integration tests; scope/promotion stay real. */
-  worker?: (unit: FixUnit, sandbox: string, onLog: (line: string) => void) => Promise<{ success: boolean; error?: string }>;
-  onProgress?: (e: FixProgress) => void;
-}
-
-/** Only areas the reviewer did not approve are worth a fix pass. */
-export function fixTargets(run: AuditRun): AuditAreaResult[] {
-  return run.results.filter(
-    (r): r is AuditAreaResult & { review: ReviewResult } =>
-      !!r.review && r.review.decision !== 'approve',
-  );
-}
-
-/** Turn a dependency-aware fix unit into a repository-grounded worker task. */
-export function buildFixTaskDescription(unit: FixUnit, context: FixRepositoryContext): string {
-  const issues = unit.targets.flatMap((target) =>
-    (target.review.issues ?? []).map((issue) => `- [${target.area.label}] ${issue}`));
-  const actions = unit.targets.flatMap((target) =>
-    (target.review.recommendedActions ?? []).map(
-      (action) => `- [${action.type}] ${action.title}${action.location ? ` (${action.location})` : ''}`,
-    ));
-  return [
-    `A code review of ${unit.targetLabels.join(', ')} found issues. Apply the MINIMAL root-cause edits needed to resolve them.`,
-    '',
-    'Primary review files:',
-    ...unit.primaryFiles.map((file) => `- ${file}`),
-    unit.dependencyFiles.length ? `\nKnown imports/callers in the dependency closure:\n${unit.dependencyFiles.map((file) => `- ${file}`).join('\n')}` : '',
-    unit.testFiles.length ? `\nRelated tests:\n${unit.testFiles.map((file) => `- ${file}`).join('\n')}` : '',
-    unit.manifestFiles.length ? `\nRelevant manifests/lockfiles:\n${unit.manifestFiles.map((file) => `- ${file}`).join('\n')}` : '',
-    '',
-    issues.length ? `Issues to fix:\n${issues.join('\n')}` : '',
-    actions.length ? `\nRecommended actions:\n${actions.join('\n')}` : '',
-    '',
-    `Repository package manager: ${context.packageManager ?? 'not detected'}.`,
-    context.verificationCommands.length
-      ? `Required verification:\n${context.verificationCommands.map((command) => `- ${command}`).join('\n')}`
-      : 'No deterministic verification command was discovered; report this limitation and do not invent one.',
-    '',
-    unit.dependencyGraphBacked
-      ? 'The supporting scope above comes from the repository dependency graph. Inspect callers/contracts before editing.'
-      : 'The dependency graph is unavailable or incomplete for these targets. This is one repository-wide serial fix unit; inspect real imports/callers before editing.',
-    'Supporting edits to listed callers, shared contracts, tests, and manifests are allowed when required by the root cause. Do not change unrelated code.',
-    'Do not replace a missing dependency with a stub, copied package, or locally invented API. Report an environment blocker instead.',
-  ]
-    .filter((l) => l !== '')
-    .join('\n');
-}
-
-/** Default fix applier: spawn a worker subagent that edits the area in place. */
-async function defaultFixUnit(
-  unit: FixUnit,
-  context: FixRepositoryContext,
-  cwd: string,
-  opts: RunAreaFixesOptions,
-  onLog: (line: string) => void,
-): Promise<{ success: boolean; error?: string }> {
-  const { runWorker, resolveWorkerBashTimeout } = await import('../agents/worker.js');
-  const result = await runWorker({
-    taskTitle: `Apply review fixes: ${unit.label}`,
-    taskDescription: buildFixTaskDescription(unit, context),
-    projectPath: cwd,
-    adapterName: opts.adapter,
-    timeoutMs: opts.timeoutMs,
-    reasoningEffort: opts.reasoningEffort,
-    bashTimeoutMs: await resolveWorkerBashTimeout(cwd, opts.reasoningEffort),
-    nudgeMaxOnNoEdit: 1,
-    fileScope: unit.allowedPaths,
-    workerContext: workerContextForFixUnit(unit, context),
-    signal: opts.signal,
-    onLog,
-    suppressStatusLogs: true,
-  });
-  return { success: result.success, error: result.error ?? result.haltReason };
-}
-
-/**
- * Apply reviewer-recommended fixes as dependency-aware units. Independent units
- * run in isolated sandboxes and only disjoint, in-scope diffs are promoted into
- * the audit worktree. Never throws on a single unit: a failed fix lands as an
- * error in its result. (INT-2249 / INT-2920)
- */
-export async function runAreaFixes(
-  run: AuditRun,
-  cwd: string,
-  opts: RunAreaFixesOptions,
-  deps: RunAreaFixesDeps = {},
-): Promise<FixAreaResult[]> {
-  const targets = fixTargets(run);
-  const context = opts.repositoryContext ?? {
-    canonicalRoot: cwd, workspaces: [], manifests: [], verificationCommands: [], sharedPaths: [], repoMemories: [],
-    dependencyGraphAvailable: false, dependencyMap: {}, preflight: { ready: true, issues: [] },
-  } satisfies FixRepositoryContext;
-  const units = planFixUnits(targets.map((target) => ({ area: target.area, review: target.review! })), context);
-  const total = units.length;
-  let done = 0;
-  // Without a dependency graph we cannot prove that two areas are independent;
-  // use a conservative serial fallback. Isolated sandboxes still protect scope.
-  const concurrency = context.dependencyGraphAvailable ? opts.concurrency : 1;
-  const onResult = (unit: FixUnit, result: { success: boolean; filesChanged: string[]; error?: string }) => {
-    done++;
-    if (result.success) deps.onProgress?.({ type: 'done', label: unit.label, filesChanged: result.filesChanged.length, done, total });
-    else deps.onProgress?.({ type: 'error', label: unit.label, error: result.error ?? 'worker failed', done, total });
-  };
-
-  if (deps.fix) {
-    const settled = await runPool(
-      units,
-      concurrency,
-      async (unit) => {
-        deps.onProgress?.({ type: 'start', label: unit.label, done, total });
-        return deps.fix!(unit, (line) => deps.onProgress?.({ type: 'log', label: unit.label, line }));
-      },
-      (entry) => {
-        const unit = units[entry.index];
-        const value = entry.value ?? { success: false, filesChanged: [], error: entry.error ? String(entry.error) : 'no result' };
-        onResult(unit, value);
-      },
-    );
-    return settled.map((entry, index) => {
-      const unit = units[index];
-      const value = entry.value;
-      return {
-        label: unit.label, targetLabels: unit.targetLabels,
-        applied: value?.success === true, filesChanged: value?.filesChanged ?? [],
-        error: value?.error ?? (entry.error ? String(entry.error) : undefined),
-      };
-    });
-  }
-
-  const isolated = await runIsolatedFixBatch({
-    projectPath: cwd,
-    items: units,
-    concurrency,
-    signal: opts.signal,
-    run: async (unit, sandbox, onLog) => {
-      deps.onProgress?.({ type: 'start', label: unit.label, done, total });
-      return deps.worker
-        ? deps.worker(unit, sandbox, onLog)
-        : defaultFixUnit(unit, context, sandbox, opts, onLog);
-    },
-    onLog: (unit, line) => deps.onProgress?.({ type: 'log', label: unit.label, line }),
-    onNotice: (line) => deps.onProgress?.({ type: 'notice', line }),
-  });
-  return isolated.map((result) => {
-    onResult(result.item, result);
-    return {
-      label: result.item.label,
-      targetLabels: result.item.targetLabels,
-      applied: result.success,
-      filesChanged: result.filesChanged,
-      error: result.error,
-    };
-  });
-}
-
-// ── Fix → verify loop (--fix-rounds) ─────────────────────────────────────────
-
-/** What one fix → re-review round did. */
-export interface FixVerifyRound {
-  round: number;
-  /** Areas flagged (non-approve) at the start of the round. */
-  flagged: number;
-  /** Areas the fix workers actually edited. */
-  edited: number;
-  filesChanged: string[];
-  /** Previously flagged areas that the fresh whole-audit now approves. */
-  resolved: number;
-  /** Areas still flagged across the whole run after the re-review. */
-  remaining: number;
-}
-
-/** Why the loop stopped. */
-export type FixVerifyStop = 'all-approved' | 'max-rounds' | 'no-progress' | 'rate-limit' | 'time-budget' | 'dependency-preflight';
-export type FixVerificationStatus = 'not-run' | 'passed' | 'failed' | 'unavailable' | 'infra';
-
-export interface FixVerifyResult {
-  rounds: FixVerifyRound[];
-  /** The run carrying the latest per-area verdicts. */
-  finalRun: AuditRun;
-  /** True when no area is flagged at the end. */
-  resolved: boolean;
-  /** Automatic publication requires deterministic verification to pass. */
-  verified: boolean;
-  verificationStatus: FixVerificationStatus;
-  verificationError?: string;
-  stopReason: FixVerifyStop;
-  /** Union of every file touched across all rounds. */
-  filesChanged: string[];
-}
-
-export interface RunFixVerifyLoopOptions {
-  concurrency: number;
-  adapter?: AdapterName;
-  /** Per-area fix-worker timeout (caller sets the long default). */
-  fixTimeoutMs?: number;
-  /** Optional hard cap on fix → re-review rounds. Unset means run until clean or blocked. */
-  maxRounds?: number;
-  /** Whole-loop wall-clock budget. Defaults to two hours. */
-  maxDurationMs?: number;
-  signal?: AbortSignal;
-  repositoryContext?: FixRepositoryContext;
-  /** Prior repository review logs forwarded to each full re-review. */
-  priorReviewContextByArea?: Readonly<Record<string, string>>;
-}
-
-export interface RunFixVerifyLoopDeps {
-  review?: RunMaxReviewDeps['review'];
-  fix?: RunAreaFixesDeps['fix'];
-  /** Test seam that preserves the production isolated-sandbox path. */
-  fixWorker?: RunAreaFixesDeps['worker'];
-  /** Start of each round: (round, flaggedCount). */
-  onRoundStart?: (round: number, flagged: number) => void;
-  /** Fix-phase progress. */
-  onFixProgress?: (e: FixProgress) => void;
-  /** Re-review-phase progress. */
-  onReviewProgress?: (e: AuditProgress) => void;
-  /** End of each round: its record. */
-  onRoundEnd?: (r: FixVerifyRound) => void;
-  /** Injectable clock for deterministic wall-clock budget tests. */
-  now?: () => number;
-  /** Deterministic repository verification captured before workers edit files. */
-  verify?: () => Promise<{ success: boolean; output?: string; failedTests?: string[] } | null>;
-  /** Fresh CodeQL evidence injected before fixing and after every re-review. */
-  refreshSecurityAudit?: () => Promise<SecurityFinding[]>;
-}
-
-class FixLoopTimeBudgetError extends Error {
-  constructor() {
-    super('fix/review loop time budget exhausted');
-    this.name = 'FixLoopTimeBudgetError';
-  }
-}
-
-/** Reject promptly when the whole-loop budget expires; the same signal aborts in-flight agents. */
-async function withinFixLoopBudget<T>(work: Promise<T>, budgetSignal: AbortSignal): Promise<T> {
-  if (budgetSignal.aborted) throw new FixLoopTimeBudgetError();
-  return await new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(new FixLoopTimeBudgetError());
-    budgetSignal.addEventListener('abort', onAbort, { once: true });
-    work.then(
-      (value) => {
-        budgetSignal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (error) => {
-        budgetSignal.removeEventListener('abort', onAbort);
-        reject(error);
-      },
-    );
-  });
-}
-
-/**
- * Overlay fresh re-review verdicts onto a base run: any area the re-review
- * actually re-verdicted takes the new result, the rest keep theirs. (mergeFallback
- * only fills *errored* base areas, so it can't downgrade an already-reviewed area
- * from reject→approve — this can.)
- *
- * Only areas with a real verdict (`r.review`) overlay. A fresh result that errored
- * (subagent crash / rate limit) carries no verdict — keep the prior findings, so a
- * failed re-review can't silently erase a still-unresolved area's issues and
- * follow-ups (which then vanish from the report and Linear filing). (INT-2443)
- */
-export function mergeReReview(base: AuditRun, reReview: AuditRun): AuditRun {
-  const fresh = new Map(reReview.results.filter((r) => r.review).map((r) => [r.area.label, r]));
-  const results = base.results.map((r) => fresh.get(r.area.label) ?? r);
-  return { summary: aggregateAuditResults(results), results, rateLimit: reReview.rateLimit ?? base.rateLimit };
-}
-
-/**
- * Iterate fix → re-review until every area approves or an explicit round budget
- * runs out. Without a budget, continue until clean, no-progress, or rate-limit.
- * Each round applies the reviewer's fixes to the currently-flagged areas,
- * then re-reviews the whole audit surface so cross-area regressions are detected
- * immediately. Stops early
- * when a round edits nothing (workers can't progress) or a re-review hits a
- * usage limit, so it never spins. Edits accumulate in the working tree — no
- * commit — so the user reviews the diff before committing. (INT-2443)
- */
-export async function runFixVerifyLoop(
-  initial: AuditRun,
-  cwd: string,
-  opts: RunFixVerifyLoopOptions,
-  deps: RunFixVerifyLoopDeps = {},
-): Promise<FixVerifyResult> {
-  const maxRounds = opts.maxRounds && opts.maxRounds > 0 ? opts.maxRounds : Number.POSITIVE_INFINITY;
-  const maxDurationMs = opts.maxDurationMs && opts.maxDurationMs > 0 ? opts.maxDurationMs : 2 * 60 * 60 * 1000;
-  const now = deps.now ?? Date.now;
-  const startedAt = now();
-  const budgetSignal = AbortSignal.timeout(maxDurationMs);
-  const phaseSignal = opts.signal ? AbortSignal.any([opts.signal, budgetSignal]) : budgetSignal;
-  const reviewOpts: RunMaxReviewOptions = {
-    concurrency: opts.concurrency,
-    adapter: opts.adapter,
-    signal: phaseSignal,
-    priorReviewContextByArea: opts.priorReviewContextByArea,
-  };
-  const fixOpts: RunAreaFixesOptions = {
-    concurrency: opts.concurrency,
-    adapter: opts.adapter,
-    timeoutMs: opts.fixTimeoutMs,
-    reasoningEffort: 'high',
-    signal: phaseSignal,
-    repositoryContext: opts.repositoryContext,
-  };
-  const reviewDeps: RunMaxReviewDeps = { review: deps.review, onProgress: deps.onReviewProgress };
-  const fixDeps: RunAreaFixesDeps = { fix: deps.fix, worker: deps.fixWorker, onProgress: deps.onFixProgress };
-  const allAreas = initial.results.filter((result) => result.area.label !== SECURITY_AUDIT_AREA).map((result) => result.area);
-
-  let run = initial;
-  const rounds: FixVerifyRound[] = [];
-  const allFiles = new Set<string>();
-  let stopReason: FixVerifyStop = 'all-approved';
-  const verificationState: { status: FixVerificationStatus; error?: string } = {
-    status: deps.verify ? 'not-run' : 'unavailable',
-  };
-  // "Unresolved" = not approved, which includes errored areas (a re-review that
-  // crashed is NOT resolved) — unlike fixTargets, which only counts non-approve
-  // areas that still carry review findings worth another fix pass.
-  const unresolved = (r: AuditRun): number => r.results.filter((x) => x.review?.decision !== 'approve').length;
-  const findingSignature = (r: AuditRun): string => JSON.stringify(r.results.map((result) => ({
-    label: result.area.label,
-    decision: result.review?.decision ?? 'error',
-    issues: result.review?.issues ?? [],
-    actions: result.review?.recommendedActions ?? [],
-  })));
-  const applyVerificationGate = async (current: AuditRun, targetLabels: Set<string>): Promise<AuditRun> => {
-    if (unresolved(current) !== 0) return current;
-    if (!deps.verify) {
-      verificationState.status = 'unavailable';
-      return current;
-    }
-    let verification: { success: boolean; output?: string; failedTests?: string[] } | null;
-    try {
-      verification = await withinFixLoopBudget(deps.verify(), budgetSignal);
-    } catch (error) {
-      if (error instanceof FixLoopTimeBudgetError) throw error;
-      verificationState.status = 'infra';
-      verificationState.error = error instanceof Error ? error.message : String(error);
-      return current;
-    }
-    if (!verification) {
-      verificationState.status = 'unavailable';
-      return current;
-    }
-    if (verification.success) {
-      verificationState.status = 'passed';
-      verificationState.error = undefined;
-      return current;
-    }
-    verificationState.status = 'failed';
-
-    const issue = [
-      `Deterministic verification failed: ${(verification.failedTests ?? []).join(', ') || 'repository checks'}`,
-      verification.output?.trim(),
-    ].filter(Boolean).join('\n');
-    const fallbackLabel = current.results[0]?.area.label;
-    const labels = targetLabels.size > 0 ? targetLabels : new Set(fallbackLabel ? [fallbackLabel] : []);
-    const results = current.results.map((result) => labels.has(result.area.label)
-      ? {
-          ...result,
-          review: {
-            decision: 'revise' as const,
-            feedback: 'LLM review approved, but deterministic verification still fails.',
-            issues: [issue],
-            recommendedActions: [{ type: 'fix', title: 'Make deterministic repository checks pass', location: result.area.dir }],
-          },
-        }
-      : result);
-    return { ...current, results, summary: aggregateAuditResults(results) };
-  };
-  const refreshSecurityGate = async (current: AuditRun): Promise<AuditRun> => {
-    if (!deps.refreshSecurityAudit) return current;
-    return mergeSecurityAuditFindings(current, await withinFixLoopBudget(deps.refreshSecurityAudit(), budgetSignal));
-  };
-
-  if (opts.repositoryContext && !opts.repositoryContext.preflight.ready) {
-    return {
-      rounds,
-      finalRun: run,
-      resolved: false,
-      verified: false,
-      verificationStatus: verificationState.status,
-      verificationError: opts.repositoryContext.preflight.issues.join('\n'),
-      stopReason: 'dependency-preflight',
-      filesChanged: [],
-    };
-  }
-
-  try {
-    run = await refreshSecurityGate(run);
-  } catch (error) {
-    if (error instanceof FixLoopTimeBudgetError) {
-      return { rounds, finalRun: run, resolved: false, verified: false, verificationStatus: verificationState.status, stopReason: 'time-budget', filesChanged: [] };
-    }
-    throw error;
-  }
-
-  for (let round = 1; round <= maxRounds; round++) {
-    let targets = fixTargets(run);
-    if (!targets.length) {
-      try {
-        run = await applyVerificationGate(run, new Set());
-      } catch (error) {
-        if (error instanceof FixLoopTimeBudgetError) {
-          stopReason = 'time-budget';
-          break;
-        }
-        throw error;
-      }
-      targets = fixTargets(run);
-    }
-    if (!targets.length) {
-      // Nothing left to fix. Clean if every area approves; otherwise the leftover
-      // is an errored/unfixable area, not a success.
-      stopReason = unresolved(run) === 0 ? 'all-approved' : 'no-progress';
-      break;
-    }
-    if (now() - startedAt >= maxDurationMs) {
-      stopReason = 'time-budget';
-      break;
-    }
-    deps.onRoundStart?.(round, targets.length);
-
-    let fixes: FixAreaResult[];
-    try {
-      fixes = await withinFixLoopBudget(runAreaFixes(run, cwd, fixOpts, fixDeps), budgetSignal);
-    } catch (error) {
-      if (error instanceof FixLoopTimeBudgetError) {
-        stopReason = 'time-budget';
-        break;
-      }
-      throw error;
-    }
-    const edited = fixes.filter((f) => f.applied && f.filesChanged.length);
-    for (const f of edited) for (const p of f.filesChanged) allFiles.add(p);
-
-    if (!edited.length) {
-      // A no-edit worker report is not proof that the finding is unfixable. The
-      // finding may already have been resolved by another area's overlapping
-      // change, or a fresh reviewer may provide a more actionable diagnosis.
-      // Re-review the whole surface once before declaring no progress.
-      const before = findingSignature(run);
-      let reReview: AuditRun;
-      try {
-        reReview = await withinFixLoopBudget(runMaxReview(allAreas, cwd, reviewOpts, reviewDeps), budgetSignal);
-      } catch (error) {
-        if (error instanceof FixLoopTimeBudgetError) {
-          stopReason = 'time-budget';
-          break;
-        }
-        throw error;
-      }
-      run = mergeReReview(run, reReview);
-      try {
-        run = await refreshSecurityGate(run);
-      } catch (error) {
-        if (error instanceof FixLoopTimeBudgetError) {
-          stopReason = 'time-budget';
-          break;
-        }
-        throw error;
-      }
-      try {
-        run = await applyVerificationGate(run, new Set(targets.map((target) => target.area.label)));
-      } catch (error) {
-        if (error instanceof FixLoopTimeBudgetError) {
-          stopReason = 'time-budget';
-          break;
-        }
-        throw error;
-      }
-      const remaining = unresolved(run);
-      const gatedByLabel = new Map(run.results.map((result) => [result.area.label, result]));
-      const rec: FixVerifyRound = {
-        round,
-        flagged: targets.length,
-        edited: 0,
-        filesChanged: [],
-        resolved: targets.filter((target) => gatedByLabel.get(target.area.label)?.review?.decision === 'approve').length,
-        remaining,
-      };
-      rounds.push(rec);
-      deps.onRoundEnd?.(rec);
-      if (reReview.rateLimit) { stopReason = 'rate-limit'; break; }
-      if (!remaining) { stopReason = 'all-approved'; break; }
-      if (findingSignature(run) === before) { stopReason = 'no-progress'; break; }
-      if (round === maxRounds) { stopReason = 'max-rounds'; break; }
-      continue;
-    }
-
-    // Re-review the entire surface. Fixes are scoped by directory but can still
-    // affect callers and shared contracts elsewhere, so a targeted review cannot
-    // prove that the repository is fully clean.
-    let reReview: AuditRun;
-    try {
-      reReview = await withinFixLoopBudget(runMaxReview(allAreas, cwd, reviewOpts, reviewDeps), budgetSignal);
-    } catch (error) {
-      if (error instanceof FixLoopTimeBudgetError) {
-        stopReason = 'time-budget';
-        break;
-      }
-      throw error;
-    }
-    run = mergeReReview(run, reReview);
-    try {
-      run = await refreshSecurityGate(run);
-    } catch (error) {
-      if (error instanceof FixLoopTimeBudgetError) {
-        stopReason = 'time-budget';
-        break;
-      }
-      throw error;
-    }
-    try {
-      run = await applyVerificationGate(run, new Set(edited.flatMap((fix) => fix.targetLabels)));
-    } catch (error) {
-      if (error instanceof FixLoopTimeBudgetError) {
-        stopReason = 'time-budget';
-        break;
-      }
-      throw error;
-    }
-
-    const remaining = unresolved(run);
-    const gatedByLabel = new Map(run.results.map((result) => [result.area.label, result]));
-
-    const rec: FixVerifyRound = {
-      round,
-      flagged: targets.length,
-      edited: edited.length,
-      filesChanged: edited.flatMap((f) => f.filesChanged),
-      resolved: targets.filter((target) => gatedByLabel.get(target.area.label)?.review?.decision === 'approve').length,
-      remaining,
-    };
-    rounds.push(rec);
-    deps.onRoundEnd?.(rec);
-
-    if (reReview.rateLimit) { stopReason = 'rate-limit'; break; }
-    if (!remaining) { stopReason = 'all-approved'; break; }
-    if (round === maxRounds) { stopReason = 'max-rounds'; break; }
-  }
-
-  return {
-    rounds,
-    finalRun: run,
-    resolved: unresolved(run) === 0,
-    verified: verificationState.status === 'passed',
-    verificationStatus: verificationState.status,
-    verificationError: verificationState.error,
-    stopReason,
-    filesChanged: [...allFiles],
-  };
+  // The primary's give-up only still stands if the fallback did not rescue every
+  // area; the fallback's own give-up always does. (AGT-3990)
+  const infraAbort = fallback.infraAbort ?? (results.some((r) => r.error) ? primary.infraAbort : undefined);
+  return { summary: aggregateAuditResults(results), results, rateLimit: fallback.rateLimit, infraAbort };
 }
