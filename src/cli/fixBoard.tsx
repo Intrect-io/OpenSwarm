@@ -11,7 +11,8 @@
 import { render } from 'ink';
 import { EventEmitter } from 'node:events';
 import { AuditBoard } from '../tui/components/AuditBoard.js';
-import type { AuditArea, FixProgress } from './reviewAudit.js';
+import type { AuditArea } from './reviewAudit.js';
+import type { FixProgress } from './reviewFixPass.js';
 
 export interface FixBoardHandle {
   /** Feed one fan-out event to the live board. */

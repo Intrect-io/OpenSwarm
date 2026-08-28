@@ -17,21 +17,24 @@ import {
   listSourceFiles,
   balanceAreasToConcurrency,
   runMaxReview,
-  runFixVerifyLoop,
-  fixTargets,
   aggregateAuditResults,
   formatAuditSummary,
   formatAuditReport,
+  oneLineError,
   mergeFallback,
   mergeSecurityAuditFindings,
   type AuditArea,
+  type AuditRun,
+  type AuditSummary,
+} from './reviewAudit.js';
+import {
+  runFixVerifyLoop,
+  fixTargets,
   type FixVerifyRound,
   type FixVerifyResult,
   type FixVerifyStop,
   type FixVerificationStatus,
-  type AuditRun,
-  type AuditSummary,
-} from './reviewAudit.js';
+} from './reviewFixPass.js';
 import {
   captureReviewFileHashes,
   dedupeReviewActions,
@@ -90,6 +93,10 @@ export interface ReviewMaxOptions {
   maxFilesPerArea?: number;
   /** Adapter override for the reviewers. */
   adapter?: string;
+  /** Per-area reviewer agentic-loop turn ceiling. */
+  maxTurns?: number;
+  /** Per-area reviewer wall-clock budget in milliseconds. */
+  timeoutMs?: number;
   /** PM-synthesize follow-ups into ≤10 cohesive Linear sub-issues (parent id or branch-inferred). */
   fileIssue?: string | boolean;
   /** Legacy: file one follow-up batch per audit area (the old --issues behavior). (INT-2225) */
@@ -531,9 +538,19 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
       {
         concurrency,
         adapter: opts.adapter as AdapterName | undefined,
+        maxTurns: opts.maxTurns,
+        timeoutMs: opts.timeoutMs,
         priorReviewContextByArea,
       },
-      { onProgress: (e) => events.emit('progress', e) },
+      {
+        onProgress: (e) => {
+          // The board is a live, self-erasing frame: anything printed only there
+          // is gone by the time the run ends. Batch notices go straight to stderr
+          // so the give-up decision survives in the scrollback. (AGT-3990)
+          if (e.type === 'notice') console.warn(`\n${status.warn(e.line)}`);
+          else events.emit('progress', e);
+        },
+      },
     );
   } finally {
     board.unmount();
@@ -549,16 +566,42 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
       const fbRun = await runMaxReview(
         pending,
         workCwd,
-        { concurrency, adapter: fallback, priorReviewContextByArea },
+        {
+          concurrency,
+          adapter: fallback,
+          maxTurns: opts.maxTurns,
+          timeoutMs: opts.timeoutMs,
+          priorReviewContextByArea,
+        },
         {
           onProgress: (e) => {
             if (e.type === 'done') console.error(`  [${fallback}] ${e.label}: ${e.decision}`);
-            else if (e.type === 'error') console.error(`  [${fallback}] ${e.label}: failed`);
+            else if (e.type === 'error') console.error(`  [${fallback}] ${e.label}: ${e.error}`);
+            else if (e.type === 'notice') console.error(`  [${fallback}] ${e.line}`);
           },
         },
       );
       run = mergeFallback(run, fbRun);
     }
+  }
+
+  // Every failure carries a reason; the live board only ever showed a counter,
+  // and it erases itself when the run ends. Print the reasons after the fallback
+  // has had its chance, so the operator can tell a hung MCP server from an
+  // exhausted quota without re-running the audit. (AGT-3990)
+  const failures = run.results.filter((r) => r.error);
+  if (failures.length) {
+    console.warn(`\n${status.warn(`${failures.length} area(s) failed before producing a verdict:`)}`);
+    for (const failure of failures) {
+      console.warn(`  ${status.err(`${oneLineError(failure.area.label)} — ${oneLineError(failure.error)}`)}`);
+    }
+  }
+  if (run.infraAbort) {
+    console.warn(
+      `\n${status.warn('Audit gave up early: the reviewer adapter never produced a verdict.')}\n` +
+        '  Check the adapter with a trivial run (e.g. `codex exec`), then re-run. ' +
+        "`--adapter claude` isolates the reviewer from the codex CLI's own configuration.",
+    );
   }
 
   run = await applyHistoryDedupe(run);
@@ -636,6 +679,8 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
         {
           concurrency,
           adapter: opts.adapter as AdapterName | undefined,
+          reviewMaxTurns: opts.maxTurns,
+          reviewTimeoutMs: opts.timeoutMs,
           fixTimeoutMs: 900_000,
           maxRounds,
           maxDurationMs: 2 * 60 * 60 * 1000,

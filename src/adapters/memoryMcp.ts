@@ -54,12 +54,15 @@ export function codexMcpConfigFlags(): string {
 }
 
 /** Argv-safe config overrides for codex exec. */
-export function codexMcpConfigArgs(): string[] {
+export function codexMcpConfigArgs(serverName: string = MEMORY_MCP_NAME): string[] {
   const { command, args } = memoryServerLaunch();
   const argsToml = '[' + args.map((a) => JSON.stringify(a)).join(', ') + ']';
   const overrides = [
-    `mcp_servers.${MEMORY_MCP_NAME}.command=${JSON.stringify(command)}`,
-    `mcp_servers.${MEMORY_MCP_NAME}.args=${argsToml}`,
+    `mcp_servers.${serverName}.command=${JSON.stringify(command)}`,
+    `mcp_servers.${serverName}.args=${argsToml}`,
+    // The inherited-server isolation pass may have disabled a colliding
+    // `openswarm_memory` entry. Re-enable the server OpenSwarm defines here.
+    `mcp_servers.${serverName}.enabled=true`,
   ];
   return overrides.flatMap((override) => ['-c', override]);
 }
