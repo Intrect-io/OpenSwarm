@@ -93,6 +93,105 @@ describe('POST /api/coordination/message', () => {
     expect(delivered).toMatchObject({ recipient: 'worker-a', detail: 'Use the existing SQLite file.' });
   });
 
+  it('answers the recipient\'s open question even when the client names another exchange', async () => {
+    // The dashboard sees a window over a ring buffer, so a question older than
+    // that window is invisible to it and it names the newest exchange instead.
+    // Filing that as a note would leave the agent parked forever (AGT-4030).
+    const store = await boardAt('events.json');
+    const question = await store.publish({
+      repository: '/repo', taskId: 't-park', actor: 'sable', actorName: 'Sable', actorRole: 'worker',
+      kind: 'human-question', status: 'waiting', summary: 'uv is missing — install it or run elsewhere?',
+    });
+    const laterStage = await store.publish({
+      repository: '/repo', taskId: 't-park', actor: 'sable', actorName: 'Sable', actorRole: 'worker',
+      recipient: 'reviewer-1', kind: 'delegation-result', status: 'failed', summary: 'Did not pass',
+    });
+
+    const result = await post('/api/coordination/message', {
+      correlationId: laterStage.correlationId,
+      recipient: 'sable',
+      repository: '/repo',
+      taskId: 't-park',
+      text: 'uv is installed now — retry.',
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('answer');
+    // The answer must ride the QUESTION's exchange — that is the id the next
+    // run replays by — not the stage exchange the client named.
+    const answer = store.list({ repository: '/repo', taskId: 't-park' })
+      .find((event) => event.kind === 'human-answer');
+    expect(answer).toMatchObject({
+      correlationId: question.correlationId,
+      recipient: 'sable',
+      detail: 'uv is installed now — retry.',
+    });
+    expect(answer?.correlationId).not.toBe(laterStage.correlationId);
+  });
+
+  it('answers the question the agent is actually parked on when several are open', async () => {
+    // A run stops at the question it just asked, so the newest unsettled one is
+    // the live blocker — and the one the operator is reading.
+    const store = await boardAt('events.json');
+    const older = await store.publish({
+      repository: '/repo', taskId: 't-two', actor: 'worker-q', actorRole: 'worker',
+      kind: 'human-question', status: 'waiting', summary: 'Which database?',
+    });
+    const newer = await store.publish({
+      repository: '/repo', taskId: 't-two', actor: 'worker-q', actorRole: 'worker',
+      kind: 'human-question', status: 'waiting', summary: 'Which credentials?',
+    });
+
+    const result = await post('/api/coordination/message', {
+      recipient: 'worker-q', repository: '/repo', taskId: 't-two', text: 'Use the mounted ones.',
+    });
+
+    expect(result.body.mode).toBe('answer');
+    const answer = store.list({ repository: '/repo', taskId: 't-two' })
+      .find((event) => event.kind === 'human-answer');
+    expect(answer?.correlationId).toBe(newer.correlationId);
+    expect(answer?.correlationId).not.toBe(older.correlationId);
+  });
+
+  it('refuses to answer a same-named agent on a different task', async () => {
+    // Agents choose their own display names, so "sable" is not unique across
+    // concurrent work. Without the task scope this would unpark the wrong
+    // agent with an answer meant for someone else.
+    const store = await boardAt('events.json');
+    const theirs = await store.publish({
+      repository: '/other-repo', taskId: 't-other', actor: 'sable', actorName: 'Sable', actorRole: 'worker',
+      kind: 'human-question', status: 'waiting', summary: 'Ship the migration separately?',
+    });
+    const mine = await store.publish({
+      repository: '/repo', taskId: 't-mine', actor: 'sable', actorName: 'Sable', actorRole: 'worker',
+      recipient: 'reviewer-1', kind: 'advice-request', status: 'open', summary: 'Where does retry live?',
+    });
+
+    const result = await post('/api/coordination/message', {
+      correlationId: mine.correlationId, recipient: 'sable',
+      repository: '/repo', taskId: 't-mine', text: 'Scheduler owns retries.',
+    });
+
+    expect(result.body.mode).toBe('note');
+    expect(store.findQuestion(theirs.correlationId)).toBeDefined();
+  });
+
+  it('does not turn a note into an answer when the recipient has nothing open', async () => {
+    const store = await boardAt('events.json');
+    const opening = await store.publish({
+      repository: '/repo', taskId: 't-plain', actor: 'worker-z', actorName: 'Worker Z', actorRole: 'worker',
+      recipient: 'reviewer-z', kind: 'advice-request', status: 'open', summary: 'Which retry policy?',
+    });
+
+    const result = await post('/api/coordination/message', {
+      correlationId: opening.correlationId, recipient: 'worker-z',
+      repository: '/repo', taskId: 't-plain', text: 'Scheduler owns it.',
+    });
+
+    expect(result.status).toBe(202);
+    expect(result.body.mode).toBe('note');
+  });
+
   it('addresses a free-standing note to the agent that last spoke in the thread', async () => {
     const store = await boardAt('events.json');
     const opening = await store.publish({

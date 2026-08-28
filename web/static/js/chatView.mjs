@@ -8,7 +8,7 @@
 // (`/api/coordination/history`), live updates from the same SSE channel the
 // orchestration view uses, with the board snapshot as a polling backstop.
 
-import { buildChatLines, latestAddressable } from './conversationModel.mjs';
+import { buildChatLines, latestAddressable, openQuestionFor } from './conversationModel.mjs';
 import { ROLE_COLORS } from './orchestrationView.mjs';
 
 const PENDING = new Set(['open', 'waiting', 'running']);
@@ -89,14 +89,21 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     // The composer can only address an agent that exists; without one the
     // POST would be unroutable (the API requires repository/taskId/recipient).
     const target = latestAddressable(events);
+    const question = target
+      ? openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId })
+      : null;
     if (input) {
       // A send takes seconds under load (AGT-4027) and agent events keep
       // arriving, so a redraw lands mid-flight — it must not re-enable the box
       // the send just locked.
       input.disabled = !target || sending;
-      input.placeholder = target
-        ? `Message ${target.actorName || target.actor}…`
-        : 'No agent to address yet';
+      // Say which of the two things the next message will do: unpark an agent
+      // that is waiting, or just speak into the room.
+      input.placeholder = !target
+        ? 'No agent to address yet'
+        : question
+          ? `Answer ${target.actorName || target.actor}: ${(question.summary || '').slice(0, 60)}…`
+          : `Message ${target.actorName || target.actor}…`;
     }
     if (button) button.disabled = !target || sending;
     if (stick) room.scrollTop = room.scrollHeight;
@@ -116,18 +123,24 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   // resolves happily on 400/409 — the server's own "cannot address this" and
   // "already answered" both arrive that way (AGT-4026).
   const send = async (text) => {
-    const target = latestAddressable([...byId.values()]);
+    const events = [...byId.values()];
+    const target = latestAddressable(events);
     if (!target) return 'No agent is addressable yet.';
+    // Answering beats chatting: if this agent is parked on a question, the
+    // message has to ride that exchange or the daemon files it as a note and
+    // the agent stays blocked (AGT-4030).
+    const question = openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId });
+    const exchange = question ?? target;
     let response;
     try {
       response = await fetcher('/api/coordination/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          correlationId: target.correlationId,
+          correlationId: exchange.correlationId,
           recipient: target.actor,
-          repository: target.repository,
-          taskId: target.taskId,
+          repository: exchange.repository,
+          taskId: exchange.taskId,
           text,
         }),
       });

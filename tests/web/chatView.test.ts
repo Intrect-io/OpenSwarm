@@ -307,3 +307,69 @@ describe('startChatView composer outcome (AGT-4026)', () => {
     view.stop();
   });
 });
+
+describe('answering a parked agent from chat (AGT-4030)', () => {
+  // Ten agents sat on human-question with no way to answer them: the composer
+  // addressed the newest stage exchange, so the daemon filed the reply as a
+  // note and nothing unparked.
+  const parked = () => [
+    boardEvent({ id: 'stage', seq: 9, correlationId: 'stage:abc:worker:2', actor: 'sable', actorName: 'Sable' }),
+    boardEvent({
+      id: 'q', seq: 10, kind: 'human-question', status: 'waiting',
+      correlationId: 'hq-9', repository: '/work/repo', taskId: 'task-9',
+      actor: 'sable', actorName: 'Sable', actorRole: 'worker',
+      recipient: 'human', recipientName: 'Operator', recipientRole: 'human',
+      summary: 'uv is missing — install it or run elsewhere?',
+    }),
+  ];
+
+  it('sends on the question\'s exchange, not the newest one', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWith(parked());
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(2));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    input.value = 'uv is installed now — retry.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(true));
+    const [, init] = fetchImpl.mock.calls.find((c) => c[0] === '/api/coordination/message')!;
+    expect(JSON.parse((init as { body: string }).body)).toEqual({
+      correlationId: 'hq-9',
+      recipient: 'sable',
+      repository: '/work/repo',
+      taskId: 'task-9',
+      text: 'uv is installed now — retry.',
+    });
+    view.stop();
+  });
+
+  it('says it is answering, and what', async () => {
+    const doc = shell();
+    const view = startChatView(doc, { fetchImpl: fetchWith(parked()), eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(2));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    expect(input.placeholder).toContain('Answer Sable');
+    expect(input.placeholder).toContain('uv is missing');
+    view.stop();
+  });
+
+  it('still just talks when nobody is waiting on an answer', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWith([boardEvent({ id: 'a', seq: 1, correlationId: 'c-plain' })]);
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    expect(input.placeholder).toContain('Message ');
+    input.value = 'just chatting';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(true));
+    const [, init] = fetchImpl.mock.calls.find((c) => c[0] === '/api/coordination/message')!;
+    expect(JSON.parse((init as { body: string }).body).correlationId).toBe('c-plain');
+    view.stop();
+  });
+});

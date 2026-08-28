@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error - plain ESM module served to the browser
-import { buildChatLines, buildThreads, chatLineOf, isUtterance, latestAddressable, metadataPairs, taskLabelOf, threadFor } from '../../web/static/js/conversationModel.mjs';
+import { buildChatLines, buildThreads, chatLineOf, isUtterance, latestAddressable, metadataPairs, openQuestionFor, taskLabelOf, threadFor } from '../../web/static/js/conversationModel.mjs';
 
 function event(overrides: Record<string, unknown> = {}) {
   return {
@@ -177,5 +177,49 @@ describe('latestAddressable', () => {
     expect(latestAddressable([
       event({ actor: 'operator-dashboard', actorRole: 'human' }),
     ])).toBeNull();
+  });
+});
+
+describe('openQuestionFor (AGT-4030)', () => {
+  const question = (over: Record<string, unknown> = {}) => event({
+    kind: 'human-question', status: 'waiting', correlationId: 'hq-1',
+    actor: 'sable', actorRole: 'worker', recipient: 'human', seq: 5, ...over,
+  });
+
+  it('finds the question an agent is still parked on', () => {
+    expect(openQuestionFor([event({ seq: 1 }), question()], 'sable', { taskId: 'uuid-1234-5678-9012' })?.correlationId).toBe('hq-1');
+  });
+
+  it('ignores a question that has since been answered', () => {
+    const answered = event({
+      kind: 'human-answer', status: 'completed', correlationId: 'hq-1',
+      actor: 'operator-dashboard', actorRole: 'human', recipient: 'sable', seq: 6,
+    });
+    expect(openQuestionFor([question(), answered], 'sable', { taskId: 'uuid-1234-5678-9012' })).toBeNull();
+  });
+
+  it('keeps an older open question when a newer one was already answered', () => {
+    // An agent can ask twice; answering the second must not hide the first.
+    const older = question({ id: 'q1', correlationId: 'hq-1', seq: 5 });
+    const newer = question({ id: 'q2', correlationId: 'hq-2', seq: 7 });
+    const answeredNewer = event({
+      id: 'a2', kind: 'human-answer', status: 'completed', correlationId: 'hq-2',
+      actor: 'operator-dashboard', actorRole: 'human', recipient: 'sable', seq: 8,
+    });
+    expect(openQuestionFor([older, newer, answeredNewer], 'sable', { taskId: 'uuid-1234-5678-9012' })?.correlationId).toBe('hq-1');
+  });
+
+  it('is null for a different agent, and for none', () => {
+    const scope = { taskId: 'uuid-1234-5678-9012' };
+    expect(openQuestionFor([question()], 'worker-3f2a', scope)).toBeNull();
+    expect(openQuestionFor([question()], undefined, scope)).toBeNull();
+    expect(openQuestionFor([event({ seq: 1 })], 'sable', scope)).toBeNull();
+  });
+
+  it('will not cross tasks, and refuses when given no scope at all', () => {
+    // Self-chosen names are not unique and the room shows every task at once.
+    const theirs = question({ taskId: 'another-task', correlationId: 'hq-other' });
+    expect(openQuestionFor([theirs], 'sable', { taskId: 'uuid-1234-5678-9012' })).toBeNull();
+    expect(openQuestionFor([theirs], 'sable', {})).toBeNull();
   });
 });

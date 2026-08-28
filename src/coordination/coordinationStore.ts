@@ -275,6 +275,46 @@ export class CoordinationStore {
       event.correlationId === correlationId && event.kind === 'human-question' && event.status === 'waiting');
   }
 
+  /**
+   * The blocking question an agent is still parked on.
+   *
+   * The dashboard can only reason about the events it has loaded, which is a
+   * window over a ring buffer — a question older than that window is invisible
+   * to it, and an operator's reply would be filed as an ordinary note while the
+   * agent stayed blocked. The retained board is here, so the decision belongs
+   * here (AGT-4030).
+   *
+   * The newest unsettled question wins when several are open: a run stops at
+   * the question it asked, so the latest is what the agent is parked on and
+   * what the operator is reading.
+   */
+  findOpenQuestionFor(
+    actor: string,
+    scope: { repository?: string; taskId?: string } = {},
+  ): CoordinationEvent | undefined {
+    // An address is not unique on its own: agents name themselves, so two on
+    // different tasks can both answer to "sable". The caller passes the task it
+    // is speaking into, and without one this refuses rather than guessing —
+    // answering the wrong task's blocking question would unpark an agent with
+    // an answer meant for someone else.
+    if (!scope.taskId && !scope.repository) return undefined;
+    const repository = scope.repository ? resolve(scope.repository) : undefined;
+    const events = this.load().events;
+    const settled = new Set(events
+      .filter((event) => ['completed', 'expired', 'failed'].includes(event.status))
+      .map((event) => event.correlationId));
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (event.kind === 'human-question'
+        && event.status === 'waiting'
+        && event.actor === actor
+        && (!repository || event.repository === repository)
+        && (!scope.taskId || event.taskId === scope.taskId)
+        && !settled.has(event.correlationId)) return event;
+    }
+    return undefined;
+  }
+
   async consume(consumer: string, options: { repository?: string; taskId?: string; includeAll?: boolean }): Promise<CoordinationEvent[]> {
     return this.mutate((state) => {
       const seen = new Set(state.consumed[consumer] ?? []);
