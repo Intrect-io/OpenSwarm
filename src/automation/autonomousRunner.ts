@@ -48,6 +48,7 @@ import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, upsertTaskState } from '../taskState/store.js';
+import { setAutomationDbPath } from './automationDbPath.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -413,6 +414,9 @@ export class AutonomousRunner {
       worktreeMode: config.worktreeMode ?? false,
     });
 
+    // Before anything opens a store: the coordination trace resolves its own
+    // path, and it has to land on the same file as the ledger below.
+    setAutomationDbPath(config.automationDbPath);
     const ledgerMode: RunLedgerMode = config.automationLedgerMode
       ?? (config.dryRun ? 'off' : 'primary');
     this.durableRuns = new DurableRunCoordinator({

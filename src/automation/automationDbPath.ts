@@ -9,9 +9,32 @@
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
-/** Absolute path of the automation database, honouring the test override. */
+let configured: string | null = null;
+
+/**
+ * Point every automation store at the database this deployment configured.
+ *
+ * The run ledger is handed its path explicitly, but the coordination trace is
+ * not — and since the trace stopped being a pure archive and became what says
+ * whether a parked run may be re-admitted, the two have to be the same file. A
+ * deployment that relocates its automation database must take the answers with
+ * it, or the runs move and what is known about them stays behind.
+ *
+ * Resolving both through here is what makes that hold by construction, rather
+ * than by every new consumer remembering to ask.
+ */
+export function setAutomationDbPath(path: string | undefined): void {
+  configured = path ? resolve(path) : null;
+}
+
+/**
+ * Absolute path of the automation database.
+ *
+ * The environment override wins: tests redirect every automation store at once
+ * by setting it, and must not be overruled by whatever config a runner under
+ * test was constructed with.
+ */
 export function defaultAutomationDbPath(): string {
-  return process.env.OPENSWARM_AUTOMATION_DB
-    ? resolve(process.env.OPENSWARM_AUTOMATION_DB)
-    : resolve(homedir(), '.openswarm', 'automation.db');
+  if (process.env.OPENSWARM_AUTOMATION_DB) return resolve(process.env.OPENSWARM_AUTOMATION_DB);
+  return configured ?? resolve(homedir(), '.openswarm', 'automation.db');
 }

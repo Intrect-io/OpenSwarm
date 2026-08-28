@@ -78,6 +78,25 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     };
   }
 
+  it('points the answer store at the same database as the runs', async () => {
+    // The ledger is handed its path; the coordination trace resolves its own. If
+    // they disagree a deployment that relocates its automation database leaves
+    // the answers behind, and a parked run can never learn that its question was
+    // answered. Only the runner knows both, so it is the runner that has to say.
+    const { defaultAutomationDbPath } = await import('./automationDbPath.js');
+    const { AutonomousRunner } = await import('./autonomousRunner.js');
+    const configured = join(root, 'relocated', 'automation.db');
+    delete process.env.OPENSWARM_AUTOMATION_DB;
+
+    new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      automationLedgerMode: 'off', automationDbPath: configured,
+    });
+
+    expect(defaultAutomationDbPath()).toBe(configured);
+  });
+
   it('holds a parked task on its backoff until the answer is there', async () => {
     const { internal, park } = await makeRunner();
     park(true);
