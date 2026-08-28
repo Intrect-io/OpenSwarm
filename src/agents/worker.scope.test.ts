@@ -22,6 +22,19 @@ describe('worker file scope', () => {
     expect(outsideScope).toEqual(['src/support/staticAssets.test.ts']);
   });
 
+  it('does not admit a subdirectory ride on a dotted infix', () => {
+    // `.+` in the infix would have let a crafted path escape the directory:
+    // src/support/web.x/evil/deep.test.ts matched a scope of src/support/web.ts.
+    const { outsideScope } = reconcileWorkerFiles([
+      'src/support/web.x/evil/deep.test.ts',
+      'src/support/web.helpers/inner.spec.ts',
+    ], scope);
+    expect(outsideScope).toEqual([
+      'src/support/web.x/evil/deep.test.ts',
+      'src/support/web.helpers/inner.spec.ts',
+    ]);
+  });
+
   it('does not admit a same-named test in another directory', () => {
     const { outsideScope } = reconcileWorkerFiles(['tests/web.test.ts'], scope);
     expect(outsideScope).toEqual(['tests/web.test.ts']);

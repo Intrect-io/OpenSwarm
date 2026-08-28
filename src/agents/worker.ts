@@ -141,7 +141,9 @@ function isTestForScopedFile(file: string, scoped: string): boolean {
   if (!match) return false;
   const [, dir, base, ext] = match;
   const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`^${escape(dir)}${escape(base)}(\\..+)?\\.(test|spec)\\.${escape(ext)}$`).test(file);
+  // [^/] keeps the infix inside the same directory: `.+` would let
+  // `src/a.x/evil/deep.test.ts` ride on a scope of `src/a.ts`.
+  return new RegExp(`^${escape(dir)}${escape(base)}(\\.[^/]+)?\\.(test|spec)\\.${escape(ext)}$`).test(file);
 }
 
 export function reconcileWorkerFiles(
