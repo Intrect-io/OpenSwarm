@@ -975,7 +975,16 @@ export async function addComment(
       try {
         const existing = await linear.comment({ id: commentId });
         const existingIssue = await existing.issue;
-        if (existingIssue?.id === issueId && existing.body === body) return;
+        // The stable id is the identity guarantee, not a byte-for-byte body
+        // match — callers like buildTaskStateSyncComment bake in a timestamp,
+        // which by construction can never match a prior call's body (AGT-4051,
+        // same shape as createSubIssue's AGT-4048 fix).
+        if (existingIssue?.id === issueId) {
+          if (existing.body !== body) {
+            console.warn(`[Linear] Idempotent comment ${commentId} body differs from this retry's content — converging on the existing artifact anyway`);
+          }
+          return;
+        }
       } catch {
         // Preserve the original create error if artifact reconciliation fails.
       }
