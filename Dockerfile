@@ -60,6 +60,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# uv, for repositories that are uv projects. Copied from the official image
+# rather than piped from an installer, and pinned by digest rather than tag —
+# a tag can be repointed, so only the digest makes this build reproducible.
+# The digest is the multi-arch index for v0.5.11; bump both together.
+COPY --from=ghcr.io/astral-sh/uv@sha256:0ac957607303916420297a4c9c213bb33fbd3c888f9cd7f4f7273596ebf42b85 /uv /uvx /usr/local/bin/
+
 RUN groupadd --gid 1001 openswarm && \
     useradd --uid 1001 --gid openswarm --shell /bin/bash --create-home openswarm
 
@@ -90,7 +96,16 @@ RUN mkdir -p /work /home/openswarm/.openswarm && \
 
 USER openswarm
 ENV HOME=/home/openswarm \
-    NODE_ENV=production
+    NODE_ENV=production \
+    UV_PYTHON_INSTALL_DIR=/home/openswarm/.local/share/uv/python
+
+# Bake the interpreter in rather than letting uv fetch it on first use: that
+# download lands under $HOME, which is not a mounted volume, so every container
+# recreate would pay for it again — and an agent whose first act is a 30 MB
+# fetch looks like a hung task. The distribution `python3` above stays: CodeQL's
+# Python extractor shells out to it, and that is a separate need from a project
+# runtime (Debian ships 3.11, and repositories here are on 3.12).
+RUN uv python install 3.12
 
 # Mounted repositories belong to arbitrary host UIDs; without this every git
 # operation inside /work dies with "dubious ownership". The container's whole
