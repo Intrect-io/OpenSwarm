@@ -311,6 +311,27 @@ describe('total storage budget (AGT-4031)', () => {
     expect(sent.map((stored) => existsSync(stored.path))).toEqual([true, true, true]);
   });
 
+  it('dates a file from when it became an attachment, not from its last byte', async () => {
+    stateAt();
+    // A client can send everything at once and hold the connection open. Timing
+    // the grace window from the bytes would put such a file outside it the
+    // moment it settled — reclaimable before the message naming it is published.
+    process.env.OPENSWARM_ATTACHMENT_GRACE_MS = '60';
+
+    const stalled = new Readable({ read() {} });
+    const slow = storeAttachment(stalled as unknown as IncomingMessage,
+      { taskId: 't-late', filename: 'early-bytes.bin' });
+    (stalled as Readable).push(Buffer.alloc(512, 0x63));
+    await new Promise((settle) => setTimeout(settle, 150));
+    (stalled as Readable).push(null);
+    const stored = await slow;
+
+    // Everything else is over the ceiling, so the sweep will take what it can.
+    process.env.OPENSWARM_ATTACHMENT_TOTAL_BYTES = '1';
+    await pruneAttachments();
+    expect(existsSync(stored.path)).toBe(true);
+  });
+
   it('protects an upload that is still streaming after its grace window lapses', async () => {
     stateAt();
     // The grace window is keyed on the file's age, so a slow upload outlives its

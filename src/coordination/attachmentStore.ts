@@ -15,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createWriteStream, lstatSync } from 'node:fs';
-import { lstat, mkdir, readdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm, utimes } from 'node:fs/promises';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
@@ -269,6 +269,14 @@ async function write(
     await rm(target, { force: true });
     throw new Error('Attachment was empty');
   }
+  // Date the file from when it became an attachment, not from its last byte. A
+  // client can send everything at once and hold the connection open for minutes;
+  // the file would then leave the grace window while still in flight and be
+  // reclaimable the moment it settles, before the message naming it is
+  // published. Retention reads the same stamp, and should: the thirty days an
+  // agent has to open a file start when it can be opened.
+  const settledAt = new Date();
+  await utimes(target, settledAt, settledAt).catch(() => { /* the bytes matter, the stamp is a refinement */ });
   return { id: named.id, filename: named.filename, bytes, path: target };
   }
 }
