@@ -45,6 +45,22 @@ export function coordinationContextFor(context: PipelineContext, role: AgentRole
  * Best-effort by design: the board is an observation surface, and a failure to
  * record must never fail the stage it describes.
  */
+/**
+ * Terminal board event for a stage that threw instead of returning a failed
+ * result. Without it the agent's delegation-request never gets its
+ * delegation-result and the orchestration view shows it running forever —
+ * classified infrastructure failures included.
+ */
+export function publishStageFailureToBoard(
+  context: PipelineContext,
+  stage: string,
+  durationMs: number,
+  error: unknown,
+): void {
+  const detail = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+  void publishStageToBoard(context, stage, 'failed', `Failed in ${(durationMs / 1000).toFixed(1)}s: ${detail}`);
+}
+
 export async function publishStageToBoard(
   context: PipelineContext,
   stage: string,

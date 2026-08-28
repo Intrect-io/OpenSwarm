@@ -51,7 +51,7 @@ import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRol
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
-import { coordinationContextFor, publishStageToBoard } from './pipelineCoordination.js';
+import { coordinationContextFor, publishStageFailureToBoard, publishStageToBoard } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
@@ -641,6 +641,7 @@ export class PairPipeline extends EventEmitter {
 
       safeConsole.log(`[${prefix}] ${stage} failed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:fail', { stage, result: stageResult, context, error });
+      publishStageFailureToBoard(context, stage, stageResult.duration, error);
       broadcastEvent({ type: 'pipeline:stage', data: {
         taskId: taskEventKey(context.task), stage, status: 'fail',
         ...metadata,
