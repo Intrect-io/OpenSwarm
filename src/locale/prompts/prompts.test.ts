@@ -83,6 +83,9 @@ describe('buildWorkerPrompt', () => {
     // Escalation path that pages the operator on Discord
     expect(result).toContain('ask_human');
     expect(result).toContain('Discord');
+    // ask_human is only wired on coordination-enabled runs; the prompt must
+    // stay honest on runs that do not expose it (report instead of call).
+    expect(result).toContain('If the tool is not available in this run');
     // Findings vs non-observations separation in audit-type outputs
     expect(result).toContain('Could not verify');
   });
