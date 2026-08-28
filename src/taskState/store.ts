@@ -195,7 +195,8 @@ function withStoreLock<T>(operation: () => T): T {
       if (code !== 'EEXIST') throw error;
       try {
         const owner = readStoreLockOwner(lockPath);
-        const lockAgeMs = Date.now() - statSync(lockPath).mtimeMs;
+        const judgedMtimeMs = statSync(lockPath).mtimeMs;
+        const lockAgeMs = Date.now() - judgedMtimeMs;
         const staleMalformedLock = !owner && lockAgeMs > LOCK_STALE_MS;
         const abandonedLock = owner !== null && !isProcessAlive(owner.pid);
         // A pid probe cannot see past its own namespace, and a container
@@ -219,7 +220,18 @@ function withStoreLock<T>(operation: () => T): T {
         // double-execute anything, and the next Linear sync re-derives it.
         const expiredLock = lockAgeMs > LOCK_ABANDON_MS;
         if (staleMalformedLock || abandonedLock || expiredLock) {
-          unlinkSync(lockPath);
+          // Reclaim only the lock that was actually judged. Between the
+          // judgement above and this unlink the holder can release and a third
+          // process can take a fresh lock; deleting THAT one would put two
+          // writers in the store. Re-reading identity here narrows the window
+          // to a pair of syscalls — it does not close it, because POSIX has no
+          // compare-and-unlink for a regular file. Closing it needs a
+          // kernel-owned mutex (AGT-4024).
+          const currentMtimeMs = statSync(lockPath).mtimeMs;
+          const currentOwner = readStoreLockOwner(lockPath);
+          const sameLock = currentMtimeMs === judgedMtimeMs
+            && currentOwner?.token === owner?.token;
+          if (sameLock) unlinkSync(lockPath);
           continue;
         }
       } catch (statError) {
