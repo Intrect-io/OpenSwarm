@@ -113,6 +113,25 @@ describe('attachment storage (AGT-4031)', () => {
       .rejects.toThrow(/empty/);
   });
 
+  it('leaves an upload in flight alone even when the sweep would expire it', async () => {
+    stateAt();
+    // The retention branch is time-based, and the clock is not a guarantee. An
+    // upload still streaming must survive a sweep whatever the sweep believes
+    // the date to be, or it resolves with a path that is already gone.
+    const stalled = new Readable({ read() {} });
+    const slow = storeAttachment(stalled as unknown as IncomingMessage,
+      { taskId: 't-live-ttl', filename: 'slow.bin' });
+    (stalled as Readable).push(Buffer.from('partial'));
+    await new Promise((settle) => setTimeout(settle, 20));
+
+    // Sweep from far enough ahead that everything on disk looks expired.
+    expect(await pruneAttachments(Date.now() + 60 * 24 * 60 * 60 * 1000)).toBe(0);
+
+    (stalled as Readable).push(null);
+    const stored = await slow;
+    expect(existsSync(stored.path)).toBe(true);
+  });
+
   it('prunes past the retention window and leaves fresh files alone', async () => {
     stateAt();
     const fresh = await storeAttachment(body('keep me'), { taskId: 't-ttl', filename: 'fresh.txt' });

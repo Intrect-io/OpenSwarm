@@ -428,6 +428,11 @@ export async function pruneAttachments(now = Date.now()): Promise<number> {
   if (!isRealDirectory(root)) return 0;
   let removed = 0;
   for (const file of await realFiles(root)) {
+    // Nothing in flight is ever deleted, by any branch. A live upload's mtime
+    // keeps it well inside the retention window in practice, but that is a fact
+    // about the clock rather than a guarantee, and the cost of not relying on it
+    // is one lookup.
+    if (inFlight.has(file)) continue;
     try {
       const info = await lstat(file);
       if (now - info.mtimeMs > ATTACHMENT_TTL_MS) {
