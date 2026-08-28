@@ -86,11 +86,23 @@ export async function tryHandleCoordinationRoutes(
     const correlationId = typeof body.correlationId === 'string' ? body.correlationId : undefined;
     const store = getCoordinationStore();
 
-    if (correlationId) {
-      const question = store.findQuestion(correlationId);
+    // Prefer answering over chatting. The client names the exchange it believes
+    // is open, but it only sees a window over the board's ring buffer — so when
+    // that lookup misses, fall back to the question that recipient is parked on,
+    // which only the server can see (AGT-4030).
+    const recipientHint = typeof body.recipient === 'string' && body.recipient ? body.recipient : undefined;
+    const scopeHint = {
+      ...(typeof body.repository === 'string' && body.repository ? { repository: body.repository } : {}),
+      ...(typeof body.taskId === 'string' && body.taskId ? { taskId: body.taskId } : {}),
+    };
+    const resolvedQuestion = (correlationId ? store.findQuestion(correlationId) : undefined)
+      ?? (recipientHint ? store.findOpenQuestionFor(recipientHint, scopeHint) : undefined);
+
+    {
+      const question = resolvedQuestion;
       if (question) {
         const { answerHumanQuestion } = await import('./humanQuestions.js');
-        const answered = await answerHumanQuestion(correlationId, text, 'operator-dashboard');
+        const answered = await answerHumanQuestion(question.correlationId, text, 'operator-dashboard');
         if (!answered.accepted) {
           writeJson(res, 409, { error: answered.reason ?? 'Question is no longer answerable' });
           return true;

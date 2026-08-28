@@ -10,7 +10,7 @@
 import { buildOrchestrationModel, dominantKind, KIND_COLORS } from './orchestrationModel.mjs';
 import { layoutTiers } from './tierLayout.mjs';
 import {
-  buildThreads, chatLineOf, isUtterance, metadataPairs, taskLabelOf, threadFor,
+  buildThreads, chatLineOf, isUtterance, metadataPairs, openQuestionFor, taskLabelOf, threadFor,
 } from './conversationModel.mjs';
 
 export const ROLE_COLORS = {
@@ -398,16 +398,23 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   };
 
   const publish = async (thread, text) => {
+    // Answering beats chatting: an agent parked on a question needs the message
+    // on THAT exchange, or the daemon files it as a note and it stays blocked
+    // (AGT-4030).
+    const question = openQuestionFor([...byId.values()], thread.replyTo?.address, {
+      repository: thread.events[0]?.repository,
+      taskId: thread.taskId,
+    });
     let response;
     try {
       response = await fetcher('/api/coordination/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          correlationId: thread.correlationId,
+          correlationId: question?.correlationId ?? thread.correlationId,
           recipient: thread.replyTo?.address,
-          repository: thread.events[0]?.repository,
-          taskId: thread.taskId,
+          repository: question?.repository ?? thread.events[0]?.repository,
+          taskId: question?.taskId ?? thread.taskId,
           text,
         }),
       });

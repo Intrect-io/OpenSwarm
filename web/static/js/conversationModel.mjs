@@ -152,6 +152,39 @@ export function buildChatLines(events) {
  * actual utterance. A daemon's instruction snapshot is not a speaker, and the
  * operator cannot address themselves.
  */
+/**
+ * The blocking question an agent is still parked on, if any.
+ *
+ * An operator writing to an agent that is waiting on them means "here is your
+ * answer" — but the daemon only turns a message into a `human-answer` when its
+ * correlation id names a pending question. Addressing the newest exchange
+ * instead files a note the agent never unparks on, which is what left ten
+ * agents waiting with no way to reply (AGT-4030).
+ */
+export function openQuestionFor(events, actorAddress, scope = {}) {
+  if (!actorAddress) return null;
+  // An address is not unique: agents name themselves, so two on different tasks
+  // can both answer to "sable", and the room shows every task at once. Without
+  // the task this would offer to answer someone else's blocking question.
+  if (!scope.taskId && !scope.repository) return null;
+  // A later terminal event on the same exchange means the question was answered
+  // or expired since; the board keeps both. Settle each candidate before
+  // picking, not after — an agent can be parked on an older question while a
+  // newer one has already been resolved, and taking the newest first would
+  // report "nothing open" and file the reply as a note.
+  const open = events
+    .filter((event) => event.kind === 'human-question'
+      && event.status === 'waiting'
+      && event.actor === actorAddress
+      && (!scope.repository || event.repository === scope.repository)
+      && (!scope.taskId || event.taskId === scope.taskId))
+    .filter((question) => !events.some((event) => event.correlationId === question.correlationId
+      && event.seq > question.seq
+      && ['completed', 'expired', 'failed'].includes(event.status)))
+    .sort((a, b) => a.seq - b.seq);
+  return open[open.length - 1] ?? null;
+}
+
 export function latestAddressable(events) {
   const spoken = events.filter(isUtterance).sort((a, b) => a.seq - b.seq);
   for (let i = spoken.length - 1; i >= 0; i -= 1) {
