@@ -105,6 +105,7 @@ type TaskStateStore = z.infer<typeof TaskStateStoreSchema>;
 let cache: TaskStateStore | null = null;
 let cacheStamp: string | null = null;
 const LOCK_STALE_MS = 30_000;
+const LOCK_ABANDON_MS = 600_000;
 const LOCK_WAIT_MS = 10;
 const LOCK_TIMEOUT_MS = 5_000;
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
@@ -194,9 +195,30 @@ function withStoreLock<T>(operation: () => T): T {
       if (code !== 'EEXIST') throw error;
       try {
         const owner = readStoreLockOwner(lockPath);
-        const staleMalformedLock = !owner && Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+        const lockAgeMs = Date.now() - statSync(lockPath).mtimeMs;
+        const staleMalformedLock = !owner && lockAgeMs > LOCK_STALE_MS;
         const abandonedLock = owner !== null && !isProcessAlive(owner.pid);
-        if (staleMalformedLock || abandonedLock) {
+        // A pid probe cannot see past its own namespace, and a container
+        // assigns the daemon the same pid every start — so a lock left behind
+        // by a killed container reads as "alive" against the new daemon
+        // itself, and nothing ever frees it (AGT-4023: 15 straight heartbeats
+        // dead, zero tasks for 75 minutes, manual rm the only exit). Age is
+        // the one signal that stays true across namespaces and generations.
+        //
+        // What this buys and what it costs. The guarded work is synchronous —
+        // read, parse, write, fsync, rename, measured at tens of milliseconds
+        // — and an out-of-space write fails fast rather than blocking, so
+        // reaching this threshold takes a frozen process (SIGSTOP, docker
+        // pause, uninterruptible I/O) or a wall-clock jump, since mtime is
+        // compared against a non-monotonic clock. A process frozen that long
+        // is serving nothing anyway. If one is evicted and later resumes, it
+        // overwrites with its own snapshot: a lost update, never a torn file
+        // (persistStore renames atomically) and never a cascade (the exit
+        // unlink is token-guarded). The run ledger — not this projection —
+        // owns leases and remote effects, so a rollback here cannot
+        // double-execute anything, and the next Linear sync re-derives it.
+        const expiredLock = lockAgeMs > LOCK_ABANDON_MS;
+        if (staleMalformedLock || abandonedLock || expiredLock) {
           unlinkSync(lockPath);
           continue;
         }

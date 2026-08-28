@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -359,5 +359,48 @@ describe('task state store', () => {
 
     expect(() => getTaskState('ISSUE-CORRUPT')).toThrow(/Task state store is corrupt/);
     expect(readFileSync(stateFile, 'utf8')).toBe('{not-json');
+  });
+
+  describe('stale lock reclamation (AGT-4023)', () => {
+    // Measured on vela: a container recreate left a well-formed lock behind,
+    // the new daemon came up on the SAME pid (a container assigns it
+    // deterministically), so the pid probe answered "alive" for the daemon's
+    // own ghost. Fifteen straight heartbeats died on it, zero tasks ran for 75
+    // minutes, and a manual rm was the only way out.
+    const lockFile = () => `${stateFile}.lock`;
+
+    it('reclaims a well-formed lock left at our own pid once it is long expired', () => {
+      writeFileSync(lockFile(), JSON.stringify({ pid: process.pid, token: 'ghost-token' }), 'utf8');
+      const longAgo = new Date(Date.now() - 900_000);
+      utimesSync(lockFile(), longAgo, longAgo);
+
+      upsertTaskState('ISSUE-LOCK-1', { execution: { status: 'todo', retryCount: 0 } });
+
+      expect(getTaskState('ISSUE-LOCK-1')?.execution.status).toBe('todo');
+      expect(existsSync(lockFile())).toBe(false);
+    });
+
+    it('respects a well-formed lock right up to the expiry, on its own clock', () => {
+      // Pins the policy from below: a lock older than the 30s malformed clock
+      // but inside the 10-minute one is still someone's — it may belong to a
+      // live writer in another pid namespace sharing the mounted state file.
+      // Shortening LOCK_ABANDON_MS toward LOCK_STALE_MS fails here.
+      writeFileSync(lockFile(), JSON.stringify({ pid: process.pid, token: 'possibly-live' }), 'utf8');
+      const almostExpired = new Date(Date.now() - 570_000);
+      utimesSync(lockFile(), almostExpired, almostExpired);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-2', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    it('still ages out a lock with no readable owner on the shorter clock', () => {
+      writeFileSync(lockFile(), 'not-json-at-all', 'utf8');
+      const longAgo = new Date(Date.now() - 120_000);
+      utimesSync(lockFile(), longAgo, longAgo);
+
+      upsertTaskState('ISSUE-LOCK-4', { execution: { status: 'todo', retryCount: 0 } });
+
+      expect(getTaskState('ISSUE-LOCK-4')?.execution.status).toBe('todo');
+    });
   });
 });
