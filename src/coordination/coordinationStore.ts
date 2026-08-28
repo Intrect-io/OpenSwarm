@@ -346,6 +346,36 @@ export class CoordinationStore {
   }
 
   /**
+   * One event per still-open (not yet completed/expired/failed) question
+   * correlation ID for a task, durable trace merged with the board.
+   *
+   * Unlike `openQuestionCount`, this is not a display counter — it backs the
+   * answer fan-out that settles every differently-worded re-ask of the same
+   * blocker. A board-only read there would leave an older sibling permanently
+   * unanswered in the durable trace once enough other traffic evicted it from
+   * the board, and `allQuestionsAnswered` would never see that task as
+   * answered again (AGT-4042).
+   */
+  openQuestions(repository: string, taskId: string): CoordinationEvent[] {
+    const merged = new Map<string, CoordinationEvent>();
+    for (const event of queryTrace({ repository, taskId, kinds: ['human-question', 'human-answer'], limit: 1_000 })) {
+      merged.set(event.id, event);
+    }
+    for (const event of this.list({ repository, taskId, limit: 500 })) merged.set(event.id, event);
+    const events = [...merged.values()];
+    const settled = new Set(events
+      .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+      .map((event) => event.correlationId));
+    const open = new Map<string, CoordinationEvent>();
+    for (const event of events) {
+      if (event.kind === 'human-question'
+        && (event.status === 'waiting' || event.status === 'running')
+        && !settled.has(event.correlationId)) open.set(event.correlationId, event);
+    }
+    return [...open.values()];
+  }
+
+  /**
    * When this task's most recent operator answer landed, or undefined if it
    * never had one. Bounds how far back a caller may read an "unanswered
    * streak" of the same kind, so a pre-answer attempt cannot be folded into a

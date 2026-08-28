@@ -170,6 +170,45 @@ describe('human questions', () => {
     expect(secondAnswer.reason).toMatch(/already completed/);
   });
 
+  it('settles a sibling question the board has evicted, so allQuestionsAnswered still becomes true (AGT-4042)', async () => {
+    // The fan-out that settles every rephrased re-ask used to scan only the
+    // live board. A task chatty enough to push an older sibling's own
+    // `human-question` event out of the board's retention window would leave
+    // it permanently unanswered in the durable trace — allQuestionsAnswered
+    // reads the trace, so it would never see that task as answered again, and
+    // a run parked on the repeat-ask stop (AGT-4042) would wait forever for a
+    // reply that, from the operator's side, already arrived.
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+
+    const first = await h.postHumanQuestion({
+      repository: '/repo', taskId: 't1', actor: 'worker-a',
+      question: 'What is the Spreadsheet ID?', notify,
+    });
+    const second = await h.postHumanQuestion({
+      repository: '/repo', taskId: 't1', actor: 'worker-b',
+      question: 'Please share the target Spreadsheet ID.', notify,
+    });
+
+    // Evict the sibling's own `human-question` event from the board, the way
+    // unrelated traffic would once the ring buffer fills — the durable trace
+    // still has it.
+    const file = join(dir, 'events.json');
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    state.events = state.events.filter((event: { correlationId: string }) =>
+      event.correlationId !== second.correlationId);
+    writeFileSync(file, JSON.stringify(state));
+    const store = (await import('./coordinationStore.js'));
+    store.resetCoordinationStoreForTests();
+
+    expect(store.getCoordinationStore().allQuestionsAnswered('t1')).toBe(false);
+
+    const accepted = await h.answerHumanQuestion(first.correlationId, 'sheet-abc123', 'discord:user');
+    expect(accepted.accepted).toBe(true);
+
+    expect(store.getCoordinationStore().allQuestionsAnswered('t1')).toBe(true);
+  });
+
   it('pages again once the outstanding question is answered', async () => {
     const h = await modules();
     const notify = vi.fn(async () => true);

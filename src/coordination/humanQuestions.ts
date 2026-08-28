@@ -203,12 +203,13 @@ export async function answerHumanQuestion(
   // only one the operator ever saw. Settle every other still-open ask for this
   // task too, or the task's openQuestionCount never reaches zero and a run
   // parked on the repeat-ask stop (AGT-4042) never sees itself as answered.
+  // Durable, not board-only: a task chatty enough to push an older sibling
+  // out of the board's own retention window would otherwise leave it
+  // permanently unanswered in the trace, and `allQuestionsAnswered` would
+  // never see that task as answered again.
   const siblings = store
-    .list({ repository: question.repository, taskId: question.taskId, limit: 500 })
-    .filter((e) =>
-      e.kind === 'human-question'
-      && (e.status === 'waiting' || e.status === 'running')
-      && e.correlationId !== correlationId);
+    .openQuestions(question.repository, question.taskId)
+    .filter((e) => e.correlationId !== correlationId);
   const seenSiblingIds = new Set<string>();
   for (const sibling of siblings) {
     if (seenSiblingIds.has(sibling.correlationId)) continue;
