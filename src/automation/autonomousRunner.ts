@@ -549,12 +549,17 @@ export class AutonomousRunner {
       // run, ask_human finds the recorded answer on the board and returns it
       // instead of blocking, so the task continues the moment a re-dispatch
       // lands after the operator replies.
-      if (task.issueId) {
+      // `issueId || id` is what the heartbeat, the ledger and the coordination
+      // context all key on. Parking under a narrower id than the one that later
+      // looks it up arms nothing: the task keeps its durable backoff and the
+      // operator's answer cannot shorten it.
+      const parkedId = task.issueId || task.id;
+      if (parkedId) {
         // Durable, next to the durable answer: the heartbeat has to know which
         // backoffs a reply may cut short, and a restart must not be what decides
         // that (AGT-4033).
-        markOperatorPark(task.issueId, true);
-        const nextRetryTime = setRetryTime(task.issueId, 4, this.failedTaskRetryTimes);
+        markOperatorPark(parkedId, true);
+        const nextRetryTime = setRetryTime(parkedId, 4, this.failedTaskRetryTimes);
         this.saveTaskState();
         console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)}, or sooner if the operator answers`);
       }
