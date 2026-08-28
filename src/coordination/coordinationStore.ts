@@ -288,6 +288,28 @@ export class CoordinationStore {
    * the question it asked, so the latest is what the agent is parked on and
    * what the operator is reading.
    */
+  /**
+   * How many blocking questions this task has asked and not yet had answered,
+   * regardless of exact wording. 0 means nothing is outstanding.
+   *
+   * Counts distinct correlation IDs, not raw events: a paged question carries
+   * two events (the `waiting` ask, the `running` page confirmation) under the
+   * same correlation ID, and a re-dispatch that rephrases the same blocker
+   * mints a different one for the same underlying wait (AGT-4042).
+   */
+  openQuestionCount(repository: string, taskId: string): number {
+    const events = this.list({ repository, taskId, limit: 500 });
+    const settled = new Set(events
+      .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+      .map((event) => event.correlationId));
+    return new Set(events
+      .filter((event) =>
+        event.kind === 'human-question'
+        && (event.status === 'waiting' || event.status === 'running')
+        && !settled.has(event.correlationId))
+      .map((event) => event.correlationId)).size;
+  }
+
   findOpenQuestionFor(
     actor: string,
     scope: { repository?: string; taskId?: string } = {},

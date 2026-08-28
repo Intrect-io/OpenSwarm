@@ -93,4 +93,30 @@ describe('CoordinationStore', () => {
     await s.publish(message({ actor: 'worker-b', recipient: 'worker-a', kind: 'advice-response', status: 'completed', summary: 'use the existing helper' }));
     expect(s.snapshot('/repo').pending).toEqual([]);
   });
+
+  it('counts distinct open questions regardless of paging status or wording', async () => {
+    const s = store();
+    await s.publish(message({ kind: 'human-question', status: 'waiting', correlationId: 'q1' }));
+    expect(s.openQuestionCount('/repo', 't1')).toBe(1);
+
+    await s.publish(message({ kind: 'human-question', status: 'running', correlationId: 'q1', summary: 'Operator paged' }));
+    expect(s.openQuestionCount('/repo', 't1')).toBe(1); // page confirmation, same question
+
+    await s.publish(message({ kind: 'human-question', status: 'waiting', correlationId: 'q2', summary: 'reworded ask' }));
+    expect(s.openQuestionCount('/repo', 't1')).toBe(2);
+
+    await s.publish(message({ kind: 'human-answer', status: 'completed', correlationId: 'q1' }));
+    expect(s.openQuestionCount('/repo', 't1')).toBe(1); // q1 settled, q2 still open
+
+    await s.publish(message({ kind: 'human-answer', status: 'completed', correlationId: 'q2' }));
+    expect(s.openQuestionCount('/repo', 't1')).toBe(0);
+  });
+
+  it('scopes the open question count to its own repository and task', async () => {
+    const s = store();
+    await s.publish(message({ kind: 'human-question', status: 'waiting', correlationId: 'q1' }));
+    await s.publish(message({ repository: '/other', kind: 'human-question', status: 'waiting', correlationId: 'q2' }));
+    await s.publish(message({ taskId: 't2', kind: 'human-question', status: 'waiting', correlationId: 'q3' }));
+    expect(s.openQuestionCount('/repo', 't1')).toBe(1);
+  });
 });

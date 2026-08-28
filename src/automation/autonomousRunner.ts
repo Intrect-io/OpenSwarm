@@ -46,6 +46,7 @@ import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState } from '../taskState/store.js';
+import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -131,6 +132,18 @@ export function decisionSelectionBudget(availableSlots: number, candidateCount: 
   if (slots === 0 || candidates === 0) return 0;
   return Math.min(candidates, Math.max(slots, slots * DECISION_SELECTION_OVERSAMPLE));
 }
+
+/**
+ * Prefix stamped on a NEEDS_HUMAN run's `lastErrorMessage` when this file
+ * parked it for a repeated, unanswered `ask_human` question (AGT-4042).
+ *
+ * `markNeedsHuman` is shared with unrelated parks (a rejection limit, a PR
+ * closed without merge — see the other call sites in this file), each with its
+ * own resume condition. This is how the filter below tells "this one resumes
+ * when the operator answers" from "this one resumes when Linear state changes"
+ * without adding a second column or state for what is still one ledger state.
+ */
+const OPERATOR_QUESTION_PARK_MARKER = '[operator-question]';
 
 export class AutonomousRunner {
   private config: AutonomousConfig;
@@ -480,7 +493,9 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
-    this.scheduler.on('waiting_on_operator', ({ task, result }) => {
+    this.scheduler.on('waiting_on_operator', ({ task, result }: {
+      task: TaskItem; result: PipelineResult;
+    }) => {
       const taskCtx = this.formatTaskContext(task);
       const question = result.workerResult?.haltReason ?? 'Blocked on an operator decision';
       console.log(`[Scheduler] Task waiting on operator: ${taskCtx} ${task.title} — ${question}`);
@@ -492,9 +507,34 @@ export class AutonomousRunner {
       // instead of blocking, so the task continues the moment a re-dispatch
       // lands after the operator replies.
       if (task.issueId) {
-        const nextRetryTime = setRetryTime(task.issueId, 4, this.failedTaskRetryTimes);
-        this.saveTaskState();
-        console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)} to check for the operator's answer`);
+        // A re-dispatch is a fresh worker session, and asking again is not free
+        // — a worker+reviewer cycle burned on a question the operator has
+        // already been paged for once and not answered. Past the first
+        // unanswered ask, stop the automatic retry loop entirely instead of
+        // paying for another one on a fixed clock: NEEDS_HUMAN drops the task
+        // out of heartbeat selection until the resume check below finds it
+        // answered, or an operator otherwise reopens it (AGT-4042). Durable
+        // mode only — without a ledger there is nowhere to put a stop that
+        // survives a restart, so legacy mode keeps the fixed-backoff ladder.
+        //
+        // The project path comes off the run's own ledger row, not the
+        // in-memory path cache: `execute()` registers it durably before the
+        // pipeline ever runs, so it survives a restart the cache would not.
+        const durableProjectPath = this.durableRuns.getRun(task.issueId)?.projectPath;
+        const openAskCount = durableProjectPath
+          ? getCoordinationStore().openQuestionCount(durableProjectPath, task.issueId)
+          : 0;
+        if (this.durableRuns.isPrimary && openAskCount >= 2) {
+          this.durableRuns.markNeedsHuman(
+            task.issueId,
+            `${OPERATOR_QUESTION_PARK_MARKER} asked ${openAskCount} times with no answer — stopped retrying automatically`,
+          );
+          console.log(`[Scheduler] Parking ${taskCtx} — asked ${openAskCount}x with no answer, stopped auto-retry until the operator answers or reopens it`);
+        } else {
+          const nextRetryTime = setRetryTime(task.issueId, 4, this.failedTaskRetryTimes);
+          this.saveTaskState();
+          console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)} to check for the operator's answer`);
+        }
       }
       this.scheduleNextHeartbeat();
     });
@@ -809,15 +849,29 @@ export class AutonomousRunner {
         durableRun = this.durableRuns.getRun(id);
       }
 
-      if (
-        this.durableRuns.isPrimary
-        && durableRun?.state === 'NEEDS_HUMAN'
-        && ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '')
-      ) {
-        const resumed = this.durableRuns.resumeNeedsHuman(id);
-        if (resumed) {
-          durableRun = this.durableRuns.getRun(id);
-          if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+      if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
+        const linearReopened = ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '');
+        // The operator-question park (AGT-4042) resumes on its own condition —
+        // the question got answered — which needs no Linear touch at all. Scoped
+        // to runs this file parked for exactly that reason (the marker prefix),
+        // so the rejection-limit and PR-closed-without-merge parks elsewhere in
+        // this file, which share the same NEEDS_HUMAN state, are untouched by it
+        // and keep resuming only on a Linear state change.
+        // The project path comes off the run's own row, not the in-memory
+        // path cache: durable, so this still finds an answer that arrived
+        // while the daemon was down, once the row is fetched again after
+        // restart.
+        const questionAnswered = Boolean(
+          durableRun.projectPath
+          && durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER)
+          && getCoordinationStore().openQuestionCount(durableRun.projectPath, id) === 0,
+        );
+        if (linearReopened || questionAnswered) {
+          const resumed = this.durableRuns.resumeNeedsHuman(id);
+          if (resumed) {
+            durableRun = this.durableRuns.getRun(id);
+            if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+          }
         }
       }
 
