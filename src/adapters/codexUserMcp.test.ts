@@ -108,16 +108,27 @@ describe('codex inherited MCP isolation (AGT-3990)', () => {
     const pidFile = join(root, 'pid');
     try {
       mkdirSync(bin);
-      writeFileSync(executable, '#!/bin/sh\ntrap "" TERM\necho $$ > "$MCP_PID_FILE"\nwhile :; do sleep 1; done\n');
+      writeFileSync(executable, [
+        '#!/bin/sh',
+        '[ -n "$MCP_WARMUP" ] && exit 0',
+        'trap "" TERM',
+        'echo $$ > "$MCP_PID_FILE"',
+        'while :; do sleep 1; done',
+        '',
+      ].join('\n'));
       chmodSync(executable, 0o755);
+      // macOS scans a freshly written executable on its first exec (measured
+      // 200-400ms), longer than the timeout under test — the fixture would be
+      // killed before it even starts. One throwaway exec warms that cache.
+      execFileSync(executable, { env: { ...process.env, MCP_WARMUP: '1' } });
       const childEnv = {
         ...process.env,
         PATH: `${bin}:${process.env.PATH ?? ''}`,
         MCP_PID_FILE: pidFile,
       };
 
-      await expect(runCodexMcpListJson(root, childEnv, undefined, 100)).rejects.toThrow(
-        'codex mcp list timed out after 100ms',
+      await expect(runCodexMcpListJson(root, childEnv, undefined, 500)).rejects.toThrow(
+        'codex mcp list timed out after 500ms',
       );
       expect(existsSync(pidFile)).toBe(true);
       const pid = Number.parseInt(readFileSync(pidFile, 'utf-8'), 10);

@@ -23,7 +23,9 @@ describe('CLI process tree termination', () => {
     const processKill = vi.spyOn(process, 'kill').mockImplementation(() => true);
     const directKill = vi.fn(() => true);
 
-    terminateCliProcessTree({ pid: 7654, kill: directKill } as never, 'linux');
+    // The lookup answers "7654 leads its own group and is our child": only
+    // then may the whole group be signalled.
+    terminateCliProcessTree({ pid: 7654, kill: directKill } as never, 'linux', () => ({ pgid: 7654, ppid: process.pid }));
 
     expect(processKill).toHaveBeenCalledWith(-7654, 'SIGKILL');
     expect(directKill).not.toHaveBeenCalled();
@@ -35,7 +37,7 @@ describe('CLI process tree termination', () => {
     });
     const directKill = vi.fn(() => true);
 
-    terminateCliProcessTree({ pid: 7655, kill: directKill } as never, 'linux');
+    terminateCliProcessTree({ pid: 7655, kill: directKill } as never, 'linux', () => ({ pgid: 7655, ppid: process.pid }));
 
     expect(directKill).toHaveBeenCalledWith('SIGKILL');
   });
@@ -126,11 +128,11 @@ describe('CLI process tree termination', () => {
     process.emit('SIGINT', 'SIGINT');
 
     expect(gracefulShutdown).toHaveBeenCalledOnce();
-    expect(processKill).toHaveBeenCalledWith(-7659, 'SIGKILL');
+    expect(processKill).not.toHaveBeenCalledWith(-7659, 'SIGKILL');
     expect(processKill).not.toHaveBeenCalledWith(process.pid, 'SIGINT');
   });
 
-  it.skipIf(process.platform === 'win32')('kills the POSIX process group on AbortSignal and removes parent hooks', async () => {
+  it.skipIf(process.platform === 'win32')('refuses the group signal for an unverifiable pid on AbortSignal and removes parent hooks', async () => {
     const proc = Object.assign(new EventEmitter(), {
       pid: 7658,
       stdout: new PassThrough(),
@@ -167,7 +169,12 @@ describe('CLI process tree termination', () => {
     controller.abort(new Error('cancelled by test'));
 
     await expect(running).rejects.toThrow('cancelled by test');
-    expect(processKill).toHaveBeenCalledWith(-7658, 'SIGKILL');
+    // 7658 is fabricated: the ownership lookup cannot verify it leads a group,
+    // so the group signal must NOT be sent — kill(-fakepid, SIGKILL) from this
+    // very suite once wiped the operator's login session. The direct handle is
+    // still killed.
+    expect(processKill).not.toHaveBeenCalledWith(-7658, 'SIGKILL');
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
     expect(process.listenerCount('SIGINT')).toBe(beforeSigint);
     expect(process.listenerCount('SIGTERM')).toBe(beforeSigterm);
   });
@@ -270,7 +277,10 @@ describe('argv-safe adapter spawning', () => {
     await expect(spawnCli(adapter, { prompt: 'hello', cwd: process.cwd() }))
       .resolves.toMatchObject({ exitCode: 0 });
     expect(Date.now() - started).toBeLessThan(2_000);
-    expect(processKill).toHaveBeenCalledWith(-125, 'SIGKILL');
+    // Unverifiable pid: the tree teardown must fall back to the direct handle
+    // instead of signalling a group it cannot prove it owns.
+    expect(processKill).not.toHaveBeenCalledWith(-125, 'SIGKILL');
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
   it('hard-times-out command construction that ignores AbortSignal and handles its late rejection', async () => {
