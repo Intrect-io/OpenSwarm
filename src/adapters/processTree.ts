@@ -1,4 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { win32 } from 'node:path';
 
@@ -334,8 +336,35 @@ const relayParentSignal = (signal: NodeJS.Signals): void => {
 const onParentSigint = (): void => relayParentSignal('SIGINT');
 const onParentSigterm = (): void => relayParentSignal('SIGTERM');
 
-export function trackCliProcessTree(proc: KillableProcess): void {
+// Group ownership proven while the child was alive. A detached child leads its
+// own group (pgid == pid) and is our direct child (ppid == us); once that
+// leader exits, /proc and ps(1) have nothing left to report, yet its orphaned
+// descendants keep the group id reserved and are reachable only by the group
+// signal. Keyed by the handle in a WeakMap so callers that untrack before
+// terminating (codexUserMcp does) cannot drop the record. exitedAt marks when
+// the leader died: any group member started before that instant predates any
+// possible reuse of the pid, which is what the kill path re-verifies.
+interface DetachedLeaderRecord {
+  pid: number;
+  exitedAt?: number;
+}
+const verifiedDetachedLeaders = new WeakMap<KillableProcess, DetachedLeaderRecord>();
+
+export function trackCliProcessTree(
+  proc: KillableProcess,
+  lookupOwnership: (pid: number) => ProcessOwnership | null = lookupProcessOwnership,
+): void {
   if (process.platform === 'win32') return;
+  if (proc.pid && proc.pid > 1 && proc.pid !== process.pid) {
+    const owner = lookupOwnership(proc.pid);
+    if (owner && owner.pgid === proc.pid && owner.ppid === process.pid) {
+      const record: DetachedLeaderRecord = { pid: proc.pid };
+      verifiedDetachedLeaders.set(proc, record);
+      (proc as Partial<ChildProcess>).once?.('exit', () => {
+        record.exitedAt = Date.now();
+      });
+    }
+  }
   if (activeCliProcessTrees.size === 0) {
     sigintInstalledWithoutOtherHandler = process.listenerCount('SIGINT') === 0;
     sigtermInstalledWithoutOtherHandler = process.listenerCount('SIGTERM') === 0;
@@ -356,11 +385,138 @@ export function untrackCliProcessTree(proc: KillableProcess): void {
   }
 }
 
+/** Where a pid sits in the process tree: its group and its parent. */
+export interface ProcessOwnership {
+  pgid: number;
+  ppid: number;
+}
+
+/**
+ * The group and parent of a pid, or null when the process no longer exists.
+ *
+ * Node has no getpgid()/getppid(pid), so ask the OS: /proc on Linux, ps(1)
+ * elsewhere. Runs at spawn and kill time, which is per-stage, not per-event.
+ */
+export function lookupProcessOwnership(pid: number): ProcessOwnership | null {
+  try {
+    if (process.platform === 'linux') {
+      // /proc/<pid>/stat: pid (comm) state ppid pgrp ... — comm may contain
+      // spaces/parens, so parse from the LAST ')'.
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const ppid = Number(rest[1]);
+      const pgid = Number(rest[2]);
+      if (!Number.isSafeInteger(ppid) || !Number.isSafeInteger(pgid) || pgid <= 0) return null;
+      return { pgid, ppid };
+    }
+    const out = execFileSync('ps', ['-o', 'ppid=,pgid=', '-p', String(pid)], { encoding: 'utf8' });
+    const [ppid, pgid] = out.trim().split(/\s+/).map(Number);
+    if (!Number.isSafeInteger(ppid) || !Number.isSafeInteger(pgid) || pgid <= 0) return null;
+    return { pgid, ppid };
+  } catch {
+    return null;
+  }
+}
+
+/** A live process in some group, with how long ago it started. */
+export interface ProcessGroupMember {
+  pid: number;
+  elapsedMs: number;
+}
+
+/**
+ * Every live member of the given process group with its age. Empty on any
+ * enumeration failure: refusing to enumerate means refusing to sweep — leak,
+ * never misfire.
+ */
+function listProcessGroupMembers(pgid: number): ProcessGroupMember[] {
+  const members: ProcessGroupMember[] = [];
+  try {
+    if (process.platform === 'linux') {
+      // starttime (field 22 of /proc/<pid>/stat) counts in USER_HZ ticks since
+      // boot; USER_HZ is 100 on mainstream Linux and the sweep's clock fuzz
+      // absorbs any rounding. Avoids depending on ps(1) in slim containers.
+      const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+      for (const entry of readdirSync('/proc')) {
+        if (!/^\d+$/.test(entry)) continue;
+        try {
+          const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+          const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+          if (Number(rest[2]) !== pgid) continue;
+          members.push({ pid: Number(entry), elapsedMs: (uptimeSec - Number(rest[19]) / 100) * 1_000 });
+        } catch {
+          // The process exited mid-scan; keep scanning.
+        }
+      }
+      return members;
+    }
+    const out = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,etime='], { encoding: 'utf8' });
+    for (const line of out.split('\n')) {
+      // etime is [[dd-]hh:]mm:ss.
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/);
+      if (!match || Number(match[2]) !== pgid) continue;
+      members.push({
+        pid: Number(match[1]),
+        elapsedMs: (Number(match[3] ?? 0) * 86_400 + Number(match[4] ?? 0) * 3_600
+          + Number(match[5]) * 60 + Number(match[6])) * 1_000,
+      });
+    }
+    return members;
+  } catch {
+    return [];
+  }
+}
+
+// Absorbs the measurement granularity of process ages plus clock skew against
+// our Date.now() exit stamp: /proc starttime ticks at 10ms on Linux, ps etime
+// truncates to whole seconds on macOS. Any acceptance rule must include this
+// band or it leaks legitimate orphans born just before the leader died; a
+// group id recycled inside the band would require the kernel to exhaust its
+// entire pid space within it.
+const GROUP_AGE_CLOCK_FUZZ_MS = process.platform === 'linux' ? 250 : 1_500;
+
+/**
+ * Kill the orphaned descendants of an exited detached leader one pid at a
+ * time. kill(-pgid) is off the table here: with the leader dead, nothing can
+ * re-verify the group as a whole, and the id could belong to a recycled group.
+ * Instead, only members that started BEFORE the leader died are signalled —
+ * POSIX reserves the group id while any original member lives, so a member
+ * predating the leader's death is provably one of its descendants, while every
+ * member of a recycled group is younger than that. What remains is the same
+ * per-pid check-then-signal window the live path already carries.
+ */
+function sweepOrphanedGroupMembers(
+  pgid: number,
+  leaderExitedAt: number,
+  signal: NodeJS.Signals,
+  listMembers: (pgid: number) => ProcessGroupMember[],
+): void {
+  // Second pass catches a descendant forked between enumeration and the kill
+  // of its parent (it still predates the leader's death only if it does).
+  for (let pass = 0; pass < 2; pass += 1) {
+    const sinceExitMs = Date.now() - leaderExitedAt;
+    let signalled = false;
+    for (const member of listMembers(pgid)) {
+      if (member.pid <= 1 || member.pid === process.pid) continue;
+      if (member.elapsedMs < sinceExitMs - GROUP_AGE_CLOCK_FUZZ_MS) continue;
+      try {
+        process.kill(member.pid, signal);
+        signalled = true;
+      } catch {
+        // Already gone.
+      }
+    }
+    if (!signalled) return;
+  }
+}
+
 /** Send one signal to a CLI wrapper and every descendant it launched. */
 export function signalCliProcessTree(
   proc: KillableProcess,
   signal: NodeJS.Signals,
   platform: NodeJS.Platform = process.platform,
+  lookupOwnership?: (pid: number) => ProcessOwnership | null,
+  listGroupMembers?: (pgid: number) => ProcessGroupMember[],
 ): void {
   if (platform === 'win32') {
     // ChildProcess.kill() uses the process handle Node retained at spawn time.
@@ -369,21 +525,65 @@ export function signalCliProcessTree(
     proc.kill(signal);
     return;
   }
-  if (proc.pid) {
-    try {
-      process.kill(-proc.pid, signal);
-      return;
-    } catch {
-      // The process may have exited before the signal or failed to form a group.
+  // Prove ownership before signalling a whole group. kill(-1) addresses every
+  // process on the host, our own group would take the daemon down with the
+  // child, and a stale or fabricated pid addresses whoever holds that group
+  // now. All three are real: unit tests handed fake pids (1, 321) to the close
+  // handler, and the resulting kill(-1, SIGKILL) wiped every application in
+  // the operator's login session and severed the SSH connection running the
+  // suite on a remote host. Only a child we spawned detached — one that leads
+  // its own group (pgid == pid) and is our direct child (ppid == us) — may be
+  // group-killed.
+  if (proc.pid && proc.pid > 1 && proc.pid !== process.pid && proc.pid !== ownProcessGroup()) {
+    const owner = (lookupOwnership ?? lookupProcessOwnership)(proc.pid);
+    if (owner) {
+      // The leader is alive, so the OS can vouch for it directly, and the
+      // group id is guaranteed unrecycled while it lives.
+      if (owner.pgid === proc.pid && owner.ppid === process.pid) {
+        try {
+          process.kill(-proc.pid, signal);
+          return;
+        } catch {
+          // The group drained between lookup and kill.
+        }
+      }
+    } else {
+      // The leader already exited. Never group-signal here — sweep only the
+      // members that provably predate the leader's death, one pid at a time.
+      const record = verifiedDetachedLeaders.get(proc);
+      if (record?.pid === proc.pid) {
+        // A kill can observe the death before the 'exit' event has fired
+        // (abort handlers run in the same loop turn as the reap). This first
+        // observation of the death is then the tightest stamp available.
+        record.exitedAt ??= Date.now();
+        sweepOrphanedGroupMembers(
+          proc.pid,
+          record.exitedAt,
+          signal,
+          listGroupMembers ?? listProcessGroupMembers,
+        );
+      }
     }
   }
   proc.kill(signal);
+}
+
+let cachedOwnProcessGroup: number | null | undefined;
+function ownProcessGroup(): number | null {
+  // Our own pgid cannot change: Node exposes no setpgid/setsid for a running
+  // process, so one lookup per process lifetime is enough.
+  if (cachedOwnProcessGroup === undefined) {
+    cachedOwnProcessGroup = lookupProcessOwnership(process.pid)?.pgid ?? null;
+  }
+  return cachedOwnProcessGroup;
 }
 
 /** Force-kill a CLI process tree. */
 export function terminateCliProcessTree(
   proc: KillableProcess,
   platform: NodeJS.Platform = process.platform,
+  lookupOwnership?: (pid: number) => ProcessOwnership | null,
+  listGroupMembers?: (pgid: number) => ProcessGroupMember[],
 ): void {
-  signalCliProcessTree(proc, 'SIGKILL', platform);
+  signalCliProcessTree(proc, 'SIGKILL', platform, lookupOwnership, listGroupMembers);
 }
