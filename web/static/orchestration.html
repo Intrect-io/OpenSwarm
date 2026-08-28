@@ -70,6 +70,9 @@
     .composer { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); }
     .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 5px 8px; font: inherit; font-size: 11px; }
     .composer button { background: var(--cyan, #3b9eff); border: none; border-radius: 4px; color: #0d1117; font: inherit; font-size: 11px; font-weight: 700; padding: 5px 12px; cursor: pointer; }
+    .composer button:disabled { background: var(--border); color: var(--dim); cursor: default; }
+    .composer-status { padding: 0 12px 6px; font-size: 10px; color: var(--dim); min-height: 13px; }
+    .composer-status.is-error { color: var(--red, #f85149); }
     .empty { color: var(--dim); padding: 14px; font-size: 12px; }
     .tier-label { fill: var(--dim); font-size: 10px; letter-spacing: 2px; font-weight: 700; }
     .tier-count { fill: #3d4454; font-size: 9px; }

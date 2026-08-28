@@ -227,6 +227,31 @@ function clip(text, max = 140) {
 }
 
 /** `Speaker → Recipient: words` — one utterance as a line of dialogue. */
+/**
+ * Paint the composer's send state: the outcome line, the in-flight lock, and
+ * the text still waiting to be accepted. Called on every render so a redraw
+ * mid-send cannot quietly re-enable the box or drop the operator's words.
+ */
+function applyComposerState(doc, form, pending) {
+  let line = doc.getElementById('composer-status');
+  if (!line) {
+    line = doc.createElement('div');
+    line.id = 'composer-status';
+    line.className = 'composer-status';
+    form.insertAdjacentElement('afterend', line);
+  }
+  const input = doc.getElementById('composer-text');
+  const button = form.querySelector('button');
+  const active = !!pending?.active;
+  line.textContent = active ? 'Sending…' : (pending?.message ?? '');
+  line.classList.toggle('is-error', !active && !!pending?.message);
+  if (input) {
+    input.disabled = active;
+    if (pending?.text !== undefined) input.value = pending.text;
+  }
+  if (button) button.disabled = active;
+}
+
 function dialogueLine(event, max = 140) {
   const line = chatLineOf(event);
   const to = line.recipientName ? ` → <span class="who">${escapeHtml(line.recipientName)}</span>` : '';
@@ -275,7 +300,7 @@ export function renderFeed(doc, events, selected, focusedEventId, onFocus) {
  * a composer. Speaking here is not decoration: the message is addressed to the
  * agent, which picks it up on its next `coordination_read`.
  */
-export function renderThread(doc, thread, onSend) {
+export function renderThread(doc, thread, onSend, pending = null) {
   const holder = doc.getElementById('thread');
   if (!holder) return;
   if (!thread) {
@@ -321,12 +346,17 @@ export function renderThread(doc, thread, onSend) {
 
   const form = doc.getElementById('composer');
   if (!form || !onSend) return;
+  // A send takes seconds under load (AGT-4027) and agent events keep arriving,
+  // so a redraw lands mid-flight and replaces this very form. The pending state
+  // therefore lives in the caller and is re-applied on every render below,
+  // rather than being held in DOM nodes this handler captured.
+  applyComposerState(doc, form, pending);
+
   form.addEventListener('submit', (submitEvent) => {
     submitEvent.preventDefault();
     const input = doc.getElementById('composer-text');
     const text = input.value.trim();
     if (!text) return;
-    input.value = '';
     onSend(thread, text);
   });
 }
@@ -337,10 +367,36 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   const byId = new Map();
   let selected = null;
   let focusedEventId = null;
+  const composerStates = new Map();
 
+  // Returns the failure reason, or null when the message was accepted. `fetch`
+  // resolves on 400/409, so the server's "cannot address this" and "already
+  // answered" both look like success unless `ok` is checked — and an operator
+  // whose reply is silently dropped is the one person who must never be lied
+  // to, since a parked agent is waiting on it (AGT-4026).
   const send = async (thread, text) => {
+    // Kept per exchange, not in the form and not in one slot: a redraw can
+    // replace the composer while this awaits, the operator can move to another
+    // exchange mid-send and start a second one there, and neither send may
+    // land its text or its verdict on the other's composer.
+    const correlationId = thread?.correlationId ?? null;
+    composerStates.set(correlationId, { active: true, message: '', text });
+    redraw();
+    const failure = await publish(thread, text);
+    if (failure) {
+      composerStates.set(correlationId, { active: false, message: failure, text });
+    } else {
+      // Accepted: nothing left to say, and keeping the entry would grow the map
+      // one exchange at a time for the life of the page.
+      composerStates.delete(correlationId);
+    }
+    redraw();
+  };
+
+  const publish = async (thread, text) => {
+    let response;
     try {
-      await fetcher('/api/coordination/message', {
+      response = await fetcher('/api/coordination/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -351,10 +407,21 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
           text,
         }),
       });
-    } catch { /* the next poll shows whether it landed */ }
+    } catch (error) {
+      return error?.message ? `Could not reach the daemon: ${error.message}` : 'Could not reach the daemon.';
+    }
+    if (!response?.ok) {
+      let reason = `The daemon refused the message (${response?.status ?? 'no status'}).`;
+      try {
+        const body = await response.json();
+        if (body?.error) reason = body.error;
+      } catch { /* a refusal without a JSON body still has its status */ }
+      return reason;
+    }
     // Re-read rather than echoing locally: the board decides what was actually
     // published (an answer to a blocking question looks different from a note).
     await refresh();
+    return null;
   };
 
   const redraw = () => {
@@ -379,7 +446,8 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
       focusedEventId = focusedEventId === id ? null : id;
       redraw();
     });
-    renderThread(doc, threadFor(threads, focused), send);
+    const shownThread = threadFor(threads, focused);
+    renderThread(doc, shownThread, send, composerStates.get(shownThread?.correlationId ?? null) ?? null);
   };
 
   const absorb = (event) => {

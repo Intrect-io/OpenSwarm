@@ -57,6 +57,26 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   const form = doc.getElementById('composer');
   const input = doc.getElementById('composer-text');
   const button = form?.querySelector('button');
+  let sending = false;
+
+  // One line under the composer carrying the send's outcome. Created on demand
+  // so the shell markup does not have to know about it.
+  const setComposerStatus = (message, { pending = false } = {}) => {
+    if (!form) return;
+    let line = doc.getElementById('composer-status');
+    if (!line) {
+      line = doc.createElement('div');
+      line.id = 'composer-status';
+      line.className = 'composer-status';
+      form.insertAdjacentElement('afterend', line);
+    }
+    sending = pending;
+    line.textContent = pending ? 'Sending…' : message;
+    line.classList.toggle('is-error', !pending && !!message);
+    const addressable = !!latestAddressable([...byId.values()]);
+    if (input) input.disabled = pending || !addressable;
+    if (button) button.disabled = pending || !addressable;
+  };
 
   room.addEventListener('scroll', () => { stick = isNearBottom(room); });
 
@@ -70,12 +90,15 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     // POST would be unroutable (the API requires repository/taskId/recipient).
     const target = latestAddressable(events);
     if (input) {
-      input.disabled = !target;
+      // A send takes seconds under load (AGT-4027) and agent events keep
+      // arriving, so a redraw lands mid-flight — it must not re-enable the box
+      // the send just locked.
+      input.disabled = !target || sending;
       input.placeholder = target
         ? `Message ${target.actorName || target.actor}…`
         : 'No agent to address yet';
     }
-    if (button) button.disabled = !target;
+    if (button) button.disabled = !target || sending;
     if (stick) room.scrollTop = room.scrollHeight;
   };
 
@@ -87,11 +110,17 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   // Interjections join the newest exchange: the message is addressed to the
   // last agent that spoke, exactly like replying in a busy room. Same POST
   // contract (and same bare-fetch auth posture) as the orchestration composer.
+  // Returns the failure reason, or null when the message was accepted. The
+  // caller keeps the operator's text until it hears null: a refusal that
+  // silently ate the message is worse than no composer at all, and `fetch`
+  // resolves happily on 400/409 — the server's own "cannot address this" and
+  // "already answered" both arrive that way (AGT-4026).
   const send = async (text) => {
     const target = latestAddressable([...byId.values()]);
-    if (!target) return;
+    if (!target) return 'No agent is addressable yet.';
+    let response;
     try {
-      await fetcher('/api/coordination/message', {
+      response = await fetcher('/api/coordination/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -102,9 +131,20 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
           text,
         }),
       });
-    } catch { /* the next poll shows whether it landed */ }
+    } catch (error) {
+      return error?.message ? `Could not reach the daemon: ${error.message}` : 'Could not reach the daemon.';
+    }
+    if (!response?.ok) {
+      let reason = `The daemon refused the message (${response?.status ?? 'no status'}).`;
+      try {
+        const body = await response.json();
+        if (body?.error) reason = body.error;
+      } catch { /* a refusal without a JSON body still has its status */ }
+      return reason;
+    }
     // Re-read rather than echoing locally: the board decides what was published.
     await refresh();
+    return null;
   };
 
   /** The durable trace reaches back past the board's ring-buffer window. */
@@ -146,12 +186,17 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   }
 
   if (form) {
-    form.addEventListener('submit', (submitEvent) => {
+    form.addEventListener('submit', async (submitEvent) => {
       submitEvent.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      input.value = '';
-      send(text);
+      // The publish queues behind the agents' own board traffic and has been
+      // measured at seconds under load (AGT-4027), so say it is in flight
+      // rather than looking dead — and hold the text until it lands.
+      setComposerStatus('', { pending: true });
+      const failure = await send(text);
+      setComposerStatus(failure ?? '', { pending: false });
+      if (!failure) input.value = '';
     });
   }
 
