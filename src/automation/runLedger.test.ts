@@ -516,6 +516,53 @@ describe('RunLedger claim and fencing races', () => {
     ledger.close();
   });
 
+  it('does not let an agent asking the operator a question close the repository', () => {
+    // A run that stops on `ask_human` has not broken anything — it is waiting on
+    // a human. Counting it as a repository failure means a handful of polite
+    // questions shuts every other task out: measured on vela, six questions and
+    // one real failure opened the circuit at 7/6 and idled the daemon for an
+    // hour, which is the opposite of what a working human-in-the-loop should do.
+    const ledger = new RunLedger(createDbPath());
+    for (const id of ['ASK-1', 'ASK-2', 'ASK-3']) register(ledger, id, '/asking-repo');
+
+    for (const [index, id] of ['ASK-1', 'ASK-2'].entries()) {
+      const held = claim(ledger, id, 'daemon', 2_000 + index, 3);
+      expect(ledger.recordAttemptResult(held, {
+        success: false,
+        finalStatus: 'waiting_on_operator',
+        maxFailuresPerHour: 1,
+        circuitCooldownMs: 60_000,
+      }, 2_100 + index)).toBe(true);
+    }
+
+    expect(ledger.getMetrics(2_200).openCircuits).toBe(0);
+    // And the next task on that repository can still start.
+    expect(ledger.claimRun('ASK-3', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_300,
+      maxActiveForProject: 3, maxFailuresPerHour: 1,
+    })).not.toBeNull();
+    ledger.close();
+  });
+
+  it('still opens the circuit for failures that are the repository\'s own', () => {
+    // The guard is about what a question means, not about disabling the circuit.
+    const ledger = new RunLedger(createDbPath());
+    for (const id of ['REAL-1', 'REAL-2']) register(ledger, id, '/breaking-repo');
+    const held = claim(ledger, 'REAL-1', 'daemon', 2_000, 2);
+    expect(ledger.recordAttemptResult(held, {
+      success: false,
+      finalStatus: 'failed',
+      maxFailuresPerHour: 1,
+      circuitCooldownMs: 60_000,
+    }, 2_100)).toBe(true);
+
+    expect(ledger.claimRun('REAL-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
+      maxActiveForProject: 2, maxFailuresPerHour: 1,
+    })).toBeNull();
+    ledger.close();
+  });
+
   it('preserves remediated attempts while excluding them from the failure circuit', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'FIXED-1', '/fixed-repo');

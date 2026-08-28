@@ -25,6 +25,29 @@ import type {
 } from './runLedgerTypes.js';
 
 export { AUTOMATION_SCHEMA_VERSION, RUN_STATES } from './runLedgerTypes.js';
+
+/**
+ * Outcomes that are not the repository failing, and so must not trip its circuit.
+ *
+ * `waiting_on_operator` is the one that matters most and was missing: an agent
+ * that stops to ask a question has not broken anything, and counting it as a
+ * failure means a run of polite questions closes the whole repository to every
+ * other task — measured on vela, six questions and one real failure opened the
+ * circuit at 7/6 and idled the daemon for an hour. The better the human-in-the-
+ * loop path works, the faster that would happen.
+ *
+ * Kept in one place because the three call sites had already drifted: the
+ * in-memory guard was missing `operator_remediated` that both SQL copies had.
+ */
+export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
+  'cancelled',
+  'superseded',
+  'rate_limited',
+  'publication_reconcile',
+  'operator_remediated',
+  'waiting_on_operator',
+];
+
 export type {
   AttemptResultInput,
   ClaimOptions,
@@ -458,11 +481,8 @@ export class RunLedger {
           FROM automation_attempts a
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ? AND a.success = 0
-            AND COALESCE(a.result_status, '') NOT IN (
-              'cancelled', 'superseded', 'rate_limited', 'publication_reconcile',
-              'operator_remediated'
-            )
-        `).get(row.project_path, hourAgo) as { count: number }).count;
+            AND COALESCE(a.result_status, '') NOT IN (${placeholders(NON_FAILURE_RESULT_STATUSES)})
+        `).get(row.project_path, hourAgo, ...NON_FAILURE_RESULT_STATUSES) as { count: number }).count;
         if (failures >= Math.max(1, options.maxFailuresPerHour)) {
           openCircuit(`failure circuit open: ${failures}/${options.maxFailuresPerHour} in 1h`);
           return null;
@@ -623,7 +643,7 @@ export class RunLedger {
       if (updated.changes !== 1) return false;
 
       const countsAsFailure = !input.success
-        && !['cancelled', 'superseded', 'rate_limited', 'publication_reconcile'].includes(input.finalStatus);
+        && !NON_FAILURE_RESULT_STATUSES.includes(input.finalStatus);
       if (countsAsFailure && input.maxFailuresPerHour != null) {
         const run = this.db.prepare('SELECT project_path FROM automation_runs WHERE issue_id = ?')
           .get(claim.issueId) as { project_path: string };
@@ -632,11 +652,8 @@ export class RunLedger {
           FROM automation_attempts a
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ? AND a.success = 0
-            AND COALESCE(a.result_status, '') NOT IN (
-              'cancelled', 'superseded', 'rate_limited', 'publication_reconcile',
-              'operator_remediated'
-            )
-        `).get(run.project_path, now - 60 * 60_000) as { count: number }).count;
+            AND COALESCE(a.result_status, '') NOT IN (${placeholders(NON_FAILURE_RESULT_STATUSES)})
+        `).get(run.project_path, now - 60 * 60_000, ...NON_FAILURE_RESULT_STATUSES) as { count: number }).count;
         if (failures >= Math.max(1, input.maxFailuresPerHour)) {
           const cooldownMs = Math.max(60_000, input.circuitCooldownMs ?? 60 * 60_000);
           const reason = `failure circuit open: ${failures}/${input.maxFailuresPerHour} in 1h`;
