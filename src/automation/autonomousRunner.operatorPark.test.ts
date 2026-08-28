@@ -84,11 +84,13 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     // the answers behind, and a parked run can never learn that its question was
     // answered. Only the runner knows both, so it is the runner that has to say.
     const { defaultAutomationDbPath } = await import('./automationDbPath.js');
-    const { AutonomousRunner } = await import('./autonomousRunner.js');
+    const { getRunner } = await import('./autonomousRunner.js');
     const configured = join(root, 'relocated', 'automation.db');
     delete process.env.OPENSWARM_AUTOMATION_DB;
 
-    new AutonomousRunner({
+    // Through the factory the process actually uses, which is where the one
+    // automation database a process has is declared.
+    getRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
       autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
       automationLedgerMode: 'off', automationDbPath: configured,

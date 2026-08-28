@@ -22,6 +22,11 @@ let configured: string | null = null;
  *
  * Resolving both through here is what makes that hold by construction, rather
  * than by every new consumer remembering to ask.
+ *
+ * Declared once per process, at the point the process learns its configuration —
+ * a process has one automation database, the same way it has one coordination
+ * board. Callers that build a runner without going through that point (tests)
+ * redirect every store together with `OPENSWARM_AUTOMATION_DB` instead.
  */
 export function setAutomationDbPath(path: string | undefined): void {
   configured = path ? resolve(path) : null;

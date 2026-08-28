@@ -414,9 +414,6 @@ export class AutonomousRunner {
       worktreeMode: config.worktreeMode ?? false,
     });
 
-    // Before anything opens a store: the coordination trace resolves its own
-    // path, and it has to land on the same file as the ledger below.
-    setAutomationDbPath(config.automationDbPath);
     const ledgerMode: RunLedgerMode = config.automationLedgerMode
       ?? (config.dryRun ? 'off' : 'primary');
     this.durableRuns = new DurableRunCoordinator({
@@ -2864,6 +2861,11 @@ export class AutonomousRunner {
 
 export function getRunner(config?: AutonomousConfig): AutonomousRunner {
   if (!runnerInstance && config) {
+    // Declared once, where the process gets its one runner. The coordination
+    // trace resolves its own path and has to land on the ledger's file; saying
+    // so from the constructor instead would let two runners built in one process
+    // redirect each other's archive, which is a shape only a test has.
+    setAutomationDbPath(config.automationDbPath);
     runnerInstance = new AutonomousRunner(config);
   }
   if (!runnerInstance) {
