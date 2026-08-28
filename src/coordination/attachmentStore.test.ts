@@ -56,7 +56,7 @@ describe('attachment storage (AGT-4031)', () => {
 
     // The traversal survives nowhere: not in the path, and not as a directory.
     expect(stored.path.includes('..')).toBe(false);
-    expect(stored.path.startsWith(join(attachmentsRoot(), 'task-2'))).toBe(true);
+    expect(stored.path.startsWith(join(attachmentsRoot(), 'task-2__'))).toBe(true);
     expect(stored.filename).not.toContain('/');
   });
 
@@ -78,7 +78,7 @@ describe('attachment storage (AGT-4031)', () => {
 
     // A half-written file would be worse than the refusal: an agent could read it
     // and act on truncated data, so nothing of it may survive.
-    expect(readdirSync(join(attachmentsRoot(), 't-big'))).toHaveLength(0);
+    expect(readdirSync(attachmentsRoot())).toHaveLength(0);
   });
 
   it('stops reading the request once the cap is exceeded', async () => {
@@ -120,8 +120,7 @@ describe('attachment storage (AGT-4031)', () => {
     // Age a second file rather than sweeping from the future: sweeping forward
     // would expire the fresh one too, and the test would pass while proving
     // nothing about what is kept.
-    mkdirSync(join(attachmentsRoot(), 't-ttl'), { recursive: true });
-    const stale = join(attachmentsRoot(), 't-ttl', 'stale-file.txt');
+    const stale = join(attachmentsRoot(), 't-ttl__stale-file.txt');
     writeFileSync(stale, 'old');
     const longAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
     utimesSync(stale, longAgo, longAgo);
@@ -152,27 +151,25 @@ describe('links planted in the store (AGT-4031)', () => {
     expect(existsSync(precious)).toBe(true);
   });
 
-  it('refuses to write into a task directory that resolves outside the store', async () => {
+  it('keeps every attachment in one directory, with the task as a name prefix', async () => {
     stateAt();
-    // The per-task name is derived from the task id, so it is the level an agent
-    // can aim at. A link there passes an `isDirectory` check on its own — the far
-    // end really is one — so the resolution has to be compared with where the
-    // name says it should be.
-    const outside = join(dir, 'not-the-store');
-    mkdirSync(outside, { recursive: true });
-    mkdirSync(attachmentsRoot(), { recursive: true });
-    symlinkSync(outside, join(attachmentsRoot(), 't-swap'));
+    // A per-task directory would be a second predictable, agent-writable path
+    // component for every read, write and delete to traverse — and a swap there
+    // could aim the sweep's `rm` outside the store. There is nothing to aim at
+    // when the task is part of the name.
+    const first = await storeAttachment(body('a'), { taskId: 'task-a', filename: 'x.txt' });
+    const second = await storeAttachment(body('b'), { taskId: 'task-b', filename: 'y.txt' });
 
-    await expect(storeAttachment(body('payload'), { taskId: 't-swap', filename: 'a.txt' }))
-      .rejects.toThrow(/not a directory/);
-    expect(readdirSync(outside)).toHaveLength(0);
+    expect(readdirSync(attachmentsRoot(), { withFileTypes: true }).every((e) => e.isFile())).toBe(true);
+    expect(relative(attachmentsRoot(), first.path).includes('/')).toBe(false);
+    expect(relative(attachmentsRoot(), second.path).includes('/')).toBe(false);
   });
 
-  it('does not follow a symlinked task directory when sweeping', async () => {
+  it('does not walk a directory planted in the store', async () => {
     stateAt();
     // The store sits in the daemon's state directory, which agents can write to.
-    // A link named like a task id would otherwise hand the TTL sweep somebody
-    // else's tree — and `rm` through a link deletes the file at the far end.
+    // A link to a tree left there would otherwise hand the TTL sweep somebody
+    // else's files — and `rm` through a link deletes the file at the far end.
     const outside = join(dir, 'not-ours');
     mkdirSync(outside, { recursive: true });
     const precious = join(outside, 'source.ts');
@@ -181,22 +178,22 @@ describe('links planted in the store (AGT-4031)', () => {
     utimesSync(precious, longAgo, longAgo);
 
     mkdirSync(attachmentsRoot(), { recursive: true });
-    symlinkSync(outside, join(attachmentsRoot(), 'looks-like-a-task'));
+    symlinkSync(outside, join(attachmentsRoot(), 'looks-like-an-attachment'));
 
     expect(await pruneAttachments()).toBe(0);
     expect(existsSync(precious)).toBe(true);
   });
 
-  it('does not follow a symlinked file inside a task directory', async () => {
+  it('does not follow a symlinked file in the store', async () => {
     stateAt();
     const outside = join(dir, 'elsewhere.txt');
     writeFileSync(outside, 'not an attachment');
     const longAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
     utimesSync(outside, longAgo, longAgo);
 
-    const directory = join(attachmentsRoot(), 't-link');
+    const directory = attachmentsRoot();
     mkdirSync(directory, { recursive: true });
-    symlinkSync(outside, join(directory, 'aged.txt'));
+    symlinkSync(outside, join(directory, 't-link__aged.txt'));
 
     expect(await pruneAttachments()).toBe(0);
     expect(existsSync(outside)).toBe(true);
@@ -214,7 +211,7 @@ describe('total storage budget (AGT-4031)', () => {
 
   it('reclaims the oldest attachments when the store is over budget', async () => {
     stateAt();
-    const directory = join(attachmentsRoot(), 't-budget');
+    const directory = attachmentsRoot();
     mkdirSync(directory, { recursive: true });
     // Seed past the ceiling with three files of descending age.
     process.env.OPENSWARM_ATTACHMENT_TOTAL_BYTES = String(3 * 1024);
@@ -251,7 +248,7 @@ describe('total storage budget (AGT-4031)', () => {
     expect(existsSync(first.path)).toBe(true);
     expect(existsSync(second.path)).toBe(true);
     // And the refused upload leaves nothing of itself behind.
-    expect(readdirSync(join(attachmentsRoot(), 't-burst'))).toHaveLength(2);
+    expect(readdirSync(attachmentsRoot())).toHaveLength(2);
   });
 
   it('never lets the store exceed its ceiling, however fast uploads arrive', async () => {
@@ -268,7 +265,7 @@ describe('total storage budget (AGT-4031)', () => {
         .catch(() => { refused += 1; });
     }
 
-    const root = join(attachmentsRoot(), 't-settle');
+    const root = attachmentsRoot();
     const sizes = readdirSync(root).map((entry) => statSync(join(root, entry)).size);
     expect(sizes.reduce((sum, size) => sum + size, 0)).toBeLessThanOrEqual(maxAttachmentTotalBytes());
     // Four fit and were kept; the rest were told so rather than displacing them.
@@ -354,8 +351,7 @@ describe('total storage budget (AGT-4031)', () => {
       taskId: 't-exempt', filename: 'big-enough.bin',
     })).rejects.toThrow(/storage is full/);
 
-    expect(existsSync(join(attachmentsRoot(), 't-exempt'))).toBe(true);
-    expect(readdirSync(join(attachmentsRoot(), 't-exempt'))).toHaveLength(0);
+    expect(readdirSync(attachmentsRoot())).toHaveLength(0);
   });
 });
 

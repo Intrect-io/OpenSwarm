@@ -147,22 +147,17 @@ export async function storeAttachment(
   req: IncomingMessage,
   input: { taskId: string; filename?: string },
 ): Promise<StoredAttachment> {
-  const root = await realAttachmentsRoot();
-  const directory = join(root, taskSegment(input.taskId));
-  await mkdir(directory, { recursive: true });
-  // Both names here are predictable — the root is a fixed name and the task
-  // directory is derived from the task id — and the state directory is writable
-  // by the agents. `mkdir` with `recursive` succeeds silently when the path is
-  // already a symlink, and the write would then land wherever it points, so
-  // each level is checked with `lstat`, which answers about the link itself.
-  await assertRealDirectory(directory);
+  const directory = await realAttachmentsRoot();
 
   const filename = displayFilename(input.filename);
   const id = randomUUID();
   // The extension is carried so an agent (and the operator's browser) can tell
   // what the file is; the name itself is ours.
   const extension = /\.([A-Za-z0-9]{1,12})$/.exec(filename)?.[1] ?? '';
-  const stored = extension ? `${id}.${extension.toLowerCase()}` : id;
+  // The task is a prefix on the name rather than a directory of its own. A
+  // directory would be a second predictable, agent-writable path component for
+  // every read, write and delete below to traverse — and nothing here needs one.
+  const stored = `${taskSegment(input.taskId)}__${id}${extension ? `.${extension.toLowerCase()}` : ''}`;
   const target = join(directory, stored);
 
   // Reclaim what is eligible and re-measure, before a byte is written. The write
@@ -173,9 +168,9 @@ export async function storeAttachment(
   inFlight.add(target);
   try {
     const attachment = await write(req, target, { id: stored, filename });
-    // The directory was a real directory when we checked; confirm it still is,
-    // so a swap that outlasts the write is caught rather than silently writing
-    // the operator's file somewhere else and reporting success.
+    // The root was a real directory when we checked; confirm it still is, so a
+    // swap that outlasts the write is caught rather than silently writing the
+    // operator's file somewhere else and reporting success.
     try {
       await assertRealDirectory(directory);
     } catch (error) {
@@ -320,15 +315,6 @@ async function assertRealDirectory(directory: string): Promise<void> {
   }
 }
 
-/**
- * Directory entries that are real directories, never links.
- *
- * The store lives in the daemon's state directory, which agents can also write
- * to. A symlink left there would otherwise make the sweep walk into whatever it
- * points at — and `rm` through a link deletes the file at the other end, so a
- * link named like a task id could hand the TTL sweep a repository to clear out.
- * `readdir` with file types answers from the link itself, so it never follows.
- */
 function isRealDirectory(path: string): boolean {
   try {
     return lstatSync(path).isDirectory();
@@ -337,16 +323,14 @@ function isRealDirectory(path: string): boolean {
   }
 }
 
-async function realDirectories(root: string): Promise<string[]> {
-  try {
-    const entries = await readdir(root, { withFileTypes: true });
-    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
-  } catch {
-    return [];
-  }
-}
-
-/** Plain files directly inside one task directory — links and anything else skipped. */
+/**
+ * Plain files directly inside the store — links and anything else skipped.
+ *
+ * `readdir` with file types answers from the entry itself, so a link is never
+ * followed, and every path handed to `rm` below is one level under a directory
+ * checked immediately above. With no per-task directories there is no second
+ * component for a swap to aim at.
+ */
 async function realFiles(directory: string): Promise<string[]> {
   try {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -361,15 +345,12 @@ async function listStored(): Promise<Array<{ path: string; bytes: number; mtimeM
   const root = attachmentsRoot();
   if (!isRealDirectory(root)) return [];
   const files: Array<{ path: string; bytes: number; mtimeMs: number }> = [];
-  for (const taskDir of await realDirectories(root)) {
-    const directory = join(root, taskDir);
-    for (const file of await realFiles(directory)) {
-      try {
-        const info = await lstat(file);
-        files.push({ path: file, bytes: info.size, mtimeMs: info.mtimeMs });
-      } catch {
-        continue; // already gone
-      }
+  for (const file of await realFiles(root)) {
+    try {
+      const info = await lstat(file);
+      files.push({ path: file, bytes: info.size, mtimeMs: info.mtimeMs });
+    } catch {
+      continue; // already gone
     }
   }
   return files.sort((a, b) => a.mtimeMs - b.mtimeMs);
@@ -434,17 +415,15 @@ export async function pruneAttachments(now = Date.now()): Promise<number> {
   const root = attachmentsRoot();
   if (!isRealDirectory(root)) return 0;
   let removed = 0;
-  for (const taskDir of await realDirectories(root)) {
-    for (const file of await realFiles(join(root, taskDir))) {
-      try {
-        const info = await lstat(file);
-        if (now - info.mtimeMs > ATTACHMENT_TTL_MS) {
-          await rm(file, { force: true });
-          removed += 1;
-        }
-      } catch {
-        continue; // already gone
+  for (const file of await realFiles(root)) {
+    try {
+      const info = await lstat(file);
+      if (now - info.mtimeMs > ATTACHMENT_TTL_MS) {
+        await rm(file, { force: true });
+        removed += 1;
       }
+    } catch {
+      continue; // already gone
     }
   }
   return removed + (await enforceTotalBudget(now)).removed;
