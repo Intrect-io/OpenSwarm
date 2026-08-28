@@ -1,14 +1,18 @@
-import { dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CliAdapter } from '../adapters/types.js';
 
 const getAdapter = vi.hoisted(() => vi.fn());
+const getMcpTools = vi.hoisted(() => vi.fn(async () => []));
 
 vi.mock('../adapters/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../adapters/index.js')>();
   return { ...actual, getAdapter };
 });
+
+vi.mock('../mcp/mcpClient.js', () => ({ getMcpTools }));
 
 import { runChatCompletion } from './chatBackend.js';
 
@@ -91,12 +95,16 @@ describe('runChatCompletion CLI fallback', () => {
   });
 
   it('terminates the spawned CLI process when the caller aborts', async () => {
+    const controller = new AbortController();
     let promptPath = '';
+    let runSignal: AbortSignal | undefined;
     getAdapter.mockReturnValue(cliAdapter((options) => {
       promptPath = options.prompt;
+      runSignal = options.signal;
+      expect(runSignal).not.toBe(controller.signal);
+      expect(runSignal?.aborted).toBe(false);
       return { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] };
     }));
-    const controller = new AbortController();
     const startedAt = Date.now();
     const pending = runChatCompletion({
       prompt: 'cancel me',
@@ -108,8 +116,134 @@ describe('runChatCompletion CLI fallback', () => {
     setTimeout(() => controller.abort(), 50);
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(runSignal?.aborted).toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(2000);
     expect(existsSync(promptPath)).toBe(false);
     expect(existsSync(dirname(promptPath))).toBe(false);
+  });
+
+  it('hard-times-out chat command construction that ignores AbortSignal and handles its late rejection', async () => {
+    let promptPath = '';
+    getAdapter.mockReturnValue(cliAdapter((options) => {
+      promptPath = options.prompt;
+      return new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('late chat command failure')), 300);
+      });
+    }));
+
+    const startedAt = Date.now();
+    await expect(runChatCompletion({
+      prompt: 'time out while enumerating MCP',
+      provider: 'codex',
+      timeoutMs: 25,
+    })).rejects.toThrow('Chat response timeout');
+    expect(Date.now() - startedAt).toBeLessThan(150);
+    expect(existsSync(promptPath)).toBe(false);
+    expect(existsSync(dirname(promptPath))).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 325));
+  });
+
+  it('hard-times-out a run adapter that ignores AbortSignal', async () => {
+    getAdapter.mockReturnValue({
+      ...cliAdapter(() => ({ command: 'unused', args: [] })),
+      run: () => new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error('late chat run failure')), 300);
+      }),
+    });
+
+    const startedAt = Date.now();
+    await expect(runChatCompletion({
+      prompt: 'time out an uncooperative run adapter',
+      provider: 'codex',
+      timeoutMs: 25,
+    })).rejects.toThrow('Chat response timeout');
+    expect(Date.now() - startedAt).toBeLessThan(150);
+    await new Promise((resolve) => setTimeout(resolve, 325));
+  });
+
+  it.skipIf(process.platform === 'win32')('terminates descendant processes when the caller aborts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-chat-tree-'));
+    const pidFile = join(root, 'child.pid');
+    const controller = new AbortController();
+    let descendantPid = 0;
+    try {
+      getAdapter.mockReturnValue(cliAdapter(() => ({
+        command: process.execPath,
+        args: [
+          '-e',
+          [
+            "const { spawn } = require('node:child_process')",
+            "const { writeFileSync } = require('node:fs')",
+            "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+            'writeFileSync(process.argv[1], String(child.pid))',
+            'setInterval(() => {}, 1000)',
+          ].join(';'),
+          pidFile,
+        ],
+      })));
+
+      const pending = runChatCompletion({
+        prompt: 'cancel the process tree',
+        provider: 'codex',
+        timeoutMs: 5000,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(existsSync(pidFile)).toBe(true));
+      descendantPid = Number.parseInt(readFileSync(pidFile, 'utf-8'), 10);
+
+      controller.abort();
+
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() => expect(() => process.kill(descendantPid, 0)).toThrow(), { timeout: 1_000 });
+    } finally {
+      if (descendantPid) {
+        try {
+          process.kill(descendantPid, 'SIGKILL');
+        } catch {
+          // Expected: the process group termination already removed it.
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('terminates a detached-stdio descendant after a successful wrapper exit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-chat-exit-tree-'));
+    const pidFile = join(root, 'child.pid');
+    let descendantPid = 0;
+    try {
+      getAdapter.mockReturnValue(cliAdapter(() => ({
+        command: process.execPath,
+        args: [
+          '-e',
+          [
+            "const { spawn } = require('node:child_process')",
+            "const { writeFileSync } = require('node:fs')",
+            "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+            'writeFileSync(process.argv[1], String(child.pid))',
+            'child.unref()',
+            "console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }))",
+          ].join(';'),
+          pidFile,
+        ],
+      })));
+
+      await expect(runChatCompletion({
+        prompt: 'finish and reap the process tree',
+        provider: 'codex',
+        timeoutMs: 5000,
+      })).resolves.toMatchObject({ response: 'done' });
+      descendantPid = Number.parseInt(readFileSync(pidFile, 'utf-8'), 10);
+      await vi.waitFor(() => expect(() => process.kill(descendantPid, 0)).toThrow(), { timeout: 1_000 });
+    } finally {
+      if (descendantPid) {
+        try {
+          process.kill(descendantPid, 'SIGKILL');
+        } catch {
+          // Expected: normal close cleanup already removed the descendant.
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

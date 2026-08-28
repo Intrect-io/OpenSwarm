@@ -5,6 +5,7 @@ import {
   memoryServerLaunch,
   writeClaudeMcpConfig,
   codexMcpConfigFlags,
+  codexMcpConfigArgs,
   MEMORY_MCP_NAME,
 } from './memoryMcp.js';
 
@@ -26,9 +27,16 @@ describe('memoryMcp', () => {
     expect(cfg.mcpServers[MEMORY_MCP_NAME].args[0]).toMatch(/memoryServer\.js$/);
   });
 
-  it('codexMcpConfigFlags emits -c overrides for command and args', () => {
+  it('codexMcpConfigFlags emits -c overrides for command, args, and enabled', () => {
     const flags = codexMcpConfigFlags();
     expect(flags).toContain(`-c 'mcp_servers.${MEMORY_MCP_NAME}.command=`);
     expect(flags).toContain(`-c 'mcp_servers.${MEMORY_MCP_NAME}.args=[`);
+    expect(flags).toContain(`-c 'mcp_servers.${MEMORY_MCP_NAME}.enabled=true'`);
+  });
+
+  it('codexMcpConfigArgs accepts a collision-resistant per-run server name', () => {
+    const args = codexMcpConfigArgs('openswarm_memory_fixture');
+    expect(args.join(' ')).toContain('mcp_servers.openswarm_memory_fixture.command=');
+    expect(args).toContain('mcp_servers.openswarm_memory_fixture.enabled=true');
   });
 });
