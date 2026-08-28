@@ -33,3 +33,30 @@ export function shouldReadmitEarly(input: {
 }): boolean {
   return input.parkedOnOperator && input.allQuestionsAnswered;
 }
+
+/**
+ * Retire the park signal, promote the run, and put the signal back if the
+ * promotion does not happen.
+ *
+ * The order is forced from both sides. Promoting while the signal is still set
+ * lets a run that then fails for its own reasons be pulled forward again on
+ * every heartbeat, past the backoff that exists to stop that. Retiring it and
+ * then failing to promote loses the only record that an early re-admission was
+ * ever permitted, and the answer can never shorten anything again.
+ *
+ * So: retire first, and on a failed promotion restore. If the restore itself
+ * fails the task simply waits out its backoff — the behaviour before any of this
+ * existed, and the safe direction to fail in.
+ */
+export function readmitWithRollback(steps: {
+  retireSignal: () => boolean;
+  promote: () => boolean;
+  restoreSignal: () => void;
+}): boolean {
+  if (!steps.retireSignal()) return false;
+  if (!steps.promote()) {
+    steps.restoreSignal();
+    return false;
+  }
+  return true;
+}

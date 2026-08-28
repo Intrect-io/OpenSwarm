@@ -30,7 +30,7 @@ import {
 } from './runnerState.js';
 import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck } from '../orchestration/decisionEngine.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
-import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
+import { OPERATOR_PARK_REASON, readmitWithRollback, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
@@ -291,13 +291,12 @@ export class AutonomousRunner {
    */
   private readmitAnsweredRun(issueId: string): boolean {
     if (!this.answerArrivedFor(issueId)) return false;
-    // Retire the signal first. If this write fails the task keeps its backoff —
-    // which is only a delay — whereas re-admitting on a signal that is still set
-    // would let a run that then fails for its own reasons be pulled forward
-    // again on every heartbeat, past the backoff that exists to stop exactly
-    // that. The answer is durable, so nothing is lost by waiting.
-    if (!markOperatorPark(issueId, false)) return false;
-    if (!this.durableRuns.markReady(issueId)) return false;
+    const promoted = readmitWithRollback({
+      retireSignal: () => markOperatorPark(issueId, false),
+      promote: () => this.durableRuns.markReady(issueId),
+      restoreSignal: () => { markOperatorPark(issueId, true); },
+    });
+    if (!promoted) return false;
     clearRetryTime(issueId, this.failedTaskRetryTimes);
     return true;
   }
