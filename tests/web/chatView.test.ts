@@ -40,10 +40,10 @@ function boardEvent(over: Record<string, unknown> = {}) {
   };
 }
 
-function fetchWith(history: unknown[], board: unknown[] = []) {
+function fetchWith(history: unknown[], board: unknown[] = [], messageResponse?: unknown) {
   return vi.fn(async (url: string) => {
     if (url.startsWith('/api/coordination/message')) {
-      return { ok: true, json: async () => ({ delivered: true }) };
+      return messageResponse ?? { ok: true, json: async () => ({ delivered: true }) };
     }
     if (url.startsWith('/api/coordination/history')) {
       return { ok: true, json: async () => ({ events: history, traceSize: history.length }) };
@@ -240,5 +240,70 @@ describe('renderLine', () => {
     });
     expect(html).not.toContain('class="tag"');
     expect(html).toContain('boo');
+  });
+});
+
+describe('startChatView composer outcome (AGT-4026)', () => {
+  // `fetch` resolves on 400/409, so a refused send used to look identical to a
+  // delivered one — the operator's text was already gone from the box and
+  // nothing said why. Nine agents were parked awaiting an answer when this was
+  // reported.
+  it('keeps the text and shows the daemon\'s reason when the send is refused', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWith(
+      [boardEvent({ id: 'a', seq: 1 })],
+      [],
+      { ok: false, status: 409, json: async () => ({ error: 'Question is already completed' }) },
+    );
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    input.value = 'Use the masked card master.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(doc.getElementById('composer-status')?.textContent).toBe('Question is already completed');
+    });
+    expect(input.value).toBe('Use the masked card master.');
+    view.stop();
+  });
+
+  it('clears the box only after the daemon accepts', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWith([boardEvent({ id: 'a', seq: 1 })]);
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    input.value = 'Proceed with the mounted credentials.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(input.value).toBe(''));
+    expect(doc.getElementById('composer-status')?.textContent).toBe('');
+    view.stop();
+  });
+
+  it('reports an unreachable daemon instead of swallowing it', async () => {
+    const doc = shell();
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.startsWith('/api/coordination/message')) throw new Error('network down');
+      if (url.startsWith('/api/coordination/history')) {
+        return { ok: true, json: async () => ({ events: [boardEvent({ id: 'a', seq: 1 })], traceSize: 1 }) };
+      }
+      return { ok: true, json: async () => ({ events: [], pending: [], lastSeq: 0 }) };
+    });
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(1));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    input.value = 'anyone there?';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(doc.getElementById('composer-status')?.textContent).toContain('network down');
+    });
+    expect(input.value).toBe('anyone there?');
+    view.stop();
   });
 });

@@ -248,7 +248,7 @@ describe('feed legibility', () => {
 });
 
 describe('clicking a feed row', () => {
-  async function withThread() {
+  async function withThread(messageResponse?: unknown) {
     const doc = shell();
     const events = [
       boardEvent({ id: 'q', seq: 1, summary: 'Retry in adapter or scheduler?' }),
@@ -261,7 +261,7 @@ describe('clicking a feed row', () => {
     ];
     const fetchImpl = vi.fn(async (url: string) => {
       if (typeof url === 'string' && url.startsWith('/api/coordination/message')) {
-        return { ok: true, json: async () => ({ delivered: true }) };
+        return messageResponse ?? { ok: true, json: async () => ({ delivered: true }) };
       }
       return { ok: true, json: async () => ({ events, pending: [], lastSeq: 2 }) };
     });
@@ -336,6 +336,96 @@ describe('clicking a feed row', () => {
       recipient: 'adept-helion-cognitor',
       text: 'Keep it in the scheduler.',
     });
+    view.stop();
+  });
+
+  // `fetch` resolves on 400/409, so a refused reply used to read as delivered
+  // while the operator's text was already gone from the box (AGT-4026).
+  it('keeps the reply and shows why when the daemon refuses it', async () => {
+    const { doc, view } = await withThread({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'Cannot address the message' }),
+    });
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    input.value = 'Use the mounted credentials.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(doc.getElementById('composer-status')?.textContent).toBe('Cannot address the message');
+    });
+    expect(input.value).toBe('Use the mounted credentials.');
+    view.stop();
+  });
+
+  it('clears the reply only once the daemon accepts it', async () => {
+    const { doc, view } = await withThread();
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'Proceed.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    // Re-query rather than holding the node: a send re-renders the panel, and
+    // the pending state is re-applied to the fresh composer — that is the
+    // property that keeps an in-flight send from being undone by an agent
+    // event arriving mid-flight.
+    await vi.waitFor(() => {
+      expect((doc.getElementById('composer-text') as HTMLInputElement).value).toBe('');
+    });
+    expect(doc.getElementById('composer-status')?.textContent).toBe('');
+    view.stop();
+  });
+
+  it('keeps the composer locked and the text intact while a send is in flight', async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { doc, view } = await withThread(
+      gate.then(() => ({ ok: true, json: async () => ({ delivered: true }) })),
+    );
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'Hold for CI.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => {
+      expect(doc.getElementById('composer-status')?.textContent).toBe('Sending…');
+    });
+    const midFlight = doc.getElementById('composer-text') as HTMLInputElement;
+    expect(midFlight.disabled).toBe(true);
+    expect(midFlight.value).toBe('Hold for CI.');
+
+    release(null);
+    await vi.waitFor(() => {
+      expect((doc.getElementById('composer-text') as HTMLInputElement).value).toBe('');
+    });
+    view.stop();
+  });
+
+  it('does not leak a pending send into a different exchange', async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const { doc, view } = await withThread(
+      gate.then(() => ({ ok: false, status: 400, json: async () => ({ error: 'Cannot address the message' }) })),
+    );
+    const rows = doc.querySelectorAll('#feed .ev');
+    (rows[0] as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    (doc.getElementById('composer-text') as HTMLInputElement).value = 'For the first thread only.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(doc.getElementById('composer-status')?.textContent).toBe('Sending…'));
+
+    // The operator moves to another exchange while the first send is in flight.
+    (rows[0] as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    release(null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const other = doc.getElementById('composer-text') as HTMLInputElement | null;
+    if (other) {
+      expect(other.value).not.toBe('For the first thread only.');
+      expect(other.disabled).toBe(false);
+    }
     view.stop();
   });
 });
