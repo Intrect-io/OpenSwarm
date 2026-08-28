@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -10,7 +11,7 @@ import { tryHandleCoordinationRoutes } from './coordinationRoutes.js';
 // so a later suite in this worker never falls back to the real ~/.openswarm store.
 const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
 let dir = '';
-afterEach(() => { resetCoordinationStoreForTests(); process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE; if (dir) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { delete process.env.OPENSWARM_ATTACHMENT_TOTAL_BYTES; resetCoordinationStoreForTests(); process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE; if (dir) rmSync(dir, { recursive: true, force: true }); });
 
 async function call(url: string) {
   let status = 0; let payload = '';
@@ -221,5 +222,67 @@ describe('POST /api/coordination/message', () => {
     await boardAt('events.json');
     const result = await post('/api/coordination/message', { text: '   ' });
     expect(result.status).toBe(400);
+  });
+});
+
+/** Stream a body through the handler the way the HTTP server does. */
+async function upload(url: string, payload: Buffer | string) {
+  let status = 0;
+  let text = '';
+  const response = {
+    writeHead: (code: number) => { status = code; },
+    end: (body: string) => { text = body; },
+  } as unknown as ServerResponse;
+  const parsed = new URL(`http://localhost${url}`);
+  const req = Readable.from([Buffer.from(payload)]) as unknown as IncomingMessage;
+  (req as { method?: string }).method = 'POST';
+  const handled = await tryHandleCoordinationRoutes(req, response, parsed.pathname, parsed);
+  return { handled, status, body: text ? JSON.parse(text) : null };
+}
+
+describe('POST /api/coordination/attachment', () => {
+  function storeAt() {
+    dir = mkdtempSync(join(tmpdir(), 'osw-attach-route-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    resetCoordinationStoreForTests();
+  }
+
+  it('stores the bytes and answers with the path the agent will open', async () => {
+    storeAt();
+    const result = await upload('/api/coordination/attachment?taskId=t1&filename=A2.csv', 'rows\n1,2\n');
+
+    expect(result.status).toBe(201);
+    expect(result.body.filename).toBe('A2.csv');
+    expect(result.body.path).toContain('attachments');
+  });
+
+  it('refuses a file with no task to belong to', async () => {
+    storeAt();
+    const result = await upload('/api/coordination/attachment?filename=orphan.csv', 'x');
+
+    expect(result.status).toBe(400);
+    expect(result.body.error).toMatch(/taskId/);
+  });
+
+  it('answers 507 when the store has no room, so the operator is told why', async () => {
+    storeAt();
+    // 413 would read as "your file is too big"; it is not, the store is full.
+    process.env.OPENSWARM_ATTACHMENT_TOTAL_BYTES = '8';
+    const result = await upload('/api/coordination/attachment?taskId=t2&filename=big.bin', 'more than eight bytes');
+
+    expect(result.status).toBe(507);
+    expect(result.body.error).toMatch(/storage is full/);
+  });
+
+  it('answers 413 when one upload is over the per-file cap', async () => {
+    storeAt();
+    const { MAX_ATTACHMENT_BYTES } = await import('./attachmentStore.js');
+    const result = await upload(
+      '/api/coordination/attachment?taskId=t3&filename=huge.bin',
+      Buffer.alloc(MAX_ATTACHMENT_BYTES + 1024, 0x61),
+    );
+
+    expect(result.status).toBe(413);
+    expect(result.body.error).toMatch(/exceeds/);
   });
 });

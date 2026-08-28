@@ -394,6 +394,20 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log(`[Service] Daily reporter started (schedule: ${config.dailyReporter.schedule || '18:00 daily'})`);
   }
 
+  // Sweep attachments once on the way up as well. The daily job is the only
+  // other caller, so a daemon that is restarted each morning before 2 AM would
+  // otherwise never prune at all, and uploads would accumulate until the volume
+  // filled (AGT-4031). Not awaited: startup does not wait on housekeeping.
+  void (async () => {
+    try {
+      const { pruneAttachments } = await import('../coordination/attachmentStore.js');
+      const removed = await pruneAttachments();
+      if (removed > 0) console.log(`[Service] Removed ${removed} chat attachment(s) on startup`);
+    } catch (error) { // cxt-ignore: error_swallow — housekeeping must not block startup
+      console.warn('[Service] Attachment sweep failed:', error instanceof Error ? error.message : error);
+    }
+  })();
+
   // Memory compaction scheduler (daily at 2 AM)
   console.log('[Service] Scheduling memory compaction (daily at 2 AM)...');
   memoryCompactionJob = Cron('0 2 * * *', async () => {
@@ -402,6 +416,20 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     try {
       // Clean up backup files first
       await cleanupBackupFiles();
+
+      // Operator chat attachments live on the same volume as the daemon's own
+      // state and every worktree, so they cannot accumulate forever — a per
+      // upload cap bounds one file, not the total (AGT-4031).
+      try {
+        const { pruneAttachments } = await import('../coordination/attachmentStore.js');
+        const removed = await pruneAttachments();
+        // Not all of these expired: the sweep also reclaims to stay under the
+        // total ceiling. Calling every removal an expiry would misexplain the
+        // one line an operator reads when an agent reports a missing file.
+        if (removed > 0) console.log(`[Compaction] Removed ${removed} chat attachment(s) (expired or over the storage ceiling)`);
+      } catch (error) { // cxt-ignore: error_swallow — a failed sweep must not abort compaction
+        console.warn('[Compaction] Attachment sweep failed:', error instanceof Error ? error.message : error);
+      }
 
       // Check if compaction is needed
       const needed = await shouldCompact();

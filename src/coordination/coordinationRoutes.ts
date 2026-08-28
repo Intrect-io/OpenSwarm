@@ -62,6 +62,41 @@ export async function tryHandleCoordinationRoutes(
     return true;
   }
 
+  // Operator attachment upload. Deliberately not routed through `readBody`:
+  // that caps a JSON body at 1 MiB and holds it as a string, which is both too
+  // small for a real file and the wrong shape for one. The raw stream goes to
+  // disk with its own cap enforced as bytes arrive (AGT-4031).
+  if (req.method === 'POST' && url === '/api/coordination/attachment') {
+    const taskId = requestUrl.searchParams.get('taskId') ?? '';
+    if (!taskId) {
+      writeJson(res, 400, { error: 'taskId is required so the file lands with the task it belongs to' });
+      return true;
+    }
+    const { storeAttachment } = await import('./attachmentStore.js');
+    try {
+      const stored = await storeAttachment(req, {
+        taskId,
+        filename: requestUrl.searchParams.get('filename') ?? undefined,
+      });
+      writeJson(res, 201, {
+        id: stored.id,
+        filename: stored.filename,
+        bytes: stored.bytes,
+        // The agent opens this directly with the file tools it already has —
+        // no new tool contract, and the operator sees where it landed.
+        path: stored.path,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const status = /exceeds/.test(message) ? 413
+        : /storage is full|ENOSPC/.test(message) ? 507
+          : 400;
+      writeJson(res, status, { error: message });
+    }
+    return true;
+  }
+
+
   // Operator interjection. Two shapes, deliberately one endpoint: replying to a
   // blocking question must unblock the agent that asked, while speaking into
   // any other exchange is an ordinary board message the addressee picks up on

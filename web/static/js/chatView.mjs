@@ -56,8 +56,81 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   const room = doc.getElementById('room');
   const form = doc.getElementById('composer');
   const input = doc.getElementById('composer-text');
-  const button = form?.querySelector('button');
+  const button = form?.querySelector('button[type="submit"]');
+  const fileInput = doc.getElementById('composer-file');
+  const attachButton = doc.getElementById('composer-attach');
+  const fileRow = doc.getElementById('composer-files');
   let sending = false;
+  // Files the operator has staged but not yet sent. Held until the message goes
+  // out so a refused send does not silently discard them (AGT-4026's rule,
+  // applied to attachments).
+  let pendingFiles = [];
+  // Where each staged file landed, once it has. Keyed by the File itself, which
+  // survives a failed send because the staging list does.
+  const uploaded = new Map();
+
+  const renderFiles = () => {
+    if (!fileRow) return;
+    fileRow.innerHTML = '';
+    pendingFiles.forEach((file, index) => {
+      const chip = doc.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = `${file.name} (${Math.max(1, Math.round(file.size / 1024))} KB)`;
+      const drop = doc.createElement('button');
+      drop.type = 'button';
+      drop.textContent = '×';
+      drop.title = `Remove ${file.name}`;
+      drop.addEventListener('click', () => {
+        uploaded.delete(file);
+        pendingFiles = pendingFiles.filter((_, i) => i !== index);
+        renderFiles();
+      });
+      chip.appendChild(drop);
+      fileRow.appendChild(chip);
+    });
+  };
+
+  const stageFiles = (list) => {
+    pendingFiles = [...pendingFiles, ...Array.from(list ?? [])];
+    renderFiles();
+  };
+
+  /**
+   * Upload the staged files and return the lines that tell the agent where they
+   * landed. The daemon writes them under its own state directory and hands back
+   * an absolute path, so the agent opens them with the file tools it already
+   * has — no new tool contract.
+   */
+  const uploadFiles = async (taskId, files) => {
+    const lines = [];
+    for (const file of files) {
+      // A file that already landed keeps its line. Publishing can fail after the
+      // uploads succeed — an unaddressable message, an answer that arrived
+      // first — and re-uploading on the retry would duplicate the bytes; the
+      // orphans then count against the store's ceiling and make the retry more
+      // likely to be refused than the attempt that failed.
+      const landed = uploaded.get(file);
+      if (landed) {
+        lines.push(landed);
+        continue;
+      }
+      const query = `?taskId=${encodeURIComponent(taskId)}&filename=${encodeURIComponent(file.name)}`;
+      const response = await fetcher(`/api/coordination/attachment${query}`, { method: 'POST', body: file });
+      if (!response?.ok) {
+        let reason = `upload failed (${response?.status ?? 'no status'})`;
+        try {
+          const failure = await response.json();
+          if (failure?.error) reason = failure.error;
+        } catch { /* a refusal without a body still has its status */ }
+        throw new Error(`${file.name}: ${reason}`);
+      }
+      const stored = await response.json();
+      const line = `- ${stored.filename} → ${stored.path}`;
+      uploaded.set(file, line);
+      lines.push(line);
+    }
+    return lines;
+  };
 
   // One line under the composer carrying the send's outcome. Created on demand
   // so the shell markup does not have to know about it.
@@ -131,6 +204,23 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     // the agent stays blocked (AGT-4030).
     const question = openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId });
     const exchange = question ?? target;
+
+    // Upload before publishing: the message has to carry paths that already
+    // exist, or the agent reads it and finds nothing there.
+    // Snapshot what is being sent. A publish takes seconds under load
+    // (AGT-4027) and the operator can stage another file meanwhile — clearing
+    // the live list on success would throw that one away unsent.
+    const sendingFiles = [...pendingFiles];
+    let body = text;
+    if (sendingFiles.length > 0) {
+      let attached;
+      try {
+        attached = await uploadFiles(exchange.taskId, sendingFiles);
+      } catch (error) {
+        return error?.message ? `Could not attach: ${error.message}` : 'Could not attach the files.';
+      }
+      body = `${text}\n\nAttached files (read them at these paths):\n${attached.join('\n')}`;
+    }
     let response;
     try {
       response = await fetcher('/api/coordination/message', {
@@ -141,7 +231,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
           recipient: target.actor,
           repository: exchange.repository,
           taskId: exchange.taskId,
-          text,
+          text: body,
         }),
       });
     } catch (error) {
@@ -155,6 +245,10 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       } catch { /* a refusal without a JSON body still has its status */ }
       return reason;
     }
+    // Sent: drop exactly what went out, keeping anything staged since.
+    pendingFiles = pendingFiles.filter((file) => !sendingFiles.includes(file));
+    sendingFiles.forEach((file) => uploaded.delete(file));
+    renderFiles();
     // Re-read rather than echoing locally: the board decides what was published.
     await refresh();
     return null;
@@ -198,11 +292,39 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     };
   }
 
+  if (attachButton && fileInput) {
+    attachButton.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      stageFiles(fileInput.files);
+      fileInput.value = '';
+    });
+  }
+
+  // A drop that misses the room lands on the document, where the browser's
+  // default is to navigate to the file — abandoning the page, the composer text
+  // and every staged file with it. Swallow those before they get that far.
+  const swallowStrayDrop = (event) => event.preventDefault();
+  doc.addEventListener('dragover', swallowStrayDrop);
+  doc.addEventListener('drop', swallowStrayDrop);
+
+  // Drag-and-drop onto the room, the way an operator expects it to work.
+  if (room) {
+    const highlight = (on) => doc.body?.classList.toggle('dropping', on);
+    room.addEventListener('dragover', (dragEvent) => { dragEvent.preventDefault(); highlight(true); });
+    room.addEventListener('dragleave', () => highlight(false));
+    room.addEventListener('drop', (dropEvent) => {
+      dropEvent.preventDefault();
+      highlight(false);
+      stageFiles(dropEvent.dataTransfer?.files);
+    });
+  }
+
   if (form) {
     form.addEventListener('submit', async (submitEvent) => {
       submitEvent.preventDefault();
       const text = input.value.trim();
-      if (!text) return;
+      // A file with no words is still a message worth sending.
+      if (!text && pendingFiles.length === 0) return;
       // The publish queues behind the agents' own board traffic and has been
       // measured at seconds under load (AGT-4027), so say it is in flight
       // rather than looking dead — and hold the text until it lands.
@@ -213,5 +335,13 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     });
   }
 
-  return { redraw, stop: () => { clearInterval(timer); source?.close(); } };
+  return {
+    redraw,
+    stop: () => {
+      clearInterval(timer);
+      source?.close();
+      doc.removeEventListener('dragover', swallowStrayDrop);
+      doc.removeEventListener('drop', swallowStrayDrop);
+    },
+  };
 }
