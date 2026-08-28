@@ -61,7 +61,15 @@ const RepoMetadataSchema = z.object({
     maxConcurrent: z.number().int().min(1).max(10).default(1),
     /** Rolling attempt budget. */
     maxAttemptsPerHour: z.number().int().min(1).max(100).default(12),
-    /** Rolling unsuccessful-attempt circuit breaker threshold. */
+    /**
+     * Rolling circuit breaker threshold: how many attempts in the last hour may
+     * end unsuccessfully before this repository is taken out of admission until
+     * `circuitCooldownMinutes` passes. "Unsuccessfully" excludes outcomes that
+     * are not the repository failing — `waiting_on_operator`, `cancelled`,
+     * `rate_limited`, and (as of AGT-4038) an `infra_error` caused by an
+     * adapter timeout, tooling failure, or network blip rather than the
+     * repository itself (disk full, a stale `.git` lock, a corrupt repo).
+     */
     maxFailuresPerHour: z.number().int().min(1).max(100).default(6),
     /** Optional daily model-cost ceiling. */
     maxCostUsdPerDay: z.number().positive().optional(),

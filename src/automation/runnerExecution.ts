@@ -878,6 +878,12 @@ export async function executePipeline(
         iterations: 0,
         totalDuration: 0,
         finalStatus: 'infra_error',
+        // The repository circuit exists for exactly this: disk full, a stale
+        // `.git` lock, a corrupt repo. `!worktreeInfo` means `createWorktree`
+        // itself is what threw, not something after it (e.g. the durable
+        // attach fence, which can throw for reasons — ledger contention — that
+        // have nothing to do with this repository's own health) (AGT-4038).
+        repositoryInfra: !worktreeInfo,
         stages: [],
       };
     }

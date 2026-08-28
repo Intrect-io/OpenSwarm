@@ -772,17 +772,17 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(preserveWorktree).not.toHaveBeenCalled();
     });
 
-    it('returns infra_error without ever constructing the pipeline when worktree creation fails', async () => {
+    it('returns a repository-scoped infra_error without ever constructing the pipeline when worktree creation fails (AGT-4038)', async () => {
       createWorktree.mockRejectedValue(new Error('git worktree add: disk full'));
 
       const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
 
-      expect(result.finalStatus).toBe('infra_error');
-      expect(result.success).toBe(false);
+      expect(result).toMatchObject({ finalStatus: 'infra_error', success: false });
+      expect(result.repositoryInfra).toBe(true); // disk full is the repo's own fault
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
     });
 
-    it('preserves an acquired worktree when durable attachment throws during setup', async () => {
+    it('preserves an acquired worktree when durable attachment throws during setup, without blaming the repository (AGT-4038)', async () => {
       createWorktree.mockResolvedValue(worktreeInfoFixture());
       const durability = {
         onWorktree: vi.fn(async () => { throw new Error('sqlite busy'); }),
@@ -794,6 +794,7 @@ describe('runnerExecution.ts coverage extension', () => {
       const result = await executePipeline(makeCtx({ worktreeMode: true, durability }), task(), '/repo');
 
       expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
+      expect(result.repositoryInfra).toBeFalsy(); // ledger contention, not the repo's git state
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
       expect(preserveWorktree).toHaveBeenCalledWith(
         expect.objectContaining({ issueId: 'issue-1' }),

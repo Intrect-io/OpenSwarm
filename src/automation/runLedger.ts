@@ -475,6 +475,7 @@ export class RunLedger {
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ? AND a.success = 0
             AND COALESCE(a.result_status, '') NOT IN (${placeholders(NON_FAILURE_RESULT_STATUSES)})
+            AND (a.result_status != 'infra_error' OR a.repository_infra = 1)
         `).get(row.project_path, hourAgo, ...NON_FAILURE_RESULT_STATUSES) as { count: number }).count;
         if (failures >= Math.max(1, options.maxFailuresPerHour)) {
           openCircuit(`failure circuit open: ${failures}/${options.maxFailuresPerHour} in 1h`);
@@ -611,7 +612,7 @@ export class RunLedger {
     const record = this.db.transaction(() => {
       const updated = this.db.prepare(`
         UPDATE automation_attempts
-        SET result_status = ?, success = ?, cost_usd = ?, result_json = ?
+        SET result_status = ?, success = ?, cost_usd = ?, result_json = ?, repository_infra = ?
         WHERE issue_id = ? AND attempt_no = ? AND lease_epoch = ?
           AND result_status IS NULL
           AND EXISTS (
@@ -625,6 +626,7 @@ export class RunLedger {
         input.success ? 1 : 0,
         input.costUsd ?? null,
         stringifyJson(input.result),
+        input.repositoryInfra ? 1 : 0,
         claim.issueId,
         claim.attemptNo,
         claim.leaseEpoch,
@@ -635,8 +637,8 @@ export class RunLedger {
       );
       if (updated.changes !== 1) return false;
 
-      const countsAsFailure = !input.success
-        && !NON_FAILURE_RESULT_STATUSES.includes(input.finalStatus);
+      const countsAsFailure = !input.success && !NON_FAILURE_RESULT_STATUSES.includes(input.finalStatus)
+        && (input.finalStatus !== 'infra_error' || input.repositoryInfra === true);
       if (countsAsFailure && input.maxFailuresPerHour != null) {
         const run = this.db.prepare('SELECT project_path FROM automation_runs WHERE issue_id = ?')
           .get(claim.issueId) as { project_path: string };
@@ -646,6 +648,7 @@ export class RunLedger {
           JOIN automation_runs r ON r.issue_id = a.issue_id
           WHERE r.project_path = ? AND a.started_at >= ? AND a.success = 0
             AND COALESCE(a.result_status, '') NOT IN (${placeholders(NON_FAILURE_RESULT_STATUSES)})
+            AND (a.result_status != 'infra_error' OR a.repository_infra = 1)
         `).get(run.project_path, now - 60 * 60_000, ...NON_FAILURE_RESULT_STATUSES) as { count: number }).count;
         if (failures >= Math.max(1, input.maxFailuresPerHour)) {
           const cooldownMs = Math.max(60_000, input.circuitCooldownMs ?? 60 * 60_000);
