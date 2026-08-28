@@ -774,12 +774,17 @@ describe('runnerExecution.ts coverage extension', () => {
 
     it('returns a repository-scoped infra_error without ever constructing the pipeline when worktree creation fails (AGT-4038)', async () => {
       createWorktree.mockRejectedValue(new Error('git worktree add: disk full'));
-
       const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
-
       expect(result).toMatchObject({ finalStatus: 'infra_error', success: false });
       expect(result.repositoryInfra).toBe(true); // disk full is the repo's own fault
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
+    });
+
+    it('does not blame the repository when a preserved worktree just needs reconciliation (AGT-4038)', async () => {
+      createWorktree.mockRejectedValue(new Error('Preserved worktree requires reconciliation (valid=false, branch=main): /wt'));
+      const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
+      expect(result).toMatchObject({ finalStatus: 'infra_error', success: false });
+      expect(result.repositoryInfra).toBeFalsy(); // stale bookkeeping, not disk/git health
     });
 
     it('preserves an acquired worktree when durable attachment throws during setup, without blaming the repository (AGT-4038)', async () => {
@@ -790,16 +795,11 @@ describe('runnerExecution.ts coverage extension', () => {
         beforePublish: vi.fn(async () => true),
         onPublication: vi.fn(async () => true),
       };
-
       const result = await executePipeline(makeCtx({ worktreeMode: true, durability }), task(), '/repo');
-
       expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
       expect(result.repositoryInfra).toBeFalsy(); // ledger contention, not the repo's git state
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
-      expect(preserveWorktree).toHaveBeenCalledWith(
-        expect.objectContaining({ issueId: 'issue-1' }),
-        'worktree setup or durable attachment failed',
-      );
+      expect(preserveWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-1' }), 'worktree setup or durable attachment failed');
       expect(removeWorktree).not.toHaveBeenCalled();
     });
 

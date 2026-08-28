@@ -872,18 +872,23 @@ export async function executePipeline(
         await preserveWorktree(worktreeInfo, 'worktree setup or durable attachment failed')
           .catch((cleanupError) => console.warn('[Worktree] Setup cleanup failed:', cleanupError));
       }
+      // `createWorktree` itself is internally multi-step, and only some of its
+      // throws are the repository's own fault. "requires reconciliation" means
+      // a preserved or crash-recovered worktree's local state is stale or on
+      // the wrong branch — a coordination/bookkeeping problem this daemon can
+      // resolve on its own reconciliation pass, not disk full, a stale `.git`
+      // lock, or a corrupt repo. `linkSharedPaths`/`ensureLfsSmudged` are
+      // self-contained best-effort (never throw), so what remains — the `git
+      // worktree add` call itself, and the active-marker file write — are
+      // genuine repo/filesystem failures (AGT-4038).
+      const needsReconciliation = err instanceof Error && /requires reconciliation/.test(err.message);
       return {
         success: false,
         sessionId: `worktree-fail-${Date.now()}`,
         iterations: 0,
         totalDuration: 0,
         finalStatus: 'infra_error',
-        // The repository circuit exists for exactly this: disk full, a stale
-        // `.git` lock, a corrupt repo. `!worktreeInfo` means `createWorktree`
-        // itself is what threw, not something after it (e.g. the durable
-        // attach fence, which can throw for reasons — ledger contention — that
-        // have nothing to do with this repository's own health) (AGT-4038).
-        repositoryInfra: !worktreeInfo,
+        repositoryInfra: !worktreeInfo && !needsReconciliation,
         stages: [],
       };
     }
