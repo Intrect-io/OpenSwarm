@@ -107,6 +107,38 @@ describe('RunLedger state machine', () => {
   });
 });
 
+describe('RunLedger operator re-admission (AGT-4033)', () => {
+  it('will not claim a run whose retry time has not come', () => {
+    // This is why letting an answered task past the heartbeat filter is not
+    // enough on its own: it would be selected every cycle and then fail to claim.
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'AGT-1');
+    ledger.deferUnclaimedRun('AGT-1', 5_000, 'parked on the operator', 1_000);
+
+    expect(ledger.claimRun('AGT-1', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, maxActiveForProject: 1, now: 2_000,
+    })).toBeNull();
+
+    ledger.close();
+  });
+
+  it('claims it once the answer brings it forward', () => {
+    // `markReady` is the transition the runner uses when the board shows the
+    // operator replied — the backoff was only ever a poll for that reply.
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'AGT-2');
+    ledger.deferUnclaimedRun('AGT-2', 5_000, 'parked on the operator', 1_000);
+
+    expect(ledger.markReady('AGT-2', 2_000)).toBe(true);
+    expect(ledger.getRun('AGT-2')?.state).toBe('READY');
+    expect(ledger.claimRun('AGT-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, maxActiveForProject: 1, now: 2_000,
+    })).not.toBeNull();
+
+    ledger.close();
+  });
+});
+
 describe('RunLedger claim and fencing races', () => {
   it('allows exactly one winner when two daemon connections claim one issue', async () => {
     const dbPath = createDbPath();

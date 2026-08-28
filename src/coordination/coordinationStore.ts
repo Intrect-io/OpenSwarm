@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { coordinationFilePath, coordinationStateDir } from './coordinationPaths.js';
-import { recordTraceEvent } from './coordinationTrace.js';
+import { recordTraceEvent, queryTrace, questionStandings } from './coordinationTrace.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -270,9 +270,44 @@ export class CoordinationStore {
    * operator answering an old question must not be told it does not exist just
    * because the board has been busy since it was asked.
    */
+  /**
+   * Whether every question this task has asked now has an answer.
+   *
+   * Asked of the durable store, which counts rather than fetches, so no window
+   * can hide an older unanswered question and make a still-blocked run look
+   * ready. When that store is unavailable the answer is no: the in-memory board
+   * is a ring and would give exactly the false "all answered" this exists to
+   * prevent. Saying no costs a task its early re-admission and it waits out the
+   * backoff — which is what happened before any of this existed.
+   */
+  allQuestionsAnswered(taskId: string): boolean {
+    const standings = questionStandings(taskId);
+    if (!standings) return false;
+    return standings.asked > 0 && standings.unanswered === 0;
+  }
+
+  /**
+   * One exchange, whole, from both the durable trace and the board.
+   *
+   * Scoped by correlation id rather than task: an exchange is a question and its
+   * answer, so nothing else on a busy task can push either out of view.
+   */
+  exchange(correlationId: string): CoordinationEvent[] {
+    const merged = new Map<string, CoordinationEvent>();
+    for (const event of queryTrace({ correlationId, limit: 1_000 })) merged.set(event.id, event);
+    for (const event of this.load().events) {
+      if (event.correlationId === correlationId) merged.set(event.id, event);
+    }
+    return [...merged.values()].sort((a, b) => a.seq - b.seq);
+  }
+
   findQuestion(correlationId: string): CoordinationEvent | undefined {
-    return this.load().events.find((event) =>
-      event.correlationId === correlationId && event.kind === 'human-question' && event.status === 'waiting');
+    // The exchange, not the board: a question that has been pushed out of the
+    // ring is still a question someone is parked on, and resolving it only from
+    // memory means the operator is told their pending question does not exist —
+    // on exactly the busy tasks that produce the most of them.
+    return this.exchange(correlationId).find((event) =>
+      event.kind === 'human-question' && event.status === 'waiting');
   }
 
   /**

@@ -51,6 +51,24 @@ describe('task state store', () => {
     resetTaskStateStoreForTests();
   });
 
+  it('keeps an operator park across a reload, and clears it again (AGT-4033)', () => {
+    // The operator's answer is durable — it lives on the coordination board — so
+    // the flag that says a backoff may be cut short has to be durable too, or a
+    // restart is the one thing that turns a two-minute reply back into a
+    // two-hour one.
+    upsertTaskState('AGT-1', { execution: { status: 'in_progress', retryCount: 0 } });
+    upsertTaskState('AGT-1', { execution: { blockedReason: 'waiting_on_operator' } });
+
+    resetTaskStateStoreForTests();
+    expect(getTaskState('AGT-1')?.execution.blockedReason).toBe('waiting_on_operator');
+    // Merged, not replaced: the park must not cost the task its execution status.
+    expect(getTaskState('AGT-1')?.execution.status).toBe('in_progress');
+
+    upsertTaskState('AGT-1', { execution: { blockedReason: undefined } });
+    resetTaskStateStoreForTests();
+    expect(getTaskState('AGT-1')?.execution.blockedReason).toBeUndefined();
+  });
+
   afterEach(() => {
     resetTaskStateStoreForTests();
     if (existsSync(stateFile)) {
