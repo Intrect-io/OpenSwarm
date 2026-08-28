@@ -31,6 +31,8 @@ export const CONFIDENCE_THRESHOLDS = {
 export interface WorkerResult {
   success: boolean;
   summary: string;
+  /** Display name the agent chose for itself (AGT-4019). */
+  codename?: string;
   filesChanged: string[];
   commands: string[];
   output: string;
@@ -78,6 +80,8 @@ export interface RecommendedAction {
 export interface ReviewResult {
   decision: ReviewDecision;
   feedback: string;
+  /** Display name the agent chose for itself (AGT-4019). */
+  codename?: string;
   issues?: string[];
   suggestions?: string[];
   costInfo?: CostInfo;

@@ -35,7 +35,7 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'coordination_publish',
-      description: 'Publish an advice request/response or delegation request/result to another OpenSwarm agent. Address it by call sign (for example "Magos Corvax-Vigilis"). Use a correlation_id to continue an existing exchange.',
+      description: 'Publish an advice request/response or delegation request/result to another OpenSwarm agent. Address it by call sign (the name the agent goes by on the board). Use a correlation_id to continue an existing exchange.',
       parameters: {
         type: 'object',
         properties: {

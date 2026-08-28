@@ -47,6 +47,8 @@ body {
   cursor: pointer;
 }
 .nav-item:hover { background: var(--surface2); color: var(--text); }
+/* Sibling pages (orchestration, chat room) link from the same nav as views. */
+a.nav-item { display: block; text-decoration: none; }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); }
 .nav-item:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 

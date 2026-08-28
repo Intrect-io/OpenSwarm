@@ -466,6 +466,18 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       }
     }
 
+    // The agent introduces itself with a `Codename:` line (AGT-4019); the name
+    // is its display identity on the coordination board.
+    const codenameMatch = (parsedResult.output || '').match(/^\s*Codename:\s*(.{1,60}?)\s*$/mi);
+    if (codenameMatch) {
+      // A structured (JSON) codename wins over the plain-text introduction line.
+      parsedResult.codename = parsedResult.codename ?? codenameMatch[1];
+      // The introduction line is the agent's name, not part of what it said.
+      if (parsedResult.summary) {
+        parsedResult.summary = parsedResult.summary.replace(/^\s*Codename:.*$/mi, '').trim() || parsedResult.summary;
+      }
+    }
+
     return parsedResult;
   };
 

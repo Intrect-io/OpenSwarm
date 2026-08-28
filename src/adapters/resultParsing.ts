@@ -31,6 +31,11 @@ function extractWorkerResultJson(text: string): WorkerResult | null {
         typeof parsed.confidencePercent === 'number' ? parsed.confidencePercent : undefined,
       haltReason: parsed.haltReason || undefined,
       noChangesReason: typeof parsed.noChangesReason === 'string' ? parsed.noChangesReason : undefined,
+      // Structured completions carry the agent's chosen display name here; the
+      // plain-text path picks it up from a `Codename:` line instead (AGT-4019).
+      codename: typeof parsed.codename === 'string' && parsed.codename.trim()
+        ? parsed.codename.trim().slice(0, 40)
+        : undefined,
     };
   } catch {
     return null;
@@ -76,6 +81,9 @@ function extractReviewerResultJson(text: string): ReviewResult | null {
         ? parsed.suggestions.filter((v: unknown): v is string => typeof v === 'string')
         : [],
       recommendedActions: parseRecommendedActions(parsed.recommendedActions),
+      ...(typeof parsed.codename === 'string' && parsed.codename.trim()
+        ? { codename: parsed.codename.trim().slice(0, 40) }
+        : {}),
     };
   } catch {
     return null;

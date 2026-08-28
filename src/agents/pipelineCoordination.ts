@@ -6,7 +6,7 @@
 // so the pipeline keeps to its own job and stays under the module size cap.
 
 import type { PipelineContext } from './pairPipelineTypes.js';
-import { assignCallSign, type AgentRole } from '../coordination/agentNames.js';
+import { assignCallSign, callSignAddress, sanitizeAgentDisplayName, type AgentRole } from '../coordination/agentNames.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
 
 /**
@@ -19,15 +19,94 @@ import { taskEventKey } from '../orchestration/decisionEngine.js';
  */
 const BOARD_STAGES: ReadonlySet<string> = new Set(['worker', 'reviewer']);
 
-/** Stable per-attempt id so a stage's start and result join into one exchange. */
-export function stageCorrelationId(context: PipelineContext, stage: string): string {
-  return `stage:${context.session.id}:${stage}:${context.currentIteration}`;
+/** Stable per-attempt id so a stage's start and result join into one exchange.
+ * Capture it at stage START and reuse it for the terminal publish: the
+ * iteration counter moves before fire-and-forget publishes run, so recomputing
+ * at result time joined the result to the NEXT exchange (AGT-4018). */
+export function stageCorrelationId(
+  context: PipelineContext,
+  stage: string,
+  iteration: number = context.currentIteration,
+): string {
+  return `stage:${context.session.id}:${stage}:${iteration}`;
 }
+
+// Names the agents chose for themselves, keyed per (repository, task, role).
+// The first choice sticks for the run; collisions get a numeric suffix so two
+// live agents never answer to one name. Bounded so a long-lived daemon does
+// not grow it forever.
+interface ChosenAgentName { name: string; address: string }
+const chosenAgentNames = new Map<string, ChosenAgentName>();
+const CHOSEN_NAME_CAP = 500;
+
+// The address shapes assignCallSign can produce (`worker-3f2a`, 8-hex final
+// fallback). Self-chosen names must stay out of this namespace, or a codename
+// could capture the mailbox of a live agent the registry cannot see.
+const RESERVED_FALLBACK_ADDRESS = /^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/;
+
+function chosenNameKey(context: PipelineContext, role: AgentRole): string {
+  // Session id scopes the entry to one pipeline run: a retry hours later is a
+  // fresh agent and gets to introduce itself again instead of inheriting the
+  // name a previous attempt chose.
+  return `${context.projectPath}\0${taskEventKey(context.task)}\0${context.session.id}\0${role}`;
+}
+
+/**
+ * Register the display name an agent picked for itself ("codename" in its
+ * structured output). Returns the effective name, or null when the raw value
+ * sanitizes to nothing. Markup and newlines are stripped so a name cannot
+ * smuggle formatting into the board or Linear comments.
+ */
+export function registerChosenAgentName(
+  context: PipelineContext,
+  role: AgentRole,
+  rawName: string | undefined,
+): string | null {
+  const cleaned = sanitizeAgentDisplayName(rawName);
+  if (!cleaned) return null;
+  const key = chosenNameKey(context, role);
+  const existing = chosenAgentNames.get(key);
+  if (existing) return existing.name;
+  // The display name is free-form (any language), but the mailbox address must
+  // stay routable. Two cases:
+  //  - The name has a routable form: suffix the display name until its address
+  //    is free. Agents that have not introduced themselves still answer at
+  //    their deterministic fallback address and are invisible to this
+  //    registry, so the entire `role-hex` fallback namespace is reserved — a
+  //    chosen name may never claim an address of that shape.
+  //  - The name normalizes to an empty address (fully non-ASCII): keep the
+  //    display name and take a deterministic identity address instead,
+  //    advancing assignCallSign's salt past occupied addresses so two live
+  //    agents never share a mailbox.
+  const takenAddresses = new Set([...chosenAgentNames.values()].map((v) => v.address));
+  let candidate = cleaned;
+  let address = callSignAddress(candidate);
+  if (address) {
+    for (let n = 2; takenAddresses.has(address) || RESERVED_FALLBACK_ADDRESS.test(address); n += 1) {
+      candidate = `${cleaned} ${n}`;
+      address = callSignAddress(candidate);
+    }
+  } else {
+    address = assignCallSign({
+      repository: context.projectPath,
+      executionId: taskEventKey(context.task),
+      role,
+    }, takenAddresses).address;
+  }
+  if (chosenAgentNames.size >= CHOSEN_NAME_CAP) {
+    const oldest = chosenAgentNames.keys().next().value;
+    if (oldest !== undefined) chosenAgentNames.delete(oldest);
+  }
+  chosenAgentNames.set(key, { name: candidate, address });
+  return candidate;
+}
+
 
 /** The board identity an agent publishes under, shared with its MCP tools. */
 export function coordinationContextFor(context: PipelineContext, role: AgentRole) {
   const taskId = taskEventKey(context.task);
-  const callSign = assignCallSign({ repository: context.projectPath, executionId: taskId, role });
+  const chosen = chosenAgentNames.get(chosenNameKey(context, role));
+  const callSign = chosen ?? assignCallSign({ repository: context.projectPath, executionId: taskId, role });
   return {
     repository: context.projectPath,
     taskId,
@@ -49,9 +128,10 @@ export function publishStageFailureToBoard(
   stage: string,
   durationMs: number,
   error: unknown,
+  correlationId?: string,
 ): void {
   const detail = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-  void publishStageToBoard(context, stage, 'failed', `Failed in ${(durationMs / 1000).toFixed(1)}s: ${detail}`);
+  void publishStageToBoard(context, stage, 'failed', `Failed in ${(durationMs / 1000).toFixed(1)}s: ${detail}`, { correlationId });
 }
 
 // Call sites publish fire-and-forget, and each publish awaits a dynamic import
@@ -68,17 +148,69 @@ const exchangeQueues = new Map<string, Promise<void>>();
  * Best-effort by design: the board is an observation surface, and a failure to
  * record must never fail the stage it describes.
  */
+/**
+ * Publish a finished stage as the agent's own words, addressed to its
+ * counterpart. Registers the codename the agent introduced itself with
+ * (first introduction wins), then speaks its summary/feedback instead of a
+ * timing stub — timing stays as the fallback when the agent said nothing.
+ */
+export function publishStageOutcomeToBoard(
+  context: PipelineContext,
+  stage: string,
+  outcome: { success: boolean; durationMs: number; result: unknown },
+  exchangeId: string,
+): void {
+  const spoken = outcome.result as {
+    codename?: string; summary?: string; feedback?: string; decision?: string;
+    costInfo?: { model?: string; inputTokens?: number; outputTokens?: number; costUsd?: number };
+  };
+  if ((stage === 'worker' || stage === 'reviewer') && spoken?.codename) {
+    registerChosenAgentName(context, stage, spoken.codename);
+  }
+  const said = stage === 'reviewer'
+    ? [spoken?.decision ? `[${spoken.decision}]` : undefined, spoken?.feedback?.trim()].filter(Boolean).join(' ')
+    : spoken?.summary?.trim();
+  const seconds = (outcome.durationMs / 1000).toFixed(1);
+  void publishStageToBoard(
+    context,
+    stage,
+    outcome.success ? 'completed' : 'failed',
+    said || (outcome.success ? `Finished in ${seconds}s` : `Did not pass in ${seconds}s`),
+    {
+      correlationId: exchangeId,
+      durationMs: outcome.durationMs,
+      detail: said && said.length > 300 ? said : undefined,
+      recipientRole: stage === 'reviewer' ? 'worker' : (stage === 'worker' ? 'reviewer' : undefined),
+      model: spoken?.costInfo?.model,
+      usage: spoken?.costInfo,
+    },
+  );
+}
+
+export interface StagePublishOptions {
+  model?: string;
+  /** Token/cost usage of the utterance, surfaced as board metadata chips. */
+  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
+  /** Full text of what the agent said (feedback, summary) when longer than the summary line. */
+  detail?: string;
+  /** Who the agent is talking to — worker results address the reviewer and vice versa. */
+  recipientRole?: AgentRole;
+  /** Exchange id captured at stage start; recomputing after the iteration counter moved joins the wrong exchange (AGT-4018). */
+  correlationId?: string;
+  durationMs?: number;
+}
+
 export function publishStageToBoard(
   context: PipelineContext,
   stage: string,
   status: 'running' | 'completed' | 'failed',
   summary: string,
-  model?: string,
+  options: StagePublishOptions = {},
 ): Promise<void> {
   if (!BOARD_STAGES.has(stage)) return Promise.resolve();
-  const key = stageCorrelationId(context, stage);
+  const key = options.correlationId ?? stageCorrelationId(context, stage);
   const chained = (exchangeQueues.get(key) ?? Promise.resolve())
-    .then(() => publishStageEvent(context, stage, status, summary, model));
+    .then(() => publishStageEvent(context, stage, status, summary, key, options));
   exchangeQueues.set(key, chained);
   void chained.finally(() => {
     if (exchangeQueues.get(key) === chained) exchangeQueues.delete(key);
@@ -91,20 +223,39 @@ async function publishStageEvent(
   stage: string,
   status: 'running' | 'completed' | 'failed',
   summary: string,
-  model?: string,
+  correlationId: string,
+  options: StagePublishOptions,
 ): Promise<void> {
   try {
     const actor = coordinationContextFor(context, stage as AgentRole);
+    const recipient = options.recipientRole
+      ? coordinationContextFor(context, options.recipientRole)
+      : undefined;
     const { publishCoordination } = await import('../coordination/runCoordination.js');
     await publishCoordination({
       ...actor,
+      ...(recipient ? {
+        recipient: recipient.actor,
+        recipientName: recipient.actorName,
+        recipientRole: recipient.actorRole,
+      } : {}),
       // The daemon delegates the stage and the agent reports back, which is
       // exactly what these two kinds mean elsewhere on the board.
       kind: status === 'running' ? 'delegation-request' : 'delegation-result',
       status,
-      correlationId: stageCorrelationId(context, stage),
-      summary: `${stage}: ${summary}`,
-      metadata: model ? { model, iteration: context.currentIteration } : { iteration: context.currentIteration },
+      correlationId,
+      // The agent's own words are the summary; role/name fields carry the
+      // speaker, so no `worker:` prefix is prepended any more.
+      summary: summary.slice(0, 300),
+      detail: options.detail?.slice(0, 4_000),
+      metadata: {
+        iteration: context.currentIteration,
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.durationMs !== undefined ? { durationMs: options.durationMs } : {}),
+        ...(options.usage?.inputTokens !== undefined ? { inputTokens: options.usage.inputTokens } : {}),
+        ...(options.usage?.outputTokens !== undefined ? { outputTokens: options.usage.outputTokens } : {}),
+        ...(options.usage?.costUsd !== undefined ? { costUsd: options.usage.costUsd } : {}),
+      },
     });
   } catch {
     // Observation only — never let it break the run.

@@ -5,7 +5,8 @@
 import { LinearClient } from '@linear/sdk';
 import { createHash } from 'node:crypto';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
-import { formatAutomationComment, type CommentSection } from './format.js';
+import { formatAutomationComment, formatPairDialogue, type CommentSection } from './format.js';
+import type { PairCompleteStats } from '../automation/taskSource.js';
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
 import { c, status } from '../support/colors.js';
@@ -1220,40 +1221,13 @@ export async function logPairRevision(
 export async function logPairComplete(
   issueId: string,
   sessionId: string,
-  stats: {
-    attempts: number;
-    duration: number;
-    filesChanged: string[];
-    workerSummary?: string;
-    workerCommands?: string[];
-    reviewerFeedback?: string;
-    reviewerDecision?: string;
-    testResults?: {
-      passed: number;
-      failed: number;
-      coverage?: number;
-      failedTests?: string[];
-    };
-    remainingWork?: string;
-    idempotencyMarker?: string;
-  }
+  stats: PairCompleteStats
 ): Promise<void> {
   const durationStr = stats.duration < 60
     ? `${stats.duration}s`
     : `${Math.floor(stats.duration / 60)}m ${stats.duration % 60}s`;
 
   const sections: CommentSection[] = [];
-
-  if (stats.workerCommands && stats.workerCommands.length > 0) {
-    sections.push({ label: 'Commands run', body: stats.workerCommands.slice(0, 5).map((c) => `\`${c}\``) });
-  }
-
-  if (stats.reviewerFeedback) {
-    sections.push({
-      label: `Reviewer — ${stats.reviewerDecision || 'APPROVE'}`,
-      body: stats.reviewerFeedback.trim(),
-    });
-  }
 
   if (stats.testResults) {
     const { passed, failed, coverage, failedTests } = stats.testResults;
@@ -1279,9 +1253,14 @@ export async function logPairComplete(
       : ['(none)'],
   });
 
+  if (stats.workerCommands && stats.workerCommands.length > 0) {
+    sections.push({ label: 'Commands run', body: stats.workerCommands.slice(0, 3).map((c) => `\`${c}\``) });
+  }
+
   const comment = formatAutomationComment({
     heading: 'Task complete',
-    summary: stats.workerSummary?.trim() || undefined,
+    // The exchange itself, as a conversation between named agents (AGT-4019).
+    summary: formatPairDialogue(stats) ?? stats.workerSummary?.trim() ?? undefined,
     sections,
     meta: {
       Session: sessionId,

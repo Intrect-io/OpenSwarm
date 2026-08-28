@@ -31,10 +31,10 @@
     aside > div { min-width: 0; }
     /* Thin, self-coloured scrollbars: the default chrome is heavy against the
        dark panel and reads as a defect rather than an affordance. */
-    #feed, .transcript, .ev-detail { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
-    #feed::-webkit-scrollbar, .transcript::-webkit-scrollbar, .ev-detail::-webkit-scrollbar { width: 6px; height: 0; }
-    #feed::-webkit-scrollbar-thumb, .transcript::-webkit-scrollbar-thumb, .ev-detail::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
-    #feed::-webkit-scrollbar-track, .transcript::-webkit-scrollbar-track, .ev-detail::-webkit-scrollbar-track { background: transparent; }
+    #feed, .transcript { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
+    #feed::-webkit-scrollbar, .transcript::-webkit-scrollbar { width: 6px; height: 0; }
+    #feed::-webkit-scrollbar-thumb, .transcript::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
+    #feed::-webkit-scrollbar-track, .transcript::-webkit-scrollbar-track { background: transparent; }
     aside h2 { font-size: 11px; letter-spacing: 1px; color: var(--dim); padding: 10px 12px 6px; }
     #detail { border-bottom: 1px solid var(--border); padding: 0 12px 10px; font-size: 12px; min-height: 84px; }
     #detail .name { color: var(--cyan); font-weight: 700; }
@@ -49,9 +49,8 @@
     .ev .status { font-weight: 700; }
     .task-chip { color: var(--cyan); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 9px; }
     .clock { color: var(--dim); margin-left: auto; font-variant-numeric: tabular-nums; }
-    .ev-line { font-size: 11px; margin-top: 3px; color: var(--white); overflow-wrap: anywhere; }
-    .ev-summary { font-size: 11px; margin-top: 2px; color: #b6bdcc; overflow-wrap: anywhere; }
-    .ev-detail { font-size: 10px; margin-top: 3px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 6.5em; overflow-y: auto; }
+    .ev-line { font-size: 11px; margin-top: 3px; color: #b6bdcc; overflow-wrap: anywhere; }
+    .ev-line .who { font-weight: 700; color: var(--white); }
     .ev-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; min-width: 0; }
     .chip { font-size: 9px; color: var(--dim); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px;
             max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -61,11 +60,13 @@
     .thread-head .participants { color: var(--dim); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .await-chip { color: #0d1117; background: var(--amber, #e8b339); border-radius: 3px; padding: 0 4px; font-weight: 700; }
     .transcript { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 12px; }
-    .msg { padding: 6px 0; border-bottom: 1px solid var(--border); }
-    .msg.from-operator { border-left: 2px solid #e5484d; padding-left: 6px; }
+    .msg { background: #10141c; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
+    .msg.from-operator { border-left: 2px solid var(--red); background: #161019; }
     .msg-head { display: flex; gap: 6px; align-items: baseline; font-size: 10px; }
     .msg .who { font-weight: 700; }
     .msg .to { color: var(--dim); }
+    .role-tag { color: var(--dim); font-size: 9px; border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; }
+    .msg-text { font-size: 11px; margin-top: 3px; color: var(--white); white-space: pre-wrap; overflow-wrap: anywhere; }
     .composer { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); }
     .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 5px 8px; font: inherit; font-size: 11px; }
     .composer button { background: var(--cyan, #3b9eff); border: none; border-radius: 4px; color: #0d1117; font: inherit; font-size: 11px; font-weight: 700; padding: 5px 12px; cursor: pointer; }
@@ -87,6 +88,7 @@
   <header>
     <h1>⚙ ORCHESTRATION</h1>
     <a href="/">← dashboard</a>
+    <a href="/chat">chat room →</a>
     <div id="stats"></div>
   </header>
   <main>

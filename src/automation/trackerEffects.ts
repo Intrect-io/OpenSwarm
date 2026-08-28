@@ -68,9 +68,13 @@ export function completionStats(result: PipelineResult): PairCompleteStats {
     duration: Math.floor(result.totalDuration / 1000),
     filesChanged: result.workerResult?.filesChanged || [],
     workerSummary: result.workerResult?.summary,
+    workerName: result.workerResult?.codename,
+    workerUsage: result.workerResult?.costInfo,
     workerCommands: result.workerResult?.commands,
     reviewerFeedback: result.reviewResult?.feedback,
     reviewerDecision: result.reviewResult?.decision,
+    reviewerName: result.reviewResult?.codename,
+    reviewerUsage: result.reviewResult?.costInfo,
     testResults: result.testerResult ? {
       passed: result.testerResult.testsPassed,
       failed: result.testerResult.testsFailed,

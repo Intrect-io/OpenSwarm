@@ -79,7 +79,7 @@ import {
   type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
 import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
-import { buildCancellationEffect, buildCompletionEffect, deliverTrackerEffect } from './trackerEffects.js';
+import { buildCancellationEffect, buildCompletionEffect, completionStats, deliverTrackerEffect } from './trackerEffects.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -399,21 +399,7 @@ export class AutonomousRunner {
       if (result.success && task.issueId) {
         try {
           await execution.syncSuccessState(task);
-          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, {
-            attempts: result.iterations,
-            duration: Math.floor(result.totalDuration / 1000),
-            filesChanged: result.workerResult?.filesChanged || [],
-            workerSummary: result.workerResult?.summary,
-            workerCommands: result.workerResult?.commands,
-            reviewerFeedback: result.reviewResult?.feedback,
-            reviewerDecision: result.reviewResult?.decision,
-            testResults: result.testerResult ? {
-              passed: result.testerResult.testsPassed,
-              failed: result.testerResult.testsFailed,
-              coverage: result.testerResult.coverage,
-              failedTests: result.testerResult.failedTests,
-            } : undefined,
-          });
+          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, completionStats(result));
           await execution.reconcileCompletionState(task);
           console.log(`[Scheduler] Issue ${task.issueId} marked as Done`);
         } catch (err) {
@@ -2251,21 +2237,7 @@ export class AutonomousRunner {
         if (result.success) {
           // On success, move to Done
           await execution.syncSuccessState(task);
-          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, {
-            attempts: result.iterations,
-            duration: Math.floor(result.totalDuration / 1000),
-            filesChanged: result.workerResult?.filesChanged || [],
-            workerSummary: result.workerResult?.summary,
-            workerCommands: result.workerResult?.commands,
-            reviewerFeedback: result.reviewResult?.feedback,
-            reviewerDecision: result.reviewResult?.decision,
-            testResults: result.testerResult ? {
-              passed: result.testerResult.testsPassed,
-              failed: result.testerResult.testsFailed,
-              coverage: result.testerResult.coverage,
-              failedTests: result.testerResult.failedTests,
-            } : undefined,
-          });
+          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, completionStats(result));
           await execution.reconcileCompletionState(task);
           console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Done`);
 

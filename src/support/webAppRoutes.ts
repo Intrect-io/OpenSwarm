@@ -63,6 +63,18 @@ export async function tryHandleAppRoutes(
     return true;
   }
 
+  if (url === '/chat') {
+    const { readChatShell } = await import('./staticAssets.js');
+    const shell = await readChatShell();
+    if (!shell) {
+      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(shell);
+    }
+    return true;
+  }
+
   if (url === '/app') {
     const shell = await readAppShell();
     if (!shell) {

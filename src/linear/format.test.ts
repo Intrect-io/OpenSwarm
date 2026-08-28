@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  formatPairDialogue,
   isoDate,
   codeRef,
   formatAutomationComment,
@@ -99,5 +100,45 @@ describe('linear/format', () => {
       const body = formatTaskDescription({ summary: 'Just do it' });
       expect(body).toBe('Just do it');
     });
+  });
+});
+
+describe('formatPairDialogue (AGT-4019)', () => {
+  it('renders the exchange as named speakers and lifts the Codename line out', () => {
+    const text = formatPairDialogue({
+      workerSummary: 'Codename: Nova\nAdded the JOIN regression test and ran the file.',
+      workerName: 'Nova',
+      workerUsage: { model: 'gpt-5.6-terra', inputTokens: 12_345, outputTokens: 890, costUsd: 0.021, durationMs: 96_400 },
+      reviewerFeedback: 'Assertions cover the guard; approving.',
+      reviewerDecision: 'approve',
+      reviewerName: 'Sable',
+      reviewerUsage: { model: 'glm-5.2', inputTokens: 900, outputTokens: 120, costUsd: 0.004, durationMs: 22_800 },
+    });
+    expect(text).toBe(
+      '**Nova** (worker · gpt-5.6-terra): Added the JOIN regression test and ran the file.\n'
+      + '_12.3k in / 890 out tok · $0.0210 · 96s_\n\n'
+      + '**Sable** (reviewer · glm-5.2 · approve): Assertions cover the guard; approving.\n'
+      + '_900 in / 120 out tok · $0.0040 · 23s_',
+    );
+  });
+
+  it('falls back to generic speakers and skips empty sides', () => {
+    expect(formatPairDialogue({ workerSummary: 'Did the thing.' })).toBe('**Worker** (worker): Did the thing.');
+    expect(formatPairDialogue({})).toBeUndefined();
+  });
+
+  it('sanitizes model-supplied names so a codename cannot inject Markdown or mentions', () => {
+    // The name arrives straight from parsed model output; without the sink-side
+    // sanitizer a value like this would break out of the bold label and ping users.
+    const text = formatPairDialogue({
+      workerSummary: 'Did the thing.',
+      workerName: 'x**\n@mention[link](https://e.x)',
+      reviewerFeedback: 'Fine.',
+      reviewerName: '\n\n# heading',
+    });
+    expect(text).toBe(
+      '**x mention link (https://e.x)** (worker): Did the thing.\n\n'
+      + '**heading** (reviewer): Fine.',
+    );
   });
 });

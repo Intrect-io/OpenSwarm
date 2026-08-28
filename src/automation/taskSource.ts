@@ -12,7 +12,7 @@ import * as linear from '../linear/index.js';
 import { getIssueStore } from '../issues/index.js';
 import type { IIssueStore } from '../issues/sqliteStore.js';
 import type { Issue, IssueStatus, IssuePriority } from '../issues/schema.js';
-import { formatAutomationComment, type CommentSection } from '../linear/format.js';
+import { formatAutomationComment, formatPairDialogue, type CommentSection } from '../linear/format.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { enrichTaskFromState } from '../taskState/store.js';
 
@@ -26,8 +26,15 @@ export interface PairCompleteStats {
   filesChanged: string[];
   workerSummary?: string;
   workerCommands?: string[];
+  /** Self-chosen display name of the worker agent, when it introduced itself. */
+  workerName?: string;
   reviewerFeedback?: string;
   reviewerDecision?: string;
+  /** Self-chosen display name of the reviewer agent. */
+  reviewerName?: string;
+  /** Model + token/cost usage per speaker, shown under each utterance. */
+  workerUsage?: { model?: string; inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs?: number };
+  reviewerUsage?: { model?: string; inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs?: number };
   testResults?: { passed: number; failed: number; coverage?: number; failedTests?: string[] };
   remainingWork?: string;
   /** Hidden marker used by the durable outbox to make comment delivery idempotent. */
@@ -224,13 +231,7 @@ export class SqliteTaskSource implements ITaskSource {
       : `${Math.floor(stats.duration / 60)}m ${stats.duration % 60}s`;
     const sections: CommentSection[] = [];
     if (stats.workerCommands && stats.workerCommands.length > 0) {
-      sections.push({ label: 'Commands run', body: stats.workerCommands.slice(0, 5).map(inlineCode) });
-    }
-    if (stats.reviewerFeedback) {
-      sections.push({
-        label: `Reviewer — ${stats.reviewerDecision || 'APPROVE'}`,
-        body: stats.reviewerFeedback.trim(),
-      });
+      sections.push({ label: 'Commands run', body: stats.workerCommands.slice(0, 3).map(inlineCode) });
     }
     if (stats.testResults) {
       const { passed, failed, coverage, failedTests } = stats.testResults;
@@ -256,7 +257,7 @@ export class SqliteTaskSource implements ITaskSource {
 
     const comment = formatAutomationComment({
       heading: 'Task complete',
-      summary: stats.workerSummary?.trim() || undefined,
+      summary: formatPairDialogue(stats) ?? stats.workerSummary?.trim() ?? undefined,
       sections,
       meta: {
         Session: sessionId,

@@ -1,36 +1,22 @@
 // ============================================
-// OpenSwarm - Warhammer 40k style agent call signs
+// OpenSwarm - Agent identity fallback names
 // ============================================
 //
-// Workers address each other by name, so a name must be stable: the same
-// worker in the same repository resolves to the same call sign across
-// restarts. Derived deterministically from the repository and execution
-// identity rather than randomly assigned, and disambiguated only when two
-// distinct identities would otherwise collide.
+// Agents choose their own display names (any style they like) via the
+// `codename` field of their first structured output; that choice is
+// registered in pipelineCoordination's name registry. What lives here is the
+// DETERMINISTIC FALLBACK identity an agent carries before it has spoken:
+// stable (same worker in the same repository resolves to the same fallback
+// across restarts) and deliberately plain — `worker-3f2a` — so a themed
+// convention never overrides the agent's own choice.
 
 import { createHash } from 'node:crypto';
-
-const TITLES = [
-  'Adept', 'Archmagos', 'Artificer', 'Castellan', 'Enginseer', 'Inquisitor',
-  'Lexmechanic', 'Magos', 'Preceptor', 'Primaris', 'Techmarine', 'Vindicator',
-] as const;
-
-const NAMES = [
-  'Aurelian', 'Corvax', 'Dominus', 'Ferrus', 'Galvanis', 'Helion', 'Ignatus',
-  'Kaledon', 'Lumen', 'Mordax', 'Nemetor', 'Orthrus', 'Praetor', 'Quintus',
-  'Rhodanis', 'Sabbat', 'Talon', 'Ultor', 'Varrus', 'Xanthus', 'Ymir', 'Zetheus',
-] as const;
-
-const EPITHETS = [
-  'Ferrum', 'Vigilis', 'Sanctus', 'Cognitor', 'Invictus', 'Astra', 'Novum',
-  'Rubicon', 'Tertius', 'Umbra', 'Vector', 'Kappa', 'Sigma', 'Theta',
-] as const;
 
 /** The role a call sign carries, so a name also states what the agent does. */
 export type AgentRole = 'worker' | 'reviewer' | 'orchestrator' | 'review-agent';
 
 export interface AgentCallSign {
-  /** Human-facing call sign, e.g. `Magos Corvax-Vigilis`. */
+  /** Human-facing call sign, e.g. `worker-3f2a` (fallback) or a self-chosen name. */
   name: string;
   /** Lowercase, punctuation-free address used for mailbox routing. */
   address: string;
@@ -41,11 +27,9 @@ function digestOf(parts: readonly string[]): Buffer {
   return createHash('sha256').update(parts.join('\0')).digest();
 }
 
-function compose(digest: Buffer, salt: number): string {
-  const title = TITLES[(digest[0] + salt) % TITLES.length];
-  const name = NAMES[(digest[1] + salt * 7) % NAMES.length];
-  const epithet = EPITHETS[(digest[2] + salt * 13) % EPITHETS.length];
-  return `${title} ${name}-${epithet}`;
+function compose(role: string, digest: Buffer, salt: number): string {
+  const hex = digest.subarray(salt % 16, (salt % 16) + 2).toString('hex');
+  return `${role}-${hex}`;
 }
 
 /** Normalize a call sign into its routable address form. */
@@ -65,11 +49,28 @@ export function assignCallSign(
   taken: ReadonlySet<string> = new Set(),
 ): AgentCallSign {
   const digest = digestOf([input.repository, input.executionId, input.role]);
-  for (let salt = 0; salt < TITLES.length * NAMES.length; salt += 1) {
-    const name = compose(digest, salt);
+  for (let salt = 0; salt < 30; salt += 1) {
+    const name = compose(input.role, digest, salt);
     const address = callSignAddress(name);
     if (!taken.has(address)) return { name, address, role: input.role };
   }
-  const fallback = `${compose(digest, 0)} ${digest.toString('hex').slice(0, 6)}`;
+  const fallback = `${input.role}-${digest.toString('hex').slice(0, 8)}`;
   return { name: fallback, address: callSignAddress(fallback), role: input.role };
+}
+
+/**
+ * Strip markup and mention characters from a model-supplied display name so a
+ * codename cannot smuggle Markdown structure or @-mentions into the
+ * coordination board or Linear comments. Returns null when nothing
+ * displayable remains. Every surface that renders a chosen name must pass it
+ * through here first — the name arrives from the model, not from us.
+ */
+export function sanitizeAgentDisplayName(raw: string | undefined): string | null {
+  const cleaned = String(raw ?? '')
+    .replace(/[\r\n`*_#>[\]|@]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40)
+    .trim();
+  return cleaned || null;
 }

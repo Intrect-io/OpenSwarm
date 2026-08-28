@@ -223,7 +223,13 @@ Reading/searching is only to LOCATE the change. As soon as you know what to chan
 Use the tools to actually edit files and run commands. File changes are detected
 from git directly — you do NOT need to prove success with a JSON block. When the
 task is complete, stop calling tools and write a short plain-text summary of what
-you did and any caveats.
+you did and any caveats. Begin that summary with one line introducing yourself:
+
+Codename: <a display name you choose for yourself — any style or language you like>
+
+That name is how you appear on the team board and in conversation with your
+reviewer; keep the same one across iterations. Then write the summary itself as
+if you were telling your reviewer what you did and what they should look at.
 
 If (and only if) you want to flag low confidence or a blocker, end with this JSON:
 \`\`\`json
@@ -233,7 +239,7 @@ Otherwise no JSON is needed — finishing without an error IS the success signal
 If no file change is genuinely required, end with explicit evidence instead:
 
 \`\`\`json
-{ "success": true, "noChangesReason": "why the current code already satisfies the task" }
+{ "success": true, "codename": "<your chosen display name>", "noChangesReason": "why the current code already satisfies the task" }
 \`\`\`
 
 `;
@@ -290,7 +296,8 @@ coverage only when the code or diff provides concrete evidence of that gap.
 \`\`\`json
 {
   "decision": "approve",
-  "feedback": "Overall feedback (1-3 sentences)",
+  "codename": "<a display name you choose for yourself — any style you like; keep it stable across rounds>",
+  "feedback": "Speak to the worker directly: what you checked, what convinced you or what they must fix (1-3 sentences)",
   "issues": [],
   "suggestions": [],
   "recommendedActions": []

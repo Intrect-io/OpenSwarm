@@ -5,7 +5,7 @@ describe('agent call signs', () => {
   it('is deterministic for one identity so a name survives a restart', () => {
     const identity = { repository: '/repo', executionId: 'session-1', role: 'worker' as const };
     expect(assignCallSign(identity)).toEqual(assignCallSign(identity));
-    expect(assignCallSign(identity).name).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+-[A-Z][a-z]+$/);
+    expect(assignCallSign(identity).name).toMatch(/^[a-z][a-z-]*-[0-9a-f]{4}$/);
   });
 
   it('gives different identities different names', () => {

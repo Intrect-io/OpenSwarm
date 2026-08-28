@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error - plain ESM module served to the browser
-import { buildThreads, describeEvent, metadataPairs, taskLabelOf, threadFor } from '../../web/static/js/conversationModel.mjs';
+import { buildChatLines, buildThreads, chatLineOf, isUtterance, latestAddressable, metadataPairs, taskLabelOf, threadFor } from '../../web/static/js/conversationModel.mjs';
 
 function event(overrides: Record<string, unknown> = {}) {
   return {
@@ -10,23 +10,6 @@ function event(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
-
-describe('describeEvent', () => {
-  it('names the speaker, the action and the addressee', () => {
-    expect(describeEvent(event({
-      recipient: 'reviewer-b', recipientName: 'Reviewer B', recipientRole: 'reviewer',
-    }))).toBe('Worker A (worker) asked for advice → Reviewer B (reviewer)');
-  });
-
-  it('omits the arrow for a broadcast', () => {
-    expect(describeEvent(event({ kind: 'review-run', actorRole: 'review-agent' })))
-      .toBe('Worker A (review agent) ran a review');
-  });
-
-  it('falls back to the raw kind for an unknown event type', () => {
-    expect(describeEvent(event({ kind: 'brand-new-kind' }))).toContain('brand-new-kind');
-  });
-});
 
 describe('taskLabelOf', () => {
   it('prefers the stamped issue identifier', () => {
@@ -124,5 +107,75 @@ describe('threadFor', () => {
     const threads = buildThreads([event(), event({ id: 'e2', seq: 2, correlationId: 'c2' })]);
     expect(threadFor(threads, event())!.correlationId).toBe('c1');
     expect(threadFor(threads, null)).toBeNull();
+  });
+});
+
+describe('chatLineOf', () => {
+  it('prefers the full words in detail over the clipped summary', () => {
+    const line = chatLineOf(event({ summary: 'clipped...', detail: 'the whole argument, verbatim' }));
+    expect(line.text).toBe('the whole argument, verbatim');
+  });
+
+  it('falls back to the summary when there is no long form', () => {
+    expect(chatLineOf(event()).text).toBe('question?');
+  });
+
+  it('names the speaker with role label and leaves the recipient nullable', () => {
+    const line = chatLineOf(event({ actorRole: 'review-agent', taskLabel: 'AGT-4019' }));
+    expect(line).toMatchObject({
+      speakerName: 'Worker A', role: 'review-agent', speakerRole: 'review agent',
+      recipientName: null, taskLabel: 'AGT-4019', status: 'open',
+    });
+  });
+
+  it('resolves the recipient name and flags operator speech', () => {
+    const line = chatLineOf(event({
+      actorRole: 'human', recipient: 'worker-a', recipientName: 'Worker A', recipientRole: 'worker',
+    }));
+    expect(line.recipientName).toBe('Worker A');
+    expect(line.isOperator).toBe(true);
+  });
+});
+
+describe('buildChatLines', () => {
+  it('hides instruction snapshots — plumbing, not speech', () => {
+    const lines = buildChatLines([
+      event({ id: 's', kind: 'instruction-snapshot' }),
+      event({ id: 'u', seq: 2, summary: 'actual words' }),
+    ]);
+    expect(lines.map((line: { id: string }) => line.id)).toEqual(['u']);
+    expect(isUtterance(event({ kind: 'instruction-snapshot' }))).toBe(false);
+  });
+
+  it('orders the room chronologically by seq across tasks', () => {
+    const lines = buildChatLines([
+      event({ id: 'later', seq: 5, taskId: 't2', correlationId: 'c2' }),
+      event({ id: 'first', seq: 1 }),
+    ]);
+    expect(lines.map((line: { id: string }) => line.id)).toEqual(['first', 'later']);
+  });
+});
+
+describe('latestAddressable', () => {
+  it('returns the newest agent speaker, skipping the operator', () => {
+    const target = latestAddressable([
+      event({ id: 'a', seq: 1 }),
+      event({ id: 'op', seq: 2, actor: 'operator-dashboard', actorName: 'Operator', actorRole: 'human' }),
+    ]);
+    expect(target.id).toBe('a');
+  });
+
+  it('never addresses the daemon through its instruction snapshot', () => {
+    const target = latestAddressable([
+      event({ id: 'a', seq: 1 }),
+      event({ id: 'snap', seq: 2, actor: 'daemon', actorRole: 'daemon', kind: 'instruction-snapshot' }),
+    ]);
+    expect(target.id).toBe('a');
+  });
+
+  it('returns null when nobody can be addressed', () => {
+    expect(latestAddressable([
+      event({ actor: 'operator-dashboard', actorRole: 'human' }),
+    ])).toBeNull();
   });
 });
