@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseReviewerResult } from './resultParsing.js';
+import { parseReviewerResult, parseWorkerResult } from './resultParsing.js';
 
 const wrap = (obj: unknown) => '```json\n' + JSON.stringify(obj) + '\n```';
 
@@ -171,5 +171,26 @@ describe('parseReviewerResult refuses a verdict the reviewer never gave (INT-391
       'I will read the diff first.\n' + wrap({ decision: 'approve', feedback: 'Coherent and well-tested.' }),
     );
     expect(r.decision).toBe('approve');
+  });
+});
+
+describe('agent codename passthrough (AGT-4019)', () => {
+  it('keeps the codename from a structured worker completion', () => {
+    const parsed = parseWorkerResult(
+      '```json\n{"success":true,"codename":"Nova","summary":"did it","noChangesReason":"n/a"}\n```',
+    );
+    expect(parsed.codename).toBe('Nova');
+  });
+
+  it('keeps the codename from a reviewer verdict', () => {
+    const parsed = parseReviewerResult(
+      '```json\n{"decision":"revise","codename":"Sable","feedback":"add the guard","issues":["missing guard"]}\n```',
+    );
+    expect(parsed.codename).toBe('Sable');
+  });
+
+  it('leaves codename unset when the agent did not introduce itself', () => {
+    const parsed = parseWorkerResult('```json\n{"success":true,"summary":"did it","noChangesReason":"n/a"}\n```');
+    expect(parsed.codename).toBeUndefined();
   });
 });

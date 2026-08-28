@@ -51,7 +51,7 @@ import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRol
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
-import { coordinationContextFor, publishStageFailureToBoard, publishStageToBoard } from './pipelineCoordination.js';
+import { coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
@@ -310,7 +310,14 @@ export class PairPipeline extends EventEmitter {
     safeConsole.log(`[${prefix}] Stage starting: ${stage}`);
     this.emit('stage:start', { stage, context, model: stageModel });
     broadcastEvent({ type: 'pipeline:stage', data: { taskId: taskEventKey(context.task), stage, status: 'start', model: stageModel, ...metadata } });
-    void publishStageToBoard(context, stage, 'running', `Started on ${context.task.title}`, stageModel);
+    // One exchange id for this stage attempt, captured before anything can
+    // move the iteration counter (AGT-4018).
+    const exchangeId = stageCorrelationId(context, stage);
+    void publishStageToBoard(context, stage, 'running', `Taking on: ${context.task.title}`, {
+      model: stageModel,
+      correlationId: exchangeId,
+      recipientRole: stage === 'reviewer' ? 'worker' : (stage === 'worker' ? 'reviewer' : undefined),
+    });
 
     if (this.config.verbose) {
       this.emit('log', { line: `[verbose] Stage: ${stage} | model: ${stageModel ?? 'default'} | iteration: ${context.currentIteration}` });
@@ -599,14 +606,11 @@ export class PairPipeline extends EventEmitter {
 
       safeConsole.log(`[${prefix}] ${stage} completed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:complete', { stage, result: stageResult, context });
-      void publishStageToBoard(
-        context,
-        stage,
-        stageResult.success ? 'completed' : 'failed',
-        stageResult.success
-          ? `Finished in ${(stageResult.duration / 1000).toFixed(1)}s`
-          : `Did not pass in ${(stageResult.duration / 1000).toFixed(1)}s`,
-      );
+      publishStageOutcomeToBoard(context, stage, {
+        success: stageResult.success,
+        durationMs: stageResult.duration,
+        result,
+      }, exchangeId);
       const costInfo = (result as { costInfo?: CostInfo }).costInfo;
 
       if (this.config.verbose) {
@@ -641,7 +645,7 @@ export class PairPipeline extends EventEmitter {
 
       safeConsole.log(`[${prefix}] ${stage} failed (${(stageResult.duration / 1000).toFixed(1)}s)`);
       this.emit('stage:fail', { stage, result: stageResult, context, error });
-      publishStageFailureToBoard(context, stage, stageResult.duration, error);
+      publishStageFailureToBoard(context, stage, stageResult.duration, error, exchangeId);
       broadcastEvent({ type: 'pipeline:stage', data: {
         taskId: taskEventKey(context.task), stage, status: 'fail',
         ...metadata,

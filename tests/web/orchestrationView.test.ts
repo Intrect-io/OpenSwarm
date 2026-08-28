@@ -153,12 +153,33 @@ describe('feed legibility', () => {
     const row = doc.querySelector('#feed .ev')!;
     expect(row.textContent).toContain('AGT-4001');
     expect(row.querySelector('.ev-line')!.textContent)
-      .toBe('Enginseer Rhodanis-Novum (worker) asked for advice → Adept Helion-Cognitor (reviewer)');
+      .toBe('Enginseer Rhodanis-Novum → Adept Helion-Cognitor: Reuse the auth helper?');
     expect(row.querySelector('.clock')!.textContent).toBeTruthy();
     view.stop();
   });
 
-  it('renders detail and metadata that the old feed dropped', async () => {
+  it('prefers the full words in detail and truncates them for the row', async () => {
+    const doc = shell();
+    const words = `the whole argument ${'x'.repeat(200)}`;
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        events: [boardEvent({ id: 'e1', summary: 'clipped...', detail: words })],
+        pending: [], lastSeq: 1,
+      }),
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelector('#feed .ev-line')).not.toBeNull());
+
+    const line = doc.querySelector('#feed .ev-line')!.textContent!;
+    expect(line).toContain('the whole argument');
+    expect(line).not.toContain('clipped...');
+    expect(line.endsWith('…')).toBe(true);
+    expect(line.length).toBeLessThan(words.length);
+    view.stop();
+  });
+
+  it('keeps instruction snapshots off the conversation surfaces', async () => {
     const doc = shell();
     const fetchImpl = vi.fn(async () => ({
       ok: true,
@@ -174,14 +195,10 @@ describe('feed legibility', () => {
       }),
     }));
     const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
-    await vi.waitFor(() => expect(doc.getElementById('feed')!.textContent).toContain('daemon'));
-
-    const row = doc.querySelector('#feed .ev')!;
-    expect(row.querySelector('.ev-line')!.textContent).toBe('OpenSwarm daemon (daemon) loaded the rule set');
-    expect(row.querySelector('.ev-meta')!.textContent).toContain('digest');
-    // The chip truncates visually, so the full value has to survive somewhere
-    // the operator can still reach — otherwise a digest is unreadable.
-    expect(row.querySelector('.chip')!.getAttribute('title')).toBe('digest: c480ceccd832');
+    // The event still feeds the graph (the daemon node exists) but nobody
+    // "said" anything, so the feed stays empty.
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
+    expect(doc.getElementById('feed')!.textContent).toContain('no coordination events');
     view.stop();
   });
 
@@ -208,7 +225,7 @@ describe('feed legibility', () => {
     view.stop();
   });
 
-  it('escapes metadata that reaches the chip tooltip', async () => {
+  it('escapes metadata that reaches the thread chip tooltip', async () => {
     const doc = shell();
     const fetchImpl = vi.fn(async () => ({
       ok: true,
@@ -218,10 +235,13 @@ describe('feed legibility', () => {
       }),
     }));
     const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
-    await vi.waitFor(() => expect(doc.querySelector('#feed .chip')).not.toBeNull());
+    await vi.waitFor(() => expect(doc.querySelector('#feed .ev')).not.toBeNull());
+    // Metadata rides with the message in the thread, not in the feed preview.
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect(doc.querySelector('#thread .chip')).not.toBeNull());
 
-    expect(doc.getElementById('feed')!.querySelector('img')).toBeNull();
-    expect(doc.querySelector('#feed .chip')!.getAttribute('title'))
+    expect(doc.getElementById('thread')!.querySelector('img')).toBeNull();
+    expect(doc.querySelector('#thread .chip')!.getAttribute('title'))
       .toBe('a"b: "><img src=x onerror=alert(1)>');
     view.stop();
   });
@@ -271,6 +291,33 @@ describe('clicking a feed row', () => {
     expect(messages).toHaveLength(2);
     expect(messages[0].textContent).toContain('Retry in adapter or scheduler?');
     expect(messages[1].textContent).toContain('Scheduler owns retries.');
+    view.stop();
+  });
+
+  it('renders the exchange as chat bubbles and sets operator speech apart', async () => {
+    const doc = shell();
+    const events = [
+      boardEvent({ id: 'q', seq: 1, summary: 'Reuse the auth helper?' }),
+      boardEvent({
+        id: 'note', seq: 2, actor: 'operator-dashboard', actorName: 'Operator', actorRole: 'human',
+        recipient: 'enginseer-rhodanis-novum', recipientName: 'Enginseer Rhodanis-Novum', recipientRole: 'worker',
+        kind: 'advice-response', status: 'completed',
+        summary: 'Ship it.', detail: 'Ship it. The helper is fine.',
+      }),
+    ];
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ events, pending: [], lastSeq: 2 }) }));
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#feed .ev').length).toBe(2));
+    (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+    const operatorMsg = doc.querySelector('#thread .msg.from-operator');
+    expect(operatorMsg).not.toBeNull();
+    // The bubble body carries the full words, not the clipped summary.
+    expect(operatorMsg!.querySelector('.msg-text')!.textContent).toBe('Ship it. The helper is fine.');
+    expect(operatorMsg!.querySelector('.to')!.textContent).toBe('→ Enginseer Rhodanis-Novum');
+    const roleTags = [...doc.querySelectorAll('#thread .role-tag')].map((el) => el.textContent);
+    expect(roleTags).toContain('operator');
+    expect(roleTags).toContain('worker');
     view.stop();
   });
 

@@ -10,6 +10,8 @@
 // Pure string builders: no I/O, no side effects, so the style lives in one place
 // and stays unit-testable.
 
+import { sanitizeAgentDisplayName } from '../coordination/agentNames.js';
+
 /** Absolute date `YYYY-MM-DD` — bodies never use relative or full-ISO dates. */
 export function isoDate(d: Date = new Date()): string {
   return d.toISOString().slice(0, 10);
@@ -43,6 +45,76 @@ function renderSection(section: CommentSection): string {
   return text.includes('\n')
     ? `**${section.label}:**\n${text}`
     : `**${section.label}:** ${text}`;
+}
+
+/** Per-agent usage the transcript attributes to each speaker. */
+export interface SpeakerUsage {
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  durationMs?: number;
+}
+
+/** The slice of pair-completion stats the dialogue transcript reads. */
+export interface PairDialogueStats {
+  workerSummary?: string;
+  workerName?: string;
+  workerUsage?: SpeakerUsage;
+  reviewerFeedback?: string;
+  reviewerDecision?: string;
+  reviewerName?: string;
+  reviewerUsage?: SpeakerUsage;
+}
+
+function compactTokens(n: number | undefined): string | undefined {
+  if (n === undefined) return undefined;
+  return n >= 10_000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+/** One muted line of who ran on what and what it cost, under each utterance. */
+function speakerUsageLine(usage: SpeakerUsage | undefined): string | undefined {
+  if (!usage) return undefined;
+  const parts: string[] = [];
+  const tin = compactTokens(usage.inputTokens);
+  const tout = compactTokens(usage.outputTokens);
+  if (tin !== undefined || tout !== undefined) parts.push(`${tin ?? '?'} in / ${tout ?? '?'} out tok`);
+  if (usage.costUsd !== undefined && usage.costUsd > 0) parts.push(`$${usage.costUsd.toFixed(4)}`);
+  if (usage.durationMs !== undefined) parts.push(`${(usage.durationMs / 1000).toFixed(0)}s`);
+  return parts.length > 0 ? `_${parts.join(' · ')}_` : undefined;
+}
+
+function speakerTag(role: string, usage: SpeakerUsage | undefined, verdict?: string): string {
+  const bits = [role, usage?.model, verdict].filter(Boolean);
+  return ` (${bits.join(' · ')})`;
+}
+
+/**
+ * Render the worker/reviewer exchange as a conversation, the way the operator
+ * reads it — named speakers saying what they did and what they judged —
+ * instead of a machine dump (AGT-4019). The worker's `Codename:` introduction
+ * line is its name, not part of what it said, so it is lifted out of the body.
+ * Names are model-supplied, so they are sanitized here at the sink — the board
+ * registry's cleaning does not protect this path.
+ */
+export function formatPairDialogue(stats: PairDialogueStats): string | undefined {
+  const workerSaid = stats.workerSummary?.replace(/^\s*Codename:.*$/im, '').trim();
+  const lines: string[] = [];
+  if (workerSaid) {
+    const usage = speakerUsageLine(stats.workerUsage);
+    lines.push(
+      `**${sanitizeAgentDisplayName(stats.workerName) ?? 'Worker'}**${speakerTag('worker', stats.workerUsage)}: ${workerSaid}`
+      + (usage ? `\n${usage}` : ''),
+    );
+  }
+  if (stats.reviewerFeedback?.trim()) {
+    const usage = speakerUsageLine(stats.reviewerUsage);
+    lines.push(
+      `**${sanitizeAgentDisplayName(stats.reviewerName) ?? 'Reviewer'}**${speakerTag('reviewer', stats.reviewerUsage, stats.reviewerDecision)}: ${stats.reviewerFeedback.trim()}`
+      + (usage ? `\n${usage}` : ''),
+    );
+  }
+  return lines.length > 0 ? lines.join('\n\n') : undefined;
 }
 
 export interface AutomationCommentInput {

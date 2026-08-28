@@ -41,7 +41,7 @@ describe('runPeriodicReview', () => {
     const { getCoordinationStore } = await import('./coordinationStore.js');
     const events = getCoordinationStore().list({ limit: 10 });
     expect(events).not.toHaveLength(0);
-    for (const event of events) expect(event.actorName).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+-[A-Z][a-z]+$/);
+    for (const event of events) expect(event.actorName).toMatch(/^[a-z][a-z-]*-[0-9a-f]{4}$/);
   });
 
   it('runs hygiene through deterministic cxt and records lifecycle events', async () => {

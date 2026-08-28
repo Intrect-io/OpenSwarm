@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenSwarm Chat Room</title>
+  <style>
+    :root {
+      --bg: #0b0e14; --panel: #11151d; --border: #1f2633; --white: #e6e9ef;
+      --dim: #6c7086; --cyan: #3b9eff; --green: #4cc38a; --amber: #e8b339;
+      --red: #e5484d; --purple: #9d7cd8;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    body { background: var(--bg); color: var(--white); font: 13px/1.5 "SF Mono", ui-monospace, Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+    header h1 { font-size: 14px; letter-spacing: 1px; }
+    header a { color: var(--dim); text-decoration: none; font-size: 11px; }
+    header a:hover { color: var(--cyan); }
+    #room { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 16px;
+            scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
+    #room::-webkit-scrollbar { width: 6px; }
+    #room::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
+    #room::-webkit-scrollbar-track { background: transparent; }
+    .line { padding: 2px 0 2px 6px; border-left: 2px solid transparent; overflow-wrap: anywhere; }
+    .line .clock { color: var(--dim); font-variant-numeric: tabular-nums; margin-right: 4px; }
+    .line .who { font-weight: 700; }
+    .line .tag { color: var(--dim); font-size: 11px; margin-right: 4px; }
+    .line .to { color: var(--dim); margin-right: 4px; }
+    .line .sep { color: var(--dim); }
+    .line .text { color: #c9d0dd; white-space: pre-wrap; }
+    .line.from-operator { border-left-color: var(--red); background: #131019; }
+    .line.pending { border-left-color: var(--amber); }
+    .line.failed .text { color: var(--red); }
+    .composer { display: flex; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--border); }
+    .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 6px 10px; font: inherit; font-size: 12px; }
+    .composer input:disabled { color: var(--dim); }
+    .composer button { background: var(--cyan); border: none; border-radius: 4px; color: #0d1117; font: inherit; font-size: 12px; font-weight: 700; padding: 6px 14px; cursor: pointer; }
+    .composer button:disabled { background: var(--border); color: var(--dim); cursor: default; }
+    .empty { color: var(--dim); padding: 14px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>💬 CHAT ROOM</h1>
+    <a href="/">← dashboard</a>
+    <a href="/orchestration">orchestration</a>
+  </header>
+  <div id="room" aria-label="Agent chat room" aria-live="polite"><div class="empty">Loading…</div></div>
+  <form class="composer" id="composer">
+    <input id="composer-text" type="text" autocomplete="off" placeholder="Loading…" aria-label="Message the agents" />
+    <button type="submit">Send</button>
+  </form>
+  <script type="module">
+    import { startChatView } from '/static/js/chatView.mjs';
+    startChatView(document);
+  </script>
+</body>
+</html>

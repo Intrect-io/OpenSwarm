@@ -103,6 +103,17 @@ export async function readOrchestrationShell(): Promise<Buffer | null> {
   }
 }
 
+/** The /chat room shell (AGT-4019), from the same static root as /app. */
+export async function readChatShell(): Promise<Buffer | null> {
+  const root = resolveStaticRoot();
+  if (!root) return null;
+  try {
+    return await readFile(join(root, 'chat.html'));
+  } catch {
+    return null;
+  }
+}
+
 export async function readAppShell(): Promise<Buffer | null> {
   const root = resolveStaticRoot();
   if (!root) return null;

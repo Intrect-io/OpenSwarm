@@ -10,7 +10,7 @@
 import { buildOrchestrationModel, dominantKind, KIND_COLORS } from './orchestrationModel.mjs';
 import { layoutTiers } from './tierLayout.mjs';
 import {
-  buildThreads, describeEvent, metadataPairs, speakerOf, addresseeOf, taskLabelOf, threadFor,
+  buildThreads, chatLineOf, isUtterance, metadataPairs, taskLabelOf, threadFor,
 } from './conversationModel.mjs';
 
 export const ROLE_COLORS = {
@@ -212,32 +212,38 @@ function clockOf(timestamp) {
   return new Date(timestamp).toLocaleTimeString();
 }
 
-/** Body of one message: the summary, its long form, and any metadata. */
-function messageBody(event) {
+/** Metadata chips: long opaque tokens truncate visually, tooltip keeps them whole. */
+function metadataChips(event) {
   const pairs = metadataPairs(event);
-  const detail = event.detail && event.detail !== event.summary
-    ? `<div class="ev-detail">${escapeHtml(event.detail)}</div>`
-    : '';
-  // Metadata values are frequently long opaque tokens (a content digest, a
-  // correlation id). Rendered raw they force the whole feed to scroll
-  // sideways, so the chip truncates and keeps the full value in its tooltip.
-  const meta = pairs.length
+  return pairs.length
     ? `<div class="ev-meta">${pairs.map(([key, value]) =>
         `<span class="chip" title="${escapeHtml(`${key}: ${value}`)}"><b>${escapeHtml(key)}</b>${escapeHtml(value)}</span>`).join('')}</div>`
     : '';
-  return `<div class="ev-summary">${escapeHtml(event.summary)}</div>${detail}${meta}`;
+}
+
+/** Feed rows carry a preview, not the whole speech — the thread has the rest. */
+function clip(text, max = 140) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** `Speaker → Recipient: words` — one utterance as a line of dialogue. */
+function dialogueLine(event, max = 140) {
+  const line = chatLineOf(event);
+  const to = line.recipientName ? ` → <span class="who">${escapeHtml(line.recipientName)}</span>` : '';
+  return `<span class="who">${escapeHtml(line.speakerName)}</span>${to}: ${escapeHtml(clip(line.text, max))}`;
 }
 
 /**
- * The feed. Every row says when it happened, which task it belongs to, who
- * spoke and to whom — the raw summary alone was unreadable for system events.
+ * The feed, read as a conversation. Every row says when it happened, which
+ * task it belongs to, and who said what to whom; plumbing events that are not
+ * speech (instruction snapshots) stay off the surface entirely.
  */
 export function renderFeed(doc, events, selected, focusedEventId, onFocus) {
   const feed = doc.getElementById('feed');
   const shown = (selected
     ? events.filter((event) => event.actor === selected || event.recipient === selected)
     : events
-  ).slice(-80).reverse();
+  ).filter(isUtterance).slice(-80).reverse();
   if (shown.length === 0) {
     feed.innerHTML = '<div class="empty">no coordination events</div>';
     return;
@@ -250,8 +256,7 @@ export function renderFeed(doc, events, selected, focusedEventId, onFocus) {
         ${task ? `<span class="task-chip">${escapeHtml(task)}</span>` : ''}
         <span class="clock">${escapeHtml(clockOf(event.timestamp))}</span>
       </div>
-      <div class="ev-line">${escapeHtml(describeEvent(event))}</div>
-      ${messageBody(event)}
+      <div class="ev-line">${dialogueLine(event)}</div>
     </div>`;
   }).join('');
 
@@ -281,15 +286,22 @@ export function renderThread(doc, thread, onSend) {
   const waiting = thread.awaitingOperator
     ? '<span class="await-chip">awaiting your answer</span>'
     : '';
-  const transcript = thread.events.map((event) => `
-    <div class="msg${event.actorRole === 'human' ? ' from-operator' : ''}">
+  // Chat bubbles: the speaker addressing the recipient, then the words said.
+  // The role rides along as a small tag; the operator's bubbles are set apart.
+  const transcript = thread.events.filter(isUtterance).map((event) => {
+    const line = chatLineOf(event);
+    return `
+    <div class="msg${line.isOperator ? ' from-operator' : ''}">
       <div class="msg-head">
-        <span class="who" style="color:${ROLE_COLORS[event.actorRole] ?? ROLE_COLORS.agent}">${escapeHtml(speakerOf(event))}</span>
-        ${addresseeOf(event) ? `<span class="to">to ${escapeHtml(addresseeOf(event))}</span>` : ''}
+        <span class="who" style="color:${ROLE_COLORS[event.actorRole] ?? ROLE_COLORS.agent}">${escapeHtml(line.speakerName)}</span>
+        ${line.recipientName ? `<span class="to">→ ${escapeHtml(line.recipientName)}</span>` : ''}
+        ${line.speakerRole ? `<span class="role-tag">${escapeHtml(line.speakerRole)}</span>` : ''}
         <span class="clock">${escapeHtml(clockOf(event.timestamp))}</span>
       </div>
-      ${messageBody(event)}
-    </div>`).join('');
+      <div class="msg-text">${escapeHtml(line.text)}</div>
+      ${metadataChips(event)}
+    </div>`;
+  }).join('');
 
   const target = thread.replyTo ? escapeHtml(thread.replyTo.name) : null;
   const composer = target

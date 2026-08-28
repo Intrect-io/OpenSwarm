@@ -5,20 +5,6 @@
 // These helpers turn one event into a sentence a person can act on, and a set
 // of events into the conversation they actually belong to.
 
-/** Kinds phrased as what happened, not as an internal enum value. */
-export const KIND_LABELS = {
-  'advice-request': 'asked for advice',
-  'advice-response': 'answered',
-  'delegation-request': 'delegated work',
-  'delegation-result': 'reported back',
-  'human-question': 'asked the operator',
-  'human-answer': 'operator answered',
-  'adapter-route': 'switched provider',
-  'review-run': 'ran a review',
-  'mcp-audit': 'tool access decision',
-  'instruction-snapshot': 'loaded the rule set',
-};
-
 const ROLE_LABELS = {
   worker: 'worker',
   reviewer: 'reviewer',
@@ -28,20 +14,6 @@ const ROLE_LABELS = {
   human: 'operator',
 };
 
-/** A speaker as it should be printed: call sign plus what it was running as. */
-export function speakerOf(event) {
-  const name = event.actorName || event.actor;
-  const role = ROLE_LABELS[event.actorRole] || event.actorRole;
-  return role ? `${name} (${role})` : name;
-}
-
-export function addresseeOf(event) {
-  if (!event.recipient && !event.recipientName) return null;
-  const name = event.recipientName || event.recipient;
-  const role = ROLE_LABELS[event.recipientRole] || event.recipientRole;
-  return role ? `${name} (${role})` : name;
-}
-
 /**
  * Short human name for the task an event belongs to. `taskId` is an issue UUID,
  * so fall back to a truncation only when no publisher stamped a label.
@@ -50,13 +22,6 @@ export function taskLabelOf(event) {
   if (event.taskLabel) return event.taskLabel;
   if (!event.taskId) return '';
   return event.taskId.length > 12 ? `${event.taskId.slice(0, 8)}…` : event.taskId;
-}
-
-/** One-line description: who did what, to whom. */
-export function describeEvent(event) {
-  const what = KIND_LABELS[event.kind] || event.kind;
-  const to = addresseeOf(event);
-  return to ? `${speakerOf(event)} ${what} → ${to}` : `${speakerOf(event)} ${what}`;
 }
 
 /** Metadata rendered as ordered key/value pairs; secrets are redacted upstream. */
@@ -138,4 +103,59 @@ export function threadFor(threads, event) {
   if (!event) return null;
   const key = event.correlationId || event.id;
   return threads.find((thread) => thread.correlationId === key) ?? null;
+}
+
+/**
+ * Kinds that are plumbing, not speech. An instruction snapshot records which
+ * rule set an agent loaded; nobody said anything, so no conversation surface
+ * (feed, thread transcript, chat room) should print it as an utterance.
+ */
+export const NON_CONVERSATION_KINDS = new Set(['instruction-snapshot']);
+
+/** True when the event is something an agent or the operator actually said. */
+export function isUtterance(event) {
+  return !NON_CONVERSATION_KINDS.has(event.kind);
+}
+
+/**
+ * One event as a line of dialogue. `detail` carries the speaker's full words
+ * and `summary` only a clipped preview, so the line prefers the former.
+ */
+export function chatLineOf(event) {
+  return {
+    id: event.id,
+    seq: event.seq,
+    timestamp: event.timestamp,
+    speakerName: event.actorName || event.actor,
+    /** Raw role for programmatic use (color maps); the label for display. */
+    role: event.actorRole || '',
+    speakerRole: ROLE_LABELS[event.actorRole] || event.actorRole || '',
+    recipientName: event.recipientName || event.recipient || null,
+    text: event.detail || event.summary || '',
+    taskLabel: taskLabelOf(event),
+    status: event.status,
+    kind: event.kind,
+    isOperator: event.actorRole === 'human',
+  };
+}
+
+/** Every utterance across every task, oldest first — the chat room's content. */
+export function buildChatLines(events) {
+  return events
+    .filter(isUtterance)
+    .sort((a, b) => a.seq - b.seq)
+    .map(chatLineOf);
+}
+
+/**
+ * The newest agent the operator can speak to: the last non-human speaker of an
+ * actual utterance. A daemon's instruction snapshot is not a speaker, and the
+ * operator cannot address themselves.
+ */
+export function latestAddressable(events) {
+  const spoken = events.filter(isUtterance).sort((a, b) => a.seq - b.seq);
+  for (let i = spoken.length - 1; i >= 0; i -= 1) {
+    if (spoken[i].actorRole !== 'human') return spoken[i];
+  }
+  return null;
 }
