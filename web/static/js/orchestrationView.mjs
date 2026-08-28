@@ -363,7 +363,11 @@ export function renderThread(doc, thread, onSend, pending = null) {
 
 /** Entry point: fetch, render, then keep live via SSE with a polling backstop. */
 export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000 } = {}) {
-  const fetcher = fetchImpl ?? ((url) => fetch(url));
+  // Forward the init: every send passes {method:'POST', headers, body} as the
+  // second argument, and dropping it turned each one into a GET — a path with
+  // no GET route, so the daemon answered 404 and the operator's reply never
+  // left the browser (AGT-4029).
+  const fetcher = fetchImpl ?? ((url, init) => fetch(url, init));
   const byId = new Map();
   let selected = null;
   let focusedEventId = null;

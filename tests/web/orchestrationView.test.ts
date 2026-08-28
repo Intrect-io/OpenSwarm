@@ -429,3 +429,41 @@ describe('clicking a feed row', () => {
     view.stop();
   });
 });
+
+describe('the default fetcher (AGT-4029)', () => {
+  // Every other test injects fetchImpl, so the fetcher a real browser uses was
+  // never exercised — and it dropped the request init, turning each POST into a
+  // GET the daemon answered 404. Drive the view with no fetchImpl so the
+  // default path is the one under test.
+  it('forwards method and body, so a send is a POST and not a GET', async () => {
+    const doc = shell();
+    const events = [
+      boardEvent({ id: 'q', seq: 1, summary: 'Retry in adapter or scheduler?' }),
+    ];
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      calls.push([url, init]);
+      return Promise.resolve({ ok: true, json: async () => ({ events, pending: [], lastSeq: 1 }) } as Response);
+    }) as typeof fetch;
+
+    try {
+      const view = startOrchestrationView(doc, { eventSourceImpl: null, pollMs: 1e9 });
+      await vi.waitFor(() => expect(doc.querySelectorAll('#feed .ev').length).toBe(1));
+      (doc.querySelector('#feed .ev') as HTMLElement).dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+      (doc.getElementById('composer-text') as HTMLInputElement).value = 'Ship it.';
+      doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+      await vi.waitFor(() => {
+        expect(calls.some(([url]) => url === '/api/coordination/message')).toBe(true);
+      });
+      const [, init] = calls.find(([url]) => url === '/api/coordination/message')!;
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toMatchObject({ text: 'Ship it.' });
+      view.stop();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
