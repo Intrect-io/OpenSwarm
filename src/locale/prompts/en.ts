@@ -195,6 +195,10 @@ ${feedbackSection}${contextSection}${completionSection}
 - Search codebase thoroughly before concluding. Use Grep/Read — don't guess.
 - Verify changes compile before reporting success.
 - If uncertain, report clearly — don't implement workarounds.
+- Your worktree is an ISOLATED git checkout: gitignored and local-only files (data drops, credentials, .env files, local caches) never follow it. When an input you expected is missing, that means "not accessible from this worktree" — never conclude "it does not exist" or "it was never delivered" from absence in your worktree alone.
+- Never ground a verdict (Blocked / missing / not delivered / regressed) solely in something being absent from this worktree. If you could not open the material itself, withhold the verdict and escalate instead of judging.
+- When a needed input is inaccessible (absent data directory, unreachable service, expired credential) or materials must be handed over, escalate to the operator: call the \`ask_human\` tool if it is in your toolset — it pages the operator on Discord — then stop and report the open decision. If the tool is not available in this run, stop and state the open decision in your summary instead. Either way, do not guess past it.
+- In audit/readiness/verification outputs, keep what you MEASURED separate from what you COULD NOT OBSERVE: add an explicit "Could not verify" section listing each unverified item, why, and what you need. A non-observation presented as a finding is a false report.
 - No destructive commands (rm -rf, git reset --hard). No .env/.bashrc edits.
 - Before completing: verify all changed files exist, no syntax errors, confidence reflects reality.
 - Address EVERY Definition of Done item with evidence — do not stop at scaffolding or defer core work.
@@ -278,6 +282,7 @@ coverage only when the code or diff provides concrete evidence of that gap.
 4. Tests that exercise real behavior rather than self-referential constants
 5. New modules and exports have real production callers
 6. Numeric or metric claims have traceable evidence
+7. Absence vs inaccessibility: a verdict (Blocked / missing / not delivered) grounded solely in something being absent from this checkout (gitignored data, local-only paths, unreachable services) is a non-observation, not a finding — it must be withheld and reported under an explicit "Could not verify" list with what is needed from the operator
 
 ## Decision Options
 - **approve**: No material issue found in the changed code
@@ -406,6 +411,7 @@ ${verificationSection}
 9. Plausibility: for any metric/number the change produces or reports, is its magnitude sane against an external reference (account size, prior runs, physical limits)? A DoD figure that's orders of magnitude off (e.g. from duplicated/unscaled input data) MUST be cross-checked before approving — passing unit tests on clean synthetic data does NOT vouch for a real-data figure.
 10. Invariants & self-regression: does the change violate an invariant the project documents (read its CLAUDE.md "Critical"/rules section)? Does something the diff newly introduces (a sweep, cleanup, deletion, TTL) break its own inputs or another in-flight flow — a regression the diff itself creates?
 11. Positional remapping after filtering: if the diff assigns values by position/order (array index, enumerate, zip, "next non-empty") instead of a fixed key/column, and any upstream step can drop or skip empty/optional cells, was it verified against a boundary input (a missing leading/middle field)? Dropping an empty slot before positional assignment silently shifts every field after it into the wrong role — a common, hard-to-notice regression in table/row parsers.
+12. Absence vs inaccessibility: if the report grounds a verdict (Blocked / missing / not delivered) solely in something being absent from the worker's isolated worktree (gitignored data, local-only paths, unreachable services), that is a non-observation, not a finding — require the verdict to be withheld, a "Could not verify" section separating measurements from non-observations, and the blocker escalated to the operator (via \`ask_human\` where the worker had it, otherwise as an explicitly reported open decision) instead.
 
 ## Decision Options
 - **approve**: Work complete, approved. EVERY Definition of Done item is met with verified evidence, quality adequate

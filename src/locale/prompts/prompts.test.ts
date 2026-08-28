@@ -74,6 +74,48 @@ describe('buildWorkerPrompt', () => {
     expect(result).toContain('before/after');
   });
 
+  it('contains AGT-4022 absent-vs-inaccessible rules (withhold verdicts, ask_human, Could not verify)', () => {
+    const result = enPrompts.buildWorkerPrompt(base);
+    // Isolated worktree caveat: absence in the worktree is not non-existence
+    expect(result).toContain('not accessible from this worktree');
+    // No verdict from absence alone
+    expect(result).toContain('withhold the verdict');
+    // Escalation path that pages the operator on Discord
+    expect(result).toContain('ask_human');
+    expect(result).toContain('Discord');
+    // ask_human is only wired on coordination-enabled runs; the prompt must
+    // stay honest on runs that do not expose it (report instead of call).
+    expect(result).toContain('If the tool is not available in this run');
+    // Findings vs non-observations separation in audit-type outputs
+    expect(result).toContain('Could not verify');
+  });
+
+  it('ko worker prompt mirrors the AGT-4022 rules', () => {
+    const result = koPrompts.buildWorkerPrompt(base);
+    expect(result).toContain('접근 불가');
+    expect(result).toContain('판정을 보류');
+    expect(result).toContain('ask_human');
+    expect(result).toContain('확인하지 못한 것');
+  });
+
+  it('reviewer prompt enforces the absence-vs-inaccessibility check in both locales (AGT-4022)', () => {
+    const en = enPrompts.buildReviewerPrompt({ taskTitle: 'T', taskDescription: 'D', workerReport: 'r' });
+    expect(en).toContain('Absence vs inaccessibility');
+    expect(en).toContain('non-observation');
+    const ko = koPrompts.buildReviewerPrompt({ taskTitle: 'T', taskDescription: 'D', workerReport: 'r' });
+    expect(ko).toContain('부재 vs 접근불가');
+    expect(ko).toContain('비관측');
+  });
+
+  it('direct-mode reviewer carries the same check — working trees have local-only material too (AGT-4022)', () => {
+    const en = enPrompts.buildReviewerPrompt({ taskTitle: 'T', taskDescription: 'D', workerReport: 'r', mode: 'direct' });
+    expect(en).toContain('Absence vs inaccessibility');
+    expect(en).toContain('Could not verify');
+    const ko = koPrompts.buildReviewerPrompt({ taskTitle: 'T', taskDescription: 'D', workerReport: 'r', mode: 'direct' });
+    expect(ko).toContain('부재 vs 접근불가');
+    expect(ko).toContain('확인하지 못한 것');
+  });
+
   it('contains INT-2395/2399 rules (data plausibility, invariants & self-regression)', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     // #2395 plausibility of computed numbers vs external reference
