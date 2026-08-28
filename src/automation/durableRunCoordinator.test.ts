@@ -784,4 +784,63 @@ describe('DurableRunCoordinator', () => {
     deadReplacement.close();
     deadLedger.close();
   });
+
+  it('rejects a negative reconcileAbandonMs instead of silently collapsing the safety margin', () => {
+    expect(() => new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), reconcileAbandonMs: -1,
+    })).toThrow(/reconcileAbandonMs/);
+  });
+
+  // AGT-4052: a container assigns the daemon the same pid every restart, so
+  // a NEEDS_RECONCILE row orphaned by a restart has processIsAlive report
+  // true forever (the new daemon's own pid probe hits itself). Age must be
+  // able to free it even while the pid probe insists the owner is alive.
+  it('abandons a NEEDS_RECONCILE owner by age once a pid probe alone can never disprove it', () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    ledger.registerRun({ issueId: 'PID-REUSE', source: 'linear', projectPath: '/repo' }, 1_000);
+    const claim = ledger.claimRun('PID-REUSE', {
+      ownerInstanceId: '7-orphaned-generation', leaseMs: 3_000, now: 1_000,
+    })!;
+    expect(ledger.transition(claim, 'EXECUTING', {}, 1_100)).toBe(true);
+
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', ledger, instanceId: '7-current-generation',
+      // Simulates pid reuse: a live daemon now occupies the orphaned row's
+      // pid, so a bare pid probe can never prove the original owner is dead.
+      processIsAlive: () => true,
+      reconcileAbandonMs: 5_000,
+    });
+
+    // First reconcile() call: reconcileExpiredLeases() moves EXECUTING ->
+    // NEEDS_RECONCILE at t=4_001 (lease expired at 4_000), setting
+    // updatedAt=4_001. The NEEDS_RECONCILE loop runs in the same call but
+    // the row is brand new (age 0), so it must stay fenced despite the
+    // stubbed-alive pid — proving the age check doesn't free prematurely.
+    expect(coordinator.reconcile(4_001)).toHaveLength(1);
+    expect(ledger.getRun('PID-REUSE')).toMatchObject({
+      state: 'NEEDS_RECONCILE',
+      ownerInstanceId: '7-orphaned-generation',
+      leaseToken: claim.leaseToken,
+    });
+
+    // Just under the abandon threshold: still fenced.
+    coordinator.reconcile(4_001 + 4_999);
+    expect(ledger.getRun('PID-REUSE')).toMatchObject({
+      ownerInstanceId: '7-orphaned-generation',
+    });
+
+    // At/past the abandon threshold: freed by age alone, even though
+    // processIsAlive still (falsely) reports the owner as alive.
+    coordinator.reconcile(4_001 + 5_000);
+    expect(ledger.getRun('PID-REUSE')).toMatchObject({
+      state: 'NEEDS_RECONCILE',
+      ownerInstanceId: undefined,
+      leaseToken: undefined,
+    });
+    expect(ledger.markReady('PID-REUSE', 4_001 + 5_001)).toBe(true);
+
+    coordinator.close();
+    ledger.close();
+  });
 });

@@ -25,6 +25,13 @@ export interface DurableRunCoordinatorConfig {
   maxActiveForProject?: number;
   /** Test seam for crash recovery; production probes the owner PID. */
   processIsAlive?: (pid: number) => boolean;
+  /**
+   * How long a NEEDS_RECONCILE row's stale owner is trusted once a pid probe
+   * alone can't disprove it (container pid reuse — see reconcile()). Default
+   * matches leaseMs: by the time a row reaches NEEDS_RECONCILE its lease has
+   * already fully expired once, so this is a second, independent wait.
+   */
+  reconcileAbandonMs?: number;
 }
 
 export interface ExecutionDurabilityHooks {
@@ -128,6 +135,7 @@ export class DurableRunCoordinator {
   private readonly leaseMs: number;
   private readonly maxActiveForProject: number;
   private readonly processIsAlive: (pid: number) => boolean;
+  private readonly reconcileAbandonMs: number;
   private readonly exitedClaims = new Map<string, RunClaim>();
   private closed = false;
 
@@ -137,7 +145,14 @@ export class DurableRunCoordinator {
     this.leaseMs = config.leaseMs ?? 10 * 60_000;
     this.maxActiveForProject = Math.max(1, Math.floor(config.maxActiveForProject ?? 1));
     this.processIsAlive = config.processIsAlive ?? processIsAlive;
+    this.reconcileAbandonMs = config.reconcileAbandonMs ?? this.leaseMs;
     if (this.leaseMs < 3_000) throw new Error('Durable run lease must be at least 3000ms');
+    // A negative value would make `now - run.updatedAt >= reconcileAbandonMs`
+    // trivially true for every row the instant it enters NEEDS_RECONCILE,
+    // silently collapsing the whole safety margin this is meant to enforce.
+    if (!Number.isFinite(this.reconcileAbandonMs) || this.reconcileAbandonMs < 0) {
+      throw new Error('reconcileAbandonMs must be a non-negative, finite number of milliseconds');
+    }
     this.ledger = config.mode === 'off' ? undefined : (config.ledger ?? new RunLedger(config.dbPath));
     this.ownsLedger = config.mode !== 'off' && !config.ledger;
   }
@@ -478,7 +493,22 @@ export class DurableRunCoordinator {
     for (const run of this.ledger.listRuns(['NEEDS_RECONCILE'])) {
       if (!run.ownerInstanceId || !run.leaseToken) continue;
       const pid = ownerProcessId(run.ownerInstanceId);
-      if (pid == null || this.processIsAlive(pid)) continue;
+      // A container assigns the daemon the same pid every start, so a row
+      // orphaned by a restart reads as "alive" forever — the new daemon's
+      // own pid probe hits itself. Age is the only signal that survives that
+      // (see reference_container_pid_reuse_lock.md; same trap already fixed
+      // once in taskState/store.ts's LOCK_ABANDON_MS).
+      //
+      // Why age alone is safe here: reaching NEEDS_RECONCILE at all already
+      // required a full leaseMs of silence — execute()'s renewTimer renews
+      // every leaseMs/3, so a genuinely alive, functioning owner renews
+      // several times over before its lease can expire. updatedAt marks that
+      // expiry moment, so reconcileAbandonMs (default leaseMs) stacks a
+      // second full lease window of silence on top — ~2*leaseMs of missed
+      // renewal (multiple consecutive misses, not one) before this frees the
+      // row, purely as a fallback for when the pid probe can't be trusted.
+      const abandonedByAge = now - run.updatedAt >= this.reconcileAbandonMs;
+      if (!abandonedByAge && (pid == null || this.processIsAlive(pid))) continue;
       this.confirmExitedClaim({
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
