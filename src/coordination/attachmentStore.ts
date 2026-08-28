@@ -131,7 +131,15 @@ function taskSegment(taskId: string): string {
  */
 export function displayFilename(raw: string | undefined): string {
   const base = String(raw ?? '').split(/[\\/]/).pop() ?? '';
-  const cleaned = base.replace(/[\r\n\t`"'|$();&<>*?[\]{}!#]+/g, ' ').replace(/\.{2,}/g, '.').trim().slice(0, 120);
+  const cleaned = base
+    // Control and format characters first: the name is pasted into the message
+    // an agent reads, where a stray newline forges a line and a bidi override
+    // makes the text read as something other than what it is.
+    .replace(/[\p{Cc}\p{Cf}]+/gu, ' ')
+    .replace(/[`"'|$();&<>*?[\]{}!#]+/g, ' ')
+    .replace(/\.{2,}/g, '.')
+    .trim()
+    .slice(0, 120);
   return cleaned || 'attachment';
 }
 
