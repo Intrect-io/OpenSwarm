@@ -509,19 +509,11 @@ describe('runnerExecution.ts coverage extension', () => {
     it('falls through to direct execution when the planner says the task fits the threshold', async () => {
       plannerNeedsDecomposition.mockReturnValue(true);
       plannerRunPlanner.mockResolvedValue({
-        success: true,
-        originalIssue: 'issue-1',
-        needsDecomposition: false,
-        subTasks: [],
-        totalEstimatedMinutes: 0,
+        success: true, originalIssue: 'issue-1', needsDecomposition: false, subTasks: [], totalEstimatedMinutes: 0,
       });
       createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
 
-      const result = await executePipeline(
-        makeCtx({ enableDecomposition: true }),
-        task(),
-        '/repo',
-      );
+      const result = await executePipeline(makeCtx({ enableDecomposition: true }), task(), '/repo');
 
       expect(result.finalStatus).toBe('approved');
       expect(createPipelineFromConfig).toHaveBeenCalledTimes(1);
@@ -530,20 +522,12 @@ describe('runnerExecution.ts coverage extension', () => {
     it('falls through to direct execution when the planner itself fails', async () => {
       plannerNeedsDecomposition.mockReturnValue(true);
       plannerRunPlanner.mockResolvedValue({
-        success: false,
-        originalIssue: 'issue-1',
-        needsDecomposition: false,
-        subTasks: [],
-        totalEstimatedMinutes: 0,
-        error: 'planner adapter exploded',
+        success: false, originalIssue: 'issue-1', needsDecomposition: false, subTasks: [],
+        totalEstimatedMinutes: 0, error: 'planner adapter exploded',
       });
       createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
 
-      const result = await executePipeline(
-        makeCtx({ enableDecomposition: true }),
-        task(),
-        '/repo',
-      );
+      const result = await executePipeline(makeCtx({ enableDecomposition: true }), task(), '/repo');
 
       expect(result.finalStatus).toBe('approved');
       expect(createPipelineFromConfig).toHaveBeenCalledTimes(1);
@@ -562,7 +546,7 @@ describe('runnerExecution.ts coverage extension', () => {
         totalEstimatedMinutes: 35,
       });
       // Echo back a per-call unique id/title (matching the real ITaskSource
-      // contract) so the dependency-resolution map (childIdByTitle) actually
+      // contract) so the dependency-resolution map (childIdByPlanTitle) actually
       // resolves Sub 2's dependency on "Sub 1" — the shared taskSourceMock
       // default (a single fixed return value for every call) would otherwise
       // make every sub-issue resolve to the same title/id, masking the
@@ -598,6 +582,29 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(taskSourceMock.updateState).toHaveBeenCalledWith('sub-1', 'Todo');
       expect(taskSourceMock.updateState).toHaveBeenCalledWith('sub-2', 'Backlog');
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Keeping INT-102 in Backlog until dependencies resolve'));
+    });
+
+    it('resolves a dependency against this retry\'s own plan title, not a recovered child\'s stale title (AGT-4048)', async () => {
+      plannerNeedsDecomposition.mockReturnValue(true);
+      plannerRunPlanner.mockResolvedValue({
+        success: true, originalIssue: 'issue-1', needsDecomposition: true, totalEstimatedMinutes: 35,
+        subTasks: [
+          { title: 'Sub 1', description: 'first', estimatedMinutes: 20, priority: 2 },
+          { title: 'Sub 2', description: 'second', estimatedMinutes: 15, priority: 3, dependencies: ['Sub 1'] },
+        ],
+      });
+      // Retry converges on Sub 1's stale first-attempt title; Sub 2 depends on
+      // "Sub 1" by THIS retry's title, which must still resolve (AGT-4048).
+      (taskSourceMock.createSubIssue as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_parentId: string, title: string) => title === 'Sub 1'
+          ? { id: 'sub-1', identifier: 'INT-101', title: 'Sub 1 (stale wording)' }
+          : { id: 'sub-2', identifier: 'INT-102', title },
+      );
+
+      await executePipeline(makeCtx({ enableDecomposition: true }), task(), '/repo');
+
+      expect(taskSourceMock.updateState).toHaveBeenCalledWith('sub-1', 'Todo');
+      expect(taskSourceMock.updateState).toHaveBeenCalledWith('sub-2', 'Backlog');
     });
 
     it('fails closed when one sub-issue state cannot be initialized', async () => {
@@ -1147,12 +1154,7 @@ describe('runnerExecution.ts coverage extension', () => {
         '/repo',
       );
 
-      expect(taskSourceMock.createSubIssue).toHaveBeenCalledWith(
-        'issue-1',
-        '[test] add edge-case coverage',
-        expect.any(String),
-        expect.objectContaining({ priority: 3 }),
-      );
+      expect(taskSourceMock.createSubIssue).toHaveBeenCalledWith('issue-1', '[test] add edge-case coverage', expect.any(String), expect.objectContaining({ priority: 3 }));
     });
 
     it('does not file follow-ups when autoFileFollowups is disabled', async () => {
@@ -1313,11 +1315,7 @@ describe('reportExecutionResult', () => {
     await reportExecutionResult(task(), executorResult(), reportFn);
 
     expect(reportFn).toHaveBeenCalledTimes(1);
-    expect(saveCognitiveMemory).toHaveBeenCalledWith(
-      'strategy',
-      expect.stringContaining('succeeded'),
-      expect.objectContaining({ derivedFrom: 'issue-1' }),
-    );
+    expect(saveCognitiveMemory).toHaveBeenCalledWith('strategy', expect.stringContaining('succeeded'), expect.objectContaining({ derivedFrom: 'issue-1' }));
   });
 
   it('tolerates a memory-save failure on success', async () => {

@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { drainLinearConnection, effectCommentId, fetchIssuesForStates, parseBlockerIdentifiers } from './linear.js';
-import type { LinearClient } from '@linear/sdk';
+import { describe, expect, it, vi } from 'vitest';
+import { createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, initLinear, parseBlockerIdentifiers } from './linear.js';
+import { LinearClient } from '@linear/sdk';
+
+// createSubIssue reads the module-level client singleton (getClient()), set only
+// via initLinear()'s real `new LinearClient(...)` — mock the constructor so
+// initLinear() installs a fake we control, instead of refactoring the function
+// to take an injected client just for this test.
+vi.mock('@linear/sdk', () => ({ LinearClient: vi.fn() }));
 
 describe('effectCommentId', () => {
   it('derives a stable, marker-specific UUIDv4 for Linear uniqueness', () => {
@@ -128,5 +134,74 @@ describe('drainLinearConnection', () => {
 
   it('tolerates a connection with no pageInfo', async () => {
     await expect(drainLinearConnection({ nodes: [{ id: 'n' }] })).resolves.toEqual([{ id: 'n' }]);
+  });
+});
+
+// AGT-4048: a decomposition retry re-plans (and so regenerates) every sub-task's
+// title/description, but reuses the same stable per-slot idempotencyId. The
+// fix is to converge on an existing sub-issue by that ID + parent alone —
+// content is diagnostic only, never a reason to treat "already created" as a
+// hard failure.
+describe('createSubIssue idempotent recovery (AGT-4048)', () => {
+  function installFakeLinearClient(overrides: { existingChild: Record<string, unknown> }) {
+    const parentIssue = { id: 'parent-uuid', team: Promise.resolve({ id: 'team-uuid' }) };
+    const team = { labels: vi.fn(async () => ({ nodes: [] })) };
+    const fakeClient = {
+      issue: vi.fn(async (id: string) => {
+        if (id === 'parent-uuid') return parentIssue;
+        if (id === 'child-uuid-1') return overrides.existingChild;
+        throw new Error(`unexpected issue() call: ${id}`);
+      }),
+      team: vi.fn(async () => team),
+      createIssue: vi.fn(async () => {
+        throw new Error('Conflict on insert of Issue - Entity Issue with id child-uuid-1 already exists.');
+      }),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+    return fakeClient;
+  }
+
+  it('recovers the existing sub-issue by ID+parent alone when the re-planned title/description differs', async () => {
+    installFakeLinearClient({
+      existingChild: {
+        id: 'child-uuid-1',
+        identifier: 'INT-501',
+        title: 'Original title from the first attempt',
+        description: 'Original description',
+        priority: 3,
+        parent: Promise.resolve({ id: 'parent-uuid' }),
+        state: Promise.resolve({ name: 'Todo' }),
+      },
+    });
+
+    const result = await createSubIssue(
+      'parent-uuid',
+      'A freshly re-planned title that differs from the first attempt',
+      'A freshly re-planned description',
+      { idempotencyId: 'child-uuid-1' },
+    );
+
+    expect(result).toMatchObject({ id: 'child-uuid-1', identifier: 'INT-501' });
+  });
+
+  it('rejects convergence when the existing artifact belongs to a different parent', async () => {
+    installFakeLinearClient({
+      existingChild: {
+        id: 'child-uuid-1',
+        identifier: 'INT-501',
+        title: 'Original title',
+        description: 'Original description',
+        priority: 3,
+        parent: Promise.resolve({ id: 'some-other-parent' }),
+        state: Promise.resolve({ name: 'Todo' }),
+      },
+    });
+
+    const result = await createSubIssue('parent-uuid', 'Re-planned title', 'Re-planned description', {
+      idempotencyId: 'child-uuid-1',
+    });
+
+    expect(result).toHaveProperty('error');
   });
 });

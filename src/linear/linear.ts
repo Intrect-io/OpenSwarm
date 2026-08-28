@@ -1451,11 +1451,17 @@ export async function createSubIssue(
       try {
         const existing = await linear.issue(options.idempotencyId);
         const existingParent = await existing.parent;
-        if (
-          existingParent?.id === parentId
-          && existing.title === title
-          && (existing.description ?? '') === description
-        ) {
+        // The ID alone is the convergence signal (decompositionChildId is a
+        // stable hash of parentId+index, deliberately independent of content)
+        // — a retry's freshly re-planned title/description is not expected to
+        // match the first attempt's byte-for-byte, and requiring that made
+        // every retry fail identically forever instead of converging on the
+        // artifact its own stable ID already points to (AGT-4048). A content
+        // mismatch is still worth knowing about, just not worth failing over.
+        if (existingParent?.id === parentId) {
+          if (existing.title !== title || (existing.description ?? '') !== description) {
+            console.warn(`[Linear] Idempotent sub-issue ${existing.identifier} content differs from this retry's re-plan — converging on the existing artifact anyway`);
+          }
           const stateName = (await existing.state)?.name ?? 'Unknown';
           console.warn(`[Linear] Recovered idempotent sub-issue create: ${existing.identifier}`);
           return {
@@ -1469,7 +1475,7 @@ export async function createSubIssue(
             comments: [],
           };
         }
-        console.error(`[Linear] Idempotent child collision for ${options.idempotencyId}: existing artifact does not match the requested plan`);
+        console.error(`[Linear] Idempotent child collision for ${options.idempotencyId}: existing artifact belongs to a different parent`);
       } catch {
         // Preserve the original create error when no matching artifact exists.
       }

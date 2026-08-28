@@ -437,14 +437,18 @@ export async function createSubIssuesWithDependencies(
     throw new Error(`Incomplete decomposition; retrying idempotently: ${detail}`);
   }
 
-  const childIdByTitle = new Map(createdSubIssues.map((subIssue) => [subIssue.title, subIssue.id]));
+  // Index against THIS retry's own plan titles, not createdSubIssues[i].title
+  // — on a convergence recovery (AGT-4048) that can be the FIRST attempt's
+  // stale title. subTasks/createdSubIssues stay index-aligned (guaranteed by
+  // the length check above), so this stays correct either way.
+  const childIdByPlanTitle = new Map(subTasks.map((subTask, i) => [subTask.title, createdSubIssues[i].id]));
   const subIssueList = createdSubIssues
     .map((s, i) => `${i + 1}. ${s.identifier}: ${s.title}`)
     .join('\n');
 
   for (const subIssue of createdSubIssues) {
     const dependencyIssueIds = subIssue.dependencies
-      .map((title) => childIdByTitle.get(title))
+      .map((title) => childIdByPlanTitle.get(title))
       .filter((value): value is string => Boolean(value));
     const isReady = dependencyIssueIds.length === 0;
 
