@@ -244,6 +244,16 @@ describe('coordination_wait', () => {
     // Worker stages get 20 min and the agentic loop 5 — a wait must never be a
     // way to burn that budget and fail the stage as infra_error.
     expect(resolveWaitMs(60 * 60_000)).toBe(COORDINATION_WAIT_MAX_MS);
+    // The fixed ceiling is not enough on its own: a loop with seconds left
+    // would still grant a full-length wait and then time out instead of
+    // returning the answer that was about to arrive.
+    const now = 1_000_000;
+    const { COORDINATION_WAIT_LOOP_MARGIN_MS } = await import('./coordinationTools.js');
+    expect(resolveWaitMs(60_000, now + 20_000, now)).toBe(20_000 - COORDINATION_WAIT_LOOP_MARGIN_MS);
+    // Past the deadline already: nothing left to spend.
+    expect(resolveWaitMs(60_000, now + 1_000, now)).toBe(0);
+    // A generous loop deadline does not raise the fixed ceiling.
+    expect(resolveWaitMs(60 * 60_000, now + 60 * 60_000, now)).toBe(COORDINATION_WAIT_MAX_MS);
     expect(resolveWaitMs(undefined)).toBe(COORDINATION_WAIT_DEFAULT_MS);
     expect(resolveWaitMs('soon')).toBe(COORDINATION_WAIT_DEFAULT_MS);
     expect(resolveWaitMs(-5)).toBe(0);

@@ -349,6 +349,14 @@ export interface ToolExecOptions {
   readOnly?: boolean;
   /** Run-scoped identity for worker coordination tool dispatch. */
   coordinationContext?: CoordinationToolContext;
+  /**
+   * Epoch ms at which the enclosing agentic loop gives up, when it has one.
+   * `coordination_wait` clamps itself below this: a fixed ceiling alone would
+   * let a wait outlive the loop it claims to respect, and the loop would then
+   * report a timeout instead of the answer that was about to arrive.
+   * (AGT-4065, caught by the PR review.)
+   */
+  loopDeadlineAt?: number;
 }
 
 const DEFAULT_BASH_TIMEOUT_MS = 30000;
@@ -841,7 +849,11 @@ export async function executeTool(
           if (!execOptions?.coordinationContext) {
             return { tool_call_id: callId, content: 'Coordination tools are unavailable outside a scoped autonomous run.', is_error: true };
           }
-          const result = await executeCoordinationTool(name, (args ?? {}) as Record<string, unknown>, execOptions.coordinationContext);
+          const result = await executeCoordinationTool(
+            name,
+            { ...(args ?? {}) as Record<string, unknown>, __loopDeadlineAt: execOptions.loopDeadlineAt },
+            execOptions.coordinationContext,
+          );
           return { tool_call_id: callId, content: result.content, is_error: result.isError };
         }
         // MCP tools (named `server__tool`) route to their server via the MCP client.

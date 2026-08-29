@@ -19,12 +19,30 @@ import { callSignAddress } from './agentNames.js';
 export const COORDINATION_WAIT_MAX_MS = 60_000;
 export const COORDINATION_WAIT_DEFAULT_MS = 20_000;
 
-/** Clamp a model-supplied wait to something a stage can afford. */
-export function resolveWaitMs(requested: unknown): number {
+/**
+ * Headroom left for the loop to wrap up after a wait returns — emit a final
+ * message, write its result. A wait that ran right up to the deadline would
+ * take the answer and then have the loop time out anyway.
+ */
+export const COORDINATION_WAIT_LOOP_MARGIN_MS = 5_000;
+
+/**
+ * Clamp a model-supplied wait to something the enclosing run can afford.
+ *
+ * The fixed ceiling is not enough on its own: a loop with 8 seconds left would
+ * still grant a 60-second wait and then report a timeout instead of the answer
+ * that was about to arrive. When the caller knows its deadline, that wins.
+ * (AGT-4065, caught by the PR review.)
+ */
+export function resolveWaitMs(requested: unknown, loopDeadlineAt?: number, now: number = Date.now()): number {
   const value = typeof requested === 'number' && Number.isFinite(requested)
     ? requested
     : COORDINATION_WAIT_DEFAULT_MS;
-  return Math.min(COORDINATION_WAIT_MAX_MS, Math.max(0, Math.trunc(value)));
+  let capped = Math.min(COORDINATION_WAIT_MAX_MS, Math.max(0, Math.trunc(value)));
+  if (typeof loopDeadlineAt === 'number' && Number.isFinite(loopDeadlineAt)) {
+    capped = Math.min(capped, Math.max(0, loopDeadlineAt - now - COORDINATION_WAIT_LOOP_MARGIN_MS));
+  }
+  return capped;
 }
 
 export interface CoordinationToolContext {
@@ -155,7 +173,7 @@ export async function executeCoordinationTool(
   }
   if (name === 'coordination_wait') {
     try {
-      const events = await waitForInbox(store, context, resolveWaitMs(args.timeout_ms));
+      const events = await waitForInbox(store, context, resolveWaitMs(args.timeout_ms, args.__loopDeadlineAt as number | undefined));
       return { content: JSON.stringify(events), isError: false };
     } catch (error) {
       // An unreadable board must not look like a quiet one.

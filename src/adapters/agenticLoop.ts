@@ -516,7 +516,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       }
     }
 
-    const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, { protectedFiles, bashTimeoutMs, readOnly, coordinationContext });
+    const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, { protectedFiles, bashTimeoutMs, readOnly, coordinationContext, loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined });
     toolCallCount += toolCalls.length;
     // Count only SUCCESSFUL edits — a model whose edit_file calls all fail
     // (old_string not found, protected file) has not modified anything, and
