@@ -722,6 +722,19 @@ program
     process.exitCode = await runProviderCommand(name);
   });
 
+// openswarm attach
+
+program
+  .command('attach')
+  .description("Upload file(s) to a task's coordination inbox and notify its agent")
+  .argument('<issueId>', 'Linear issue id or identifier (e.g. AGT-123)')
+  .argument('<files...>', 'Local file path(s) to upload')
+  .option('-m, --message <text>', 'Message to send with the file(s)')
+  .action(async (issueId: string, files: string[], opts: { message?: string }) => {
+    const { runAttachCommand } = await import('./cli/attachHandler.js');
+    process.exitCode = await runAttachCommand(issueId, files, opts);
+  });
+
 // openswarm dash
 
 program
