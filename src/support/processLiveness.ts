@@ -172,19 +172,42 @@ export function processAppearsAlive(pid: number): boolean {
  * Whether the process that wrote a record is *provably* gone.
  *
  * A pid is unique among live processes, so a record carrying this process's own
- * pid was written either by this process or by one that has since exited. If it
- * predates our start it cannot be ours, which settles it however alive the pid
- * table claims that pid to be. That is exactly the container-restart shape, and
- * it needs nothing written into the record beyond a pid and a timestamp — so it
- * also reaches records already on disk.
+ * pid was written either by this process or by one that has since exited.
+ * Deciding which is what the two signals below are for, and either suffices:
  *
- * Deliberately narrow: it returns false for any pid that is not ours, because a
- * *different* live process legitimately owns its own records. Concurrent
+ *  - **`ownerId`** — an id minted per process. Ours means the record is ours and
+ *    live; anything else, *given that the pid is ours*, means a process that has
+ *    exited. Note the pid conjunct is doing the work: a differing id alone
+ *    proves nothing, because a live sibling process also differs (AGT-4067).
+ *    Clock-free, so nothing below can undermine it.
+ *  - **`writtenAtMs`** — the fallback for records carrying no owner id. A record
+ *    older than our own start cannot be ours.
+ *
+ * The timestamp path needs a margin and the margin is the reason `ownerId`
+ * exists. It has to absorb an imprecise timestamp — for a lock file that is the
+ * **mtime**, and on a filesystem with one-second granularity a lock we wrote at
+ * `…13.900` reports `…13.000`, before our own start of `…13.231`, so without a
+ * margin we would reclaim our own live lock. But a container recreate takes
+ * about half a second, which is *inside* any margin large enough for that, so
+ * the timestamp path cannot decide the very case this exists for. Measured on
+ * vela: lock written 17:12:12.670, successor started 17:12:13.231, gap 0.561 s
+ * against a 1 s margin. (AGT-4071)
+ *
+ * Deliberately narrow in both paths: false for any pid that is not ours, because
+ * a *different* live process legitimately owns its own records. Concurrent
  * OpenSwarm processes — `openswarm attach`, a manual `openswarm run`, a second
  * daemon — must keep their locks and worktrees.
  */
-export function writerProvablyGone(record: { pid: number; writtenAtMs: number }): boolean {
+export function writerProvablyGone(record: {
+  pid: number;
+  writtenAtMs?: number;
+  ownerId?: string;
+  ourOwnerId?: string;
+}): boolean {
   if (record.pid !== process.pid) return false;
-  if (!Number.isFinite(record.writtenAtMs)) return false; // unreadable — never claim proof
+  if (record.ownerId !== undefined && record.ourOwnerId !== undefined) {
+    return record.ownerId !== record.ourOwnerId;
+  }
+  if (record.writtenAtMs === undefined || !Number.isFinite(record.writtenAtMs)) return false;
   return record.writtenAtMs < PROCESS_STARTED_AT_MS - PROCESS_START_JITTER_MS;
 }

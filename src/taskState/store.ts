@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
+import { getInstanceId } from '../support/healthEndpoint.js';
 
 const TASK_STATE_MARKER = '<!-- openswarm:task-state:v1 -->';
 
@@ -116,12 +117,26 @@ const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
  * /proc/self/ns/pid); absent means the lock predates the field entirely. The
  * three are distinct — collapsing "unknown" into "absent" would let a
  * fail-closed writer be probed as if it had opted into the legacy rule. */
-type StoreLockOwner = { pid: number; token: string; ns?: string | null };
+type StoreLockOwner = { pid: number; token: string; ns?: string | null; instance?: string };
 
 /** Preserves the string / null / absent distinction described on StoreLockOwner. */
 function lockNamespaceOf(raw: unknown): string | null | undefined {
   if (raw === null) return null;
   return typeof raw === 'string' ? raw : undefined;
+}
+
+/**
+ * What a held lock records about its holder. Exported because the writer is the
+ * only place these fields originate and `withStoreLock` removes the file in its
+ * `finally`, so there is no way to observe the real thing after the fact — a
+ * mutation dropping `instance` passed the whole suite until this existed.
+ *
+ * `instance` is what lets a successor decide ownership without a clock;
+ * `ns` scopes the pid; `?? null` on the namespace is deliberate — an omitted
+ * key would be indistinguishable from a lock written before the field existed.
+ */
+export function buildLockPayload(token: string): StoreLockOwner {
+  return { pid: process.pid, token, ns: processNamespaceId() ?? null, instance: getInstanceId() };
 }
 
 /** Whether this lock's pid can be probed from here at all. */
@@ -138,7 +153,12 @@ function readStoreLockOwner(lockPath: string): StoreLockOwner | null {
   try {
     const value = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<StoreLockOwner>;
     return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.token === 'string'
-      ? { pid: value.pid!, token: value.token, ns: lockNamespaceOf(value.ns) }
+      ? {
+        pid: value.pid!,
+        token: value.token,
+        ns: lockNamespaceOf(value.ns),
+        instance: typeof value.instance === 'string' ? value.instance : undefined,
+      }
       : null;
   } catch {
     return null;
@@ -203,7 +223,7 @@ function withStoreLock<T>(operation: () => T): T {
       lockFd = openSync(lockPath, 'wx', 0o600);
       // `?? null` deliberately: an omitted key would be indistinguishable from
       // a pre-field lock, which readers are entitled to probe locally.
-      writeFileSync(lockFd, JSON.stringify({ pid: process.pid, token: lockToken, ns: processNamespaceId() ?? null }), 'utf8');
+      writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
       fsyncSync(lockFd);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -236,7 +256,12 @@ function withStoreLock<T>(operation: () => T): T {
         // which is exactly what the AGT-4023 policy test pins.
         const priorGenerationLock = owner !== null
           && isProofCapableSpace(owner.ns ?? undefined) && sameProcessNamespace(owner.ns ?? undefined)
-          && writerProvablyGone({ pid: owner.pid, writtenAtMs: judgedMtimeMs });
+          && writerProvablyGone({
+            pid: owner.pid,
+            ownerId: owner.instance,
+            ourOwnerId: getInstanceId(),
+            writtenAtMs: judgedMtimeMs,
+          });
         // A pid probe cannot see past its own namespace, and a container
         // assigns the daemon the same pid every start — so a lock left behind
         // by a killed container reads as "alive" against the new daemon

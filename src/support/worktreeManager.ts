@@ -484,7 +484,7 @@ function activeMarkerAbandonMs(): number {
  * exited. Needs no field on the marker, so it also releases the markers a
  * crashed daemon left behind before `ownerInstanceId` existed. (AGT-4067)
  */
-function markerPredatesThisProcess(marker: ActiveWorktreeMarker): boolean {
+function markerWriterIsGone(marker: ActiveWorktreeMarker): boolean {
   // Gated on the recorded pid space, because that is the scope in which a pid
   // is unique. This checkout can be mounted into more than one container, each
   // with its own pid 1, and taking a worktree from a live owner in another one
@@ -496,7 +496,12 @@ function markerPredatesThisProcess(marker: ActiveWorktreeMarker): boolean {
   // space establishes.
   if (!isProofCapableSpace(marker.ownerNamespace ?? undefined)) return false;
   if (!sameProcessNamespace(marker.ownerNamespace ?? undefined)) return false;
-  return writerProvablyGone({ pid: marker.ownerPid, writtenAtMs: Date.parse(marker.createdAt) });
+  return writerProvablyGone({
+    pid: marker.ownerPid,
+    ownerId: marker.ownerInstanceId,
+    ourOwnerId: getInstanceId(),
+    writtenAtMs: Date.parse(marker.createdAt),
+  });
 }
 
 /**
@@ -519,7 +524,7 @@ function markerPredatesThisProcess(marker: ActiveWorktreeMarker): boolean {
  */
 function markerWriterProvablyGone(marker: ActiveWorktreeMarker): boolean {
   if (marker.ownerInstanceId === getInstanceId()) return false;
-  return markerPredatesThisProcess(marker);
+  return markerWriterIsGone(marker);
 }
 
 /**

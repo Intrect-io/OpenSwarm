@@ -72,6 +72,45 @@ describe('writerProvablyGone', () => {
   it('claims nothing when the timestamp is unreadable', () => {
     expect(writerProvablyGone({ pid: process.pid, writtenAtMs: Number.NaN })).toBe(false);
   });
+
+  // AGT-4071: the timestamp path could not decide the case it was written for.
+  // A container recreate takes about half a second — measured on vela at 0.561 s
+  // — which is INSIDE any margin big enough to absorb a coarse mtime. The owner
+  // id settles it without consulting a clock at all.
+  it('proves death from the owner id even when the record is newer than the clock margin', () => {
+    expect(writerProvablyGone({
+      pid: process.pid,
+      ownerId: 'a-previous-boot',
+      ourOwnerId: 'this-boot',
+      writtenAtMs: PROCESS_STARTED_AT_MS - 500, // the real gap; the margin is 1000
+    })).toBe(true);
+  });
+
+  it('never reclaims our own record, however far back its timestamp reads', () => {
+    // The margin existed for this: a lock file's mtime can round down below our
+    // own start on a coarse filesystem. With an owner id the timestamp is not
+    // consulted, so it cannot go wrong.
+    expect(writerProvablyGone({
+      pid: process.pid,
+      ownerId: 'this-boot',
+      ourOwnerId: 'this-boot',
+      writtenAtMs: 0,
+    })).toBe(false);
+  });
+
+  it('still claims nothing about another live process, whatever its owner id', () => {
+    expect(writerProvablyGone({
+      pid: process.pid + 1,
+      ownerId: 'somebody-else',
+      ourOwnerId: 'this-boot',
+      writtenAtMs: 0,
+    })).toBe(false);
+  });
+
+  it('falls back to the timestamp when the record carries no owner id', () => {
+    expect(writerProvablyGone({ pid: process.pid, writtenAtMs: PROCESS_STARTED_AT_MS - 60_000 })).toBe(true);
+    expect(writerProvablyGone({ pid: process.pid, writtenAtMs: PROCESS_STARTED_AT_MS - 500 })).toBe(false);
+  });
 });
 
 describe('processNamespaceId / sameProcessNamespace', () => {
