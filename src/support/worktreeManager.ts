@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getInstanceId } from './healthEndpoint.js';
+import { readyReusedPullRequest } from './pullRequestReady.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
@@ -1141,39 +1142,49 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
   )).trim();
 }
 
+
 /** Commit changes + push + gh pr create */
 export async function commitAndCreatePR(
   info: WorktreeInfo,
   title: string,
   issueIdentifier: string,
   description: string,
+  options: { draft?: boolean; committedOnly?: boolean } = {},
 ): Promise<string> {
   const { worktreePath, branchName } = info;
 
-  // Check for uncommitted changes and commit them
-  await stripRuntimeMarkerFromGit(worktreePath);
-  const status = await git(worktreePath, 'status', '--porcelain');
+  // Check for uncommitted changes and commit them.
+  //
+  // `committedOnly` skips this whole phase, and with it every write into the
+  // working tree. A run parked for the operator publishes what it has already
+  // committed and leaves the tree exactly as the worker left it, so the resume
+  // continues from the same place instead of inheriting a commit it never made.
+  // (AGT-4076)
+  if (!options.committedOnly) {
+    await stripRuntimeMarkerFromGit(worktreePath);
+    const status = await git(worktreePath, 'status', '--porcelain');
 
-  if (status.trim()) {
-    await git(worktreePath, 'add', '-A');
-    await guardUnsafeBinaryStaging(worktreePath); // INT-2430
+    if (status.trim()) {
+      await git(worktreePath, 'add', '-A');
+      await guardUnsafeBinaryStaging(worktreePath); // INT-2430
 
-    const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
-    if (stillStaged.trim()) {
-      const commitMsg = [
-        `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
-      ].join('\n');
+      const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
+      if (stillStaged.trim()) {
+        const commitMsg = [
+          `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
+        ].join('\n');
 
-      // Validate conventional commit format (warning only)
-      const commitCheck = runConventionalCommitGuard(commitMsg);
-      if (!commitCheck.passed) {
-        console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
+        // Validate conventional commit format (warning only)
+        const commitCheck = runConventionalCommitGuard(commitMsg);
+        if (!commitCheck.passed) {
+          console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
+        }
+
+        await git(worktreePath, 'commit', '-m', commitMsg);
+        console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
+      } else {
+        console.log(`[Worktree] Nothing left to commit after unsafe-binary-staging guard stripped all staged changes (${branchName})`);
       }
-
-      await git(worktreePath, 'commit', '-m', commitMsg);
-      console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
-    } else {
-      console.log(`[Worktree] Nothing left to commit after unsafe-binary-staging guard stripped all staged changes (${branchName})`);
     }
   }
 
@@ -1201,6 +1212,19 @@ export async function commitAndCreatePR(
 
   if (existing) {
     console.log(`[Worktree] PR already exists: ${existing}`);
+    // Reusing a PR opened while the run was parked must not leave reviewed work
+    // sitting as a draft. Only the reviewed caller promotes; a parked publish
+    // (`draft: true`) is meant to stay a draft.
+    //
+    // But `draft` is not the only reason a PR is one. A PR is also opened draft
+    // when another branch already closes this issue (INT-2544), deliberately, so
+    // a duplicate implementation cannot masquerade as the sole one. Promoting on
+    // the caller's option alone would defeat that, so the duplicate condition is
+    // re-checked here. (Caught by the commit gate, not self-caught.)
+    if (!options.draft) {
+      const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
+      await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
+    }
     return existing;
   }
 
@@ -1234,7 +1258,10 @@ export async function commitAndCreatePR(
   ].join('\n');
 
   const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
-  if (duplicates.length > 0) createArgs.push('--draft');
+  // Draft when the work never earned a review: a duplicate implementation must
+  // not masquerade as the sole one, and work published because a run parked
+  // (AGT-4076) never reached a reviewer at all.
+  if (options.draft || duplicates.length > 0) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();
@@ -1249,6 +1276,10 @@ export async function commitAndCreatePR(
     if (!racedUrl) throw createError;
     url = racedUrl;
     console.warn(`[Worktree] PR create raced with another publisher; using existing PR: ${url}`);
+    // The winner may have opened it as a draft (a parked run does). Losing the
+    // race must not turn a reviewed publication into a hidden draft. Reuses the
+    // duplicate set already computed above rather than re-querying.
+    if (!options.draft) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
   }
 
   // Register PR ownership for conflict auto-resolution
