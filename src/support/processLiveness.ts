@@ -18,7 +18,7 @@
 
 /** Epoch ms at which THIS process started. `process.uptime()` counts from
  * process start, so sampling it at module load is both cheap and accurate. */
-import { readlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
 
 export const PROCESS_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
@@ -45,24 +45,42 @@ const PROCESS_START_JITTER_MS = 1_000;
 /**
  * The pid-space id for a given platform, or undefined when it cannot be known.
  *
- * Split out as a pure function because both of its interesting branches are
- * unreachable on a developer's macOS: a mutation to either passed the suite
- * until this existed, which means it was not covered at all.
+ * Split out as a pure function because its interesting branches are unreachable
+ * on a developer's macOS: mutations to them passed the whole suite until this
+ * existed, which means they were not covered at all.
  *
- * Where pid namespaces exist, an unreadable one is UNKNOWN and never a shared
- * default. Collapsing it to a host-wide value would make two containers that
- * cannot read /proc — and were handed the same host name — compare equal, and
- * that is the one answer that must never be guessed.
- * (Caught by the commit-gate review.)
+ * On Linux the id is the kernel's **boot id** plus the pid-namespace inode.
+ * Both halves are load-bearing and neither is enough alone:
+ *
+ *  - The inode separates two containers on one host, but is a per-boot counter,
+ *    so two hosts hand out the same numbers routinely.
+ *  - The boot id separates hosts (and reboots), and containers share their
+ *    host's, so it cannot separate containers by itself.
+ *
+ * The host name is deliberately NOT used: this container reports `localhost`,
+ * so two deployments sharing a state directory over a network filesystem would
+ * have matched on it and reclaimed each other's live locks and worktrees.
+ * (Caught by the fresh PR review.)
+ *
+ * A source that cannot be read makes the id UNKNOWN, never a shared default —
+ * collapsing it would make every process that cannot read /proc compare equal,
+ * which is the one answer that must never be guessed. After a host reboot the
+ * boot id changes, so records written before it read as unjudgeable and fall
+ * back to the age rules; everything they described is dead by then anyway.
  */
-export function resolveNamespaceId(platform: string, readNamespaceLink: () => string): string | undefined {
+export function resolveNamespaceId(
+  platform: string,
+  readNamespaceLink: () => string,
+  readBootId: () => string,
+): string | undefined {
   if (platform !== 'linux') {
-    // No pid namespaces on this platform: one pid space per machine, so the
-    // host name is a complete identification rather than a fallback.
+    // No pid namespaces here, so one pid space per machine. The host name is
+    // the identification available; a deployment that shares one state
+    // directory between machines runs the containerised path above.
     return hostname();
   }
   try {
-    return `${hostname()}:${readNamespaceLink()}`;
+    return `${readBootId().trim()}:${readNamespaceLink()}`;
   } catch {
     return undefined;
   }
@@ -82,7 +100,11 @@ export function namespacesMatch(recorded: string | undefined, mine: string | und
 let namespaceId: string | undefined | null = null; // null = not resolved yet
 export function processNamespaceId(): string | undefined {
   if (namespaceId === null) {
-    namespaceId = resolveNamespaceId(process.platform, () => readlinkSync('/proc/self/ns/pid'));
+    namespaceId = resolveNamespaceId(
+      process.platform,
+      () => readlinkSync('/proc/self/ns/pid'),
+      () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8'),
+    );
   }
   return namespaceId;
 }

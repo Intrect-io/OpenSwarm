@@ -99,23 +99,58 @@ describe('processNamespaceId / sameProcessNamespace', () => {
     expect(namespacesMatch('ns-a', 'ns-b')).toBe(false);
   });
 
-  // Both branches below are unreachable on macOS, so they are exercised through
+  // The branches below are unreachable on macOS, so they are exercised through
   // the pure resolver rather than the platform. Without this, a mutation that
-  // collapses an unreadable Linux namespace to a shared host-wide default
-  // passes the whole suite. (AGT-4068)
+  // collapses an unreadable Linux namespace to a shared default passes the
+  // whole suite. (AGT-4068)
+  const BOOT = 'boot-1c3bda3d-e21a-4166-be21-c34ce6538059';
+  const NS = 'pid:[4026531836]';
+
   it('reports an unreadable Linux pid namespace as unknown, not as a shared default', () => {
-    const id = resolveNamespaceId('linux', () => { throw new Error('EACCES /proc/self/ns/pid'); });
+    const id = resolveNamespaceId('linux', () => { throw new Error('EACCES /proc/self/ns/pid'); }, () => BOOT);
     expect(id).toBeUndefined();
   });
 
-  it('identifies a readable Linux pid namespace by host and namespace together', () => {
-    const id = resolveNamespaceId('linux', () => 'pid:[4026531836]');
-    expect(id).toBe(`${hostname()}:pid:[4026531836]`);
+  it('reports an unreadable boot id as unknown too', () => {
+    const id = resolveNamespaceId('linux', () => NS, () => { throw new Error('EACCES boot_id'); });
+    expect(id).toBeUndefined();
   });
 
-  it('uses the host name alone where the platform has no pid namespaces', () => {
-    const read = vi.fn(() => 'pid:[4026531836]');
-    expect(resolveNamespaceId('darwin', read)).toBe(hostname());
-    expect(read).not.toHaveBeenCalled();
+  it('separates two hosts that share a namespace inode', () => {
+    // Inodes are a per-boot counter, so two machines hand out the same numbers
+    // routinely. Without the boot id these would compare equal and each could
+    // reclaim the other's live lock across a shared state directory.
+    const a = resolveNamespaceId('linux', () => NS, () => 'boot-aaaa');
+    const b = resolveNamespaceId('linux', () => NS, () => 'boot-bbbb');
+    expect(a).not.toBe(b);
+    expect(namespacesMatch(a, b)).toBe(false);
+  });
+
+  it('separates two containers on one host, which share a boot id', () => {
+    const a = resolveNamespaceId('linux', () => 'pid:[4026531111]', () => BOOT);
+    const b = resolveNamespaceId('linux', () => 'pid:[4026532222]', () => BOOT);
+    expect(namespacesMatch(a, b)).toBe(false);
+  });
+
+  it('matches the same container across a restart — same host boot, same namespace', () => {
+    const before = resolveNamespaceId('linux', () => NS, () => BOOT);
+    const after = resolveNamespaceId('linux', () => NS, () => `${BOOT}\n`); // trailing newline from /proc
+    expect(namespacesMatch(before, after)).toBe(true);
+  });
+
+  it('is exactly boot id plus namespace on Linux — no host name', () => {
+    // The host name is not in it on purpose: this container reports
+    // `localhost`, so two deployments sharing a state directory would have
+    // matched on it. An exact assertion rather than `not.toContain`, which a
+    // one-letter CI host name could fail by accident.
+    expect(resolveNamespaceId('linux', () => NS, () => BOOT)).toBe(`${BOOT}:${NS}`);
+  });
+
+  it('uses the host name where the platform has no pid namespaces', () => {
+    const readNs = vi.fn(() => NS);
+    const readBoot = vi.fn(() => BOOT);
+    expect(resolveNamespaceId('darwin', readNs, readBoot)).toBe(hostname());
+    expect(readNs).not.toHaveBeenCalled();
+    expect(readBoot).not.toHaveBeenCalled();
   });
 });
