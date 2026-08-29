@@ -320,9 +320,12 @@ export async function waitForInbox(
       finish([]);
     }, timeoutMs);
     const poll = setInterval(check, COORDINATION_WAIT_POLL_MS);
-    // Neither timer may hold the process open past this wait.
-    deadline.unref?.();
-    poll.unref?.();
+    // Deliberately NOT unref'd. Someone is awaiting this promise, so the
+    // process must stay alive until it settles — unref'ing let a CLI run whose
+    // only pending handles were these timers exit mid-wait, and the awaited
+    // promise simply never resolved. How long they can hold the loop open is
+    // already bounded by `deadline`, which is the clamped timeout.
+    // (Caught by the PR review.)
     hub.on('coordination:published', check);
     // Now that something is listening, look at what is already there.
     check();

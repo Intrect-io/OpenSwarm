@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import fsp from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assignCallSign } from './agentNames.js';
@@ -257,4 +258,37 @@ describe('coordination_wait', () => {
     expect([...COORDINATION_TOOL_NAMES].sort())
       .toEqual(COORDINATION_TOOL_DEFINITIONS.map((d) => d.function.name).sort());
   });
+});
+
+// Unref'd timers let a process whose only pending handles are those timers
+// exit mid-wait, and the awaited promise simply never resolves. Nothing
+// in-process can observe that — vitest's own worker always has other handles —
+// so drive a real child. (Caught by the PR review; AGT-4065)
+describe('a wait keeps its process alive until it settles', () => {
+  it('resolves in a child process with nothing else pending', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const scriptDir = mkdtempSync(join(tmpdir(), 'osw-wait-alive-'));
+    const script = join(scriptDir, 'probe.mts');
+    await fsp.writeFile(script, [
+      `import { waitForInbox } from ${JSON.stringify(join(process.cwd(), 'src/coordination/coordinationTools.ts'))};`,
+      'const store = { consume: async () => [] };',
+      'const started = Date.now();',
+      "const events = await waitForInbox(store, { repository: '/r', taskId: 't', actor: 'a' }, 1200);",
+      "console.log('SETTLED', JSON.stringify(events), Date.now() - started >= 1000);",
+    ].join('\n'), 'utf-8');
+
+    try {
+      const { stdout } = await run(
+        process.execPath,
+        [join(process.cwd(), 'node_modules/tsx/dist/cli.mjs'), script],
+        { cwd: process.cwd(), timeout: 60_000 },
+      );
+      // Without the fix the child exits silently and this never appears.
+      expect(stdout).toContain('SETTLED [] true');
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  }, 90_000);
 });
