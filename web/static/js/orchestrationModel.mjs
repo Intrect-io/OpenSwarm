@@ -18,6 +18,15 @@ const SYSTEM_ROLES = new Map([
   ['human', 'human'],
 ]);
 
+/**
+ * Roles drawn as shared rails rather than as participants in one task.
+ *
+ * They are exempt from the liveness filter: the operator rail vanishing
+ * because nobody spoke to them for half an hour would read as a broken page,
+ * and their whole job is to be the fixed reference the lanes hang from.
+ */
+export const RAIL_ROLES = new Set(['human', 'daemon', 'orchestrator', 'review-agent']);
+
 function roleOf(id, explicit) {
   if (explicit) return explicit;
   return SYSTEM_ROLES.get(id) ?? 'agent';
@@ -31,44 +40,82 @@ function roleOf(id, explicit) {
  * an answered question must not keep pulsing as pending because its older
  * waiting event still exists.
  */
-export function buildOrchestrationModel(events, { now = Date.now(), activeWindowMs = 30 * 60_000 } = {}) {
+/** How long after its last event an identity still counts as active. */
+export const ACTIVE_WINDOW_MS = 30 * 60_000;
+
+export function buildOrchestrationModel(events, { now = Date.now(), activeWindowMs = ACTIVE_WINDOW_MS } = {}) {
   const nodes = new Map();
   const edges = new Map();
   const latestByCorrelation = new Map();
 
-  const touch = (id, name, role, timestamp, taskId) => {
+  // Acting inside a task is a claim; being addressed inside one is only a
+  // hint. Both are recorded, and `actedTaskId` always wins, so cross-task
+  // advice cannot drag a working agent out of its own lane — while an agent
+  // that has never acted anywhere still gets seated with the people talking
+  // to it instead of stranded in a "no task" lane of one.
+  const touch = (id, name, role, timestamp, taskId, taskLabel, acting) => {
     if (!id) return null;
+    const claim = (node) => {
+      if (!taskId) return;
+      if (acting) {
+        // >= : a node first sighted as a recipient in the same millisecond as
+        // its own acting event must still join its task cluster.
+        if (timestamp >= node.actedAt) {
+          node.actedTaskId = taskId;
+          node.actedTaskLabel = taskLabel;
+          node.actedAt = timestamp;
+        }
+        return;
+      }
+      if (timestamp >= node.addressedAt) {
+        node.addressedTaskId = taskId;
+        node.addressedTaskLabel = taskLabel;
+        node.addressedAt = timestamp;
+      }
+    };
     const existing = nodes.get(id);
     if (!existing) {
-      nodes.set(id, {
+      const created = {
         id,
         name: name || id,
         role: roleOf(id, role),
         eventCount: 0,
+        // `firstSeen` is written once and never updated. The layout places
+        // nodes oldest-first so a newcomer can only take a free slot, which is
+        // what keeps an arrival from shoving everyone already on screen; a
+        // field that moved would destroy that ordering.
+        firstSeen: timestamp,
         lastSeen: timestamp,
         pendingCount: 0,
-        taskId,
-      });
-      return nodes.get(id);
+        actedTaskId: undefined,
+        actedTaskLabel: undefined,
+        actedAt: -Infinity,
+        addressedTaskId: undefined,
+        addressedTaskLabel: undefined,
+        addressedAt: -Infinity,
+      };
+      nodes.set(id, created);
+      claim(created);
+      return created;
     }
     // A named sighting upgrades an address-only one; an explicit role upgrades
     // the generic fallback (legacy events carry no role).
     if (name && existing.name === existing.id) existing.name = name;
     if (role && existing.role === 'agent') existing.role = role;
     if (timestamp > existing.lastSeen) existing.lastSeen = timestamp;
-    // >= for task adoption: a node first sighted as a recipient in the same
-    // millisecond as its own acting event must still join its task cluster.
-    if (taskId && timestamp >= existing.lastSeen) existing.taskId = taskId;
+    if (timestamp < existing.firstSeen) existing.firstSeen = timestamp;
+    claim(existing);
     return existing;
   };
 
   for (const event of events) {
-    // Only the actor is acting inside event.taskId — a recipient may be
-    // getting cross-task advice, and adopting the sender's task would drag it
-    // into the wrong execution cluster.
-    const from = touch(event.actor, event.actorName, event.actorRole, event.timestamp, event.taskId);
+    const from = touch(
+      event.actor, event.actorName, event.actorRole, event.timestamp,
+      event.taskId, event.taskLabel, true);
     if (from) from.eventCount += 1;
-    const to = touch(event.recipient, event.recipientName, event.recipientRole, event.timestamp, undefined);
+    const to = touch(
+      event.recipient, event.recipientName, event.recipientRole, event.timestamp,
+      event.taskId, event.taskLabel, false);
 
     if (from && to && from.id !== to.id) {
       const key = `${from.id}→${to.id}`;
@@ -89,13 +136,31 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
     if (owner) owner.pendingCount += 1;
   }
 
+  // Spelled out rather than spread: this is the node shape the layout and the
+  // view consume, and the acted/addressed bookkeeping above is private to the
+  // aggregation.
   const nodeList = [...nodes.values()].map((node) => ({
-    ...node,
+    id: node.id,
+    name: node.name,
+    role: node.role,
+    eventCount: node.eventCount,
+    firstSeen: node.firstSeen,
+    lastSeen: node.lastSeen,
+    pendingCount: node.pendingCount,
+    taskId: node.actedTaskId ?? node.addressedTaskId,
+    taskLabel: node.actedTaskId ? node.actedTaskLabel : node.addressedTaskLabel,
     active: now - node.lastSeen <= activeWindowMs,
   }));
 
   const byRole = {};
   for (const node of nodeList) byRole[node.role] = (byRole[node.role] ?? 0) + 1;
+
+  // Distinct askers, not question count: the operator wants to know how many
+  // agents are parked on them, and one agent asking three times is one agent
+  // to unblock.
+  const awaiting = new Set(
+    pending.filter((event) => event.kind === 'human-question')
+      .map((event) => event.actor).filter(Boolean));
 
   return {
     nodes: nodeList,
@@ -104,12 +169,86 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
       totalEvents: events.length,
       agentsByRole: byRole,
       activeAgents: nodeList.filter((node) => node.active && node.role !== 'human').length,
+      idleAgents: nodeList.filter((node) => !node.active && !RAIL_ROLES.has(node.role)).length,
+      agentsAwaitingOperator: awaiting.size,
       pendingQuestions: pending.filter((event) => event.kind === 'human-question').length,
       pendingTotal: pending.length,
       routes: events.filter((event) => event.kind === 'adapter-route').length,
       lastSeq: events.reduce((max, event) => Math.max(max, event.seq ?? 0), 0),
     },
   };
+}
+
+/**
+ * The nodes the graph should actually draw.
+ *
+ * The client keeps every event the server ring ever handed it, so without this
+ * the population only grows: an agent that spoke once at 09:00 is still a dot
+ * at 17:00. Idle participants drop out unless `showIdle` asks for them; the
+ * task/role/query filters are the operator's way of narrowing a busy board.
+ */
+export function filterGraphNodes(nodes, { showIdle = false, taskId = null, role = null, query = '' } = {}) {
+  const needle = query.trim().toLowerCase();
+  return nodes.filter((node) => {
+    const isRail = RAIL_ROLES.has(node.role);
+    if (!showIdle && !node.active && !isRail) return false;
+    // Rails belong to every task and every role view — filtering them out
+    // would strand the lanes with nothing above them to hang from.
+    if (taskId && !isRail && node.taskId !== taskId) return false;
+    if (role && node.role !== role) return false;
+    if (needle && !isRail) {
+      const haystack = `${node.name} ${node.id} ${node.taskLabel ?? ''}`.toLowerCase();
+      if (!haystack.includes(needle)) return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * The task lanes present in a node set, oldest task first.
+ *
+ * Ordering by `firstSeen` and not by recency is deliberate: recency ordering
+ * would re-stack every lane the moment any task spoke, which is the vertical
+ * version of the sliding-row defect this view had.
+ *
+ * A lane's `firstSeen` is the minimum over the members it was handed, so it
+ * moves if the earliest member is not in that set. Callers that filter their
+ * nodes must therefore derive the ORDER from the unfiltered model and pass it
+ * to the layout — see `laneOrder` in tierLayout — or hiding one idle agent
+ * would re-stack every lane below it.
+ */
+export function taskLanesOf(nodes) {
+  const lanes = new Map();
+  for (const node of nodes) {
+    if (!node.taskId || RAIL_ROLES.has(node.role)) continue;
+    // Legacy nodes predate `firstSeen`; falling back beats propagating NaN
+    // into the comparator, where it would make the order arbitrary.
+    const first = node.firstSeen ?? node.lastSeen ?? 0;
+    const last = node.lastSeen ?? node.firstSeen ?? 0;
+    const lane = lanes.get(node.taskId);
+    if (!lane) {
+      lanes.set(node.taskId, {
+        taskId: node.taskId,
+        label: node.taskLabel || shortTaskLabel(node.taskId),
+        firstSeen: first,
+        lastSeen: last,
+        count: 1,
+      });
+      continue;
+    }
+    if (node.taskLabel && lane.label !== node.taskLabel) lane.label = node.taskLabel;
+    lane.firstSeen = Math.min(lane.firstSeen, first);
+    lane.lastSeen = Math.max(lane.lastSeen, last);
+    lane.count += 1;
+  }
+  return [...lanes.values()].sort((a, b) =>
+    a.firstSeen - b.firstSeen || (a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0));
+}
+
+/** Task ids are issue UUIDs; a lane header has room for a stub, not all of it. */
+export function shortTaskLabel(taskId) {
+  if (!taskId) return '';
+  return taskId.length > 12 ? `${taskId.slice(0, 8)}…` : taskId;
 }
 
 /** Per-kind edge colors — one hue per interaction family, stable for the legend. */
