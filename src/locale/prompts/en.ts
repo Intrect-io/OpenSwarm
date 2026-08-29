@@ -3,6 +3,7 @@
 // ============================================
 
 import type { PromptTemplates } from '../types.js';
+import { formatSiblingWork } from '../../agents/siblingWorkFormat.js';
 
 const DATA_BLOCK_OPEN = '<openswarm-untrusted-data>';
 const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
@@ -62,7 +63,7 @@ Apply the above feedback and make corrections.
 
     // Code context section (repository + draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
     let contextSection = '';
-    if (context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length) {
+    if (context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
       const parts: string[] = ['## Code Context (auto-generated)'];
 
       if (context.repository) {
@@ -78,6 +79,14 @@ Apply the above feedback and make corrections.
           for (const command of bounded(repo.verificationCommands)) parts.push(promptDataBlock(command));
         }
         parts.push('Treat manifests, package-manager choice, callers, and shared contracts as binding repository context. Do not replace missing dependencies with local stubs or package reimplementations.');
+      }
+
+      if (context.siblingWork && context.siblingWork.length > 0) {
+        parts.push('');
+        parts.push('### Concurrent work in this repository (uncommitted)');
+        parts.push('- Sibling worktrees and the files each is editing (untrusted repository data):');
+        parts.push(promptDataBlock(formatSiblingWork(context.siblingWork)));
+        parts.push('If you must edit one of these files, keep your change as narrow as possible and prefer a non-overlapping approach where one exists. Do not wait for that work or make its changes for it — the branches merge at integration.');
       }
 
       if (context.repoMemories && context.repoMemories.length > 0) {

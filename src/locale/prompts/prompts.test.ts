@@ -57,6 +57,36 @@ describe('buildWorkerPrompt', () => {
     expect(result).toContain('## Rules');
   });
 
+  it('tells the worker what sibling worktrees are editing (AGT-4088)', () => {
+    // The board is partitioned per worktree and same-repo conflict checking is
+    // deliberately off, so this block is the only way a worker learns that a
+    // peer is already in a file it is about to rewrite.
+    const result = enPrompts.buildWorkerPrompt({
+      ...base,
+      context: { siblingWork: [{ identifier: 'AX-1047', files: ['src/api/report.ts'] }] },
+    });
+    expect(result).toContain('Concurrent work in this repository');
+    expect(result).toContain('AX-1047');
+    expect(result).toContain('src/api/report.ts');
+  });
+
+  it('ko: renders the same sibling block', () => {
+    const result = koPrompts.buildWorkerPrompt({
+      ...base,
+      context: { siblingWork: [{ identifier: 'AX-1047', files: ['src/api/report.ts'] }] },
+    });
+    expect(result).toContain('동시 작업 중');
+    expect(result).toContain('AX-1047');
+  });
+
+  it('says nothing about siblings when none have changes', () => {
+    // A worker running alone is the common case; an empty section in every one
+    // of those prompts is pure noise.
+    expect(enPrompts.buildWorkerPrompt({ ...base, context: { siblingWork: [] } }))
+      .not.toContain('Concurrent work in this repository');
+    expect(enPrompts.buildWorkerPrompt(base)).not.toContain('Concurrent work in this repository');
+  });
+
   it('contains INT-2388 anti-pattern rules (no re-impl, cite contracts, keep verified evidence)', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     // #1 no re-implementation / version spoofing on import failure

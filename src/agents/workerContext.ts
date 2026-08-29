@@ -3,6 +3,7 @@ import { recallRepoKnowledge } from '../memory/repoKnowledge.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import type { WorkerContext } from '../locale/types.js';
 import { safeConsole } from '../support/safeLog.js';
+import { collectSiblingWork } from './siblingWork.js';
 import type { PipelineContext } from './pairPipelineTypes.js';
 
 export async function collectWorkerContext(
@@ -39,6 +40,12 @@ export async function collectWorkerContext(
     }
     const memories = await recallRepoKnowledge(context.projectPath, context.task.title, context.task.description || '');
     if (memories.length) { wc.repoMemories = memories; safeConsole.log(`[Pipeline] Recalled ${memories.length} repo memories for context`); }
-    return wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories ? wc : undefined;
+    // Overlap is invisible to a worker otherwise: the coordination board is
+    // partitioned per worktree, and same-repo conflict checking is deliberately
+    // off so workers are never serialised (autonomousRunner). Advisory only —
+    // it changes what the worker knows, not what it is allowed to do. (AGT-4088)
+    const siblingWork = await collectSiblingWork(context.projectPath);
+    if (siblingWork.length) { wc.siblingWork = siblingWork; safeConsole.log(`[Pipeline] ${siblingWork.length} sibling worktree(s) have uncommitted changes`); }
+    return wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
   } catch (error) { safeConsole.warn('[Pipeline] Worker context collection failed (non-blocking):', error); return undefined; }
 }
