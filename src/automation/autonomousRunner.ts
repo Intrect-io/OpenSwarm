@@ -56,6 +56,7 @@ import {
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
+import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
@@ -190,6 +191,7 @@ export class AutonomousRunner {
   private _heartbeatRunning = false;
   private heartbeatCompletion: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
+  private stopEventLoopMonitor: (() => void) | null = null;
   private deferredShutdownCleanup: Promise<void> | null = null;
   private durableRunsClosed = false;
 
@@ -1465,6 +1467,36 @@ export class AutonomousRunner {
     }
 
     this.stopping = false;
+
+    // Always-on, because the stalls this exists to catch only appear under
+    // dispatch load: an external probe of `/api/health` saw zero in its first
+    // 65 samples at 2 running tasks and then caught 28.58s and >=30s once the
+    // scheduler was busy, with the daemon logging nothing throughout (AGT-4079).
+    // Started before `engine.init()` so a stall during startup is caught too —
+    // loading the embedding model alone blocks ~780ms.
+    //
+    // Replace rather than add, so a retry after a failed start arms one monitor
+    // against this loop rather than two reporting the same stall twice.
+    this.stopEventLoopMonitor?.();
+    this.stopEventLoopMonitor = startEventLoopMonitor();
+    try {
+      await this.startAfterMonitor();
+    } catch (error) {
+      // `performStop()` never runs for a start that rejected, and `unref()`
+      // only frees the process to exit — the interval itself keeps firing for
+      // the rest of the process's life. Release it on the way out.
+      this.stopEventLoopMonitor?.();
+      this.stopEventLoopMonitor = null;
+      throw error;
+    }
+  }
+
+  /**
+   * Everything `start()` does once the event-loop monitor is armed. Split out
+   * only so the monitor has exactly one failure path to unwind; the body is
+   * unchanged.
+   */
+  private async startAfterMonitor(): Promise<void> {
     await this.engine.init();
 
     // Recover durable intent before looking at filesystem leftovers. A restart
@@ -1588,6 +1620,8 @@ export class AutonomousRunner {
 
   private async performStop(): Promise<void> {
     this.stopping = true;
+    this.stopEventLoopMonitor?.();
+    this.stopEventLoopMonitor = null;
     for (const job of this.periodicReviewJobs) job.stop();
     this.periodicReviewJobs = [];
     this.orchestratorJob?.stop();
