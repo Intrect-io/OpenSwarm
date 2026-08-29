@@ -200,9 +200,14 @@ describe('DurableRunCoordinator', () => {
     ownershipProbe.mockRestore();
     exitAck.mockRestore();
     warning.mockRestore();
-    expect(coordinator.reconcile(Date.now() + 4_000)).toHaveLength(1);
+    // 2, not 1: the expired-lease reconciliation itself, plus the same call's
+    // NEEDS_RECONCILE pass auto-reopening the row straight to READY once its
+    // owner/lease just cleared and nothing was ever published (AGT-4054
+    // follow-up — previously this sat in NEEDS_RECONCILE forever, unclaimable
+    // yet still counted against the project's admission cap).
+    expect(coordinator.reconcile(Date.now() + 4_000)).toHaveLength(2);
     expect(ledger.getRun('LEDGER-READ-FAIL')).toMatchObject({
-      state: 'NEEDS_RECONCILE',
+      state: 'READY',
       ownerInstanceId: undefined,
       leaseToken: undefined,
     });
@@ -243,9 +248,12 @@ describe('DurableRunCoordinator', () => {
     });
 
     vi.setSystemTime(5_000);
-    expect(coordinator.reconcile(5_000)).toHaveLength(1);
+    // 2, not 1 — see the identical note in the ledger-read-failure test above
+    // (AGT-4054 follow-up): auto-reopen fires in the same call that clears
+    // the loser's owner/lease, since nothing was ever published.
+    expect(coordinator.reconcile(5_000)).toHaveLength(2);
     expect(ledger.getRun('LOSE-LEASE')).toMatchObject({
-      state: 'NEEDS_RECONCILE',
+      state: 'READY',
       ownerInstanceId: undefined,
       leaseToken: undefined,
     });
@@ -839,6 +847,124 @@ describe('DurableRunCoordinator', () => {
       leaseToken: undefined,
     });
     expect(ledger.markReady('PID-REUSE', 4_001 + 5_001)).toBe(true);
+
+    coordinator.close();
+    ledger.close();
+  });
+
+  // AGT-4054 follow-up: AGT-4052 only cleared a NEEDS_RECONCILE row's stale
+  // owner/lease — it never advanced the row's STATE, so a row a prior sweep
+  // (or claimRun()'s own reconcileExpiredRows()) already orphaned is stuck
+  // forever: not claimable (CLAIMABLE_STATES excludes NEEDS_RECONCILE) yet
+  // still counted against claimRun()'s per-project admission cap. Confirmed
+  // live on vela: AX-1018/885/1044 sat 2+ hours post-restart with owner/lease
+  // already null, silently starving 5 other CGF-Portal claims every
+  // heartbeat with "Durable claim unavailable ... concurrent owner".
+  it('auto-reopens an orphaned NEEDS_RECONCILE row once nothing was published', () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    ledger.registerRun({ issueId: 'ORPHAN-NO-PR', source: 'linear', projectPath: '/repo' }, 1_000);
+    const claim = ledger.claimRun('ORPHAN-NO-PR', {
+      ownerInstanceId: 'dead-generation', leaseMs: 3_000, now: 1_000,
+    })!;
+    expect(ledger.transition(claim, 'EXECUTING', {}, 1_100)).toBe(true);
+
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', ledger, instanceId: 'live-generation',
+      processIsAlive: () => true, // pid reuse — probe alone can never disprove
+      reconcileAbandonMs: 5_000,
+    });
+
+    // Same 3-call cadence as the PID-REUSE test above: lease expires -> brand
+    // new NEEDS_RECONCILE (age 0, stays fenced) -> still under threshold
+    // (stays fenced) -> age threshold crossed (owner/lease cleared here).
+    coordinator.reconcile(4_001);
+    coordinator.reconcile(4_001 + 4_999);
+    coordinator.reconcile(4_001 + 5_000);
+    expect(ledger.getRun('ORPHAN-NO-PR')).toMatchObject({
+      state: 'NEEDS_RECONCILE', ownerInstanceId: undefined, leaseToken: undefined, prUrl: undefined,
+    });
+
+    // The very next reconcile() — no manual markReady() call — must reopen it.
+    const reopened = coordinator.reconcile(4_001 + 5_001);
+    expect(ledger.getRun('ORPHAN-NO-PR')).toMatchObject({ state: 'READY' });
+    expect(reopened.map((r) => r.issueId)).toContain('ORPHAN-NO-PR');
+
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('leaves an orphaned NEEDS_RECONCILE row alone when a PR was actually published', () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    ledger.registerRun({ issueId: 'ORPHAN-WITH-PR', source: 'linear', projectPath: '/repo' }, 1_000);
+    const claim = ledger.claimRun('ORPHAN-WITH-PR', {
+      ownerInstanceId: 'dead-generation', leaseMs: 3_000, now: 1_000,
+    })!;
+    expect(ledger.transition(claim, 'EXECUTING', {}, 1_100)).toBe(true);
+    expect(ledger.transition(claim, 'PUBLISHING', { prUrl: 'https://github.com/x/y/pull/1' }, 1_200)).toBe(true);
+
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', ledger, instanceId: 'live-generation',
+      processIsAlive: () => true,
+      reconcileAbandonMs: 5_000,
+    });
+
+    coordinator.reconcile(4_001);
+    coordinator.reconcile(4_001 + 4_999);
+    coordinator.reconcile(4_001 + 5_000);
+    expect(ledger.getRun('ORPHAN-WITH-PR')).toMatchObject({
+      state: 'NEEDS_RECONCILE', ownerInstanceId: undefined, leaseToken: undefined,
+      prUrl: 'https://github.com/x/y/pull/1',
+    });
+
+    // A discovered PR means artifact state a human/reconciler still needs to
+    // look at (recoverPublishedRun/markNeedsHuman own that path) — must NOT
+    // be silently reopened as if nothing happened.
+    coordinator.reconcile(4_001 + 5_001);
+    expect(ledger.getRun('ORPHAN-WITH-PR')).toMatchObject({ state: 'NEEDS_RECONCILE' });
+
+    coordinator.close();
+    ledger.close();
+  });
+
+  // Caught by fresh PR review, not self-caught: prUrl == null only proves the
+  // LEDGER never recorded a PR — it does not prove nothing was pushed. A row
+  // can reach here having run `gh pr create` successfully but died before the
+  // ledger write that would have set prUrl. reconcileDurableArtifacts() (in
+  // autonomousRunner.ts) owns exactly this case: it checks GitHub for a real
+  // PR by branchName before ever falling back to worktree-evidence
+  // inspection. reconcile() has no filesystem/GitHub access, so it must defer
+  // to that path — not race ahead of it — for any row with a branchName.
+  // Confirmed live on vela: AX-1018/AX-885/AX-1044 all carry a branchName.
+  it('leaves a branchName-carrying orphaned NEEDS_RECONCILE row for reconcileDurableArtifacts, not a direct reopen', () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    ledger.registerRun({ issueId: 'ORPHAN-WITH-BRANCH', source: 'linear', projectPath: '/repo' }, 1_000);
+    const claim = ledger.claimRun('ORPHAN-WITH-BRANCH', {
+      ownerInstanceId: 'dead-generation', leaseMs: 3_000, now: 1_000,
+    })!;
+    expect(ledger.transition(claim, 'EXECUTING', { branchName: 'swarm/ORPHAN-WITH-BRANCH' }, 1_100)).toBe(true);
+
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', ledger, instanceId: 'live-generation',
+      processIsAlive: () => true,
+      reconcileAbandonMs: 5_000,
+    });
+
+    coordinator.reconcile(4_001);
+    coordinator.reconcile(4_001 + 4_999);
+    coordinator.reconcile(4_001 + 5_000);
+    expect(ledger.getRun('ORPHAN-WITH-BRANCH')).toMatchObject({
+      state: 'NEEDS_RECONCILE', ownerInstanceId: undefined, leaseToken: undefined,
+      branchName: 'swarm/ORPHAN-WITH-BRANCH', prUrl: undefined,
+    });
+
+    // Must stay parked here even though prUrl is null — only
+    // reconcileDurableArtifacts()'s GitHub lookup can prove nothing was
+    // published for this branch.
+    coordinator.reconcile(4_001 + 5_001);
+    expect(ledger.getRun('ORPHAN-WITH-BRANCH')).toMatchObject({ state: 'NEEDS_RECONCILE' });
 
     coordinator.close();
     ledger.close();
