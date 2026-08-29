@@ -48,9 +48,21 @@ FROM node:22-slim AS production
 # Python extractor shells out to an interpreter. Without it a single tracked
 # .py file makes `codeql database create --build-mode=none` fail, which the
 # pipeline reports as an infra error and parks the task.
+#
+# postgresql-client / openssh-client / jq / netcat-openbsd are the agent's
+# toolchain, not the daemon's. Repository credentials already reach an isolated
+# worktree — cgf-portal links .env, apps/pipelines/.env and friends in via its
+# post-checkout hook, and AGT-4061 lets the sandbox read through those links —
+# so an agent holding a working DSN and no `psql`, or reachable NAS credentials
+# and no `ssh`, can do nothing but ask the operator to verify for it.
+#
+# These grant no new access: they are clients for services the container can
+# already reach with credentials it already has. Evidence and the measured
+# effect are on AGT-4081.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        dumb-init ca-certificates curl git bubblewrap gnupg python3 && \
+        dumb-init ca-certificates curl git bubblewrap gnupg python3 \
+        postgresql-client openssh-client jq netcat-openbsd && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
