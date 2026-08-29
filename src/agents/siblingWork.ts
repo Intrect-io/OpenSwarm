@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  parseChangedFiles, parseWorktreeList, identifierFromBranch, selectSiblingWorktrees,
+  parseChangedFiles, parseWorktreeList, identifierFromBranch, selectSiblingWorktrees, withoutBookkeeping,
   type SiblingWork, type WorktreeEntry,
 } from './siblingWorkFormat.js';
 
@@ -130,7 +130,7 @@ export async function collectSiblingWork(
     // begun, so the scan overruns by at most one in-flight command.
     if (now() >= deadline) return { identifier, files: [] };
     try {
-      return { identifier, files: parseChangedFiles(await readStatus(entry.path)) };
+      return { identifier, files: withoutBookkeeping(parseChangedFiles(await readStatus(entry.path))) };
     } catch {
       return { identifier, files: [] };
     }

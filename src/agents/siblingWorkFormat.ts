@@ -96,6 +96,40 @@ export function selectSiblingWorktrees(
 }
 
 /**
+ * Paths OpenSwarm generates inside a repository, which every managed worktree
+ * carries and which tell a worker nothing about what a peer is building.
+ *
+ * Measured on the live host the moment this shipped: 16 of 23 reported file
+ * entries were `.openswarm-preserved`, and 15 of 19 siblings had nothing else
+ * at all — so the advisory was 79% noise, and the four siblings doing real work
+ * were being pushed past the display cap by housekeeping. The synthetic
+ * fixtures could not show this; only the production distribution did.
+ *
+ * An explicit list, not a `.openswarm/` prefix. That directory also holds
+ * `verify.yaml`, which is repository-owned configuration a task may genuinely
+ * change (README, and `deterministicTester`'s VERIFY_INPUTS) — hiding a sibling's
+ * edit to it would suppress exactly the conflict this advisory exists to report.
+ * Between over- and under-filtering, an unrecognised path is therefore shown.
+ * (Caught by the commit-gate review.)
+ */
+const GENERATED_PATHS: ReadonlySet<string> = new Set([
+  '.openswarm-preserved',
+  '.openswarm/repo-snapshot.json',
+  '.openswarm/repo.graphql',
+]);
+
+export function isBookkeepingPath(path: string): boolean {
+  // `openswarm.json` without the dot is the repository's own config — a task may
+  // legitimately edit it, so it is deliberately not matched here.
+  return GENERATED_PATHS.has(path) || path.startsWith('.openswarm/audit/');
+}
+
+/** Drop OpenSwarm's bookkeeping from a worktree's changed-file list. */
+export function withoutBookkeeping(files: readonly string[]): string[] {
+  return files.filter((file) => !isBookkeepingPath(file));
+}
+
+/**
  * Render the advisory block, or an empty string when there is nothing to say.
  *
  * Empty rather than a "no siblings" sentence: a worker running alone is the
