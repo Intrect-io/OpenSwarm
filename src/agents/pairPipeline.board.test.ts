@@ -215,3 +215,41 @@ describe('agents publish under an assigned handle', () => {
     expect(assignedAgentName(ctx as never, 'worker')).not.toBe(assignedAgentName(ctx as never, 'reviewer'));
   });
 });
+
+// A reply is addressed to a handle, so a restart must not rename a live
+// participant. The first version of assignment probed against this module's
+// in-memory registry, so a handle depended on which other tasks that process
+// had already seen — and a restart, knowing fewer of them, resolved a
+// collision differently. (AGT-4064, caught by the PR review)
+describe('a handle does not depend on what the process has already seen', () => {
+  function ctxFor(n: number) {
+    return context({ task: { id: `t-${n}`, issueId: `i-${n}`, issueIdentifier: `AX-${n}`, title: 'T' } });
+  }
+
+  it('resolves a COLLIDING task the same in a busy process and in a fresh one', async () => {
+    const { assignCallSign } = await import('../coordination/agentNames.js');
+    // Registry-based probing only diverges where two identities actually want
+    // the same handle, so find a real collision rather than hoping for one.
+    const byAddress = new Map<string, number>();
+    let earlier = -1;
+    let later = -1;
+    for (let n = 0; n < 4_000 && later < 0; n += 1) {
+      const address = assignCallSign({
+        repository: '/repo', executionId: `i-${n}`, role: 'worker',
+      }).address;
+      const seen = byAddress.get(address);
+      if (seen !== undefined) { earlier = seen; later = n; } else { byAddress.set(address, n); }
+    }
+    expect(later).toBeGreaterThan(-1); // a collision must exist for this to test anything
+
+    // A daemon that saw the earlier task first, then the later one.
+    const busy = await import('./pipelineCoordination.js');
+    busy.assignedAgentName(ctxFor(earlier) as never, 'worker');
+    const busyLater = busy.assignedAgentName(ctxFor(later) as never, 'worker');
+
+    // Restart: only the later task is still in flight.
+    vi.resetModules();
+    const fresh = await import('./pipelineCoordination.js');
+    expect(fresh.assignedAgentName(ctxFor(later) as never, 'worker')).toBe(busyLater);
+  });
+});

@@ -127,29 +127,54 @@ export function callSignAddress(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
+// Roles resolved in a fixed order so cross-role avoidance is deterministic:
+// each role skips any handle an earlier role on the same task already took.
+const ROLE_ORDER: readonly AgentRole[] = ['orchestrator', 'review-agent', 'worker', 'reviewer'];
+
 /**
  * Resolve a stable handle for one agent identity.
  *
- * `taken` holds the addresses already in use by other live identities in this
- * repository; a collision advances the salt to a different handle rather than
- * letting two active agents answer to one address — and never by appending a
- * number to the handle it first wanted (AGT-4064).
+ * Purely a function of (repository, executionId, role) — no process state — so
+ * a daemon restart resolves the same identity to the same handle. That matters
+ * because a reply is addressed to a handle: if a restart renamed a live
+ * participant, the answer would sit in an inbox nobody reads. (Caught by the
+ * PR review on AGT-4064: an earlier version probed against an in-memory
+ * registry, which made a collision-resolved handle restart-dependent.)
+ *
+ * Collisions are avoided only against the other roles on the SAME task, and
+ * that is sufficient: `CoordinationStore.consume` filters by `taskId` as well
+ * as recipient, so two agents on different tasks cannot read each other's mail
+ * even when their handles coincide.
+ *
+ * `taken` remains available for a caller that knows of addresses it must avoid;
+ * production callers pass nothing and stay deterministic.
  */
 export function assignCallSign(
   input: { repository: string; executionId: string; role: AgentRole },
   taken: ReadonlySet<string> = new Set(),
 ): AgentCallSign {
+  const blocked = new Set(taken);
+  for (const other of ROLE_ORDER) {
+    if (other === input.role) break;
+    blocked.add(callSignAddress(handleFor({ ...input, role: other }, blocked)));
+  }
+  const name = handleFor(input, blocked);
+  return { name, address: callSignAddress(name), role: input.role };
+}
+
+function handleFor(
+  input: { repository: string; executionId: string; role: AgentRole },
+  blocked: ReadonlySet<string>,
+): string {
   const digest = digestOf([input.repository, input.executionId, input.role]);
   for (let salt = 0; salt < 64; salt += 1) {
     const name = composeHandle(input.role, digest, salt);
-    const address = callSignAddress(name);
-    if (!taken.has(address)) return { name, address, role: input.role };
+    if (!blocked.has(callSignAddress(name))) return name;
   }
-  // Every probe collided — vanishingly unlikely, but the address still has to
-  // be unique. Widen with digest hex rather than a counter, and keep the handle
-  // shape: no `role-hex`, no " 2".
-  const name = `${composeHandle(input.role, digest, 0)}${digest.toString('hex').slice(0, 4)}`;
-  return { name, address: callSignAddress(name), role: input.role };
+  // Every probe collided — vanishingly unlikely, but the handle still has to be
+  // distinct. Widen with digest hex rather than a counter, and keep the shape:
+  // no `role-hex`, no " 2".
+  return `${composeHandle(input.role, digest, 0)}${digest.toString('hex').slice(0, 4)}`;
 }
 
 /**

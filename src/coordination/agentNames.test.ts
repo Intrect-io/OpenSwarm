@@ -87,3 +87,37 @@ describe('assigned handles read like handles a person would pick', () => {
     expect(second.name.startsWith(first.name)).toBe(false);
   });
 });
+
+// A reply is addressed to a handle. If a daemon restart renamed a live
+// participant, the answer would sit in an inbox nobody reads — the same
+// invariant a retry already had to preserve. An earlier version probed
+// against an in-memory registry, which made a collision-resolved handle
+// depend on what that process happened to hold. (AGT-4064, caught by PR review)
+describe('handles survive a restart', () => {
+  it('resolves an identity the same way with an empty and a populated process', () => {
+    const identity = { repository: '/repo', executionId: 'AX-1', role: 'reviewer' as const };
+    // "After a restart" is simply: the same call with nothing else known.
+    const cold = assignCallSign(identity);
+    // "Mid-life" used to pass the whole live registry here.
+    const warm = assignCallSign(identity);
+    expect(warm).toEqual(cold);
+  });
+
+  it('separates the roles on one task without consulting process state', () => {
+    const task = { repository: '/repo', executionId: 'AX-1' };
+    const worker = assignCallSign({ ...task, role: 'worker' });
+    const reviewer = assignCallSign({ ...task, role: 'reviewer' });
+    expect(reviewer.address).not.toBe(worker.address);
+    // And still deterministically, on a second cold call.
+    expect(assignCallSign({ ...task, role: 'reviewer' }).address).toBe(reviewer.address);
+  });
+
+  it('keeps every role on a task distinct across many tasks', () => {
+    for (let i = 0; i < 300; i += 1) {
+      const task = { repository: '/repo', executionId: `AX-${i}` };
+      const addresses = (['orchestrator', 'review-agent', 'worker', 'reviewer'] as const)
+        .map((role) => assignCallSign({ ...task, role }).address);
+      expect(new Set(addresses).size).toBe(addresses.length);
+    }
+  });
+});

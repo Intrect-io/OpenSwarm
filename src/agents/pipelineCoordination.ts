@@ -64,12 +64,16 @@ function agentIdentity(context: PipelineContext, role: AgentRole): AgentIdentity
   const key = identityKey(context, role);
   const existing = agentIdentities.get(key);
   if (existing) return existing;
-  const taken = new Set([...agentIdentities.values()].map((v) => v.address));
+  // No `taken` set: assignment must not depend on what this process happens to
+  // hold, or a restart would rename a live participant and strand replies
+  // addressed to the old handle. assignCallSign avoids the other roles on this
+  // task deterministically, and `consume` is task-scoped, so a handle shared
+  // with a different task cannot cross wires. (AGT-4064, PR review)
   const callSign = assignCallSign({
     repository: context.projectPath,
     executionId: taskEventKey(context.task),
     role,
-  }, taken);
+  });
   if (agentIdentities.size >= IDENTITY_CAP) {
     const oldest = agentIdentities.keys().next().value;
     if (oldest !== undefined) agentIdentities.delete(oldest);
