@@ -5,7 +5,6 @@ describe('agent call signs', () => {
   it('is deterministic for one identity so a name survives a restart', () => {
     const identity = { repository: '/repo', executionId: 'session-1', role: 'worker' as const };
     expect(assignCallSign(identity)).toEqual(assignCallSign(identity));
-    expect(assignCallSign(identity).name).toMatch(/^[a-z][a-z-]*-[0-9a-f]{4}$/);
   });
 
   it('gives different identities different names', () => {
@@ -26,5 +25,65 @@ describe('agent call signs', () => {
 
   it('routes by a normalized address', () => {
     expect(callSignAddress('Magos Corvax-Vigilis')).toBe('magos-corvax-vigilis');
+  });
+});
+
+// The operator banned two shapes outright after seeing
+// `Atlas 3 2 (worker · AX-1030) → reviewer-b0bc` on the board: the machine-ID
+// fallback, and names decorated with a collision counter. (AGT-4064)
+describe('assigned handles read like handles a person would pick', () => {
+  const ROLES = ['worker', 'reviewer', 'orchestrator', 'review-agent'] as const;
+  const MACHINE_ID = /^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/;
+
+  function sample(): string[] {
+    const names: string[] = [];
+    for (const role of ROLES) {
+      for (let i = 0; i < 200; i += 1) {
+        names.push(assignCallSign({ repository: '/repo', executionId: `T-${i}`, role }).name);
+      }
+    }
+    return names;
+  }
+
+  it('never produces the banned role-hex shape', () => {
+    expect(sample().filter((n) => MACHINE_ID.test(n))).toEqual([]);
+  });
+
+  it('never decorates a name with a collision counter', () => {
+    // The old failure mode: `Atlas` → `Atlas 2` → `Atlas 3` → `Atlas 3 2`.
+    expect(sample().filter((n) => / \d+$/.test(n))).toEqual([]);
+  });
+
+  it('varies the handle shape rather than repeating one template', () => {
+    const shapes = new Set(sample().map((n) => (
+      /_/.test(n) ? 'tagged' : /\d{4}$/.test(n) ? 'numbered-role' : /\d{2}$/.test(n) ? 'compound' : 'suffixed'
+    )));
+    expect(shapes.size).toBeGreaterThan(2);
+  });
+
+  it('draws a reviewer from different vocabulary than a worker', () => {
+    const wordsOf = (role: 'worker' | 'reviewer') => new Set(
+      Array.from({ length: 200 }, (_, i) =>
+        assignCallSign({ repository: '/repo', executionId: `T-${i}`, role }).name.toLowerCase())
+        .flatMap((n) => n.split(/[^a-z]+/).filter(Boolean)),
+    );
+    const worker = wordsOf('worker');
+    const reviewer = wordsOf('reviewer');
+    const shared = [...worker].filter((w) => reviewer.has(w));
+    // Role words differ too, so overlap should be essentially nothing.
+    expect(shared).toEqual([]);
+  });
+
+  it('does not double a word inside one handle', () => {
+    // `heronheron27` reads as a bug rather than a name.
+    expect(sample().filter((n) => /^([a-z]+)\1/.test(n))).toEqual([]);
+  });
+
+  it('resolves a collision to a different handle, not a decorated one', () => {
+    const identity = { repository: '/repo', executionId: 'T-1', role: 'reviewer' as const };
+    const first = assignCallSign(identity);
+    const second = assignCallSign(identity, new Set([first.address]));
+    expect(second.name).not.toBe(first.name);
+    expect(second.name.startsWith(first.name)).toBe(false);
   });
 });

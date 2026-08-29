@@ -407,6 +407,32 @@ describe('PairPipeline model selection', () => {
     expect(result.stages[0]).toMatchObject({ stage: 'worker', success: false });
   });
 
+  // The board and the Linear comment must name an agent the same way. Linear
+  // renders `stats.workerName`, which trackerEffects reads from
+  // `workerResult.codename` — the model's own self-description. Left alone the
+  // board would read `NimbusDev1892` while Linear still said `Atlas 3`, which
+  // is the split the operator was already seeing on the board. (AGT-4064)
+  it('stamps the assigned handle over the codename the model reported', async () => {
+    runWorker.mockResolvedValueOnce({
+      success: true, summary: 'did it', codename: 'Atlas 3', filesChanged: [], commands: [],
+    });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 1,
+      roles: { worker: { enabled: true, model: 'm', timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    const stamped = result.workerResult?.codename;
+    expect(stamped).toBeTruthy();
+    expect(stamped).not.toBe('Atlas 3');
+    // An assigned handle, never the machine-ID shape or a collision counter.
+    expect(stamped).not.toMatch(/^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/);
+    expect(stamped).not.toMatch(/ \d+$/);
+  });
+
   // INT-2424: runStage()'s catch used to swallow a CLI/infra failure into an
   // ordinary StageResult and just retry, so a codex usage-limit or non-zero
   // exit never reached run()'s isInfraError() classification — it silently

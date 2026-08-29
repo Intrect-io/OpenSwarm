@@ -5,8 +5,7 @@ vi.mock('../coordination/runCoordination.js', () => ({
   publishCoordination: vi.fn(async (event: Record<string, unknown>) => { published.events.push(event); }),
 }));
 
-const { publishStageToBoard, publishStageOutcomeToBoard, registerChosenAgentName, stageCorrelationId } = await import('./pipelineCoordination.js');
-const { assignCallSign } = await import('../coordination/agentNames.js');
+const { publishStageToBoard, publishStageOutcomeToBoard, assignedAgentName, stageCorrelationId } = await import('./pipelineCoordination.js');
 
 function context(over: Record<string, unknown> = {}) {
   return {
@@ -19,57 +18,9 @@ function context(over: Record<string, unknown> = {}) {
 }
 
 describe('stage lifecycle on the coordination board', () => {
-  it('keeps a routable address when the chosen name is entirely non-ASCII', async () => {
-    const ctx = context({ task: { id: 'task-kr', issueId: 'i-kr', issueIdentifier: 'AGT-3', title: 'T' } });
-    expect(registerChosenAgentName(ctx as never, 'worker', '불꽃대장')).toBe('불꽃대장');
-    await publishStageToBoard(ctx as never, 'worker', 'running', 'hi', {});
-    const event = published.events.at(-1) as Record<string, unknown>;
-    expect(event.actorName).toBe('불꽃대장');
-    // Address falls back to the deterministic identity, never an empty string.
-    expect(String(event.actor)).toMatch(/^worker-[0-9a-f]{4,}$/);
-  });
 
-  it('never lets a chosen name capture a deterministic mailbox', async () => {
-    // A worker tries to squat on the reviewer's deterministic fallback address
-    // by choosing that exact string as its display name. Agents that have not
-    // introduced themselves are invisible to the registry, so the whole
-    // `role-hex` namespace is reserved: the squatter is suffixed out of it and
-    // the reviewer — here self-naming in a script with no routable form, which
-    // routes through the fallback path — keeps its own mailbox.
-    const task = { id: 'task-squat', issueId: 'i-squat', issueIdentifier: 'AGT-9', title: 'T' };
-    const ctx = context({ task });
-    const reviewerFallback = assignCallSign({ repository: '/repo', executionId: task.issueId, role: 'reviewer' });
-    expect(registerChosenAgentName(ctx as never, 'worker', reviewerFallback.name)).not.toBe(reviewerFallback.name);
-    expect(registerChosenAgentName(ctx as never, 'reviewer', '한글이름')).toBe('한글이름');
-    await publishStageToBoard(ctx as never, 'worker', 'running', 'hi', {});
-    const workerEvent = published.events.at(-1) as Record<string, unknown>;
-    await publishStageToBoard(ctx as never, 'reviewer', 'running', 'hi', {});
-    const reviewerEvent = published.events.at(-1) as Record<string, unknown>;
-    expect(workerEvent.actor).not.toBe(reviewerFallback.address);
-    expect(workerEvent.actor).not.toMatch(/^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/);
-    expect(reviewerEvent.actor).toBe(reviewerFallback.address);
-  });
 
-  it('reserves the 8-hex final-fallback shape too, not just the 4-hex one', async () => {
-    // assignCallSign's last resort is `role-` + 8 hex chars; a chosen name of
-    // that exact shape must also be suffixed out of the reserved namespace.
-    const task = { id: 'task-squat8', issueId: 'i-squat8', issueIdentifier: 'AGT-10', title: 'T' };
-    const ctx = context({ task });
-    const effective = registerChosenAgentName(ctx as never, 'worker', 'reviewer-a1b2c3d4');
-    expect(effective).toBe('reviewer-a1b2c3d4 2');
-    await publishStageToBoard(ctx as never, 'worker', 'running', 'hi', {});
-    const event = published.events.at(-1) as Record<string, unknown>;
-    expect(event.actor).toBe('reviewer-a1b2c3d4-2');
-  });
 
-  it('speaks under the name the agent chose for itself', async () => {
-    const ctx = context({ task: { id: 'task-name', issueId: 'i-n', issueIdentifier: 'AGT-1', title: 'T' } });
-    // Markup and newlines cannot ride into the display name.
-    const effective = registerChosenAgentName(ctx as never, 'worker', '  **Nova\nSpark**  ');
-    expect(effective).toBe('Nova Spark');
-    await publishStageToBoard(ctx as never, 'worker', 'running', 'hello reviewer', { recipientRole: 'reviewer' });
-    expect(published.events[0].actorName).toBe('Nova Spark');
-  });
 
   it('publishes the agent\'s own words as the outcome, addressed to its counterpart', async () => {
     const ctx = context({ task: { id: 'task-out', issueId: 'i-o', issueIdentifier: 'AGT-2', title: 'T' } });
@@ -83,7 +34,11 @@ describe('stage lifecycle on the coordination board', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const event = published.events.at(-1) as Record<string, unknown>;
     expect(event.summary).toBe('[revise] The JOIN guard is missing — add it before resubmitting.');
-    expect(event).toMatchObject({ actorName: 'Sable', recipientRole: 'worker', status: 'failed', correlationId: exchangeId });
+    // The name is assigned, not taken from the model's `codename` — that field
+    // no longer decides identity (AGT-4064).
+    expect(event).toMatchObject({ recipientRole: 'worker', status: 'failed', correlationId: exchangeId });
+    expect(event.actorName).toBe(assignedAgentName(ctx as never, 'reviewer'));
+    expect(event.actorName).not.toBe('Sable');
   });
 
   // AGT-4060: the board showed `(no summary)` and bare `Codename: X` lines
@@ -220,5 +175,43 @@ describe('stage lifecycle on the coordination board', () => {
       await publishStageToBoard(context() as never, stage, 'running', 'noise');
     }
     expect(published.events).toHaveLength(0);
+  });
+});
+
+// The operator saw `Atlas 3 2 (worker · AX-1030) → reviewer-b0bc` and banned
+// both shapes: self-chosen names that collect collision counters, and the
+// machine-ID fallback. (AGT-4064)
+describe('agents publish under an assigned handle', () => {
+  const MACHINE_ID = /^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/;
+
+  it('ignores the codename the model reports for itself', async () => {
+    const ctx = context({ task: { id: 't-cn', issueId: 'i-cn', issueIdentifier: 'AGT-64', title: 'T' } });
+    publishStageOutcomeToBoard(ctx as never, 'worker', {
+      success: true, durationMs: 1_000, result: { codename: 'Atlas 3', summary: 'did the thing' },
+    }, stageCorrelationId(ctx as never, 'worker'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const event = published.events.at(-1) as Record<string, unknown>;
+    expect(event.actorName).not.toBe('Atlas 3');
+    expect(event.actorName).toBe(assignedAgentName(ctx as never, 'worker'));
+  });
+
+  it('never addresses a counterpart by a machine id', async () => {
+    const ctx = context({ task: { id: 't-addr', issueId: 'i-addr', issueIdentifier: 'AGT-65', title: 'T' } });
+    await publishStageToBoard(ctx as never, 'worker', 'running', 'start', { recipientRole: 'reviewer' });
+    const event = published.events.at(-1) as Record<string, unknown>;
+    expect(String(event.actor)).not.toMatch(MACHINE_ID);
+    expect(String(event.recipient)).not.toMatch(MACHINE_ID);
+    expect(String(event.recipientName)).not.toMatch(MACHINE_ID);
+  });
+
+  it('keeps one handle for the whole run', () => {
+    const ctx = context({ task: { id: 't-stable', issueId: 'i-stable', issueIdentifier: 'AGT-66', title: 'T' } });
+    expect(assignedAgentName(ctx as never, 'worker')).toBe(assignedAgentName(ctx as never, 'worker'));
+  });
+
+  it('gives the worker and the reviewer different handles', () => {
+    const ctx = context({ task: { id: 't-pair', issueId: 'i-pair', issueIdentifier: 'AGT-67', title: 'T' } });
+    expect(assignedAgentName(ctx as never, 'worker')).not.toBe(assignedAgentName(ctx as never, 'reviewer'));
   });
 });

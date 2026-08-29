@@ -6,7 +6,7 @@
 // so the pipeline keeps to its own job and stays under the module size cap.
 
 import type { PipelineContext } from './pairPipelineTypes.js';
-import { assignCallSign, callSignAddress, sanitizeAgentDisplayName, type AgentRole } from '../coordination/agentNames.js';
+import { assignCallSign, type AgentRole } from '../coordination/agentNames.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
 import { t } from '../locale/index.js';
 
@@ -32,82 +32,63 @@ export function stageCorrelationId(
   return `stage:${context.session.id}:${stage}:${iteration}`;
 }
 
-// Names the agents chose for themselves, keyed per (repository, task, role).
-// The first choice sticks for the run; collisions get a numeric suffix so two
-// live agents never answer to one name. Bounded so a long-lived daemon does
-// not grow it forever.
-interface ChosenAgentName { name: string; address: string }
-const chosenAgentNames = new Map<string, ChosenAgentName>();
-const CHOSEN_NAME_CAP = 500;
+// Handles assigned to agents, keyed per (repository, task, session, role) so a
+// stage keeps one identity across its iterations. Bounded so a long-lived
+// daemon does not grow it forever.
+interface AgentIdentity { name: string; address: string }
+const agentIdentities = new Map<string, AgentIdentity>();
+const IDENTITY_CAP = 500;
 
-// The address shapes assignCallSign can produce (`worker-3f2a`, 8-hex final
-// fallback). Self-chosen names must stay out of this namespace, or a codename
-// could capture the mailbox of a live agent the registry cannot see.
-const RESERVED_FALLBACK_ADDRESS = /^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/;
-
-function chosenNameKey(context: PipelineContext, role: AgentRole): string {
-  // Session id scopes the entry to one pipeline run: a retry hours later is a
-  // fresh agent and gets to introduce itself again instead of inheriting the
-  // name a previous attempt chose.
-  return `${context.projectPath}\0${taskEventKey(context.task)}\0${context.session.id}\0${role}`;
+function identityKey(context: PipelineContext, role: AgentRole): string {
+  // Deliberately NOT scoped by session id. A retry opens a fresh session, and
+  // if that changed the handle then an answer addressed to the first attempt
+  // would sit in an inbox nobody reads. One (repo, task, role) is one
+  // participant in the conversation, however many attempts it takes.
+  return `${context.projectPath}\0${taskEventKey(context.task)}\0${role}`;
 }
 
 /**
- * Register the display name an agent picked for itself ("codename" in its
- * structured output). Returns the effective name, or null when the raw value
- * sanitizes to nothing. Markup and newlines are stripped so a name cannot
- * smuggle formatting into the board or Linear comments.
+ * The handle this agent answers to, assigned on first use and stable for the
+ * rest of the run.
+ *
+ * Agents used to name themselves through the `codename` field of their first
+ * structured output. That is gone (AGT-4064): a collision appended " 2" to the
+ * chosen name, the collision set included agents that had finished hours
+ * earlier, and the bumped names reached later agents through the board history
+ * they read — so a model would report `Codename: Atlas 3` as its own choice and
+ * be bumped again to `Atlas 3 2`. The numbering fed itself. Assignment removes
+ * both the self-naming and the suffix: a collision now resolves to a different
+ * handle, never a decorated one.
  */
-export function registerChosenAgentName(
-  context: PipelineContext,
-  role: AgentRole,
-  rawName: string | undefined,
-): string | null {
-  const cleaned = sanitizeAgentDisplayName(rawName);
-  if (!cleaned) return null;
-  const key = chosenNameKey(context, role);
-  const existing = chosenAgentNames.get(key);
-  if (existing) return existing.name;
-  // The display name is free-form (any language), but the mailbox address must
-  // stay routable. Two cases:
-  //  - The name has a routable form: suffix the display name until its address
-  //    is free. Agents that have not introduced themselves still answer at
-  //    their deterministic fallback address and are invisible to this
-  //    registry, so the entire `role-hex` fallback namespace is reserved — a
-  //    chosen name may never claim an address of that shape.
-  //  - The name normalizes to an empty address (fully non-ASCII): keep the
-  //    display name and take a deterministic identity address instead,
-  //    advancing assignCallSign's salt past occupied addresses so two live
-  //    agents never share a mailbox.
-  const takenAddresses = new Set([...chosenAgentNames.values()].map((v) => v.address));
-  let candidate = cleaned;
-  let address = callSignAddress(candidate);
-  if (address) {
-    for (let n = 2; takenAddresses.has(address) || RESERVED_FALLBACK_ADDRESS.test(address); n += 1) {
-      candidate = `${cleaned} ${n}`;
-      address = callSignAddress(candidate);
-    }
-  } else {
-    address = assignCallSign({
-      repository: context.projectPath,
-      executionId: taskEventKey(context.task),
-      role,
-    }, takenAddresses).address;
+function agentIdentity(context: PipelineContext, role: AgentRole): AgentIdentity {
+  const key = identityKey(context, role);
+  const existing = agentIdentities.get(key);
+  if (existing) return existing;
+  const taken = new Set([...agentIdentities.values()].map((v) => v.address));
+  const callSign = assignCallSign({
+    repository: context.projectPath,
+    executionId: taskEventKey(context.task),
+    role,
+  }, taken);
+  if (agentIdentities.size >= IDENTITY_CAP) {
+    const oldest = agentIdentities.keys().next().value;
+    if (oldest !== undefined) agentIdentities.delete(oldest);
   }
-  if (chosenAgentNames.size >= CHOSEN_NAME_CAP) {
-    const oldest = chosenAgentNames.keys().next().value;
-    if (oldest !== undefined) chosenAgentNames.delete(oldest);
-  }
-  chosenAgentNames.set(key, { name: candidate, address });
-  return candidate;
+  const identity = { name: callSign.name, address: callSign.address };
+  agentIdentities.set(key, identity);
+  return identity;
 }
 
+/** The handle an agent will publish under. Exported for tests and callers that
+ * need the name before the agent has spoken. */
+export function assignedAgentName(context: PipelineContext, role: AgentRole): string {
+  return agentIdentity(context, role).name;
+}
 
 /** The board identity an agent publishes under, shared with its MCP tools. */
 export function coordinationContextFor(context: PipelineContext, role: AgentRole) {
   const taskId = taskEventKey(context.task);
-  const chosen = chosenAgentNames.get(chosenNameKey(context, role));
-  const callSign = chosen ?? assignCallSign({ repository: context.projectPath, executionId: taskId, role });
+  const callSign = agentIdentity(context, role);
   return {
     repository: context.projectPath,
     taskId,
@@ -192,9 +173,6 @@ export function publishStageOutcomeToBoard(
     codename?: string; summary?: string; feedback?: string; decision?: string;
     costInfo?: { model?: string; inputTokens?: number; outputTokens?: number; costUsd?: number };
   };
-  if ((stage === 'worker' || stage === 'reviewer') && spoken?.codename) {
-    registerChosenAgentName(context, stage, spoken.codename);
-  }
   const said = stage === 'reviewer'
     ? [spoken?.decision ? `[${spoken.decision}]` : undefined, spoken?.feedback?.trim()].filter(Boolean).join(' ')
     : boardWords(spoken?.summary);

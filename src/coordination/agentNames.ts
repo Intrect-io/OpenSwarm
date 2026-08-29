@@ -1,14 +1,26 @@
 // ============================================
-// OpenSwarm - Agent identity fallback names
+// OpenSwarm - Agent identity
 // ============================================
 //
-// Agents choose their own display names (any style they like) via the
-// `codename` field of their first structured output; that choice is
-// registered in pipelineCoordination's name registry. What lives here is the
-// DETERMINISTIC FALLBACK identity an agent carries before it has spoken:
-// stable (same worker in the same repository resolves to the same fallback
-// across restarts) and deliberately plain — `worker-3f2a` — so a themed
-// convention never overrides the agent's own choice.
+// Every agent on the coordination board gets an assigned handle. It is
+// deterministic from (repository, executionId, role), so the same agent
+// answers to the same handle across restarts, and it is drawn from
+// role-flavoured vocabulary so a reviewer does not read like a worker.
+//
+// Two rules the operator set, both load-bearing (AGT-4064):
+//
+//  - **No `role-hex`.** The previous fallback produced `reviewer-b0bc`, which
+//    reads as a machine ID rather than a participant in a conversation.
+//  - **No numeric collision suffixes.** Agents used to name themselves, and a
+//    collision appended " 2". Because the collision set included agents that
+//    had finished hours earlier, a name that was merely *used before* got
+//    bumped — and the bumped name reached later agents through the board
+//    history they read, so a model would report `Codename: Atlas 3` as its own
+//    choice and get bumped again to `Atlas 3 2`. The numbering fed itself.
+//    A collision now picks a different handle; it never decorates one.
+//
+// Handles come in several shapes so a board does not read as one template
+// repeated: `MopReviewer3744`, `kestrel_qa`, `NimbusReviews`, `mosslark42`.
 
 import { createHash } from 'node:crypto';
 
@@ -27,9 +39,87 @@ function digestOf(parts: readonly string[]): Buffer {
   return createHash('sha256').update(parts.join('\0')).digest();
 }
 
-function compose(role: string, digest: Buffer, salt: number): string {
-  const hex = digest.subarray(salt % 16, (salt % 16) + 2).toString('hex');
-  return `${role}-${hex}`;
+// Role-flavoured vocabulary: a reviewer should not read like a worker. Words
+// are concrete and ordinary — the kind of thing a person picks for a handle —
+// and none of them is a role keyword, so no generated handle can land in the
+// `role-hex` shape this module is here to avoid.
+const SUBJECTS: Readonly<Record<AgentRole, readonly string[]>> = {
+  worker: [
+    'anvil', 'kestrel', 'harbor', 'lathe', 'quarry', 'rivet', 'timber', 'beacon',
+    'cinder', 'drift', 'gable', 'halyard', 'mason', 'nimbus', 'orchard', 'pylon',
+    'ridge', 'solder', 'trellis', 'vault', 'willow', 'basalt', 'copper', 'dovetail',
+    'ember', 'furrow', 'granite', 'hollow', 'juniper', 'kiln',
+  ],
+  reviewer: [
+    'mop', 'lens', 'sieve', 'ledger', 'sentry', 'tally', 'plumb', 'caliper',
+    'compass', 'gauge', 'warden', 'sifter', 'marker', 'thistle', 'bramble', 'lantern',
+    'pumice', 'quill', 'sable', 'tinder', 'verge', 'wicker', 'amber', 'burrow',
+    'clover', 'dapple', 'fathom', 'garnet', 'heron', 'indigo',
+  ],
+  orchestrator: [
+    'relay', 'dispatch', 'switch', 'pilot', 'signal', 'junction', 'tiller', 'rudder',
+    'atlas', 'cairn', 'ferry', 'lattice', 'meridian', 'pivot', 'span', 'trailhead',
+  ],
+  'review-agent': [
+    'audit', 'probe', 'survey', 'canvas', 'sweep', 'scope', 'reckon', 'tessera',
+    'almanac', 'bellwether', 'cadence', 'docket', 'errata', 'foolscap',
+  ],
+};
+
+/** Shape A's role word — the `Reviewer` in `MopReviewer3744`. */
+const ROLE_WORDS: Readonly<Record<AgentRole, readonly string[]>> = {
+  worker: ['Dev', 'Builder', 'Eng', 'Maker'],
+  reviewer: ['Reviewer', 'Checker', 'QA', 'Auditor'],
+  orchestrator: ['Ops', 'Lead', 'Runner', 'Coord'],
+  'review-agent': ['Audit', 'Scan', 'Sweep', 'Review'],
+};
+
+/** Shape B's lowercase tag — the `qa` in `kestrel_qa`. */
+const ROLE_TAGS: Readonly<Record<AgentRole, readonly string[]>> = {
+  worker: ['dev', 'eng', 'build', 'wip'],
+  reviewer: ['qa', 'review', 'check', 'rv'],
+  orchestrator: ['ops', 'lead', 'run', 'hq'],
+  'review-agent': ['audit', 'scan', 'sweep', 'rev'],
+};
+
+/** Shape C's trailing word — the `Reviews` in `NimbusReviews`. */
+const ROLE_SUFFIXES: Readonly<Record<AgentRole, readonly string[]>> = {
+  worker: ['Builds', 'Works', 'Forge', 'Labs'],
+  reviewer: ['Reviews', 'Checks', 'Audits', 'Notes'],
+  orchestrator: ['Runs', 'Ops', 'Board', 'Desk'],
+  'review-agent': ['Audits', 'Scans', 'Sweeps', 'Reports'],
+};
+
+const HANDLE_SHAPES = 4;
+
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
+/**
+ * Build one handle from the digest. `salt` shifts which bytes are read, so a
+ * collision moves to a genuinely different handle instead of decorating the
+ * one it wanted with a number.
+ */
+function composeHandle(role: AgentRole, digest: Buffer, salt: number): string {
+  const at = (i: number): number => digest[(i * 3 + salt * 7) % digest.length];
+  const pick = <T>(list: readonly T[], i: number): T => list[at(i) % list.length];
+  const subjects = SUBJECTS[role];
+  const subject = pick(subjects, 1);
+  // Offset by at least one so the compound shape never doubles a word
+  // (`heronheron27` reads like a bug, not a handle).
+  const second = subjects[(subjects.indexOf(subject) + 1 + (at(2) % (subjects.length - 1))) % subjects.length];
+
+  switch (at(0) % HANDLE_SHAPES) {
+    case 0: // MopReviewer3744
+      return `${capitalize(subject)}${pick(ROLE_WORDS[role], 3)}${String(((at(4) << 8) | at(5)) % 10_000).padStart(4, '0')}`;
+    case 1: // kestrel_qa
+      return `${subject}_${pick(ROLE_TAGS[role], 6)}`;
+    case 2: // NimbusReviews
+      return `${capitalize(subject)}${pick(ROLE_SUFFIXES[role], 7)}`;
+    default: // mosslark42
+      return `${subject}${second}${String(at(8) % 100).padStart(2, '0')}`;
+  }
 }
 
 /** Normalize a call sign into its routable address form. */
@@ -38,24 +128,28 @@ export function callSignAddress(name: string): string {
 }
 
 /**
- * Resolve a stable call sign for one agent identity.
+ * Resolve a stable handle for one agent identity.
  *
  * `taken` holds the addresses already in use by other live identities in this
- * repository; a collision advances to the next candidate rather than letting
- * two active agents answer to one name.
+ * repository; a collision advances the salt to a different handle rather than
+ * letting two active agents answer to one address — and never by appending a
+ * number to the handle it first wanted (AGT-4064).
  */
 export function assignCallSign(
   input: { repository: string; executionId: string; role: AgentRole },
   taken: ReadonlySet<string> = new Set(),
 ): AgentCallSign {
   const digest = digestOf([input.repository, input.executionId, input.role]);
-  for (let salt = 0; salt < 30; salt += 1) {
-    const name = compose(input.role, digest, salt);
+  for (let salt = 0; salt < 64; salt += 1) {
+    const name = composeHandle(input.role, digest, salt);
     const address = callSignAddress(name);
     if (!taken.has(address)) return { name, address, role: input.role };
   }
-  const fallback = `${input.role}-${digest.toString('hex').slice(0, 8)}`;
-  return { name: fallback, address: callSignAddress(fallback), role: input.role };
+  // Every probe collided — vanishingly unlikely, but the address still has to
+  // be unique. Widen with digest hex rather than a counter, and keep the handle
+  // shape: no `role-hex`, no " 2".
+  const name = `${composeHandle(input.role, digest, 0)}${digest.toString('hex').slice(0, 4)}`;
+  return { name, address: callSignAddress(name), role: input.role };
 }
 
 /**
