@@ -18,9 +18,11 @@ import {
   hydrateTaskStateFromComments,
   markTaskBacklog,
   resetTaskStateStoreForTests,
+  buildLockPayload,
   type OpenSwarmTaskState,
 } from './store.js';
 import { PROCESS_STARTED_AT_MS, isProofCapableSpace, processNamespaceId } from '../support/processLiveness.js';
+import { getInstanceId } from '../support/healthEndpoint.js';
 
 // The fast-path proof needs a REAL pid space, which only Linux can give (boot
 // id + pid-namespace inode). Elsewhere the recorded id is a machine hint, good
@@ -519,6 +521,52 @@ describe('task state store', () => {
 
       expect(() => upsertTaskState('ISSUE-LOCK-11', { execution: { status: 'todo', retryCount: 0 } }))
         .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    itWithPidSpace('reclaims a prior-generation lock written half a second before we started (AGT-4071)', () => {
+      // The production case, at production timing: the outgoing container wrote
+      // this at 17:12:12.670 and its successor started at 17:12:13.231. The
+      // timestamp path cannot see 0.561 s past a 1 s margin; the owner id can.
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: process.pid,
+        token: 'prior-generation',
+        ns: processNamespaceId(),
+        instance: 'a-previous-boot',
+      }), 'utf8');
+      const justBeforeWeStarted = new Date(PROCESS_STARTED_AT_MS - 500);
+      utimesSync(lockFile(), justBeforeWeStarted, justBeforeWeStarted);
+
+      upsertTaskState('ISSUE-LOCK-12', { execution: { status: 'todo', retryCount: 0 } });
+
+      expect(getTaskState('ISSUE-LOCK-12')?.execution.status).toBe('todo');
+      expect(existsSync(lockFile())).toBe(false);
+    });
+
+    itWithPidSpace('does not reclaim a lock this very process holds, however its mtime reads (AGT-4071)', () => {
+      // A coarse-granularity filesystem can report our own fresh lock as older
+      // than our start. The owner id keeps that from mattering.
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: process.pid,
+        token: 'ours-right-now',
+        ns: processNamespaceId(),
+        instance: getInstanceId(),
+      }), 'utf8');
+      const impossiblyOld = new Date(PROCESS_STARTED_AT_MS - 500);
+      utimesSync(lockFile(), impossiblyOld, impossiblyOld);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-13', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    it('records who holds it, so a successor can decide ownership without a clock (AGT-4071)', () => {
+      const payload = buildLockPayload('tok-1');
+      expect(payload.pid).toBe(process.pid);
+      expect(payload.token).toBe('tok-1');
+      expect(payload.instance).toBe(getInstanceId());
+      // `null`, not absent: an omitted key reads as "written before the field
+      // existed", which is entitled to a local pid probe.
+      expect('ns' in payload).toBe(true);
+      expect(payload.ns).toBe(processNamespaceId() ?? null);
     });
 
     it('still ages out a lock with no readable owner on the shorter clock', () => {
