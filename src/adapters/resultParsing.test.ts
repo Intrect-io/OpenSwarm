@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseReviewerResult, parseWorkerResult } from './resultParsing.js';
+import { t } from '../locale/index.js';
 
 const wrap = (obj: unknown) => '```json\n' + JSON.stringify(obj) + '\n```';
 
@@ -192,5 +193,62 @@ describe('agent codename passthrough (AGT-4019)', () => {
   it('leaves codename unset when the agent did not introduce itself', () => {
     const parsed = parseWorkerResult('```json\n{"success":true,"summary":"did it","noChangesReason":"n/a"}\n```');
     expect(parsed.codename).toBeUndefined();
+  });
+});
+
+describe("the worker's report survives extraction (AGT-4073)", () => {
+  // The worker prompt asks for a plain-text report whose FIRST line is the
+  // agent's `Codename:` introduction, and for no JSON on the success path — so
+  // this is the shape the text fallback actually receives in production.
+  const promptShapedReport = [
+    'Codename: Atlas',
+    'Wired a low-confidence filter into renderA2() so it is excluded from the daily figure.',
+    'Verified with 32 targeted Node tests; the two-week backfill is still unverified.',
+    'Reviewer: start at src/a2/render.ts:118.',
+  ].join('\n');
+
+  it('summarises the report body, not the codename line', () => {
+    const parsed = parseWorkerResult(promptShapedReport);
+    expect(parsed.summary).not.toMatch(/Codename/i);
+    expect(parsed.summary).toContain('Wired a low-confidence filter');
+  });
+
+  it('carries later lines a single-line summary would have dropped', () => {
+    // What the worker could not verify sits on the SECOND line; taking only the
+    // first line lost it. The third line ("start at …") does not fit under the
+    // 200-character cap, which is unchanged by this fix and bounds how much of
+    // any report reaches the reviewer.
+    const parsed = parseWorkerResult(promptShapedReport);
+    expect(parsed.summary).toContain('still unverified');
+  });
+
+  it('leaves a report with no codename line exactly as before', () => {
+    const parsed = parseWorkerResult('Rewrote the retry policy so a 429 backs off.');
+    expect(parsed.summary).toBe('Rewrote the retry policy so a 429 backs off.');
+  });
+
+  it('stops at a whole line rather than joining past the cap and cutting mid-word', () => {
+    // Joining everything and truncating afterwards would also respect the cap,
+    // so length alone does not discriminate. The property that does: a report
+    // whose individual lines fit is never cut mid-word, so it carries no
+    // ellipsis — the summary ends where a line ended.
+    const long = ['Codename: Atlas', ...Array.from({ length: 12 }, (_, i) => `Sentence number ${i} about the change.`)].join('\n');
+    const parsed = parseWorkerResult(long);
+    expect(parsed.summary.length).toBeLessThanOrEqual(200);
+    expect(parsed.summary.endsWith('...')).toBe(false);
+    expect(parsed.summary.endsWith('.')).toBe(true);
+  });
+
+  it('truncates a single over-long line rather than returning it whole', () => {
+    const parsed = parseWorkerResult('x'.repeat(400));
+    expect(parsed.summary).toHaveLength(203);
+    expect(parsed.summary.endsWith('...')).toBe(true);
+  });
+
+  it('falls back to the no-summary placeholder when only a codename was said', () => {
+    // Nothing but the introduction: there is genuinely no report to carry, and
+    // the board's own normaliser turns this into the timing line.
+    const parsed = parseWorkerResult('Codename: Atlas');
+    expect(parsed.summary).toBe(t('common.fallback.noSummary'));
   });
 });

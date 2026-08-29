@@ -190,11 +190,37 @@ function isExplicitFailure(text: string): boolean {
   return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(text);
 }
 
-function extractSummary(text: string): string {
-  const lines = text.split('\n').filter((l) => l.trim().length > 10);
+/** The self-introduction line the worker prompt mandates, not part of the report. */
+const CODENAME_LINE = /^\s*Codename:/i;
+const SUMMARY_MAX_CHARS = 200;
+
+/**
+ * The agent's own words, recovered from a plain-text answer.
+ *
+ * Two rules, both learned from what the worker prompt actually asks for
+ * (`locale/prompts/*.ts`: report in short plain text, first line
+ * `Codename: <name>`, no JSON on the success path):
+ *
+ * - **Codename lines are skipped.** Taking the literal first line handed the
+ *   reviewer `- **Summary:** Codename: Atlas` and threw the report away, so the
+ *   worker had no channel to the reviewer at all (AGT-4073).
+ * - **Content is joined up to the cap**, not cut at the first line. A report
+ *   states what was done, what could not be verified, and where to look; one
+ *   line keeps only the first of those. The 200-character bound is unchanged,
+ *   so this carries more of the answer without carrying more text.
+ */
+export function extractSummary(text: string): string {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 10 && !CODENAME_LINE.test(line));
   if (lines.length === 0) return t('common.fallback.noSummary');
-  const summary = lines[0].trim();
-  return summary.length > 200 ? `${summary.slice(0, 200)}...` : summary;
+  let summary = lines[0];
+  for (const line of lines.slice(1)) {
+    if (summary.length + 1 + line.length > SUMMARY_MAX_CHARS) break;
+    summary = `${summary} ${line}`;
+  }
+  return summary.length > SUMMARY_MAX_CHARS ? `${summary.slice(0, SUMMARY_MAX_CHARS)}...` : summary;
 }
 
 function extractErrorMessage(text: string): string {
@@ -290,9 +316,9 @@ const DECISION_PHRASE =
  *
  * The two parse paths need different evidence. A JSON verdict carries its findings
  * in dedicated fields, so those are authoritative. The text fallback does not: its
- * `feedback` comes from extractSummary, which quotes the first substantial line —
- * usually the "Decision: revise" line itself — so a populated feedback field there
- * proves nothing. For that path the question is whether the message holds anything
+ * `feedback` comes from extractSummary, which quotes the substantial lines up to a
+ * length cap — usually starting with the "Decision: revise" line itself — so a
+ * populated feedback field there proves nothing. For that path the question is whether the message holds anything
  * once the control tokens and the verdict declaration are removed.
  *
  * Residual prose only counts when the reviewer actually DECLARED a verdict. Without

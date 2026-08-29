@@ -19,6 +19,7 @@ import type { ReviewDecision } from '../agents/agentPair.js';
 import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { extractResultFromStreamJson } from '../agents/cliStreamParser.js';
 import { t } from '../locale/index.js';
+import { extractSummary } from './resultParsing.js';
 import { writeClaudeMcpConfig } from './memoryMcp.js';
 
 const execFileAsync = promisify(execFile);
@@ -267,12 +268,6 @@ function extractWorkerFromText(text: string): WorkerResult {
   };
 }
 
-function extractSummary(text: string): string {
-  const lines = text.split('\n').filter((l) => l.trim().length > 10);
-  if (lines.length === 0) return t('common.fallback.noSummary');
-  const summary = lines[0].trim();
-  return summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
-}
 
 function extractErrorMessage(text: string): string {
   const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
