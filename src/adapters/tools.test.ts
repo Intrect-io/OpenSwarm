@@ -724,6 +724,37 @@ describe('executeTool coordination_history dispatch (AGT-4054)', () => {
     expect(result.content).not.toContain('Unknown tool');
     expect(() => JSON.parse(result.content)).not.toThrow();
   });
+
+  // The adapter used to carry its own hardcoded copy of the coordination tool
+  // names, so a tool could be defined, advertised to the model, and still fall
+  // through to "Unknown tool" here. Drive every declared name through the real
+  // dispatch rather than trusting the two lists to stay in step. (AGT-4065)
+  it('dispatches every declared coordination tool, not a hardcoded subset', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-coord-dispatch-'));
+    process.env.OPENSWARM_COORDINATION_FILE = path.join(dir, 'events.json');
+    process.env.OPENSWARM_AUTOMATION_DB = path.join(dir, 'automation.db');
+    (await import('../coordination/coordinationStore.js')).resetCoordinationStoreForTests();
+    (await import('../coordination/coordinationTrace.js')).resetTraceDbForTests();
+
+    const { COORDINATION_TOOL_DEFINITIONS } = await import('../coordination/coordinationTools.js');
+    const coordinationContext: CoordinationToolContext = {
+      repository: TMP_DIR, taskId: 't-agt-4065', actor: 'worker-test', actorName: 'Worker Test',
+    };
+    // Arguments that make each tool a no-op: a zero wait returns immediately,
+    // and ask_human is excluded because it deliberately ends a run.
+    const args: Record<string, Record<string, unknown>> = {
+      coordination_wait: { timeout_ms: 0 },
+    };
+
+    for (const definition of COORDINATION_TOOL_DEFINITIONS) {
+      const name = definition.function.name;
+      if (name === 'ask_human' || name === 'coordination_publish') continue;
+      const result = await executeTool(
+        makeCall(name, args[name] ?? {}), TMP_DIR, undefined, { coordinationContext },
+      );
+      expect(result.content, `${name} did not reach executeCoordinationTool`).not.toContain('Unknown tool');
+    }
+  });
 });
 
 // ──────────────────────────────────────────────
