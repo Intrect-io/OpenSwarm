@@ -296,3 +296,66 @@ describe('human questions', () => {
       .filter((event) => event.kind === 'human-question')).toHaveLength(1);
   });
 });
+
+describe('the operator is told which issue is asking (AGT-4074)', () => {
+  it('names the issue identifier in the page, not the worktree id', async () => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    await h.postHumanQuestion({
+      repository: '/repo',
+      taskId: 'f8c57098-cbf6-4beb-9e0f-20595d60c7c7',
+      taskLabel: 'AX-867',
+      actor: 'pylon-dev', actorName: 'pylon_dev', actorRole: 'worker',
+      question: 'Which DSN?', notify,
+    });
+    const page = notify.mock.calls[0][0] as string;
+    expect(page).toContain('AX-867');
+    expect(page).not.toContain('f8c57098');
+  });
+
+  it('falls back to the task id when no label is known', async () => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    await h.postHumanQuestion({
+      repository: '/repo', taskId: 'unlabelled-task',
+      actor: 'pylon-dev', question: 'Which DSN?', notify,
+    });
+    expect(notify.mock.calls[0][0]).toContain('unlabelled-task');
+  });
+
+  it('labels the question, the page marker and the answer', async () => {
+    const h = await modules();
+    const store = await import('./coordinationStore.js');
+    const posted = await h.postHumanQuestion({
+      repository: '/repo', taskId: 'wt-uuid', taskLabel: 'AX-867',
+      actor: 'pylon-dev', actorName: 'pylon_dev', actorRole: 'worker',
+      question: 'Which DSN?', notify: async () => true,
+    });
+    await h.answerHumanQuestion(posted.correlationId, 'Use the staging DSN', 'discord:user');
+    const events = store.getCoordinationStore().exchange(posted.correlationId);
+    expect(events.length).toBeGreaterThanOrEqual(3);
+    for (const event of events) expect(event.taskLabel).toBe('AX-867');
+  });
+
+  it('attributes the page marker to the asking agent, not the daemon', async () => {
+    // The board's pending set is the latest event per correlation id, and this
+    // marker lands after the question — so publishing it as the daemon made
+    // every "who is waiting on the operator" readout name the daemon.
+    const h = await modules();
+    const store = await import('./coordinationStore.js');
+    const posted = await h.postHumanQuestion({
+      repository: '/repo', taskId: 'wt-uuid', taskLabel: 'AX-867',
+      actor: 'pylon-dev', actorName: 'pylon_dev', actorRole: 'worker',
+      question: 'Which DSN?', notify: async () => true,
+    });
+    const events = store.getCoordinationStore().exchange(posted.correlationId);
+    const latest = events.reduce((a, b) => (b.seq > a.seq ? b : a));
+    expect(latest.summary).toBe('Operator paged on Discord');
+    expect(latest.actor).toBe('pylon-dev');
+    expect(latest.actorName).toBe('pylon_dev');
+    // It must stay a pending human-question: another kind drops the exchange out
+    // of pendingQuestions, and a terminal status drops it out of pending entirely.
+    expect(latest.kind).toBe('human-question');
+    expect(latest.status).toBe('running');
+  });
+});
