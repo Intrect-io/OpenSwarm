@@ -5,19 +5,14 @@ import {
   selectSiblingWorktrees,
 } from './siblingWork.js';
 
-// Shape taken verbatim from `git worktree list --porcelain` on the live host.
-const PORCELAIN = `worktree /work/cgf-portal
-HEAD a882db13ea2731ab0a5a35a2f80c282ba2d73b23
-branch refs/heads/chore/link-nas-env
-
-worktree /work/cgf-portal/worktree/05a3c502
-HEAD 904aafb4f1e8cf85c24c4507ca50699c1d96de1f
-branch refs/heads/swarm/AX-1062-policy-finalize
-
-worktree /work/cgf-portal/worktree/1b0c6d1a
-HEAD 2821f2aee0eff87e05185235af20f9eb8cb22d48
-branch refs/heads/swarm/AX-1027-ops-tool-meta
-`;
+// `git worktree list --porcelain -z`: each attribute is its own NUL-terminated
+// field, and an empty field separates records. Shape taken from the live host.
+const wt = (...records: string[][]) => records.map((r) => `${r.join('\0')}\0\0`).join('');
+const PORCELAIN = wt(
+  ['worktree /work/cgf-portal', 'HEAD a882db13', 'branch refs/heads/chore/link-nas-env'],
+  ['worktree /work/cgf-portal/worktree/05a3c502', 'HEAD 904aafb4', 'branch refs/heads/swarm/AX-1062-policy-finalize'],
+  ['worktree /work/cgf-portal/worktree/1b0c6d1a', 'HEAD 2821f2ae', 'branch refs/heads/swarm/AX-1027-ops-tool-meta'],
+);
 
 describe('parseWorktreeList', () => {
   it('reads each worktree and its branch', () => {
@@ -28,25 +23,30 @@ describe('parseWorktreeList', () => {
     ]);
   });
 
-  it('keeps a detached worktree, which has no branch line', () => {
+  it('keeps a detached worktree, which has no branch field', () => {
     // A detached worktree still holds edits; dropping it would hide them.
-    expect(parseWorktreeList('worktree /w/a\nHEAD abc\ndetached\n')).toEqual([{ path: '/w/a' }]);
+    expect(parseWorktreeList(wt(['worktree /w/a', 'HEAD abc', 'detached']))).toEqual([{ path: '/w/a' }]);
   });
 
   it('keeps a worktree path with a trailing space', () => {
-    // Verified against real git: `worktree list --porcelain` emits paths
-    // literally, trailing space and all. Trimming it either hides a real
-    // overlap or makes us report our own edits as a peer's.
-    expect(parseWorktreeList('worktree /repo/trailing \nHEAD abc\n')).toEqual([{ path: '/repo/trailing ' }]);
+    // Verified against real git: paths come through literally here, trailing
+    // space and all — unlike `status --porcelain`, this command does not
+    // C-quote. Trimming either hides a real overlap or makes us report our own
+    // edits as a peer's.
+    expect(parseWorktreeList(wt(['worktree /repo/trailing ', 'HEAD abc']))).toEqual([{ path: '/repo/trailing ' }]);
   });
 
-  it('keeps a worktree path containing spaces', () => {
-    expect(parseWorktreeList('worktree /repo/my worktree\nHEAD abc\n')).toEqual([{ path: '/repo/my worktree' }]);
+  it('keeps a worktree path containing spaces, quotes and non-ASCII', () => {
+    expect(parseWorktreeList(wt(['worktree /repo/my "보고서" dir', 'HEAD abc'])))
+      .toEqual([{ path: '/repo/my "보고서" dir' }]);
   });
 
-  it('tolerates CRLF line endings', () => {
-    expect(parseWorktreeList('worktree /repo/a\r\nbranch refs/heads/x\r\n'))
-      .toEqual([{ path: '/repo/a', branch: 'refs/heads/x' }]);
+  it('keeps a worktree path containing a newline', () => {
+    // The line-based form splits this path across two lines and yields a
+    // truncated directory that does not exist, so the sibling's changes are
+    // never read. -z keeps it in one field.
+    expect(parseWorktreeList(wt(['worktree /repo/new\nline', 'HEAD abc'])))
+      .toEqual([{ path: '/repo/new\nline' }]);
   });
 
   it('returns nothing for empty output', () => {
@@ -181,7 +181,7 @@ describe('formatSiblingWork', () => {
 describe('collectSiblingWork', () => {
   function worktreeList(count: number): string {
     return Array.from({ length: count }, (_, i) =>
-      `worktree /repo/worktree/w${i}\nHEAD abc${i}\nbranch refs/heads/swarm/AX-${1000 + i}-task\n`).join('\n');
+      `worktree /repo/worktree/w${i}\0HEAD abc${i}\0branch refs/heads/swarm/AX-${1000 + i}-task\0\0`).join('');
   }
 
   it('reports a dirty worktree that sits far past the sibling cap', async () => {

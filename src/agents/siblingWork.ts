@@ -32,32 +32,38 @@ export const MAX_SIBLINGS = 8;
 export const MAX_FILES_PER_SIBLING = 12;
 
 /**
- * Parse `git worktree list --porcelain`.
+ * Parse `git worktree list --porcelain -z`.
  *
  * Git is asked rather than the run ledger on purpose: git knows every worktree
  * of the repository, including ones no run owns (the main checkout, a worktree
  * left behind by an abandoned run), and those hold edits that conflict exactly
  * as much. It is also reachable from inside a worktree, which the ledger is not.
+ *
+ * `-z` because the line-based form cannot represent a path containing a
+ * newline: measured against real git, such a path splits across two lines and
+ * the parser reads a truncated directory that does not exist, so a real overlap
+ * goes unseen. With `-z` each attribute is one NUL-terminated field and the
+ * path survives whole.
+ *
+ * Note that unlike `status --porcelain`, this command does NOT C-quote unusual
+ * paths — spaces, quotes and non-ASCII were all verified to come through
+ * literally in both forms — so the field is used as-is rather than unescaped.
+ * (Newline case caught by the fresh PR review.)
  */
-export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
+export function parseWorktreeList(porcelainZ: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = [];
   let current: WorktreeEntry | undefined;
 
-  for (const rawLine of porcelain.split('\n')) {
-    // Only \r is stripped, for a checkout written with CRLF endings. The path
-    // itself is NOT trimmed: measured against real git, `worktree list
-    // --porcelain` emits paths literally and unquoted, trailing space included,
-    // so trimming corrupts a legitimate path — which then either fails to match
-    // ourselves (and we report our own edits as a peer's) or points `git status`
-    // at a directory that does not exist (and a real overlap goes unseen).
-    // (Caught by the fresh PR review.)
-    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-    if (line.startsWith('worktree ')) {
-      current = { path: line.slice('worktree '.length) };
+  for (const field of porcelainZ.split('\0')) {
+    if (field.startsWith('worktree ')) {
+      // Not trimmed: a trailing space is part of the path, and trimming it
+      // either hides a real overlap or makes us report our own edits as a
+      // peer's.
+      current = { path: field.slice('worktree '.length) };
       entries.push(current);
-    } else if (line.startsWith('branch ') && current) {
+    } else if (field.startsWith('branch ') && current) {
       // A ref name cannot contain whitespace, so trimming here is safe.
-      current.branch = line.slice('branch '.length).trim();
+      current.branch = field.slice('branch '.length).trim();
     }
   }
 
@@ -212,7 +218,7 @@ export async function collectSiblingWork(
   const remaining = () => deadline - now();
 
   const listWorktrees = io.listWorktrees ?? (async (cwd: string) => (
-    (await execFileAsync('git', ['-C', cwd, 'worktree', 'list', '--porcelain'], {
+    (await execFileAsync('git', ['-C', cwd, 'worktree', 'list', '--porcelain', '-z'], {
       ...GIT_LIMITS, timeout: commandTimeoutMs(remaining()),
     })).stdout
   ));
