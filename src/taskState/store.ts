@@ -441,26 +441,73 @@ export function enrichTaskFromState(task: TaskItem): TaskItem {
   };
 }
 
+/**
+ * The execution status a Linear state implies, for the R5 reconciliation below.
+ * Any state absent from this map leaves the local status alone.
+ */
+const LINEAR_STATE_TO_EXECUTION_STATUS: Record<string, TaskExecutionStatus> = {
+  Done: 'done',
+  'In Progress': 'in_progress',
+  Todo: 'todo',
+  Backlog: 'backlog',
+  Canceled: 'backlog',
+  Cancelled: 'backlog',
+};
+
+/**
+ * The execution status this reconciliation would move the task to, or
+ * `undefined` when it would leave the status where it is.
+ *
+ * Only a locally `in_progress` or `done` task is downgraded: those are the two
+ * statuses that wrongly satisfy a dependency or wrongly look live if Linear has
+ * since moved the issue elsewhere.
+ */
+function reconciledExecutionStatus(
+  current: OpenSwarmTaskState | undefined,
+  linearState: string,
+): TaskExecutionStatus | undefined {
+  const status = current?.execution.status;
+  if (status !== 'in_progress' && status !== 'done') return undefined;
+  const next = LINEAR_STATE_TO_EXECUTION_STATUS[linearState];
+  return next === undefined || next === status ? undefined : next;
+}
+
+/**
+ * Decide what a Linear-state reconciliation would change, or `null` when it
+ * would change nothing.
+ *
+ * Split out from the write so the decision is testable on its own, and so the
+ * common answer — "nothing" — costs nothing. The heartbeat calls this once per
+ * fetched issue, and almost none have moved since the previous poll. A no-op is
+ * not cheap here: the store is one file holding every task, so a single
+ * unchanged row still costs a full parse, re-serialize, write and two fsyncs of
+ * the whole store. At 3146 tasks that measured 18 ms each, which is how a quiet
+ * heartbeat came to block the event loop for ~30 s and write 1.4 GiB (AGT-4086).
+ */
+export function planLinearStateReconciliation(
+  current: OpenSwarmTaskState | undefined,
+  linearState: string,
+): Partial<OpenSwarmTaskState> | null {
+  const nextStatus = reconciledExecutionStatus(current, linearState);
+  if (current && current.linearState === linearState && nextStatus === undefined) return null;
+
+  const patch: Partial<OpenSwarmTaskState> = { linearState };
+  if (current && nextStatus !== undefined) {
+    patch.execution = { ...current.execution, status: nextStatus };
+  }
+  return patch;
+}
+
 export function updateTaskLinearState(issueId: string, linearState: string): OpenSwarmTaskState {
   // R5: reconcile stale local execution status against Linear (the source of
   // truth). If Linear parks, reopens, or completes an issue while local state is
   // stale, downgrade it so dependencies do not stay incorrectly resolved or
   // actively running. This is a local-only update; it never writes back to
   // Linear (preserves R7).
-  const patch: Partial<OpenSwarmTaskState> = { linearState };
   const current = getTaskState(issueId);
-  if (current?.execution.status === 'in_progress' || current?.execution.status === 'done') {
-    if (linearState === 'Done') {
-      patch.execution = { ...current.execution, status: 'done' };
-    } else if (linearState === 'In Progress') {
-      patch.execution = { ...current.execution, status: 'in_progress' };
-    } else if (linearState === 'Todo') {
-      patch.execution = { ...current.execution, status: 'todo' };
-    } else if (linearState === 'Backlog' || linearState === 'Canceled' || linearState === 'Cancelled') {
-      patch.execution = { ...current.execution, status: 'backlog' };
-    }
-  }
-  return upsertTaskState(issueId, patch);
+  const patch = planLinearStateReconciliation(current, linearState);
+  if (patch === null && current) return current;
+  return upsertTaskState(issueId, patch ?? { linearState });
 }
 
 export function markTaskInProgress(
