@@ -37,7 +37,10 @@ describe('buildHealthPayload', () => {
       uptimeS: 12.9,
       version: '1.2.3',
       instanceId: 'fixed-id',
+      memory: { heapUsedBytes: 1024 * 1024, heapLimitBytes: 2 * 1024 * 1024, rssBytes: 3 * 1024 * 1024 },
     });
+    // Exhaustive on purpose: this is the shape vega's shell parses, so an
+    // accidental addition should have to be acknowledged here.
     expect(payload).toEqual({
       status: 'ok',
       app: 'openswarm',
@@ -47,6 +50,9 @@ describe('buildHealthPayload', () => {
       backend_pid: 42,
       backend_parent_pid: 1,
       uptime_s: 12,
+      heap_used_mb: 1,
+      heap_limit_mb: 2,
+      rss_mb: 3,
     });
   });
 
@@ -203,4 +209,33 @@ describe('GET /api/health over the live server', () => {
       { path: '~/dev/kyte-portal', name: 'kyte-portal' },
     ]);
   });
+});
+
+// The daemon is single-threaded, so a heap near its ceiling means frequent
+// stop-the-world mark-compact pauses — nothing else on the loop runs. Measured
+// at 3.55 GB RSS against Node's default 4144 MB ceiling, with /api/health
+// latency bimodal at sub-second or tens of seconds; `used_heap_size` was
+// reported nowhere, so the cause could only be inferred from RSS. (AGT-4063)
+describe('buildHealthPayload memory reporting (AGT-4063)', () => {
+  it('reports heap used, heap ceiling, and RSS in MB', () => {
+    const payload = buildHealthPayload({
+      env: {},
+      memory: {
+        heapUsedBytes: 3_500 * 1024 * 1024,
+        heapLimitBytes: 4_144 * 1024 * 1024,
+        rssBytes: 3_711 * 1024 * 1024,
+      },
+    });
+    expect(payload).toMatchObject({ heap_used_mb: 3_500, heap_limit_mb: 4_144, rss_mb: 3_711 });
+  });
+
+  it('reads live process numbers when none are supplied', () => {
+    const payload = buildHealthPayload({ env: {} });
+    // A running V8 always has some heap and a ceiling above it; pinning exact
+    // values would test the runtime, not this code.
+    expect(payload.heap_used_mb).toBeGreaterThan(0);
+    expect(payload.rss_mb).toBeGreaterThan(0);
+    expect(payload.heap_limit_mb).toBeGreaterThan(payload.heap_used_mb);
+  });
+
 });
