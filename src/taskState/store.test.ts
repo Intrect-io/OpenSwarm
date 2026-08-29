@@ -20,6 +20,7 @@ import {
   resetTaskStateStoreForTests,
   type OpenSwarmTaskState,
 } from './store.js';
+import { PROCESS_STARTED_AT_MS, processNamespaceId } from '../support/processLiveness.js';
 
 describe('task state store', () => {
   let stateFile: string;
@@ -407,6 +408,81 @@ describe('task state store', () => {
       utimesSync(lockFile(), almostExpired, almostExpired);
 
       expect(() => upsertTaskState('ISSUE-LOCK-2', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    // AGT-4068: the 10-minute wait above is a timer, not evidence, and it cost
+    // ten minutes of dead heartbeats after every container restart — measured
+    // on vela 2026-08-29, where the new daemon came up on pid 7 holding a lock
+    // pid 7 had written 0.7s before the container was recreated. A pid is
+    // unique among live processes, so a lock carrying OUR pid that predates our
+    // start belongs to a process that has exited. No wait required.
+    it('reclaims a same-namespace lock at our own pid that predates this process, well inside the expiry', () => {
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: process.pid, token: 'prior-generation', ns: processNamespaceId(),
+      }), 'utf8');
+      const beforeWeStarted = new Date(PROCESS_STARTED_AT_MS - 60_000); // and only a minute old
+      utimesSync(lockFile(), beforeWeStarted, beforeWeStarted);
+
+      upsertTaskState('ISSUE-LOCK-5', { execution: { status: 'todo', retryCount: 0 } });
+
+      expect(getTaskState('ISSUE-LOCK-5')?.execution.status).toBe('todo');
+      expect(existsSync(lockFile())).toBe(false);
+    });
+
+    it('does not reason about a pid from another pid space, however old the lock', () => {
+      // Two containers sharing this mounted state file each have their own
+      // pid 1, so a matching pid number means nothing across them. Such a lock
+      // gets the age rule and nothing else — it may be a live writer.
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: process.pid, token: 'other-container', ns: 'some-other-host:pid:[4026531999]',
+      }), 'utf8');
+      const beforeWeStarted = new Date(PROCESS_STARTED_AT_MS - 60_000);
+      utimesSync(lockFile(), beforeWeStarted, beforeWeStarted);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-6', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    it('does not reclaim a foreign-namespace lock just because its pid is dead here (AGT-4068)', () => {
+      // The pid probe runs before any age rule, so an ESRCH answer reclaims
+      // outright. That pid belongs to another container's space, where it may
+      // be a live writer; our local probe is answering a different question.
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: 2_147_483_647, // certainly not alive HERE
+        token: 'other-container',
+        ns: 'some-other-host:pid:[4026531999]',
+      }), 'utf8');
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(lockFile(), recent, recent);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-7', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    it('still reclaims a legacy lock with no namespace recorded when its pid is dead', () => {
+      // Locks written before the field existed keep the original behaviour.
+      writeFileSync(lockFile(), JSON.stringify({ pid: 2_147_483_647, token: 'legacy' }), 'utf8');
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(lockFile(), recent, recent);
+
+      upsertTaskState('ISSUE-LOCK-8', { execution: { status: 'todo', retryCount: 0 } });
+
+      expect(getTaskState('ISSUE-LOCK-8')?.execution.status).toBe('todo');
+    });
+
+    it('does not probe a lock whose writer could not identify its own pid space (AGT-4068)', () => {
+      // `ns: null` is a fail-closed writer saying "I do not know where I am",
+      // which is not the same as a lock written before the field existed. An
+      // omitted key would have made the two indistinguishable and licensed a
+      // local probe. (Caught by the commit-gate review.)
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: 2_147_483_647, token: 'unknown-space', ns: null,
+      }), 'utf8');
+      const recent = new Date(Date.now() - 60_000);
+      utimesSync(lockFile(), recent, recent);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-9', { execution: { status: 'todo', retryCount: 0 } }))
         .toThrow(/Timed out waiting for task state lock/);
     });
 

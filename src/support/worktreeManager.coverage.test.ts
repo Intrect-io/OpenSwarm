@@ -331,6 +331,64 @@ describe('createWorktree retry/resume error paths', () => {
     });
   });
 
+  it('does not reason about a marker pid from another pid space, however old (AGT-4068)', async () => {
+    // This checkout can be mounted into more than one container, each with its
+    // own pid 1, so a matching pid number means nothing across them. Such a
+    // marker gets the age window and nothing else — it may be a live executor.
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-other-namespace');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId;
+    marker.ownerNamespace = 'some-other-host:pid:[4026531999]';
+    // A pid that is certainly not alive HERE. In the space that issued it, it
+    // may well be a running executor — probing it locally answers a different
+    // question, and treating that answer as "orphaned" takes a live worktree.
+    marker.ownerPid = 2_147_483_647;
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+  });
+
+  it('still ages out a marker from another pid space once the abandon window passes (AGT-4068)', async () => {
+    // "Cannot be judged" must not mean "kept forever" where an age escape
+    // exists: a container that is genuinely gone would pin the worktree.
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-other-namespace-aged');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    marker.ownerNamespace = 'some-other-host:pid:[4026531999]';
+    marker.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'orphaned',
+    });
+  });
+
+  it('does not probe a marker whose writer could not identify its own pid space (AGT-4068)', async () => {
+    // `ownerNamespace: null` is a fail-closed writer, not a pre-field marker.
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-unknown-namespace');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId;
+    marker.ownerNamespace = null;
+    marker.ownerPid = 2_147_483_647; // dead-looking here, but "here" is unknown
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+  });
+
   it('keeps a marker from this boot for the full window so a live stage cannot lose its worktree (AGT-4067)', async () => {
     const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-this-boot');
     const markerPath = join(

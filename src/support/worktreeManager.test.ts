@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { processNamespaceId } from './processLiveness.js';
 import { createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWorktree, resolveSharedPaths, computeFileOverlaps, formatOverlapReport, findOpenPRFileOverlaps, resolveBaseRef, commitAndCreatePR, type WorktreeInfo } from './worktreeManager.js';
 
 describe('open PR planned-file preflight (INT-2568)', () => {
@@ -444,12 +445,39 @@ describe('removePreservedWorktreeAt (INT-2506)', () => {
       originalPath: repo,
       ownerPid: process.pid,
       ownerToken: 'crashed-boot-token',
+      ownerNamespace: processNamespaceId(),
       createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
     }));
 
     await removePreservedWorktreeAt(info.worktreePath);
 
     expect(existsSync(info.worktreePath)).toBe(false);
+  });
+
+  it('keeps a preserved tree whose marker names another pid space, dead-looking pid or not (AGT-4068)', async () => {
+    // This site has no age escape, so a "not alive" answer here authorises
+    // deletion outright. The pid is from another container's space, where our
+    // local probe means nothing — the tree may still have a live owner.
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'daemon died mid-run');
+
+    const markerDir = join(repo, '.git', 'openswarm', 'active-worktrees', 'INT-9');
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(join(markerDir, 'foreign-space-token.json'), JSON.stringify({
+      issueId: 'INT-9',
+      branchName: info.branchName,
+      worktreePath: info.worktreePath,
+      originalPath: repo,
+      ownerPid: 2_147_483_647, // certainly not alive HERE — but that says nothing there
+      ownerToken: 'foreign-space-token',
+      ownerNamespace: 'some-other-host:pid:[4026531999]',
+      createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+    }));
+
+    await removePreservedWorktreeAt(info.worktreePath);
+
+    expect(existsSync(info.worktreePath)).toBe(true);
   });
 
   it('no-ops on paths that are not managed worktrees', async () => {

@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
 
 const TASK_STATE_MARKER = '<!-- openswarm:task-state:v1 -->';
 
@@ -110,25 +111,34 @@ const LOCK_WAIT_MS = 10;
 const LOCK_TIMEOUT_MS = 5_000;
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 
-type StoreLockOwner = { pid: number; token: string };
+/** `ns`: the writer's pid space. A string identifies it; `null` records that
+ * the writer could not determine its own (a Linux process with an unreadable
+ * /proc/self/ns/pid); absent means the lock predates the field entirely. The
+ * three are distinct — collapsing "unknown" into "absent" would let a
+ * fail-closed writer be probed as if it had opted into the legacy rule. */
+type StoreLockOwner = { pid: number; token: string; ns?: string | null };
+
+/** Preserves the string / null / absent distinction described on StoreLockOwner. */
+function lockNamespaceOf(raw: unknown): string | null | undefined {
+  if (raw === null) return null;
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+/** Whether this lock's pid can be probed from here at all. */
+function lockPidIsJudgeable(owner: StoreLockOwner): boolean {
+  if (owner.ns === undefined) return true; // predates the field — original behaviour
+  if (owner.ns === null) return false; // writer could not identify its own pid space
+  return sameProcessNamespace(owner.ns);
+}
 
 function readStoreLockOwner(lockPath: string): StoreLockOwner | null {
   try {
     const value = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<StoreLockOwner>;
     return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.token === 'string'
-      ? { pid: value.pid!, token: value.token }
+      ? { pid: value.pid!, token: value.token, ns: lockNamespaceOf(value.ns) }
       : null;
   } catch {
     return null;
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
@@ -188,7 +198,9 @@ function withStoreLock<T>(operation: () => T): T {
   while (lockFd === undefined) {
     try {
       lockFd = openSync(lockPath, 'wx', 0o600);
-      writeFileSync(lockFd, JSON.stringify({ pid: process.pid, token: lockToken }), 'utf8');
+      // `?? null` deliberately: an omitted key would be indistinguishable from
+      // a pre-field lock, which readers are entitled to probe locally.
+      writeFileSync(lockFd, JSON.stringify({ pid: process.pid, token: lockToken, ns: processNamespaceId() ?? null }), 'utf8');
       fsyncSync(lockFd);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -198,7 +210,30 @@ function withStoreLock<T>(operation: () => T): T {
         const judgedMtimeMs = statSync(lockPath).mtimeMs;
         const lockAgeMs = Date.now() - judgedMtimeMs;
         const staleMalformedLock = !owner && lockAgeMs > LOCK_STALE_MS;
-        const abandonedLock = owner !== null && !isProcessAlive(owner.pid);
+        // A pid only means something inside the space it was issued in. This
+        // file can be a projection two containers share, so probing a lock
+        // that names a different space answers about whatever holds that
+        // number locally — and an ESRCH there would reclaim a lock a live
+        // writer still holds. Such a lock gets the age rule and nothing else.
+        // A lock with no space recorded predates the field and keeps the
+        // original probe behaviour. (Caught by the commit-gate review.)
+        const ownerPidIsJudgeable = owner !== null && lockPidIsJudgeable(owner);
+        const abandonedLock = owner !== null && ownerPidIsJudgeable && !processAppearsAlive(owner.pid);
+        // The pid probe above cannot see a generation change, so a lock the
+        // previous container left behind reads as held against the new daemon
+        // that inherited its pid. Settling that case outright, instead of
+        // waiting out LOCK_ABANDON_MS, is worth a full ten minutes of dead
+        // heartbeats after every restart. (AGT-4068)
+        //
+        // Gated on the recorded pid namespace, because that is the scope in
+        // which a pid is unique — and this file may be a mounted projection
+        // two containers share, each with its own pid 1. A lock from a
+        // different namespace, or one written before this field existed, is
+        // NOT reasoned about by pid: it falls through to the age rule below,
+        // which is exactly what the AGT-4023 policy test pins.
+        const priorGenerationLock = owner !== null
+          && owner.ns != null && sameProcessNamespace(owner.ns)
+          && writerProvablyGone({ pid: owner.pid, writtenAtMs: judgedMtimeMs });
         // A pid probe cannot see past its own namespace, and a container
         // assigns the daemon the same pid every start — so a lock left behind
         // by a killed container reads as "alive" against the new daemon
@@ -219,7 +254,7 @@ function withStoreLock<T>(operation: () => T): T {
         // owns leases and remote effects, so a rollback here cannot
         // double-execute anything, and the next Linear sync re-derives it.
         const expiredLock = lockAgeMs > LOCK_ABANDON_MS;
-        if (staleMalformedLock || abandonedLock || expiredLock) {
+        if (staleMalformedLock || abandonedLock || priorGenerationLock || expiredLock) {
           // Reclaim only the lock that was actually judged. Between the
           // judgement above and this unlink the holder can release and a third
           // process can take a fresh lock; deleting THAT one would put two
