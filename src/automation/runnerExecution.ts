@@ -29,7 +29,6 @@ import type { ITaskSource } from './taskSource.js';
 import {
   buildBranchName,
   createWorktree,
-  commitAndCreatePR,
   hasRecoverableWorktree,
   preserveWorktree,
   removeWorktree,
@@ -37,6 +36,7 @@ import {
 } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
+import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from './publishOnPark.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
@@ -1154,59 +1154,11 @@ export async function executePipeline(
       result.finalStatus = 'infra_error';
     }
 
-    // Create PR (worktree mode + pipeline success = finalStatus 'approved')
-    if (worktreeInfo && result.success && result.finalStatus === 'approved') {
-      const publishAllowed = await ctx.durability?.beforePublish() ?? true;
-      if (!publishAllowed) {
-        result.success = false;
-        result.finalStatus = 'infra_error';
-        console.warn(`[Worktree] Publication fenced for ${task.issueIdentifier}; preserving worktree`);
-      } else {
-        try {
-          const prUrl = await commitAndCreatePR(
-            worktreeInfo,
-            task.title,
-            task.issueIdentifier || '',
-            task.description || '',
-          );
-          result.prUrl = prUrl;
-          const publicationRecorded = await ctx.durability?.onPublication(prUrl) ?? true;
-          if (!publicationRecorded) {
-            throw new Error('Durable lease fence rejected publication attachment');
-          }
-          broadcastEvent({
-            type: 'log',
-            data: {
-              taskId: task.issueId || task.id,
-              stage: 'pr',
-              line: `PR created: ${prUrl}`,
-            },
-          });
-          console.log(`[Runner] PR created for ${task.issueIdentifier}: ${prUrl}`);
-        } catch (err) {
-          console.error('[Worktree] PR creation failed:', err);
-          // A worktree-mode run is not deliverable until the branch is published.
-          // Keep it retryable and preserved instead of marking the issue Done with
-          // no remotely reviewable artifact.
-          result.success = false;
-          result.finalStatus = 'infra_error';
-          broadcastEvent({
-            type: 'log',
-            data: {
-              taskId: task.issueId || task.id,
-              stage: 'pr',
-              line: `PR creation failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          });
-        }
-      }
-    } else if (worktreeInfo) {
-      // Log why PR was not created
-      const reason = !result.success
-        ? `Pipeline failed (${result.finalStatus})`
-        : `Unexpected state (success=${result.success}, finalStatus=${result.finalStatus})`;
-      console.log(`[Runner] PR not created for ${task.issueIdentifier}: ${reason}`);
+    if (shouldPublishParkedWork(Boolean(worktreeInfo), result) && worktreeInfo) {
+      await publishParkedWork(worktreeInfo, task, ctx.durability);
     }
+
+    await publishApprovedWork(worktreeInfo, task, result, ctx.durability);
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');
     return result;

@@ -303,6 +303,31 @@ describe('DurableRunCoordinator', () => {
     coordinator.close();
   });
 
+  it('a parked result carrying a prUrl stops being a park (AGT-4076 guard)', async () => {
+    // Why the parked-publish path in runnerExecution attaches the PR to the
+    // LEDGER but never writes `result.prUrl`. `publishedNeedsReconcile` treats
+    // any prUrl on a non-approved result as publication debt, so setting it
+    // would turn an operator park — which frees the repository admission slot
+    // and resumes on the answer — into a NEEDS_RECONCILE row that holds one.
+    // If this classification ever changes, the comment in runnerExecution.ts
+    // is stale and this test is where that shows up.
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'park-with-pr',
+    });
+
+    await coordinator.execute(task('AGT-PARK-PR'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'waiting_on_operator',
+      prUrl: 'https://github.com/o/r/pull/1',
+    }));
+
+    expect(coordinator.getRun('AGT-PARK-PR')).toMatchObject({
+      state: 'NEEDS_RECONCILE',
+      lastErrorCode: 'publication_reconcile',
+    });
+    coordinator.close();
+  });
+
   it('reconciles a published PR before any retry when publication attachment throws', async () => {
     const path = dbPath();
     const ledger = new RunLedger(path);

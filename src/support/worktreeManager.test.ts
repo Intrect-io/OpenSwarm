@@ -554,6 +554,210 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
     git(repo, 'worktree', 'remove', '--force', info.worktreePath);
   });
 
+  it('committedOnly publishes committed work and leaves the working tree untouched (AGT-4076)', async () => {
+    // The shape a parked run is in: one commit made, and dirty files the worker
+    // was still holding when it stopped for the operator. The commit must ship;
+    // the dirty files must stay dirty so the resume continues from the same place.
+    const repo = makeRepo('parkrepo', 'main', 'origin');
+    const bare = join(root, 'parkrepo.git');
+    const info = await createWorktree(repo, 'INT-76', 'swarm/INT-76-park');
+    writeFileSync(join(info.worktreePath, 'done.py'), 'finished work\n');
+    git(info.worktreePath, 'add', 'done.py');
+    git(info.worktreePath, 'commit', '-m', 'feat: finished part');
+    writeFileSync(join(info.worktreePath, 'wip.py'), 'half-written\n');
+
+    const bin = join(root, 'bin-park');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-park.log');
+    writeFileSync(join(bin, 'gh'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\ncase "$*" in *"pr create"*) echo "https://example.test/park";; esac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const url = await commitAndCreatePR(info, 'parked', 'INT-76', 'desc', { draft: true, committedOnly: true });
+      expect(url).toBe('https://example.test/park');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    // The committed work reached the remote.
+    expect(execFileSync('git', ['-C', bare, 'branch', '--list', 'swarm/INT-76-park'], { encoding: 'utf8' }))
+      .toContain('swarm/INT-76-park');
+    // The dirty file was NOT committed — it is still an untracked change.
+    expect(String(git(info.worktreePath, 'status', '--porcelain'))).toContain('wip.py');
+    expect(String(git(info.worktreePath, 'log', '--oneline', '-1'))).toContain('finished part');
+    // Draft, because nothing reviewed this.
+    expect(readFileSync(ghLog, 'utf8')).toContain('--draft');
+  });
+
+  it('promotes a reused draft PR to ready when the reviewed path republishes (AGT-4076)', async () => {
+    // The exact sequence the fifth gate round flagged: a parked run opens a
+    // draft, the branch later passes review, and commitAndCreatePR reuses the
+    // existing PR. Without promotion the approved work ships as a draft.
+    const repo = makeRepo('promoterepo', 'main', 'origin');
+    const info = await createWorktree(repo, 'INT-77', 'swarm/INT-77-promote');
+    writeFileSync(join(info.worktreePath, 'done.py'), 'work\n');
+    git(info.worktreePath, 'add', 'done.py');
+    git(info.worktreePath, 'commit', '-m', 'feat: done');
+
+    const bin = join(root, 'bin-promote');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-promote.log');
+    // `pr list` reports an existing PR; `pr view --json isDraft` says it is one.
+    writeFileSync(join(bin, 'gh'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+      + `case "$*" in\n`
+      + `  *"pr list"*) echo "https://example.test/pull/5";;\n`
+      + `  *"isDraft"*) echo "true";;\n`
+      + `esac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const url = await commitAndCreatePR(info, 'reviewed', 'INT-77', 'desc');
+      expect(url).toBe('https://example.test/pull/5');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+    expect(readFileSync(ghLog, 'utf8')).toContain('pr ready https://example.test/pull/5');
+  });
+
+  it('promotes the PR it loses a create race to, when the losing publish is reviewed (AGT-4076)', async () => {
+    // `gh pr create` fails (the winner already made one), the fallback finds
+    // that PR, and it is a draft because the winner was a parked run. A reviewed
+    // publication must still end up open for review.
+    const repo = makeRepo('racerepo', 'main', 'origin');
+    const info = await createWorktree(repo, 'INT-81', 'swarm/INT-81-race');
+    writeFileSync(join(info.worktreePath, 'done.py'), 'work\n');
+    git(info.worktreePath, 'add', 'done.py');
+    git(info.worktreePath, 'commit', '-m', 'feat: done');
+
+    const bin = join(root, 'bin-race');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-race.log');
+    // First `pr list` (the pre-create check) finds nothing, so creation is tried;
+    // creation fails; the fallback `pr list` then finds the winner's draft.
+    const stateFile = join(root, 'race-state');
+    writeFileSync(join(bin, 'gh'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+      + `case "$*" in\n`
+      + `  *"--search"*) echo '[]';;\n`
+      + `  *"pr create"*) echo "already exists" >&2; exit 1;;\n`
+      + `  *"isDraft"*) echo "true";;\n`
+      + `  *"pr list"*) if [ -f "${stateFile}" ]; then echo "https://example.test/pull/9"; else touch "${stateFile}"; fi;;\n`
+      + `esac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const url = await commitAndCreatePR(info, 'reviewed', 'INT-81', 'desc');
+      expect(url).toBe('https://example.test/pull/9');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+    expect(readFileSync(ghLog, 'utf8')).toContain('pr ready https://example.test/pull/9');
+  });
+
+  it('keeps a reused PR draft while another branch also closes the issue (AGT-4076)', async () => {
+    // A PR is opened draft when a duplicate implementation exists (INT-2544).
+    // Promoting on the caller's `draft` option alone would defeat that guard.
+    const repo = makeRepo('duprepo', 'main', 'origin');
+    const info = await createWorktree(repo, 'INT-80', 'swarm/INT-80-dup');
+    writeFileSync(join(info.worktreePath, 'done.py'), 'work\n');
+    git(info.worktreePath, 'add', 'done.py');
+    git(info.worktreePath, 'commit', '-m', 'feat: done');
+
+    const bin = join(root, 'bin-dup');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-dup.log');
+    // `pr list --search` (the duplicate probe) reports a sibling PR on another branch.
+    writeFileSync(join(bin, 'gh'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+      + `case "$*" in\n`
+      + `  *"--search"*) echo '[{"number":3,"url":"https://example.test/pull/3","headRefName":"swarm/other"}]';;\n`
+      + `  *"pr list"*) echo "https://example.test/pull/8";;\n`
+      + `  *"isDraft"*) echo "true";;\n`
+      + `esac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const url = await commitAndCreatePR(info, 'reviewed', 'INT-80', 'desc');
+      expect(url).toBe('https://example.test/pull/8');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+    expect(readFileSync(ghLog, 'utf8')).not.toContain('pr ready');
+  });
+
+  it('does not re-ready a PR that is already open for review (AGT-4076)', async () => {
+    // `gh pr ready` on a non-draft PR fails, and the reviewed path treats a
+    // publication failure as retryable infra_error — so a run that actually
+    // succeeded would be marked broken. The isDraft check is what prevents that.
+    const repo = makeRepo('readyrepo', 'main', 'origin');
+    const info = await createWorktree(repo, 'INT-79', 'swarm/INT-79-ready');
+    writeFileSync(join(info.worktreePath, 'done.py'), 'work\n');
+    git(info.worktreePath, 'add', 'done.py');
+    git(info.worktreePath, 'commit', '-m', 'feat: done');
+
+    const bin = join(root, 'bin-ready');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-ready.log');
+    // Existing PR is NOT a draft, and `pr ready` fails the way real gh does.
+    writeFileSync(join(bin, 'gh'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+      + `case "$*" in\n`
+      + `  *"pr list"*) echo "https://example.test/pull/7";;\n`
+      + `  *"isDraft"*) echo "false";;\n`
+      + `  *"pr ready"*) echo "not a draft" >&2; exit 1;;\n`
+      + `esac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const url = await commitAndCreatePR(info, 'reviewed', 'INT-79', 'desc');
+      expect(url).toBe('https://example.test/pull/7');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+    expect(readFileSync(ghLog, 'utf8')).not.toContain('pr ready');
+  });
+
+  it('leaves a reused PR alone when publishing as a draft (AGT-4076)', async () => {
+    // The parked path must not promote: nothing has reviewed this work.
+    const repo = makeRepo('nopromoterepo', 'main', 'origin');
+    const info = await createWorktree(repo, 'INT-78', 'swarm/INT-78-nopromote');
+    writeFileSync(join(info.worktreePath, 'done.py'), 'work\n');
+    git(info.worktreePath, 'add', 'done.py');
+    git(info.worktreePath, 'commit', '-m', 'feat: done');
+
+    const bin = join(root, 'bin-nopromote');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-nopromote.log');
+    writeFileSync(join(bin, 'gh'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n`
+      + `case "$*" in\n`
+      + `  *"pr list"*) echo "https://example.test/pull/6";;\n`
+      + `  *"isDraft"*) echo "true";;\n`
+      + `esac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      await commitAndCreatePR(info, 'parked', 'INT-78', 'desc', { draft: true, committedOnly: true });
+    } finally {
+      process.env.PATH = prevPath;
+    }
+    expect(readFileSync(ghLog, 'utf8')).not.toContain('pr ready');
+  });
+
   it('commitAndCreatePR pushes to the RESOLVED remote and PRs against the resolved base (non-origin)', async () => {
     const repo = makeRepo('forkrepo', 'main', 'unohee');
     const bare = join(root, 'forkrepo.git');
