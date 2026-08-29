@@ -11,6 +11,7 @@
 
 import { createHash } from 'node:crypto';
 import { getCoordinationStore, type CoordinationEvent } from './coordinationStore.js';
+import { answerHint } from './answerHint.js';
 
 export interface HumanQuestionInput {
   repository: string;
@@ -146,7 +147,7 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
   const delivered = await notify(
     `OpenSwarm needs a decision for ${input.taskId}` +
       `${input.actorName ? ` (asked by ${input.actorName})` : ''}.\n${input.question}\n\n` +
-      `Reply with: !answer ${correlationId} <your answer>`,
+      answerHint(correlationId),
   );
   if (delivered) {
     await store.publish({

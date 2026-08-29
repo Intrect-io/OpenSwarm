@@ -14,6 +14,7 @@ import {
   ThreadChannel,
 } from 'discord.js';
 import fs from 'node:fs/promises';
+import { correlationIdFromHint } from '../coordination/answerHint.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SwarmEvent, AgentStatus } from '../core/types.js';
@@ -353,11 +354,69 @@ import {
   handleTurbo,
 } from './discordHandlers.js';
 
+
+/**
+ * The correlation id a posted question carries, or undefined if this is not one
+ * of our question messages.
+ *
+ * The link between a reply and the question it answers lives in the message
+ * Discord already stores — the `!answer <id>` line we posted — rather than in a
+ * map this process keeps. That matters because a parked question routinely
+ * outlives the daemon: it is asked twice, parked, and answered hours later,
+ * possibly after a restart, and an in-memory map would have lost it.
+ *
+ * Only OUR OWN messages are read for this. Otherwise an operator could reply to
+ * any message that happens to contain the text `!answer <id>` — including one
+ * they wrote themselves — and answer a question through a route that never
+ * passed the allowed-user check on the question itself.
+ */
+export function questionCorrelationIdFrom(
+  referenced: { author?: { id?: string } | null; content?: string } | null,
+  botUserId: string | undefined,
+): string | undefined {
+  if (!referenced || !botUserId) return undefined;
+  if (referenced.author?.id !== botUserId) return undefined;
+  return correlationIdFromHint(referenced.content ?? undefined);
+}
+
+/** Returns true when the reply was handled as an answer — handled including
+ * "we told the operator why it was not accepted", since falling through to the
+ * chat handler after that would answer their reply twice. */
+async function tryAnswerByReply(msg: Message): Promise<boolean> {
+  if (!msg.reference?.messageId) return false;
+  const referenced = await msg.fetchReference().catch(() => null);
+  const correlationId = questionCorrelationIdFrom(referenced, client?.user?.id);
+  if (!correlationId) return false;
+
+  const answer = msg.content.trim();
+  if (!answer) return false;
+  const { answerHumanQuestion } = await import('../coordination/humanQuestions.js');
+  const result = await answerHumanQuestion(correlationId, answer, `discord:${msg.author.id}`);
+  await msg.reply(result.accepted
+    ? `Answer accepted for ${correlationId}.`
+    : `Answer not accepted: ${result.reason}`);
+  return true;
+}
+
 /**
  * Message handler
  */
 async function handleMessage(msg: Message): Promise<void> {
   if (msg.author.bot) return;
+
+  // A reply to a question we posted answers that question.
+  //
+  // Replying is the obvious gesture, and until now it silently was not an
+  // answer: the message did not start with `!`, so it fell through to
+  // handleChat and the asking agent never saw it. Operators were expected to
+  // copy a correlation id by hand into `!answer <id> <text>`, and 28 runs sat
+  // parked on questions that had in fact been replied to. (AGT-4070)
+  if (ALLOWED_USER_IDS.length > 0
+      && ALLOWED_USER_IDS.includes(msg.author.id)
+      && !msg.content.startsWith('!')
+      && await tryAnswerByReply(msg)) {
+    return;
+  }
 
   // Respond to regular messages from allowed users (excluding ! commands)
   if (ALLOWED_USER_IDS.length > 0 &&
@@ -627,8 +686,7 @@ export async function sendToChannel(content: string | { embeds: EmbedBuilder[] }
     if (!channel) return;
 
     if (typeof content === 'string' && content.length > DISCORD_MESSAGE_CHUNK) {
-      const chunks = splitForDiscord(content, DISCORD_MESSAGE_CHUNK);
-      for (const chunk of chunks) {
+      for (const chunk of chunkForDiscord(content, DISCORD_MESSAGE_CHUNK)) {
         await channel.send(chunk);
       }
     } else {
@@ -659,6 +717,26 @@ const DISCORD_MESSAGE_CHUNK = 1900;
  * rather than re-stating the number, which is what let the 3900 mismatch sit
  * unnoticed.
  */
+/**
+ * Split a long message for Discord, keeping any answer hint on every chunk.
+ *
+ * The hint is appended last, so plain splitting leaves it on the final chunk
+ * only — and an operator replying to the chunk that actually shows the QUESTION
+ * would be replying to a message carrying no correlation id, which silently
+ * does not answer it. Repeating it costs a line per chunk and makes every piece
+ * of the question a valid thing to reply to. (Caught by the commit-gate review.)
+ *
+ * Messages that carry no hint are split exactly as before.
+ */
+export function chunkForDiscord(content: string, maxLen: number): string[] {
+  const lines = content.split('\n');
+  const hint = correlationIdFromHint(lines[lines.length - 1]) ? lines[lines.length - 1] : undefined;
+  if (hint === undefined) return splitForDiscord(content, maxLen);
+  const body = lines.slice(0, -1).join('\n').trimEnd();
+  const chunks = splitForDiscord(body, Math.max(1, maxLen - hint.length - 2));
+  return chunks.map((chunk) => `${chunk}\n\n${hint}`);
+}
+
 export function splitForDiscordForTest(text: string): string[] {
   return splitForDiscord(text, DISCORD_MESSAGE_CHUNK);
 }
