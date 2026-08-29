@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
 import { TOOL_DEFINITIONS, executeTool, createReadCache, ToolCall, buildBashToolEnv, validatePath } from './tools.js';
 import { homedir } from 'node:os';
+import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 // search_memory loads the memory core lazily; stub the shared helper so the tool
 // test stays fast and deterministic (no LanceDB / embedding model).
@@ -667,5 +668,50 @@ describe('search_files without ripgrep', () => {
     } finally {
       process.env.PATH = savedPath;
     }
+  });
+});
+
+// AGT-4054: coordination_history was defined, advertised, and had a working
+// handler in coordinationTools.ts, but the executeTool dispatcher's
+// special-case list never included its name — so any call fell through to
+// "Unknown tool". These exercise the dispatcher itself (not
+// executeCoordinationTool directly), since that's the layer that broke.
+describe('executeTool coordination_history dispatch (AGT-4054)', () => {
+  const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
+  const ORIGINAL_AUTOMATION_DB = process.env.OPENSWARM_AUTOMATION_DB;
+  let dir = '';
+
+  afterAll(async () => {
+    (await import('../coordination/coordinationStore.js')).resetCoordinationStoreForTests();
+    (await import('../coordination/coordinationTrace.js')).resetTraceDbForTests();
+    process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE;
+    process.env.OPENSWARM_AUTOMATION_DB = ORIGINAL_AUTOMATION_DB;
+    if (dir) await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('routes to executeCoordinationTool instead of failing as an unknown tool', async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-coord-history-'));
+    process.env.OPENSWARM_COORDINATION_FILE = path.join(dir, 'events.json');
+    process.env.OPENSWARM_AUTOMATION_DB = path.join(dir, 'automation.db');
+    (await import('../coordination/coordinationStore.js')).resetCoordinationStoreForTests();
+    (await import('../coordination/coordinationTrace.js')).resetTraceDbForTests();
+
+    const coordinationContext: CoordinationToolContext = {
+      repository: TMP_DIR,
+      taskId: 't-agt-4054',
+      actor: 'worker-test',
+      actorName: 'Worker Test',
+    };
+
+    const result = await executeTool(
+      makeCall('coordination_history', {}),
+      TMP_DIR,
+      undefined,
+      { coordinationContext },
+    );
+
+    expect(result.is_error).toBe(false);
+    expect(result.content).not.toContain('Unknown tool');
+    expect(() => JSON.parse(result.content)).not.toThrow();
   });
 });

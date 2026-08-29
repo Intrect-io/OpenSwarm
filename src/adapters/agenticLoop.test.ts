@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
 
 /** Scripted API response carrying a single tool call. */
@@ -163,6 +163,20 @@ describe('shouldNudgeReadLoop — early read-loop nudge (ported 8a1420f)', () =>
   });
   it('stops nudging once the budget is exhausted', () => {
     expect(shouldNudgeReadLoop(0, 3, 3, READ_LOOP_NUDGE_AT + 5)).toBe(false);
+  });
+});
+
+// AGT-4054
+describe('shouldNudgeCoordinationCheck', () => {
+  it('nudges once enough turns have passed without a check, with coordination enabled', () => {
+    expect(shouldNudgeCoordinationCheck(true, COORDINATION_CHECK_NUDGE_EVERY)).toBe(true);
+    expect(shouldNudgeCoordinationCheck(true, COORDINATION_CHECK_NUDGE_EVERY + 5)).toBe(true);
+  });
+  it('does NOT nudge before enough turns have passed', () => {
+    expect(shouldNudgeCoordinationCheck(true, COORDINATION_CHECK_NUDGE_EVERY - 1)).toBe(false);
+  });
+  it('does NOT nudge when there is no coordination context, regardless of turns elapsed', () => {
+    expect(shouldNudgeCoordinationCheck(false, COORDINATION_CHECK_NUDGE_EVERY + 100)).toBe(false);
   });
 });
 
@@ -364,6 +378,111 @@ describe('runAgenticLoop blocking human decision', () => {
     // turn in which it could answer its own question.
     expect(calls).toEqual(['turn-1', 'turn-2']);
     expect(result.text).toContain('Blocked');
+  });
+});
+
+// AGT-4054: an operator/agent can message a running worker/reviewer without
+// it asking first (unlike ask_human), so nothing else surfaces that — this
+// nudge is the only active prompt telling the agent to go check.
+describe('runAgenticLoop coordination-inbox nudge (AGT-4054)', () => {
+  const coordinationContext = {
+    repository: process.cwd(),
+    taskId: 't-coord-nudge',
+    actor: 'worker-coord-nudge-test',
+    actorName: 'Coord Nudge Test',
+  };
+
+  it('nudges to check the coordination inbox after enough turns of silence', async () => {
+    const logs: string[] = [];
+    let call = 0;
+    const callApi = async () => {
+      call++;
+      if (call <= COORDINATION_CHECK_NUDGE_EVERY + 1) {
+        return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
+      }
+      return finalResp('done');
+    };
+
+    await runAgenticLoop({
+      prompt: 'x', cwd: process.cwd(), model: 'test', callApi,
+      coordinationContext, maxTurns: COORDINATION_CHECK_NUDGE_EVERY + 5, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+
+    expect(logs.some((l) => l.includes('Coordination-inbox nudge'))).toBe(true);
+  });
+
+  it('does NOT nudge when the run has no coordination context', async () => {
+    const logs: string[] = [];
+    let call = 0;
+    const callApi = async () => {
+      call++;
+      if (call <= COORDINATION_CHECK_NUDGE_EVERY + 3) {
+        return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
+      }
+      return finalResp('done');
+    };
+
+    await runAgenticLoop({
+      prompt: 'x', cwd: process.cwd(), model: 'test', callApi,
+      maxTurns: COORDINATION_CHECK_NUDGE_EVERY + 5, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+
+    expect(logs.some((l) => l.includes('Coordination-inbox nudge'))).toBe(false);
+  });
+
+  it('resets the clock when the agent checks its inbox on its own', async () => {
+    const logs: string[] = [];
+    let call = 0;
+    // 3 turns of silence (turns 0-2), a self-initiated check at turn 3, then
+    // 4 more turns of silence (turns 4-7) — 7 turns elapsed since turn 0
+    // overall, which WOULD cross COORDINATION_CHECK_NUDGE_EVERY (6) measured
+    // from the start. It must NOT cross measured from the turn-3 check
+    // (turn 7 - turn 3 = 4 < 6). A broken/missing reset would nudge around
+    // turn 6; a working one keeps this silent through turn 7.
+    const CHECK_AT_CALL = 4;
+    const callApi = async () => {
+      call++;
+      if (call === CHECK_AT_CALL) return toolCallResp(`c${call}`, 'coordination_read', {});
+      if (call <= CHECK_AT_CALL + 4) {
+        return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
+      }
+      return finalResp('done');
+    };
+
+    await runAgenticLoop({
+      prompt: 'x', cwd: process.cwd(), model: 'test', callApi,
+      coordinationContext, maxTurns: 10, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+
+    expect(logs.some((l) => l.includes('Coordination-inbox nudge'))).toBe(false);
+  });
+
+  it('does NOT reset the clock on coordination_history alone — it consumes nothing from the live inbox', async () => {
+    const logs: string[] = [];
+    let call = 0;
+    // Call coordination_history every turn instead of coordination_read. If it
+    // wrongly counted as a check, this would look identical to the previous
+    // test and never nudge — but it must, because the live inbox was never
+    // actually consumed. Vary the args per call so the no-progress stall
+    // guard (identical tool calls 3 turns running) doesn't cut the run short.
+    const callApi = async () => {
+      call++;
+      if (call <= COORDINATION_CHECK_NUDGE_EVERY + 1) {
+        return toolCallResp(`c${call}`, 'coordination_history', { limit: call });
+      }
+      return finalResp('done');
+    };
+
+    await runAgenticLoop({
+      prompt: 'x', cwd: process.cwd(), model: 'test', callApi,
+      coordinationContext, maxTurns: COORDINATION_CHECK_NUDGE_EVERY + 5, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+
+    expect(logs.some((l) => l.includes('Coordination-inbox nudge'))).toBe(true);
   });
 });
 

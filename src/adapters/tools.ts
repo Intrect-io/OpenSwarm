@@ -744,7 +744,7 @@ export async function executeTool(
       }
 
       default:
-        if (['coordination_read', 'coordination_publish', 'ask_human'].includes(name)) {
+        if (['coordination_read', 'coordination_history', 'coordination_publish', 'ask_human'].includes(name)) {
           if (!execOptions?.coordinationContext) {
             return { tool_call_id: callId, content: 'Coordination tools are unavailable outside a scoped autonomous run.', is_error: true };
           }

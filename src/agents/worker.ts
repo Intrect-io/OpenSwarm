@@ -19,7 +19,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeConsole as console } from '../support/safeLog.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
-import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { COORDINATION_GUIDANCE_PROMPT, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import {
   isRouteReasonAllowed,
   planAdapterAttempts,
@@ -366,7 +366,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     const callSignHeader = options.coordinationContext?.actorName
       ? `\n\n## Your identity\nYou are **${options.coordinationContext.actorName}**. Other agents address you by that call sign, and you address them by theirs.\n`
       : '';
-    let systemPrompt = getPrompts().systemPrompt + callSignHeader
+    // Gated on coordinationContext itself (not actorName): that's the same
+    // condition agenticLoop.ts uses to decide whether coordination tools are
+    // even exposed to this run (AGT-4054).
+    const coordinationGuidance = options.coordinationContext ? COORDINATION_GUIDANCE_PROMPT : '';
+    let systemPrompt = getPrompts().systemPrompt + callSignHeader + coordinationGuidance
       + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd));
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;
     else if (editFormat === 'whole-file') systemPrompt += WHOLE_FILE_PROMPT;
