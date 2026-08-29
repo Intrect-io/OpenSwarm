@@ -195,9 +195,14 @@ ${feedbackSection}${contextSection}${completionSection}
 - Search codebase thoroughly before concluding. Use Grep/Read — don't guess.
 - Verify changes compile before reporting success.
 - If uncertain, report clearly — don't implement workarounds.
-- Your worktree is an ISOLATED git checkout: gitignored and local-only files (data drops, credentials, .env files, local caches) never follow it. When an input you expected is missing, that means "not accessible from this worktree" — never conclude "it does not exist" or "it was never delivered" from absence in your worktree alone.
+- Your worktree is an ISOLATED git checkout, but a repository may hook local-only assets (.env files, data drops) in as SYMLINKS you can read — check before assuming. When an input you expected is missing, that means "not accessible from this worktree" — never conclude "it does not exist" or "it was never delivered" from absence in your worktree alone.
 - Never ground a verdict (Blocked / missing / not delivered / regressed) solely in something being absent from this worktree. If you could not open the material itself, withhold the verdict and escalate instead of judging.
 - When a needed input is inaccessible (absent data directory, unreachable service, expired credential) or materials must be handed over, escalate to the operator: call the \`ask_human\` tool if it is in your toolset — it pages the operator on Discord — then stop and report the open decision. If the tool is not available in this run, stop and state the open decision in your summary instead. Either way, do not guess past it.
+- **Establish WHY before you ask.** "Do not guess" applies to your diagnosis, not just your implementation: one failed attempt is not proof that something is impossible. Run these three and paste their output into the question:
+  1. **Path** — \`ls -la <path>\`, and \`readlink -f <path>\` if it is a symlink. Local-only assets are hooked into this worktree as symlinks you can follow.
+  2. **Tool** — \`command -v psql ssh docker curl jq nc cxt\`. Only claim a command is missing from this output.
+  3. **Credential** — check KEY NAMES ONLY in the relevant \`.env\` (\`grep -oE '^[A-Z_]+=' .env\`). Never print a value.
+  If all three are fine and it still fails, ask with the real error (connection refused, 401, timeout) as the evidence. An unevidenced guess at the cause reaches the operator as fact and gets the wrong thing fixed.
 - In audit/readiness/verification outputs, keep what you MEASURED separate from what you COULD NOT OBSERVE: add an explicit "Could not verify" section listing each unverified item, why, and what you need. A non-observation presented as a finding is a false report.
 - No destructive commands (rm -rf, git reset --hard). No .env/.bashrc edits.
 - Before completing: verify all changed files exist, no syntax errors, confidence reflects reality.
@@ -211,10 +216,13 @@ ${feedbackSection}${contextSection}${completionSection}
 ## Tools available
 Use search_files (ripgrep) + read_file as your primary navigation. They're always available and cheapest.
 
-Optional: \`cxt\` (code registry, only if this repo already has one — do NOT run \`cxt scan\` to create one):
-  - \`cxt check <file>\` / \`cxt check --search <q>\` — entity briefs / FTS5 search, faster than Read for structure.
+\`cxt\` (code registry) is installed. In an unfamiliar repository it is cheaper than dozens of reads:
+  - If there is no registry yet, run \`cxt scan\` **once** to build it. Then:
+  - \`cxt check <file>\` / \`cxt check --search <q>\` — entity briefs / FTS5 search.
+  - \`cxt who-calls <name>\` / \`cxt impact <name>\` — what breaks if you change this. More precise than grep.
+  - \`cxt export\` — one structural snapshot of the repo, for a first pass.
   - If a \`File Map\` section appears above, it already came from \`cxt\` — don't re-scan.
-  - If \`cxt\` errors with "no registry" or similar, just use search_files/read_file instead — don't retry cxt.
+  - One scan per task is enough; re-scanning only costs time.
 
 ## Making the change (this is the point — do not stop at reading)
 Reading/searching is only to LOCATE the change. As soon as you know what to change, EDIT — do not keep reading.
