@@ -583,3 +583,35 @@ describe('completion-criteria pass gate', () => {
     });
   }
 });
+
+describe('diagnose before escalating, and the cxt hook (AGT-4081)', () => {
+  const task = { taskTitle: 'Fix login bug', taskDescription: 'Session expires too fast' };
+  // 40 of 74 parked operator questions asked for material the agent already
+  // had: credentials linked into the worktree, a `docker` it claimed was not
+  // installed. The prompt used to send an agent straight from one failed
+  // attempt to paging a human, so its guess at the cause arrived as fact.
+  for (const [name, prompts] of [['en', enPrompts], ['ko', koPrompts]] as const) {
+    it(`${name} worker prompt requires evidence before ask_human`, () => {
+      const result = prompts.buildWorkerPrompt(task);
+      expect(result).toContain('readlink -f');   // is the path a followable symlink?
+      expect(result).toContain('command -v');    // is the tool actually missing?
+      expect(result).toMatch(/\.env/);           // does the credential exist?
+    });
+
+    it(`${name} worker prompt never asks for credential values`, () => {
+      const result = prompts.buildWorkerPrompt(task);
+      expect(result).toMatch(name === 'en' ? /KEY NAMES ONLY/ : /키 이름만/);
+    });
+
+    it(`${name} worker prompt lets an agent build the cxt registry`, () => {
+      // It previously forbade `cxt scan`, because cxt was not installed in the
+      // image. It is now, so an unfamiliar repo can be indexed once instead of
+      // read file by file.
+      const result = prompts.buildWorkerPrompt(task);
+      expect(result).toContain('cxt scan');
+      expect(result).not.toContain('do NOT run `cxt scan`');
+      expect(result).not.toContain('`cxt scan`으로 새로 만들지 말 것');
+      expect(result).toContain('cxt impact');
+    });
+  }
+});

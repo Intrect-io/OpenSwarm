@@ -121,7 +121,7 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'ask_human',
-      description: 'Page the operator on Discord with one blocking decision. Returns a correlation ID; the operator answers later, so stop this run and report the open decision rather than inventing an answer or continuing past it.',
+      description: 'Page the operator on Discord with one blocking decision. Returns a correlation ID; the operator answers later, so stop this run and report the open decision rather than inventing an answer or continuing past it. Before calling, establish WHY you are blocked and include the evidence in the question: whether the path exists (ls -la, readlink -f for a symlink), whether the tool exists (command -v), and whether the credential exists (KEY NAMES ONLY, never a value). One failed attempt is not proof that something is impossible, and an unevidenced guess at the cause reaches the operator as fact.',
       parameters: {
         type: 'object',
         properties: { question: { type: 'string' } },

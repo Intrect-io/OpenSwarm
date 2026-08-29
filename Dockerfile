@@ -91,6 +91,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends gnupg && \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# cxt, the code-exploration CLI. An agent dropped into an unfamiliar repository
+# otherwise answers "where is X / what calls X / is this tested" with dozens of
+# grep and read calls, and its context fills with file dumps before it starts
+# work. `cxt scan` once, then `cxt check`/`who-calls`/`impact`/`bs` answer those
+# from a local registry.
+#
+# Pinned exactly: an agent-facing tool that changed behaviour under us would
+# change every agent's reading of a repository at once.
+RUN npm install -g @intrect/cxt@0.3.0 && npm cache clean --force
+
 # uv, for repositories that are uv projects. Copied from the official image
 # rather than piped from an installer, and pinned by digest rather than tag —
 # a tag can be repointed, so only the digest makes this build reproducible.
