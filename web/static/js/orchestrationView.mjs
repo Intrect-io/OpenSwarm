@@ -7,7 +7,10 @@
 // full current event set every time — the model is cheap at board scale
 // (≤2000 events) and idempotent redraw avoids incremental-DOM drift.
 
-import { buildOrchestrationModel, dominantKind, KIND_COLORS } from './orchestrationModel.mjs';
+import {
+  ACTIVE_WINDOW_MS, buildOrchestrationModel, dominantKind, filterGraphNodes, KIND_COLORS,
+  RAIL_ROLES, taskLanesOf,
+} from './orchestrationModel.mjs';
 import { layoutTiers } from './tierLayout.mjs';
 import {
   buildThreads, chatLineOf, isUtterance, metadataPairs, openQuestionFor, taskLabelOf, threadFor,
@@ -38,6 +41,79 @@ function escapeHtml(text) {
   ));
 }
 
+/**
+ * A drawing layer that survives redraws.
+ *
+ * The view used to open every render with `svg.innerHTML = ''`, throwing the
+ * previous picture away wholesale — so any position change, however small,
+ * arrived as a hard jump with no chance of a transition. Keeping the layers
+ * and reconciling their children by key is what lets CSS animate a move.
+ */
+function layerOf(doc, svg, name) {
+  const existing = svg.querySelector(`g[data-layer="${name}"]`);
+  if (existing) return existing;
+  const layer = el(doc, 'g', { 'data-layer': name });
+  svg.appendChild(layer);
+  return layer;
+}
+
+function clearChildren(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+/**
+ * Enter/update/exit one keyed layer.
+ *
+ * `create` builds a fresh element for a key it has never seen, `paint`
+ * refreshes one already on screen. Keys that vanished are removed, so the DOM
+ * tracks the model rather than accumulating orphans.
+ */
+function reconcile(layer, keyAttr, items, create, paint) {
+  const alive = new Set();
+  const existing = new Map();
+  for (const child of layer.children) {
+    const key = child.getAttribute(keyAttr);
+    if (key !== null) existing.set(key, child);
+  }
+  for (const item of items) {
+    alive.add(item.key);
+    let node = existing.get(item.key);
+    if (!node) {
+      node = create(item);
+      node.setAttribute(keyAttr, item.key);
+      layer.appendChild(node);
+    }
+    paint(node, item);
+  }
+  for (const [key, node] of existing) {
+    if (!alive.has(key)) node.remove();
+  }
+}
+
+/**
+ * Reconciliation key for one directed edge, safe to carry in an attribute.
+ *
+ * The two addresses have to be joined by something that cannot occur inside
+ * either of them, or `a→b` and `a→b` built from different pairs could collide.
+ * Percent-encoding guarantees that: `>` always encodes to `%3E`, so the `->`
+ * separator can never appear within an encoded address. An out-of-band
+ * delimiter such as NUL would do the same job but makes the served asset a
+ * binary file to every tool that touches it.
+ */
+export function edgeKey(from, to) {
+  return `${encodeURIComponent(from)}->${encodeURIComponent(to)}`;
+}
+
+/**
+ * The click handler in force for one graph, looked up at click time.
+ *
+ * Node groups are created once and then reused across redraws, but `onSelect`
+ * closes over the current redraw and is a different function each time. Adding
+ * a listener per render would stack them; keeping the live handler here lets a
+ * group bind exactly one listener for its whole lifetime.
+ */
+const selectHandlers = new WeakMap();
+
 /** Node radius grows with activity but stays readable: 10..26px. */
 export function nodeRadius(node) {
   return Math.min(26, 10 + Math.sqrt(node.eventCount) * 2.5);
@@ -46,6 +122,7 @@ export function nodeRadius(node) {
 export function renderStats(doc, stats) {
   const holder = doc.getElementById('stats');
   const cells = [
+    ['waiting on you', stats.agentsAwaitingOperator ?? 0, (stats.agentsAwaitingOperator ?? 0) > 0],
     ['active agents', stats.activeAgents, false],
     ['pending questions', stats.pendingQuestions, stats.pendingQuestions > 0],
     ['open exchanges', stats.pendingTotal, false],
@@ -57,17 +134,49 @@ export function renderStats(doc, stats) {
     .join('');
 }
 
+/**
+ * The one line on this screen the operator can act on.
+ *
+ * `pendingTotal` was already computed and already rendered as a stat chip, but
+ * a chip among six chips is not the same as being told. An agent parked on a
+ * question is blocked until somebody answers, so the count of *agents* — not
+ * of questions — gets its own banner above the graph.
+ */
+export function renderWaitingBanner(doc, stats) {
+  const holder = doc.getElementById('waiting');
+  if (!holder) return;
+  const waiting = stats.agentsAwaitingOperator ?? 0;
+  const open = stats.pendingTotal ?? 0;
+  if (waiting > 0) {
+    holder.className = 'waiting is-blocking';
+    holder.textContent = waiting === 1
+      ? '1 agent is waiting on you'
+      : `${waiting} agents are waiting on you`;
+    return;
+  }
+  holder.className = 'waiting';
+  holder.textContent = open > 0
+    ? `${open} exchange${open === 1 ? '' : 's'} open · nothing needs you`
+    : 'nothing is waiting on you';
+}
+
 export function renderGraph(doc, model, layout, selected, onSelect, spotlight = null) {
   const { positions, bands, labelGutter } = layout;
   const svg = doc.getElementById('graph');
   const width = svg.clientWidth || 900;
   const height = svg.clientHeight || 600;
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.innerHTML = '';
+  selectHandlers.set(svg, onSelect);
 
-  // Hierarchy furniture below everything: alternating band fills, separators,
-  // and a tier label with its head-count — the pyramid reading at a glance.
-  const bandLayer = el(doc, 'g');
+  // Layers are created once and kept. Order of first creation is paint order:
+  // furniture under edges under nodes.
+  const bandLayer = layerOf(doc, svg, 'bands');
+  const edgeLayer = layerOf(doc, svg, 'edges');
+  const nodeLayer = layerOf(doc, svg, 'nodes');
+
+  // Band furniture is redrawn wholesale — it is static decoration that carries
+  // no transition and no listener, so keying it would buy nothing.
+  clearChildren(bandLayer);
   bands.forEach((band, index) => {
     if (index % 2 === 1) {
       bandLayer.appendChild(el(doc, 'rect', {
@@ -78,25 +187,29 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
     if (index > 0) {
       bandLayer.appendChild(el(doc, 'line', {
         x1: 0, y1: band.y0, x2: width, y2: band.y0,
-        stroke: '#1f2633', 'stroke-dasharray': '4 6',
+        stroke: '#1f2633', 'stroke-dasharray': band.kind === 'lane' ? '2 4' : '4 6',
       }));
     }
     const label = el(doc, 'text', {
-      x: 12, y: (band.y0 + band.y1) / 2, class: 'tier-label', 'data-tier-label': band.id,
+      x: 12,
+      y: (band.y0 + band.y1) / 2,
+      class: band.kind === 'lane' ? 'tier-label lane-label' : 'tier-label',
+      'data-tier-label': band.id,
     });
     label.textContent = band.label;
     bandLayer.appendChild(label);
     const count = el(doc, 'text', {
       x: 12, y: (band.y0 + band.y1) / 2 + 13, class: 'tier-count',
     });
-    count.textContent = band.count === 0 ? 'none' : `${band.count} placed`;
+    count.textContent = band.count === 0
+      ? 'none'
+      : `${band.count} ${band.kind === 'lane' ? 'in task' : 'placed'}`;
     bandLayer.appendChild(count);
   });
   bandLayer.appendChild(el(doc, 'line', {
     x1: labelGutter - 14, y1: bands[0].y0, x2: labelGutter - 14, y2: bands[bands.length - 1].y1,
     stroke: '#1f2633',
   }));
-  svg.appendChild(bandLayer);
 
   const neighbors = new Set();
   if (selected) {
@@ -110,69 +223,84 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
   // the addressee a quieter one, so a single message reads off the hierarchy.
   const speaking = spotlight?.actor ?? null;
   const spokenTo = spotlight?.recipient ?? null;
+  // Agents now carry assigned handles (AGT-4064). A tooltip that prints the
+  // routing address instead is naming something the operator never sees
+  // anywhere else on the page.
+  const displayName = new Map(model.nodes.map((node) => [node.id, node.name]));
+  const nameOf = (id) => displayName.get(id) ?? id;
 
-  const edgeLayer = el(doc, 'g');
-  for (const edge of model.edges) {
-    const a = positions.get(edge.from);
-    const b = positions.get(edge.to);
-    if (!a || !b) continue;
-    // A gentle quadratic bend keeps A→B and B→A visually distinct.
-    const mx = (a.x + b.x) / 2 + (b.y - a.y) * 0.12;
-    const my = (a.y + b.y) / 2 + (a.x - b.x) * 0.12;
-    const path = el(doc, 'path', {
-      d: `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`,
-      class: `edge${selected && edge.from !== selected && edge.to !== selected ? ' dimmed' : ''}`,
-      stroke: KIND_COLORS[dominantKind(edge)] ?? '#6c7086',
-      'stroke-width': Math.min(6, 1 + Math.log2(1 + edge.count)),
+  const drawnEdges = model.edges
+    .filter((edge) => positions.has(edge.from) && positions.has(edge.to))
+    .map((edge) => ({ key: edgeKey(edge.from, edge.to), edge }));
+  reconcile(edgeLayer, 'data-edge', drawnEdges,
+    () => {
+      const path = el(doc, 'path', {});
+      path.appendChild(el(doc, 'title'));
+      return path;
+    },
+    (path, { edge }) => {
+      const a = positions.get(edge.from);
+      const b = positions.get(edge.to);
+      // A gentle quadratic bend keeps A→B and B→A visually distinct.
+      const mx = (a.x + b.x) / 2 + (b.y - a.y) * 0.12;
+      const my = (a.y + b.y) / 2 + (a.x - b.x) * 0.12;
+      path.setAttribute('d', `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`);
+      path.setAttribute('class', `edge${selected && edge.from !== selected && edge.to !== selected ? ' dimmed' : ''}`);
+      path.setAttribute('stroke', KIND_COLORS[dominantKind(edge)] ?? '#6c7086');
+      path.setAttribute('stroke-width', String(Math.min(6, 1 + Math.log2(1 + edge.count))));
+      path.querySelector('title').textContent =
+        `${nameOf(edge.from)} → ${nameOf(edge.to)}: ${edge.count} (${Object.entries(edge.kinds).map(([k, n]) => `${k}×${n}`).join(', ')})`;
     });
-    path.appendChild(el(doc, 'title')).textContent =
-      `${edge.from} → ${edge.to}: ${edge.count} (${Object.entries(edge.kinds).map(([k, n]) => `${k}×${n}`).join(', ')})`;
-    edgeLayer.appendChild(path);
-  }
-  svg.appendChild(edgeLayer);
 
-  const nodeLayer = el(doc, 'g');
-  for (const node of model.nodes) {
-    const p = positions.get(node.id);
-    if (!p) continue;
-    const group = el(doc, 'g', {
-      class: `node${selected && !neighbors.has(node.id) ? ' dimmed' : ''}`,
-      transform: `translate(${p.x} ${p.y})`,
-      'data-node': node.id,
+  const drawnNodes = model.nodes
+    .filter((node) => positions.has(node.id))
+    .map((node) => ({ key: node.id, node }));
+  reconcile(nodeLayer, 'data-node', drawnNodes,
+    ({ node }) => {
+      const group = el(doc, 'g', {});
+      // Bound once for the group's whole life; the live handler is looked up
+      // through `selectHandlers` so redraws cannot stack listeners here.
+      group.addEventListener('click', () => selectHandlers.get(svg)?.(node.id));
+      return group;
+    },
+    (group, { node }) => {
+      const p = positions.get(node.id);
+      group.setAttribute('class', `node${selected && !neighbors.has(node.id) ? ' dimmed' : ''}`);
+      group.setAttribute('transform', `translate(${p.x} ${p.y})`);
+      group.removeAttribute('data-speaking');
+      group.removeAttribute('data-spoken-to');
+      clearChildren(group);
+
+      const radius = nodeRadius(node);
+      if (node.pendingCount > 0) {
+        group.appendChild(el(doc, 'circle', { r: radius + 6, fill: 'none', stroke: '#e8b339', 'stroke-width': 2, class: 'pulse' }));
+      }
+      if (node.id === speaking) {
+        group.setAttribute('data-speaking', 'true');
+        group.appendChild(el(doc, 'circle', {
+          r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 2.5, class: 'speaking',
+        }));
+      } else if (node.id === spokenTo) {
+        group.setAttribute('data-spoken-to', 'true');
+        group.appendChild(el(doc, 'circle', {
+          r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 1.5,
+          'stroke-opacity': 0.45, 'stroke-dasharray': '3 4', class: 'spoken-to',
+        }));
+      }
+      group.appendChild(el(doc, 'circle', {
+        r: radius,
+        fill: ROLE_COLORS[node.role] ?? ROLE_COLORS.agent,
+        'fill-opacity': node.active ? 0.9 : 0.35,
+        stroke: node.id === selected ? '#e6e9ef' : 'transparent',
+        'stroke-width': 2,
+      }));
+      const label = el(doc, 'text', { y: radius + 12 });
+      label.textContent = node.name;
+      group.appendChild(label);
+      const roleLabel = el(doc, 'text', { y: radius + 22, class: 'role-label' });
+      roleLabel.textContent = node.role;
+      group.appendChild(roleLabel);
     });
-    const radius = nodeRadius(node);
-    if (node.pendingCount > 0) {
-      group.appendChild(el(doc, 'circle', { r: radius + 6, fill: 'none', stroke: '#e8b339', 'stroke-width': 2, class: 'pulse' }));
-    }
-    if (node.id === speaking) {
-      group.setAttribute('data-speaking', 'true');
-      group.appendChild(el(doc, 'circle', {
-        r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 2.5, class: 'speaking',
-      }));
-    } else if (node.id === spokenTo) {
-      group.setAttribute('data-spoken-to', 'true');
-      group.appendChild(el(doc, 'circle', {
-        r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 1.5,
-        'stroke-opacity': 0.45, 'stroke-dasharray': '3 4', class: 'spoken-to',
-      }));
-    }
-    group.appendChild(el(doc, 'circle', {
-      r: radius,
-      fill: ROLE_COLORS[node.role] ?? ROLE_COLORS.agent,
-      'fill-opacity': node.active ? 0.9 : 0.35,
-      stroke: node.id === selected ? '#e6e9ef' : 'transparent',
-      'stroke-width': 2,
-    }));
-    const label = el(doc, 'text', { y: radius + 12 });
-    label.textContent = node.name;
-    group.appendChild(label);
-    const roleLabel = el(doc, 'text', { y: radius + 22, class: 'role-label' });
-    roleLabel.textContent = node.role;
-    group.appendChild(roleLabel);
-    group.addEventListener('click', () => onSelect(node.id));
-    nodeLayer.appendChild(group);
-  }
-  svg.appendChild(nodeLayer);
 }
 
 export function renderLegend(doc) {
@@ -185,6 +313,65 @@ export function renderLegend(doc) {
     `<div class="row"><span class="line" style="background:${KIND_COLORS['adapter-route']}"></span>route / mcp</div>`,
   ];
   doc.getElementById('legend').innerHTML = rows.join('');
+}
+
+/**
+ * Refresh the filter controls from the current model.
+ *
+ * Deliberately does NOT touch the search box or rebuild a select whose options
+ * are unchanged: this runs on every SSE event, and replacing an input the
+ * operator is typing into would eat the caret. Only the task options and the
+ * idle count actually change with the data.
+ */
+export function renderControls(doc, model, filters) {
+  const taskSelect = doc.getElementById('filter-task');
+  if (taskSelect) {
+    const lanes = taskLanesOf(model.nodes);
+    const signature = lanes.map((lane) => `${lane.taskId}:${lane.label}`).join('|');
+    if (taskSelect.getAttribute('data-options') !== signature) {
+      taskSelect.setAttribute('data-options', signature);
+      taskSelect.innerHTML = ['<option value="">all tasks</option>', ...lanes.map((lane) =>
+        `<option value="${escapeHtml(lane.taskId)}">${escapeHtml(lane.label)}</option>`)].join('');
+    }
+    // The selected task can be evicted with its lane; fall back to "all" so the
+    // control never points at something that is no longer on the board.
+    const wanted = filters.taskId ?? '';
+    const known = wanted === '' || lanes.some((lane) => lane.taskId === wanted);
+    if (!known) filters.taskId = null;
+    const value = filters.taskId ?? '';
+    if (taskSelect.value !== value) taskSelect.value = value;
+  }
+
+  const roleSelect = doc.getElementById('filter-role');
+  if (roleSelect && roleSelect.value !== (filters.role ?? '')) roleSelect.value = filters.role ?? '';
+
+  const idleToggle = doc.getElementById('filter-idle');
+  if (idleToggle && idleToggle.checked !== filters.showIdle) idleToggle.checked = filters.showIdle;
+  const idleCount = doc.getElementById('idle-count');
+  if (idleCount) {
+    const idle = model.stats.idleAgents ?? 0;
+    idleCount.textContent = idle === 0 ? '' : `(${idle})`;
+  }
+}
+
+/**
+ * Bind the controls once.
+ *
+ * Attaching these inside the render would add a listener per redraw, and a
+ * redraw happens on every coordination event — the toggle would eventually
+ * fire dozens of times per click.
+ */
+export function wireControls(doc, filters, onChange) {
+  const bind = (id, type, read) => {
+    const node = doc.getElementById(id);
+    if (!node || node.getAttribute('data-bound') === 'true') return;
+    node.setAttribute('data-bound', 'true');
+    node.addEventListener(type, () => { read(node); onChange(); });
+  };
+  bind('filter-search', 'input', (node) => { filters.query = node.value; });
+  bind('filter-task', 'change', (node) => { filters.taskId = node.value || null; });
+  bind('filter-role', 'change', (node) => { filters.role = node.value || null; });
+  bind('filter-idle', 'change', (node) => { filters.showIdle = node.checked; });
 }
 
 export function renderDetail(doc, model, events, selected) {
@@ -372,6 +559,7 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   let selected = null;
   let focusedEventId = null;
   const composerStates = new Map();
+  const filters = { showIdle: false, taskId: null, role: null, query: '' };
 
   // Returns the failure reason, or null when the message was accepted. `fetch`
   // resolves on 400/409, so the server's "cannot address this" and "already
@@ -435,19 +623,37 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     return null;
   };
 
+  // Every path back into the DOM funnels through `redraw`, so one guard here
+  // covers them all: a fetch that was already in flight when `stop()` was
+  // called, a late SSE frame, a resize, a control change. Without it the
+  // resolving fetch would rebuild the graph and arm a fresh liveness timer
+  // that nothing is left to clear.
+  let stopped = false;
+
   const redraw = () => {
+    if (stopped) return;
     const events = [...byId.values()].sort((a, b) => a.seq - b.seq);
     const model = buildOrchestrationModel(events);
-    if (selected && !model.nodes.some((node) => node.id === selected)) selected = null;
+    // Only what is drawn can be selected: a node hidden by the liveness filter
+    // would otherwise stay selected invisibly and keep the feed narrowed to it
+    // with nothing on screen explaining why.
+    const visible = filterGraphNodes(model.nodes, filters);
+    if (selected && !visible.some((node) => node.id === selected)) selected = null;
     const focused = focusedEventId ? byId.get(focusedEventId) ?? null : null;
     if (focusedEventId && !focused) focusedEventId = null;
     const threads = buildThreads(events);
     const svg = doc.getElementById('graph');
-    const layout = layoutTiers(model.nodes, {
+    const layout = layoutTiers(visible, {
       width: svg.clientWidth || 900,
       height: svg.clientHeight || 600,
+      // Derived from the FULL board, not the filtered set: a lane's age is a
+      // property of the task, and hiding one idle member must not restack the
+      // conversations above and below it.
+      laneOrder: taskLanesOf(model.nodes).map((lane) => lane.taskId),
     });
     renderStats(doc, model.stats);
+    renderWaitingBanner(doc, model.stats);
+    renderControls(doc, model, filters);
     renderGraph(doc, model, layout, selected, (id) => {
       selected = selected === id ? null : id;
       redraw();
@@ -459,10 +665,53 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     });
     const shownThread = threadFor(threads, focused);
     renderThread(doc, shownThread, send, composerStates.get(shownThread?.correlationId ?? null) ?? null);
+    scheduleLivenessSweep(model.nodes);
+  };
+
+  // Liveness is measured against wall time, but only an event, a poll change,
+  // a resize or a control action redraws — so on a quiet board an agent that
+  // went idle stayed on screen indefinitely, which is exactly the unbounded
+  // population this change exists to remove. Wake once, at the moment the next
+  // still-active agent crosses the window, rather than polling for it.
+  let livenessTimer = null;
+  const scheduleLivenessSweep = (nodes) => {
+    if (livenessTimer) clearTimeout(livenessTimer);
+    livenessTimer = null;
+    // Rails never age out of the picture, so their expiry is not a wake reason.
+    const expiries = nodes
+      .filter((node) => node.active && !RAIL_ROLES.has(node.role))
+      .map((node) => node.lastSeen + ACTIVE_WINDOW_MS);
+    if (expiries.length === 0) return;
+    const due = Math.min(...expiries) - Date.now();
+    // A small margin past the boundary: waking exactly on it can still read as
+    // active by a millisecond and schedule the same wake again.
+    livenessTimer = setTimeout(redraw, Math.max(250, due + 250));
+  };
+
+  // The server ring drops coordination events at 2000; this map used to keep
+  // every one it was ever handed, so a dashboard left open for a shift held
+  // more history than the daemon does and every agent that ever spoke stayed a
+  // node forever.
+  //
+  // `MAX_EVENTS` is a ceiling, not an average: pruning triggers the moment the
+  // map exceeds it, so `byId.size <= MAX_EVENTS` holds after every absorb. The
+  // batch is what makes it cheap — each prune frees `PRUNE_BATCH` slots, so the
+  // sort is paid for once per batch of arrivals rather than once per event.
+  const MAX_EVENTS = 2000;
+  const PRUNE_BATCH = 256;
+  const prune = () => {
+    if (byId.size <= MAX_EVENTS) return;
+    const ordered = [...byId.values()].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    const target = Math.max(0, MAX_EVENTS - PRUNE_BATCH);
+    for (const event of ordered.slice(0, byId.size - target)) byId.delete(event.id);
   };
 
   const absorb = (event) => {
-    if (event && event.id && !byId.has(event.id)) { byId.set(event.id, event); return true; }
+    if (event && event.id && !byId.has(event.id)) {
+      byId.set(event.id, event);
+      prune();
+      return true;
+    }
     return false;
   };
 
@@ -493,6 +742,19 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   }
 
   renderLegend(doc);
+  wireControls(doc, filters, redraw);
+  // Removed on stop with the same reference it was added with. Leaving it
+  // attached kept a stopped view repainting the graph — and holding the whole
+  // event map and its closures — for as long as the page lived.
   doc.defaultView?.addEventListener('resize', redraw);
-  return { redraw, stop: () => { clearInterval(timer); source?.close(); } };
+  return {
+    redraw,
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+      if (livenessTimer) clearTimeout(livenessTimer);
+      source?.close();
+      doc.defaultView?.removeEventListener('resize', redraw);
+    },
+  };
 }

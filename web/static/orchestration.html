@@ -75,8 +75,30 @@
     .composer-status.is-error { color: var(--red, #f85149); }
     .empty { color: var(--dim); padding: 14px; font-size: 12px; }
     .tier-label { fill: var(--dim); font-size: 10px; letter-spacing: 2px; font-weight: 700; }
+    /* A lane header names a task, not a rank: cyan like every other task chip,
+       and unspaced so a real issue key stays readable in the gutter. */
+    .lane-label { fill: var(--cyan); letter-spacing: 0.5px; }
     .tier-count { fill: #3d4454; font-size: 9px; }
-    .node { cursor: pointer; }
+    /* The one line on the page an operator can act on, so it sits above the
+       graph rather than being a sixth chip in the stat row. */
+    .waiting { padding: 5px 16px; font-size: 11px; color: var(--dim); border-bottom: 1px solid var(--border); }
+    .waiting.is-blocking { color: #0d1117; background: var(--amber); font-weight: 700; }
+    #controls { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    #controls input[type="search"], #controls select {
+      background: #0d1117; border: 1px solid var(--border); border-radius: 4px;
+      color: var(--white); font: inherit; font-size: 11px; padding: 3px 6px;
+    }
+    #controls input[type="search"] { min-width: 150px; }
+    #controls label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dim); }
+    #idle-count { color: #3d4454; }
+    /* Positions are stable now (a node's column comes from its address, not its
+       index), so the rare move a node does make is worth animating rather than
+       cutting to. Anyone who asked for less motion gets none. */
+    .node { cursor: pointer; transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1); }
+    @media (prefers-reduced-motion: reduce) {
+      .node { transition: none; }
+      .pulse, .speaking { animation: none; }
+    }
     .node text { fill: var(--white); font-size: 10px; text-anchor: middle; pointer-events: none; }
     .node .role-label { fill: var(--dim); font-size: 8px; }
     .node.dimmed { opacity: 0.25; }
@@ -94,6 +116,25 @@
     <a href="/chat">chat room →</a>
     <div id="stats"></div>
   </header>
+  <div id="waiting" class="waiting" role="status" aria-live="polite"></div>
+  <div id="controls">
+    <input id="filter-search" type="search" autocomplete="off" placeholder="search agents…" aria-label="Search agents" />
+    <select id="filter-task" aria-label="Filter by task" data-options="">
+      <option value="">all tasks</option>
+    </select>
+    <select id="filter-role" aria-label="Filter by role">
+      <option value="">all roles</option>
+      <option value="worker">worker</option>
+      <option value="reviewer">reviewer</option>
+      <option value="orchestrator">orchestrator</option>
+      <option value="review-agent">review agent</option>
+      <option value="daemon">daemon</option>
+      <option value="human">operator</option>
+    </select>
+    <label for="filter-idle">
+      <input id="filter-idle" type="checkbox" /> show idle <span id="idle-count"></span>
+    </label>
+  </div>
   <main>
     <div id="graph-wrap">
       <svg id="graph" role="img" aria-label="Agent interaction graph"></svg>

@@ -4,11 +4,39 @@
 // page: a fetch shape mismatch, an unhooked selection, or an SSE event that
 // never reaches the model. Drive it with a faked fetch and assert real DOM.
 
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
-import { startOrchestrationView, nodeRadius, ROLE_COLORS } from '../../web/static/js/orchestrationView.mjs';
+import {
+  startOrchestrationView, edgeKey, nodeRadius, ROLE_COLORS, wireControls,
+} from '../../web/static/js/orchestrationView.mjs';
 
 function shell(): Document {
+  document.body.innerHTML = `
+    <div id="stats"></div>
+    <div id="waiting"></div>
+    <div id="controls">
+      <input id="filter-search" type="search" />
+      <select id="filter-task" data-options=""><option value="">all tasks</option></select>
+      <select id="filter-role">
+        <option value="">all roles</option>
+        <option value="worker">worker</option>
+        <option value="reviewer">reviewer</option>
+      </select>
+      <input id="filter-idle" type="checkbox" />
+      <span id="idle-count"></span>
+    </div>
+    <svg id="graph"></svg>
+    <div id="legend"></div>
+    <div id="detail"></div>
+    <div id="feed"></div>
+    <div id="thread"></div>`;
+  return document;
+}
+
+/** The controls are optional furniture; some hosts render the graph alone. */
+function bareShell(): Document {
   document.body.innerHTML = `
     <div id="stats"></div>
     <svg id="graph"></svg>
@@ -18,6 +46,9 @@ function shell(): Document {
     <div id="thread"></div>`;
   return document;
 }
+
+/** Built, never typed: a literal NUL in this file would defeat its own guard. */
+const NUL = String.fromCharCode(0);
 
 function boardEvent(over: Record<string, unknown> = {}) {
   return {
@@ -61,10 +92,11 @@ describe('startOrchestrationView', () => {
     expect(nodes).toContain('adept-helion-cognitor');
     expect(nodes).toContain('human');
 
-    // The hierarchy is stated by the drawing: all four tier bands labeled, and
-    // the operator seated above the worker.
+    // The hierarchy is stated by the drawing: the three shared rails labeled,
+    // then a lane per task, and the operator seated above the worker.
     const labels = [...doc.querySelectorAll('.tier-label')].map((el) => el.textContent);
-    expect(labels).toEqual(['OPERATOR', 'CONTROL PLANE', 'COORDINATION', 'EXECUTION']);
+    expect(labels.slice(0, 3)).toEqual(['OPERATOR', 'CONTROL PLANE', 'COORDINATION']);
+    expect(labels).toContain('t1');
     const yOf = (id: string) => Number(/translate\(\S+ (\S+)\)/.exec(
       doc.querySelector(`[data-node="${id}"]`)!.getAttribute('transform')!)![1]);
     expect(yOf('human')).toBeLessThan(yOf('enginseer-rhodanis-novum'));
@@ -137,6 +169,355 @@ describe('startOrchestrationView', () => {
   it('scales node radius with activity but caps it readable', () => {
     expect(nodeRadius({ eventCount: 0 })).toBe(10);
     expect(nodeRadius({ eventCount: 10_000 })).toBe(26);
+  });
+});
+
+describe('the picture stays bounded and legible (AGT-4066)', () => {
+  // The server ring drops coordination events at 2000; this map kept every one
+  // it ever saw, so a dashboard left open for a shift outgrew the daemon's own
+  // history and every agent that once spoke stayed a node forever.
+  it('evicts the oldest events instead of growing without bound', async () => {
+    const doc = shell();
+    const flood = Array.from({ length: 2400 }, (_, index) => boardEvent({
+      id: `e${index}`,
+      seq: index + 1,
+      correlationId: `c${index}`,
+      actor: `agent-${index}`,
+      actorName: `Agent ${index}`,
+      status: 'completed',
+      summary: `line ${index}`,
+    }));
+    const view = startOrchestrationView(doc, { fetchImpl: fetchWith(flood), eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
+
+    // The cap is a ceiling on what is retained, not an average it drifts above:
+    // 2400 events arrived, at most the server ring's own 2000 are still held.
+    const eventStat = [...doc.querySelectorAll('#stats .stat')]
+      .find((cell) => cell.textContent!.endsWith('events'))!;
+    const retained = Number(eventStat.querySelector('b')!.textContent);
+    expect(retained).toBeLessThanOrEqual(2000);
+    // ...and it prunes a batch, not the whole map.
+    expect(retained).toBeGreaterThan(1500);
+
+    // The very first speakers were pruned; the newest are still on the board.
+    expect(doc.querySelector('[data-node="agent-0"]')).toBeNull();
+    expect(doc.querySelector('[data-node="agent-2399"]')).not.toBeNull();
+    view.stop();
+  });
+
+  // Liveness is wall-clock, but only an event, a poll change, a resize or a
+  // control action redraws. On a quiet board nothing ever crossed the window,
+  // so an agent that stopped talking stayed on screen forever — the very
+  // unbounded population the eviction above is meant to prevent.
+  it('sheds an agent that ages out even when the board stays silent', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const doc = shell();
+      const view = startOrchestrationView(doc, {
+        fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1, status: 'completed' })]),
+        eventSourceImpl: null,
+        pollMs: 1e9,
+      });
+      await vi.waitFor(() => expect(doc.querySelector('[data-node="enginseer-rhodanis-novum"]')).not.toBeNull());
+
+      // No new events, no resize, no clicks — only time passing.
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+
+      expect(doc.querySelector('[data-node="enginseer-rhodanis-novum"]')).toBeNull();
+      view.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // `redraw` no-ops after stop, so a leaked sweep repaints nothing — which is
+  // exactly why this asserts the timer itself. An armed sweep holds a
+  // half-hour wake and the whole view closure alive regardless.
+  it('disarms every timer it armed when it is stopped', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const doc = shell();
+      const view = startOrchestrationView(doc, {
+        fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1, status: 'completed' })]),
+        eventSourceImpl: null,
+        pollMs: 1e9,
+      });
+      await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
+      // The poll interval and the liveness sweep are both armed by now.
+      expect(vi.getTimerCount()).toBeGreaterThan(1);
+
+      view.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // stop() clears the timers it can see, but a fetch already awaiting its
+  // response is not one of them: its continuation would rebuild the graph and
+  // arm a fresh liveness timer that nothing is left to clear.
+  it('does not redraw after stop when a fetch was already in flight', async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const doc = shell();
+    const fetchImpl = vi.fn(() => gate.then(() => ({
+      ok: true,
+      json: async () => ({ events: [boardEvent({ id: 'e1', seq: 1 })], pending: [], lastSeq: 1 }),
+    })));
+
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    view.stop();          // the snapshot has not landed yet
+    release(null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(doc.querySelectorAll('.node')).toHaveLength(0);
+    expect(doc.getElementById('graph')!.querySelector('[data-layer]')).toBeNull();
+  });
+
+  it('keeps node elements across redraws instead of tearing the graph down', async () => {
+    const doc = shell();
+    const listeners: { onmessage?: (msg: { data: string }) => void } = {};
+    class FakeSource {
+      set onmessage(fn: (msg: { data: string }) => void) { listeners.onmessage = fn; }
+      close(): void { /* noop */ }
+    }
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1 })]),
+      eventSourceImpl: FakeSource,
+    });
+    await vi.waitFor(() => expect(doc.querySelector('[data-node="enginseer-rhodanis-novum"]')).not.toBeNull());
+    const before = doc.querySelector('[data-node="enginseer-rhodanis-novum"]')!;
+
+    listeners.onmessage!({
+      data: JSON.stringify({
+        type: 'coordination:event',
+        data: boardEvent({ id: 'e-live', seq: 9, actor: 'vindicator-ferrus-theta', actorName: 'Vindicator Ferrus-Theta', correlationId: 'c9' }),
+      }),
+    });
+
+    // Same element object, not a replacement: that identity is what lets CSS
+    // transition a move rather than cutting to it.
+    expect(doc.querySelector('[data-node="enginseer-rhodanis-novum"]')).toBe(before);
+    view.stop();
+  });
+
+  // A NUL joined the two addresses at first. Node parsed it happily, but the
+  // served asset became a binary file to `file`, to static-asset middleware and
+  // to every text tool that touches it.
+  it('keeps the served asset text, and keeps edge keys unambiguous', async () => {
+    // Read from disk, not through the import: the module graph would happily
+    // hand back a parsed module and hide the byte that is the actual problem.
+    const source = await readFile(
+      resolve(process.cwd(), 'web/static/js/orchestrationView.mjs'), 'utf8');
+    expect(source).not.toHaveLength(0);
+    expect(source.includes(NUL)).toBe(false);
+
+    // Injective: no pair of addresses can produce another pair's key.
+    expect(edgeKey('a', 'b->c')).not.toBe(edgeKey('a->b', 'c'));
+    expect(edgeKey('a', 'b')).toBe(edgeKey('a', 'b'));
+    expect(edgeKey('a>b', 'c')).not.toContain(NUL);
+  });
+
+  it('names both ends of an edge by handle, not by routing address', async () => {
+    const doc = shell();
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1 })]),
+      eventSourceImpl: null,
+      pollMs: 1e9,
+    });
+    await vi.waitFor(() => expect(doc.querySelector('[data-edge] title')).not.toBeNull());
+
+    const tooltip = doc.querySelector('[data-edge] title')!.textContent!;
+    expect(tooltip).toContain('Enginseer Rhodanis-Novum → Adept Helion-Cognitor');
+    expect(tooltip).not.toContain('enginseer-rhodanis-novum');
+    view.stop();
+  });
+
+  it('says how many agents are waiting on the operator without any interaction', async () => {
+    const doc = shell();
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([
+        boardEvent({ id: 'q1', seq: 1, kind: 'human-question', status: 'waiting', recipient: 'human', recipientRole: 'human', correlationId: 'hq-1' }),
+        boardEvent({
+          id: 'q2', seq: 2, kind: 'human-question', status: 'waiting', recipient: 'human',
+          recipientRole: 'human', correlationId: 'hq-2',
+          actor: 'vindicator-ferrus-theta', actorName: 'Vindicator Ferrus-Theta',
+        }),
+      ]),
+      eventSourceImpl: null,
+      pollMs: 1e9,
+    });
+    await vi.waitFor(() => expect(doc.getElementById('waiting')!.textContent).toContain('waiting on you'));
+
+    expect(doc.getElementById('waiting')!.textContent).toBe('2 agents are waiting on you');
+    expect(doc.getElementById('waiting')!.className).toContain('is-blocking');
+    view.stop();
+  });
+
+  it('tells the operator nothing needs them when nothing does', async () => {
+    const doc = shell();
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1, status: 'completed' })]),
+      eventSourceImpl: null,
+      pollMs: 1e9,
+    });
+    await vi.waitFor(() => expect(doc.getElementById('waiting')!.textContent).toBeTruthy());
+    expect(doc.getElementById('waiting')!.textContent).toBe('nothing is waiting on you');
+    expect(doc.getElementById('waiting')!.className).not.toContain('is-blocking');
+    view.stop();
+  });
+});
+
+describe('filter and collapse controls (AGT-4066)', () => {
+  const twoTasks = () => [
+    boardEvent({ id: 'e1', seq: 1, taskId: 't1', taskLabel: 'AGT-1' }),
+    boardEvent({
+      id: 'e2', seq: 2, taskId: 't2', taskLabel: 'AGT-2', correlationId: 'c2',
+      actor: 'vindicator-ferrus-theta', actorName: 'Vindicator Ferrus-Theta', actorRole: 'worker',
+      recipient: 'castellan-mordax-invictus', recipientName: 'Castellan Mordax-Invictus',
+      recipientRole: 'orchestrator',
+    }),
+  ];
+
+  it('offers the live tasks as filter options and narrows the graph to one', async () => {
+    const doc = shell();
+    const view = startOrchestrationView(doc, { fetchImpl: fetchWith(twoTasks()), eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(2));
+
+    const select = doc.getElementById('filter-task') as HTMLSelectElement;
+    expect([...select.options].map((option) => option.textContent)).toEqual(['all tasks', 'AGT-1', 'AGT-2']);
+
+    select.value = 't1';
+    select.dispatchEvent(new window.Event('change', { bubbles: true }));
+
+    expect(doc.querySelector('[data-node="enginseer-rhodanis-novum"]')).not.toBeNull();
+    expect(doc.querySelector('[data-node="vindicator-ferrus-theta"]')).toBeNull();
+    // The orchestrator is a shared rail, so it survives a task filter.
+    expect(doc.querySelector('[data-node="castellan-mordax-invictus"]')).not.toBeNull();
+    view.stop();
+  });
+
+  it('searches by handle', async () => {
+    const doc = shell();
+    const view = startOrchestrationView(doc, { fetchImpl: fetchWith(twoTasks()), eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(2));
+
+    const search = doc.getElementById('filter-search') as HTMLInputElement;
+    search.value = 'vindic';
+    search.dispatchEvent(new window.Event('input', { bubbles: true }));
+
+    expect(doc.querySelector('[data-node="vindicator-ferrus-theta"]')).not.toBeNull();
+    expect(doc.querySelector('[data-node="enginseer-rhodanis-novum"]')).toBeNull();
+    view.stop();
+  });
+
+  it('collapses agents outside the activity window and expands them on request', async () => {
+    const doc = shell();
+    const old = Date.now() - 45 * 60_000;
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([
+        boardEvent({ id: 'fresh', seq: 2 }),
+        boardEvent({
+          id: 'stale', seq: 1, timestamp: old, correlationId: 'c-old', status: 'completed',
+          actor: 'retired-agent', actorName: 'Retired Agent', recipient: undefined,
+          recipientName: undefined, recipientRole: undefined,
+        }),
+      ]),
+      eventSourceImpl: null,
+      pollMs: 1e9,
+    });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
+
+    expect(doc.querySelector('[data-node="retired-agent"]')).toBeNull();
+    expect(doc.getElementById('idle-count')!.textContent).toBe('(1)');
+
+    const toggle = doc.getElementById('filter-idle') as HTMLInputElement;
+    toggle.checked = true;
+    toggle.dispatchEvent(new window.Event('change', { bubbles: true }));
+    expect(doc.querySelector('[data-node="retired-agent"]')).not.toBeNull();
+    view.stop();
+  });
+
+  // Redraws run on every SSE event, so a control that gained a listener per
+  // wiring pass would eventually fire dozens of times per click.
+  // Expanding the idle set must not re-stack the conversations — that would be
+  // the vertical twin of the sliding row this issue exists to remove.
+  it('keeps the lane order fixed when idle agents are expanded', async () => {
+    const doc = shell();
+    const old = Date.now() - 45 * 60_000;
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([
+        // The oldest sighting on task B is idle, so collapsing it would make
+        // task B look younger than task A and swap the two lanes.
+        boardEvent({
+          id: 'b-old', seq: 1, timestamp: old, taskId: 'tB', taskLabel: 'B', correlationId: 'cb',
+          status: 'completed', actor: 'veteran', actorName: 'Veteran',
+          recipient: undefined, recipientName: undefined, recipientRole: undefined,
+        }),
+        boardEvent({ id: 'a1', seq: 2, taskId: 'tA', taskLabel: 'A', correlationId: 'ca' }),
+        boardEvent({
+          id: 'b-new', seq: 3, taskId: 'tB', taskLabel: 'B', correlationId: 'cb2',
+          actor: 'vindicator-ferrus-theta', actorName: 'Vindicator Ferrus-Theta',
+          recipient: undefined, recipientName: undefined, recipientRole: undefined,
+        }),
+      ]),
+      eventSourceImpl: null,
+      pollMs: 1e9,
+    });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.lane-label').length).toBeGreaterThan(0));
+    const lanesNow = () => [...doc.querySelectorAll('.lane-label')].map((el) => el.textContent);
+    const collapsed = lanesNow();
+    expect(collapsed).toEqual(['B', 'A']);
+
+    const toggle = doc.getElementById('filter-idle') as HTMLInputElement;
+    toggle.checked = true;
+    toggle.dispatchEvent(new window.Event('change', { bubbles: true }));
+    expect(lanesNow()).toEqual(collapsed);
+    view.stop();
+  });
+
+  it('binds each control once even if wiring runs again', () => {
+    const doc = shell();
+    const filters = { showIdle: false, taskId: null, role: null, query: '' };
+    let changes = 0;
+    wireControls(doc, filters, () => { changes += 1; });
+    wireControls(doc, filters, () => { changes += 1; });
+
+    const toggle = doc.getElementById('filter-idle') as HTMLInputElement;
+    toggle.checked = true;
+    toggle.dispatchEvent(new window.Event('change', { bubbles: true }));
+
+    expect(changes).toBe(1);
+    expect(filters.showIdle).toBe(true);
+  });
+
+  // Same reasoning as the timers: `redraw` no-ops after stop, so a listener
+  // left attached is invisible from the DOM — but it still pins the view's
+  // whole closure, and its event map, to the window for the page's lifetime.
+  it('releases the resize listener when it is stopped', async () => {
+    const doc = shell();
+    const view = startOrchestrationView(doc, {
+      fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1 })]),
+      eventSourceImpl: null,
+      pollMs: 1e9,
+    });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
+
+    const remove = vi.spyOn(doc.defaultView!, 'removeEventListener');
+    try {
+      view.stop();
+      expect(remove).toHaveBeenCalledWith('resize', expect.any(Function));
+    } finally {
+      remove.mockRestore();
+    }
+  });
+
+  it('still renders when the host page ships no controls at all', async () => {
+    const doc = bareShell();
+    const view = startOrchestrationView(doc, { fetchImpl: fetchWith(twoTasks()), eventSourceImpl: null, pollMs: 1e9 });
+    await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(2));
+    expect(doc.getElementById('feed')!.textContent).toContain('Reuse the auth helper?');
+    view.stop();
   });
 });
 
