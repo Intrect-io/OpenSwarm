@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const execFileAsync = promisify(execFile);
@@ -87,15 +88,41 @@ export function identifierFromBranch(branch?: string): string | undefined {
 }
 
 /**
+ * Canonicalise a path for comparison: symlinks resolved where the path exists,
+ * lexical normalisation where it does not.
+ *
+ * `resolve` alone is not enough. git always reports a worktree by its *real*
+ * path — verified by asking through a symlink, which still answered with the
+ * resolved directory — while the dispatched project path can carry a symlinked
+ * component (on macOS `/var` alone is one). Comparing the two forms lexically
+ * makes them differ, and the current worktree is then scanned and reported as
+ * a conflicting peer. (Caught by the fresh PR review.)
+ */
+export function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // A worktree git still lists but that is gone from disk; lexical is the
+    // best available, and it is only used to tell it apart from ourselves.
+    return resolve(path);
+  }
+}
+
+/**
  * Every worktree of this repository except the one we are working in.
  *
- * Paths are resolved before comparison so a worktree reached by a different
- * spelling is still recognised as ourselves — reporting our own edits back to
- * us would read as a conflict with a phantom peer.
+ * Both sides go through the same canonicaliser, so a worktree reached by a
+ * different spelling is still recognised as ourselves — reporting our own edits
+ * back to us would read as a conflict with a phantom peer. The canonicaliser is
+ * a parameter so the decision stays testable without symlinks on disk.
  */
-export function selectSiblingWorktrees(entries: readonly WorktreeEntry[], selfPath: string): WorktreeEntry[] {
-  const self = resolve(selfPath);
-  return entries.filter((entry) => resolve(entry.path) !== self);
+export function selectSiblingWorktrees(
+  entries: readonly WorktreeEntry[],
+  selfPath: string,
+  canonicalise: (path: string) => string = resolve,
+): WorktreeEntry[] {
+  const self = canonicalise(selfPath);
+  return entries.filter((entry) => canonicalise(entry.path) !== self);
 }
 
 /**
@@ -230,7 +257,7 @@ export async function collectSiblingWork(
 
   let entries: WorktreeEntry[];
   try {
-    entries = selectSiblingWorktrees(parseWorktreeList(await listWorktrees(worktreePath)), worktreePath);
+    entries = selectSiblingWorktrees(parseWorktreeList(await listWorktrees(worktreePath)), worktreePath, canonicalPath);
   } catch {
     return [];
   }

@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   MAX_FILES_PER_SIBLING, MAX_SIBLINGS, STATUS_CONCURRENCY, TOTAL_BUDGET_MS, collectSiblingWork,
   commandTimeoutMs, formatSiblingWork, identifierFromBranch, parseChangedFiles, parseWorktreeList,
@@ -84,6 +87,19 @@ describe('selectSiblingWorktrees', () => {
     // phantom peer.
     expect(selectSiblingWorktrees(entries, '/work/cgf-portal/worktree/../worktree/05a3c502')
       .map((e) => e.path)).not.toContain('/work/cgf-portal/worktree/05a3c502');
+  });
+
+  it('recognises ourselves when git reports our real path and we hold a symlinked one', () => {
+    // git always reports a worktree by its real path; the dispatched project
+    // path can carry a symlinked component. Compared lexically the two differ,
+    // and we would scan ourselves and report our own edits as a peer's.
+    const canonicalise = (p: string) => p.replace('/link/', '/real/');
+    const linked = [
+      { path: '/real/worktree/a' },
+      { path: '/real/worktree/b' },
+    ];
+    expect(selectSiblingWorktrees(linked, '/link/worktree/a', canonicalise).map((e) => e.path))
+      .toEqual(['/real/worktree/b']);
   });
 
   it('keeps the main checkout — it holds edits too', () => {
@@ -179,6 +195,9 @@ describe('formatSiblingWork', () => {
 });
 
 describe('collectSiblingWork', () => {
+  const cleanups: string[] = [];
+  afterAll(() => { for (const dir of cleanups) rmSync(dir, { recursive: true, force: true }); });
+
   function worktreeList(count: number): string {
     return Array.from({ length: count }, (_, i) =>
       `worktree /repo/worktree/w${i}\0HEAD abc${i}\0branch refs/heads/swarm/AX-${1000 + i}-task\0\0`).join('');
@@ -277,6 +296,27 @@ describe('collectSiblingWork', () => {
   it('never asks for a zero timeout, which child_process reads as "no timeout"', () => {
     expect(commandTimeoutMs(0)).toBe(1);
     expect(commandTimeoutMs(-500)).toBe(1);
+  });
+
+  it('excludes itself through a real symlink, not just in theory', async () => {
+    // The pure selector takes an injectable canonicaliser, so a test of it
+    // passes even if production forgets to pass one. This covers the wiring:
+    // git reports the real path, we hold the symlinked one, and only an actual
+    // realpath call reconciles them.
+    const root = mkdtempSync(join(tmpdir(), 'sibling-symlink-'));
+    cleanups.push(root);
+    const real = join(root, 'real');
+    mkdirSync(join(real, 'self'), { recursive: true });
+    mkdirSync(join(real, 'peer'), { recursive: true });
+    symlinkSync(real, join(root, 'link'));
+
+    const result = await collectSiblingWork(join(root, 'link', 'self'), {
+      // git always answers with the real path, whichever spelling it was asked through.
+      listWorktrees: async () => `worktree ${join(real, 'self')}\0worktree ${join(real, 'peer')}\0\0`,
+      readStatus: async () => 'M  a.ts\0',
+    });
+
+    expect(result.map((r) => r.identifier)).toEqual([join(real, 'peer')]);
   });
 
   it('returns nothing, and does not throw, when the repository cannot be listed', async () => {
