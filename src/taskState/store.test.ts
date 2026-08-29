@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
@@ -17,6 +17,7 @@ import {
   buildTaskStateSyncComment,
   hydrateTaskStateFromComments,
   markTaskBacklog,
+  planLinearStateReconciliation,
   resetTaskStateStoreForTests,
   buildLockPayload,
   type OpenSwarmTaskState,
@@ -76,6 +77,26 @@ describe('task state store', () => {
     upsertTaskState('AGT-1', { execution: { blockedReason: undefined } });
     resetTaskStateStoreForTests();
     expect(getTaskState('AGT-1')?.execution.blockedReason).toBeUndefined();
+  });
+
+  it('does not rewrite the store when Linear reports the state it already has', () => {
+    // The heartbeat reconciles every fetched issue, and the store is one file
+    // holding all of them, so an unchanged row that still persists costs a full
+    // parse + re-serialize + fsync of every other task. That is what froze the
+    // event loop for ~30 s per heartbeat (AGT-4086), so "no change" has to mean
+    // "no write" — asserted on the file's mtime, not on the returned value.
+    updateTaskLinearState('AGT-1', 'Backlog');
+    const stale = new Date('2020-01-01T00:00:00Z');
+    utimesSync(stateFile, stale, stale);
+
+    updateTaskLinearState('AGT-1', 'Backlog');
+    expect(statSync(stateFile).mtimeMs).toBe(stale.getTime());
+    expect(getTaskState('AGT-1')?.linearState).toBe('Backlog');
+
+    // A real move still writes, or the reconciliation would be inert.
+    updateTaskLinearState('AGT-1', 'Todo');
+    expect(statSync(stateFile).mtimeMs).toBeGreaterThan(stale.getTime());
+    expect(getTaskState('AGT-1')?.linearState).toBe('Todo');
   });
 
   afterEach(() => {
@@ -578,5 +599,72 @@ describe('task state store', () => {
 
       expect(getTaskState('ISSUE-LOCK-4')?.execution.status).toBe('todo');
     });
+  });
+});
+
+describe('planLinearStateReconciliation', () => {
+  function state(
+    status: OpenSwarmTaskState['execution']['status'],
+    linearState: string,
+  ): OpenSwarmTaskState {
+    return {
+      version: 1,
+      issueId: 'AGT-1',
+      childIssueIds: [],
+      dependencyIssueIds: [],
+      dependencyTitles: [],
+      fileScope: [],
+      execution: { status, retryCount: 2 },
+      worktree: {},
+      linearState,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+  }
+
+  it('plans nothing when Linear agrees with what is already recorded', () => {
+    expect(planLinearStateReconciliation(state('backlog', 'Backlog'), 'Backlog')).toBeNull();
+  });
+
+  it('plans nothing when a live task is still live in Linear', () => {
+    // Same status either side: the old code assigned it anyway, which read as a
+    // change and cost a write.
+    expect(planLinearStateReconciliation(state('in_progress', 'In Progress'), 'In Progress')).toBeNull();
+  });
+
+  it('records the new Linear state when the issue has moved', () => {
+    expect(planLinearStateReconciliation(state('backlog', 'Backlog'), 'Todo')).toEqual({ linearState: 'Todo' });
+  });
+
+  it('creates a patch for a task it has never seen', () => {
+    // No local row yet: skipping here would lose the issue entirely.
+    expect(planLinearStateReconciliation(undefined, 'Backlog')).toEqual({ linearState: 'Backlog' });
+  });
+
+  it('downgrades a locally in-progress task that Linear has completed', () => {
+    expect(planLinearStateReconciliation(state('in_progress', 'In Progress'), 'Done')).toEqual({
+      linearState: 'Done',
+      execution: { status: 'done', retryCount: 2 },
+    });
+  });
+
+  it('reopens a locally done task that Linear has cancelled', () => {
+    expect(planLinearStateReconciliation(state('done', 'Done'), 'Cancelled')).toEqual({
+      linearState: 'Cancelled',
+      execution: { status: 'backlog', retryCount: 2 },
+    });
+  });
+
+  it('leaves the local status alone for a Linear state it does not map', () => {
+    // 'In Review' has no mapping, so only the Linear state is recorded — but it
+    // did change, so this is still a write.
+    expect(planLinearStateReconciliation(state('in_progress', 'In Progress'), 'In Review')).toEqual({
+      linearState: 'In Review',
+    });
+  });
+
+  it('does not downgrade a task that is neither in progress nor done', () => {
+    // A blocked task's status is local truth; Linear saying 'Done' records the
+    // Linear state without clobbering it.
+    expect(planLinearStateReconciliation(state('blocked', 'Todo'), 'Done')).toEqual({ linearState: 'Done' });
   });
 });
