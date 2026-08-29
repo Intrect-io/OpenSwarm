@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   MAX_FILES_PER_SIBLING, MAX_SIBLINGS, STATUS_CONCURRENCY, TOTAL_BUDGET_MS, collectSiblingWork,
   commandTimeoutMs, formatSiblingWork, identifierFromBranch, parseChangedFiles, parseWorktreeList,
-  selectSiblingWorktrees,
+  selectSiblingWorktrees, withoutBookkeeping, isBookkeepingPath,
 } from './siblingWork.js';
 
 // `git worktree list --porcelain -z`: each attribute is its own NUL-terminated
@@ -158,6 +158,46 @@ describe('parseChangedFiles', () => {
   });
 });
 
+describe('withoutBookkeeping', () => {
+  it('drops the preserve marker every managed worktree carries', () => {
+    // Measured live the moment this shipped: 16 of 23 reported entries were
+    // this one file, and 15 of 19 siblings had nothing else — the advisory was
+    // 79% housekeeping, pushing the siblings doing real work past the cap.
+    expect(withoutBookkeeping(['.openswarm-preserved', 'src/a.ts'])).toEqual(['src/a.ts']);
+  });
+
+  it('drops the generated repo snapshot and graph', () => {
+    expect(withoutBookkeeping(['.openswarm/repo-snapshot.json', '.openswarm/repo.graphql'])).toEqual([]);
+  });
+
+  it('drops generated audit reports', () => {
+    expect(withoutBookkeeping(['.openswarm/audit/audit-123.md'])).toEqual([]);
+  });
+
+  it('KEEPS .openswarm/verify.yaml — a sibling editing it is real conflicting work', () => {
+    // Repository-owned configuration (README; deterministicTester's
+    // VERIFY_INPUTS). Filtering the whole directory would suppress exactly the
+    // overlap this advisory exists to report.
+    expect(isBookkeepingPath('.openswarm/verify.yaml')).toBe(false);
+    expect(withoutBookkeeping(['.openswarm/verify.yaml'])).toEqual(['.openswarm/verify.yaml']);
+  });
+
+  it('shows an unrecognised .openswarm path rather than guessing it is noise', () => {
+    // Between over- and under-filtering, over-filtering is the worse failure.
+    expect(withoutBookkeeping(['.openswarm/something-new.json'])).toEqual(['.openswarm/something-new.json']);
+  });
+
+  it('keeps openswarm.json, which is the repository\'s own config', () => {
+    // Without the dot it is a real file a task may legitimately edit.
+    expect(isBookkeepingPath('openswarm.json')).toBe(false);
+    expect(withoutBookkeeping(['openswarm.json'])).toEqual(['openswarm.json']);
+  });
+
+  it('keeps a file that merely starts with the same letters', () => {
+    expect(withoutBookkeeping(['.openswarm-preserved-notes.md'])).toEqual(['.openswarm-preserved-notes.md']);
+  });
+});
+
 describe('formatSiblingWork', () => {
   it('says nothing at all when no sibling has changes', () => {
     expect(formatSiblingWork([])).toBe('');
@@ -239,6 +279,16 @@ describe('collectSiblingWork', () => {
       readStatus: async (cwd) => { seen.push(cwd); return ''; },
     });
     expect(seen).toHaveLength(20);
+  });
+
+  it('drops a sibling whose only change is bookkeeping', async () => {
+    // 15 of 19 live siblings looked like this. Reporting them as peers doing
+    // work is worse than saying nothing: it fills the cap with noise.
+    const result = await collectSiblingWork('/repo/worktree/self', {
+      listWorktrees: async () => worktreeList(3),
+      readStatus: async (cwd) => (cwd === '/repo/worktree/w1' ? 'M  src/real.ts\0' : 'M  .openswarm-preserved\0'),
+    });
+    expect(result).toEqual([{ identifier: 'AX-1001', files: ['src/real.ts'] }]);
   });
 
   it('loses only the failing worktree when git errors', async () => {
