@@ -9,7 +9,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -35,6 +35,14 @@ vi.mock('../automation/prOwnership.js', () => ({
   registerOwnedPR: vi.fn().mockResolvedValue(undefined),
 }));
 import { registerOwnedPR } from '../automation/prOwnership.js';
+import { PROCESS_STARTED_AT_MS, isProofCapableSpace, processNamespaceId } from './processLiveness.js';
+
+// The fast-path proof needs a REAL pid space, which only Linux can give (boot
+// id + pid-namespace inode). Elsewhere the recorded id is a machine hint, good
+// for ruling a record out but never for the proof — so these cases cannot arise
+// there at all. Asserted on Linux in CI.
+const itWithPidSpace = isProofCapableSpace(processNamespaceId()) ? it : it.skip;
+
 
 describe('buildBranchName (pure)', () => {
   it('slugifies the title and joins it to the issue identifier', () => {
@@ -314,7 +322,7 @@ describe('createWorktree retry/resume error paths', () => {
   // reach them. A pid is unique among live processes, which is proof enough —
   // a marker carrying our own pid that predates our start belongs to a process
   // that has since exited, whatever the pid table now says.
-  it('abandons a marker that carries our pid but predates this process (AGT-4067)', async () => {
+  itWithPidSpace('abandons a marker that carries our pid but predates this process (AGT-4067)', async () => {
     const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-legacy-prior-boot');
     const markerPath = join(
       repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
@@ -371,8 +379,10 @@ describe('createWorktree retry/resume error paths', () => {
     });
   });
 
-  it('does not probe a marker whose writer could not identify its own pid space (AGT-4068)', async () => {
-    // `ownerNamespace: null` is a fail-closed writer, not a pre-field marker.
+  it('does not probe a marker whose writer could name no pid space at all (AGT-4068)', async () => {
+    // `ownerNamespace: null` is a writer that could not read its own pid
+    // namespace, so a local ESRCH says nothing about it. Distinct from an
+    // ABSENT field, which predates the change and keeps the original probe.
     const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-unknown-namespace');
     const markerPath = join(
       repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
@@ -380,8 +390,48 @@ describe('createWorktree retry/resume error paths', () => {
     const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
     delete marker.ownerInstanceId;
     marker.ownerNamespace = null;
-    marker.ownerPid = 2_147_483_647; // dead-looking here, but "here" is unknown
+    marker.ownerPid = 2_147_483_647; // dead-looking HERE, which proves nothing there
     marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+  });
+
+  it('withholds the fast-path proof from a marker with no named pid space (AGT-4068)', async () => {
+    // Our own pid, written before we started. Named and matching, the proof
+    // would abandon this at once; unnamed, it waits out the age window.
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-unknown-namespace-live-pid');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId;
+    marker.ownerNamespace = null;
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+  });
+
+  it('does not let a matching machine HINT license the pid proof (AGT-4068)', async () => {
+    // On a platform with no pid namespaces the recorded space is `host:<name>`,
+    // which matches our own. That is enough to keep the local probe, but it is
+    // NOT enough to conclude "this pid is mine, so its writer exited" — two
+    // machines sharing a state directory can carry the same host name. The
+    // marker must fall back to the age window instead of being abandoned.
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-hint-not-proof');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId;
+    marker.ownerNamespace = `host:${hostname()}`;
+    expect(marker.ownerPid).toBe(process.pid);
+    marker.createdAt = new Date(PROCESS_STARTED_AT_MS - 4 * 60 * 60 * 1000).toISOString();
     writeFileSync(markerPath, JSON.stringify(marker));
 
     await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
@@ -419,6 +469,26 @@ describe('createWorktree retry/resume error paths', () => {
 
     await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
       state: 'active_owner',
+    });
+  });
+
+  it('still probes a marker written before the pid-space field existed (AGT-4068)', async () => {
+    // An ABSENT space is not the same as an explicit null: it predates the
+    // field, so it keeps the local probe it has always had. Withholding it here
+    // would leave every pre-upgrade marker's dead owner pinned for 24 hours —
+    // exactly the wedge this work exists to remove.
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-pre-field-marker');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId;
+    delete marker.ownerNamespace; // as a pre-AGT-4068 daemon left it
+    marker.ownerPid = 2_147_483_647; // a genuinely dead owner
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'orphaned',
     });
   });
 
@@ -707,7 +777,7 @@ describe('pruneWorktrees (INT-1810 R4 / INT-2503 / INT-2506)', () => {
     expect(existsSync(orphan.worktreePath)).toBe(false);
   });
 
-  it('sweeps a proven orphan whose marker predates this process, well inside the age window (AGT-4067)', async () => {
+  itWithPidSpace('sweeps a proven orphan whose marker predates this process, well inside the age window (AGT-4067)', async () => {
     const orphan = await createWorktree(repo, 'INT-7', 'swarm/INT-7-prior-boot');
     const markerPath = join(
       repo, '.git', 'openswarm', 'active-worktrees', 'INT-7', `${orphan.activeMarkerToken}.json`,

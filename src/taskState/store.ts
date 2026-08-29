@@ -20,7 +20,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import { processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
+import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
 
 const TASK_STATE_MARKER = '<!-- openswarm:task-state:v1 -->';
 
@@ -126,8 +126,11 @@ function lockNamespaceOf(raw: unknown): string | null | undefined {
 
 /** Whether this lock's pid can be probed from here at all. */
 function lockPidIsJudgeable(owner: StoreLockOwner): boolean {
-  if (owner.ns === undefined) return true; // predates the field — original behaviour
-  if (owner.ns === null) return false; // writer could not identify its own pid space
+  // Absent keeps the original probe; null fails closed (the writer could name
+  // no space, so our pid table is not its pid table); a string must be ours.
+  // See the matching note in worktreeManager, including its AGT-4069 caveat.
+  if (owner.ns === undefined) return true;
+  if (owner.ns === null) return false;
   return sameProcessNamespace(owner.ns);
 }
 
@@ -232,7 +235,7 @@ function withStoreLock<T>(operation: () => T): T {
         // NOT reasoned about by pid: it falls through to the age rule below,
         // which is exactly what the AGT-4023 policy test pins.
         const priorGenerationLock = owner !== null
-          && owner.ns != null && sameProcessNamespace(owner.ns)
+          && isProofCapableSpace(owner.ns ?? undefined) && sameProcessNamespace(owner.ns ?? undefined)
           && writerProvablyGone({ pid: owner.pid, writtenAtMs: judgedMtimeMs });
         // A pid probe cannot see past its own namespace, and a container
         // assigns the daemon the same pid every start — so a lock left behind

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -20,7 +20,14 @@ import {
   resetTaskStateStoreForTests,
   type OpenSwarmTaskState,
 } from './store.js';
-import { PROCESS_STARTED_AT_MS, processNamespaceId } from '../support/processLiveness.js';
+import { PROCESS_STARTED_AT_MS, isProofCapableSpace, processNamespaceId } from '../support/processLiveness.js';
+
+// The fast-path proof needs a REAL pid space, which only Linux can give (boot
+// id + pid-namespace inode). Elsewhere the recorded id is a machine hint, good
+// for ruling a record out but never for the proof — so these cases cannot arise
+// there at all. Asserted on Linux in CI.
+const itWithPidSpace = isProofCapableSpace(processNamespaceId()) ? it : it.skip;
+
 
 describe('task state store', () => {
   let stateFile: string;
@@ -417,7 +424,7 @@ describe('task state store', () => {
     // pid 7 had written 0.7s before the container was recreated. A pid is
     // unique among live processes, so a lock carrying OUR pid that predates our
     // start belongs to a process that has exited. No wait required.
-    it('reclaims a same-namespace lock at our own pid that predates this process, well inside the expiry', () => {
+    itWithPidSpace('reclaims a same-namespace lock at our own pid that predates this process, well inside the expiry', () => {
       writeFileSync(lockFile(), JSON.stringify({
         pid: process.pid, token: 'prior-generation', ns: processNamespaceId(),
       }), 'utf8');
@@ -471,11 +478,11 @@ describe('task state store', () => {
       expect(getTaskState('ISSUE-LOCK-8')?.execution.status).toBe('todo');
     });
 
-    it('does not probe a lock whose writer could not identify its own pid space (AGT-4068)', () => {
-      // `ns: null` is a fail-closed writer saying "I do not know where I am",
-      // which is not the same as a lock written before the field existed. An
-      // omitted key would have made the two indistinguishable and licensed a
-      // local probe. (Caught by the commit-gate review.)
+    it('does not probe a lock whose writer could name no pid space at all (AGT-4068)', () => {
+      // `ns: null` is a writer that could not read its own pid namespace, so
+      // our pid table is not its pid table and a local ESRCH means nothing.
+      // Distinct from an ABSENT ns, which predates the field and keeps the
+      // original probe — an omitted key would have conflated the two.
       writeFileSync(lockFile(), JSON.stringify({
         pid: 2_147_483_647, token: 'unknown-space', ns: null,
       }), 'utf8');
@@ -483,6 +490,34 @@ describe('task state store', () => {
       utimesSync(lockFile(), recent, recent);
 
       expect(() => upsertTaskState('ISSUE-LOCK-9', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    it('withholds the fast-path proof from a lock with no named pid space (AGT-4068)', () => {
+      // Our own pid, written before we started — the proof would reclaim this
+      // at once if the space were named and matched. Unnamed, it must wait out
+      // the age rule like any pre-field lock.
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: process.pid, token: 'unknown-space-live-pid', ns: null,
+      }), 'utf8');
+      const beforeWeStarted = new Date(PROCESS_STARTED_AT_MS - 60_000);
+      utimesSync(lockFile(), beforeWeStarted, beforeWeStarted);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-10', { execution: { status: 'todo', retryCount: 0 } }))
+        .toThrow(/Timed out waiting for task state lock/);
+    });
+
+    it('does not let a matching machine HINT license the pid proof (AGT-4068)', () => {
+      // `host:<name>` matches ours, which keeps the local probe — but it does
+      // not establish that our pid numbering is the writer's, so the proof
+      // stays off and the age rule governs.
+      writeFileSync(lockFile(), JSON.stringify({
+        pid: process.pid, token: 'hint-not-proof', ns: `host:${hostname()}`,
+      }), 'utf8');
+      const beforeWeStarted = new Date(PROCESS_STARTED_AT_MS - 60_000);
+      utimesSync(lockFile(), beforeWeStarted, beforeWeStarted);
+
+      expect(() => upsertTaskState('ISSUE-LOCK-11', { execution: { status: 'todo', retryCount: 0 } }))
         .toThrow(/Timed out waiting for task state lock/);
     });
 

@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getInstanceId } from './healthEndpoint.js';
-import { processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
+import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
@@ -491,7 +491,11 @@ function markerPredatesThisProcess(marker: ActiveWorktreeMarker): boolean {
   // would put two executors on the same tree. A marker from a different space —
   // or one written before the field existed — is not reasoned about by pid at
   // all; it falls back to the age window. (Caught by the commit-gate review.)
-  if (marker.ownerNamespace == null || !sameProcessNamespace(marker.ownerNamespace)) return false;
+  // A machine hint is not enough: "this pid is mine, so its writer exited"
+  // needs the pid numbering to be the same numbering, which only a real pid
+  // space establishes.
+  if (!isProofCapableSpace(marker.ownerNamespace ?? undefined)) return false;
+  if (!sameProcessNamespace(marker.ownerNamespace ?? undefined)) return false;
   return writerProvablyGone({ pid: marker.ownerPid, writtenAtMs: Date.parse(marker.createdAt) });
 }
 
@@ -532,8 +536,24 @@ function markerWriterProvablyGone(marker: ActiveWorktreeMarker): boolean {
  * (Caught by the commit-gate review.)
  */
 function markerPidIsJudgeable(marker: ActiveWorktreeMarker): boolean {
-  if (marker.ownerNamespace === undefined) return true; // predates the field
-  if (marker.ownerNamespace === null) return false; // writer could not identify its own pid space
+  // Three states, three answers:
+  //
+  //  - **absent** — predates the field. Keeps the original local probe, which
+  //    is the behaviour this module inherited and must not regress.
+  //  - **null** — the writer could name no space at all. Fail closed: it is a
+  //    Linux process that could not read /proc/self/ns/pid, and probing its pid
+  //    here would answer about a different pid table. Costs nothing now that
+  //    platforms without pid namespaces record a host hint instead of null.
+  //  - **a string** — probe only if it is our space. A different one is another
+  //    machine or another container, where our pid table says nothing.
+  //
+  // KNOWN LIMITATION (AGT-4069, pre-existing): an *absent* record, and a host
+  // hint that happens to match, still get the local probe. Two machines sharing
+  // a state directory under the same host name can therefore still judge each
+  // other's live owner dead — as this code already did. Closing that needs a
+  // real OS machine identity, tracked separately.
+  if (marker.ownerNamespace === undefined) return true;
+  if (marker.ownerNamespace === null) return false;
   return sameProcessNamespace(marker.ownerNamespace);
 }
 

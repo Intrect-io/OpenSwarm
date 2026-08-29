@@ -4,6 +4,7 @@ import {
   PROCESS_STARTED_AT_MS,
   processAppearsAlive,
   processNamespaceId,
+  isProofCapableSpace,
   namespacesMatch,
   resolveNamespaceId,
   sameProcessNamespace,
@@ -74,11 +75,8 @@ describe('writerProvablyGone', () => {
 });
 
 describe('processNamespaceId / sameProcessNamespace', () => {
-  it('is stable, and identifies this machine when it can be resolved at all', () => {
+  it('is stable across calls', () => {
     expect(processNamespaceId()).toBe(processNamespaceId());
-    const id = processNamespaceId();
-    // undefined only on Linux with an unreadable /proc/self/ns/pid.
-    if (id !== undefined) expect(id).toContain(hostname());
   });
 
   it('matches only a record written in this same pid space', () => {
@@ -143,14 +141,34 @@ describe('processNamespaceId / sameProcessNamespace', () => {
     // `localhost`, so two deployments sharing a state directory would have
     // matched on it. An exact assertion rather than `not.toContain`, which a
     // one-letter CI host name could fail by accident.
-    expect(resolveNamespaceId('linux', () => NS, () => BOOT)).toBe(`${BOOT}:${NS}`);
+    expect(resolveNamespaceId('linux', () => NS, () => BOOT)).toBe(`pidns:${BOOT}:${NS}`);
   });
 
-  it('uses the host name where the platform has no pid namespaces', () => {
+  it('gives a machine HINT where there are no pid namespaces, and marks it as not proof', () => {
+    // Asymmetric on purpose: a host-name MISMATCH is a sound signal that a
+    // record came from another machine, which is enough to withhold the local
+    // pid probe. A match proves nothing — two machines can share a host name,
+    // and this project's container reports `localhost` — so it must never
+    // license the proof.
     const readNs = vi.fn(() => NS);
     const readBoot = vi.fn(() => BOOT);
-    expect(resolveNamespaceId('darwin', readNs, readBoot)).toBe(hostname());
+    const id = resolveNamespaceId('darwin', readNs, readBoot);
+    expect(id).toBe(`host:${hostname()}`);
+    expect(isProofCapableSpace(id)).toBe(false);
+    expect(isProofCapableSpace(resolveNamespaceId('win32', readNs, readBoot))).toBe(false);
     expect(readNs).not.toHaveBeenCalled();
     expect(readBoot).not.toHaveBeenCalled();
+  });
+
+  it('marks a real Linux pid space as proof-capable, and nothing else', () => {
+    expect(isProofCapableSpace(resolveNamespaceId('linux', () => NS, () => BOOT))).toBe(true);
+    expect(isProofCapableSpace(undefined)).toBe(false);
+    expect(isProofCapableSpace('host:some-machine')).toBe(false);
+  });
+
+  it('withholds the probe from a record naming a different machine', () => {
+    // The property the host name is actually for.
+    expect(namespacesMatch('host:other-machine', `host:${hostname()}`)).toBe(false);
+    expect(namespacesMatch(`host:${hostname()}`, `host:${hostname()}`)).toBe(true);
   });
 });

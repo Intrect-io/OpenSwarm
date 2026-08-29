@@ -68,19 +68,49 @@ const PROCESS_START_JITTER_MS = 1_000;
  * boot id changes, so records written before it read as unjudgeable and fall
  * back to the age rules; everything they described is dead by then anyway.
  */
+/** A pid space this process can actually reason about pids in. */
+const PROOF_PREFIX = 'pidns:';
+/** A machine hint: good enough to rule a record OUT, never to rule one IN. */
+const HINT_PREFIX = 'host:';
+
+/**
+ * Whether an id names a real pid space, or is only a machine hint.
+ *
+ * Only a real pid space licenses `writerProvablyGone`: "this pid is mine, so
+ * its writer has exited" needs the pid numbering to be the same numbering, and
+ * a host name does not establish that.
+ */
+export function isProofCapableSpace(id: string | undefined): boolean {
+  return typeof id === 'string' && id.startsWith(PROOF_PREFIX);
+}
+
 export function resolveNamespaceId(
   platform: string,
   readNamespaceLink: () => string,
   readBootId: () => string,
 ): string | undefined {
   if (platform !== 'linux') {
-    // No pid namespaces here, so one pid space per machine. The host name is
-    // the identification available; a deployment that shares one state
-    // directory between machines runs the containerised path above.
-    return hostname();
+    // A machine HINT, not a pid-space proof — and the prefix says which.
+    //
+    // The host name is asymmetric evidence, exactly like an owner id. A
+    // *mismatch* is a sound signal that the record came from somewhere else, so
+    // it is enough to withhold the local pid probe and protect a live remote
+    // owner in the ordinary distinct-host case. A *match* proves nothing: two
+    // machines sharing a state directory can carry the same host name, and this
+    // project's own container reports `localhost`. So it never licenses the
+    // proof — `isProofCapableSpace` gates that on a real pid namespace.
+    //
+    // A MAC was tried instead and is worse: this developer's Mac reports
+    // `7a:83:be:1b:ed:d5`, whose locally-administered bit is set because macOS
+    // randomises Wi-Fi addresses per network, and Docker and VPN adapters are
+    // software-assigned too. Closing the same-host-name case honestly needs an
+    // OS identity call (AGT-4069). (Caught by the fresh PR review, three times
+    // — the first two rejected the host name as a proof, which it is not used
+    // as here.)
+    return `${HINT_PREFIX}${hostname()}`;
   }
   try {
-    return `${readBootId().trim()}:${readNamespaceLink()}`;
+    return `${PROOF_PREFIX}${readBootId().trim()}:${readNamespaceLink()}`;
   } catch {
     return undefined;
   }
