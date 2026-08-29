@@ -281,6 +281,7 @@ export async function waitForInbox(
     // commit-gate review.)
     let anySuccess = false;
     let lastError: unknown;
+    let expired = false;
 
     const stop = () => {
       settled = true;
@@ -308,16 +309,40 @@ export async function waitForInbox(
         .catch((error) => { lastError = error; })
         .finally(() => {
           draining = false;
-          if (again && !settled) { again = false; check(); }
+          if (settled) return;
+          // A wake-up recorded during this drain is honoured even after the
+          // deadline: the message it announced was published before the
+          // deadline, and dropping it would report an empty inbox for mail
+          // that had already arrived. Bounded, because expiry detaches the
+          // wake-up sources — nothing can set `again` again.
+          if (again) { again = false; check(); return; }
+          if (expired) settleExpired();
         });
     }
 
-    const deadline = setTimeout(() => {
+    function settleExpired(): void {
       if (!anySuccess && lastError !== undefined) {
         fail(new Error(`Coordination board unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`));
         return;
       }
       finish([]);
+    }
+
+    // The deadline does not cut off a drain that is already running. `consume`
+    // is destructive — it marks what it returns as seen — so resolving `[]`
+    // while a drain was in flight threw away the message that drain was in the
+    // middle of collecting. The wait can therefore overrun its timeout by one
+    // store read, which is the right trade against losing mail.
+    // (Caught by the PR review.)
+    const deadline = setTimeout(() => {
+      expired = true;
+      // Detach first: no new wake-ups may be recorded past the deadline, which
+      // is what bounds the catch-up above to a single extra drain.
+      hub.off('coordination:published', check);
+      clearInterval(poll);
+      if (draining) return;
+      if (again) { again = false; check(); return; }
+      settleExpired();
     }, timeoutMs);
     const poll = setInterval(check, COORDINATION_WAIT_POLL_MS);
     // Deliberately NOT unref'd. Someone is awaiting this promise, so the

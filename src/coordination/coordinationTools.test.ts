@@ -292,3 +292,68 @@ describe('a wait keeps its process alive until it settles', () => {
     }
   }, 90_000);
 });
+
+describe('the deadline does not throw away mail a drain was collecting', () => {
+  it('returns a message whose drain outlived the timeout', async () => {
+    // `consume` is destructive: it marks what it returns as seen. Resolving []
+    // while a drain was in flight consumed the message and discarded it — the
+    // agent saw "nobody answered" for mail that had arrived.
+    // (Caught by the PR review; AGT-4065)
+    const mod = await tools();
+    const store = {
+      consume: async () => {
+        await new Promise((r) => setTimeout(r, 300));
+        return [{ summary: 'arrived just before the deadline' }];
+      },
+    };
+    const events = await mod.waitForInbox(
+      store, { repository: '/r', taskId: 't', actor: 'a' }, 80,
+    ) as Array<{ summary: string }>;
+    expect(events.map((e) => e.summary)).toContain('arrived just before the deadline');
+  }, 10_000);
+
+  it('still settles under a stream of wake-ups after the deadline', async () => {
+    // The post-expiry catch-up is bounded by detaching the wake-up sources at
+    // the deadline. Without that, continuous publishing keeps re-arming the
+    // catch-up and the wait never returns.
+    const mod = await tools();
+    const { getEventHub } = await import('../core/eventHub.js');
+    const noise = setInterval(() => getEventHub().emit('coordination:published', {}), 10);
+    const store = {
+      consume: async () => { await new Promise((r) => setTimeout(r, 30)); return [] as unknown[]; },
+    };
+    try {
+      const started = Date.now();
+      await expect(mod.waitForInbox(store, { repository: '/r', taskId: 't', actor: 'a' }, 100))
+        .resolves.toEqual([]);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    } finally {
+      clearInterval(noise);
+    }
+  }, 10_000);
+
+  it('honours a wake-up recorded during the drain that outlived the deadline', async () => {
+    // The message was published BEFORE the deadline; only its delivery landed
+    // after. Dropping the recorded wake-up reported an empty inbox for mail
+    // that had already arrived. (Caught by the PR review; AGT-4065)
+    const mod = await tools();
+    const { getEventHub } = await import('../core/eventHub.js');
+    let call = 0;
+    const store = {
+      consume: async () => {
+        call += 1;
+        if (call === 1) {
+          setTimeout(() => getEventHub().emit('coordination:published', {}), 20);
+          await new Promise((r) => setTimeout(r, 200));
+          return [];
+        }
+        return [{ summary: 'published before the deadline' }];
+      },
+    };
+    const events = await mod.waitForInbox(
+      store, { repository: '/r', taskId: 't', actor: 'a' }, 80,
+    ) as Array<{ summary: string }>;
+    expect(events.map((e) => e.summary)).toContain('published before the deadline');
+  }, 10_000);
+
+});
