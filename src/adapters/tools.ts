@@ -6,7 +6,7 @@
 // ============================================
 
 import fs from 'node:fs/promises';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
@@ -366,6 +366,66 @@ function canonicalizePath(candidate: string): string {
   return path.join(realpathSync(ancestor), ...suffix);
 }
 
+/**
+ * The main checkout a linked git worktree belongs to, or null when `root` is
+ * not a linked worktree.
+ *
+ * Derived from git's own metadata rather than guessed: a linked worktree's
+ * `.git` is a FILE holding `gitdir: <main>/.git/worktrees/<name>`, so stripping
+ * the trailing `/.git/worktrees/<name>` yields the main checkout. Read directly
+ * instead of shelling out to `git worktree list --porcelain` (which is what
+ * cgf-portal's own `link-local-assets.sh` uses) because validatePath runs on
+ * every file-tool call and must not spawn a process per read.
+ *
+ * Deliberately uncached. Measured at ~36µs per resolve — noise beside the file
+ * read it guards — and a cache keyed by path would go stale the moment the
+ * worktree metadata it reads changes, in a daemon that outlives many worktrees.
+ */
+function mainCheckoutOf(root: string): string | null {
+  const dotGit = path.join(root, '.git');
+  let raw: string;
+  try {
+    if (!statSync(dotGit).isFile()) return null; // plain checkout: `.git` is a directory
+    raw = readFileSync(dotGit, 'utf-8');
+  } catch {
+    return null;
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(raw);
+  if (!match) return null;
+  // `gitdir` may be relative (git >= 2.48 with --relative-paths), so resolve it
+  // against the worktree before walking up.
+  const gitDir = path.resolve(root, match[1]);
+  if (path.basename(path.dirname(gitDir)) !== 'worktrees') return null;
+  const commonDir = path.dirname(path.dirname(gitDir));
+  if (path.basename(commonDir) !== '.git') return null;
+  // Require git's own back-link. The worktree's `.git` is INSIDE the sandbox,
+  // so an agent could rewrite it to `gitdir: /etc/.git/worktrees/x` and open
+  // all of /etc to reads. git also writes `<gitDir>/gitdir` pointing back at
+  // this worktree's `.git`, and that file lives in the main checkout where no
+  // write path can reach it — checking both directions turns a forgeable
+  // one-way pointer into a link only git could have created.
+  let backLink: string;
+  try {
+    backLink = readFileSync(path.join(gitDir, 'gitdir'), 'utf-8').trim();
+  } catch {
+    return null;
+  }
+  // Resolved against `gitDir`, not the process cwd: with
+  // `worktree.useRelativePaths=true` (git >= 2.48) the back-link is written
+  // relative to the metadata dir — e.g. `../../../../wt/.git` — and resolving
+  // that against the daemon's cwd yields a garbage path, silently rejecting
+  // every relative-path worktree. (Caught by the commit-gate review.)
+  if (!backLink || canonicalizePath(path.dirname(path.resolve(gitDir, backLink))) !== root) return null;
+  const mainRoot = path.dirname(commonDir);
+  // A main checkout at the filesystem root would make the exception meaningless.
+  if (path.dirname(mainRoot) === mainRoot) return null;
+  try {
+    return statSync(mainRoot).isDirectory() ? mainRoot : null;
+  } catch {
+    return null;
+  }
+}
+
 export function isProtectedPath(resolved: string, protectedFiles?: string[]): boolean {
   if (!protectedFiles?.length) return false;
   return protectedFiles.some((p) => {
@@ -375,8 +435,36 @@ export function isProtectedPath(resolved: string, protectedFiles?: string[]): bo
   });
 }
 
+export interface ValidatePathOptions {
+  /**
+   * Also accept a path whose canonical form lands inside the main checkout this
+   * worktree belongs to. READ-ONLY tools only.
+   *
+   * A repo may symlink local-only material (data the agent needs but git cannot
+   * carry) from its main checkout into every worktree — cgf-portal's
+   * `link-local-assets.sh` post-checkout hook does exactly this for
+   * `docs/CGF_data` and the `.env` family. `canonicalizePath` resolves the
+   * symlink to its target in the main checkout, which is outside the worktree,
+   * so the read was refused and the agent reported the data as missing
+   * (AGT-4061: worker-86be asked the operator twice for files that were in
+   * fact linked into its worktree and readable).
+   *
+   * Reads only, never writes: writing into the main checkout would break
+   * worktree isolation — the exact failure `link-local-assets.sh` documents for
+   * `.venv`, where a guard test kept passing because the import resolved
+   * through the main tree instead of the worktree under test.
+   *
+   * Callers must additionally withhold this for `readOnly` runs. An ordinary
+   * worker can already reach the main checkout through the unvalidated `bash`
+   * tool, so there this is a usability fix, not a widening. A read-only
+   * reviewer has `bash` denied (READ_ONLY_DENIED_TOOLS), which makes this
+   * sandbox its real outbound boundary — INT-3189 — and it stays untouched.
+   */
+  allowMainCheckoutRead?: boolean;
+}
+
 /** 프로젝트 경로 내로 접근을 제한하는 경로 검증 */
-export function validatePath(filePath: string, cwd: string): string {
+export function validatePath(filePath: string, cwd: string, options: ValidatePathOptions = {}): string {
   const requestedRoot = path.resolve(cwd);
   const projectRoot = existsSync(requestedRoot) ? realpathSync(requestedRoot) : requestedRoot;
   const resolved = path.resolve(projectRoot, filePath);
@@ -387,9 +475,10 @@ export function validatePath(filePath: string, cwd: string): string {
     const rel = path.relative(canonicalRoot, canonical);
     return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
   };
+  const mainCheckout = options.allowMainCheckoutRead ? mainCheckoutOf(projectRoot) : null;
   // cwd 하위이거나, /tmp 하위만 허용. 문자열 prefix 비교는 상대 cwd를
   // 전부 거부하고 `/repo-evil` 같은 sibling을 `/repo` 내부로 오인한다.
-  if (!inside(projectRoot) && !inside('/tmp')) {
+  if (!inside(projectRoot) && !inside('/tmp') && !(mainCheckout && inside(mainCheckout))) {
     // 모델이 자가수정하도록 안내 — 그냥 거부만 하면 같은 실수를 반복한다.
     throw new Error(
       `Path "${filePath}" is outside the project root (${projectRoot}). ` +
@@ -486,7 +575,11 @@ export async function executeTool(
 
     switch (name) {
       case 'read_file': {
-        const filePath = validatePath(args.path, cwd);
+        // Reads may follow a symlink into this worktree's main checkout, so an
+        // agent can reach local-only material the repo links in (AGT-4061).
+        // Withheld in readOnly: there `bash` is denied, so this sandbox is the
+        // run's real outbound boundary (INT-3189).
+        const filePath = validatePath(args.path, cwd, { allowMainCheckoutRead: !execOptions?.readOnly });
         const offset = args.offset ?? 0;
         const limit = args.limit ?? 500;
         const cacheKey = `${filePath}#${offset}:${limit}`;
@@ -631,7 +724,7 @@ export async function executeTool(
       }
 
       case 'search_files': {
-        const searchPath = validatePath(args.path, cwd);
+        const searchPath = validatePath(args.path, cwd, { allowMainCheckoutRead: !execOptions?.readOnly });
         const rgArgs = ['--no-heading', '--line-number', '--max-count', '50'];
         if (args.glob) {
           rgArgs.push('--glob', args.glob);

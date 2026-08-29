@@ -16,6 +16,16 @@ vi.mock('../memory/repoKnowledge.js', () => ({
       : 'A non-empty query is required.',
 }));
 
+// `worktree.useRelativePaths` landed in git 2.48; older git always writes the
+// worktree back-link as an absolute path, so the relative-mode test has nothing
+// to discriminate and is skipped rather than passing vacuously.
+let hasRelativeWorktrees = false;
+try {
+  const raw = execFileSync('git', ['--version'], { stdio: 'pipe' }).toString();
+  const [, major, minor] = /(\d+)\.(\d+)/.exec(raw) ?? [];
+  hasRelativeWorktrees = Number(major) > 2 || (Number(major) === 2 && Number(minor) >= 48);
+} catch { /* git not installed */ }
+
 // Check if rg binary is available (not just a shell function wrapper)
 let hasRg = false;
 try {
@@ -713,5 +723,200 @@ describe('executeTool coordination_history dispatch (AGT-4054)', () => {
     expect(result.is_error).toBe(false);
     expect(result.content).not.toContain('Unknown tool');
     expect(() => JSON.parse(result.content)).not.toThrow();
+  });
+});
+
+// ──────────────────────────────────────────────
+// 12. Local-only material linked from the main checkout (AGT-4061)
+// ──────────────────────────────────────────────
+
+// A repo may symlink material git cannot carry (client data, .env) from its
+// main checkout into every worktree — cgf-portal's `link-local-assets.sh`
+// post-checkout hook does exactly that. canonicalizePath resolves the symlink
+// to its target outside the worktree, so every read was refused and the agent
+// reported the data as missing while `ls` through the same link worked.
+//
+// The fixture lives under /var/tmp, NOT /tmp: validatePath allows /tmp
+// outright, so a fixture there would pass with the fix reverted.
+describe('reads that resolve into the worktree\'s main checkout', () => {
+  let root = '';
+  let mainRoot = '';
+  let worktree = '';
+  let linked = '';
+  let git = true;
+
+  beforeAll(async () => {
+    root = await fs.mkdtemp('/var/tmp/openswarm-agt4061-');
+    mainRoot = path.join(root, 'main');
+    worktree = path.join(root, 'wt');
+    await fs.mkdir(mainRoot, { recursive: true });
+    const run = (args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: mainRoot, stdio: 'pipe' });
+    try {
+      run(['init', '-q', '-b', 'main']);
+      await fs.writeFile(path.join(mainRoot, 'README.md'), 'main\n', 'utf-8');
+      run(['add', '-A']);
+      run(['commit', '-qm', 'init']);
+      run(['worktree', 'add', '-q', '-b', 'wt', worktree]);
+    } catch {
+      git = false;
+      return;
+    }
+    // Local-only material: present in the main checkout, linked into the worktree.
+    await fs.mkdir(path.join(mainRoot, 'local-data'), { recursive: true });
+    await fs.writeFile(path.join(mainRoot, 'local-data', 'asset.txt'), 'CGF ROWS\n', 'utf-8');
+    linked = path.join(worktree, 'local-data');
+    await fs.symlink(path.join(mainRoot, 'local-data'), linked);
+  });
+
+  afterAll(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('reads a file through a symlink into the main checkout', async () => {
+    if (!git) return;
+    const r = await executeTool(makeCall('read_file', { path: 'local-data/asset.txt' }), worktree);
+    expect(r.is_error).toBe(false);
+    expect(r.content).toContain('CGF ROWS');
+  });
+
+  it('refuses to write through that same symlinked path', async () => {
+    if (!git) return;
+    // Writing into the main checkout would break worktree isolation — the exact
+    // failure link-local-assets.sh documents for `.venv`.
+    const r = await executeTool(
+      makeCall('write_file', { path: 'local-data/asset.txt', content: 'clobbered' }),
+      worktree,
+    );
+    expect(r.is_error).toBe(true);
+    expect(r.content).toContain('outside the project root');
+    expect(await fs.readFile(path.join(mainRoot, 'local-data', 'asset.txt'), 'utf-8')).toBe('CGF ROWS\n');
+  });
+
+  it('refuses the same read for a read-only run', async () => {
+    if (!git) return;
+    // A read-only reviewer has `bash` denied, so this sandbox is its real
+    // outbound boundary (INT-3189) and must not widen. An ordinary worker can
+    // already reach the main checkout through the unvalidated `bash` tool.
+    const r = await executeTool(
+      makeCall('read_file', { path: 'local-data/asset.txt' }), worktree, undefined, { readOnly: true },
+    );
+    expect(r.is_error).toBe(true);
+    expect(r.content).toContain('outside the project root');
+  });
+
+  it('still refuses a path outside both the worktree and its main checkout', async () => {
+    if (!git) return;
+    const sibling = path.join(root, 'elsewhere.txt');
+    await fs.writeFile(sibling, 'nope', 'utf-8');
+    const r = await executeTool(makeCall('read_file', { path: sibling }), worktree);
+    expect(r.is_error).toBe(true);
+    expect(r.content).toContain('outside the project root');
+  });
+
+  it('grants nothing extra to a plain checkout that is not a worktree', async () => {
+    if (!git) return;
+    // `.git` is a directory here, so there is no main checkout to fall back to
+    // and the exception must not resolve to some ancestor.
+    const outside = path.join(root, 'elsewhere.txt');
+    expect(() => validatePath(outside, mainRoot, { allowMainCheckoutRead: true }))
+      .toThrow('outside the project root');
+  });
+});
+
+// A worktree's own `.git` is INSIDE the sandbox, so `write_file` can rewrite it
+// and claim any directory as this worktree's "main checkout". git also records
+// a back-link at `<gitDir>/gitdir` inside the main checkout, where no write
+// path reaches — so the link is only trustworthy checked in both directions.
+describe('a forged worktree link cannot widen the sandbox (AGT-4061)', () => {
+  let root = '';
+  const at = (...p: string[]) => path.join(root, ...p);
+
+  beforeAll(async () => {
+    root = await fs.mkdtemp('/var/tmp/openswarm-agt4061-forge-');
+    await fs.writeFile(await mk('decoy', 'secret.txt'), 'private', 'utf-8');
+    // Three worktree metadata dirs in the decoy's `.git`, and three checkouts
+    // pointing at them. Only the last pair links back to each other.
+    for (const [name, backLink] of [
+      ['no-backlink', null],
+      ['other', at('someone-else', '.git')],
+      ['mine', at('genuine', '.git')],
+    ] as Array<[string, string | null]>) {
+      await fs.mkdir(at('decoy', '.git', 'worktrees', name), { recursive: true });
+      if (backLink) await fs.writeFile(at('decoy', '.git', 'worktrees', name, 'gitdir'), `${backLink}\n`, 'utf-8');
+    }
+    for (const [checkout, meta] of [
+      ['wt-nolink', 'no-backlink'], ['wt-other', 'other'], ['genuine', 'mine'],
+    ]) {
+      await fs.mkdir(at(checkout), { recursive: true });
+      await fs.writeFile(at(checkout, '.git'), `gitdir: ${at('decoy', '.git', 'worktrees', meta)}\n`, 'utf-8');
+    }
+  });
+
+  async function mk(...parts: string[]): Promise<string> {
+    await fs.mkdir(path.join(root, ...parts.slice(0, -1)), { recursive: true });
+    return path.join(root, ...parts);
+  }
+
+  afterAll(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const read = (checkout: string) =>
+    validatePath(at('decoy', 'secret.txt'), at(checkout), { allowMainCheckoutRead: true });
+
+  it('refuses a claimed main checkout that recorded no back-link at all', () => {
+    expect(() => read('wt-nolink')).toThrow('outside the project root');
+  });
+
+  it('refuses a back-link that points at a different worktree', () => {
+    // The dangerous shape: on a host running many worktrees, every other repo
+    // already has a real `<main>/.git/worktrees/<id>/gitdir`. Pointing at one
+    // would hand this agent reads across another repository's main checkout.
+    expect(() => read('wt-other')).toThrow('outside the project root');
+  });
+
+  it('accepts the one link git actually wrote, in both directions', async () => {
+    expect(read('genuine')).toBe(path.join(await fs.realpath(at('decoy')), 'secret.txt'));
+  });
+});
+
+describe.skipIf(!hasRelativeWorktrees)('worktrees that record their links as relative paths (AGT-4061)', () => {
+  let root = '';
+  let worktree = '';
+  let backLinkRaw = '';
+
+  beforeAll(async () => {
+    root = await fs.mkdtemp('/var/tmp/openswarm-agt4061-rel-');
+    const mainRoot = path.join(root, 'main');
+    worktree = path.join(root, 'wt');
+    await fs.mkdir(mainRoot, { recursive: true });
+    const run = (args: string[]) =>
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: mainRoot, stdio: 'pipe' });
+    run(['init', '-q', '-b', 'main']);
+    run(['commit', '-q', '--allow-empty', '-m', 'init']);
+    run(['config', 'worktree.useRelativePaths', 'true']);
+    run(['worktree', 'add', '-q', '-b', 'wt', worktree]);
+    await fs.mkdir(path.join(mainRoot, 'local-data'), { recursive: true });
+    await fs.writeFile(path.join(mainRoot, 'local-data', 'asset.txt'), 'CGF ROWS\n', 'utf-8');
+    await fs.symlink(path.join(mainRoot, 'local-data'), path.join(worktree, 'local-data'));
+    const gitDir = path.resolve(worktree, (await fs.readFile(path.join(worktree, '.git'), 'utf-8')).replace(/^gitdir:\s*/, '').trim());
+    backLinkRaw = (await fs.readFile(path.join(gitDir, 'gitdir'), 'utf-8')).trim();
+  });
+
+  afterAll(async () => {
+    if (root) await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('git really did record the back-link relatively', () => {
+    // Guards the test below from passing vacuously if git ever stops honouring
+    // the config — then the absolute-mode fixture would be all that runs.
+    expect(path.isAbsolute(backLinkRaw)).toBe(false);
+  });
+
+  it('still reads through the symlink into the main checkout', async () => {
+    const r = await executeTool(makeCall('read_file', { path: 'local-data/asset.txt' }), worktree);
+    expect(r.is_error).toBe(false);
+    expect(r.content).toContain('CGF ROWS');
   });
 });
