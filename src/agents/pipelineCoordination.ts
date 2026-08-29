@@ -8,6 +8,7 @@
 import type { PipelineContext } from './pairPipelineTypes.js';
 import { assignCallSign, callSignAddress, sanitizeAgentDisplayName, type AgentRole } from '../coordination/agentNames.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
+import { t } from '../locale/index.js';
 
 /**
  * Roles that appear on the coordination board as deployed agents.
@@ -152,11 +153,16 @@ const exchangeQueues = new Map<string, Promise<void>>();
  * A summary that carries no actual report, normalized to undefined so the
  * caller's timing fallback fires. Two things reach here that are not words:
  *
- * - The literal `(no summary)` an adapter substitutes for a missing summary
- *   (`src/adapters/claude.ts`, `agents/documenter.ts`, `agents/auditor.ts`,
- *   `agents/skillDocumenter.ts`). It is truthy, so `said || fallback` took it
- *   and the board showed the placeholder where a duration would at least have
- *   been true.
+ * - The placeholder an adapter substitutes for a missing summary
+ *   (`src/adapters/resultParsing.ts`, `codex.ts`, `claude.ts`,
+ *   `agents/documenter.ts`, `agents/auditor.ts`, `agents/skillDocumenter.ts`).
+ *   It is truthy, so `said || fallback` took it and the board showed the
+ *   placeholder where a duration would at least have been true. Compared
+ *   through `t()` rather than a hardcoded string: the adapters emit the ACTIVE
+ *   locale's value, so an English-only check would still publish `(요약 없음)`
+ *   on a Korean deployment — this repo's own default. `worker.ts` already
+ *   compares against `t('common.fallback.noSummary')` for the same reason.
+ *   (Caught by the fresh PR review, not self-caught.)
  * - A summary that is only the agent's `Codename:` self-introduction
  *   (AGT-4019). `worker.ts` strips that line, but restores the original when
  *   stripping empties the string, so a codename-only summary arrived intact
@@ -166,7 +172,7 @@ const exchangeQueues = new Map<string, Promise<void>>();
  */
 function boardWords(summary: string | undefined): string | undefined {
   const stripped = summary?.replace(/^\s*Codename:.*$/gim, '').trim();
-  if (!stripped || stripped === '(no summary)') return undefined;
+  if (!stripped || stripped === t('common.fallback.noSummary')) return undefined;
   return stripped;
 }
 

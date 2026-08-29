@@ -124,6 +124,23 @@ describe('stage lifecycle on the coordination board', () => {
     it('keeps the report when a codename line merely precedes it', async () => {
       expect(await outcomeSummary('Codename: Atlas\nAdded the JOIN guard.')).toBe('Added the JOIN guard.');
     });
+
+    // Caught by the fresh PR review, not self-caught: the adapters emit the
+    // ACTIVE locale's placeholder (`t('common.fallback.noSummary')`), so an
+    // English-only comparison still published `(요약 없음)` verbatim on a
+    // Korean deployment — which is this repo's own default locale.
+    it("recognizes the placeholder in whatever locale the adapters emitted it", async () => {
+      const { initLocale, t } = await import('../locale/index.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      initLocale('ko');
+      try {
+        expect(t('common.fallback.noSummary')).toBe('(요약 없음)');
+        expect(await outcomeSummary('(요약 없음)')).toBe('Finished in 3.3s');
+      } finally {
+        initLocale('en');
+        log.mockRestore();
+      }
+    });
   });
 
   beforeEach(() => { published.events = []; });
