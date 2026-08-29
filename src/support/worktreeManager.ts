@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getInstanceId } from './healthEndpoint.js';
+import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
@@ -274,6 +275,17 @@ export interface ActiveWorktreeMarker {
    * Missing on markers written before this field existed.
    */
   ownerInstanceId?: string;
+  /**
+   * The pid space the writer lived in — the scope within which its pid is
+   * unique. Two daemons sharing this checkout each have their own pid 1, so a
+   * matching pid number means nothing across them.
+   *
+   * A string identifies the space; `null` records that the writer could not
+   * determine its own; absent means the marker predates the field. The three
+   * are distinct — collapsing "unknown" into "absent" would let a fail-closed
+   * writer be probed as if it had opted into the legacy rule.
+   */
+  ownerNamespace?: string | null;
   createdAt: string;
 }
 
@@ -344,6 +356,9 @@ async function writeActiveWorktreeMarker(info: WorktreeInfo): Promise<string> {
     ownerPid: process.pid,
     ownerToken,
     ownerInstanceId: getInstanceId(),
+    // `?? null` deliberately: an omitted key would be indistinguishable from
+    // a pre-field marker, which readers are entitled to probe locally.
+    ownerNamespace: processNamespaceId() ?? null,
     createdAt: new Date().toISOString(),
   };
   const tempPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
@@ -424,15 +439,6 @@ export type WorktreeRecoveryStatus =
   | { state: 'orphaned'; worktreePath: string; marker: ActiveWorktreeMarker }
   | { state: 'ambiguous'; worktreePath: string };
 
-function processAppearsAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
-}
 
 /** This container assigns the daemon process the same pid every restart, so
  * a marker from a dead prior generation makes `processAppearsAlive` hit the
@@ -472,30 +478,25 @@ function activeMarkerAbandonMs(): number {
  * Markers from this boot, and legacy markers with no boot recorded, keep the
  * original pid + age test so a live long-running stage is still protected.
  */
-/** Epoch ms at which THIS process started. `process.uptime()` counts from
- * process start, so sampling it at module load is both cheap and accurate. */
-const PROCESS_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
-
-/** Slack for clock resolution when comparing a marker's timestamp to our own
- * start. Erring towards "still ours" only costs a fallback to the age window. */
-const PROCESS_START_JITTER_MS = 1_000;
-
 /**
- * A marker that records OUR pid but was written before we started running.
- *
- * A pid is unique among live processes, so a marker carrying this process's own
- * pid was written either by this process or by one that has since exited. If it
- * predates our start it cannot be ours, which makes its writer provably gone
- * however alive the pid table claims that pid to be.
- *
- * Unlike `ownerInstanceId` this needs no field on the marker, so it also
- * releases the markers a crashed daemon left behind before that field existed.
+ * A marker whose writer is provably gone by the shared pid proof: it carries
+ * OUR pid but predates our start, so it belongs to a process that has since
+ * exited. Needs no field on the marker, so it also releases the markers a
+ * crashed daemon left behind before `ownerInstanceId` existed. (AGT-4067)
  */
 function markerPredatesThisProcess(marker: ActiveWorktreeMarker): boolean {
-  if (marker.ownerPid !== process.pid) return false;
-  const createdAt = Date.parse(marker.createdAt);
-  if (!Number.isFinite(createdAt)) return false; // unreadable — never claim proof
-  return createdAt < PROCESS_STARTED_AT_MS - PROCESS_START_JITTER_MS;
+  // Gated on the recorded pid space, because that is the scope in which a pid
+  // is unique. This checkout can be mounted into more than one container, each
+  // with its own pid 1, and taking a worktree from a live owner in another one
+  // would put two executors on the same tree. A marker from a different space —
+  // or one written before the field existed — is not reasoned about by pid at
+  // all; it falls back to the age window. (Caught by the commit-gate review.)
+  // A machine hint is not enough: "this pid is mine, so its writer exited"
+  // needs the pid numbering to be the same numbering, which only a real pid
+  // space establishes.
+  if (!isProofCapableSpace(marker.ownerNamespace ?? undefined)) return false;
+  if (!sameProcessNamespace(marker.ownerNamespace ?? undefined)) return false;
+  return writerProvablyGone({ pid: marker.ownerPid, writtenAtMs: Date.parse(marker.createdAt) });
 }
 
 /**
@@ -521,7 +522,43 @@ function markerWriterProvablyGone(marker: ActiveWorktreeMarker): boolean {
   return markerPredatesThisProcess(marker);
 }
 
+/**
+ * Whether this marker's pid can be probed at all from here.
+ *
+ * A pid only means something inside the space it was issued in. Probing a
+ * marker that names a *different* space tells us about whatever holds that
+ * number locally, and a "not alive" answer from that would authorise taking a
+ * worktree a live container still owns. Such a marker is treated as live and
+ * left to the age window — or, where there is none, left alone.
+ *
+ * A marker with no space recorded predates the field and keeps the original
+ * pid-probe behaviour, which is no worse than before it existed.
+ * (Caught by the commit-gate review.)
+ */
+function markerPidIsJudgeable(marker: ActiveWorktreeMarker): boolean {
+  // Three states, three answers:
+  //
+  //  - **absent** — predates the field. Keeps the original local probe, which
+  //    is the behaviour this module inherited and must not regress.
+  //  - **null** — the writer could name no space at all. Fail closed: it is a
+  //    Linux process that could not read /proc/self/ns/pid, and probing its pid
+  //    here would answer about a different pid table. Costs nothing now that
+  //    platforms without pid namespaces record a host hint instead of null.
+  //  - **a string** — probe only if it is our space. A different one is another
+  //    machine or another container, where our pid table says nothing.
+  //
+  // KNOWN LIMITATION (AGT-4069, pre-existing): an *absent* record, and a host
+  // hint that happens to match, still get the local probe. Two machines sharing
+  // a state directory under the same host name can therefore still judge each
+  // other's live owner dead — as this code already did. Closing that needs a
+  // real OS machine identity, tracked separately.
+  if (marker.ownerNamespace === undefined) return true;
+  if (marker.ownerNamespace === null) return false;
+  return sameProcessNamespace(marker.ownerNamespace);
+}
+
 function markerLooksLive(marker: ActiveWorktreeMarker): boolean {
+  if (!markerPidIsJudgeable(marker)) return (activeMarkerAgeMs(marker) ?? 0) < activeMarkerAbandonMs();
   if (markerWriterProvablyGone(marker)) return false;
   return processAppearsAlive(marker.ownerPid) && (activeMarkerAgeMs(marker) ?? 0) < activeMarkerAbandonMs();
 }
@@ -596,7 +633,13 @@ export async function removePreservedWorktreeAt(worktreePath: string): Promise<v
     // active marker before releasing this same lock.
     const active = await readActiveWorktreeMarkers(match[1], normalized);
     if (active.unreadable
-      || active.markers.some((marker) => !markerWriterProvablyGone(marker) && processAppearsAlive(marker.ownerPid))) return;
+      || active.markers.some((marker) => (
+        // No age escape at this site, so an unjudgeable pid means "keep": a
+        // preserved tree still reachable by a live owner elsewhere must not be
+        // deleted. pruneWorktrees' preserved-tree expiry is the backstop.
+        !markerPidIsJudgeable(marker)
+        || (!markerWriterProvablyGone(marker) && processAppearsAlive(marker.ownerPid))
+      ))) return;
     await removePreservedWorktreeAtUnlocked(normalized);
   });
 }
