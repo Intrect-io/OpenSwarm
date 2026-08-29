@@ -6,7 +6,8 @@
 // rejects outright, and two messages in one channel finishing out of order.
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { appendHistoryEntry, channelHistoryMap, splitForDiscordForTest, updateHistoryResponse } from './discordCore.js';
+import { appendHistoryEntry, channelHistoryMap, chunkForDiscord, splitForDiscordForTest, updateHistoryResponse } from './discordCore.js';
+import { answerHint, correlationIdFromHint } from '../coordination/answerHint.js';
 
 /** Discord's hard limit on message content. Embeds are 4096; messages are not. */
 const DISCORD_CONTENT_LIMIT = 2000;
@@ -90,5 +91,32 @@ describe('updateHistoryResponse', () => {
 
   it('is a no-op for an unknown channel', () => {
     expect(() => updateHistoryResponse('nope', 'm1', 'answer')).not.toThrow();
+  });
+});
+
+// AGT-4070: an operator answers a question by replying to it, and the reply is
+// matched back by reading the answer hint out of the message replied to. A long
+// question is split, the hint is appended last — so without this every chunk but
+// the final one is a dead end, including the one that shows the question.
+describe('chunkForDiscord keeps the answer hint replyable', () => {
+  const hint = answerHint('hq-abc123');
+
+  it('repeats the hint on every chunk of a split question', () => {
+    const chunks = chunkForDiscord(`${'x'.repeat(5_000)}\n\n${hint}`, 2_000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(correlationIdFromHint(chunk)).toBe('hq-abc123');
+      expect(chunk.length).toBeLessThanOrEqual(DISCORD_CONTENT_LIMIT);
+    }
+  });
+
+  it('adds nothing to a message that carries no hint', () => {
+    // The discriminating property: repeating a hint makes the chunks longer
+    // than the input. A message with no hint must gain nothing at all.
+    const plain = 'y'.repeat(5_000);
+    const chunks = chunkForDiscord(plain, 2_000);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.join('').length).toBe(plain.length);
+    for (const chunk of chunks) expect(correlationIdFromHint(chunk)).toBeUndefined();
   });
 });

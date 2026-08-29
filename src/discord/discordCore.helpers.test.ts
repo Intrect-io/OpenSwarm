@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { clampDiscordText, getChatHistory, saveChatHistory, startTypingIndicator } from './discordCore.js';
+import { clampDiscordText, getChatHistory, questionCorrelationIdFrom, saveChatHistory, startTypingIndicator } from './discordCore.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -49,5 +49,42 @@ describe('Discord outbound bounds', () => {
     clearInterval(timer);
     expect(sendTyping.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+// AGT-4070: replying to an agent's question is how an operator naturally
+// answers it. Until this existed the reply fell through to the chat handler and
+// the asking agent never saw it — 28 runs sat parked on questions that had been
+// replied to. The link lives in the message Discord already stores, so a parked
+// question that outlives the daemon still resolves after a restart.
+describe('questionCorrelationIdFrom (AGT-4070)', () => {
+  const BOT = 'bot-user-1';
+  const posted = (content: string, authorId = BOT) => ({ author: { id: authorId }, content });
+
+  it('reads the correlation id out of a question we posted', () => {
+    const id = questionCorrelationIdFrom(
+      posted('OpenSwarm needs a decision for AX-1.\nShip v2?\n\nReply to this message with your answer, or: !answer hq-abc123 <your answer>'),
+      BOT,
+    );
+    expect(id).toBe('hq-abc123');
+  });
+
+  it('ignores a message somebody else wrote, however it is worded', () => {
+    // Otherwise an operator could reply to their OWN message containing
+    // `!answer <id>` and answer through a path that never checked who asked.
+    expect(questionCorrelationIdFrom(posted('!answer hq-abc123 yes', 'someone-else'), BOT)).toBeUndefined();
+  });
+
+  it('ignores one of our messages that is not a question', () => {
+    expect(questionCorrelationIdFrom(posted('Build finished in 41s'), BOT)).toBeUndefined();
+  });
+
+  it('claims nothing when the reference could not be fetched, or we do not know who we are', () => {
+    expect(questionCorrelationIdFrom(null, BOT)).toBeUndefined();
+    expect(questionCorrelationIdFrom(posted('!answer hq-abc123 <your answer>'), undefined)).toBeUndefined();
+    // Both sides unknown must NOT compare equal: `undefined !== undefined` is
+    // false, so without the explicit guard an author-less message would be
+    // read as ours and answer a question on nobody's authority.
+    expect(questionCorrelationIdFrom({ author: null, content: '!answer hq-abc123 yes' }, undefined)).toBeUndefined();
   });
 });
