@@ -149,6 +149,28 @@ const exchangeQueues = new Map<string, Promise<void>>();
  * record must never fail the stage it describes.
  */
 /**
+ * A summary that carries no actual report, normalized to undefined so the
+ * caller's timing fallback fires. Two things reach here that are not words:
+ *
+ * - The literal `(no summary)` an adapter substitutes for a missing summary
+ *   (`src/adapters/claude.ts`, `agents/documenter.ts`, `agents/auditor.ts`,
+ *   `agents/skillDocumenter.ts`). It is truthy, so `said || fallback` took it
+ *   and the board showed the placeholder where a duration would at least have
+ *   been true.
+ * - A summary that is only the agent's `Codename:` self-introduction
+ *   (AGT-4019). `worker.ts` strips that line, but restores the original when
+ *   stripping empties the string, so a codename-only summary arrived intact
+ *   and read as if the agent had reported its own name as its work.
+ *   `src/linear/format.ts` already strips it without restoring for the Linear
+ *   comment path; this is the same rule for the board. (AGT-4060)
+ */
+function boardWords(summary: string | undefined): string | undefined {
+  const stripped = summary?.replace(/^\s*Codename:.*$/gim, '').trim();
+  if (!stripped || stripped === '(no summary)') return undefined;
+  return stripped;
+}
+
+/**
  * Publish a finished stage as the agent's own words, addressed to its
  * counterpart. Registers the codename the agent introduced itself with
  * (first introduction wins), then speaks its summary/feedback instead of a
@@ -169,7 +191,7 @@ export function publishStageOutcomeToBoard(
   }
   const said = stage === 'reviewer'
     ? [spoken?.decision ? `[${spoken.decision}]` : undefined, spoken?.feedback?.trim()].filter(Boolean).join(' ')
-    : spoken?.summary?.trim();
+    : boardWords(spoken?.summary);
   const seconds = (outcome.durationMs / 1000).toFixed(1);
   void publishStageToBoard(
     context,
