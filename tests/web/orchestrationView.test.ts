@@ -230,32 +230,48 @@ describe('the picture stays bounded and legible (AGT-4066)', () => {
     }
   });
 
-  it('stops sweeping once the view is stopped', async () => {
+  // `redraw` no-ops after stop, so a leaked sweep repaints nothing — which is
+  // exactly why this asserts the timer itself. An armed sweep holds a
+  // half-hour wake and the whole view closure alive regardless.
+  it('disarms every timer it armed when it is stopped', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const doc = shell();
       const view = startOrchestrationView(doc, {
-        // Addressed to the operator, so the board carries a RAIL node. Rails
-        // are exempt from the liveness filter, so a sweep that outlived stop()
-        // would repaint one — without it the assertion could not tell a leaked
-        // timer from a correctly aged-out board.
-        fetchImpl: fetchWith([boardEvent({
-          id: 'e1', seq: 1, status: 'completed', kind: 'human-answer',
-          recipient: 'human', recipientName: undefined, recipientRole: 'human',
-        })]),
+        fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1, status: 'completed' })]),
         eventSourceImpl: null,
         pollMs: 1e9,
       });
-      await vi.waitFor(() => expect(doc.querySelector('[data-node="human"]')).not.toBeNull());
-      view.stop();
+      await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
+      // The poll interval and the liveness sweep are both armed by now.
+      expect(vi.getTimerCount()).toBeGreaterThan(1);
 
-      const svg = doc.getElementById('graph')!;
-      svg.innerHTML = '';
-      await vi.advanceTimersByTimeAsync(31 * 60_000);
-      expect(svg.querySelectorAll('.node')).toHaveLength(0);
+      view.stop();
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // stop() clears the timers it can see, but a fetch already awaiting its
+  // response is not one of them: its continuation would rebuild the graph and
+  // arm a fresh liveness timer that nothing is left to clear.
+  it('does not redraw after stop when a fetch was already in flight', async () => {
+    let release: (value: unknown) => void = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    const doc = shell();
+    const fetchImpl = vi.fn(() => gate.then(() => ({
+      ok: true,
+      json: async () => ({ events: [boardEvent({ id: 'e1', seq: 1 })], pending: [], lastSeq: 1 }),
+    })));
+
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 1e9 });
+    view.stop();          // the snapshot has not landed yet
+    release(null);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(doc.querySelectorAll('.node')).toHaveLength(0);
+    expect(doc.getElementById('graph')!.querySelector('[data-layer]')).toBeNull();
   });
 
   it('keeps node elements across redraws instead of tearing the graph down', async () => {
@@ -475,9 +491,10 @@ describe('filter and collapse controls (AGT-4066)', () => {
     expect(filters.showIdle).toBe(true);
   });
 
-  // A stopped view that still answers resize keeps repainting the graph and
-  // keeps its whole event map alive for as long as the page lives.
-  it('lets go of the resize listener when it is stopped', async () => {
+  // Same reasoning as the timers: `redraw` no-ops after stop, so a listener
+  // left attached is invisible from the DOM — but it still pins the view's
+  // whole closure, and its event map, to the window for the page's lifetime.
+  it('releases the resize listener when it is stopped', async () => {
     const doc = shell();
     const view = startOrchestrationView(doc, {
       fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1 })]),
@@ -485,12 +502,14 @@ describe('filter and collapse controls (AGT-4066)', () => {
       pollMs: 1e9,
     });
     await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(0));
-    view.stop();
 
-    const svg = doc.getElementById('graph')!;
-    svg.innerHTML = '';
-    doc.defaultView!.dispatchEvent(new window.Event('resize'));
-    expect(svg.querySelectorAll('.node')).toHaveLength(0);
+    const remove = vi.spyOn(doc.defaultView!, 'removeEventListener');
+    try {
+      view.stop();
+      expect(remove).toHaveBeenCalledWith('resize', expect.any(Function));
+    } finally {
+      remove.mockRestore();
+    }
   });
 
   it('still renders when the host page ships no controls at all', async () => {

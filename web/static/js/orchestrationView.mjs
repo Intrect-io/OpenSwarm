@@ -623,7 +623,15 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     return null;
   };
 
+  // Every path back into the DOM funnels through `redraw`, so one guard here
+  // covers them all: a fetch that was already in flight when `stop()` was
+  // called, a late SSE frame, a resize, a control change. Without it the
+  // resolving fetch would rebuild the graph and arm a fresh liveness timer
+  // that nothing is left to clear.
+  let stopped = false;
+
   const redraw = () => {
+    if (stopped) return;
     const events = [...byId.values()].sort((a, b) => a.seq - b.seq);
     const model = buildOrchestrationModel(events);
     // Only what is drawn can be selected: a node hidden by the liveness filter
@@ -742,6 +750,7 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   return {
     redraw,
     stop: () => {
+      stopped = true;
       clearInterval(timer);
       if (livenessTimer) clearTimeout(livenessTimer);
       source?.close();
