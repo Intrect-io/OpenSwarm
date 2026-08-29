@@ -286,6 +286,84 @@ describe('createWorktree retry/resume error paths', () => {
     }
   });
 
+  // The regression this fix must not introduce: `openswarm attach`, a manual
+  // `openswarm run` and a second daemon are all "not this process", so a
+  // differing owner id cannot be read as proof of death. Doing so would put
+  // two owners on one worktree. (Caught by the commit-gate review.)
+  it('respects a marker from another live OpenSwarm process even though its owner id differs (AGT-4067)', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-sibling-process');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    // A different process that is genuinely running: our own parent. Its id
+    // differs from ours and its marker predates nothing — it must be kept.
+    marker.ownerInstanceId = 'sibling-process-00000000-0000-4000-8000-000000000000';
+    marker.ownerPid = process.ppid;
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+      marker: { ownerPid: process.ppid },
+    });
+  });
+
+  // The live incident this was written for: the markers already on disk were
+  // written before `ownerInstanceId` existed, so the boot comparison cannot
+  // reach them. A pid is unique among live processes, which is proof enough —
+  // a marker carrying our own pid that predates our start belongs to a process
+  // that has since exited, whatever the pid table now says.
+  it('abandons a marker that carries our pid but predates this process (AGT-4067)', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-legacy-prior-boot');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId; // written before the field existed
+    expect(marker.ownerPid).toBe(process.pid);
+    // Comfortably inside the 24h abandon window, so age alone still says live.
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'orphaned',
+    });
+  });
+
+  it('keeps a marker from this boot for the full window so a live stage cannot lose its worktree (AGT-4067)', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-this-boot');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    expect(marker.ownerInstanceId).toBeTruthy();
+    // An hour in — long enough that shortening the abandon window (the unsafe
+    // workaround this replaces) would expire it, but this boot wrote it, so a
+    // long-running worker stage must keep its worktree.
+    marker.createdAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+      marker: { ownerInstanceId: marker.ownerInstanceId },
+    });
+  });
+
+  it('falls back to the pid + age test for a legacy marker with no boot recorded (AGT-4067)', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-legacy-marker');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId; // written before this field existed
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+  });
+
   it('distinguishes a live owner, a dead owner, and a safely preserved worktree', async () => {
     const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-recovery');
     await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
@@ -564,6 +642,21 @@ describe('pruneWorktrees (INT-1810 R4 / INT-2503 / INT-2506)', () => {
     );
     const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
     marker.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await pruneWorktrees(repo, new Set(), new Set([orphan.worktreePath]));
+
+    expect(existsSync(orphan.worktreePath)).toBe(false);
+  });
+
+  it('sweeps a proven orphan whose marker predates this process, well inside the age window (AGT-4067)', async () => {
+    const orphan = await createWorktree(repo, 'INT-7', 'swarm/INT-7-prior-boot');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-7', `${orphan.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    delete marker.ownerInstanceId; // as a crashed pre-AGT-4067 boot left it
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     writeFileSync(markerPath, JSON.stringify(marker));
 
     await pruneWorktrees(repo, new Set(), new Set([orphan.worktreePath]));

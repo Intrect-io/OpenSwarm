@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { getInstanceId } from './healthEndpoint.js';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
@@ -264,6 +265,15 @@ export interface ActiveWorktreeMarker {
   ownerPid: number;
   /** Missing only on legacy single-file markers written before token fencing. */
   ownerToken?: string;
+  /**
+   * The process that wrote this marker, as a per-process id.
+   *
+   * Used in one direction only: a marker whose id matches ours is positively
+   * ours, and therefore live. A differing id is NOT evidence of death — every
+   * concurrently running OpenSwarm process would fail that comparison too.
+   * Missing on markers written before this field existed.
+   */
+  ownerInstanceId?: string;
   createdAt: string;
 }
 
@@ -333,6 +343,7 @@ async function writeActiveWorktreeMarker(info: WorktreeInfo): Promise<string> {
     ...info,
     ownerPid: process.pid,
     ownerToken,
+    ownerInstanceId: getInstanceId(),
     createdAt: new Date().toISOString(),
   };
   const tempPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
@@ -449,6 +460,72 @@ function activeMarkerAbandonMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ACTIVE_MARKER_ABANDON_MS;
 }
 
+/**
+ * Whether a marker's writer can still be running.
+ *
+ * A marker stamped with a *different* daemon boot is abandoned outright: that
+ * process is provably gone, whatever the pid table now says. `ownerPid` alone
+ * cannot decide this in a container, where pids repeat and a restarted daemon
+ * finds the recorded pid alive again — which left every restart's orphans
+ * looking live for the full 24-hour window and wedged the admission cap.
+ *
+ * Markers from this boot, and legacy markers with no boot recorded, keep the
+ * original pid + age test so a live long-running stage is still protected.
+ */
+/** Epoch ms at which THIS process started. `process.uptime()` counts from
+ * process start, so sampling it at module load is both cheap and accurate. */
+const PROCESS_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
+
+/** Slack for clock resolution when comparing a marker's timestamp to our own
+ * start. Erring towards "still ours" only costs a fallback to the age window. */
+const PROCESS_START_JITTER_MS = 1_000;
+
+/**
+ * A marker that records OUR pid but was written before we started running.
+ *
+ * A pid is unique among live processes, so a marker carrying this process's own
+ * pid was written either by this process or by one that has since exited. If it
+ * predates our start it cannot be ours, which makes its writer provably gone
+ * however alive the pid table claims that pid to be.
+ *
+ * Unlike `ownerInstanceId` this needs no field on the marker, so it also
+ * releases the markers a crashed daemon left behind before that field existed.
+ */
+function markerPredatesThisProcess(marker: ActiveWorktreeMarker): boolean {
+  if (marker.ownerPid !== process.pid) return false;
+  const createdAt = Date.parse(marker.createdAt);
+  if (!Number.isFinite(createdAt)) return false; // unreadable — never claim proof
+  return createdAt < PROCESS_STARTED_AT_MS - PROCESS_START_JITTER_MS;
+}
+
+/**
+ * Whether the marker's writer is *provably* gone — not merely unresponsive.
+ *
+ * `processAppearsAlive` cannot answer this in a container, where pids are handed
+ * out deterministically and a restarted daemon very often finds the recorded pid
+ * alive again as something unrelated. The 24-hour age was then the only thing
+ * that could ever release such a marker, so every restart left each in-flight
+ * run looking active for a full day; a NEEDS_RECONCILE row still occupies an
+ * admission slot, so the autonomous loop stopped taking work altogether.
+ *
+ * Note the asymmetry in how `ownerInstanceId` is read. A *matching* id is
+ * positive identification — we wrote it, so its writer is obviously alive. A
+ * *differing* id proves nothing at all: a concurrently running OpenSwarm
+ * process (`openswarm attach`, a manual `openswarm run`, a second daemon) is
+ * equally "not us", and taking its worktree would put two owners on one tree.
+ * Only the pid test below is proof, and it holds however many processes run.
+ * (Caught by the commit-gate review.)
+ */
+function markerWriterProvablyGone(marker: ActiveWorktreeMarker): boolean {
+  if (marker.ownerInstanceId === getInstanceId()) return false;
+  return markerPredatesThisProcess(marker);
+}
+
+function markerLooksLive(marker: ActiveWorktreeMarker): boolean {
+  if (markerWriterProvablyGone(marker)) return false;
+  return processAppearsAlive(marker.ownerPid) && (activeMarkerAgeMs(marker) ?? 0) < activeMarkerAbandonMs();
+}
+
 /** Null on an unreadable/unparseable timestamp — callers must treat that as
  * "not provably abandoned" (mirrors preserveMarkerAgeMs's fail-safe null). */
 function activeMarkerAgeMs(marker: ActiveWorktreeMarker): number | null {
@@ -469,9 +546,7 @@ export async function inspectWorktreeRecovery(
     : resolveWorktreePath(repoPath, issueId);
   if (!existsSync(worktreePath)) return { state: 'missing', worktreePath };
   const active = await readActiveWorktreeMarkers(repoPath, worktreePath);
-  const liveMarker = active.markers.find(
-    (marker) => processAppearsAlive(marker.ownerPid) && (activeMarkerAgeMs(marker) ?? 0) < activeMarkerAbandonMs(),
-  );
+  const liveMarker = active.markers.find(markerLooksLive);
   if (liveMarker) return { state: 'active_owner', worktreePath, marker: liveMarker };
   if (existsSync(join(worktreePath, PRESERVE_MARKER))) {
     return preserveMarkerAgeMs(worktreePath) === null
@@ -520,7 +595,8 @@ export async function removePreservedWorktreeAt(worktreePath: string): Promise<v
     // issue. Re-check ownership under the lock; a resumed worker publishes its
     // active marker before releasing this same lock.
     const active = await readActiveWorktreeMarkers(match[1], normalized);
-    if (active.unreadable || active.markers.some((marker) => processAppearsAlive(marker.ownerPid))) return;
+    if (active.unreadable
+      || active.markers.some((marker) => !markerWriterProvablyGone(marker) && processAppearsAlive(marker.ownerPid))) return;
     await removePreservedWorktreeAtUnlocked(normalized);
   });
 }
@@ -1284,10 +1360,7 @@ export async function pruneWorktrees(
           // owner either writes its marker first (and is retained), or waits
           // until this proven-orphan cleanup has finished.
           const active = await readActiveWorktreeMarkers(repoPath, p);
-          const liveMarker = active.markers.find(
-            (candidate) => processAppearsAlive(candidate.ownerPid)
-              && (activeMarkerAgeMs(candidate) ?? 0) < activeMarkerAbandonMs(),
-          );
+          const liveMarker = active.markers.find(markerLooksLive);
           if (liveMarker) {
             console.log(`[Worktree] Retaining live owner ${liveMarker.ownerPid}: ${p}`);
             return;

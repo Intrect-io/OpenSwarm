@@ -423,6 +423,35 @@ describe('removePreservedWorktreeAt (INT-2506)', () => {
     expect(existsSync(info.worktreePath)).toBe(false);
   });
 
+  // AGT-4067: the daemon calls this itself when a run concludes. A marker left
+  // behind by a boot that crashed mid-run kept reading as live — pids repeat in
+  // a container, so `processAppearsAlive` finds the recorded pid alive again as
+  // something unrelated — and this site has no age check to eventually release
+  // it. The daemon then skipped its own cleanup forever and leaked the tree.
+  it('cleans up when the only active marker predates this process (AGT-4067)', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'daemon died mid-run');
+
+    // Re-create the marker the crashed boot never got to clear: our own pid
+    // (as a container hands back), written before this process started.
+    const markerDir = join(repo, '.git', 'openswarm', 'active-worktrees', 'INT-9');
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(join(markerDir, 'crashed-boot-token.json'), JSON.stringify({
+      issueId: 'INT-9',
+      branchName: info.branchName,
+      worktreePath: info.worktreePath,
+      originalPath: repo,
+      ownerPid: process.pid,
+      ownerToken: 'crashed-boot-token',
+      createdAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
+    }));
+
+    await removePreservedWorktreeAt(info.worktreePath);
+
+    expect(existsSync(info.worktreePath)).toBe(false);
+  });
+
   it('no-ops on paths that are not managed worktrees', async () => {
     await removePreservedWorktreeAt(repo); // repo root — no /worktree/ segment
     expect(existsSync(repo)).toBe(true);
