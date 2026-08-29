@@ -31,9 +31,89 @@ const QUERY_PACK_BY_LANGUAGE: Record<string, string> = {
 const RUNTIME_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const OPENSWARM_SECURITY_SUITE = join(RUNTIME_ROOT, '.codeql', 'security', 'openswarm-security-extended.qls');
 
+/**
+ * Process-wide cap on how many CodeQL runs execute at once.
+ *
+ * The audit runs per task — once to capture a baseline, once after the work —
+ * so without a gate its cost scales with `maxConcurrentTasks` while the
+ * container's budget does not. Measured on the daemon at `maxConcurrentTasks:
+ * 6`: two overlapping runs held 3.32 GB + 3.21 GB of RSS beside the daemon's
+ * own 3.41 GB, the container sat pinned at its 4-CPU cap, and `memory.peak`
+ * reached 13.76 GiB of a 16 GiB limit. The daemon's single JS thread was
+ * starved for up to 40s at a stretch — long enough that `/api/health`, which
+ * builds a pure in-memory payload, timed out and the container read
+ * `unhealthy` while working normally. (AGT-4062)
+ *
+ * The gate belongs here rather than at the scheduler: bounding the expensive
+ * stage keeps task parallelism intact, whereas lowering `maxConcurrentTasks`
+ * would cut all of it to contain one stage.
+ *
+ * The limit is fixed for the life of the process. It was briefly a per-audit
+ * config field, and every review round of this change found a different defect
+ * in that shape — a later caller silently raising the cap out from under a
+ * running audit, a lowered cap that could never take hold, a raise that was
+ * discarded rather than deferred. All three were symptoms of one mistake:
+ * a process-wide resource bound is not a per-call argument.
+ */
+export class ConcurrencyGate {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  get activeCount(): number { return this.active; }
+  get waitingCount(): number { return this.waiting.length; }
+
+  /**
+   * Drop all state. Exists for test isolation: the CodeQL gate below is module
+   * state shared by every case in a file, so one test that leaves a slot held
+   * makes every later one wait out its full timeout instead of failing where
+   * the fault is.
+   */
+  reset(): void {
+    this.active = 0;
+    this.waiting.length = 0;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) { this.active += 1; return; }
+    return new Promise<void>((resolve) => { this.waiting.push(resolve); });
+  }
+
+  /**
+   * Hand the slot to the longest-waiting caller, or free it when none is
+   * queued. No cap re-check is needed: `limit` is fixed for the life of the
+   * gate, and a caller only ever queues once `active` has reached it, so after
+   * a release there is always room for exactly the one being admitted.
+   */
+  release(): void {
+    const next = this.waiting.shift();
+    if (next) { next(); return; }
+    this.active = Math.max(0, this.active - 1);
+  }
+}
+
+/**
+ * Read the cap once, at module load. One is right for the container this was
+ * measured in (4 CPUs, `--threads=2` per run leaves two for the daemon); a
+ * larger host can raise it. An unset, unparseable, or out-of-range value falls
+ * back to the safe default rather than failing the daemon's start.
+ */
+export function resolveCodeqlConcurrency(raw: string | undefined): number {
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 8) return 1;
+  return parsed;
+}
+
+/** Shared by every pipeline: they all run inside the one daemon process. */
+export const codeqlGate = new ConcurrencyGate(
+  resolveCodeqlConcurrency(process.env.OPENSWARM_CODEQL_MAX_CONCURRENT),
+);
+
 export const DEFAULT_SECURITY_AUDIT_CONFIG: SecurityAuditConfig = {
   enabled: true,
   maxThreads: 2,
+  maxRamMb: 4096,
 };
 
 export type SecurityFindingLevel = 'error' | 'warning' | 'note';
@@ -238,6 +318,10 @@ export async function runSecurityAudit(
     }] };
   }
 
+  // Held across the snapshot copy and every CodeQL invocation — the whole
+  // stretch that competes with the daemon for CPU and RAM (AGT-4062).
+  await codeqlGate.acquire();
+
   let snapshot: { root: string; cleanup(): Promise<void> } | undefined;
   try {
     snapshot = await createSnapshot(projectPath, sourceFiles);
@@ -270,6 +354,7 @@ export async function runSecurityAudit(
       }
     }
 
+    const ram = `--ram=${config.maxRamMb ?? DEFAULT_SECURITY_AUDIT_CONFIG.maxRamMb}`;
     const findings: SecurityFinding[] = [];
     const skippedCodeqlLanguages: string[] = [];
     let infrastructureFailure = false;
@@ -280,7 +365,7 @@ export async function runSecurityAudit(
       const sarif = join(snapshot.root, `.codeql-${language}.sarif`);
       const create = await run(executable, [
         'database', 'create', database, `--language=${language}`, '--build-mode=none',
-        `--source-root=${snapshot.root}`, `--threads=${config.maxThreads}`,
+        `--source-root=${snapshot.root}`, `--threads=${config.maxThreads}`, ram,
       ], snapshot.root);
       if (create.exitCode !== 0) {
         if (rejectsNoBuildMode(create.stderr || create.stdout, language)) {
@@ -296,7 +381,7 @@ export async function runSecurityAudit(
         : `${pack}:codeql-suites/${language}-security-extended.qls`;
       const analyze = await run(executable, [
         'database', 'analyze', database, querySuite,
-        '--format=sarifv2.1.0', `--output=${sarif}`, `--threads=${config.maxThreads}`,
+        '--format=sarifv2.1.0', `--output=${sarif}`, `--threads=${config.maxThreads}`, ram,
       ], snapshot.root);
       if (analyze.exitCode !== 0) {
         infrastructureFailure = true;
@@ -335,6 +420,15 @@ export async function runSecurityAudit(
       ruleId: 'openswarm/security-codeql-runtime', level: 'error', message: `CodeQL security audit failed: ${cause}`,
     }], detail: cause };
   } finally {
-    await snapshot?.cleanup();
+    // Nested so the slot is returned even when cleanup throws. `rm` runs with
+    // `force: true`, which swallows ENOENT but not EACCES/EPERM/EBUSY — and
+    // before the gate existed a failed cleanup only leaked a temp directory,
+    // whereas now it would strand the slot and deadlock every later audit in
+    // this process. (Caught by the commit-gate review.)
+    try {
+      await snapshot?.cleanup();
+    } finally {
+      codeqlGate.release();
+    }
   }
 }

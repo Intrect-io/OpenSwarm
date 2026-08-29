@@ -268,7 +268,8 @@ const VerifyConfigSchema = z.object({
 const SecurityAuditConfigSchema = z.object({
   enabled: z.boolean().default(true),
   maxThreads: z.number().int().min(1).max(16).default(2),
-}).default({ enabled: true, maxThreads: 2 });
+  maxRamMb: z.number().int().min(512).max(65536).default(4096),
+}).default({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
 
 const AutonomousConfigSchema = z.object({
   /** Auto-enable on service start */

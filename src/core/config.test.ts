@@ -151,6 +151,7 @@ agents:
       expect(config.autonomous?.securityAudit).toEqual({
         enabled: true,
         maxThreads: 2,
+        maxRamMb: 4096,
       });
     });
 
@@ -182,6 +183,7 @@ agents:
       expect(loadConfig('/tmp/config.json').autonomous?.securityAudit).toEqual({
         enabled: false,
         maxThreads: 1,
+        maxRamMb: 4096,
       });
     });
 
