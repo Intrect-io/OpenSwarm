@@ -639,3 +639,41 @@ describe('compactPriorTurns with a wide tool fan-out', () => {
     expect(fanOutHasNoOrphans(messages)).toBe(true);
   });
 });
+
+// `allToolCallsSeen` keys on name+args, and `coordination_read` takes no
+// parameters — so every inbox check produced an identical key and three checks
+// of a quiet inbox tripped the stall detector. An agent waiting for a reply was
+// killed for waiting. (AGT-4065)
+describe('checking an inbox is not a stall', () => {
+  const call = (name: string, args = '{}') => ({ id: `c-${name}-${args}`, function: { name, arguments: args } });
+
+  it('does not count a repeated inbox check as a stalled turn', async () => {
+    const { allToolCallsSeen } = await import('./agenticLoop.js');
+    const seen = new Set<string>();
+    const turn = [call('coordination_read')];
+    // Simulate three consecutive identical checks, as an agent awaiting a reply
+    // would make.
+    for (let i = 0; i < 3; i += 1) {
+      expect(allToolCallsSeen(turn, seen)).toBe(false);
+      seen.add('coordination_read:{}');
+    }
+  });
+
+  it('does not count a wait as a stalled turn either', async () => {
+    const { allToolCallsSeen } = await import('./agenticLoop.js');
+    expect(allToolCallsSeen([call('coordination_wait', '{"timeout_ms":5000}')],
+      new Set(['coordination_wait:{"timeout_ms":5000}']))).toBe(false);
+  });
+
+  it('still catches a genuine stall on tools that read only this agent\'s own work', async () => {
+    const { allToolCallsSeen } = await import('./agenticLoop.js');
+    const repeated = [call('read_file', '{"path":"a.ts"}')];
+    expect(allToolCallsSeen(repeated, new Set(['read_file:{"path":"a.ts"}']))).toBe(true);
+  });
+
+  it('a turn that also checked the inbox is not a stall, even when its other calls repeat', async () => {
+    const { allToolCallsSeen } = await import('./agenticLoop.js');
+    const mixed = [call('read_file', '{"path":"a.ts"}'), call('coordination_read')];
+    expect(allToolCallsSeen(mixed, new Set(['read_file:{"path":"a.ts"}', 'coordination_read:{}']))).toBe(false);
+  });
+});

@@ -15,7 +15,7 @@ import { webFetch, webSearch } from './webTools.js';
 import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
-import { executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -837,7 +837,7 @@ export async function executeTool(
       }
 
       default:
-        if (['coordination_read', 'coordination_history', 'coordination_publish', 'ask_human'].includes(name)) {
+        if (COORDINATION_TOOL_NAMES.has(name)) {
           if (!execOptions?.coordinationContext) {
             return { tool_call_id: callId, content: 'Coordination tools are unavailable outside a scoped autonomous run.', is_error: true };
           }

@@ -748,12 +748,32 @@ export function toolCallKey(tc: ToolCall): string {
 }
 
 /**
+ * Tools whose answer changes without this agent doing anything.
+ *
+ * `same name+args` is a good stall signal for a tool that reads the agent's own
+ * workspace, and a bad one for a tool that reads an inbox: `coordination_read`
+ * takes no parameters at all, so every check produces an identical key and
+ * three checks of a quiet inbox looked exactly like a stalled model. An agent
+ * that waited for a reply was killed for waiting. (AGT-4065)
+ *
+ * The loop is still bounded — `maxTurns` and the wall-clock deadline both
+ * still apply — so exempting these cannot produce an unbounded run.
+ */
+const EXTERNALLY_CHANGING_TOOLS: ReadonlySet<string> = new Set([
+  'coordination_read',
+  'coordination_wait',
+]);
+
+/**
  * True when every tool call this turn was already seen (same name+args), i.e.
  * pure repetition with no new info or change — a stalled turn. Empty turns are
- * not stalls (the model produced no tool calls, which ends the loop normally).
+ * not stalls (the model produced no tool calls, which ends the loop normally),
+ * and neither is a turn that checked something only the outside world can
+ * change.
  */
 export function allToolCallsSeen(toolCalls: ToolCall[], seen: Set<string>): boolean {
   if (toolCalls.length === 0) return false;
+  if (toolCalls.some((tc) => EXTERNALLY_CHANGING_TOOLS.has(tc.function.name))) return false;
   return toolCalls.every((tc) => seen.has(toolCallKey(tc)));
 }
 
