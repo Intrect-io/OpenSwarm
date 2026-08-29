@@ -192,7 +192,7 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     await newProcessor().fixOne(pr, '/tmp/proj');
 
     const args = createPipelineFromConfigImpl.mock.calls.at(-1);
-    expect(args?.[9]).toEqual({ enabled: true, maxThreads: 2 });
+    expect(args?.[9]).toEqual({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
   });
 
   it('succeeds when there are no conflicts, the pipeline succeeds, and CI passes', async () => {

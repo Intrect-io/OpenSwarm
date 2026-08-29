@@ -155,6 +155,14 @@ autonomous:
   securityAudit:
     enabled: true
     maxThreads: 2
+    # Memory target passed to each CodeQL run, in MB. Best-effort by CodeQL's
+    # own account — a large database can still exceed it.
+    maxRamMb: 4096
+    # How many CodeQL runs may execute at once is a PROCESS-wide bound, not a
+    # per-audit setting, so it lives in the environment rather than here:
+    # OPENSWARM_CODEQL_MAX_CONCURRENT (default 1, max 8). Raise it only on a
+    # host with cores to spare — the audit runs twice per task, and letting it
+    # scale with maxConcurrentTasks is what starved the daemon (AGT-4062).
 
   # Pipeline guards
   guards:

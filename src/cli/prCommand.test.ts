@@ -203,7 +203,7 @@ describe('loadRolesBestEffort / buildProcessorConfig (INT-3282)', () => {
   });
 
   it('defaults PR remediation to the enabled CodeQL policy', () => {
-    expect(loadSecurityAuditBestEffort()).toEqual({ enabled: true, maxThreads: 2 });
+    expect(loadSecurityAuditBestEffort()).toEqual({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
   });
 
   it('enables the conflict resolver by default', () => {

@@ -503,6 +503,10 @@ export type VerifyConfig = {
 export type SecurityAuditConfig = {
   enabled: boolean;
   maxThreads: number;
+  /** Memory target passed to each CodeQL run, in MB. Best-effort: CodeQL's own
+   *  help says a large database may still break the threshold, so the
+   *  concurrency gate — not this — is what actually bounds total usage. */
+  maxRamMb: number;
 };
 
 export type AutonomousStartupConfig = {

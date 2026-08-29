@@ -22,6 +22,9 @@ vi.mock('node:fs/promises', async (importOriginal) => ({
 }));
 
 import {
+  codeqlGate,
+  ConcurrencyGate,
+  resolveCodeqlConcurrency,
   DEFAULT_SECURITY_AUDIT_CONFIG,
   detectCodeqlLanguages,
   listTrackedSecurityFiles,
@@ -34,6 +37,9 @@ import {
 beforeEach(() => {
   vi.stubEnv('PATH', '/tools');
   vi.clearAllMocks();
+  // Module state shared by every case here: without this, one test that leaves
+  // a slot held makes each later one wait out its full timeout.
+  codeqlGate.reset();
   fsMock.access.mockResolvedValue(undefined);
   fsMock.cp.mockResolvedValue(undefined);
   fsMock.lstat.mockResolvedValue({ isFile: () => true, isSymbolicLink: () => false });
@@ -259,5 +265,171 @@ describe('listTrackedSecurityFiles', () => {
       ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
       expect.objectContaining({ cwd: '/repo' }),
     );
+  });
+});
+
+// The audit runs per task, twice (baseline + post-work), so without a cap its
+// cost scaled with `maxConcurrentTasks`. Measured on the daemon at 6: two
+// overlapping runs held 6.5 GB beside the daemon's own 3.41 GB, the container
+// sat pinned at its 4-CPU cap with `memory.peak` at 13.76 of 16 GiB, and the
+// single JS thread stalled up to 40s. (AGT-4062)
+/** parseSarif requires version 2.1.0 — an omitted version ends the audit in `failed`. */
+const EMPTY_SARIF = JSON.stringify({ version: '2.1.0', runs: [{ results: [] }] });
+
+/** A wake-up that never comes should fail the test, not hang the suite. */
+function withinTick<T>(promise: Promise<T>, what: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`never resolved: ${what}`)), 100)),
+  ]);
+}
+
+describe('ConcurrencyGate', () => {
+  it('lets callers through up to the limit and makes the next one wait', async () => {
+    const gate = new ConcurrencyGate(2);
+    await gate.acquire();
+    await gate.acquire();
+    expect(gate.activeCount).toBe(2);
+
+    let third = false;
+    const pending = gate.acquire().then(() => { third = true; });
+    await Promise.resolve();
+    expect(third).toBe(false);
+    expect(gate.waitingCount).toBe(1);
+
+    gate.release();
+    await withinTick(pending, 'release did not wake the queued caller');
+    expect(third).toBe(true);
+  });
+
+  it('serves queued callers in arrival order', async () => {
+    const gate = new ConcurrencyGate(1);
+    await gate.acquire();
+    const order: string[] = [];
+    const first = gate.acquire().then(() => { order.push('queued-first'); });
+    const second = gate.acquire().then(() => { order.push('queued-second'); });
+
+    gate.release();
+    await withinTick(first, 'first queued caller');
+    expect(order).toEqual(['queued-first']);
+    expect(gate.activeCount).toBe(1);
+
+    gate.release();
+    await withinTick(second, 'second queued caller');
+    expect(order).toEqual(['queued-first', 'queued-second']);
+  });
+
+  it('never lets release drive the active count below zero', () => {
+    const gate = new ConcurrencyGate(1);
+    gate.release();
+    gate.release();
+    expect(gate.activeCount).toBe(0);
+  });
+
+  it('frees the slot on reset so one leaked hold cannot hang the rest of a file', async () => {
+    const gate = new ConcurrencyGate(1);
+    await gate.acquire();
+    gate.reset();
+    await withinTick(gate.acquire(), 'reset did not free the slot');
+    expect(gate.activeCount).toBe(1);
+  });
+});
+
+describe('resolveCodeqlConcurrency', () => {
+  // Read once at module load. A bad value must not fail the daemon's start, so
+  // anything unusable falls back to the cap the measurement supports.
+  it.each([
+    ['3', 3],
+    ['1', 1],
+    ['8', 8],
+    [undefined, 1],
+    ['', 1],
+    ['nonsense', 1],
+    ['0', 1],
+    ['-2', 1],
+    ['9', 1],
+    ['2.5', 1],
+  ])('resolves %s to %i', (raw, expected) => {
+    expect(resolveCodeqlConcurrency(raw as string | undefined)).toBe(expected);
+  });
+});
+
+describe('runSecurityAudit resource bounds (AGT-4062)', () => {
+  it('runs one audit at a time no matter how many callers arrive', { timeout: 3_000 }, async () => {
+    // Three concurrent callers, default config. Only the holder may reach
+    // CodeQL; the rest must be parked before spawning anything.
+    let releaseFirst: (() => void) | undefined;
+    const firstCallStarted = new Promise<void>((started) => {
+      execFileMock.mockImplementation(() => new Promise((resolve) => {
+        started();
+        releaseFirst = () => resolve({ stdout: '', stderr: '' });
+      }));
+    });
+
+    const audits = [
+      runSecurityAudit('/repo', ['src/a.ts']),
+      runSecurityAudit('/repo', ['src/b.ts']),
+      runSecurityAudit('/repo', ['src/c.ts']),
+    ];
+    await firstCallStarted;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // One `pack download`, from the single audit holding the gate.
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+
+    // Let everything drain so the shared gate is not left held for later tests.
+    execFileMock.mockImplementation(async () => ({ stdout: '', stderr: '' }));
+    releaseFirst?.();
+    fsMock.readFile.mockResolvedValue(EMPTY_SARIF);
+    await Promise.all(audits);
+  });
+
+  it('caps the memory each CodeQL invocation may take', async () => {
+    fsMock.readFile.mockResolvedValue(EMPTY_SARIF);
+    await runSecurityAudit('/repo', ['src/a.ts']);
+
+    const codeql = execFileMock.mock.calls
+      .map((call) => call[1] as string[])
+      .filter((args) => args[0] === 'database');
+    expect(codeql.length).toBeGreaterThanOrEqual(2); // create + analyze
+    for (const args of codeql) {
+      expect(args).toContain(`--ram=${DEFAULT_SECURITY_AUDIT_CONFIG.maxRamMb}`);
+    }
+  });
+
+  it('bounds concurrency per process, not per configured task parallelism', async () => {
+    // The bug was exactly this coupling: audit cost tracked maxConcurrentTasks
+    // while the container budget stayed fixed. Four callers, one process cap.
+    let inFlight = 0;
+    let peak = 0;
+    execFileMock.mockImplementation(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      inFlight -= 1;
+      return { stdout: '', stderr: '' };
+    });
+    fsMock.readFile.mockResolvedValue(EMPTY_SARIF);
+
+    await Promise.all(['a', 'b', 'c', 'd'].map((n) => runSecurityAudit('/repo', [`src/${n}.ts`])));
+    expect(peak).toBe(1);
+  });
+});
+
+describe('the gate survives a failing snapshot cleanup (AGT-4062)', () => {
+  it('returns the slot even when cleanup throws', { timeout: 3_000 }, async () => {
+    // `rm` runs with force:true, which swallows ENOENT but not EACCES/EPERM/
+    // EBUSY. Before the gate a failed cleanup only leaked a temp directory;
+    // with a limit of 1 it would strand the slot and deadlock every later
+    // audit in this process.
+    fsMock.readFile.mockResolvedValue(EMPTY_SARIF);
+    fsMock.rm.mockRejectedValueOnce(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+
+    await expect(runSecurityAudit('/repo', ['src/a.ts'])).rejects.toThrow('EACCES');
+    expect(codeqlGate.activeCount).toBe(0);
+
+    // The next audit must still be able to start.
+    fsMock.rm.mockResolvedValue(undefined);
+    await expect(runSecurityAudit('/repo', ['src/b.ts'])).resolves.toMatchObject({ status: 'passed' });
   });
 });
