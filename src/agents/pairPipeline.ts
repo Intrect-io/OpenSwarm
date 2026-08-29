@@ -51,7 +51,8 @@ import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRol
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
-import { coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
+import { repoNameFromPath, worktreeNameFromPath } from './repoPathNames.js';
+import { assignedAgentName, coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
 import {
   isTesterCodeFile,
@@ -427,6 +428,10 @@ export class PairPipeline extends EventEmitter {
             onLog,
             runWorker: workerAgent.runWorker,
           });
+          // The assigned handle replaces whatever the model called itself, so
+          // every reader of `codename` — the Linear comment among them — names
+          // the agent the way the board does. (AGT-4064)
+          (result as { codename?: string }).codename = assignedAgentName(context, 'worker');
           agentPair.saveWorkerResult(context.session.id, result as WorkerResult);
           context.workerResult = result as WorkerResult;
 
@@ -512,6 +517,7 @@ export class PairPipeline extends EventEmitter {
           safeConsole.log(`[${prefix}] Running full review...`);
           result = await reviewerAgent.runReviewer(reviewerOptions);
 
+          (result as { codename?: string }).codename = assignedAgentName(context, 'reviewer');
           agentPair.saveReviewerResult(context.session.id, result as ReviewResult);
           context.reviewResult = result as ReviewResult;
 
@@ -1383,16 +1389,6 @@ export function createPipelineFromConfig(
     roleMcpTools,
     adapterRouting,
   });
-}
-
-function repoNameFromPath(projectPath?: string): string | undefined {
-  if (!projectPath) return undefined;
-  const normalized = projectPath.replace(/\/+$/, '').replace(/\/worktree\/[^/]+$/, '');
-  return normalized.split('/').pop();
-}
-
-function worktreeNameFromPath(projectPath?: string): string | undefined {
-  return projectPath?.match(/\/worktree\/([^/]+)\/?$/)?.[1];
 }
 
 // Helpers

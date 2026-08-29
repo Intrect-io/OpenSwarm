@@ -41,7 +41,13 @@ describe('runPeriodicReview', () => {
     const { getCoordinationStore } = await import('./coordinationStore.js');
     const events = getCoordinationStore().list({ limit: 10 });
     expect(events).not.toHaveLength(0);
-    for (const event of events) expect(event.actorName).toMatch(/^[a-z][a-z-]*-[0-9a-f]{4}$/);
+    // An assigned handle, never the machine-ID shape the operator banned after
+    // seeing `→ reviewer-b0bc` on the board (AGT-4064).
+    for (const event of events) {
+      expect(event.actorName).toBeTruthy();
+      expect(event.actorName).not.toMatch(/^(?:worker|reviewer|orchestrator|review-agent)-[0-9a-f]{4,}$/);
+      expect(event.actorName).not.toMatch(/ \d+$/);
+    }
   });
 
   it('runs hygiene through deterministic cxt and records lifecycle events', async () => {
