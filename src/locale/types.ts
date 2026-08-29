@@ -394,6 +394,11 @@ export interface LocaleMessages {
  */
 /** Worker에 주입할 코드 컨텍스트 (반복 횟수 감소 목적) */
 export interface WorkerContext {
+  /**
+   * What the repository's other worktrees are editing right now, so a worker
+   * can see an overlap before its branch collides with theirs at integration.
+   */
+  siblingWork?: { identifier: string; files: string[] }[];
   /** Repository/toolchain capsule captured before a fix worker mutates files. */
   repository?: {
     packageManager?: string;
