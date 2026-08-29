@@ -117,6 +117,26 @@ describe('coordination_wait', () => {
       .resolves.toEqual([]);
   }, 10_000);
 
+  it('reports a board that broke after its first successful read, not an empty inbox', async () => {
+    // The mirror of the transient case, and the one that bites: the first
+    // drain succeeds empty, then the board becomes unreadable for the rest of
+    // the wait. Tracking "any drain ever succeeded" called that a clean empty
+    // inbox — but that first read says nothing about the seconds that followed
+    // it, during which a reply could have landed unseen. The LAST observation
+    // is what an empty list has to rest on. (Caught by the fresh PR review.)
+    const mod = await tools();
+    let call = 0;
+    const store = {
+      consume: async () => {
+        call += 1;
+        if (call === 1) return [] as unknown[];
+        throw new Error('EACCES board went away');
+      },
+    };
+    await expect(mod.waitForInbox(store, { repository: '/repo', taskId: 't1', actor: 'a' }, 3_000))
+      .rejects.toThrow(/Coordination board unavailable.*EACCES/);
+  }, 10_000);
+
   it('wakes for a publisher the in-process hub cannot see', async () => {
     // `openswarm attach` and the CLI write to the board file from their own
     // processes, where an in-memory emitter never fires. Without a slow

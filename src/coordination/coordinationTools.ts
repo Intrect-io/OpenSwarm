@@ -293,12 +293,18 @@ export async function waitForInbox(
     let settled = false;
     let draining = false;
     let again = false;
-    // A board that cannot be read is not the same as a board with no mail. If
-    // every drain failed, the deadline must report that rather than hand back
-    // an empty list an agent would read as "nobody answered". (Caught by the
-    // commit-gate review.)
-    let anySuccess = false;
-    let lastError: unknown;
+    // A board that cannot be read is not the same as a board with no mail: an
+    // empty list is a claim about the board's contents, and only a drain that
+    // actually completed can support it. (Caught by the commit-gate review.)
+    //
+    // What matters is the LAST attempt, not whether any ever worked. `consume`
+    // returns everything unseen rather than a delta, so one good read at the
+    // end also observes whatever arrived during an earlier failure — but a
+    // first read that succeeded empty says nothing about the twenty seconds of
+    // failures that followed it, during which a reply could have landed
+    // unseen. Tracking "any success" reported those as a clean empty inbox.
+    // (Caught by the fresh PR review.)
+    let pendingError: unknown;
     let expired = false;
 
     const stop = () => {
@@ -321,10 +327,10 @@ export async function waitForInbox(
       draining = true;
       drain()
         .then((events) => {
-          anySuccess = true;
+          pendingError = undefined; // this read saw the board; earlier failures are covered
           if (events.length > 0) finish(events);
         })
-        .catch((error) => { lastError = error; })
+        .catch((error) => { pendingError = error; })
         .finally(() => {
           draining = false;
           if (settled) return;
@@ -339,8 +345,8 @@ export async function waitForInbox(
     }
 
     function settleExpired(): void {
-      if (!anySuccess && lastError !== undefined) {
-        fail(new Error(`Coordination board unavailable: ${lastError instanceof Error ? lastError.message : String(lastError)}`));
+      if (pendingError !== undefined) {
+        fail(new Error(`Coordination board unavailable: ${pendingError instanceof Error ? pendingError.message : String(pendingError)}`));
         return;
       }
       finish([]);
