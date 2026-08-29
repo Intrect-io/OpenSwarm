@@ -4,7 +4,7 @@
 // ============================================
 
 import type { PromptTemplates } from '../types.js';
-import { formatSiblingWork } from '../../agents/siblingWork.js';
+import { formatSiblingWork } from '../../agents/siblingWorkFormat.js';
 
 const DATA_BLOCK_OPEN = '<openswarm-untrusted-data>';
 const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
