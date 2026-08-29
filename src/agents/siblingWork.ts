@@ -43,11 +43,20 @@ export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = [];
   let current: WorktreeEntry | undefined;
 
-  for (const line of porcelain.split('\n')) {
+  for (const rawLine of porcelain.split('\n')) {
+    // Only \r is stripped, for a checkout written with CRLF endings. The path
+    // itself is NOT trimmed: measured against real git, `worktree list
+    // --porcelain` emits paths literally and unquoted, trailing space included,
+    // so trimming corrupts a legitimate path — which then either fails to match
+    // ourselves (and we report our own edits as a peer's) or points `git status`
+    // at a directory that does not exist (and a real overlap goes unseen).
+    // (Caught by the fresh PR review.)
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
     if (line.startsWith('worktree ')) {
-      current = { path: line.slice('worktree '.length).trim() };
+      current = { path: line.slice('worktree '.length) };
       entries.push(current);
     } else if (line.startsWith('branch ') && current) {
+      // A ref name cannot contain whitespace, so trimming here is safe.
       current.branch = line.slice('branch '.length).trim();
     }
   }

@@ -33,6 +33,22 @@ describe('parseWorktreeList', () => {
     expect(parseWorktreeList('worktree /w/a\nHEAD abc\ndetached\n')).toEqual([{ path: '/w/a' }]);
   });
 
+  it('keeps a worktree path with a trailing space', () => {
+    // Verified against real git: `worktree list --porcelain` emits paths
+    // literally, trailing space and all. Trimming it either hides a real
+    // overlap or makes us report our own edits as a peer's.
+    expect(parseWorktreeList('worktree /repo/trailing \nHEAD abc\n')).toEqual([{ path: '/repo/trailing ' }]);
+  });
+
+  it('keeps a worktree path containing spaces', () => {
+    expect(parseWorktreeList('worktree /repo/my worktree\nHEAD abc\n')).toEqual([{ path: '/repo/my worktree' }]);
+  });
+
+  it('tolerates CRLF line endings', () => {
+    expect(parseWorktreeList('worktree /repo/a\r\nbranch refs/heads/x\r\n'))
+      .toEqual([{ path: '/repo/a', branch: 'refs/heads/x' }]);
+  });
+
   it('returns nothing for empty output', () => {
     expect(parseWorktreeList('')).toEqual([]);
   });
