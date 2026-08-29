@@ -20,7 +20,7 @@ import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { getCodexModelIds } from './codexModels.js';
 import { codexMcpConfigArgs } from './memoryMcp.js';
 import { codexUserMcpDisableArgs } from './codexUserMcp.js';
-import { parseReviewerResult } from './resultParsing.js';
+import { extractSummary, parseReviewerResult } from './resultParsing.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -484,12 +484,6 @@ function isExplicitFailure(text: string): boolean {
   return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(text);
 }
 
-function extractSummary(text: string): string {
-  const lines = text.split('\n').filter((l) => l.trim().length > 10);
-  if (lines.length === 0) return t('common.fallback.noSummary');
-  const summary = lines[0].trim();
-  return summary.length > 200 ? `${summary.slice(0, 200)}...` : summary;
-}
 
 function extractErrorMessage(text: string): string {
   const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
