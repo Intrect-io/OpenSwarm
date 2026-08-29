@@ -86,6 +86,63 @@ describe('stage lifecycle on the coordination board', () => {
     expect(event).toMatchObject({ actorName: 'Sable', recipientRole: 'worker', status: 'failed', correlationId: exchangeId });
   });
 
+  // AGT-4060: the board showed `(no summary)` and bare `Codename: X` lines
+  // where the agent's report should be. Both reached it as truthy strings, so
+  // the `said || timing-fallback` never fired. Reported by the user watching
+  // the live board, not caught by a test.
+  describe('a summary that carries no report falls through to the timing fallback (AGT-4060)', () => {
+    async function outcomeSummary(summary: string | undefined, success = true): Promise<unknown> {
+      const ctx = context({ task: { id: `t-${summary ?? 'none'}`, issueId: `i-${summary ?? 'none'}`, issueIdentifier: 'AGT-60', title: 'T' } });
+      publishStageOutcomeToBoard(ctx as never, 'worker', {
+        success, durationMs: 3_300, result: { summary },
+      }, stageCorrelationId(ctx as never, 'worker'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return (published.events.at(-1) as Record<string, unknown>).summary;
+    }
+
+    it("does not publish the adapter's literal `(no summary)` placeholder", async () => {
+      expect(await outcomeSummary('(no summary)')).toBe('Finished in 3.3s');
+    });
+
+    it('does not publish a summary that is only the agent\'s Codename introduction', async () => {
+      // worker.ts strips this line but restores the original when stripping
+      // empties it, so a codename-only summary arrives here intact and would
+      // otherwise read as the agent reporting its own name as its work.
+      expect(await outcomeSummary('Codename: Atlas')).toBe('Finished in 3.3s');
+    });
+
+    it('uses the failure wording when a reportless stage failed', async () => {
+      expect(await outcomeSummary('(no summary)', false)).toBe('Did not pass in 3.3s');
+    });
+
+    it('still publishes a real summary untouched', async () => {
+      expect(await outcomeSummary('Added the JOIN guard and a regression test.'))
+        .toBe('Added the JOIN guard and a regression test.');
+    });
+
+    it('keeps the report when a codename line merely precedes it', async () => {
+      expect(await outcomeSummary('Codename: Atlas\nAdded the JOIN guard.')).toBe('Added the JOIN guard.');
+    });
+
+    // Caught by the fresh PR review, not self-caught: the adapters emit the
+    // ACTIVE locale's placeholder (`t('common.fallback.noSummary')`), so an
+    // English-only comparison still published `(요약 없음)` verbatim on a
+    // Korean deployment — which is this repo's own default locale.
+    it("recognizes the placeholder in whatever locale the adapters emitted it", async () => {
+      const { initLocale, t } = await import('../locale/index.js');
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+      initLocale('ko');
+      try {
+        expect(t('common.fallback.noSummary')).toBe('(요약 없음)');
+        expect(await outcomeSummary('(요약 없음)')).toBe('Finished in 3.3s');
+      } finally {
+        initLocale('en');
+        log.mockRestore();
+      }
+    });
+  });
+
   beforeEach(() => { published.events = []; });
 
   it('records a worker start as a delegation addressed from a named agent', async () => {

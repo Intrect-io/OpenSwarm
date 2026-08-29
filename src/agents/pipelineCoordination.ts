@@ -8,6 +8,7 @@
 import type { PipelineContext } from './pairPipelineTypes.js';
 import { assignCallSign, callSignAddress, sanitizeAgentDisplayName, type AgentRole } from '../coordination/agentNames.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
+import { t } from '../locale/index.js';
 
 /**
  * Roles that appear on the coordination board as deployed agents.
@@ -149,6 +150,33 @@ const exchangeQueues = new Map<string, Promise<void>>();
  * record must never fail the stage it describes.
  */
 /**
+ * A summary that carries no actual report, normalized to undefined so the
+ * caller's timing fallback fires. Two things reach here that are not words:
+ *
+ * - The placeholder an adapter substitutes for a missing summary
+ *   (`src/adapters/resultParsing.ts`, `codex.ts`, `claude.ts`,
+ *   `agents/documenter.ts`, `agents/auditor.ts`, `agents/skillDocumenter.ts`).
+ *   It is truthy, so `said || fallback` took it and the board showed the
+ *   placeholder where a duration would at least have been true. Compared
+ *   through `t()` rather than a hardcoded string: the adapters emit the ACTIVE
+ *   locale's value, so an English-only check would still publish `(요약 없음)`
+ *   on a Korean deployment — this repo's own default. `worker.ts` already
+ *   compares against `t('common.fallback.noSummary')` for the same reason.
+ *   (Caught by the fresh PR review, not self-caught.)
+ * - A summary that is only the agent's `Codename:` self-introduction
+ *   (AGT-4019). `worker.ts` strips that line, but restores the original when
+ *   stripping empties the string, so a codename-only summary arrived intact
+ *   and read as if the agent had reported its own name as its work.
+ *   `src/linear/format.ts` already strips it without restoring for the Linear
+ *   comment path; this is the same rule for the board. (AGT-4060)
+ */
+function boardWords(summary: string | undefined): string | undefined {
+  const stripped = summary?.replace(/^\s*Codename:.*$/gim, '').trim();
+  if (!stripped || stripped === t('common.fallback.noSummary')) return undefined;
+  return stripped;
+}
+
+/**
  * Publish a finished stage as the agent's own words, addressed to its
  * counterpart. Registers the codename the agent introduced itself with
  * (first introduction wins), then speaks its summary/feedback instead of a
@@ -169,7 +197,7 @@ export function publishStageOutcomeToBoard(
   }
   const said = stage === 'reviewer'
     ? [spoken?.decision ? `[${spoken.decision}]` : undefined, spoken?.feedback?.trim()].filter(Boolean).join(' ')
-    : spoken?.summary?.trim();
+    : boardWords(spoken?.summary);
   const seconds = (outcome.durationMs / 1000).toFixed(1);
   void publishStageToBoard(
     context,
