@@ -16,6 +16,12 @@ import { answerHint } from './answerHint.js';
 export interface HumanQuestionInput {
   repository: string;
   taskId: string;
+  /**
+   * The issue identifier this question belongs to (AX-867), used to address the
+   * operator and to attribute the board event. `taskId` is a worktree UUID, so
+   * without this the page reads "a decision for f8c57098-cbf6-…" (AGT-4074).
+   */
+  taskLabel?: string;
   /** Board address of the agent asking, so the answer can be routed back. */
   actor: string;
   actorName?: string;
@@ -96,6 +102,7 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
     await store.publish({
       repository: input.repository,
       taskId: input.taskId,
+      taskLabel: input.taskLabel,
       actor: input.actor,
       actorName: input.actorName,
       actorRole: input.actorRole,
@@ -145,16 +152,29 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
 
   const notify = input.notify ?? notifyOperatorViaDiscord;
   const delivered = await notify(
-    `OpenSwarm needs a decision for ${input.taskId}` +
+    `OpenSwarm needs a decision for ${input.taskLabel ?? input.taskId}` +
       `${input.actorName ? ` (asked by ${input.actorName})` : ''}.\n${input.question}\n\n` +
       answerHint(correlationId),
   );
   if (delivered) {
+    // Published under the ASKING agent, not the daemon. The board's pending set
+    // is the latest event per correlation id
+    // (`web/static/js/orchestrationModel.mjs:129-133`), and this marker shares
+    // the question's id and lands after it — so it was the latest event for 48
+    // of 69 pending exchanges on the live board, and every "who is waiting on
+    // the operator" readout named the daemon instead of the parked worker.
+    //
+    // It stays a pending `human-question` on purpose: moving it to another kind
+    // would drop those exchanges out of `pendingQuestions`, and marking it
+    // terminal would drop them out of the pending set altogether. The note is
+    // about this agent's question, so the agent is the right speaker (AGT-4074).
     await store.publish({
       repository: input.repository,
       taskId: input.taskId,
-      actor: 'openswarm-daemon',
-      actorName: 'OpenSwarm daemon',
+      taskLabel: input.taskLabel,
+      actor: input.actor,
+      actorName: input.actorName,
+      actorRole: input.actorRole,
       recipient: 'human',
       kind: 'human-question',
       status: 'running',
@@ -186,6 +206,7 @@ export async function answerHumanQuestion(
   const event = await store.publish({
     repository: question.repository,
     taskId: question.taskId,
+    taskLabel: question.taskLabel,
     actor,
     actorRole: 'human',
     recipient: question.actor,
@@ -218,6 +239,7 @@ export async function answerHumanQuestion(
     await store.publish({
       repository: question.repository,
       taskId: question.taskId,
+      taskLabel: sibling.taskLabel,
       actor,
       actorRole: 'human',
       recipient: sibling.actor,

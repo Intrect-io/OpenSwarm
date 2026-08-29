@@ -227,6 +227,7 @@ export async function executeCoordinationTool(
     const posted = await postHumanQuestion({
       repository: context.repository,
       taskId: context.taskId,
+      taskLabel: context.taskLabel,
       actor: context.actor,
       actorName: context.actorName,
       actorRole: context.actorRole,
