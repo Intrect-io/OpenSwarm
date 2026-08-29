@@ -291,6 +291,15 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // could exhaust it and then slip past the guard, ending analysis-only. (INT-1925)
   let noEditNudgesUsed = 0;
   let readLoopNudgesUsed = 0;
+  // AGT-4054: an operator or another agent can reach out mid-task without this
+  // agent asking first — nothing else in the loop surfaces that unprompted, so
+  // track how long it has been since coordination_read last actually consumed
+  // the live inbox (turn 0 = "as if checked at the start") and nudge
+  // periodically. coordination_history does NOT count — it searches the
+  // permanent trace and consumes nothing (its own tool description says so),
+  // so an agent could call it repeatedly and never see a newly addressed
+  // message; only a real coordination_read proves the inbox was checked.
+  let lastCoordinationCheckTurn = 0;
   // search-replace stall guard: consecutive finish-turns where S/R blocks were
   // present but ALL failed to apply. A model can re-emit the same non-matching
   // block forever, burning turns at full API cost — bail after a couple. (INT-1676)
@@ -516,6 +525,17 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       (tc.function.name === 'edit_file' || tc.function.name === 'write_file' || tc.function.name === 'apply_patch') && !results[i]?.is_error,
     ).length;
 
+    // AGT-4054: only a successful coordination_read resets the nudge clock —
+    // coordination_history consumes nothing (it searches the permanent trace,
+    // not the live inbox), so it must NOT count as "checked" or an agent could
+    // satisfy the nudge forever without ever consuming a newly addressed
+    // message. A reset here is otherwise indistinguishable from one caused by
+    // the nudge firing itself (set below) — a check the model does on its own
+    // looks the same either way.
+    if (toolCalls.some((tc, i) => tc.function.name === 'coordination_read' && !results[i]?.is_error)) {
+      lastCoordinationCheckTurn = turn;
+    }
+
     // Capture the shell commands the worker actually ran (ground truth for the
     // validation-evidence gate — the model's self-reported `commands` is often
     // empty). Only successful bash calls; deduped, capped. (INT-2485)
@@ -594,6 +614,28 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
           'You have spent several turns reading/searching with ZERO edits. You have enough ' +
           'context now — STOP reading and apply the fix with edit_file immediately, then verify. ' +
           'Do not read more files unless an edit actually fails.',
+      });
+    }
+
+    // AGT-4054: an operator or another agent can message this agent mid-task
+    // without it asking first (unlike ask_human, which the agent itself
+    // initiates) — nothing else here surfaces that, so nudge periodically.
+    // Not readOnly-gated here: coordination tools are already withheld from
+    // `tools` when readOnly or !coordinationContext, so a nudge in that case
+    // would just get ignored — but skip it anyway to avoid a pointless turn.
+    const turnsSinceCoordinationCheck = turn - lastCoordinationCheckTurn;
+    if (!readOnly && shouldNudgeCoordinationCheck(Boolean(coordinationContext), turnsSinceCoordinationCheck)) {
+      onLog?.(`↩ Coordination-inbox nudge: turn ${turn}, ${turnsSinceCoordinationCheck} turns since last check`);
+      // Treat the nudge itself as a check for spacing purposes — the model
+      // gets a fresh window either way, whether it heeds this one or not.
+      lastCoordinationCheckTurn = turn;
+      messages.push({
+        role: 'user',
+        content:
+          'It has been a while since you checked your coordination inbox. Call coordination_read ' +
+          'now to see if the operator or another agent has sent you anything. If you find a ' +
+          'message that is not a reply to something you initiated, acknowledge it with ' +
+          'coordination_publish before continuing your work.',
       });
     }
   }
@@ -730,6 +772,24 @@ export function shouldNudgeReadLoop(
   turn: number,
 ): boolean {
   return editToolCount === 0 && nudgesUsed < nudgeMax && turn >= READ_LOOP_NUDGE_AT;
+}
+
+/**
+ * How often a coordination-enabled agent gets nudged to check its inbox when
+ * it hasn't checked on its own. Matches READ_LOOP_NUDGE_AT's cadence — the
+ * same turn budget this loop is already tuned around. Unlike the read-loop
+ * nudge, this repeats (not capped by a nudge-count budget): a long task
+ * should get checked in on more than once, and an agent already checking on
+ * its own never triggers it, since its own calls reset the clock. (AGT-4054)
+ */
+export const COORDINATION_CHECK_NUDGE_EVERY = 6;
+
+/** True when a coordination-enabled agent has gone too long without checking its inbox. */
+export function shouldNudgeCoordinationCheck(
+  hasCoordinationContext: boolean,
+  turnsSinceLastCheck: number,
+): boolean {
+  return hasCoordinationContext && turnsSinceLastCheck >= COORDINATION_CHECK_NUDGE_EVERY;
 }
 
 // ============ 히스토리 압축 (VEGA compaction.py 패턴 이식) ============

@@ -80,6 +80,26 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
+/**
+ * Appended to a worker/reviewer's system prompt whenever it has a
+ * coordinationContext, alongside the periodic in-loop nudge
+ * (src/adapters/agenticLoop.ts's shouldNudgeCoordinationCheck). The nudge
+ * says *when* to check; this says *why it matters and what a good response
+ * looks like*, so it stays short — the nudge message itself carries the
+ * "do it now" instruction. (AGT-4054)
+ */
+export const COORDINATION_GUIDANCE_PROMPT = `
+
+## Coordination inbox
+
+An operator or another agent may message you mid-task through the
+coordination board, without you asking first. If you check your inbox
+(\`coordination_read\`) and find a message that is not a reply to something
+you initiated, acknowledge it with \`coordination_publish\` before you finish
+your work — do not just silently fold it into your next edit with no
+response.
+`;
+
 export async function executeCoordinationTool(
   name: string,
   args: Record<string, unknown>,

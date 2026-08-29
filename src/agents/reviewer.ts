@@ -14,7 +14,7 @@ import { isInfraError } from '../adapters/errorClassification.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
-import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { COORDINATION_GUIDANCE_PROMPT, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 // Types
 
@@ -93,6 +93,19 @@ export interface ReviewerOptions {
 function reviewerIdentityHeader(callSign: string | undefined): string {
   if (!callSign) return '';
   return `\n\n## Your identity\nYou are **${callSign}**. Sign your review with that call sign so the worker and the operator know who reviewed the change.\n`;
+}
+
+/**
+ * Coordination tools are withheld while readOnly is set (INT-3189) even
+ * though coordinationContext is still carried for identity/labeling — so
+ * this must check both, not just coordinationContext, or the reviewer would
+ * be told to use a tool it doesn't actually have. (AGT-4054)
+ */
+function reviewerCoordinationGuidance(
+  coordinationContext: CoordinationToolContext | undefined,
+  readOnly: boolean | undefined,
+): string {
+  return coordinationContext && !readOnly ? COORDINATION_GUIDANCE_PROMPT : '';
 }
 
 export interface PreCheckResult {
@@ -317,6 +330,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       processContext: options.processContext,
       systemPrompt: getPrompts().systemPrompt
         + reviewerIdentityHeader(options.coordinationContext?.actorName)
+        + reviewerCoordinationGuidance(options.coordinationContext, options.readOnly)
         + (options.instructionCapsule?.text ?? ''),
       reasoningEffort: options.reasoningEffort,
       mcpTools: options.mcpTools,
