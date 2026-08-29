@@ -104,8 +104,20 @@ RUN npm install -g @intrect/cxt@0.3.0 && npm cache clean --force
 # uv, for repositories that are uv projects. Copied from the official image
 # rather than piped from an installer, and pinned by digest rather than tag —
 # a tag can be repointed, so only the digest makes this build reproducible.
-# The digest is the multi-arch index for v0.5.11; bump both together.
-COPY --from=ghcr.io/astral-sh/uv@sha256:0ac957607303916420297a4c9c213bb33fbd3c888f9cd7f4f7273596ebf42b85 /uv /uvx /usr/local/bin/
+# The digest is the multi-arch index for v0.12.7; bump both together.
+#
+# Held at 0.5.11 until 2026-08-29, where it cost the daemon its event loop.
+# 0.5.11 caches wheels as archives and re-extracts them into every venv: of 129
+# files sampled in a fresh venv, 0 were hardlinks, and `UV_LINK_MODE=hardlink`
+# made no difference. 0.12.7 keeps an extracted `archive-v0` store and links
+# from it — 349 of 400 files in a real `uv sync` of apps/pipelines, whose venv
+# is 392MB. With 23 worktrees each building their own (the venv is deliberately
+# never shared: a linked one makes a worktree import the main checkout's src/),
+# rebuilding three or four at once wrote ~1.49GB and blocked the loop for 28-33s,
+# observed seven times. Verified against the real lockfile before bumping:
+# `uv.lock` is version 1, 0.12.7 reads it unmigrated and `sync --frozen`
+# completed in 1.7s.
+COPY --from=ghcr.io/astral-sh/uv@sha256:95f2aa1fe59274951cfe9b0cbc7972e879ff1004bc8945d130a32eb0dbd85945 /uv /uvx /usr/local/bin/
 
 RUN groupadd --gid 1001 openswarm && \
     useradd --uid 1001 --gid openswarm --shell /bin/bash --create-home openswarm
