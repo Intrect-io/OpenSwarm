@@ -50,10 +50,12 @@ import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, upsertTaskState } from '../taskState/store.js';
 import { setAutomationDbPath } from './automationDbPath.js';
 import {
+  commitAndCreatePR,
   findPullRequestForBranch,
   inspectWorktreeRecovery,
   pruneWorktrees,
   removePreservedWorktreeAt,
+  type WorktreeRecoveryStatus,
 } from '../support/worktreeManager.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { STUCK_LABEL } from '../linear/index.js';
@@ -91,6 +93,29 @@ export type { ProjectInfo } from './runnerState.js';
 
 let runnerInstance: AutonomousRunner | null = null;
 const DECISION_SELECTION_OVERSAMPLE = 3;
+
+/**
+ * Does this parked run have work worth publishing, before any I/O?
+ *
+ * Pure so it can be tested without the runner's singletons and timers — the
+ * integration harness is flaky for exactly that reason. (AGT-4076)
+ */
+export function hasStrandedWork<T extends { prUrl?: string; branchName?: string; worktreePath?: string }>(
+  run: T,
+): run is T & { branchName: string; worktreePath: string } {
+  return !run.prUrl && Boolean(run.branchName) && Boolean(run.worktreePath);
+}
+
+/**
+ * Does this worktree verdict permit writing into it?
+ *
+ * Only `preserved` (the run's own kept WIP) and `orphaned` (its writer is
+ * provably gone) do. `active_owner` and `ambiguous` may still be held by a live
+ * process, and `missing` has nothing to publish from.
+ */
+export function worktreeIsPublishable(state: WorktreeRecoveryStatus['state']): boolean {
+  return state === 'preserved' || state === 'orphaned';
+}
 
 /** One source of truth for scheduler, heartbeat, and durable admission. */
 export function effectiveProjectConcurrency(config: Pick<AutonomousConfig,
@@ -1229,6 +1254,89 @@ export class AutonomousRunner {
     );
   }
 
+  /**
+   * Publish the work a parked run left behind.
+   *
+   * A run that stops for the operator keeps its commits on a branch that was
+   * never pushed. Measured on the deployed daemon: 23 commits across six
+   * branches, no PR, while the operator was being asked 70 questions about work
+   * they could not see. Publishing as a draft makes it reviewable — and because
+   * `NEEDS_HUMAN` is not one of `ACTIVE_LEASE_STATES`, a row that gets here has
+   * already stopped holding a repository admission slot, so this is purely
+   * about visibility. (AGT-4076)
+   *
+   * Reads the ledger directly rather than an actionable task fetch. A parked run
+   * is frequently absent from that fetch — parked is exactly the state it filters
+   * out — so keying off it would skip the sweep for the rows it exists to serve.
+   * The run record already carries the title and identifier the PR needs; on the
+   * deployed daemon all 26 parked rows have both populated. (Caught by the
+   * commit gate, not self-caught.)
+   *
+   * Draft, never ready-for-review: this work did not pass a reviewer, and
+   * marking it ready would ask people to review output nothing vouched for.
+   */
+  private async publishStrandedWork(): Promise<void> {
+    if (!this.durableRuns.isPrimary || this.stopping) return;
+
+    for (const run of this.durableRuns.listRuns(['NEEDS_HUMAN'])) {
+      if (this.stopping) return;
+      if (!hasStrandedWork(run)) continue;
+
+      // A PR may already exist without the ledger knowing — a publish that
+      // crashed between `gh pr create` and the ledger write. Record it rather
+      // than opening a second one.
+      let existing;
+      try {
+        existing = await findPullRequestForBranch(run.projectPath, run.branchName);
+      } catch (error) {
+        console.warn(`[Stranded] GitHub lookup failed for ${run.identifier ?? run.issueId}:`, error);
+        continue;
+      }
+      if (existing) {
+        this.durableRuns.recordUnownedPublication(run.issueId, existing.url);
+        continue;
+      }
+
+      // Only two verdicts mean the worktree is ours to write into: `preserved`
+      // (the run's own WIP, deliberately kept) and `orphaned` (its writer is
+      // provably gone). `active_owner` and `ambiguous` may still be held by a
+      // live process, and `missing` has nothing to publish from.
+      const recovery = await inspectWorktreeRecovery(run.projectPath, run.issueId, run.worktreePath)
+        .catch(() => null);
+      if (!recovery || !worktreeIsPublishable(recovery.state)) continue;
+
+      try {
+        const url = await commitAndCreatePR(
+          {
+            worktreePath: run.worktreePath,
+            branchName: run.branchName,
+            originalPath: run.projectPath,
+            issueId: run.issueId,
+          },
+          run.title ?? run.identifier ?? run.issueId,
+          run.identifier ?? run.issueId,
+          'Published while this run was parked for an operator decision, so the work is'
+            + ' visible instead of sitting on an unpushed branch. It has not been reviewed'
+            + ' — this PR is a draft on purpose.',
+          // Never write into the worktree: a parked run can be resumed and
+          // claimed while this await is in flight, and only a caller that
+          // writes nothing can be safe against that. Committed work is exactly
+          // what the operator asked to see published.
+          { draft: true, committedOnly: true },
+        );
+        this.durableRuns.recordUnownedPublication(run.issueId, url);
+        console.log(`[Stranded] Published parked work for ${run.identifier ?? run.issueId}: ${url}`);
+      } catch (error) {
+        // "No commits to create PR from" is the common, correct outcome — the
+        // branch held nothing. Nothing here may block the run or the sweep.
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!/No commits to create PR from/.test(detail)) {
+          console.warn(`[Stranded] Could not publish ${run.identifier ?? run.issueId}: ${detail}`);
+        }
+      }
+    }
+  }
+
   private async reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void> {
     if (!this.durableRuns.isPrimary || this.stopping) return;
     const taskById = new Map(tasks.map((task) => [task.issueId || task.id, task]));
@@ -1299,6 +1407,7 @@ export class AutonomousRunner {
       }
     }
     await this.drainDurableOutbox();
+    await this.publishStrandedWork();
   }
 
   private async migrateLegacyRunState(tasks: TaskItem[]): Promise<void> {

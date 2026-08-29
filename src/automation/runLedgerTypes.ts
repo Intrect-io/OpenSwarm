@@ -216,3 +216,39 @@ export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
   'operator_remediated',
   'waiting_on_operator',
 ];
+
+/**
+ * Row-mapping and argument helpers shared by the ledger's SQL.
+ *
+ * They live here rather than in `runLedger.ts` because that module sits on the
+ * 1500-line pre-commit cap, and these are self-contained: no database handle, no
+ * ledger state, nothing but their arguments.
+ */
+export function parseJson(value: string | null): unknown {
+  if (value == null) return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+export function stringifyJson(value: unknown): string | null {
+  return value === undefined ? null : JSON.stringify(value);
+}
+
+export function placeholders(values: readonly unknown[]): string {
+  return values.map(() => '?').join(', ');
+}
+
+export function assertPositiveDuration(value: number, label: string): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label} must be a positive finite number`);
+  }
+}
+
+export function assertRunState(value: string): asserts value is RunState {
+  if (!(RUN_STATES as readonly string[]).includes(value)) {
+    throw new Error(`Unknown automation run state: ${value}`);
+  }
+}

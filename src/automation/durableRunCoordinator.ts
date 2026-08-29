@@ -190,6 +190,10 @@ export class DurableRunCoordinator {
     return this.ledger?.recoverPublishedRun(issueId, publication, effect, now) ?? false;
   }
 
+  recordUnownedPublication(issueId: string, prUrl: string, now = Date.now()): boolean {
+    return this.ledger?.recordUnownedPublication(issueId, prUrl, now) ?? false;
+  }
+
   markNeedsHuman(issueId: string, reason: string, now = Date.now()): boolean {
     return this.ledger?.markNeedsHuman(issueId, reason, now) ?? false;
   }

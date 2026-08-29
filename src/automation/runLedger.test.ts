@@ -1095,3 +1095,38 @@ describe('RunLedger WAL negotiation', () => {
     }
   });
 });
+
+describe('recordUnownedPublication (AGT-4076)', () => {
+  // Shape verified against the deployed daemon: all 26 NEEDS_HUMAN rows there
+  // have owner_instance_id NULL, no pr_url, and a branch. markNeedsHuman itself
+  // refuses an owned row, so parking is only reachable once the owner is gone.
+  it('records a PR on a parked row that has no owner', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'INT-P1');
+    expect(ledger.markNeedsHuman('INT-P1', 'blocked on the operator')).toBe(true);
+
+    expect(ledger.recordUnownedPublication('INT-P1', 'https://github.com/o/r/pull/7')).toBe(true);
+    expect(ledger.getRun('INT-P1')!.prUrl).toBe('https://github.com/o/r/pull/7');
+  });
+
+  it('refuses a row a live executor still owns', () => {
+    // attachPublication is the path for an owned row; this must never race it.
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'INT-P2');
+    const c = claim(ledger, 'INT-P2', 'daemon-a');
+    ledger.transition(c, 'EXECUTING');
+
+    expect(ledger.recordUnownedPublication('INT-P2', 'https://github.com/o/r/pull/8')).toBe(false);
+    expect(ledger.getRun('INT-P2')!.prUrl).toBeUndefined();
+  });
+
+  it('never overwrites a PR the row already has', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'INT-P3');
+    ledger.markNeedsHuman('INT-P3', 'blocked');
+    ledger.recordUnownedPublication('INT-P3', 'https://github.com/o/r/pull/9');
+
+    expect(ledger.recordUnownedPublication('INT-P3', 'https://github.com/o/r/pull/10')).toBe(false);
+    expect(ledger.getRun('INT-P3')!.prUrl).toBe('https://github.com/o/r/pull/9');
+  });
+});

@@ -1147,33 +1147,44 @@ export async function commitAndCreatePR(
   title: string,
   issueIdentifier: string,
   description: string,
+  options: { draft?: boolean; committedOnly?: boolean } = {},
 ): Promise<string> {
   const { worktreePath, branchName } = info;
 
-  // Check for uncommitted changes and commit them
-  await stripRuntimeMarkerFromGit(worktreePath);
-  const status = await git(worktreePath, 'status', '--porcelain');
+  // Check for uncommitted changes and commit them.
+  //
+  // `committedOnly` skips this whole phase, and with it every write into the
+  // working tree — no marker strip, no `add -A`, no commit. That is what makes
+  // a publish safe to run without owning the worktree: a parked run can be
+  // resumed and claimed while the publish is in flight, and a caller that never
+  // writes cannot race the worker that takes over. What remains (rev-list,
+  // push, gh) reads the tree and writes only the remote.
+  // (AGT-4076, second commit-gate round.)
+  if (!options.committedOnly) {
+    await stripRuntimeMarkerFromGit(worktreePath);
+    const status = await git(worktreePath, 'status', '--porcelain');
 
-  if (status.trim()) {
-    await git(worktreePath, 'add', '-A');
-    await guardUnsafeBinaryStaging(worktreePath); // INT-2430
+    if (status.trim()) {
+      await git(worktreePath, 'add', '-A');
+      await guardUnsafeBinaryStaging(worktreePath); // INT-2430
 
-    const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
-    if (stillStaged.trim()) {
-      const commitMsg = [
-        `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
-      ].join('\n');
+      const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
+      if (stillStaged.trim()) {
+        const commitMsg = [
+          `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
+        ].join('\n');
 
-      // Validate conventional commit format (warning only)
-      const commitCheck = runConventionalCommitGuard(commitMsg);
-      if (!commitCheck.passed) {
-        console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
+        // Validate conventional commit format (warning only)
+        const commitCheck = runConventionalCommitGuard(commitMsg);
+        if (!commitCheck.passed) {
+          console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
+        }
+
+        await git(worktreePath, 'commit', '-m', commitMsg);
+        console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
+      } else {
+        console.log(`[Worktree] Nothing left to commit after unsafe-binary-staging guard stripped all staged changes (${branchName})`);
       }
-
-      await git(worktreePath, 'commit', '-m', commitMsg);
-      console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
-    } else {
-      console.log(`[Worktree] Nothing left to commit after unsafe-binary-staging guard stripped all staged changes (${branchName})`);
     }
   }
 
@@ -1234,7 +1245,10 @@ export async function commitAndCreatePR(
   ].join('\n');
 
   const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
-  if (duplicates.length > 0) createArgs.push('--draft');
+  // Draft when the work never earned a review: a duplicate implementation must
+  // not masquerade as the sole one, and work published on the way out of a run
+  // (AGT-4076) never reached a reviewer at all.
+  if (options.draft || duplicates.length > 0) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();

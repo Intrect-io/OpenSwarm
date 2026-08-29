@@ -26,6 +26,13 @@ import type {
   RunState,
   TransitionPatch,
 } from './runLedgerTypes.js';
+import {
+  assertPositiveDuration,
+  assertRunState,
+  parseJson,
+  placeholders,
+  stringifyJson,
+} from './runLedgerTypes.js';
 
 export { AUTOMATION_SCHEMA_VERSION, RUN_STATES, NON_FAILURE_RESULT_STATUSES } from './runLedgerTypes.js';
 
@@ -92,35 +99,6 @@ interface EffectRow {
   created_at: number;
   updated_at: number;
   applied_at: number | null;
-}
-
-function parseJson(value: string | null): unknown {
-  if (value == null) return undefined;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
-}
-
-function stringifyJson(value: unknown): string | null {
-  return value === undefined ? null : JSON.stringify(value);
-}
-
-function placeholders(values: readonly unknown[]): string {
-  return values.map(() => '?').join(', ');
-}
-
-function assertPositiveDuration(value: number, label: string): void {
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} must be a positive finite number`);
-  }
-}
-
-function assertRunState(value: string): asserts value is RunState {
-  if (!(RUN_STATES as readonly string[]).includes(value)) {
-    throw new Error(`Unknown automation run state: ${value}`);
-  }
 }
 
 export { defaultAutomationDbPath } from './automationDbPath.js';
@@ -781,6 +759,28 @@ export class RunLedger {
       claim.leaseEpoch,
       now,
     );
+    return result.changes === 1;
+  }
+
+  /**
+   * Record a PR opened for a row nobody owns.
+   *
+   * `attachPublication` cannot do this: it fences on a live owner, lease token
+   * and unexpired lease, none of which a parked row has. This is the path for
+   * work published on the way out — the run stopped, its branch still held
+   * commits, and the PR exists so the operator can see them (AGT-4076).
+   *
+   * Both guards are load-bearing. `owner_instance_id IS NULL` means it can
+   * never race a live executor's own publication, and `pr_url IS NULL` means a
+   * second sweep cannot overwrite the first PR with a different one.
+   */
+  recordUnownedPublication(issueId: string, prUrl: string, now = Date.now()): boolean {
+    const result = this.db.prepare(`
+      UPDATE automation_runs
+      SET pr_url = ?, updated_at = ?
+      WHERE issue_id = ? AND owner_instance_id IS NULL AND lease_token IS NULL
+        AND pr_url IS NULL
+    `).run(prUrl, now, issueId);
     return result.changes === 1;
   }
 
