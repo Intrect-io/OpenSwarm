@@ -491,7 +491,29 @@ export class DurableRunCoordinator {
       }
     }
     for (const run of this.ledger.listRuns(['NEEDS_RECONCILE'])) {
-      if (!run.ownerInstanceId || !run.leaseToken) continue;
+      if (!run.ownerInstanceId || !run.leaseToken) {
+        // Owner/lease already cleared — by a prior sweep of this same loop, or
+        // by claimRun()'s own reconcileExpiredRows() path — but the row's
+        // STATE never advanced past NEEDS_RECONCILE, so it is stuck forever:
+        // not claimable (CLAIMABLE_STATES excludes NEEDS_RECONCILE) yet still
+        // counted against claimRun()'s per-project admission cap, silently
+        // squatting a slot no other issue in the repo can ever use (AGT-4056).
+        //
+        // Only safe to reopen here when NOTHING was ever pushed
+        // (branchName == null): reconcile() has no filesystem/GitHub access,
+        // so `prUrl == null` alone cannot prove nothing was published — the
+        // ledger write and the actual `gh pr create` are two separate steps,
+        // and a row can reach here having done the second without ever
+        // completing the first. A row with a branchName MUST go through
+        // autonomousRunner's reconcileDurableArtifacts() instead, which
+        // checks GitHub for a real PR by branch name before ever falling back
+        // to worktree-evidence inspection — reopening here would race ahead
+        // of that check and can duplicate published work.
+        if (run.branchName == null && run.prUrl == null && this.ledger.markReady(run.issueId, now)) {
+          reconciled.push(this.ledger.getRun(run.issueId)!);
+        }
+        continue;
+      }
       const pid = ownerProcessId(run.ownerInstanceId);
       // A container assigns the daemon the same pid every start, so a row
       // orphaned by a restart reads as "alive" forever — the new daemon's
