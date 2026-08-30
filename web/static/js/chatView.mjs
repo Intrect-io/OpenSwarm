@@ -100,9 +100,10 @@ export function renderLine(line, mentionTargets = []) {
     ? `<span class="to">→ ${mentionMarkup(line.recipientName, line.recipientRole)}</span>`
     : '';
   return `<div class="line${line.isOperator ? ' from-operator' : ''}${statusClass}" data-line="${escapeHtml(line.id)}">
-    <span class="clock">[${escapeHtml(clockOf(line.timestamp))}]</span>
+    <span class="meta"><span class="clock">[${escapeHtml(clockOf(line.timestamp))}]</span>
     <span class="who" style="color:${color}">${escapeHtml(line.speakerName)}</span>
-    ${tag}${to}<span class="sep">:</span> <span class="text">${renderMentionText(line.text, mentionTargets)}</span>
+    ${tag}${to}<span class="sep">:</span></span>
+    <span class="text">${renderMentionText(line.text, mentionTargets)}</span>
   </div>`;
 }
 
