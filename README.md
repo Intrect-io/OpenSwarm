@@ -395,6 +395,38 @@ The native-loop supervisor also receives its repository-cell coordination
 identity, so it can discover peers and create, join, or reply to durable threads
 without gaining shell access to a worktree.
 
+When cached tracker/dependency facts still leave a real tie, conflict cohort,
+or high-impact ordering question, agents can open a durable priority council on
+an existing cross-task coordination thread. A proposal contains 2–8 options and
+the versioned cached evidence behind them; opening it never queries Linear.
+Eligibility is frozen from recently active independent peers, candidate-task
+participants may submit evidence but cannot vote, and each actor+task pair gets
+one equal-weight ranked ballot. Finalization is version-CAS guarded and records
+quorum, cross-task/cross-role participation, tally, cited evidence, expiry, and
+the deterministic proposal-order tie-break.
+
+The resulting signal is deliberately advisory. `coordination_council_consume`
+is orchestrator-only and can reorder only the existing option cohort's slots
+when the council and cached snapshot versions still match. Its authority
+contract explicitly forbids starting tasks, bypassing dependencies or file
+leases, merging, destructive tools, and tracker mutation. The HTTP API exposes
+list/read, operator proposal/evidence, and CAS finalization under
+`/api/coordination/councils`; it intentionally has no vote endpoint because a
+request body cannot establish an agent's actor/task identity. Ballots use the
+trusted agent-tool context instead.
+
+For automatic Decision Engine consumption, include `scheduling_facts` for every
+option (priority, topology/due fields, downstream count, blockers, and tracker
+state) and open with `snapshot_version: auto`. OpenSwarm stores a canonical
+`sched-v1` digest, recomputes it from the already-fetched task cache on each
+heartbeat, CAS-consumes at most the newest matching finalized council, and then
+changes only those tasks' existing slots. Repository scope comes only from a
+task's explicit project path or the `linear.projectId` in that repository's
+`openswarm.json`; an absent or ambiguous mapping fails closed. A missing
+database, manual-only or no-quorum decision, stale facts, CAS race, partial
+cohort, cross-repository match, or invalid authority is a no-op that preserves
+deterministic ordering; none of these paths triggers another Linear request.
+
 Blocking questions are sent to the configured Discord channel as `!answer <correlation-id> <answer>`. Only users in `DISCORD_ALLOWED_USERS` can settle them. The asking run stops and reports rather than guessing a default, and the question stays open on the board until someone answers — the answer is addressed back to the call sign that raised it, so the next run of that agent reads it from its inbox. When Discord is not configured the tool says so instead of claiming the operator was paged.
 
 Per-role adapter overrides (each role may pick its own valid adapter + model):

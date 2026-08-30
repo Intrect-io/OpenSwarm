@@ -45,6 +45,11 @@ export async function tryHandleAppRoutes(
   }
 
   {
+    const { tryHandlePriorityCouncilRoutes } = await import('../coordination/priorityCouncilRoutes.js');
+    if (await tryHandlePriorityCouncilRoutes(req, res, url, requestUrl, readBody)) return true;
+  }
+
+  {
     const { tryHandleCoordinationThreadRoutes } = await import('../coordination/coordinationThreadRoutes.js');
     if (await tryHandleCoordinationThreadRoutes(req, res, url, requestUrl, readBody)) return true;
   }

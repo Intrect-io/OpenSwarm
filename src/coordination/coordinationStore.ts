@@ -23,6 +23,7 @@ export type CoordinationKind =
   | 'review-run'
   | 'mcp-audit'
   | 'thread-update'
+  | 'council-update'
   | 'instruction-snapshot';
 
 export type CoordinationStatus = 'open' | 'waiting' | 'running' | 'completed' | 'failed' | 'expired';

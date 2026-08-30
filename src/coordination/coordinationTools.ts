@@ -14,6 +14,12 @@ import {
   COORDINATION_THREAD_TOOL_NAMES,
   executeCoordinationThreadTool,
 } from './coordinationThreadTools.js';
+import {
+  PRIORITY_COUNCIL_GUIDANCE_PROMPT,
+  PRIORITY_COUNCIL_TOOL_DEFINITIONS,
+  PRIORITY_COUNCIL_TOOL_NAMES,
+  executePriorityCouncilTool,
+} from './priorityCouncilTools.js';
 
 /**
  * Bounds on `coordination_wait`.
@@ -157,6 +163,7 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
   ...COORDINATION_THREAD_TOOL_DEFINITIONS,
+  ...PRIORITY_COUNCIL_TOOL_DEFINITIONS,
 ];
 
 /**
@@ -188,13 +195,16 @@ you initiated, acknowledge it with \`coordination_publish\` before you finish
 your work — do not just silently fold it into your next edit with no
 response. Use \`coordination_peers\` to find an active worker or reviewer on a
 dependency/conflict task before starting a cross-task exchange.
-` + COORDINATION_THREAD_GUIDANCE_PROMPT;
+` + COORDINATION_THREAD_GUIDANCE_PROMPT + PRIORITY_COUNCIL_GUIDANCE_PROMPT;
 
 export async function executeCoordinationTool(
   name: string,
   args: Record<string, unknown>,
   context: CoordinationToolContext,
 ): Promise<{ content: string; isError: boolean }> {
+  if (PRIORITY_COUNCIL_TOOL_NAMES.has(name)) {
+    return executePriorityCouncilTool(name, args, context);
+  }
   if (COORDINATION_THREAD_TOOL_NAMES.has(name)) {
     return executeCoordinationThreadTool(name, args, context);
   }
