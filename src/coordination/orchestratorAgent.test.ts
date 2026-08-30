@@ -52,14 +52,12 @@ describe('buildOrchestratorObjective', () => {
     expect(objective).toContain('advice-request/open');
   });
 
-  it('does not spend a sweep on questions only the operator can answer', () => {
-    // A human-question stays waiting until someone replies in Discord; the
-    // orchestrator has no way to settle it, so a sweep over it can only
-    // conclude "still waiting" at the price of a provider call.
-    expect(buildOrchestratorObjective([event()])).toBeNull();
+  it('asks the supervisor to resolve worker questions from evidence before escalating', () => {
+    expect(buildOrchestratorObjective([event()])).toContain('Which API version?');
     const mixed = buildOrchestratorObjective([event(), event({ kind: 'advice-request', status: 'open', summary: 'Reuse the auth helper?' })]);
     expect(mixed).toContain('Reuse the auth helper?');
-    expect(mixed).not.toContain('Which API version?');
+    expect(mixed).toContain('Which API version?');
+    expect(mixed).toContain('never manufacture business authority');
   });
 });
 
@@ -215,5 +213,49 @@ describe('runOrchestrator', () => {
     expect(result.toolsGranted).toEqual([]);
     expect(getMcpTools).not.toHaveBeenCalled();
     expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
+  });
+
+  it('grants native cache-first tracker tools without external MCP discovery', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-native-tracker-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+    const tracker = {
+      getCachedIssue: vi.fn(),
+      resolveIssue: vi.fn(),
+      addComment: vi.fn(),
+    };
+
+    const result = await runOrchestrator({
+      repository: '/repo', taskId: 'coordination', objective: 'settle worker question', tracker,
+    });
+
+    expect(getMcpTools).not.toHaveBeenCalled();
+    expect(result.toolsGranted).toEqual([
+      'tracker_cached_issue', 'tracker_save_comment', 'coordination_answer_question',
+    ]);
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      mcpTools: expect.arrayContaining([
+        expect.objectContaining({ function: expect.objectContaining({ name: 'tracker_save_comment' }) }),
+      ]),
+      coordinationContext: expect.objectContaining({ tracker }),
+    }));
+  });
+
+  it('records and propagates a failed native supervisor run', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-failed-run-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    spawnCli.mockRejectedValueOnce(new Error('provider unavailable'));
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    await expect(runOrchestrator({
+      repository: '/repo', taskId: 'coordination', objective: 'settle worker question',
+    })).rejects.toThrow('provider unavailable');
+
+    const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 20 });
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: 'mcp-audit', status: 'failed', summary: expect.stringContaining('provider unavailable'),
+    }));
   });
 });

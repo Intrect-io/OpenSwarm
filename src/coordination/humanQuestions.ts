@@ -189,6 +189,7 @@ export async function answerHumanQuestion(
   correlationId: string,
   answer: string,
   actor: string,
+  actorRole: 'human' | 'orchestrator' = 'human',
 ): Promise<{ accepted: boolean; event?: CoordinationEvent; reason?: string }> {
   const store = getCoordinationStore();
   // findQuestion scans the whole retained board, not a recency window: on a
@@ -208,14 +209,16 @@ export async function answerHumanQuestion(
     taskId: question.taskId,
     taskLabel: question.taskLabel,
     actor,
-    actorRole: 'human',
+    actorRole,
     recipient: question.actor,
     recipientName: question.actorName,
     recipientRole: question.actorRole,
     kind: 'human-answer',
     status: 'completed',
     correlationId,
-    summary: 'Human answered the blocking question',
+    summary: actorRole === 'human'
+      ? 'Human answered the blocking question'
+      : 'Project supervisor answered the blocking question',
     detail: answer,
   });
 
@@ -241,7 +244,7 @@ export async function answerHumanQuestion(
       taskId: question.taskId,
       taskLabel: sibling.taskLabel,
       actor,
-      actorRole: 'human',
+      actorRole,
       recipient: sibling.actor,
       recipientName: sibling.actorName,
       recipientRole: sibling.actorRole,

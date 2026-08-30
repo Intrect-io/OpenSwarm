@@ -2703,11 +2703,48 @@ export class AutonomousRunner {
     const config = resolveOrchestratorConfig(this.config);
     if (!config?.enabled) return;
 
+    const trackerSource = getTaskSource();
+    const getCachedIssue = (issueIdOrIdentifier: string) => {
+      const requested = issueIdOrIdentifier.toLowerCase();
+      const task = this.lastFetchedTasks.find((candidate) =>
+        candidate.issueId?.toLowerCase() === requested
+        || candidate.issueIdentifier?.toLowerCase() === requested
+        || candidate.id.toLowerCase() === requested);
+      const issueId = task?.issueId ?? task?.id;
+      if (!task || !issueId) return undefined;
+      return {
+        issueId,
+        identifier: task.issueIdentifier ?? issueId,
+        title: task.title,
+        state: task.linearState,
+        priority: task.priority,
+        blockedBy: task.blockedBy,
+      };
+    };
+    const tracker = trackerSource ? {
+      getCachedIssue,
+      resolveIssue: async (issueIdOrIdentifier: string) => {
+        const cached = getCachedIssue(issueIdOrIdentifier);
+        if (cached) return { issueId: cached.issueId, identifier: cached.identifier, source: 'cache' as const };
+        if (!trackerSource.resolveIssue) return null;
+        const resolved = await trackerSource.resolveIssue(issueIdOrIdentifier);
+        if (!resolved.ok) throw new Error(`Tracker issue lookup failed: ${resolved.error}`);
+        return resolved.issue ? {
+          issueId: resolved.issue.id,
+          identifier: resolved.issue.identifier,
+          source: 'tracker' as const,
+        } : null;
+      },
+      addComment: (issueId: string, body: string, idempotencyKey: string) =>
+        trackerSource.addComment(issueId, body, idempotencyKey),
+    } : undefined;
+
     const supervisor = new OrchestratorSupervisor({
       config,
       policy: this.config.mcpPolicies?.orchestrator,
       getRepositories: () => this.getBackgroundServiceProjects(),
       buildInstructionCapsule,
+      tracker,
     });
     try {
       supervisor.start();

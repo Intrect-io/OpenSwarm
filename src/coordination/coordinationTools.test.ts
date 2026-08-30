@@ -527,10 +527,15 @@ describe('coordination_wait', () => {
   it('is dispatchable — the adapter derives its tool names from the definitions', async () => {
     const { COORDINATION_TOOL_NAMES, COORDINATION_TOOL_DEFINITIONS } = await import('./coordinationTools.js');
     // The adapter used to keep a hardcoded copy of this list, so a new tool was
-    // defined, advertised, and then silently undispatchable.
+    // defined, advertised, and then silently undispatchable. The dispatch set
+    // may additionally contain role-scoped tools that are advertised only to
+    // an orchestrator through mcpTools; every globally advertised definition
+    // must still be executable.
     expect(COORDINATION_TOOL_NAMES.has('coordination_wait')).toBe(true);
-    expect([...COORDINATION_TOOL_NAMES].sort())
-      .toEqual(COORDINATION_TOOL_DEFINITIONS.map((d) => d.function.name).sort());
+    for (const definition of COORDINATION_TOOL_DEFINITIONS) {
+      expect(COORDINATION_TOOL_NAMES.has(definition.function.name)).toBe(true);
+    }
+    expect(COORDINATION_TOOL_NAMES.has('tracker_save_comment')).toBe(true);
   });
 });
 

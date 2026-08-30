@@ -48,6 +48,11 @@ export type TrackerIssueLookup =
   | { ok: true; issue: { state: string; stateType?: string } | null }
   | { ok: false; error: string };
 
+/** Minimal issue identity used by cache-first supervisor tracker tools. */
+export type TrackerIssueResolution =
+  | { ok: true; issue: { id: string; identifier: string; title: string; state: string } | null }
+  | { ok: false; error: string };
+
 /**
  * Everything the autonomous runner needs from its task tracker. LinearTaskSource
  * preserves today's behavior exactly (thin delegation); SqliteTaskSource backs
@@ -58,6 +63,8 @@ export interface ITaskSource {
   fetchTasks(): Promise<TaskItem[]>;
   /** Fetch one issue even when terminal states are excluded from fetchTasks(). */
   lookupIssueState(issueIdOrIdentifier: string): Promise<TrackerIssueLookup>;
+  /** Resolve an identifier on a cache miss without widening the normal bulk fetch. */
+  resolveIssue?(issueIdOrIdentifier: string): Promise<TrackerIssueResolution>;
   /** Create a top-level task/issue (used by the /plan cockpit to seed a parent). */
   createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult>;
   updateState(issueId: string, state: TaskState): Promise<boolean>;
@@ -101,6 +108,19 @@ export class LinearTaskSource implements ITaskSource {
       issue: result.issue
         ? { state: result.issue.state, stateType: result.issue.stateType }
         : null,
+    };
+  }
+  async resolveIssue(issueIdOrIdentifier: string): Promise<TrackerIssueResolution> {
+    const result = await linear.lookupIssue(issueIdOrIdentifier);
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      issue: result.issue ? {
+        id: result.issue.id,
+        identifier: result.issue.identifier,
+        title: result.issue.title,
+        state: result.issue.state,
+      } : null,
     };
   }
   async createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult> {
@@ -182,6 +202,18 @@ export class SqliteTaskSource implements ITaskSource {
       ? 'completed'
       : issue.status === 'cancelled' ? 'canceled' : undefined;
     return { ok: true, issue: { state: issue.status, stateType } };
+  }
+  async resolveIssue(issueId: string): Promise<TrackerIssueResolution> {
+    const issue = this.store.getIssue(issueId);
+    return {
+      ok: true,
+      issue: issue ? {
+        id: issue.id,
+        identifier: issue.linearIdentifier ?? issue.id,
+        title: issue.title,
+        state: issue.status,
+      } : null,
+    };
   }
   async createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult> {
     try {

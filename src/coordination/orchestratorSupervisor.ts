@@ -16,6 +16,7 @@ import type { RoleMcpPolicy } from './mcpPolicy.js';
 import { repositoryCell, type RepositoryCell } from './repositoryCell.js';
 import { buildOrchestratorObjective, runOrchestrator, type OrchestratorRunOptions, type OrchestratorRunResult } from './orchestratorAgent.js';
 import type { ResolvedOrchestratorConfig } from './orchestratorConfig.js';
+import type { OrchestratorTrackerBridge } from './orchestratorTrackerTools.js';
 
 export type OrchestratorTrigger = 'cron' | 'coordination-event' | 'manual';
 
@@ -38,6 +39,7 @@ export interface OrchestratorSupervisorOptions {
   getRepositories: () => string[];
   getPending?: (repository: string, repoKey: string) => readonly CoordinationEvent[];
   buildInstructionCapsule: (repository: string) => InstructionCapsule;
+  tracker?: OrchestratorTrackerBridge;
   run?: (options: OrchestratorRunOptions) => Promise<OrchestratorRunResult>;
   lockTimeoutMs?: number;
 }
@@ -66,8 +68,9 @@ export function isActionableOrchestratorEvent(event: CoordinationEvent): boolean
   if (isSupervisorAuthoredEvent(event)) return false;
   if (event.kind === 'review-run' && event.status === 'failed') return true;
   if (isTerminalFollowUp(event)) return true;
-  return event.status === 'open'
-    && (event.kind === 'advice-request' || event.kind === 'delegation-request' || event.kind === 'thread-update');
+  return (event.status === 'open'
+    && (event.kind === 'advice-request' || event.kind === 'delegation-request' || event.kind === 'thread-update'))
+    || (event.kind === 'human-question' && ['waiting', 'running'].includes(event.status));
 }
 
 /**
@@ -96,7 +99,6 @@ export function selectOrchestratorItems(
 
 function actionableFingerprint(events: readonly CoordinationEvent[]): string {
   const actionable = events
-    .filter((event) => event.kind !== 'human-question')
     .map((event) => `${event.fingerprint}:${event.status}`)
     .sort();
   return createHash('sha256').update(actionable.join('\0')).digest('hex');
@@ -352,6 +354,7 @@ export class OrchestratorSupervisor {
             timeoutMs: this.options.config.timeoutMs,
             maxTurns: this.options.config.maxTurns,
             instructionCapsule: this.buildCapsule(repository),
+            tracker: this.options.tracker,
             trigger,
             signal,
           });

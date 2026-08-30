@@ -20,6 +20,11 @@ import {
   PRIORITY_COUNCIL_TOOL_NAMES,
   executePriorityCouncilTool,
 } from './priorityCouncilTools.js';
+import {
+  ORCHESTRATOR_TRACKER_TOOL_NAMES,
+  executeOrchestratorTrackerTool,
+  type OrchestratorTrackerBridge,
+} from './orchestratorTrackerTools.js';
 
 /**
  * Bounds on `coordination_wait`.
@@ -73,6 +78,8 @@ export interface CoordinationToolContext {
   actorRole?: string;
   /** Overridable operator notifier; defaults to the configured Discord channel. */
   notifyOperator?: (message: string) => Promise<boolean>;
+  /** Cache-first tracker bridge, installed only for the trusted project supervisor. */
+  tracker?: OrchestratorTrackerBridge;
 }
 
 export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
@@ -181,7 +188,10 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
  * tool here left it undispatchable until someone noticed. (AGT-4065)
  */
 export const COORDINATION_TOOL_NAMES: ReadonlySet<string> = new Set(
-  COORDINATION_TOOL_DEFINITIONS.map((definition) => definition.function.name),
+  [
+    ...COORDINATION_TOOL_DEFINITIONS.map((definition) => definition.function.name),
+    ...ORCHESTRATOR_TRACKER_TOOL_NAMES,
+  ],
 );
 
 export const COORDINATION_GUIDANCE_PROMPT = `
@@ -202,6 +212,9 @@ export async function executeCoordinationTool(
   args: Record<string, unknown>,
   context: CoordinationToolContext,
 ): Promise<{ content: string; isError: boolean }> {
+  if (ORCHESTRATOR_TRACKER_TOOL_NAMES.has(name)) {
+    return executeOrchestratorTrackerTool(name, args, context);
+  }
   if (PRIORITY_COUNCIL_TOOL_NAMES.has(name)) {
     return executePriorityCouncilTool(name, args, context);
   }

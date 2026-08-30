@@ -24,6 +24,10 @@ import type { AdapterName } from '../adapters/types.js';
 import type { InstructionCapsule } from '../agents/instructionCapsule.js';
 import { assignCallSign } from './agentNames.js';
 import { repositoryCell } from './repositoryCell.js';
+import {
+  ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS,
+  type OrchestratorTrackerBridge,
+} from './orchestratorTrackerTools.js';
 
 export interface OrchestratorRunOptions {
   repository: string;
@@ -38,6 +42,8 @@ export interface OrchestratorRunOptions {
   /** Why this run started (`cron`, `coordination-event`, or a coalesced set). */
   trigger?: string;
   instructionCapsule?: InstructionCapsule;
+  /** Native cache-first tracker operations; no external MCP credential is required. */
+  tracker?: OrchestratorTrackerBridge;
   signal?: AbortSignal;
 }
 
@@ -58,17 +64,16 @@ export interface OrchestratorRunResult {
  *
  * Returns null when nothing actionable is pending: a sweep that finds nothing
  * to do still spends a provider call, and unblocking existing work is the only
- * reason this agent runs. Questions waiting on the operator are excluded — only
- * a human can settle those, so handing them to the orchestrator buys a call
- * that can only conclude "still waiting". Everything else is addressed by call
- * sign so the orchestrator can answer the agent that raised it.
+ * reason this agent runs. Operator questions remain in scope: the supervisor
+ * first tries cached tracker facts, durable coordination history, and peers,
+ * and leaves only genuinely authority-bound decisions for the human.
  */
 export function buildOrchestratorObjective(pending: readonly CoordinationEvent[]): string | null {
-  const actionable = pending.filter((event) => event.kind !== 'human-question');
-  if (actionable.length === 0) return null;
+  if (pending.length === 0) return null;
   return [
     'Unblock the following open coordination items. Address each agent by its call sign.',
-    ...actionable.map((event) =>
+    'For a worker question, investigate cached tracker facts and durable peer evidence before escalating. Answer it only when the evidence is decisive; never manufacture business authority or credentials.',
+    ...pending.map((event) =>
       `- [${event.kind}/${event.status}] ${event.actorName ?? event.actor}`
       + ` → ${event.recipientName ?? event.recipient ?? 'all'}: ${event.summary}`),
   ].join('\n');
@@ -146,6 +151,8 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
   }
   options.signal?.throwIfAborted();
   const { tools, denied } = filterMcpToolsForRole(discovered, options.policy);
+  const nativeTrackerTools = options.tracker ? ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS : [];
+  const grantedTools = [...tools, ...nativeTrackerTools];
   for (const entry of denied) {
     await store.publish({
       repository: options.repository,
@@ -194,8 +201,10 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         '',
         `You are **${callSign.name}**, the orchestrator for this repository. Address workers by their call signs.`,
         '',
-        'Coordinate the autonomous workers using the internal coordination tools and approved MCP tools only.',
+        'Coordinate the autonomous workers using the internal coordination tools, cache-first tracker tools, and approved MCP tools only.',
         'You have no access to the repository working tree: your file tools are confined to a scratch directory.',
+        'Use tracker_cached_issue before tracker_save_comment. Tracker comments must cite verified evidence and use a stable idempotency key.',
+        'Use coordination_answer_question only after the blocker is actually resolved; leave decisions requiring new business authority pending.',
         'Never attempt a write or destructive MCP operation that was not granted; report it as a blocker instead.',
         'Use coordination_peers and the durable coordination_thread_* tools to consult active workers/reviewers.',
         'For a contested priority, ownership, or integration decision, create or join a repository thread, ask the relevant peer by coordination_publish, and incorporate a useful response before deciding. If no response arrives within this run, leave the thread open and report the uncertainty.',
@@ -209,7 +218,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       maxTurns: options.maxTurns ?? 10,
       timeoutMs: options.timeoutMs ?? 300_000,
       systemPrompt: options.instructionCapsule?.text,
-      mcpTools: tools,
+      mcpTools: grantedTools,
       coordinationContext: {
         repository: cell.repositoryPath,
         repoKey: cell.repoKey,
@@ -218,6 +227,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         actor: callSign.address,
         actorName: callSign.name,
         actorRole: 'orchestrator',
+        tracker: options.tracker,
       },
       webTools: false,
       memoryTools: false,
@@ -252,7 +262,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     return {
       callSign: callSign.name,
       output: raw.stdout,
-      toolsGranted: tools.map((tool) => tool.function.name),
+      toolsGranted: grantedTools.map((tool) => tool.function.name),
       toolsDenied: denied,
       adapter: adapter.name as AdapterName,
       model,

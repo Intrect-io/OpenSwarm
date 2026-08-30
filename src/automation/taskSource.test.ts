@@ -63,6 +63,18 @@ describe('SqliteTaskSource', () => {
     await expect(src.lookupIssueState('missing')).resolves.toEqual({ ok: true, issue: null });
   });
 
+  it('resolves a terminal issue identity for cache-miss supervisor comments', async () => {
+    store = freshStore();
+    const issue = store.createIssue({ projectId: 'p', title: 'finished', status: 'done' });
+    const src = new SqliteTaskSource(store);
+
+    await expect(src.resolveIssue(issue.id)).resolves.toEqual({
+      ok: true,
+      issue: { id: issue.id, identifier: issue.id, title: 'finished', state: 'done' },
+    });
+    await expect(src.resolveIssue('missing')).resolves.toEqual({ ok: true, issue: null });
+  });
+
   it('addComment records a commented event', async () => {
     store = freshStore();
     const issue = store.createIssue({ projectId: 'p', title: 'x' });

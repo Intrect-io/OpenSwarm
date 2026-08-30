@@ -102,6 +102,7 @@ describe('OrchestratorSupervisor', () => {
       kind: 'thread-update', status: 'completed', metadata: { action: 'replied' },
       actorRole: 'orchestrator', taskId: ORCHESTRATOR_SUPERVISOR_TASK_ID,
     }))).toBe(false);
+    expect(isActionableOrchestratorEvent(event({ kind: 'human-question', status: 'waiting' }))).toBe(true);
   });
 
   it('includes the latest failed review in the supervisor view until its exchange advances', () => {
@@ -492,7 +493,7 @@ describe('OrchestratorSupervisor', () => {
     await restarted.stop();
   });
 
-  it('skips human-only or empty board state without building a capsule or calling a model', async () => {
+  it('runs on a worker question so the supervisor can resolve it before human escalation', async () => {
     tempState();
     const run = vi.fn(async () => result());
     const buildInstructionCapsule = vi.fn(() => capsule);
@@ -507,9 +508,9 @@ describe('OrchestratorSupervisor', () => {
 
     await supervisor.requestSweep('cron');
 
-    expect(run).not.toHaveBeenCalled();
-    expect(buildInstructionCapsule).not.toHaveBeenCalled();
-    expect(supervisor.getLastSweep()).toMatchObject({ noAction: 1, ran: 0 });
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ objective: expect.stringContaining('Which shared helper') }));
+    expect(buildInstructionCapsule).toHaveBeenCalledTimes(1);
+    expect(supervisor.getLastSweep()).toMatchObject({ noAction: 0, ran: 1 });
     await supervisor.stop();
   });
 
