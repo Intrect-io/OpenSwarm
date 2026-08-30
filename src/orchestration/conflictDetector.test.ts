@@ -79,6 +79,20 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.safe).toHaveLength(2);
   });
 
+  it('runs non-adjacent tasks from a transitive conflict chain concurrently', async () => {
+    const result = await detectFileConflicts(
+      [
+        task('A', 2, ['src/ab.ts']),
+        task('B', 2, ['src/ab.ts', 'src/bc.ts']),
+        task('C', 2, ['src/bc.ts']),
+      ],
+      PROJECT,
+    );
+
+    expect(result.safe.map((candidate) => candidate.id)).toEqual(['A', 'C']);
+    expect(result.conflictGroups).toHaveLength(1);
+  });
+
   it('ignores stale generated/worktree scope entries instead of creating false conflicts', async () => {
     const result = await detectFileConflicts(
       [

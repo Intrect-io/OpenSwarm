@@ -77,7 +77,7 @@ describe('AutonomousRunner durable completion race', () => {
     } as unknown as ITaskSource);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'integration-conflict.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -163,8 +163,6 @@ describe('AutonomousRunner durable completion race', () => {
       allowedProjects: ['/repo'],
       heartbeatSchedule: '0 * * * *',
       autoExecute: true,
-      maxConsecutiveTasks: 1,
-      cooldownSeconds: 0,
       dryRun: true,
       pairMode: true,
       automationLedgerMode: 'primary',
@@ -226,7 +224,7 @@ describe('AutonomousRunner durable completion race', () => {
 
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'cancel-race.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -300,8 +298,6 @@ describe('AutonomousRunner durable completion race', () => {
       allowedProjects: ['/repo'],
       heartbeatSchedule: '0 * * * *',
       autoExecute: true,
-      maxConsecutiveTasks: 1,
-      cooldownSeconds: 0,
       dryRun: true,
       pairMode: true,
       shutdownGraceMs: 1_000,
@@ -341,7 +337,7 @@ describe('AutonomousRunner durable completion race', () => {
     ]);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'legacy-import.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -376,7 +372,7 @@ describe('AutonomousRunner durable completion race', () => {
     } as unknown as ITaskSource);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'stuck-recovery.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -425,7 +421,7 @@ esac
     } as unknown as ITaskSource);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'pr-recovery.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -490,7 +486,7 @@ esac
     } as unknown as ITaskSource);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'terminal-card.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -559,7 +555,7 @@ esac
     } as unknown as ITaskSource);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'unpublished.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -602,7 +598,7 @@ esac
     execution.setTaskSource(source);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'terminal-lookup.db'),
     });
     const internal = runner as unknown as InternalRunner;
@@ -628,7 +624,7 @@ esac
     const { AutonomousRunner } = await import('./autonomousRunner.js');
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       shutdownGraceMs: 0, automationLedgerMode: 'primary',
       automationDbPath: join(root, 'hung-shutdown.db'),
     });

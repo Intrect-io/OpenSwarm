@@ -636,7 +636,6 @@ describe('service', () => {
         prProcessor: {
           enabled: true,
           schedule: '*/15 * * * *',
-          cooldownHours: 6,
           maxIterations: 3,
         },
       };
@@ -713,7 +712,6 @@ describe('service', () => {
         prProcessor: {
           enabled: false,
           schedule: '*/15 * * * *',
-          cooldownHours: 6,
           maxIterations: 3,
         },
       };
@@ -733,7 +731,6 @@ describe('service', () => {
         prProcessor: {
           enabled: true,
           schedule: '*/15 * * * *',
-          cooldownHours: 6,
           maxIterations: 3,
         },
       };

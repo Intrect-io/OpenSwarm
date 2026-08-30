@@ -14,8 +14,6 @@ const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   allowedProjects: ['/x/a'],
   heartbeatSchedule: '0 * * * *',
   autoExecute: false,
-  maxConsecutiveTasks: 1,
-  cooldownSeconds: 0,
   dryRun: true,
   ...over,
 });

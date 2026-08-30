@@ -128,7 +128,6 @@ export function buildProcessorConfig(
   return {
     repos: [],
     schedule: '0 0 1 1 *', // unused for one-shot
-    cooldownHours: 0,
     maxIterations: opts.maxIterations ?? 3,
     maxRetries: opts.maxRetries ?? 3,
     roles,

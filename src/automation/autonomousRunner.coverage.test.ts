@@ -1,6 +1,6 @@
 // Purpose: targeted coverage for AutonomousRunner's safely-reachable public/private
-// helpers that the four existing companion test files (cancel/enable/infraError/
-// maxpace) don't touch. Follows their established pattern — `new
+// helpers that the existing companion test files (cancel/enable/infraError)
+// don't touch. Follows their established pattern — `new
 // AutonomousRunner(cfg())` with `dryRun: true`, direct calls to public
 // methods/getters, and casting to reach small private helpers exactly like
 // `autonomousRunner.enable.test.ts` already does for `shouldFilterByEnabled` /
@@ -68,8 +68,6 @@ const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   allowedProjects: ['/repo'],
   heartbeatSchedule: '0 * * * *',
   autoExecute: false,
-  maxConsecutiveTasks: 1,
-  cooldownSeconds: 0,
   dryRun: true,
   ...over,
 });
@@ -137,11 +135,13 @@ type Internal = {
   engine: { heartbeat: ReturnType<typeof vi.fn> };
   durableRuns: {
     listRuns(states?: readonly string[]): Array<{ issueId: string; lastErrorCode?: string }>;
+    getRun(issueId: string): { state: string; leaseExpiresAt?: number; prUrl?: string } | null;
     markReady(issueId: string): boolean;
   };
   rateLimitUntil: number;
   scheduleNextHeartbeat(): void;
   executeTaskPairMode: ReturnType<typeof vi.fn>;
+  reconcileStalledInProgress(tasks: TaskItem[], now?: number): Promise<TaskItem[]>;
   state: { pendingApproval?: TaskItem };
 };
 
@@ -642,7 +642,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const r = new AutonomousRunner(cfg());
       const internal = r as unknown as Internal;
       internal.state.pendingApproval = task();
-      internal.engine.heartbeat = vi.fn(async (): Promise<DecisionResult> => ({ action: 'defer', reason: 'cooldown' }));
+      internal.engine.heartbeat = vi.fn(async (): Promise<DecisionResult> => ({ action: 'defer', reason: 'waiting' }));
       internal.executeTaskPairMode = vi.fn(async () => {});
       expect(await r.approve()).toBe(false);
       expect(internal.state.pendingApproval).toBeUndefined();
@@ -671,6 +671,20 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const r = new AutonomousRunner(cfg());
       await expect(r.stop()).resolves.toBeUndefined();
       expect(r.getState().isRunning).toBe(false);
+    });
+  });
+
+  describe('stalled In Progress reconciliation', () => {
+    it('moves an unowned stale Linear task to Backlog and updates the current snapshot', async () => {
+      const updateState = vi.fn(async () => true);
+      runnerExecution.setTaskSource({ kind: 'linear', updateState } as unknown as ITaskSource);
+      const r = new AutonomousRunner(cfg({ stalledInProgressHours: 6 }));
+      const stale = task({ linearState: 'In Progress', trackerUpdatedAt: 1_000 });
+
+      await (r as unknown as Internal).reconcileStalledInProgress([stale], 6 * 60 * 60_000 + 1_000);
+
+      expect(updateState).toHaveBeenCalledWith('ISSUE-1', 'Backlog');
+      expect(stale.linearState).toBe('Backlog');
     });
   });
 

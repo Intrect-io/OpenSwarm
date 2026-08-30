@@ -184,7 +184,6 @@ import { getOwnedPRsForRepo } from './prOwnership.js';
 export interface PRProcessorConfig {
   repos: string[];
   schedule: string;
-  cooldownHours: number;
   maxIterations: number;
   roles?: DefaultRolesConfig;
   maxRetries?: number;          // Max retry attempts per PR (default: 3)
@@ -672,23 +671,6 @@ export class PRProcessor {
           });
 
           const hasReviewFeedback = hasFormalReviewFeedback || hasCommentFeedback;
-
-          // Cooldown check (skip cooldown for conflicting PRs or PRs with review feedback)
-          if (!hasConflicts && !hasReviewFeedback) {
-            const existing = state.prs[key];
-            if (existing?.lastProcessed) {
-              const hoursSince =
-                (Date.now() - new Date(existing.lastProcessed).getTime()) / (1000 * 60 * 60);
-              if (hoursSince < this.config.cooldownHours) {
-                console.log(`[PRProcessor] ${key}: cooldown (${hoursSince.toFixed(1)}h < ${this.config.cooldownHours}h)`);
-                continue;
-              }
-            }
-          } else if (hasConflicts) {
-            console.log(`[PRProcessor] ${key}: merge conflicts detected (bypassing cooldown)`);
-          } else if (hasReviewFeedback) {
-            console.log(`[PRProcessor] ${key}: review feedback detected (bypassing cooldown)`);
-          }
 
           // If no conflicts and no review feedback, check CI status — only process PRs with failures
           if (!hasConflicts && !hasReviewFeedback) {

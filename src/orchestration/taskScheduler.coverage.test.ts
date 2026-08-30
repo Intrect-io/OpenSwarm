@@ -402,6 +402,22 @@ describe('TaskScheduler.getStats byProject aggregation', () => {
     expect(stats.byProject.get('/repo')).toBe(2);
     expect(stats.running).toBe(2);
   });
+
+  it('exposes runnable and project-blocked queue pressure separately', () => {
+    const sched = new TaskScheduler({ maxConcurrent: 2, worktreeMode: true });
+    sched.startTask(task('running'), '/repo-a', pendingExecutor());
+    sched.enqueue(task('same-project'), '/repo-a');
+    sched.enqueue(task('other-project'), '/repo-b');
+
+    expect(sched.getStats().throughput.current).toMatchObject({
+      maxConcurrent: 2,
+      availableSlots: 1,
+      runnableQueued: 1,
+      blockedByGlobalCapacity: 0,
+      blockedByProjectCapacity: 1,
+      blockedByQuarantine: 0,
+    });
+  });
 });
 
 describe('TaskScheduler.setTaskStage on an unknown id', () => {

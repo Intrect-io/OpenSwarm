@@ -105,10 +105,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .btn-active:hover:not(:disabled) { background: #332200; border-color: var(--amber); }
     .btn-danger { border-color: #551111; color: var(--red); }
     .btn-danger:hover:not(:disabled) { background: #220000; border-color: var(--red); }
-    #turbo-btn { border-color: #553300; color: #ff8800; transition: all 0.3s; }
-    #turbo-btn:hover:not(:disabled) { background: #221100; border-color: #ff8800; }
-    #turbo-btn.turbo-active { background: #331800; border-color: #ff8800; color: #ffaa00; box-shadow: 0 0 8px rgba(255,136,0,0.3); animation: turbo-pulse 2s infinite; }
-    @keyframes turbo-pulse { 0%,100% { box-shadow: 0 0 4px rgba(255,136,0,0.2); } 50% { box-shadow: 0 0 12px rgba(255,136,0,0.5); } }
     .move-to-todo-btn {
       font-family: inherit;
       font-size: 9px;
@@ -619,8 +615,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <!--PROVIDER_BUTTONS-->
         </div>
         <span class="svc-sep">│</span>
-        <button class="btn" id="turbo-btn" onclick="toggleTurbo()" title="Max pace: full concurrency + heartbeat, persistent (on by default)">MAX PACE</button>
-        <span class="svc-sep">│</span>
         <button class="btn btn-danger" id="svc-stop-btn" onclick="svcAction('stop')">⏸ STOP</button>
         <button class="btn" id="svc-restart-btn" onclick="svcAction('restart')">↻ RESTART</button>
       </div>
@@ -955,17 +949,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         document.getElementById("stat-uptime").textContent =
           (h ? h + "h " : "") + (m ? m + "m " : "") + ss + "s";
       }
-      // Max pace (persistent — no countdown)
-      const turboBtn = document.getElementById("turbo-btn");
-      if (turboBtn) {
-        turboBtn.classList.toggle("turbo-active", !!data.turboMode);
-        turboBtn.textContent = data.turboMode ? "MAX PACE" : "TURBO";
-      }
       // Daily pace (informational count of tasks completed today; not an enforced cap)
       const paceEl = document.getElementById("stat-pace");
       if (paceEl && data.dailyPace) {
         paceEl.textContent = data.dailyPace.completedToday + " today";
-        paceEl.className = "stat-val" + (data.turboMode ? " amber" : "");
+        paceEl.className = "stat-val";
       }
     }
 
@@ -1122,28 +1110,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         addLogLine({ taskId: "system", stage: "error", line: "Heartbeat failed: " + e.message });
         btn.disabled = false; btn.textContent = "▶ HEARTBEAT";
       }
-    }
-
-    async function toggleTurbo() {
-      const btn = document.getElementById("turbo-btn");
-      const isActive = btn.classList.contains("turbo-active");
-      const newState = !isActive;
-      if (newState && !confirm("Enable TURBO mode? (5min heartbeat, 20 daily cap, auto-expires in 4h)")) return;
-      btn.disabled = true;
-      try {
-        const res = await fetch("/api/turbo", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ enabled: newState })
-        });
-        if (!res.ok) throw new Error("Failed");
-        addLogLine({ taskId: "system", stage: "turbo", line: newState ? "TURBO MODE ON" : "TURBO MODE OFF" });
-        const stats = await fetch("/api/stats").then(r => r.json());
-        updateStats(stats);
-      } catch (e) {
-        addLogLine({ taskId: "system", stage: "error", line: "Turbo toggle failed: " + e.message });
-      }
-      btn.disabled = false;
     }
 
     async function switchProvider(provider) {

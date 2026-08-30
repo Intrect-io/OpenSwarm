@@ -215,8 +215,23 @@ export async function detectFileConflicts(
       continue;
     }
 
-    // 충돌 그룹: 최고 우선순위(낮은 숫자) 태스크만 safe에 포함
-    const groupTasks = indices.map(i => tasks[i]);
+    // A connected component is not necessarily a clique. Pick a deterministic
+    // maximal independent set so A↔B↔C can run A and C together instead of
+    // serializing the whole transitive component behind one task.
+    const orderedIndices = [...indices].sort((left, right) =>
+      tasks[left].priority - tasks[right].priority || left - right);
+    const selectedIndices: number[] = [];
+    for (const candidate of orderedIndices) {
+      const conflictsWithSelected = selectedIndices.some((selected) => {
+        const left = Math.min(candidate, selected);
+        const right = Math.max(candidate, selected);
+        return pairShared.has(`${left}:${right}`);
+      });
+      if (!conflictsWithSelected) selectedIndices.push(candidate);
+    }
+    for (const index of selectedIndices) safe.push(tasks[index]);
+
+    const groupTasks = orderedIndices.map(index => tasks[index]);
     const sharedModuleSet = new Set<string>();
     for (let a = 0; a < indices.length; a++) {
       for (let b = a + 1; b < indices.length; b++) {
@@ -228,12 +243,6 @@ export async function detectFileConflicts(
       }
     }
     const sharedModules = Array.from(sharedModuleSet);
-
-    // 우선순위 기준 정렬 (1=Urgent > 4=Low)
-    groupTasks.sort((a, b) => a.priority - b.priority);
-
-    // 최고 우선순위 태스크만 safe
-    safe.push(groupTasks[0]);
 
     // 나머지는 충돌 그룹으로 기록
     conflictGroups.push({

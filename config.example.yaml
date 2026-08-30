@@ -47,10 +47,13 @@ autonomous:
   pairMode: true
   schedule: "*/15 * * * *"  # Every 15 minutes
   maxAttempts: 3
-  maxConcurrentTasks: 4  # Number of concurrent tasks
+  maxConcurrentTasks: 64  # Operator-controlled global capacity (maximum 256)
+  # In Progress is a live ownership signal, not a parking lot. If neither the
+  # scheduler nor a durable lease owns an issue for this long, return it to Backlog.
+  stalledInProgressHours: 6
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
-  maxConcurrentPerProject: 2  # Optional cap for same-project worktree parallelism
+  # maxConcurrentPerProject: 64  # Optional; omitted means inherit the global capacity
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
   shutdownGraceMs: 30000         # Wait for real executor exit before service teardown
@@ -234,7 +237,6 @@ autonomous:
 prProcessor:
   enabled: true
   schedule: "*/15 * * * *"    # Check every 15 minutes
-  cooldownHours: 6            # Wait 6 hours after processing
   maxIterations: 3            # Max 3 Worker-Reviewer iterations
 
 # Anonymous usage telemetry (opt-out). Sends command name, version, and OS only —
