@@ -428,8 +428,9 @@ humanSurfaceReadOnly:
 
 With this switch on, OpenSwarm does not attempt to classify arbitrary programs:
 it removes native `bash` and compiler-spawning diagnostics, refuses delegated
-CLI adapters before command construction, and blocks the same hidden tool calls
-at dispatch. This closes `curl --config`, scripts, dynamic URLs, fake CLIs, and
+CLI adapters before availability/model discovery or command construction, and
+blocks the same hidden tool calls at dispatch. This closes `curl --config`,
+scripts, dynamic URLs, fake CLIs, and
 credentials found through inherited `HOME` by making their execution impossible.
 Use a native-loop adapter; local web chat remains available with file tools,
 read-only web access, and policy-filtered MCP tools. Approved typed DevOps/data

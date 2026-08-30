@@ -9,7 +9,7 @@ import { t, getPrompts } from '../locale/index.js';
 import type { WorkerContext } from '../locale/types.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import type { ToolDefinition } from '../adapters/tools.js';
-import { getAdapter, getDefaultAdapterName, spawnCli } from '../adapters/index.js';
+import { getAdapter, getDefaultAdapterName, probeAdapterAvailability, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
@@ -237,7 +237,7 @@ async function planWorkerAdapters(primary: AdapterName, policy?: AdapterRoutePol
   const candidates = new Set<AdapterName>(policy.fallbacks ?? []);
   candidates.delete(primary);
   if (isRouteReasonAllowed(policy, 'capability')) candidates.add(primary);
-  for (const candidate of candidates) available[candidate] = await getAdapter(candidate).isAvailable();
+  for (const candidate of candidates) available[candidate] = await probeAdapterAvailability(getAdapter(candidate));
   return planAdapterAttempts({ policy, primary, available });
 }
 

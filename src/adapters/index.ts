@@ -25,6 +25,13 @@ export { AtlasCloudCliAdapter } from './atlascloud.js';
 export { ClaudeCliAdapter } from './claude.js';
 export { CcRouterAdapter } from './ccRouter.js';
 export { CursorCliAdapter } from './cursor.js';
+export {
+  adapterCanRunUnderHumanSurfaceBoundary,
+  assertAdapterCanRunUnderHumanSurfaceBoundary,
+  listBoundarySafeModels,
+  probeAdapterAvailability,
+  resolveBoundarySafeDefaultModel,
+} from './humanSurfaceBoundary.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
 import { CodexCliAdapter } from './codex.js';
@@ -37,6 +44,7 @@ import { AtlasCloudCliAdapter } from './atlascloud.js';
 import { ClaudeCliAdapter } from './claude.js';
 import { CcRouterAdapter } from './ccRouter.js';
 import { CursorCliAdapter } from './cursor.js';
+import { probeAdapterAvailability } from './humanSurfaceBoundary.js';
 import type { AdapterName, CliAdapter } from './types.js';
 
 const adapters: Record<string, CliAdapter> = {
@@ -97,7 +105,7 @@ export function listAdapterNames(): AdapterName[] {
 export async function listAvailableAdapters(): Promise<string[]> {
   const results: string[] = [];
   for (const [name, adapter] of Object.entries(adapters)) {
-    if (await adapter.isAvailable()) {
+    if (await probeAdapterAvailability(adapter)) {
       results.push(name);
     }
   }

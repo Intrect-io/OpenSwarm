@@ -22,6 +22,7 @@ import {
 } from './processTree.js';
 import { raceWithAbort } from './abortRace.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { assertAdapterCanRunUnderHumanSurfaceBoundary } from './humanSurfaceBoundary.js';
 
 export { terminateCliProcessTree } from './processTree.js';
 
@@ -35,19 +36,7 @@ export async function spawnCli(
   requestedOptions: CliRunOptions,
 ): Promise<CliRunResult> {
   const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
-  if (
-    strictHumanSurfaceBoundary
-    && (!adapter.run || adapter.capabilities.enforcesHumanSurfaceReadOnly !== true)
-  ) {
-    const reason = adapter.run
-      ? 'does not declare enforcement of the strict human-surface boundary'
-      : 'delegates to an external CLI with its own tool loop';
-    throw new Error(
-      `HUMAN_SURFACE_READ_ONLY: Adapter '${adapter.name}' ${reason}; `
-      + 'arbitrary program execution is disabled while humanSurfaceReadOnly.enabled is true. '
-      + 'Use a native OpenSwarm-loop adapter.',
-    );
-  }
+  assertAdapterCanRunUnderHumanSurfaceBoundary(adapter);
   const options: CliRunOptions = strictHumanSurfaceBoundary
     ? { ...requestedOptions, shellTools: false, diagnosticsTool: false }
     : requestedOptions;

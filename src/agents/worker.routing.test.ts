@@ -9,6 +9,7 @@ const adapters = vi.hoisted(() => ({
 vi.mock('../adapters/index.js', () => ({
   getAdapter: (name?: keyof typeof adapters) => adapters[name ?? 'codex'],
   getDefaultAdapterName: () => 'codex',
+  probeAdapterAvailability: (adapter: { isAvailable(): Promise<boolean> }) => adapter.isAvailable(),
   spawnCli: (...args: unknown[]) => spawnCli(...args),
 }));
 vi.mock('../support/gitTracker.js', () => ({ isGitRepo: vi.fn(async () => false), takeSnapshot: vi.fn() }));

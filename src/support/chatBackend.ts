@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { AdapterName } from '../adapters/index.js';
-import { getAdapter, getDefaultAdapterName } from '../adapters/index.js';
+import { getAdapter, getDefaultAdapterName, listBoundarySafeModels } from '../adapters/index.js';
 // Single source for each provider's default model — see getDefaultChatModel.
 import { CODEX_DEFAULT_MODEL } from '../adapters/codex.js';
 import { DEFAULT_MODEL as CODEX_RESPONSES_DEFAULT_MODEL } from '../adapters/codexResponses.js';
@@ -180,7 +180,7 @@ export async function listChatModels(provider: AdapterName): Promise<string[]> {
   try {
     const adapter = getAdapter(provider);
     if (typeof adapter.listModels === 'function') {
-      const live = await adapter.listModels();
+      const live = await listBoundarySafeModels(adapter);
       if (live?.length) return Array.from(new Set(live));
     }
   } catch {

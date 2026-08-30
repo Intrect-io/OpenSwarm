@@ -14,6 +14,7 @@ import type {
   WorkerResult,
 } from './types.js';
 import { parseReviewerResult, parseWorkerResult } from './resultParsing.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +35,7 @@ export class CursorCliAdapter implements CliAdapter {
   };
 
   async isAvailable(): Promise<boolean> {
+    if (isHumanSurfaceReadOnlyEnabled()) return false;
     try {
       await execFileAsync('cursor-agent', ['status'], { timeout: 5_000 });
       return true;
@@ -43,6 +45,7 @@ export class CursorCliAdapter implements CliAdapter {
   }
 
   async listModels(): Promise<string[]> {
+    if (isHumanSurfaceReadOnlyEnabled()) return [];
     try {
       const { stdout } = await execFileAsync('cursor-agent', ['--list-models'], { timeout: 10_000 });
       return stdout.split('\n').map((line) => line.trim()).filter((line) => line && !/^available models/i.test(line));

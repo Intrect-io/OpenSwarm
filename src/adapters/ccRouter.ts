@@ -2,13 +2,9 @@
 // OpenSwarm - CC-Router Responses adapter
 // ============================================
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { AdapterCapabilities, CliRunOptions } from './types.js';
 import { CodexResponsesAdapter } from './codexResponses.js';
-import { prepareApprovedLocalResponsesRequest } from '../support/approvedEgress.js';
-
-const execFileAsync = promisify(execFile);
+import { approvedLocalModelEndpoint, prepareApprovedLocalResponsesRequest } from '../support/approvedEgress.js';
 
 export class CcRouterAdapter extends CodexResponsesAdapter {
   readonly name = 'cc-router';
@@ -24,8 +20,19 @@ export class CcRouterAdapter extends CodexResponsesAdapter {
 
   async isAvailable(): Promise<boolean> {
     try {
-      const { stdout } = await execFileAsync('cc-router', ['status', '--json'], { timeout: 5_000 });
-      const status = JSON.parse(stdout) as { status?: string; operational?: { capabilities?: { openAIResponses?: boolean } } };
+      // Availability probing is part of adapter selection and runs before
+      // spawnCli's execution boundary. Never resolve a PATH binary here: a fake
+      // `cc-router` could execute arbitrary code with the daemon's HOME/env even
+      // though strict mode would later refuse the delegated process. The router
+      // already exposes the same status payload over its loopback-only health
+      // endpoint, so probe that narrow approved egress path directly.
+      const endpoint = approvedLocalModelEndpoint(this.baseOrigin(), '/cc-router/health');
+      const response = await fetch(endpoint, {
+        headers: this.headers(),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) return false;
+      const status = await response.json() as { status?: string; operational?: { capabilities?: { openAIResponses?: boolean } } };
       return status.status === 'ok' && status.operational?.capabilities?.openAIResponses === true;
     } catch {
       return false;
@@ -34,7 +41,8 @@ export class CcRouterAdapter extends CodexResponsesAdapter {
 
   async listModels(): Promise<string[]> {
     try {
-      const response = await fetch(`${this.baseUrl()}/models`, { headers: this.headers() });
+      const endpoint = approvedLocalModelEndpoint(this.baseOrigin(), '/v1/models');
+      const response = await fetch(endpoint, { headers: this.headers() });
       if (!response.ok) return [];
       const body = await response.json() as { data?: Array<{ id?: string }> };
       return (body.data ?? []).flatMap((entry) => typeof entry.id === 'string' ? [entry.id] : []);

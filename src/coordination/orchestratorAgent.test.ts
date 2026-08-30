@@ -13,7 +13,11 @@ const getAdapter = vi.hoisted(() => vi.fn(() => ({
   run: vi.fn(),
   getDefaultModel: vi.fn(async () => 'gpt-5.6-terra'),
 })));
-vi.mock('../adapters/index.js', () => ({ getAdapter, spawnCli }));
+vi.mock('../adapters/index.js', () => ({
+  adapterCanRunUnderHumanSurfaceBoundary: (adapter: { run?: unknown }) => typeof adapter.run === 'function',
+  getAdapter,
+  spawnCli,
+}));
 vi.mock('../mcp/mcpClient.js', () => ({ getMcpTools }));
 
 const tool = (name: string): ToolDefinition => ({ type: 'function', function: { name, description: '', parameters: { type: 'object' } } });

@@ -9,7 +9,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getAdapter, getDefaultAdapterName, spawnCli } from '../adapters/index.js';
+import {
+  getAdapter,
+  getDefaultAdapterName,
+  resolveBoundarySafeDefaultModel,
+  spawnCli,
+} from '../adapters/index.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
@@ -641,7 +646,9 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     // Explicit per-provider drafter model (INT-1915); options.model overrides on the
     // primary adapter only, then DRAFT_MODELS, then the adapter's own default.
     const override = isFallbackAttempt ? undefined : options.model;
-    const resolvedModel = override ?? DRAFT_MODELS[adapterName] ?? await adapter.getDefaultModel();
+    const resolvedModel = override
+      ?? DRAFT_MODELS[adapterName]
+      ?? await resolveBoundarySafeDefaultModel(adapter);
 
     if (isFallbackAttempt) {
       onLog?.(`[Draft] Usage limit on ${adaptersToTry[i - 1]}, fallback to ${adapterName}`);

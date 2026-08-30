@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
-import { getAdapter, getDefaultAdapterName, listAvailableAdapters } from '../adapters/index.js';
+import { getAdapter, getDefaultAdapterName, listAvailableAdapters, probeAdapterAvailability } from '../adapters/index.js';
 import { initLocale } from '../locale/index.js';
 import { expandPath } from '../core/config.js';
 import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgress.js';
@@ -37,7 +37,7 @@ export interface CliRunOptions {
 
 /** Check if the configured/default adapter can run before starting the pipeline */
 async function checkDefaultAdapter(): Promise<boolean> {
-  return getAdapter(getDefaultAdapterName()).isAvailable();
+  return probeAdapterAvailability(getAdapter(getDefaultAdapterName()));
 }
 
 function validateMaxIterations(value: number | undefined): number {
