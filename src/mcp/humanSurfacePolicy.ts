@@ -648,6 +648,23 @@ export function humanSurfaceMcpCallWriteReason(
   const humanDestination = destinations.find((entry) => entry.kind === 'human');
   const unresolvedDestination = destinations.find((entry) => entry.kind === 'unresolved');
 
+  // Destination classification is an independent boundary from the HTTP verb.
+  // A nominal GET to `${TARGET_URL}` is not the "same GET" we promise to keep:
+  // the daemon cannot prove which surface receives it (or whether that endpoint
+  // honours GET as read-only).  Resolve the target completely before allowing
+  // even a read, otherwise method=GET turns the dynamic-destination fail-close
+  // contract into a bypass.
+  if (facts.truncated) return 'generic MCP call blocked because argument inspection exceeded the safety bound';
+  if (unresolvedDestination) {
+    return `generic MCP call blocked because its ${unresolvedDestination.evidence} cannot be classified`;
+  }
+  if (destinations.length === 0) {
+    return 'generic MCP call blocked because no concrete destination was provided';
+  }
+  if (graphBatch && graphRelativeDestinations.length === 0) {
+    return 'generic MCP call blocked because a Microsoft Graph batch has no inspectable nested destinations';
+  }
+
   if (humanDestination) {
     if (access === 'read') return undefined;
     return `generic MCP ${access === 'write' ? 'write' : 'call'} blocked (${humanDestination.evidence}); `
@@ -655,16 +672,6 @@ export function humanSurfaceMcpCallWriteReason(
   }
 
   if (access === 'read') return undefined;
-  if (graphBatch && graphRelativeDestinations.length === 0) {
-    return 'generic MCP write blocked because a Microsoft Graph batch has no inspectable nested destinations';
-  }
-  if (facts.truncated) return 'generic MCP write blocked because argument inspection exceeded the safety bound';
-  if (unresolvedDestination) {
-    return `generic MCP write blocked because its ${unresolvedDestination.evidence} cannot be classified`;
-  }
-  if (destinations.length === 0) {
-    return 'generic MCP write blocked because no concrete destination was provided';
-  }
   if (policy.access === 'read') {
     return 'generic MCP write blocked because the tool descriptor does not declare a write capability';
   }

@@ -328,6 +328,12 @@ describe('initMcpTools / callMcpTool regressions', () => {
     await expect(callMcpTool('gateway__proxy', {
       request: { destination: '${TARGET_URL}', verb: 'POST', payload: { text: 'hi' } },
     })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('dynamic destination') });
+    await expect(callMcpTool('gateway__proxy', {
+      request: { destination: '${TARGET_URL}', verb: 'GET' },
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('dynamic destination') });
+    await expect(callMcpTool('gateway__proxy', {
+      request: { verb: 'GET' },
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('no concrete destination') });
     expect(clientMock.callTool).not.toHaveBeenCalled();
 
     // A URL quoted inside an issue body is data, not the generic request target.
