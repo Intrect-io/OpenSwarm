@@ -636,8 +636,18 @@ companion and makes the daemon wait for its real health proof before startup:
 
 ```bash
 sudo install -d -o 1001 -g 1001 -m 0700 sandbox-socket
+export OPENSWARM_IMAGE="openswarm:$(git rev-parse --short=12 HEAD)"
+export OPENSWARM_WORKSPACE="$(pwd)/workspace" # use the real absolute workspace root
+docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml build
 docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml up -d
 ```
+
+Set both `humanSurfaceReadOnly.enabled` and
+`humanSurfaceReadOnly.sandboxExecutor.enabled` to `true` in `config.yaml`.
+Before starting, confirm that `OPENSWARM_WORKSPACE` contains every configured
+`/work/<repo>` checkout. After the build, both services must resolve to the
+same `OPENSWARM_IMAGE` image ID; keep the prior immutable image tag for
+rollback. Do not rely on a pre-existing mutable `openswarm:latest` image.
 
 Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated `0.0.0.0` bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
 

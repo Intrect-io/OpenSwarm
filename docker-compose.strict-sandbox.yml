@@ -36,7 +36,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: openswarm:latest
+    image: ${OPENSWARM_IMAGE:-openswarm:latest}
     container_name: openswarm-sandbox-executor
     restart: unless-stopped
     user: "0:0"
