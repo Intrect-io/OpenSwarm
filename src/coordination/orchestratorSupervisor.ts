@@ -19,6 +19,8 @@ import type { ResolvedOrchestratorConfig } from './orchestratorConfig.js';
 
 export type OrchestratorTrigger = 'cron' | 'coordination-event' | 'manual';
 
+export const ORCHESTRATOR_SUPERVISOR_TASK_ID = 'orchestrator:sweep';
+
 export interface OrchestratorSweepStats {
   trigger: string;
   considered: number;
@@ -47,11 +49,21 @@ function isTerminalFollowUp(event: CoordinationEvent): boolean {
     && (event.metadata?.action === 'replied' || event.metadata?.action === 'resolved');
 }
 
+function isOneShotFollowUp(event: CoordinationEvent): boolean {
+  return (event.kind === 'review-run' && event.status === 'failed') || isTerminalFollowUp(event);
+}
+
+function isSupervisorAuthoredEvent(event: CoordinationEvent): boolean {
+  return event.actorRole === 'orchestrator'
+    && (event.sourceTaskId ?? event.taskId) === ORCHESTRATOR_SUPERVISOR_TASK_ID;
+}
+
 /** Requests, findings, and late peer outcomes trigger an immediate paid run. */
 export function isActionableOrchestratorEvent(event: CoordinationEvent): boolean {
   // Never recursively wake on the supervisor's own board mutations. A later
-  // peer response still has the peer's role and will wake the repository.
-  if (event.actorRole === 'orchestrator') return false;
+  // peer orchestrator response still has a different source task and wakes the
+  // repository. Role alone is not ownership of this supervisor lifecycle.
+  if (isSupervisorAuthoredEvent(event)) return false;
   if (event.kind === 'review-run' && event.status === 'failed') return true;
   if (isTerminalFollowUp(event)) return true;
   return event.status === 'open'
@@ -66,16 +78,20 @@ export function isActionableOrchestratorEvent(event: CoordinationEvent): boolean
  * the project supervisor, so derive the supervisor view from the full snapshot
  * rather than registering an event trigger that can never reach its objective.
  */
-export function selectOrchestratorItems(events: readonly CoordinationEvent[]): CoordinationEvent[] {
+export function selectOrchestratorItems(
+  events: readonly CoordinationEvent[],
+  handledTerminalThroughSeq = 0,
+): CoordinationEvent[] {
   const latest = new Map<string, CoordinationEvent>();
   for (const event of events) {
     const previous = latest.get(event.correlationId);
     if (!previous || event.seq > previous.seq) latest.set(event.correlationId, event);
   }
-  return [...latest.values()].filter((event) =>
-    ['open', 'waiting', 'running'].includes(event.status)
-    || (event.kind === 'review-run' && event.status === 'failed')
-    || isTerminalFollowUp(event));
+  return [...latest.values()].filter((event) => {
+    if (isSupervisorAuthoredEvent(event)) return false;
+    if (['open', 'waiting', 'running'].includes(event.status)) return true;
+    return isOneShotFollowUp(event) && event.seq > handledTerminalThroughSeq;
+  });
 }
 
 function actionableFingerprint(events: readonly CoordinationEvent[]): string {
@@ -96,28 +112,63 @@ function repositoryStatePath(repoKey: string): string {
   return join(coordinationStateDir(), 'orchestrator', `${key}.json`);
 }
 
-function readHandledFingerprint(repoKey: string): string | undefined {
+interface HandledState {
+  version: 1 | 2;
+  fingerprint: string;
+  terminalThroughSeq: number;
+}
+
+function readHandledState(repoKey: string): HandledState | undefined {
   const path = repositoryStatePath(repoKey);
   if (!existsSync(path)) return undefined;
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
     version?: unknown;
     repoKey?: unknown;
     fingerprint?: unknown;
+    terminalThroughSeq?: unknown;
   };
-  if (parsed.version !== 1 || parsed.repoKey !== repoKey || typeof parsed.fingerprint !== 'string') {
+  if ((parsed.version !== 1 && parsed.version !== 2)
+    || parsed.repoKey !== repoKey
+    || typeof parsed.fingerprint !== 'string'
+    || (parsed.version === 2
+      && (!Number.isSafeInteger(parsed.terminalThroughSeq) || Number(parsed.terminalThroughSeq) < 0))) {
     throw new Error(`Invalid orchestrator state: ${path}`);
   }
-  return parsed.fingerprint;
+  return {
+    version: parsed.version,
+    fingerprint: parsed.fingerprint,
+    // Version 1 proved only a whole-board fingerprint. Treat terminal events as
+    // unconsumed until that fingerprint is migrated under the repository lock.
+    terminalThroughSeq: parsed.version === 2 ? Number(parsed.terminalThroughSeq) : 0,
+  };
 }
 
-function writeHandledFingerprint(cell: RepositoryCell, fingerprint: string): void {
+function writeHandledState(
+  cell: RepositoryCell,
+  fingerprint: string,
+  terminalThroughSeq: number,
+): void {
   atomicWriteFileSync(repositoryStatePath(cell.repoKey), `${JSON.stringify({
-    version: 1,
+    version: 2,
     repoKey: cell.repoKey,
     repository: cell.repositoryPath,
     fingerprint,
+    terminalThroughSeq,
     handledAt: new Date().toISOString(),
   }, null, 2)}\n`, 0o600);
+}
+
+function advancedTerminalCursor(events: readonly CoordinationEvent[], current: number): number {
+  return events.reduce(
+    (highest, event) => isOneShotFollowUp(event) ? Math.max(highest, event.seq) : highest,
+    current,
+  );
+}
+
+interface PendingSelection {
+  events: readonly CoordinationEvent[];
+  rawEvents?: readonly CoordinationEvent[];
+  handledState?: HandledState;
 }
 
 /**
@@ -128,7 +179,7 @@ function writeHandledFingerprint(cell: RepositoryCell, fingerprint: string): voi
  * lets service shutdown stop the native adapter and wait for its real exit.
  */
 export class OrchestratorSupervisor {
-  private readonly getPending: (repository: string, repoKey: string) => readonly CoordinationEvent[];
+  private readonly customGetPending?: (repository: string, repoKey: string) => readonly CoordinationEvent[];
   private readonly buildCapsule: (repository: string) => InstructionCapsule;
   private readonly run: (options: OrchestratorRunOptions) => Promise<OrchestratorRunResult>;
   private readonly lockTimeoutMs: number;
@@ -143,15 +194,23 @@ export class OrchestratorSupervisor {
   private lastSweep: OrchestratorSweepStats | null = null;
 
   constructor(private readonly options: OrchestratorSupervisorOptions) {
-    this.getPending = options.getPending
-      ?? ((repository, repoKey) => selectOrchestratorItems(
-        getCoordinationStore().list({ repository, repoKey, limit: 500 }),
-      ));
+    this.customGetPending = options.getPending;
     // The builder itself is cheap; invoking it remains lazy until the board has
     // an actionable generation and this process owns the repository lock.
     this.buildCapsule = options.buildInstructionCapsule;
     this.run = options.run ?? runOrchestrator;
     this.lockTimeoutMs = options.lockTimeoutMs ?? 50;
+  }
+
+  private pendingFor(repository: string, repoKey: string): PendingSelection {
+    if (this.customGetPending) return { events: this.customGetPending(repository, repoKey) };
+    const handledState = readHandledState(repoKey);
+    const rawEvents = getCoordinationStore().list({ repository, repoKey, limit: 500 });
+    return {
+      events: selectOrchestratorItems(rawEvents, handledState?.terminalThroughSeq ?? 0),
+      rawEvents,
+      handledState,
+    };
   }
 
   start(): void {
@@ -241,7 +300,7 @@ export class OrchestratorSupervisor {
       if (signal.aborted) break;
       stats.considered++;
       const { repoKey, repositoryPath: repository } = cell;
-      const pending = this.getPending(repository, repoKey);
+      const pending = this.pendingFor(repository, repoKey).events;
       const objective = buildOrchestratorObjective(pending);
       if (!objective) {
         stats.noAction++;
@@ -258,22 +317,33 @@ export class OrchestratorSupervisor {
         let result: OrchestratorRunResult | undefined;
         let handledByAnotherProcess = false;
         let lockedFingerprint = fingerprint;
+        let handledFingerprint = fingerprint;
         await withFileLock(repositoryLockPath(repoKey), async () => {
           if (signal.aborted) return;
           // Another daemon may have handled or advanced the repository while
           // this process waited for the cross-process lock. Decide again under
           // the same lock that protects the durable handled cursor.
-          const current = this.getPending(repository, repoKey);
+          const selection = this.pendingFor(repository, repoKey);
+          const current = selection.events;
           const currentObjective = buildOrchestratorObjective(current);
           if (!currentObjective) return;
           lockedFingerprint = actionableFingerprint(current);
-          if (readHandledFingerprint(repoKey) === lockedFingerprint) {
+          const handledState = selection.handledState ?? readHandledState(repoKey);
+          if (handledState?.fingerprint === lockedFingerprint) {
+            if (selection.rawEvents && handledState.version === 1) {
+              const terminalThroughSeq = advancedTerminalCursor(current, handledState.terminalThroughSeq);
+              const settled = selectOrchestratorItems(selection.rawEvents, terminalThroughSeq);
+              handledFingerprint = actionableFingerprint(settled);
+              writeHandledState(cell, handledFingerprint, terminalThroughSeq);
+            } else {
+              handledFingerprint = lockedFingerprint;
+            }
             handledByAnotherProcess = true;
             return;
           }
           result = await this.run({
             repository,
-            taskId: 'orchestrator:sweep',
+            taskId: ORCHESTRATOR_SUPERVISOR_TASK_ID,
             objective: currentObjective,
             policy: this.options.policy,
             adapterName: this.options.config.adapter,
@@ -286,11 +356,18 @@ export class OrchestratorSupervisor {
             signal,
           });
           if (result && !result.skippedReason) {
-            writeHandledFingerprint(cell, lockedFingerprint);
+            const terminalThroughSeq = selection.rawEvents
+              ? advancedTerminalCursor(current, handledState?.terminalThroughSeq ?? 0)
+              : handledState?.terminalThroughSeq ?? 0;
+            const settled = selection.rawEvents
+              ? selectOrchestratorItems(selection.rawEvents, terminalThroughSeq)
+              : current;
+            handledFingerprint = actionableFingerprint(settled);
+            writeHandledState(cell, handledFingerprint, terminalThroughSeq);
           }
         }, { timeoutMs: this.lockTimeoutMs });
         if (handledByAnotherProcess) {
-          this.lastActionable.set(repoKey, lockedFingerprint);
+          this.lastActionable.set(repoKey, handledFingerprint);
           stats.unchanged++;
           continue;
         }
@@ -301,7 +378,7 @@ export class OrchestratorSupervisor {
           stats.skipped++;
         } else {
           stats.ran++;
-          this.lastActionable.set(repoKey, lockedFingerprint);
+          this.lastActionable.set(repoKey, handledFingerprint);
         }
       } catch (error) {
         if (signal.aborted) break;

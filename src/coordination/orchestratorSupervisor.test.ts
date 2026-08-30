@@ -8,7 +8,8 @@ import {
   getCoordinationStore, resetCoordinationStoreForTests, type CoordinationEvent,
 } from './coordinationStore.js';
 import {
-  isActionableOrchestratorEvent, OrchestratorSupervisor, selectOrchestratorItems,
+  isActionableOrchestratorEvent, ORCHESTRATOR_SUPERVISOR_TASK_ID,
+  OrchestratorSupervisor, selectOrchestratorItems,
 } from './orchestratorSupervisor.js';
 import { repositoryCell, resetRepositoryCellCacheForTests } from './repositoryCell.js';
 
@@ -96,6 +97,10 @@ describe('OrchestratorSupervisor', () => {
     }))).toBe(false);
     expect(isActionableOrchestratorEvent(event({
       kind: 'thread-update', status: 'completed', metadata: { action: 'replied' }, actorRole: 'orchestrator',
+    }))).toBe(true);
+    expect(isActionableOrchestratorEvent(event({
+      kind: 'thread-update', status: 'completed', metadata: { action: 'replied' },
+      actorRole: 'orchestrator', taskId: ORCHESTRATOR_SUPERVISOR_TASK_ID,
     }))).toBe(false);
   });
 
@@ -122,6 +127,68 @@ describe('OrchestratorSupervisor', () => {
     });
 
     expect(selectOrchestratorItems([request, response])).toEqual([response]);
+  });
+
+  it('excludes only this supervisor\'s events and advances one-shot terminal items by sequence', () => {
+    const ownResponse = event({
+      id: 'own', seq: 2, taskId: ORCHESTRATOR_SUPERVISOR_TASK_ID,
+      actorRole: 'orchestrator', kind: 'advice-response', status: 'completed',
+      correlationId: 'own-response', fingerprint: 'own-fingerprint',
+    });
+    const peerResponse = event({
+      id: 'peer', seq: 3, taskId: 'peer-orchestrator', actorRole: 'orchestrator',
+      kind: 'advice-response', status: 'completed', correlationId: 'peer-response',
+      fingerprint: 'peer-fingerprint',
+    });
+    const open = event({
+      id: 'open', seq: 1, correlationId: 'open-request', fingerprint: 'open-fingerprint',
+    });
+
+    expect(selectOrchestratorItems([open, ownResponse, peerResponse], 2)).toEqual([open, peerResponse]);
+    expect(selectOrchestratorItems([open, ownResponse, peerResponse], 3)).toEqual([open]);
+  });
+
+  it('does not replay an older terminal outcome when a later outcome arrives after restart', async () => {
+    tempState();
+    const store = getCoordinationStore();
+    await store.publish({
+      repository: '/repo', taskId: 'worker-a', actor: 'worker-a', actorRole: 'worker',
+      kind: 'advice-response', status: 'completed', correlationId: 'first-response',
+      summary: 'first terminal outcome',
+    });
+    const firstRun = vi.fn(async () => result());
+    const common = {
+      config: {
+        enabled: true, eventDriven: false, eventDebounceMs: 0,
+        timeoutMs: 10_000, maxTurns: 5, legacy: false,
+      } as const,
+      getRepositories: () => ['/repo'],
+      buildInstructionCapsule: () => capsule,
+    };
+    const first = new OrchestratorSupervisor({ ...common, run: firstRun });
+    await first.requestSweep('manual');
+    expect(firstRun.mock.calls[0][0].objective).toContain('first terminal outcome');
+    await first.stop();
+
+    await store.publish({
+      repository: '/repo', taskId: 'worker-b', actor: 'worker-b', actorRole: 'worker',
+      kind: 'delegation-result', status: 'completed', correlationId: 'second-response',
+      summary: 'second terminal outcome',
+    });
+    const secondRun = vi.fn(async () => result());
+    const second = new OrchestratorSupervisor({ ...common, run: secondRun });
+    await second.requestSweep('manual');
+    expect(secondRun).toHaveBeenCalledTimes(1);
+    expect(secondRun.mock.calls[0][0].objective).toContain('second terminal outcome');
+    expect(secondRun.mock.calls[0][0].objective).not.toContain('first terminal outcome');
+    await second.stop();
+
+    const thirdRun = vi.fn(async () => result());
+    const third = new OrchestratorSupervisor({ ...common, run: thirdRun });
+    await third.requestSweep('manual');
+    expect(thirdRun).not.toHaveBeenCalled();
+    expect(third.getLastSweep()).toMatchObject({ noAction: 1, ran: 0 });
+    await third.stop();
   });
 
   it('reconciles a pre-start durable event once and keeps the handled cursor across restart', async () => {
