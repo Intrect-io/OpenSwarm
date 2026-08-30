@@ -1246,7 +1246,11 @@ export class AutonomousRunner {
       // one place it actually protects something. (AGT-4094)
       const task = taskById.get(run.issueId);
       if (run.ownerInstanceId || run.leaseToken) {
-        console.warn(`[Reconciler] Keeping ${run.identifier ?? run.issueId} fenced until its original executor exits`);
+        // Not "until its executor exits": a container restart replaces the
+        // process holding the claim, so that exit is never observed and the
+        // line reads as a permanent wedge. What actually frees the row is the
+        // age sweep in durableRunCoordinator, so report its deadline. (AGT-4126)
+        console.warn(this.durableRuns.fenceWaitMessage(run));
         continue;
       }
 

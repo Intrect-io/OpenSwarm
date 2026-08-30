@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import { DurableRunCoordinator, retryAtFor, runRecordToTask } from './durableRunCoordinator.js';
+import { DurableRunCoordinator, formatFenceWait, retryAtFor, runRecordToTask } from './durableRunCoordinator.js';
 import { RunLedger } from './runLedger.js';
 
 const roots: string[] = [];
@@ -53,6 +53,52 @@ describe('DurableRunCoordinator', () => {
     expect(retryAtFor(superseded, 1_000, 2)).toBe(1_000 + 10 * 60_000);
     expect(retryAtFor(superseded, 1_000, 3)).toBe(1_000 + 20 * 60_000);
     expect(retryAtFor(superseded, 1_000, 20)).toBe(1_000 + 6 * 60 * 60_000);
+  });
+
+  it('reports the deadline the age sweep will actually act on', () => {
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'daemon', reconcileAbandonMs: 10 * 60_000,
+    });
+
+    // Read off updatedAt — the same field the sweep compares — so the reported
+    // wait and the actual free cannot drift. (AGT-4126)
+    expect(coordinator.reconcileAbandonDeadline({ updatedAt: 1_000 })).toBe(1_000 + 10 * 60_000);
+  });
+
+  it('names a checkable condition and a time in the fence message', () => {
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'daemon', reconcileAbandonMs: 10 * 60_000,
+    });
+
+    const message = coordinator.fenceWaitMessage({ updatedAt: 0, identifier: 'AX-879', issueId: 'uuid-1' });
+
+    expect(message).toContain('AX-879');
+    expect(message).toContain('1970-01-01T00:10:00.000Z');
+    // Both exits the sweep has, and only those: nothing renews a row that has
+    // already sat through a full lease of silence.
+    expect(message).toContain('by age');
+    expect(message).toContain('exited');
+    expect(message).not.toContain('renew');
+    // The old wording pointed at an event no one can observe once the container
+    // holding that executor has been replaced, so a self-healing wait read as a
+    // permanent wedge.
+    expect(message).not.toContain('original executor');
+  });
+
+  it('falls back to the issue id when a run has no identifier', () => {
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'daemon', reconcileAbandonMs: 60_000,
+    });
+
+    expect(coordinator.fenceWaitMessage({ updatedAt: 0, issueId: 'uuid-1' })).toContain('uuid-1');
+  });
+
+  it('formats the wait without needing a coordinator', () => {
+    expect(formatFenceWait('AX-1', 0)).toBe(
+      '[Reconciler] Keeping AX-1 fenced — its claim is still held;'
+      + ' frees at 1970-01-01T00:00:00.000Z by age,'
+      + ' or sooner if its owner process is seen to have exited',
+    );
   });
 
   it('admits only one concurrent run per repository across coordinator instances', async () => {
