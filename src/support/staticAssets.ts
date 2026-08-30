@@ -114,6 +114,17 @@ export async function readChatShell(): Promise<Buffer | null> {
   }
 }
 
+/** The operator warehouse shell (AGT-4128). */
+export async function readWarehouseShell(): Promise<Buffer | null> {
+  const root = resolveStaticRoot();
+  if (!root) return null;
+  try {
+    return await readFile(join(root, 'warehouse.html'));
+  } catch {
+    return null;
+  }
+}
+
 export async function readAppShell(): Promise<Buffer | null> {
   const root = resolveStaticRoot();
   if (!root) return null;

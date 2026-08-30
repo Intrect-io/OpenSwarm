@@ -467,19 +467,22 @@ curl http://localhost:3847/api/health         # daemon health (token-less)
 
 Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated `0.0.0.0` bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
 
-The compose file wires the three mounts that matter:
+The compose file wires the persistent and local-data mounts that matter:
 
 | Mount | Purpose |
 |---|---|
 | `./config.yaml → /app/config.yaml` | daemon configuration (read-only) |
 | `openswarm-state → /home/openswarm/.openswarm` | task state, auth profiles, coordination board — **must persist**, and one container per state volume (two daemons sharing it would fight over locks and double-process issues) |
 | `./workspace → /work` | the repositories the daemon works on; point `autonomous.allowedProjects` at `/work/<repo>` |
+| `../openswarm-warehouse → /warehouse` | agent-readable, Git-external local assets (read-only) |
+| `../openswarm-warehouse → /warehouse-rw` | operator upload path used only by the authenticated `/warehouse` web UI |
 
 Notes:
 
 - **Provider CLIs are not baked in.** The default `codex-responses` adapter runs OpenSwarm's own tool loop against OAuth state — log in on the host (`openswarm auth login`) and mount `~/.codex` / reuse the state volume. For the delegated CLI adapters (`claude`, `codex`, `cursor`), derive your own image: `FROM ghcr.io/unohee/openswarm` + `npm install -g <cli>`.
 - **Git identity**: mount `~/.gitconfig` or set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` (and `GH_TOKEN` for `gh`) so worker commits and PRs attribute correctly.
 - **Verify sandbox**: `bubblewrap` is installed but fail-closed under Docker's default seccomp profile. Enabling it requires `security_opt: [seccomp=unconfined]` + `cap_add: [SYS_ADMIN]` (commented in `docker-compose.yml`) — weigh that against your threat model.
+- **Local asset warehouse**: create `../openswarm-warehouse/INDEX.md`, then open `/warehouse` in the dashboard to browse, download, or upload. Agents are prompted to inspect `/warehouse/INDEX.md` before asking for gitignored data. See [docs/WAREHOUSE.md](docs/WAREHOUSE.md).
 
 ---
 

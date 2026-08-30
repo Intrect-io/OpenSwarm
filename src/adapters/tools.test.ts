@@ -35,6 +35,7 @@ try {
 
 // Shared temp directory for all tests
 const TMP_DIR = await fs.mkdtemp('/tmp/openswarm-tools-test-');
+const WAREHOUSE_DIR = await fs.mkdtemp('/var/tmp/openswarm-warehouse-test-');
 
 /** Helper to build a ToolCall object */
 function makeCall(name: string, args: Record<string, unknown>, id = 'tc-1'): ToolCall {
@@ -51,6 +52,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await fs.rm(TMP_DIR, { recursive: true, force: true });
+  await fs.rm(WAREHOUSE_DIR, { recursive: true, force: true });
 });
 
 // ──────────────────────────────────────────────
@@ -81,6 +83,43 @@ describe('validatePath realpath containment', () => {
       expect(() => validatePath(link, TMP_DIR)).toThrow(/outside the project root/);
     } finally {
       await fs.unlink(link);
+    }
+  });
+
+  it('allows warehouse reads while keeping writes outside the project root denied', async () => {
+    vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
+    const file = path.join(WAREHOUSE_DIR, 'vega-agent.env');
+    await fs.writeFile(file, 'KEY_NAME=redacted\n');
+    try {
+      const read = await executeTool(makeCall('read_file', { path: file }), TMP_DIR);
+      const write = await executeTool(makeCall('write_file', { path: file, content: 'changed' }), TMP_DIR);
+      expect(read).toMatchObject({ is_error: false });
+      expect(read.content).toContain('KEY_NAME=redacted');
+      expect(write).toMatchObject({ is_error: true });
+      await expect(fs.readFile(file, 'utf8')).resolves.toBe('KEY_NAME=redacted\n');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('allows a read-only file tool to follow a worktree symlink into the warehouse', async () => {
+    vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
+    const target = path.join(WAREHOUSE_DIR, 'INDEX.md');
+    const link = path.join(TMP_DIR, 'warehouse-index.md');
+    await fs.writeFile(target, '# Warehouse\n');
+    await fs.symlink(target, link);
+    try {
+      const result = await executeTool(
+        makeCall('read_file', { path: link }),
+        TMP_DIR,
+        undefined,
+        { readOnly: true },
+      );
+      expect(result).toMatchObject({ is_error: false });
+      expect(result.content).toContain('Warehouse');
+    } finally {
+      await fs.unlink(link);
+      vi.unstubAllEnvs();
     }
   });
 });

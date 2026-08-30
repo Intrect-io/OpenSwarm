@@ -59,7 +59,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a file and return its content. Use offset/limit for large files.',
+      description: 'Read a file and return its content. Use offset/limit for large files. Local-only assets may be read under /warehouse when provisioned.',
       parameters: {
         type: 'object',
         properties: {
@@ -469,6 +469,8 @@ export interface ValidatePathOptions {
    * sandbox its real outbound boundary — INT-3189 — and it stays untouched.
    */
   allowMainCheckoutRead?: boolean;
+  /** Accept the configured warehouse root for read/search tools only. */
+  allowWarehouseRead?: boolean;
 }
 
 /** 프로젝트 경로 내로 접근을 제한하는 경로 검증 */
@@ -484,9 +486,17 @@ export function validatePath(filePath: string, cwd: string, options: ValidatePat
     return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
   };
   const mainCheckout = options.allowMainCheckoutRead ? mainCheckoutOf(projectRoot) : null;
+  const warehouseRoot = options.allowWarehouseRead
+    ? (process.env.OPENSWARM_WAREHOUSE_ROOT?.trim() || '/warehouse')
+    : null;
   // cwd 하위이거나, /tmp 하위만 허용. 문자열 prefix 비교는 상대 cwd를
   // 전부 거부하고 `/repo-evil` 같은 sibling을 `/repo` 내부로 오인한다.
-  if (!inside(projectRoot) && !inside('/tmp') && !(mainCheckout && inside(mainCheckout))) {
+  if (
+    !inside(projectRoot)
+    && !inside('/tmp')
+    && !(mainCheckout && inside(mainCheckout))
+    && !(warehouseRoot && inside(warehouseRoot))
+  ) {
     // 모델이 자가수정하도록 안내 — 그냥 거부만 하면 같은 실수를 반복한다.
     throw new Error(
       `Path "${filePath}" is outside the project root (${projectRoot}). ` +
@@ -587,7 +597,10 @@ export async function executeTool(
         // agent can reach local-only material the repo links in (AGT-4061).
         // Withheld in readOnly: there `bash` is denied, so this sandbox is the
         // run's real outbound boundary (INT-3189).
-        const filePath = validatePath(args.path, cwd, { allowMainCheckoutRead: !execOptions?.readOnly });
+        const filePath = validatePath(args.path, cwd, {
+          allowMainCheckoutRead: !execOptions?.readOnly,
+          allowWarehouseRead: true,
+        });
         const offset = args.offset ?? 0;
         const limit = args.limit ?? 500;
         const cacheKey = `${filePath}#${offset}:${limit}`;
@@ -732,7 +745,10 @@ export async function executeTool(
       }
 
       case 'search_files': {
-        const searchPath = validatePath(args.path, cwd, { allowMainCheckoutRead: !execOptions?.readOnly });
+        const searchPath = validatePath(args.path, cwd, {
+          allowMainCheckoutRead: !execOptions?.readOnly,
+          allowWarehouseRead: true,
+        });
         const rgArgs = ['--no-heading', '--line-number', '--max-count', '50'];
         if (args.glob) {
           rgArgs.push('--glob', args.glob);

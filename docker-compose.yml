@@ -19,6 +19,10 @@ services:
       # the in-container healthcheck still work. Reads/mutations from outside
       # then require the X-OpenSwarm-Token header (/api/health stays open).
       - OPENSWARM_WEB_TOKEN=${OPENSWARM_WEB_TOKEN:-}
+      # Agents read the warehouse through the read-only mount. The operator
+      # web UI writes through a second mount of the same host directory.
+      - OPENSWARM_WAREHOUSE_ROOT=/warehouse
+      - OPENSWARM_WAREHOUSE_WRITE_ROOT=/warehouse-rw
       # Provider/API keys come from .env (see env_file) or the shell:
       #   LINEAR_API_KEY, LINEAR_TEAM_ID, DISCORD_TOKEN, DISCORD_CHANNEL_ID,
       #   ATLASCLOUD_API_KEY, OPENROUTER_API_KEY, ...
@@ -42,6 +46,11 @@ services:
       - openswarm-state:/home/openswarm/.openswarm
       # Repositories the daemon works on. Point allowedProjects at /work/<repo>.
       - ${OPENSWARM_WORKSPACE:-./workspace}:/work
+      # Local-only data and credentials live outside every Git checkout. The
+      # first view is agent-readable only; the second is used by the authorized
+      # browser upload handler. See docs/WAREHOUSE.md.
+      - ${OPENSWARM_WAREHOUSE_HOST:-../openswarm-warehouse}:/warehouse:ro
+      - ${OPENSWARM_WAREHOUSE_HOST:-../openswarm-warehouse}:/warehouse-rw
       # Git identity for worker commits (or set GIT_AUTHOR_* env instead).
       # - ~/.gitconfig:/home/openswarm/.gitconfig:ro
       # ChatGPT-OAuth (codex-responses adapter) state from a host login:
@@ -59,6 +68,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+    # A concrete ceiling makes host provisioning observable. Override on large
+    # hosts (vela uses 48g) while leaving headroom for Docker and other services.
+    mem_limit: ${OPENSWARM_MEMORY_LIMIT:-24g}
 
     security_opt:
       - no-new-privileges:true
