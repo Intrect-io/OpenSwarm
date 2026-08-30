@@ -112,6 +112,10 @@ function peerKey(taskId: string, address: string): string {
   return `${taskId}\0${address}`;
 }
 
+function lifecycleKey(taskId: string, address: string, correlationId: string): string {
+  return `${peerKey(taskId, address)}\0${correlationId}`;
+}
+
 function endsAgentPresence(event: CoordinationEvent): boolean {
   return PRESENCE_TERMINAL_KINDS.has(event.kind) && PRESENCE_TERMINAL_STATUSES.has(event.status);
 }
@@ -139,7 +143,10 @@ export function coordinationPeers(
   const activeWindowMs = options.activeWindowMs ?? 30 * 60_000;
   const roles = options.roles?.length ? new Set(options.roles) : undefined;
   const tasks = options.taskIds?.length ? new Set(options.taskIds) : undefined;
-  const presence = new Map<string, { event: CoordinationEvent; peer?: CoordinationPeer }>();
+  const lifecycles = new Map<
+    string,
+    { event: CoordinationEvent; peer?: CoordinationPeer }
+  >();
   const legacyRepository = options.repository ? canonicalPath(options.repository) : undefined;
 
   for (const event of events) {
@@ -149,18 +156,19 @@ export function coordinationPeers(
     const taskId = event.sourceTaskId ?? event.taskId;
     if (!address || !taskId || !role || !AGENT_ROLES.has(role)) continue;
 
-    const key = peerKey(taskId, address);
-    const previous = presence.get(key);
-    if (previous && !isNewerPresenceEvent(event, previous.event)) continue;
-
     // Recipients are routing metadata, not proof that the addressed role has
-    // started. Keep a terminal tombstone so an older running event cannot revive
-    // an agent when callers provide a reordered event slice.
-    if (endsAgentPresence(event)) {
-      presence.set(key, { event });
+    // started. Fold lifecycle state by correlation so a delayed terminal from
+    // one attempt cannot retire a newer, still-running retry for the same peer.
+    const key = lifecycleKey(taskId, address, event.correlationId);
+    const previous = lifecycles.get(key);
+    if (previous && !isNewerPresenceEvent(event, previous.event)) {
       continue;
     }
-    presence.set(key, {
+    if (endsAgentPresence(event)) {
+      lifecycles.set(key, { event });
+      continue;
+    }
+    lifecycles.set(key, {
       event,
       peer: {
         repoKey: options.repoKey,
@@ -174,9 +182,19 @@ export function coordinationPeers(
     });
   }
 
+  const presence = new Map<string, { event: CoordinationEvent; peer: CoordinationPeer }>();
+  for (const lifecycle of lifecycles.values()) {
+    if (!lifecycle.peer) continue;
+    const key = peerKey(lifecycle.peer.taskId, lifecycle.peer.address);
+    const previous = presence.get(key);
+    if (!previous || isNewerPresenceEvent(lifecycle.event, previous.event)) {
+      presence.set(key, { event: lifecycle.event, peer: lifecycle.peer });
+    }
+  }
+
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 50);
   return [...presence.values()]
-    .flatMap(({ peer }) => peer ? [peer] : [])
+    .map(({ peer }) => peer)
     .filter((peer) => !options.exclude
       || options.exclude.address !== peer.address
       || options.exclude.taskId !== peer.taskId)

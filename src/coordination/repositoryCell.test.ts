@@ -96,6 +96,7 @@ describe('coordinationPeers', () => {
     const reviewerStart = event({
       seq: 2,
       timestamp: now - 200,
+      correlationId: 'reviewer-attempt-1',
       actor: 'reviewer-a',
       actorName: 'Reviewer A',
       actorRole: 'reviewer',
@@ -110,6 +111,7 @@ describe('coordinationPeers', () => {
     const reviewerDone = event({
       seq: 3,
       timestamp: now - 100,
+      correlationId: 'reviewer-attempt-1',
       actor: 'reviewer-a',
       actorName: 'Reviewer A',
       actorRole: 'reviewer',
@@ -129,6 +131,7 @@ describe('coordinationPeers', () => {
     const started = event({
       seq: 10,
       timestamp: now - 200,
+      correlationId: 'lifecycle-attempt-1',
       actor,
       actorRole: role,
       taskId,
@@ -138,6 +141,7 @@ describe('coordinationPeers', () => {
     const ended = event({
       seq: 11,
       timestamp: now - 100,
+      correlationId: 'lifecycle-attempt-1',
       actor,
       actorRole: role,
       taskId,
@@ -151,11 +155,18 @@ describe('coordinationPeers', () => {
   });
 
   it('removes only the terminal actor/task presence when one address appears on two tasks', () => {
-    const taskA = event({ seq: 20, timestamp: now - 300, actor: 'shared-actor', taskId: 'task-a' });
+    const taskA = event({
+      seq: 20,
+      timestamp: now - 300,
+      correlationId: 'task-a-attempt-1',
+      actor: 'shared-actor',
+      taskId: 'task-a',
+    });
     const taskB = event({ seq: 21, timestamp: now - 200, actor: 'shared-actor', taskId: 'task-b' });
     const taskADone = event({
       seq: 22,
       timestamp: now - 100,
+      correlationId: 'task-a-attempt-1',
       actor: 'shared-actor',
       taskId: 'task-a',
       kind: 'delegation-result',
@@ -164,5 +175,58 @@ describe('coordinationPeers', () => {
 
     expect(coordinationPeers([taskA, taskB, taskADone], { repoKey: 'git:shared', now }))
       .toEqual([expect.objectContaining({ address: 'shared-actor', taskId: 'task-b' })]);
+  });
+
+  it('keeps a retry present when an earlier attempt terminates later', () => {
+    const attempt1Start = event({
+      seq: 30,
+      timestamp: now - 400,
+      correlationId: 'attempt-1',
+      actor: 'retry-worker',
+      taskId: 'task-retry',
+    });
+    const attempt2Start = event({
+      seq: 31,
+      timestamp: now - 300,
+      correlationId: 'attempt-2',
+      actor: 'retry-worker',
+      taskId: 'task-retry',
+    });
+    const attempt1Done = event({
+      seq: 32,
+      timestamp: now - 200,
+      correlationId: 'attempt-1',
+      actor: 'retry-worker',
+      taskId: 'task-retry',
+      kind: 'delegation-result',
+      status: 'completed',
+    });
+
+    expect(coordinationPeers(
+      // Deliberately replayed out of order: seq, not array order, decides
+      // each correlation's latest lifecycle state.
+      [attempt1Done, attempt2Start, attempt1Start],
+      { repoKey: 'git:shared', now },
+    )).toEqual([
+      expect.objectContaining({
+        address: 'retry-worker',
+        taskId: 'task-retry',
+        lastSeen: attempt2Start.timestamp,
+      }),
+    ]);
+
+    const attempt2Done = event({
+      seq: 33,
+      timestamp: now - 100,
+      correlationId: 'attempt-2',
+      actor: 'retry-worker',
+      taskId: 'task-retry',
+      kind: 'delegation-result',
+      status: 'completed',
+    });
+    expect(coordinationPeers(
+      [attempt2Done, attempt1Done, attempt2Start, attempt1Start],
+      { repoKey: 'git:shared', now },
+    )).toEqual([]);
   });
 });
