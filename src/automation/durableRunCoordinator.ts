@@ -170,7 +170,12 @@ function holdsLiveLease(run: Pick<RunRecord, 'leaseExpiresAt'>, now: number): bo
 }
 
 export function runRecordToTask(run: RunRecord): TaskItem {
-  const metadata = (run.metadata ?? {}) as { projectId?: string; projectName?: string; fileScope?: string[] };
+  const metadata = (run.metadata ?? {}) as {
+    projectId?: string;
+    projectName?: string;
+    fileScope?: string[];
+    explicitDispatch?: boolean;
+  };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
   return {
     id: run.issueId,
@@ -187,6 +192,7 @@ export function runRecordToTask(run: RunRecord): TaskItem {
       ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
       : undefined,
     fileScope: metadata.fileScope,
+    explicitDispatch: metadata.explicitDispatch === true,
     createdAt: run.discoveredAt,
   };
 }
@@ -408,6 +414,7 @@ export class DurableRunCoordinator {
         projectId: task.linearProject?.id,
         projectName: task.linearProject?.name,
         fileScope: task.fileScope,
+        explicitDispatch: task.explicitDispatch === true,
       },
     }, now);
 

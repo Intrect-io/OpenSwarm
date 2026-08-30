@@ -1202,6 +1202,7 @@ describe('runRecordToTask', () => {
       id: 'issue-1', issueId: 'issue-1', issueIdentifier: 'AX-1', source: 'linear',
       title: 'round trip', priority: 2, createdAt: 1_000,
       linearProject: { id: 'proj', name: 'Proj' }, fileScope: ['x.ts'],
+      explicitDispatch: true,
     };
     const stored = coordinator.observeTask(original, '/repo');
     expect(stored).not.toBeNull();
@@ -1213,6 +1214,7 @@ describe('runRecordToTask', () => {
     expect(rebuilt.source).toBe(original.source);
     expect(rebuilt.linearProject).toEqual(original.linearProject);
     expect(rebuilt.fileScope).toEqual(original.fileScope);
+    expect(rebuilt.explicitDispatch).toBe(true);
     coordinator.close();
     ledger.close();
   });
