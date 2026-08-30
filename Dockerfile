@@ -48,6 +48,12 @@ FROM node:22-slim AS production
 # Python extractor shells out to an interpreter. Without it a single tracked
 # .py file makes `codeql database create --build-mode=none` fail, which the
 # pipeline reports as an infra error and parks the task.
+# python3-venv + python3-pip: workers on Python repositories (vega-agent) must
+# create a project venv and install its requirements to run tests; the slim
+# distribution python3 ships without ensurepip, so `python3 -m venv` fails and
+# every such task parks asking an operator for a "usable Python dependency
+# environment". The venvs themselves live under /work (a bind mount), so they
+# survive redeploys — only the interpreter machinery belongs to the image.
 #
 # postgresql-client / sqlite3 / openssh-client / jq / netcat-openbsd are the
 # agent's toolchain, not the daemon's. Repository credentials already reach an
@@ -69,6 +75,7 @@ FROM node:22-slim AS production
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         dumb-init ca-certificates curl git bubblewrap gnupg python3 \
+        python3-venv python3-pip \
         postgresql-client sqlite3 openssh-client jq netcat-openbsd && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
