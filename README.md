@@ -382,6 +382,10 @@ The project supervisor is separate from worker provider switching: pin its
 `adapter` and `model` explicitly when it must remain on the frontier tier. Only
 native-loop adapters can receive the role-scoped MCP tools while also enforcing
 `shellTools: false`; delegated `codex`, `claude`, and `cursor` CLIs fail closed.
+External MCP servers are optional: with no `mcpPolicies.orchestrator` entry, or
+when discovery is temporarily unavailable, the supervisor still runs with only
+the repository-scoped coordination inbox and thread tools. No external tool is
+granted implicitly.
 One sweep runs at a time per daemon and repository, concurrent daemons contend
 on a file lock, and shutdown aborts then drains an active supervisor call. An
 unchanged set of open board items is not sent to the model again. The deprecated

@@ -117,6 +117,34 @@ describe('OrchestratorSupervisor', () => {
     await supervisor.stop();
   });
 
+  it('runs an internal-only sweep without an external MCP policy', async () => {
+    tempState();
+    const run = vi.fn(async () => result({ toolsGranted: [] }));
+    const supervisor = new OrchestratorSupervisor({
+      config: {
+        enabled: true,
+        eventDriven: false,
+        eventDebounceMs: 0,
+        adapter: 'codex-responses',
+        model: 'gpt-5.6-sol',
+        reasoningEffort: 'high',
+        timeoutMs: 600_000,
+        maxTurns: 12,
+        legacy: false,
+      },
+      getRepositories: () => ['/repo'],
+      getPending: () => [event()],
+      buildInstructionCapsule: () => capsule,
+      run,
+    });
+
+    await supervisor.requestSweep('manual');
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ policy: undefined }));
+    expect(supervisor.getLastSweep()).toMatchObject({ ran: 1, skipped: 0 });
+    await supervisor.stop();
+  });
+
   it('reacts only to actionable board events and coalesces an unchanged generation', async () => {
     tempState();
     const run = vi.fn(async () => result());

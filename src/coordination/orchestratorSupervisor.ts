@@ -182,11 +182,6 @@ export class OrchestratorSupervisor {
       locked: 0,
       failed: 0,
     };
-    if (!this.options.policy) {
-      console.warn('[Orchestrator] no mcpPolicies.orchestrator configured — skipping sweep');
-      return stats;
-    }
-
     const repositories = [...new Set(this.options.getRepositories().map((repository) => resolve(repository)))];
     for (const repository of repositories) {
       if (signal.aborted) break;

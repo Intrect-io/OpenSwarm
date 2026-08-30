@@ -16,6 +16,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getAdapter, spawnCli } from '../adapters/index.js';
+import type { ToolDefinition } from '../adapters/tools.js';
 import { getMcpTools } from '../mcp/mcpClient.js';
 import { filterMcpToolsForRole, type RoleMcpPolicy } from './mcpPolicy.js';
 import { getCoordinationStore, type CoordinationEvent } from './coordinationStore.js';
@@ -123,32 +124,25 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     },
   });
 
-  let discovered;
-  try {
-    discovered = await getMcpTools();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await store.publish({
-      repository: options.repository,
-      taskId: options.taskId,
-      actor: callSign.address,
-      actorName: callSign.name,
-      actorRole: 'orchestrator',
-      kind: 'mcp-audit',
-      status: 'failed',
-      summary: `Orchestrator skipped: MCP discovery failed (${message.slice(0, 240)})`,
-      metadata: { adapter: adapter.name, model },
-    });
-    return {
-      callSign: callSign.name,
-      output: '',
-      toolsGranted: [],
-      toolsDenied: [],
-      adapter: adapter.name as AdapterName,
-      model,
-      reasoningEffort: options.reasoningEffort,
-      skippedReason: 'mcp-discovery-failed',
-    };
+  let discovered: ToolDefinition[] = [];
+  const wantsExternalMcp = (options.policy?.servers.length ?? 0) > 0;
+  if (wantsExternalMcp) {
+    try {
+      discovered = await getMcpTools();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await store.publish({
+        repository: options.repository,
+        taskId: options.taskId,
+        actor: callSign.address,
+        actorName: callSign.name,
+        actorRole: 'orchestrator',
+        kind: 'mcp-audit',
+        status: 'failed',
+        summary: `External MCP discovery failed; continuing with internal coordination tools (${message.slice(0, 240)})`,
+        metadata: { adapter: adapter.name, model },
+      });
+    }
   }
   options.signal?.throwIfAborted();
   const { tools, denied } = filterMcpToolsForRole(discovered, options.policy);
@@ -174,19 +168,9 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       actorRole: 'orchestrator',
       kind: 'mcp-audit',
       status: 'completed',
-      summary: 'Orchestrator skipped: no policy-approved MCP tools are available',
-      metadata: { adapter: adapter.name, model, deniedCount: denied.length },
+      summary: 'No external MCP tools granted; continuing with internal coordination tools',
+      metadata: { adapter: adapter.name, model, deniedCount: denied.length, internalCoordination: true },
     });
-    return {
-      callSign: callSign.name,
-      output: '',
-      toolsGranted: [],
-      toolsDenied: denied,
-      adapter: adapter.name as AdapterName,
-      model,
-      reasoningEffort: options.reasoningEffort,
-      skippedReason: 'no-approved-mcp-tools',
-    };
   }
 
   const runCorrelationId = `orchestrator-run:${randomUUID()}`;
@@ -210,7 +194,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         '',
         `You are **${callSign.name}**, the orchestrator for this repository. Address workers by their call signs.`,
         '',
-        'Coordinate the autonomous workers for this repository using the connected MCP tools only.',
+        'Coordinate the autonomous workers using the internal coordination tools and approved MCP tools only.',
         'You have no access to the repository working tree: your file tools are confined to a scratch directory.',
         'Never attempt a write or destructive MCP operation that was not granted; report it as a blocker instead.',
         'Use coordination_peers and the durable coordination_thread_* tools to consult active workers/reviewers.',
@@ -252,12 +236,13 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       kind: 'mcp-audit',
       status: 'completed',
       correlationId: runCorrelationId,
-      summary: `Orchestrator run granted ${tools.length} MCP tool(s), denied ${denied.length}`,
+      summary: `Orchestrator run used internal coordination and granted ${tools.length} external MCP tool(s), denied ${denied.length}`,
       metadata: {
         adapter: adapter.name,
         model,
         grantedCount: tools.length,
         deniedCount: denied.length,
+        internalCoordination: true,
         durationMs: raw.durationMs,
         ...(raw.costInfo?.inputTokens !== undefined ? { inputTokens: raw.costInfo.inputTokens } : {}),
         ...(raw.costInfo?.outputTokens !== undefined ? { outputTokens: raw.costInfo.outputTokens } : {}),

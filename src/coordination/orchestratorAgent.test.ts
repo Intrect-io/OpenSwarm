@@ -166,7 +166,7 @@ describe('runOrchestrator', () => {
     expect(events).toContainEqual(expect.objectContaining({ kind: 'adapter-route', status: 'failed' }));
   });
 
-  it('records MCP discovery failure and skips the provider call', async () => {
+  it('records external MCP discovery failure and continues with internal coordination', async () => {
     dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-mcp-down-'));
     process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
     (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
@@ -177,13 +177,13 @@ describe('runOrchestrator', () => {
       repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['linear'] },
     });
 
-    expect(result.skippedReason).toBe('mcp-discovery-failed');
-    expect(spawnCli).not.toHaveBeenCalled();
+    expect(result.skippedReason).toBeUndefined();
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
     const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 10 });
     expect(events).toContainEqual(expect.objectContaining({ kind: 'mcp-audit', status: 'failed', summary: expect.stringContaining('catalog offline') }));
   });
 
-  it('does not spend a model call when policy grants no discovered tool', async () => {
+  it('continues with internal coordination when policy grants no external tool', async () => {
     dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-no-tools-'));
     process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
     (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
@@ -194,7 +194,22 @@ describe('runOrchestrator', () => {
       repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['linear'] },
     });
 
-    expect(result.skippedReason).toBe('no-approved-mcp-tools');
-    expect(spawnCli).not.toHaveBeenCalled();
+    expect(result.skippedReason).toBeUndefined();
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
+  });
+
+  it('does not discover or grant external MCP without an explicit role policy', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-internal-only-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    const result = await runOrchestrator({
+      repository: '/repo', taskId: 'coordination', objective: 'x',
+    });
+
+    expect(result.toolsGranted).toEqual([]);
+    expect(getMcpTools).not.toHaveBeenCalled();
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
   });
 });
