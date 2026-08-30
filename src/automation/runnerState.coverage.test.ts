@@ -54,6 +54,83 @@ describe('runnerState persistence and helpers', () => {
     expect(mod.isPathEnabled('/repo/application', enabled)).toBe(false);
   });
 
+  it('joins a quiet pinned repository to fetched tasks by Linear project id', () => {
+    const projects = mod.buildProjectsInfo([
+      task('cgf-1', 'CGF-Portal'),
+    ] as any, [], [], new Map(), new Set(['/work/cgf-portal']));
+
+    expect(projects[0]).toMatchObject({
+      path: '',
+      name: 'CGF-Portal',
+      linearProjectId: 'CGF-Portal-id',
+      pending: [expect.objectContaining({ id: 'cgf-1' })],
+    });
+    expect(mod.projectInfoForRepository(projects, {
+      path: '/work/cgf-portal',
+      directoryName: 'cgf-portal',
+      linearProjectId: 'CGF-Portal-id',
+    })).toBe(projects[0]);
+  });
+
+  it('keeps active work attached when a Linear project is renamed', () => {
+    const fetched = task('cgf-1', 'CGF-Portal');
+    const running = task('cgf-2', 'Old CGF name', 1, {
+      linearProject: { id: 'CGF-Portal-id', name: 'Old CGF name' },
+    });
+    const queued = task('cgf-3', 'Another stale name', 1, {
+      linearProject: { id: 'CGF-Portal-id', name: 'Another stale name' },
+    });
+    const projects = mod.buildProjectsInfo(
+      [fetched] as any,
+      [{ task: running, projectPath: '/work/cgf-portal' }] as any,
+      [{ task: queued, projectPath: '/work/cgf-portal' }] as any,
+      new Map(),
+      new Set(['/work/cgf-portal']),
+    );
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0]).toMatchObject({
+      name: 'CGF-Portal',
+      linearProjectId: 'CGF-Portal-id',
+      running: [expect.objectContaining({ id: 'cgf-2' })],
+      queued: [expect.objectContaining({ id: 'cgf-3' })],
+    });
+  });
+
+  it('uses a case-insensitive project-name fallback for legacy repositories', () => {
+    const projects = mod.buildProjectsInfo([
+      task('cgf-1', 'CGF-Portal', 1, { linearProject: { name: 'CGF-Portal' } }),
+    ] as any, [], [], new Map(), new Set());
+
+    expect(mod.projectInfoForRepository(projects, {
+      path: '/work/cgf-portal', directoryName: 'cgf-portal',
+    })).toBe(projects[0]);
+  });
+
+  it('does not let a stale path override configured Linear project identity', () => {
+    const stale = {
+      path: '/work/cgf-portal',
+      name: 'Unrelated',
+      linearProjectId: 'unrelated-id',
+    } as mod.ProjectInfo;
+    const expected = {
+      path: '',
+      name: 'CGF-Portal',
+      linearProjectId: 'cgf-id',
+    } as mod.ProjectInfo;
+
+    expect(mod.projectInfoForRepository([stale, expected], {
+      path: '/work/cgf-portal',
+      directoryName: 'cgf-portal',
+      linearProjectId: 'cgf-id',
+    })).toBe(expected);
+    expect(mod.projectInfoForRepository([stale], {
+      path: '/work/cgf-portal',
+      directoryName: 'cgf-portal',
+      linearProjectId: 'cgf-id',
+    })).toBeUndefined();
+  });
+
   it('records project pace, prunes old entries, and reports daily totals', async () => {
     writeFileSync(mod.DAILY_PACE_FILE, JSON.stringify({
       updatedAt: 'old',
