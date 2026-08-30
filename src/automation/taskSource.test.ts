@@ -51,6 +51,18 @@ describe('SqliteTaskSource', () => {
     await expect(src.updateState('missing', 'Done')).resolves.toBe(false);
   });
 
+  it('explicitly looks up terminal local issues that fetchTasks excludes', async () => {
+    store = freshStore();
+    const issue = store.createIssue({ projectId: 'p', title: 'finished', status: 'done' });
+    const src = new SqliteTaskSource(store);
+
+    await expect(src.lookupIssueState(issue.id)).resolves.toEqual({
+      ok: true,
+      issue: { state: 'done', stateType: 'completed' },
+    });
+    await expect(src.lookupIssueState('missing')).resolves.toEqual({ ok: true, issue: null });
+  });
+
   it('addComment records a commented event', async () => {
     store = freshStore();
     const issue = store.createIssue({ projectId: 'p', title: 'x' });

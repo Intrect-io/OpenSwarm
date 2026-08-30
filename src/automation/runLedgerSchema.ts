@@ -41,6 +41,9 @@ export function migrateAutomationSchema(db: Database.Database): void {
         started_at INTEGER,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER,
+        tracker_state TEXT,
+        tracker_state_type TEXT,
+        tracker_checked_at INTEGER,
         metadata_json TEXT
       );
 
@@ -131,6 +134,18 @@ export function migrateAutomationSchema(db: Database.Database): void {
       if (!attemptColumns.has('repository_infra')) db.exec('ALTER TABLE automation_attempts ADD COLUMN repository_infra INTEGER');
       db.exec(`CREATE INDEX IF NOT EXISTS idx_automation_attempts_budget
         ON automation_attempts(started_at, success, cost_usd)`);
+
+      // v2 -> v3: cache explicit tracker observations beside the run they
+      // reconcile. A still-open issue is then rechecked on a bounded cadence
+      // instead of spending one Linear request on every heartbeat (AGT-4127).
+      const runColumns = new Set(
+        (db.pragma('table_info(automation_runs)') as Array<{ name: string }>).map((column) => column.name),
+      );
+      if (!runColumns.has('tracker_state')) db.exec('ALTER TABLE automation_runs ADD COLUMN tracker_state TEXT');
+      if (!runColumns.has('tracker_state_type')) db.exec('ALTER TABLE automation_runs ADD COLUMN tracker_state_type TEXT');
+      if (!runColumns.has('tracker_checked_at')) db.exec('ALTER TABLE automation_runs ADD COLUMN tracker_checked_at INTEGER');
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_automation_runs_tracker_reconcile
+        ON automation_runs(source, state, tracker_checked_at, updated_at)`);
 
       const current = db.prepare('SELECT value FROM automation_meta WHERE key = ?').get('schema_version') as { value: string } | undefined;
       if (current && Number(current.value) > AUTOMATION_SCHEMA_VERSION) {

@@ -107,6 +107,62 @@ describe('RunLedger state machine', () => {
   });
 });
 
+describe('RunLedger tracker observation cache (AGT-4127)', () => {
+  it('preserves the row and recovery fields while closing a stale run from tracker truth', () => {
+    const ledger = new RunLedger(createDbPath());
+    ledger.importRun({
+      issueId: 'TRACKER-DONE', source: 'linear', identifier: 'AX-856',
+      title: 'done upstream', projectPath: '/repo', state: 'RETRY_AT',
+      retryAt: 10_000, branchName: 'swarm/AX-856', errorCode: 'failed',
+      errorMessage: 'original failure evidence',
+    }, 1_000);
+    const stale = ledger.getRun('TRACKER-DONE')!;
+
+    expect(ledger.cacheTrackerObservation(
+      stale,
+      { state: 'Done', stateType: 'completed' },
+      'DONE',
+      3_000,
+    )).toBe(true);
+    expect(ledger.listRuns()).toHaveLength(1);
+    expect(ledger.getRun('TRACKER-DONE')).toMatchObject({
+      state: 'DONE',
+      branchName: 'swarm/AX-856',
+      lastErrorCode: 'failed',
+      lastErrorMessage: 'original failure evidence',
+      trackerState: 'Done',
+      trackerStateType: 'completed',
+      trackerCheckedAt: 3_000,
+      completedAt: 3_000,
+    });
+    ledger.close();
+  });
+
+  it('caches an open state without refreshing run age, and loses to a concurrent claim', () => {
+    const ledger = new RunLedger(createDbPath());
+    ledger.importRun({
+      issueId: 'TRACKER-OPEN', source: 'linear', projectPath: '/repo',
+      state: 'RETRY_AT', retryAt: 1_000,
+    }, 1_000);
+    const stale = ledger.getRun('TRACKER-OPEN')!;
+    expect(ledger.cacheTrackerObservation(stale, { state: 'Todo', stateType: 'unstarted' }, undefined, 2_000)).toBe(true);
+    expect(ledger.getRun('TRACKER-OPEN')).toMatchObject({
+      state: 'RETRY_AT', updatedAt: 1_000, trackerState: 'Todo', trackerCheckedAt: 2_000,
+    });
+
+    const observed = ledger.getRun('TRACKER-OPEN')!;
+    expect(claim(ledger, 'TRACKER-OPEN', 'worker', 3_000)).not.toBeNull();
+    expect(ledger.cacheTrackerObservation(
+      observed,
+      { state: 'Done', stateType: 'completed' },
+      'DONE',
+      3_100,
+    )).toBe(false);
+    expect(ledger.getRun('TRACKER-OPEN')?.state).toBe('CLAIMED');
+    ledger.close();
+  });
+});
+
 describe('RunLedger operator re-admission (AGT-4033)', () => {
   it('will not claim a run whose retry time has not come', () => {
     // This is why letting an answered task past the heartbeat filter is not
@@ -772,9 +828,11 @@ describe('RunLedger schema migration', () => {
     ledger.close();
 
     const verify = new Database(path, { readonly: true });
-    const columns = (verify.pragma('table_info(automation_attempts)') as Array<{ name: string }>).map((row) => row.name);
-    expect(columns).toEqual(expect.arrayContaining(['result_status', 'success', 'cost_usd']));
-    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('2');
+    const attemptColumns = (verify.pragma('table_info(automation_attempts)') as Array<{ name: string }>).map((row) => row.name);
+    const runColumns = (verify.pragma('table_info(automation_runs)') as Array<{ name: string }>).map((row) => row.name);
+    expect(attemptColumns).toEqual(expect.arrayContaining(['result_status', 'success', 'cost_usd']));
+    expect(runColumns).toEqual(expect.arrayContaining(['tracker_state', 'tracker_state_type', 'tracker_checked_at']));
+    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('3');
     verify.close();
   });
 });

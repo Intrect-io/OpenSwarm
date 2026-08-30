@@ -1,4 +1,4 @@
-export const AUTOMATION_SCHEMA_VERSION = 2;
+export const AUTOMATION_SCHEMA_VERSION = 3;
 
 export const RUN_STATES = [
   'DISCOVERED',
@@ -96,7 +96,19 @@ export interface RunRecord {
   startedAt?: number;
   updatedAt: number;
   completedAt?: number;
+  /** Last tracker state observed by the terminal reconciler. */
+  trackerState?: string;
+  /** Tracker workflow-state type (`completed`, `canceled`, etc.), when available. */
+  trackerStateType?: string;
+  /** Durable cache timestamp for the explicit tracker lookup. */
+  trackerCheckedAt?: number;
   metadata?: unknown;
+}
+
+export interface TrackerStateObservation {
+  state?: string;
+  stateType?: string;
+  lookupError?: boolean;
 }
 
 export interface RunClaim {

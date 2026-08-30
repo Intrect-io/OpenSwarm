@@ -856,12 +856,14 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
       if (ident.toUpperCase() !== issue.identifier.toUpperCase()) blockedBy.add(ident);
     }
 
+    const issueState = await issue.state;
     return {
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
       description: issue.description ?? undefined,
-      state: (await issue.state)?.name ?? 'Unknown',
+      state: issueState?.name ?? 'Unknown',
+      stateType: issueState?.type ?? undefined,
       priority: issue.priority,
       labels: labels.nodes.map((l) => l.name),
       comments: comments.nodes.map((c) => ({

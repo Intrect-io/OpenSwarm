@@ -14,7 +14,9 @@ import {
   type RunLedgerMode,
   type RunRecord,
   type RunState,
+  type TrackerStateObservation,
 } from './runLedger.js';
+import type { TrackerTerminalState } from './runLedgerTrackerCache.js';
 import { pickPipelineFailureDetail } from './runnerState.js';
 
 export interface DurableRunCoordinatorConfig {
@@ -226,6 +228,16 @@ export class DurableRunCoordinator {
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     return this.ledger?.listRuns(states) ?? [];
+  }
+
+  cacheTrackerObservation(
+    expected: Pick<RunRecord, 'issueId' | 'state' | 'stateVersion'>,
+    observation: TrackerStateObservation,
+    terminalState?: TrackerTerminalState,
+    now = Date.now(),
+  ): boolean {
+    if (!this.ledger || this.mode !== 'primary') return false;
+    return this.ledger.cacheTrackerObservation(expected, observation, terminalState, now);
   }
 
   /**

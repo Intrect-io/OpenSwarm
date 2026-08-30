@@ -43,6 +43,11 @@ export interface PairCompleteStats {
 
 export type SubIssueResult = { id: string; identifier: string; title: string } | { error: string };
 
+/** Explicit tracker lookup used only for stale durable-run reconciliation. */
+export type TrackerIssueLookup =
+  | { ok: true; issue: { state: string; stateType?: string } | null }
+  | { ok: false; error: string };
+
 /**
  * Everything the autonomous runner needs from its task tracker. LinearTaskSource
  * preserves today's behavior exactly (thin delegation); SqliteTaskSource backs
@@ -51,6 +56,8 @@ export type SubIssueResult = { id: string; identifier: string; title: string } |
 export interface ITaskSource {
   readonly kind: 'linear' | 'local';
   fetchTasks(): Promise<TaskItem[]>;
+  /** Fetch one issue even when terminal states are excluded from fetchTasks(). */
+  lookupIssueState(issueIdOrIdentifier: string): Promise<TrackerIssueLookup>;
   /** Create a top-level task/issue (used by the /plan cockpit to seed a parent). */
   createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult>;
   updateState(issueId: string, state: TaskState): Promise<boolean>;
@@ -86,6 +93,16 @@ export class LinearTaskSource implements ITaskSource {
   constructor(private readonly fetch: () => Promise<TaskItem[]>) {}
 
   fetchTasks(): Promise<TaskItem[]> { return this.fetch(); }
+  async lookupIssueState(issueIdOrIdentifier: string): Promise<TrackerIssueLookup> {
+    const result = await linear.lookupIssue(issueIdOrIdentifier);
+    if (!result.ok) return result;
+    return {
+      ok: true,
+      issue: result.issue
+        ? { state: result.issue.state, stateType: result.issue.stateType }
+        : null,
+    };
+  }
   async createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult> {
     // Pass projectId so createIssue links the issue AND resolves the project's team
     // (multi-team configs would otherwise hit "teamId must be a UUID"). (INT-2210)
@@ -157,6 +174,14 @@ export class SqliteTaskSource implements ITaskSource {
     // Enrich from canonical task state so planner-declared fileScope (plus
     // dependency/topoRank data) reaches the runner — mirrors the Linear path.
     return issues.map((issue) => enrichTaskFromState(issueToTask(issue)));
+  }
+  async lookupIssueState(issueId: string): Promise<TrackerIssueLookup> {
+    const issue = this.store.getIssue(issueId);
+    if (!issue) return { ok: true, issue: null };
+    const stateType = issue.status === 'done'
+      ? 'completed'
+      : issue.status === 'cancelled' ? 'canceled' : undefined;
+    return { ok: true, issue: { state: issue.status, stateType } };
   }
   async createTask(title: string, description: string, projectId?: string): Promise<SubIssueResult> {
     try {
