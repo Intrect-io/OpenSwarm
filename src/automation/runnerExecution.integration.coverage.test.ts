@@ -348,6 +348,17 @@ describe('resolveProjectPath / isValidProjectPath', () => {
     )).resolves.toBe(path);
   });
 
+  it('does not dispatch a valid direct fallback outside a configured allow-list', async () => {
+    fsStat.mockImplementation(makeFsStatImpl({
+      '/home/testuser/dev/OpenSwarm': ['.git'],
+      '/home/dev/repoA': ['.git'],
+    }));
+    await expect(resolveProjectPath(
+      makeCtx({ allowedProjects: ['/home/dev/repoA'] }),
+      task(),
+    )).resolves.toBeNull();
+  });
+
   it('uses the fuzzy mapper as the last fallback', async () => {
     mapLinearProject.mockResolvedValueOnce('/some/fuzzy/match');
     await expect(resolveProjectPath(
@@ -355,6 +366,14 @@ describe('resolveProjectPath / isValidProjectPath', () => {
       task({ linearProject: { id: 'proj-1', name: 'Unmatched Project' } }),
     )).resolves.toBe('/some/fuzzy/match');
     expect(mapLinearProject).toHaveBeenCalledWith('proj-1', 'Unmatched Project', []);
+  });
+
+  it('does not dispatch a fuzzy mapping outside a configured allow-list', async () => {
+    mapLinearProject.mockResolvedValueOnce('/some/fuzzy/match');
+    await expect(resolveProjectPath(
+      makeCtx({ allowedProjects: ['/home/dev/repoA'] }),
+      task({ linearProject: { id: 'proj-1', name: 'Unmatched Project' } }),
+    )).resolves.toBeNull();
   });
 
   it('returns null when every resolution priority fails', async () => {
