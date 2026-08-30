@@ -53,7 +53,7 @@ autonomous:
   stalledInProgressHours: 6
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
-  # maxConcurrentPerProject: 64  # Optional; omitted means inherit the global capacity
+  # maxConcurrentPerProject: 64  # Optional hard cap; omit for weighted, work-conserving project fairness
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
   shutdownGraceMs: 30000         # Wait for real executor exit before service teardown

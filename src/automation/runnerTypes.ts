@@ -34,6 +34,7 @@ export interface AutonomousConfig {
   maxConcurrentTasks?: number;
   /** Move unowned In Progress issues back to Backlog after this many idle hours. */
   stalledInProgressHours?: number;
+  /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   defaultRoles?: DefaultRolesConfig;
   projectAgents?: ProjectAgentConfig[];
