@@ -254,6 +254,15 @@ export class AutonomousRunner {
     return this.projectSelectionTouched || this.enabledProjects.size > 0;
   }
 
+  /**
+   * Repositories that background services may touch. Once the operator has
+   * touched project selection, an empty enabled set means exactly zero — never
+   * fall back to every allowed repository behind the UI's back.
+   */
+  private getBackgroundServiceProjects(): string[] {
+    return this.shouldFilterByEnabled() ? this.getEnabledProjects() : this.getAllowedProjects();
+  }
+
   private sameProjectCandidateCap(): number | null {
     const sameProjectParallel = (this.config.allowSameProjectConcurrent ?? true) && (this.config.worktreeMode ?? false);
     return sameProjectParallel ? effectiveProjectConcurrency(this.config) : null;
@@ -2671,7 +2680,7 @@ export class AutonomousRunner {
 
   private async runPeriodicReviewAcrossProjects(review: NonNullable<AutonomousConfig['periodicReviews']>[number]): Promise<void> {
     const { runPeriodicReview } = await import('../coordination/periodicReview.js');
-    const projects = this.getEnabledProjects().length > 0 ? this.getEnabledProjects() : this.getAllowedProjects();
+    const projects = this.getBackgroundServiceProjects();
     for (const repository of projects) {
       await runPeriodicReview({
         repository,
@@ -2689,10 +2698,7 @@ export class AutonomousRunner {
     const supervisor = new OrchestratorSupervisor({
       config,
       policy: this.config.mcpPolicies?.orchestrator,
-      getRepositories: () => {
-        const enabled = this.getEnabledProjects();
-        return enabled.length > 0 ? enabled : this.getAllowedProjects();
-      },
+      getRepositories: () => this.getBackgroundServiceProjects(),
       buildInstructionCapsule,
     });
     try {

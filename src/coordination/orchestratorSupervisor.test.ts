@@ -62,7 +62,15 @@ afterEach(() => {
 describe('OrchestratorSupervisor', () => {
   it('treats a newly opened durable thread as actionable supervision work', () => {
     expect(isActionableOrchestratorEvent(event({ kind: 'thread-update', status: 'open' }))).toBe(true);
-    expect(isActionableOrchestratorEvent(event({ kind: 'thread-update', status: 'completed' }))).toBe(false);
+    expect(isActionableOrchestratorEvent(event({
+      kind: 'thread-update', status: 'completed', metadata: { action: 'replied' },
+    }))).toBe(true);
+    expect(isActionableOrchestratorEvent(event({
+      kind: 'thread-update', status: 'completed', metadata: { action: 'created' },
+    }))).toBe(false);
+    expect(isActionableOrchestratorEvent(event({
+      kind: 'thread-update', status: 'completed', metadata: { action: 'replied' }, actorRole: 'orchestrator',
+    }))).toBe(false);
   });
 
   it('includes the latest failed review in the supervisor view until its exchange advances', () => {
@@ -78,6 +86,72 @@ describe('OrchestratorSupervisor', () => {
 
     expect(selectOrchestratorItems([failed])).toEqual([failed]);
     expect(selectOrchestratorItems([failed, completed])).toEqual([]);
+  });
+
+  it('keeps a late peer response in the supervisor view after it closes the request exchange', () => {
+    const request = event({ correlationId: 'advice-1' });
+    const response = event({
+      id: 'event-2', seq: 2, kind: 'advice-response', status: 'completed',
+      correlationId: 'advice-1', fingerprint: 'fingerprint-2',
+    });
+
+    expect(selectOrchestratorItems([request, response])).toEqual([response]);
+  });
+
+  it('reconciles a pre-start durable event once and keeps the handled cursor across restart', async () => {
+    tempState();
+    const firstRun = vi.fn(async () => result());
+    const options = {
+      config: {
+        enabled: true, eventDriven: true, eventDebounceMs: 0,
+        timeoutMs: 10_000, maxTurns: 5, legacy: false,
+      } as const,
+      getRepositories: () => ['/repo'],
+      getPending: () => [event()],
+      buildInstructionCapsule: () => capsule,
+    };
+    const first = new OrchestratorSupervisor({ ...options, run: firstRun });
+
+    first.start();
+    await vi.waitFor(() => expect(firstRun).toHaveBeenCalledTimes(1));
+    await first.stop();
+
+    const secondRun = vi.fn(async () => result());
+    const second = new OrchestratorSupervisor({ ...options, run: secondRun });
+    second.start();
+    await vi.waitFor(() => expect(second.getLastSweep()).not.toBeNull());
+    expect(secondRun).not.toHaveBeenCalled();
+    expect(second.getLastSweep()).toMatchObject({ unchanged: 1, ran: 0 });
+    await second.stop();
+  });
+
+  it('wakes an event-only supervisor for a response that arrives after the request run', async () => {
+    tempState();
+    let pending: CoordinationEvent[] = [];
+    const run = vi.fn(async () => result());
+    const supervisor = new OrchestratorSupervisor({
+      config: {
+        enabled: true, eventDriven: true, eventDebounceMs: 0,
+        timeoutMs: 10_000, maxTurns: 5, legacy: false,
+      },
+      getRepositories: () => ['/repo'],
+      getPending: () => pending,
+      buildInstructionCapsule: () => capsule,
+      run,
+    });
+    supervisor.start();
+    await vi.waitFor(() => expect(supervisor.getLastSweep()).not.toBeNull());
+
+    const response = event({
+      id: 'event-2', seq: 2, kind: 'advice-response', status: 'completed',
+      correlationId: 'advice-1', fingerprint: 'response-fingerprint',
+    });
+    pending = [response];
+    getEventHub().emit('coordination:published', response);
+
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    expect(run.mock.calls[0][0].objective).toContain('advice-response/completed');
+    await supervisor.stop();
   });
 
   it('passes the explicit high-capability route into a cron/manual sweep', async () => {
@@ -147,6 +221,7 @@ describe('OrchestratorSupervisor', () => {
 
   it('reacts only to actionable board events and coalesces an unchanged generation', async () => {
     tempState();
+    let pending: CoordinationEvent[] = [];
     const run = vi.fn(async () => result());
     const supervisor = new OrchestratorSupervisor({
       config: {
@@ -159,7 +234,7 @@ describe('OrchestratorSupervisor', () => {
       },
       policy: { servers: ['linear'] },
       getRepositories: () => ['/repo'],
-      getPending: () => [event()],
+      getPending: () => pending,
       buildInstructionCapsule: () => capsule,
       run,
     });
@@ -169,6 +244,7 @@ describe('OrchestratorSupervisor', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(run).not.toHaveBeenCalled();
 
+    pending = [event()];
     getEventHub().emit('coordination:published', event());
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
     await supervisor.requestSweep('cron');

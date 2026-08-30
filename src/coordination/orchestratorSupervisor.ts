@@ -3,11 +3,13 @@
 // ============================================
 
 import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { Cron } from 'croner';
 import type { InstructionCapsule } from '../agents/instructionCapsule.js';
 import { getEventHub } from '../core/eventHub.js';
 import { withFileLock } from '../support/fileLock.js';
+import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { coordinationStateDir } from './coordinationPaths.js';
 import { getCoordinationStore, type CoordinationEvent } from './coordinationStore.js';
 import type { RoleMcpPolicy } from './mcpPolicy.js';
@@ -37,9 +39,20 @@ export interface OrchestratorSupervisorOptions {
   lockTimeoutMs?: number;
 }
 
-/** Only events that represent a request/finding trigger an immediate paid run. */
+function isTerminalFollowUp(event: CoordinationEvent): boolean {
+  if (!['completed', 'failed'].includes(event.status)) return false;
+  if (event.kind === 'advice-response' || event.kind === 'delegation-result') return true;
+  return event.kind === 'thread-update'
+    && (event.metadata?.action === 'replied' || event.metadata?.action === 'resolved');
+}
+
+/** Requests, findings, and late peer outcomes trigger an immediate paid run. */
 export function isActionableOrchestratorEvent(event: CoordinationEvent): boolean {
+  // Never recursively wake on the supervisor's own board mutations. A later
+  // peer response still has the peer's role and will wake the repository.
+  if (event.actorRole === 'orchestrator') return false;
   if (event.kind === 'review-run' && event.status === 'failed') return true;
+  if (isTerminalFollowUp(event)) return true;
   return event.status === 'open'
     && (event.kind === 'advice-request' || event.kind === 'delegation-request' || event.kind === 'thread-update');
 }
@@ -60,7 +73,8 @@ export function selectOrchestratorItems(events: readonly CoordinationEvent[]): C
   }
   return [...latest.values()].filter((event) =>
     ['open', 'waiting', 'running'].includes(event.status)
-    || (event.kind === 'review-run' && event.status === 'failed'));
+    || (event.kind === 'review-run' && event.status === 'failed')
+    || isTerminalFollowUp(event));
 }
 
 function actionableFingerprint(events: readonly CoordinationEvent[]): string {
@@ -74,6 +88,34 @@ function actionableFingerprint(events: readonly CoordinationEvent[]): string {
 function repositoryLockPath(repository: string): string {
   const key = createHash('sha256').update(resolve(repository)).digest('hex').slice(0, 16);
   return join(coordinationStateDir(), 'locks', `orchestrator-${key}.lock`);
+}
+
+function repositoryStatePath(repository: string): string {
+  const key = createHash('sha256').update(resolve(repository)).digest('hex').slice(0, 32);
+  return join(coordinationStateDir(), 'orchestrator', `${key}.json`);
+}
+
+function readHandledFingerprint(repository: string): string | undefined {
+  const path = repositoryStatePath(repository);
+  if (!existsSync(path)) return undefined;
+  const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
+    version?: unknown;
+    repository?: unknown;
+    fingerprint?: unknown;
+  };
+  if (parsed.version !== 1 || parsed.repository !== resolve(repository) || typeof parsed.fingerprint !== 'string') {
+    throw new Error(`Invalid orchestrator state: ${path}`);
+  }
+  return parsed.fingerprint;
+}
+
+function writeHandledFingerprint(repository: string, fingerprint: string): void {
+  atomicWriteFileSync(repositoryStatePath(repository), `${JSON.stringify({
+    version: 1,
+    repository: resolve(repository),
+    fingerprint,
+    handledAt: new Date().toISOString(),
+  }, null, 2)}\n`, 0o600);
 }
 
 /**
@@ -126,6 +168,10 @@ export class OrchestratorSupervisor {
     }
     this.started = true;
     this.stopping = false;
+    // Reconcile events committed before this process subscribed. Event-only
+    // mode otherwise loses any request published immediately before a crash.
+    void this.requestSweep('coordination-event').catch((error) =>
+      console.error('[Orchestrator] startup reconciliation failed:', error));
   }
 
   private readonly onCoordinationEvent = (value: unknown): void => {
@@ -201,12 +247,25 @@ export class OrchestratorSupervisor {
 
       try {
         let result: OrchestratorRunResult | undefined;
+        let handledByAnotherProcess = false;
+        let lockedFingerprint = fingerprint;
         await withFileLock(repositoryLockPath(repository), async () => {
           if (signal.aborted) return;
+          // Another daemon may have handled or advanced the repository while
+          // this process waited for the cross-process lock. Decide again under
+          // the same lock that protects the durable handled cursor.
+          const current = this.getPending(repository);
+          const currentObjective = buildOrchestratorObjective(current);
+          if (!currentObjective) return;
+          lockedFingerprint = actionableFingerprint(current);
+          if (readHandledFingerprint(repository) === lockedFingerprint) {
+            handledByAnotherProcess = true;
+            return;
+          }
           result = await this.run({
             repository,
             taskId: 'orchestrator:sweep',
-            objective,
+            objective: currentObjective,
             policy: this.options.policy,
             adapterName: this.options.config.adapter,
             model: this.options.config.model,
@@ -217,7 +276,15 @@ export class OrchestratorSupervisor {
             trigger,
             signal,
           });
+          if (result && !result.skippedReason) {
+            writeHandledFingerprint(repository, lockedFingerprint);
+          }
         }, { timeoutMs: this.lockTimeoutMs });
+        if (handledByAnotherProcess) {
+          this.lastActionable.set(repository, lockedFingerprint);
+          stats.unchanged++;
+          continue;
+        }
         if (!result) continue;
         // A provider call that actually completed handled this board generation.
         // Environment skips remain retryable on a later cron/event.
@@ -225,7 +292,7 @@ export class OrchestratorSupervisor {
           stats.skipped++;
         } else {
           stats.ran++;
-          this.lastActionable.set(repository, fingerprint);
+          this.lastActionable.set(repository, lockedFingerprint);
         }
       } catch (error) {
         if (signal.aborted) break;
