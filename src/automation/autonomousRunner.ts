@@ -1916,6 +1916,9 @@ export class AutonomousRunner {
     const candidates = planStalledInProgress(tasks, {
       now,
       staleAfterMs,
+      hasOpenSwarmClaim: (issueId) =>
+        this.durableRuns.getRun(issueId) != null
+        && getTaskState(issueId)?.execution.status === 'in_progress',
       isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
       hasLiveLease: (issueId) => {
         const run = this.durableRuns.getRun(issueId);
@@ -1932,6 +1935,27 @@ export class AutonomousRunner {
     let moved = 0;
     for (const { task, targetState } of candidates) {
       const issueId = task.issueId || task.id;
+      // Re-read immediately before the write. The heartbeat snapshot may be
+      // minutes old; a person or another daemon could have reclaimed or edited
+      // the issue since then. Linear has no conditional issue-update mutation,
+      // so an exact state+updatedAt match is the strongest available optimistic
+      // guard and missing evidence must fail closed.
+      const refreshed = await source.lookupIssueState(task.issueIdentifier ?? issueId).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      if (
+        !refreshed.ok
+        || !refreshed.issue
+        || refreshed.issue.state.toLowerCase() !== 'in progress'
+        || !Number.isFinite(refreshed.issue.updatedAt)
+        || refreshed.issue.updatedAt !== task.trackerUpdatedAt
+      ) {
+        console.warn(
+          `[AutonomousRunner] Skipping stale-state repair for ${task.issueIdentifier ?? issueId}: tracker ownership changed or could not be revalidated`,
+        );
+        continue;
+      }
       const accepted = await source.updateState(issueId, targetState).catch((error) => {
         console.warn(`[AutonomousRunner] Failed to retire stalled ${task.issueIdentifier ?? issueId}:`, error);
         return false;
