@@ -81,6 +81,8 @@ describe('GET /api/coordination', () => {
     expect(backfill).toMatchObject({ status: 200, body: { locale: 'ko', translated: 2, events: 2, failed: 0 } });
     const repeated = await post('/api/coordination/translations/backfill', {});
     expect(repeated).toMatchObject({ status: 200, body: { translated: 0, cached: 2, failed: 0 } });
+    const boardOnly = await post('/api/coordination/translations/backfill', { repository: '/repo', includeHistory: false });
+    expect(boardOnly).toMatchObject({ status: 200, body: { events: 1, boardEvents: 1, cached: 1 } });
     expect(runChatCompletion).toHaveBeenCalledTimes(1);
     const response = await call('/api/coordination');
     expect(response.body.events[0]).toMatchObject({
@@ -112,11 +114,14 @@ describe('GET /api/coordination', () => {
       actor: 'worker-old', kind: 'advice-response', status: 'completed', correlationId: 'old-auto-correlation',
       summary: 'Do not translate the entire archive from a dashboard poll.', fingerprint: 'older-trace-fingerprint',
     });
-    runChatCompletion.mockResolvedValue({
-      response: JSON.stringify([{
-        id: getCoordinationStore().snapshot('/repo').events[0]!.id,
-        summary: '수정하기 전에 기존 구현을 검토하세요.',
-      }]),
+    runChatCompletion.mockImplementation(async ({ prompt }: { prompt: string }) => {
+      const items = JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1)) as Array<{ id: string }>;
+      return { response: JSON.stringify(items.map(({ id }) => ({
+        id,
+        summary: id === 'older-trace-only'
+          ? '대시보드 poll에서 전체 이력을 번역하지 마세요.'
+          : '수정하기 전에 기존 구현을 검토하세요.',
+      }))) };
     });
 
     const first = await call('/api/coordination?repository=%2Frepo');
@@ -133,6 +138,19 @@ describe('GET /api/coordination', () => {
     });
     expect(runChatCompletion).toHaveBeenCalledTimes(1);
     expect(runChatCompletion.mock.calls[0]![0].prompt).not.toContain('older-trace-only');
+
+    const history = await call('/api/coordination/history?repository=%2Frepo');
+    expect(history.body.events.find((item: { id: string }) => item.id === 'older-trace-only')).toMatchObject({
+      summary: '대시보드 poll에서 전체 이력을 번역하지 마세요.',
+      localizedLocale: 'ko',
+    });
+    expect(runChatCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects transcript backfill when the installation locale is English', async () => {
+    initLocale('en');
+    const response = await post('/api/coordination/translations/backfill', {});
+    expect(response).toMatchObject({ status: 409, body: { error: expect.stringMatching(/non-English/) } });
   });
 
   it('returns only what the client has not seen, and leaves other routes alone', async () => {

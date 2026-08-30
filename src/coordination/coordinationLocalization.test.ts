@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   backfillCoordinationLocale,
+  missingCoordinationTranslations,
   needsCoordinationTranslation,
   projectCoordinationLocale,
 } from './coordinationLocalization.js';
@@ -96,5 +97,33 @@ describe('coordination transcript localization cache', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('batches a backlog and records a translator failure without discarding completed batches', async () => {
+    root = mkdtempSync(join(tmpdir(), 'coordination-locale-batches-'));
+    process.env.OPENSWARM_COORDINATION_TRANSLATIONS_FILE = join(root, 'translations.json');
+    const events = Array.from({ length: 21 }, (_, index) => event({
+      id: `event-${index}`, fingerprint: `fingerprint-${index}`, summary: `Translate backlog item ${index}.`, detail: undefined,
+    }));
+    const translate = vi.fn(async (items: Array<{ id: string }>) => {
+      if (items[0]?.id === 'event-20') throw new Error('translator unavailable');
+      return items.map((item) => ({ id: item.id, summary: `번역 ${item.id}` }));
+    });
+
+    expect(missingCoordinationTranslations(events, 'ko')).toBe(21);
+    const result = await backfillCoordinationLocale(events, 'ko', translate);
+    expect(result).toMatchObject({ translated: 20, failed: 1, errors: ['translator unavailable'] });
+    expect(translate).toHaveBeenCalledTimes(2);
+    expect(missingCoordinationTranslations(events, 'ko')).toBe(1);
+  });
+
+  it('bypasses localization work for an English installation', async () => {
+    const source = event();
+    const translate = vi.fn();
+    expect(await backfillCoordinationLocale([source], 'en', translate))
+      .toEqual({ translated: 0, cached: 1, skipped: 0, failed: 0, errors: [] });
+    expect(projectCoordinationLocale([source], 'en')[0]).toEqual(source);
+    expect(missingCoordinationTranslations([source], 'en')).toBe(0);
+    expect(translate).not.toHaveBeenCalled();
   });
 });
