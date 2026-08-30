@@ -62,6 +62,17 @@ describe('loadRegistry', () => {
     expect(reg.fs).toEqual({ transport: 'stdio', command: 'npx', args: ['-y', 'server-filesystem', '/tmp'], env: { A: '1' } });
   });
 
+  it('preserves an explicit trust-domain surface label', () => {
+    const p = writeMcpJson({
+      mcpServers: { communications: { command: 'company-mcp', surface: 'human' } },
+    });
+    expect(loadRegistry(p).communications).toMatchObject({
+      transport: 'stdio',
+      command: 'company-mcp',
+      surface: 'human',
+    });
+  });
+
   it('normalizes a remote entry (url → http; sse honored)', () => {
     const p = writeMcpJson({
       mcpServers: {
@@ -154,6 +165,13 @@ describe('resolveMcpTools (INT-1951)', () => {
       }),
     ).toEqual([]);
   });
+
+  it('filters human-surface mutations from provided and discovered adapter tools', async () => {
+    const safe = { ...tool, function: { ...tool.function, name: 'slack__list_channels' } };
+    const write = { ...tool, function: { ...tool.function, name: 'slack__chat_postMessage' } };
+    expect(await resolveMcpTools([safe, write])).toEqual([safe]);
+    expect(await resolveMcpTools(undefined, async () => [safe, write])).toEqual([safe]);
+  });
 });
 
 describe('initMcpTools / callMcpTool regressions', () => {
@@ -195,6 +213,24 @@ describe('initMcpTools / callMcpTool regressions', () => {
     await initMcpTools(registry);
     clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
     await expect(callMcpTool('svc__ok', {})).resolves.toEqual({ content: 'done', isError: false });
+  });
+
+  it('denies a human-surface mutation at dispatch even when a hidden call bypasses tool exposure', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [
+        { name: 'chat_postMessage', description: 'Post a message', inputSchema: { type: 'object' } },
+        { name: 'list_channels', description: 'List channels', inputSchema: { type: 'object' } },
+      ],
+    });
+    await initMcpTools({ slack: { transport: 'stdio', command: 'mock-mcp', surface: 'human' } });
+
+    const denied = await callMcpTool('slack__chat_postMessage', { text: 'hello' });
+    expect(denied).toMatchObject({ isError: true, content: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    expect(clientMock.callTool).not.toHaveBeenCalled();
+
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'general' }] });
+    await expect(callMcpTool('slack__list_channels', {})).resolves.toEqual({ content: 'general', isError: false });
+    expect(clientMock.callTool).toHaveBeenCalledOnce();
   });
 
   it('keeps the truncation marker inside the configured result cap', async () => {

@@ -106,6 +106,8 @@ export type SwarmEvent = {
 export type McpServerConfig = {
   /** Reference a built-in preset (e.g. `linear`) instead of command/url. (INT-1952) */
   preset?: string;
+  /** Trust-domain label used by the external human-surface policy. */
+  surface?: 'human' | 'devops' | 'data' | 'sandbox' | 'unknown';
   command?: string;
   args?: string[];
   env?: Record<string, string>;

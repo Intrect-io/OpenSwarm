@@ -14,6 +14,7 @@ import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
 import type { CliRunResult } from './types.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { filterHumanSurfaceMcpTools } from '../mcp/humanSurfacePolicy.js';
 
 // ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
 
@@ -227,6 +228,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     editFormat = 'json',
   } = options;
 
+  const humanSurfaceFilteredMcp = filterHumanSurfaceMcpTools(mcpTools ?? []);
+  for (const entry of humanSurfaceFilteredMcp.denied) {
+    onLog?.(`[MCP policy] ${entry.name}: ${entry.reason}`);
+  }
+
   const startTime = Date.now();
   const deadline = timeoutMs > 0 ? startTime + timeoutMs : Number.POSITIVE_INFINITY;
 
@@ -277,7 +283,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         // own memory server exposes writes, so injected content could leave
         // something behind for a later run. (INT-3189)
         ...(webTools && !readOnly ? WEB_TOOL_DEFINITIONS : []),
-        ...(readOnly ? [] : mcpTools ?? []),
+        ...(readOnly ? [] : humanSurfaceFilteredMcp.tools),
         ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
       ]
     : [];

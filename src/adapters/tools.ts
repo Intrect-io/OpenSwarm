@@ -16,6 +16,7 @@ import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
 import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { humanSurfaceShellWriteReason, stripHumanSurfaceEnv } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,7 +41,7 @@ export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
   ];
   const current = (base.PATH ?? '').split(':').filter(Boolean);
   const merged = [...extra.filter((p) => !current.includes(p)), ...current];
-  return { ...base, PATH: merged.join(':') };
+  return stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') });
 }
 
 // ============ 도구 정의 (OpenAI function calling 포맷) ============
@@ -807,6 +808,10 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        const humanSurfaceDenial = humanSurfaceShellWriteReason(command);
+        if (humanSurfaceDenial) {
+          return { tool_call_id: callId, content: `HUMAN_SURFACE_READ_ONLY: ${humanSurfaceDenial}`, is_error: true };
+        }
         if (isCommandBlocked(command)) {
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }

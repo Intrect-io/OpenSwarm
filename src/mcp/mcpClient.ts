@@ -18,6 +18,13 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 import { safeInheritedEnv } from '../support/spawnEnv.js';
+import {
+  attachMcpToolPolicy,
+  filterHumanSurfaceMcpTools,
+  type McpSurface,
+  type McpToolAnnotations,
+  type McpToolPolicyDecision,
+} from './humanSurfacePolicy.js';
 
 /** Qualified tool name separator: `<server>__<tool>`. */
 const SEP = '__';
@@ -29,6 +36,7 @@ const EMPTY_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties
 
 interface ServerConfig {
   transport: 'stdio' | 'http' | 'sse';
+  surface?: McpSurface;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -45,6 +53,7 @@ interface ServerConfig {
 export const BUILTIN_MCP_SERVERS: Record<string, ServerConfig> = {
   linear: {
     transport: 'stdio',
+    surface: 'devops',
     command: 'npx',
     args: ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp'],
   },
@@ -72,6 +81,10 @@ function stringRecordOrNull(value: unknown): Record<string, string> | undefined 
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function isMcpSurface(value: unknown): value is McpSurface {
+  return value === 'human' || value === 'devops' || value === 'data' || value === 'sandbox' || value === 'unknown';
 }
 
 function isJsonSchemaObject(schema: unknown, depth = 0): schema is Record<string, unknown> {
@@ -117,8 +130,11 @@ function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
 /** A persisted entry: `{preset}`, `{command,args,env}` (stdio) or `{url,headers,transport?}` (remote). */
 function normalizeEntry(raw: unknown): ServerConfig | null {
   if (!isRecord(raw)) return null;
+  if (raw.surface !== undefined && !isMcpSurface(raw.surface)) return null;
+  const surface = raw.surface as McpSurface | undefined;
   if (typeof raw.preset === 'string' && raw.preset) {
-    return BUILTIN_MCP_SERVERS[raw.preset] ?? null;
+    const preset = BUILTIN_MCP_SERVERS[raw.preset];
+    return preset ? { ...preset, ...(surface ? { surface } : {}) } : null;
   }
   if (typeof raw.command === 'string' && raw.command) {
     const args = stringArrayOrNull(raw.args);
@@ -126,6 +142,7 @@ function normalizeEntry(raw: unknown): ServerConfig | null {
     if (!args || env === null) return null;
     return {
       transport: 'stdio',
+      ...(surface ? { surface } : {}),
       command: raw.command,
       args,
       env,
@@ -135,7 +152,7 @@ function normalizeEntry(raw: unknown): ServerConfig | null {
     const headers = stringRecordOrNull(raw.headers);
     if (headers === null) return null;
     const t = raw.transport === 'sse' ? 'sse' : 'http';
-    return { transport: t, url: raw.url, headers };
+    return { transport: t, ...(surface ? { surface } : {}), url: raw.url, headers };
   }
   return null;
 }
@@ -238,12 +255,19 @@ function isValidToolName(name: string): boolean {
 }
 
 // Resolved at initMcpTools(); callMcpTool() looks the server up here.
-let serverByTool: Record<string, { cfg: ServerConfig; toolName: string }> = {};
+interface McpToolRoute {
+  cfg: ServerConfig;
+  toolName: string;
+  policy: McpToolPolicyDecision;
+}
+
+let serverByTool: Record<string, McpToolRoute> = {};
 
 interface McpTool {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
 }
 
 /**
@@ -253,7 +277,7 @@ interface McpTool {
  */
 interface DiscoveryResult {
   defs: ToolDefinition[];
-  routing: Record<string, { cfg: ServerConfig; toolName: string }>;
+  routing: Record<string, McpToolRoute>;
   /** Servers skipped because they could not be reached. Empty when complete. */
   unreachable: string[];
 }
@@ -274,7 +298,7 @@ interface DiscoveryResult {
  */
 async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise<DiscoveryResult> {
   const defs: ToolDefinition[] = [];
-  const routing: Record<string, { cfg: ServerConfig; toolName: string }> = {};
+  const routing: Record<string, McpToolRoute> = {};
   const unreachable: string[] = [];
   const entries = Object.entries(registry);
   let next = 0;
@@ -290,15 +314,24 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
             console.warn(`[MCP] server "${server}" returned invalid tool name "${tool.name}" — skipped`);
             continue;
           }
-          routing[qualified] = { cfg, toolName: tool.name };
-          defs.push({
+          const definition: ToolDefinition = {
             type: 'function',
             function: {
               name: qualified,
               description: (tool.description ?? '').slice(0, 1024),
               parameters: sanitizeInputSchema(tool.inputSchema),
             },
+          };
+          const policy = attachMcpToolPolicy(definition, {
+            server,
+            action: tool.name,
+            description: tool.description,
+            declaredSurface: cfg.surface,
+            serverIdentityHints: [cfg.url ?? '', cfg.command ?? '', ...(cfg.args ?? [])].filter(Boolean),
+            annotations: tool.annotations,
           });
+          routing[qualified] = { cfg, toolName: tool.name, policy };
+          defs.push(definition);
         }
       } catch (err) {
         unreachable.push(server);
@@ -405,9 +438,9 @@ export async function resolveMcpTools(
   provided?: ToolDefinition[],
   source: () => Promise<ToolDefinition[]> = getMcpTools,
 ): Promise<ToolDefinition[]> {
-  if (provided) return provided;
+  if (provided) return filterHumanSurfaceMcpTools(provided).tools;
   try {
-    return await source();
+    return filterHumanSurfaceMcpTools(await source()).tools;
   } catch {
     return [];
   }
@@ -422,6 +455,13 @@ export interface McpCallResult {
 export async function callMcpTool(qualified: string, args: Record<string, unknown>): Promise<McpCallResult> {
   const entry = serverByTool[qualified];
   if (!entry) return { content: `MCP tool not registered: ${qualified}`, isError: true };
+  if (entry.policy.surface === 'human' && !entry.policy.humanSurfaceReadAllowed) {
+    return {
+      content: `HUMAN_SURFACE_READ_ONLY: ${qualified} cannot mutate an external human-facing service. `
+        + 'Only read/list/get/search/fetch MCP actions are allowed.',
+      isError: true,
+    };
+  }
   try {
     const result = (await withClient(entry.cfg, (c) =>
       c.callTool({ name: entry.toolName, arguments: args }),

@@ -5,14 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CliAdapter } from '../adapters/types.js';
 
 const getAdapter = vi.hoisted(() => vi.fn());
-const getMcpTools = vi.hoisted(() => vi.fn(async () => []));
+const resolveMcpTools = vi.hoisted(() => vi.fn(async () => []));
 
 vi.mock('../adapters/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../adapters/index.js')>();
   return { ...actual, getAdapter };
 });
 
-vi.mock('../mcp/mcpClient.js', () => ({ getMcpTools }));
+vi.mock('../mcp/mcpClient.js', () => ({ resolveMcpTools }));
 
 import { runChatCompletion } from './chatBackend.js';
 
@@ -159,6 +159,27 @@ describe('runChatCompletion CLI fallback', () => {
     })).rejects.toThrow('Chat response timeout');
     expect(Date.now() - startedAt).toBeLessThan(150);
     await new Promise((resolve) => setTimeout(resolve, 325));
+  });
+
+  it('sources the globally filtered MCP set for native chat runs', async () => {
+    const safeTool = {
+      type: 'function' as const,
+      function: { name: 'slack__list_channels', description: '', parameters: { type: 'object' } },
+    };
+    resolveMcpTools.mockResolvedValueOnce([safeTool]);
+    let seenTools: unknown;
+    getAdapter.mockReturnValue({
+      ...cliAdapter(() => ({ command: 'unused', args: [] })),
+      run: async (options: { mcpTools?: unknown }) => {
+        seenTools = options.mcpTools;
+        return { exitCode: 0, stdout: 'done', stderr: '', durationMs: 1 };
+      },
+    });
+
+    await expect(runChatCompletion({ prompt: 'inspect', provider: 'codex', timeoutMs: 5000 }))
+      .resolves.toMatchObject({ response: 'done' });
+    expect(resolveMcpTools).toHaveBeenCalledOnce();
+    expect(seenTools).toEqual([safeTool]);
   });
 
   it.skipIf(process.platform === 'win32')('terminates descendant processes when the caller aborts', async () => {

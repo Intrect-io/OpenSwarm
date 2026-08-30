@@ -8,6 +8,8 @@ describe('MCP role policy', () => {
   it('classifies read, write, and destructive operations conservatively', () => {
     expect(classifyMcpTool('github__get_issue')).toBe('read');
     expect(classifyMcpTool('linear__save_comment')).toBe('write');
+    expect(classifyMcpTool('slack__chat_postMessage')).toBe('write');
+    expect(classifyMcpTool('discord__send_message')).toBe('write');
     expect(classifyMcpTool('cloudflare__delete_worker')).toBe('destructive');
   });
 
@@ -36,5 +38,28 @@ describe('MCP role policy', () => {
       writeTools: ['linear__save_comment'],
       destructiveTools: ['github__merge_pull_request'],
     }).tools).toEqual(tools);
+  });
+
+  it('does not let an exact role grant widen human-surface authority', () => {
+    const tools = [tool('slack__list_channels'), tool('slack__chat_postMessage'), tool('notion__create_page')];
+    const result = filterMcpToolsForRole(tools, {
+      servers: ['slack', 'notion'],
+      writeTools: ['slack__chat_postMessage', 'notion__create_page'],
+    });
+    expect(result.tools.map((entry) => entry.function.name)).toEqual(['slack__list_channels']);
+    expect(result.denied).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'slack__chat_postMessage', reason: expect.stringContaining('human surface is read-only') }),
+      expect.objectContaining({ name: 'notion__create_page', reason: expect.stringContaining('human surface is read-only') }),
+    ]));
+  });
+
+  it('preserves exact DevOps and data mutations', () => {
+    const tools = [tool('github__create_issue'), tool('cloudflare__delete_worker'), tool('postgres__update_row')];
+    const result = filterMcpToolsForRole(tools, {
+      servers: ['github', 'cloudflare', 'postgres'],
+      writeTools: ['github__create_issue', 'postgres__update_row'],
+      destructiveTools: ['cloudflare__delete_worker'],
+    });
+    expect(result.tools).toEqual(tools);
   });
 });

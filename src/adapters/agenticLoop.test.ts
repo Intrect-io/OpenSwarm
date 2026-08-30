@@ -438,6 +438,35 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(deniedResult).toContain('TOOL_NOT_ALLOWED');
     expect(deniedResult).toContain('linear__delete_issue');
   });
+
+  it('removes human-surface writes from the provider schema while preserving reads and DevOps writes', async () => {
+    let toolNames: string[] = [];
+    const logs: string[] = [];
+    const mcp = (name: string) => ({
+      type: 'function' as const,
+      function: { name, description: '', parameters: { type: 'object' } },
+    });
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      filesystemTools: false,
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      mcpTools: [mcp('slack__list_channels'), mcp('slack__chat_postMessage'), mcp('github__create_issue')],
+      onLog: (line) => logs.push(line),
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((entry) => entry.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toEqual(['slack__list_channels', 'github__create_issue']);
+    expect(logs.join('\n')).toContain('slack__chat_postMessage');
+    expect(logs.join('\n')).toContain('human surface is read-only');
+  });
 });
 
 describe('runAgenticLoop blocking human decision', () => {

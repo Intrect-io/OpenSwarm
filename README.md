@@ -392,6 +392,33 @@ role. This lets the supervisor settle evidence-backed worker questions without
 copying OAuth state or granting every worker broad Linear access. No external
 tool is granted implicitly, and decisions requiring new business authority stay
 with the operator.
+
+External human-facing surfaces have a stricter global boundary than the role
+grant above. Slack, Discord, email, Notion, and other messaging/collaboration
+servers are identified from the configured server descriptor, endpoint/package
+identity, tool action, and MCP annotations; custom opaque aliases should set
+`mcp.servers.<name>.surface: human`. Only actions containing an explicit
+`read`, `list`, `get`, `search`, or `fetch` verb are exposed or dispatched.
+`send`, `post`, `create`, `update`, `delete`, unknown actions, and equivalent
+mutations fail closed even if a role includes their exact name in `writeTools`
+or `destructiveTools`. MCP annotations are untrusted hints: they may tighten the
+decision but cannot turn a mutating action into a read. GitHub, Linear,
+Cloudflare, database/server tools, and sandbox-local data tools keep their
+existing role-scoped write contract.
+
+Native-loop shells additionally reject direct writes to known human-service
+endpoints and service CLIs. Microsoft Graph is narrowed to mail, message,
+calendar, chat, drive, and other human-facing path/action families so its
+device/directory DevOps APIs retain their existing contract. Both native and
+delegated worker processes omit
+product-scoped human-service credentials from inherited environment variables
+while retaining model, DevOps, database, and sandbox-data settings. Delegated
+CLIs receive none of OpenSwarm's MCP grants (`codex` disables inherited MCP and `claude` uses a
+strict MCP config); use a native-loop adapter when the policy must cover shell
+commands too. OpenSwarm cannot classify an arbitrary program that reads a
+credential embedded inside the repository and implements its own network
+protocol, so such credentials must not be placed in an agent worktree.
+
 One sweep runs at a time per daemon and repository, concurrent daemons contend
 on a file lock, and shutdown aborts then drains an active supervisor call. An
 unchanged set of open board items is not sent to the model again. The deprecated

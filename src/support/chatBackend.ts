@@ -21,6 +21,7 @@ import {
   untrackCliProcessTree,
 } from '../adapters/processTree.js';
 import { raceWithAbort } from '../adapters/abortRace.js';
+import { buildWorkerEnv } from '../adapters/envPath.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -293,9 +294,9 @@ async function runChatViaAdapter(
   // so it can actually read/edit/run in the working directory. Tokens stream via
   // onToken; tool executions surface through onLog.
   // Expose any MCP servers configured in ~/.openswarm/mcp.json as tools (cached).
-  const { getMcpTools } = await import('../mcp/mcpClient.js');
+  const { resolveMcpTools } = await import('../mcp/mcpClient.js');
   const mcpTools = await raceWithAbort(
-    getMcpTools().catch(() => []),
+    resolveMcpTools(),
     runSignal,
     'Chat response cancelled',
   );
@@ -415,7 +416,7 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
     if (runSignal.aborted) throw chatAbortError(runSignal);
 
     return await new Promise<ChatCompletionResult>((resolve, reject) => {
-      const cliSpawn = prepareCliProcessTreeSpawn(command, args, process.env);
+      const cliSpawn = prepareCliProcessTreeSpawn(command, args, buildWorkerEnv(process.env));
       const proc = spawn(cliSpawn.command, cliSpawn.args, {
         shell: false,
         detached: process.platform !== 'win32',
