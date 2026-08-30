@@ -8,6 +8,7 @@ import type { ExecutionDurabilityHooks } from '../automation/durableRunCoordinat
 import type { EffectClaim, EffectInput } from '../automation/runLedger.js';
 import type { RepoMetadata } from '../support/repoMetadata.js';
 import {
+  buildConflictFreeWaves,
   buildWorkAdmission,
   formatWorkSummary,
   runWorkCommand,
@@ -122,6 +123,10 @@ function baseDeps(overrides: Partial<WorkCommandDeps> = {}): WorkCommandDeps & {
     isGitRepo: () => true,
     loadRepoMetadata: async () => null,
     getIssue: async (id) => issue({ identifier: id, id: `uuid-${id}` }),
+    resolveTaskFileScope: vi.fn(async (task) => {
+      task.fileScope ??= [`src/${task.issueIdentifier ?? task.id}.ts`];
+      return task.fileScope;
+    }),
     hasRecoverableWorktree: async () => false,
     createCoordinator: () => coordinator,
     executePipeline: exec,
@@ -573,6 +578,32 @@ describe('runWorkCommand — exit code matrix', () => {
 });
 
 describe('runWorkCommand — options plumbing', () => {
+  it('runs overlapping file scopes in separate waves instead of racing two worktrees', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const deps = baseDeps({
+      resolveTaskFileScope: vi.fn(async (task) => {
+        task.fileScope = ['src/shared.ts'];
+        return task.fileScope;
+      }),
+      executePipeline: vi.fn(async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return pipelineResult();
+      }),
+    });
+
+    const code = await runWorkCommand({
+      issueIds: ['INT-1', 'INT-2'], path: '/repo', yes: true, concurrency: 2,
+    }, deps);
+
+    expect(code).toBe(WORK_EXIT_OK);
+    expect(maxActive).toBe(1);
+    expect(deps.logs.join('\n')).toContain('2 non-overlapping wave(s)');
+  });
+
   it('defaults concurrency to min(selected, autonomous.maxConcurrentTasks ?? 4)', async () => {
     const createCoordinator = vi.fn(() => fakeCoordinator());
     const deps = baseDeps({
@@ -702,13 +733,25 @@ describe('pure helpers', () => {
     resumes: false,
   };
 
-  it('buildWorkAdmission matches the daemon fan-out defaults (capacity-only admit)', () => {
-    expect(buildWorkAdmission(3)).toEqual({
+  it('buildWorkAdmission carries the task scope into atomic cross-process admission', () => {
+    expect(buildWorkAdmission(3, undefined, ['src/shared.ts'])).toEqual({
       maxConcurrent: 3,
-      conflictScope: undefined,
+      conflictScope: ['src/shared.ts'],
       maxFailuresPerHour: 6,
       circuitCooldownMs: 3_600_000,
     });
+  });
+
+  it('partitions overlapping and unknown task scopes into deterministic waves', () => {
+    const rows = [
+      { task: { ...row.task, id: 'a', fileScope: ['src/shared.ts'] } },
+      { task: { ...row.task, id: 'b', fileScope: ['src/other.ts'] } },
+      { task: { ...row.task, id: 'c', fileScope: ['src/shared.ts'] } },
+      { task: { ...row.task, id: 'unknown', fileScope: [] } },
+    ];
+
+    expect(buildConflictFreeWaves(rows).map((wave) => wave.map(({ task }) => task.id)))
+      .toEqual([['a', 'b'], ['c'], ['unknown']]);
   });
 
   it('summarizeSettled maps approved success to a removed worktree', () => {

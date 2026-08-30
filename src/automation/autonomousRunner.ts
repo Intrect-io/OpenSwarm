@@ -112,7 +112,7 @@ export function effectiveProjectConcurrency(config: Pick<AutonomousConfig,
   return Math.max(1, Math.min(requested, globalCap));
 }
 
-/** Worktrees isolate issue execution; integration conflicts are handled later. */
+/** Worktrees isolate filesystem writes; file-scope admission still protects integration. */
 export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
   'allowSameProjectConcurrent' | 'worktreeMode'
 >): boolean {
@@ -1191,9 +1191,12 @@ export class AutonomousRunner {
         maxConcurrent: sameRepoParallelAllowed
           ? (metadata?.automation?.maxConcurrent ?? effectiveProjectConcurrency(this.config))
           : 1,
-        // Each issue gets its own worktree in fan-out mode. Overlapping files
-        // may conflict when branches integrate, but must not serialize workers.
-        conflictScope: sameRepoParallelAllowed ? undefined : task.fileScope,
+        // Worktrees isolate live filesystem writes, not the branches that must
+        // later merge. Always carry the predicted write set into the durable
+        // claim so another daemon / `openswarm work` process cannot race past
+        // this heartbeat's in-memory conflict check. An empty scope fails
+        // closed while another same-repository run is active.
+        conflictScope: task.fileScope ?? [],
         // A fixed default attempt budget of 12 made a 32-slot daemon trip its
         // repository circuit before the first pool could even fill. Treat this
         // as an explicit repository policy; failure and cost circuits remain
@@ -2259,10 +2262,6 @@ export class AutonomousRunner {
   }
 
   private async detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
-    if (worktreeFanoutEnabled(this.config)) {
-      return new Set(candidates.map(candidate => candidate.task.id));
-    }
-
     // Group candidates by canonical repository identity for conflict detection.
     // A symlink/relative-path alias must not split one repository into two groups
     // and bypass same-repository conflict serialization.

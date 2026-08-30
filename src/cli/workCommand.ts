@@ -39,8 +39,9 @@ import {
 import type { EffectClaim } from '../automation/runLedger.js';
 import { setAutomationDbPath } from '../automation/automationDbPath.js';
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
-import {hasRecoverableWorktree } from '../support/worktreeManager.js';
+import { hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
+import { fileScopesConflict, resolveTaskFileScope } from '../orchestration/conflictDetector.js';
 import { ensureTaskSource } from './reviewCommand.js';
 import { filterRepoIssues, selectIssuesInteractive, WORK_SKIP_STATES } from './workSelect.js';
 import {
@@ -56,18 +57,19 @@ export const WORK_EXIT_NOT_RUN = 2;
 export const WORK_EXIT_INTERRUPTED = 130;
 
 /** The daemon's fan-out admission (autonomousRunner.executeDurably) with the
- *  repository's own openswarm.json automation policy layered in: capacity-only
- *  admit (worktree isolation replaces file-scope serialization), but attempt/
- *  failure/cost circuits and the repo's concurrency cap are authoritative. */
+ *  repository's own openswarm.json automation policy layered in. Worktrees
+ *  isolate live edits, while the predicted write set protects later branch
+ *  integration across this CLI and a concurrently running daemon. */
 export function buildWorkAdmission(
   concurrency: number,
   automation?: RepoMetadata['automation'],
+  conflictScope: string[] = [],
 ): RepositoryAdmissionPolicy {
   return {
     maxConcurrent: automation?.maxConcurrent !== undefined
       ? Math.min(concurrency, automation.maxConcurrent)
       : concurrency,
-    conflictScope: undefined,
+    conflictScope,
     maxAttemptsPerHour: automation?.maxAttemptsPerHour,
     maxFailuresPerHour: automation?.maxFailuresPerHour ?? 6,
     maxCostUsdPerDay: automation?.maxCostUsdPerDay,
@@ -125,6 +127,7 @@ export interface WorkCommandDeps {
   ) => Promise<PipelineResult>;
   deliverEffect?: (effect: EffectClaim, source: ITaskSource | null) => Promise<void>;
   hasRecoverableWorktree?: (repoPath: string, issueId: string, branchName: string) => Promise<boolean>;
+  resolveTaskFileScope?: (task: TaskItem, projectPath: string) => Promise<string[]>;
   /** Installs the SIGINT handler; returns the uninstaller. */
   installSigintHandler?: (onSigint: () => void) => () => void;
   isTTY?: boolean;
@@ -141,6 +144,24 @@ interface PlanRow {
   branchName: string;
   /** A preserved worktree or task branch already exists — the run resumes it. */
   resumes: boolean;
+}
+
+/**
+ * Partition a priority-ordered plan into pairwise-disjoint execution waves.
+ * Unknown scopes conflict with everything, so they each get a serial wave.
+ * The durable ledger repeats the same check atomically across processes; this
+ * local partition prevents siblings from merely losing a claim and being
+ * reported as superseded instead of running in the next safe wave.
+ */
+export function buildConflictFreeWaves<T extends { task: TaskItem }>(rows: readonly T[]): T[][] {
+  const waves: T[][] = [];
+  for (const row of rows) {
+    const wave = waves.find((candidate) => candidate.every((peer) =>
+      !fileScopesConflict(row.task.fileScope, peer.task.fileScope)));
+    if (wave) wave.push(row);
+    else waves.push([row]);
+  }
+  return waves;
 }
 
 export interface WorkIssueSummary {
@@ -491,6 +512,13 @@ async function runWorkCommandInner(
   }
 
   // ---- Execution -----------------------------------------------------------
+  const resolveScope = deps.resolveTaskFileScope ?? resolveTaskFileScope;
+  await Promise.all(plan.map((row) => resolveScope(row.task, repoPath)));
+  const waves = buildConflictFreeWaves(plan);
+  if (waves.length > 1) {
+    log(`Conflict preflight split ${plan.length} issue(s) into ${waves.length} non-overlapping wave(s).`);
+  }
+
   // Same file for the ledger and the coordination trace — see setAutomationDbPath.
   setAutomationDbPath(config.autonomous?.automationDbPath);
   const coordinator = (deps.createCoordinator
@@ -500,7 +528,6 @@ async function runWorkCommandInner(
       maxActiveForProject: o.maxActive,
     })))({ dbPath: config.autonomous?.automationDbPath, maxActive: concurrency });
 
-  const admission = buildWorkAdmission(concurrency, meta?.automation);
   const exec = deps.executePipeline ?? executePipeline;
 
   const sigint = new AbortController();
@@ -519,58 +546,67 @@ async function runWorkCommandInner(
 
   let settledRows: Array<{ value?: PipelineResult; error?: unknown }>;
   try {
-    settledRows = await runPool(plan, concurrency, async (row) => {
-      // Ctrl-C: runPool keeps pulling queued rows — skip them outright instead
-      // of entering coordinator.execute, which would still claim the issue and
-      // run comment refresh + draft analysis before the abort lands.
-      if (sigint.signal.aborted) {
-        return {
-          success: false,
-          sessionId: `work-interrupted-${Date.now()}`,
-          stages: [],
-          finalStatus: 'cancelled',
-          totalDuration: 0,
-          iterations: 0,
-          taskContext: {
-            issueIdentifier: row.task.issueIdentifier,
-            projectPath: repoPath,
-            taskTitle: row.task.title,
-          },
-        } satisfies PipelineResult;
-      }
-      log(`[${row.task.issueIdentifier}] deploying${row.resumes ? ' (resume)' : ''}…`);
-      return coordinator.execute(
-        row.task,
-        repoPath,
-        (durability, leaseSignal) => exec(
-          buildWorkExecutionContext({
-            autonomous: config.autonomous,
-            repoPath,
-            peerIssues: tasks,
-            durability,
-            adapter: opts.adapter as import('../core/types.js').AgentAdapterName | undefined,
-            log,
-          }),
+    const settledByRow = new Map<PlanRow, { value?: PipelineResult; error?: unknown }>();
+    for (const wave of waves) {
+      const waveSettled = await runPool(wave, Math.min(concurrency, wave.length), async (row) => {
+        // Ctrl-C: runPool keeps pulling queued rows — skip them outright instead
+        // of entering coordinator.execute, which would still claim the issue and
+        // run comment refresh + draft analysis before the abort lands.
+        if (sigint.signal.aborted) {
+          return {
+            success: false,
+            sessionId: `work-interrupted-${Date.now()}`,
+            stages: [],
+            finalStatus: 'cancelled',
+            totalDuration: 0,
+            iterations: 0,
+            taskContext: {
+              issueIdentifier: row.task.issueIdentifier,
+              projectPath: repoPath,
+              taskTitle: row.task.title,
+            },
+          } satisfies PipelineResult;
+        }
+        log(`[${row.task.issueIdentifier}] deploying${row.resumes ? ' (resume)' : ''}…`);
+        return coordinator.execute(
           row.task,
           repoPath,
-          AbortSignal.any([sigint.signal, leaseSignal]),
-        ),
-        {
-          admission,
-          successEffect: (result, claim) => buildWorkCompletionEffect(row.task, result, claim.attemptNo),
-          cancelEffect: (_result, claim) => buildWorkCancellationEffect(row.task, claim.attemptNo),
-          // Interruptions are resumable — never turn Ctrl-C into a tracker cancel.
-          retryCancellation: () => true,
-        },
-      );
-    }, (settled) => {
-      const row = plan[settled.index];
-      if (settled.error !== undefined) {
-        log(`[${row.task.issueIdentifier}] error: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}`);
-      } else if (settled.value) {
-        const prNote = settled.value.prUrl ? ` → ${settled.value.prUrl}` : '';
-        log(`[${row.task.issueIdentifier}] ${settled.value.finalStatus}${prNote}`);
+          (durability, leaseSignal) => exec(
+            buildWorkExecutionContext({
+              autonomous: config.autonomous,
+              repoPath,
+              peerIssues: tasks,
+              durability,
+              adapter: opts.adapter as import('../core/types.js').AgentAdapterName | undefined,
+              log,
+            }),
+            row.task,
+            repoPath,
+            AbortSignal.any([sigint.signal, leaseSignal]),
+          ),
+          {
+            admission: buildWorkAdmission(concurrency, meta?.automation, row.task.fileScope ?? []),
+            successEffect: (result, claim) => buildWorkCompletionEffect(row.task, result, claim.attemptNo),
+            cancelEffect: (_result, claim) => buildWorkCancellationEffect(row.task, claim.attemptNo),
+            // Interruptions are resumable — never turn Ctrl-C into a tracker cancel.
+            retryCancellation: () => true,
+          },
+        );
+      }, (settled) => {
+        const row = wave[settled.index];
+        if (settled.error !== undefined) {
+          log(`[${row.task.issueIdentifier}] error: ${settled.error instanceof Error ? settled.error.message : String(settled.error)}`);
+        } else if (settled.value) {
+          const prNote = settled.value.prUrl ? ` → ${settled.value.prUrl}` : '';
+          log(`[${row.task.issueIdentifier}] ${settled.value.finalStatus}${prNote}`);
+        }
+      });
+      for (const [index, settled] of waveSettled.entries()) {
+        settledByRow.set(wave[index], settled);
       }
+    }
+    settledRows = plan.map((row) => settledByRow.get(row) ?? {
+      error: new Error('work plan row was not executed'),
     });
 
     // Deliver queued completion effects (Done transition + completion comment)
