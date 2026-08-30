@@ -3,6 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const timeWindowMock = vi.hoisted(() => ({
+  checkWorkAllowed: vi.fn(() => ({ allowed: true, reason: 'test', currentTime: '00:00' })),
+}));
+vi.mock('../support/timeWindow.js', () => timeWindowMock);
 vi.mock('./workflow.js', () => ({
   loadWorkflow: vi.fn(() => ({ id: 'wf-1', name: 'Test', projectPath: '/repo', steps: [] })),
   listWorkflows: vi.fn(async () => []),
@@ -27,6 +31,7 @@ let root: string;
 let councilRepository: string;
 
 beforeEach(() => {
+  timeWindowMock.checkWorkAllowed.mockReturnValue({ allowed: true, reason: 'test', currentTime: '00:00' });
   root = mkdtempSync(join(tmpdir(), 'priority-council-ranking-'));
   process.env.OPENSWARM_AUTOMATION_DB = join(root, 'automation.db');
   resetTraceDbForTests();
