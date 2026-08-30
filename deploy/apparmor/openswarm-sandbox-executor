@@ -1,0 +1,37 @@
+# OpenSwarm strict sandbox companion.
+#
+# Docker's generated docker-default profile denies mount(2), while Ubuntu's
+# global /usr/bin/bwrap profile transitions the bubblewrap child into a profile
+# that denies every capability.  The companion needs a deliberately small
+# exception: its container has a read-only root, no network, no credentials,
+# no Docker socket, and a capability bounding set declared by Compose.  This
+# profile lets bubblewrap use only those container-bounded capabilities and
+# construct the per-execution mount/network namespaces.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile openswarm-sandbox-executor flags=(attach_disconnected,mediate_deleted) {
+  capability sys_admin,
+  capability setuid,
+  capability setgid,
+  capability dac_read_search,
+  capability net_admin,
+
+  network,
+  unix,
+  signal,
+  file,
+  mount,
+  umount,
+  pivot_root,
+
+  # Keep the executor and bwrap in this container-scoped profile.  In
+  # particular, do not auto-transition /usr/bin/bwrap into Ubuntu's global
+  # bwrap//&unpriv_bwrap child, which denies the NET_ADMIN capability needed
+  # to raise loopback inside the new network namespace.
+  /usr/bin/bwrap ix,
+  /usr/bin/setpriv ix,
+  /usr/local/bin/node ix,
+}

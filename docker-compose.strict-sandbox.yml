@@ -1,4 +1,7 @@
 # Opt-in strict native-shell companion. Use together with the base file:
+#   sudo install -m 0644 deploy/apparmor/openswarm-sandbox-executor \
+#     /etc/apparmor.d/openswarm-sandbox-executor
+#   sudo apparmor_parser -r /etc/apparmor.d/openswarm-sandbox-executor
 #   sudo install -d -o 1001 -g 1001 -m 0700 sandbox-socket
 #   docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml up -d
 # The host directory must be owned by uid/gid 1001. The server refuses a
@@ -93,6 +96,11 @@ services:
     security_opt:
       - no-new-privileges:true
       - seccomp=unconfined
+      # Docker's default profile denies the mount operations bubblewrap needs,
+      # while Ubuntu's global bwrap profile strips NET_ADMIN before loopback
+      # setup. The repo-shipped profile keeps AppArmor enforced and scopes the
+      # exception to this credential-less, network-none companion.
+      - apparmor=openswarm-sandbox-executor
     pids_limit: 512
     mem_limit: ${OPENSWARM_SANDBOX_MEMORY_LIMIT:-8g}
     cpus: ${OPENSWARM_SANDBOX_CPUS:-8}

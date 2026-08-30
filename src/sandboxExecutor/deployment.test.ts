@@ -214,6 +214,10 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
   it('keeps the base compose unchanged and makes every privileged mount/capability strict-opt-in', async () => {
     const base = parse(await readFile(join(process.cwd(), 'docker-compose.yml'), 'utf8')) as Record<string, any>;
     const strictSource = await readFile(join(process.cwd(), 'docker-compose.strict-sandbox.yml'), 'utf8');
+    const appArmorSource = await readFile(
+      join(process.cwd(), 'deploy/apparmor/openswarm-sandbox-executor'),
+      'utf8',
+    );
     const strict = parse(strictSource) as Record<string, any>;
     const baseDaemon = base.services.openswarm;
     const strictDaemon = strict.services.openswarm;
@@ -238,8 +242,17 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
     expect(sidecar).not.toHaveProperty('env_file');
     expect(sidecar.cap_drop).toEqual(['ALL']);
     expect(sidecar.cap_add).toEqual(['SYS_ADMIN', 'SETUID', 'SETGID', 'DAC_READ_SEARCH', 'NET_ADMIN']);
-    expect(sidecar.security_opt).toEqual(expect.arrayContaining(['no-new-privileges:true', 'seccomp=unconfined']));
+    expect(sidecar.security_opt).toEqual(expect.arrayContaining([
+      'no-new-privileges:true',
+      'seccomp=unconfined',
+      'apparmor=openswarm-sandbox-executor',
+    ]));
     expect(sidecar.security_opt).not.toContain('apparmor=unconfined');
+    expect(appArmorSource).toContain('profile openswarm-sandbox-executor');
+    expect(appArmorSource).toContain('/usr/bin/bwrap ix,');
+    expect(appArmorSource).toContain('capability net_admin,');
+    expect(appArmorSource).toContain('mount,');
+    expect(appArmorSource).not.toContain('flags=(unconfined)');
     expect(targets).toEqual(expect.arrayContaining(['/work', '/run/openswarm-sandbox']));
     expect(targets).not.toEqual(expect.arrayContaining([
       '/home/openswarm', '/run', '/var/run/docker.sock', '/run/ssh-agent', '/var/run/postgresql',
