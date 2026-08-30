@@ -284,7 +284,15 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       allowSameProjectConcurrent: config.autonomous.allowSameProjectConcurrent,
       defaultRoles: config.autonomous.defaultRoles,
       projectAgents: config.autonomous.projectAgents,
-      // Task decomposition (Planner) configuration
+      // Task decomposition (Planner) configuration. The whole object is passed,
+      // not a hand-picked subset: the runner reads maxDepth, maxChildrenPerTask,
+      // dailyLimit and autoBacklog straight off `config.decomposition`, and
+      // forwarding only the four below left every one of them undefined, so the
+      // code defaults silently overrode the operator's file. Measured: a
+      // configured dailyLimit of 5 ran as 20 and produced 23 issues in two
+      // minutes. Forwarding the object means a field added later cannot go
+      // missing the same way. (AGT-4122)
+      decomposition: config.autonomous.decomposition,
       enableDecomposition: config.autonomous.decomposition?.enabled ?? false,
       decompositionThresholdMinutes: config.autonomous.decomposition?.thresholdMinutes ?? 30,
       plannerModel: config.autonomous.decomposition?.plannerModel,

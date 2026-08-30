@@ -74,6 +74,8 @@ const getChildrenCount = vi.fn();
 const getDailyCreationCount = vi.fn();
 const canCreateMoreIssues = vi.fn();
 const registerDecomposition = vi.fn();
+const reserveDailyCreations = vi.fn();
+const releaseDailyReservation = vi.fn();
 
 const loadRepoMetadata = vi.fn();
 const mapLinearProject = vi.fn();
@@ -137,6 +139,8 @@ vi.mock('./runnerState.js', () => ({
   getDailyCreationCount,
   canCreateMoreIssues,
   registerDecomposition,
+  reserveDailyCreations,
+  releaseDailyReservation,
 }));
 
 // resolveProjectPath / isValidProjectPath dependencies (real versions all read
@@ -288,6 +292,9 @@ describe('runnerExecution.ts coverage extension', () => {
     getDailyCreationCount.mockReturnValue(0);
     canCreateMoreIssues.mockReturnValue(true);
     registerDecomposition.mockReturnValue(undefined);
+    // Admission runs through the atomic reserve in production. (AGT-4122)
+    reserveDailyCreations.mockReturnValue(true);
+    releaseDailyReservation.mockReturnValue(undefined);
 
     markTaskInProgress.mockReturnValue({ issueId: 'issue-1' });
     buildTaskStateSyncComment.mockReturnValue('sync comment');
