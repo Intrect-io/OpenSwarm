@@ -4,7 +4,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { join } from 'node:path';
 import { Cron } from 'croner';
 import type { InstructionCapsule } from '../agents/instructionCapsule.js';
 import { getEventHub } from '../core/eventHub.js';
@@ -13,6 +13,7 @@ import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { coordinationStateDir } from './coordinationPaths.js';
 import { getCoordinationStore, type CoordinationEvent } from './coordinationStore.js';
 import type { RoleMcpPolicy } from './mcpPolicy.js';
+import { repositoryCell, type RepositoryCell } from './repositoryCell.js';
 import { buildOrchestratorObjective, runOrchestrator, type OrchestratorRunOptions, type OrchestratorRunResult } from './orchestratorAgent.js';
 import type { ResolvedOrchestratorConfig } from './orchestratorConfig.js';
 
@@ -33,7 +34,7 @@ export interface OrchestratorSupervisorOptions {
   config: ResolvedOrchestratorConfig;
   policy?: RoleMcpPolicy;
   getRepositories: () => string[];
-  getPending?: (repository: string) => readonly CoordinationEvent[];
+  getPending?: (repository: string, repoKey: string) => readonly CoordinationEvent[];
   buildInstructionCapsule: (repository: string) => InstructionCapsule;
   run?: (options: OrchestratorRunOptions) => Promise<OrchestratorRunResult>;
   lockTimeoutMs?: number;
@@ -85,34 +86,35 @@ function actionableFingerprint(events: readonly CoordinationEvent[]): string {
   return createHash('sha256').update(actionable.join('\0')).digest('hex');
 }
 
-function repositoryLockPath(repository: string): string {
-  const key = createHash('sha256').update(resolve(repository)).digest('hex').slice(0, 16);
+function repositoryLockPath(repoKey: string): string {
+  const key = createHash('sha256').update(repoKey).digest('hex').slice(0, 16);
   return join(coordinationStateDir(), 'locks', `orchestrator-${key}.lock`);
 }
 
-function repositoryStatePath(repository: string): string {
-  const key = createHash('sha256').update(resolve(repository)).digest('hex').slice(0, 32);
+function repositoryStatePath(repoKey: string): string {
+  const key = createHash('sha256').update(repoKey).digest('hex').slice(0, 32);
   return join(coordinationStateDir(), 'orchestrator', `${key}.json`);
 }
 
-function readHandledFingerprint(repository: string): string | undefined {
-  const path = repositoryStatePath(repository);
+function readHandledFingerprint(repoKey: string): string | undefined {
+  const path = repositoryStatePath(repoKey);
   if (!existsSync(path)) return undefined;
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as {
     version?: unknown;
-    repository?: unknown;
+    repoKey?: unknown;
     fingerprint?: unknown;
   };
-  if (parsed.version !== 1 || parsed.repository !== resolve(repository) || typeof parsed.fingerprint !== 'string') {
+  if (parsed.version !== 1 || parsed.repoKey !== repoKey || typeof parsed.fingerprint !== 'string') {
     throw new Error(`Invalid orchestrator state: ${path}`);
   }
   return parsed.fingerprint;
 }
 
-function writeHandledFingerprint(repository: string, fingerprint: string): void {
-  atomicWriteFileSync(repositoryStatePath(repository), `${JSON.stringify({
+function writeHandledFingerprint(cell: RepositoryCell, fingerprint: string): void {
+  atomicWriteFileSync(repositoryStatePath(cell.repoKey), `${JSON.stringify({
     version: 1,
-    repository: resolve(repository),
+    repoKey: cell.repoKey,
+    repository: cell.repositoryPath,
     fingerprint,
     handledAt: new Date().toISOString(),
   }, null, 2)}\n`, 0o600);
@@ -126,7 +128,7 @@ function writeHandledFingerprint(repository: string, fingerprint: string): void 
  * lets service shutdown stop the native adapter and wait for its real exit.
  */
 export class OrchestratorSupervisor {
-  private readonly getPending: (repository: string) => readonly CoordinationEvent[];
+  private readonly getPending: (repository: string, repoKey: string) => readonly CoordinationEvent[];
   private readonly buildCapsule: (repository: string) => InstructionCapsule;
   private readonly run: (options: OrchestratorRunOptions) => Promise<OrchestratorRunResult>;
   private readonly lockTimeoutMs: number;
@@ -142,7 +144,9 @@ export class OrchestratorSupervisor {
 
   constructor(private readonly options: OrchestratorSupervisorOptions) {
     this.getPending = options.getPending
-      ?? ((repository) => selectOrchestratorItems(getCoordinationStore().snapshot(repository).events));
+      ?? ((repository, repoKey) => selectOrchestratorItems(
+        getCoordinationStore().list({ repository, repoKey, limit: 500 }),
+      ));
     // The builder itself is cheap; invoking it remains lazy until the board has
     // an actionable generation and this process owns the repository lock.
     this.buildCapsule = options.buildInstructionCapsule;
@@ -228,19 +232,24 @@ export class OrchestratorSupervisor {
       locked: 0,
       failed: 0,
     };
-    const repositories = [...new Set(this.options.getRepositories().map((repository) => resolve(repository)))];
-    for (const repository of repositories) {
+    const cells = new Map<string, RepositoryCell>();
+    for (const configuredPath of this.options.getRepositories()) {
+      const cell = repositoryCell(configuredPath);
+      if (!cells.has(cell.repoKey)) cells.set(cell.repoKey, cell);
+    }
+    for (const cell of cells.values()) {
       if (signal.aborted) break;
       stats.considered++;
-      const pending = this.getPending(repository);
+      const { repoKey, repositoryPath: repository } = cell;
+      const pending = this.getPending(repository, repoKey);
       const objective = buildOrchestratorObjective(pending);
       if (!objective) {
         stats.noAction++;
-        this.lastActionable.delete(repository);
+        this.lastActionable.delete(repoKey);
         continue;
       }
       const fingerprint = actionableFingerprint(pending);
-      if (this.lastActionable.get(repository) === fingerprint) {
+      if (this.lastActionable.get(repoKey) === fingerprint) {
         stats.unchanged++;
         continue;
       }
@@ -249,16 +258,16 @@ export class OrchestratorSupervisor {
         let result: OrchestratorRunResult | undefined;
         let handledByAnotherProcess = false;
         let lockedFingerprint = fingerprint;
-        await withFileLock(repositoryLockPath(repository), async () => {
+        await withFileLock(repositoryLockPath(repoKey), async () => {
           if (signal.aborted) return;
           // Another daemon may have handled or advanced the repository while
           // this process waited for the cross-process lock. Decide again under
           // the same lock that protects the durable handled cursor.
-          const current = this.getPending(repository);
+          const current = this.getPending(repository, repoKey);
           const currentObjective = buildOrchestratorObjective(current);
           if (!currentObjective) return;
           lockedFingerprint = actionableFingerprint(current);
-          if (readHandledFingerprint(repository) === lockedFingerprint) {
+          if (readHandledFingerprint(repoKey) === lockedFingerprint) {
             handledByAnotherProcess = true;
             return;
           }
@@ -277,11 +286,11 @@ export class OrchestratorSupervisor {
             signal,
           });
           if (result && !result.skippedReason) {
-            writeHandledFingerprint(repository, lockedFingerprint);
+            writeHandledFingerprint(cell, lockedFingerprint);
           }
         }, { timeoutMs: this.lockTimeoutMs });
         if (handledByAnotherProcess) {
-          this.lastActionable.set(repository, lockedFingerprint);
+          this.lastActionable.set(repoKey, lockedFingerprint);
           stats.unchanged++;
           continue;
         }
@@ -292,7 +301,7 @@ export class OrchestratorSupervisor {
           stats.skipped++;
         } else {
           stats.ran++;
-          this.lastActionable.set(repository, lockedFingerprint);
+          this.lastActionable.set(repoKey, lockedFingerprint);
         }
       } catch (error) {
         if (signal.aborted) break;

@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getEventHub } from '../core/eventHub.js';
-import type { CoordinationEvent } from './coordinationStore.js';
+import {
+  getCoordinationStore, resetCoordinationStoreForTests, type CoordinationEvent,
+} from './coordinationStore.js';
 import {
   isActionableOrchestratorEvent, OrchestratorSupervisor, selectOrchestratorItems,
 } from './orchestratorSupervisor.js';
+import { repositoryCell, resetRepositoryCellCacheForTests } from './repositoryCell.js';
 
 const originalCoordinationFile = process.env.OPENSWARM_COORDINATION_FILE;
 const dirs: string[] = [];
@@ -16,6 +20,26 @@ function tempState(): string {
   dirs.push(dir);
   process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'coordination.json');
   return dir;
+}
+
+function git(cwd: string, ...args: string[]): void {
+  execFileSync('git', ['-C', cwd, ...args], { stdio: 'ignore' });
+}
+
+function linkedRepository(root: string): { main: string; sibling: string; alias: string } {
+  const main = join(root, 'main');
+  const sibling = join(root, 'sibling');
+  const alias = join(root, 'main-alias');
+  mkdirSync(main);
+  git(main, 'init');
+  git(main, 'config', 'user.email', 'test@example.invalid');
+  git(main, 'config', 'user.name', 'OpenSwarm test');
+  writeFileSync(join(main, 'README.md'), 'supervisor cell\n');
+  git(main, 'add', 'README.md');
+  git(main, 'commit', '-m', 'seed');
+  git(main, 'worktree', 'add', '-b', 'sibling', sibling);
+  symlinkSync(main, alias, 'dir');
+  return { main, sibling, alias };
 }
 
 function event(over: Partial<CoordinationEvent> = {}): CoordinationEvent {
@@ -54,6 +78,8 @@ const capsule = {
 };
 
 afterEach(() => {
+  resetCoordinationStoreForTests();
+  resetRepositoryCellCacheForTests();
   process.env.OPENSWARM_COORDINATION_FILE = originalCoordinationFile;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
@@ -314,6 +340,89 @@ describe('OrchestratorSupervisor', () => {
     release();
     await owningSweep;
     await Promise.all([first.stop(), second.stop()]);
+  });
+
+  it('deduplicates linked-worktree and symlink aliases into one supervisor cell', async () => {
+    const root = tempState();
+    const { main, sibling, alias } = linkedRepository(root);
+    resetCoordinationStoreForTests();
+    const cell = repositoryCell(main);
+    await getCoordinationStore().publish({
+      repository: sibling,
+      repoKey: cell.repoKey,
+      taskId: 'task-1',
+      actor: 'worker-a',
+      actorRole: 'worker',
+      kind: 'advice-request',
+      status: 'open',
+      correlationId: 'cell-request',
+      summary: 'Coordinate this repository cell',
+    });
+    const run = vi.fn(async () => result());
+    const buildInstructionCapsule = vi.fn((repository: string) => ({
+      ...capsule, repositoryRoot: repository,
+    }));
+    const supervisor = new OrchestratorSupervisor({
+      config: { enabled: true, eventDriven: false, eventDebounceMs: 0, timeoutMs: 10_000, maxTurns: 5, legacy: false },
+      getRepositories: () => [sibling, alias, main],
+      buildInstructionCapsule,
+      run,
+    });
+
+    await supervisor.requestSweep('manual');
+
+    expect(supervisor.getLastSweep()).toMatchObject({ considered: 1, ran: 1 });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ repository: cell.repositoryPath }));
+    expect(buildInstructionCapsule).toHaveBeenCalledWith(cell.repositoryPath);
+    await supervisor.stop();
+  });
+
+  it('shares the supervisor lock and handled cursor across sibling worktrees', async () => {
+    const root = tempState();
+    const { main, sibling, alias } = linkedRepository(root);
+    resetCoordinationStoreForTests();
+    const cell = repositoryCell(main);
+    await getCoordinationStore().publish({
+      repository: sibling,
+      repoKey: cell.repoKey,
+      taskId: 'task-1',
+      actor: 'worker-a',
+      actorRole: 'worker',
+      kind: 'advice-request',
+      status: 'open',
+      correlationId: 'shared-lock-request',
+      summary: 'Run exactly one supervisor',
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const firstRun = vi.fn(async () => { await gate; return result(); });
+    const secondRun = vi.fn(async () => result());
+    const common = {
+      config: { enabled: true, eventDriven: false, eventDebounceMs: 0, timeoutMs: 10_000, maxTurns: 5, legacy: false } as const,
+      buildInstructionCapsule: (repository: string) => ({ ...capsule, repositoryRoot: repository }),
+      lockTimeoutMs: 0,
+    };
+    const first = new OrchestratorSupervisor({ ...common, getRepositories: () => [main], run: firstRun });
+    const second = new OrchestratorSupervisor({ ...common, getRepositories: () => [sibling], run: secondRun });
+
+    const owningSweep = first.requestSweep('manual');
+    await vi.waitFor(() => expect(firstRun).toHaveBeenCalledTimes(1));
+    await second.requestSweep('manual');
+    expect(secondRun).not.toHaveBeenCalled();
+    expect(second.getLastSweep()).toMatchObject({ locked: 1, ran: 0 });
+    release();
+    await owningSweep;
+    await Promise.all([first.stop(), second.stop()]);
+
+    const restartedRun = vi.fn(async () => result());
+    const restarted = new OrchestratorSupervisor({
+      ...common, getRepositories: () => [alias], run: restartedRun,
+    });
+    await restarted.requestSweep('manual');
+    expect(restartedRun).not.toHaveBeenCalled();
+    expect(restarted.getLastSweep()).toMatchObject({ unchanged: 1, ran: 0 });
+    await restarted.stop();
   });
 
   it('skips human-only or empty board state without building a capsule or calling a model', async () => {
