@@ -4,10 +4,13 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { constants, existsSync, realpathSync } from 'node:fs';
-import { link, lstat, open, readdir, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { link, lstat, open, opendir, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { basename, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 250 * 1024 * 1024;
+const TREE_PAGE_SIZE = 200;
 
 class WarehouseHttpError extends Error {
   constructor(public statusCode: number, message: string) {
@@ -200,6 +203,14 @@ function messageOf(error: unknown): string {
   return 'Warehouse operation failed';
 }
 
+function writeRouteError(res: ServerResponse, error: unknown): void {
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  writeJson(res, statusOf(error), { error: messageOf(error) });
+}
+
 export async function tryHandleWarehouseRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -210,7 +221,21 @@ export async function tryHandleWarehouseRoutes(
     try {
       const directory = resolveWarehouseReadPath(requestUrl.searchParams.get('path'), true);
       if (!(await stat(directory)).isDirectory()) throw new WarehouseHttpError(400, 'Path is not a directory');
-      const entries = await Promise.all((await readdir(directory, { withFileTypes: true })).map(async (entry) => {
+      const selected = [];
+      const handle = await opendir(directory);
+      try {
+        for (let index = 0; index < TREE_PAGE_SIZE + 1; index += 1) {
+          const entry = await handle.read();
+          if (!entry) break;
+          selected.push(entry);
+        }
+      } finally {
+        await handle.close();
+      }
+      if (selected.length > TREE_PAGE_SIZE) {
+        throw new WarehouseHttpError(413, `Directory exceeds ${TREE_PAGE_SIZE} entries; split it into subdirectories`);
+      }
+      const entries = await Promise.all(selected.map(async (entry) => {
         const info = await lstat(join(directory, entry.name));
         return {
           name: entry.name,
@@ -220,9 +245,12 @@ export async function tryHandleWarehouseRoutes(
         };
       }));
       entries.sort((a, b) => (a.type === 'directory' ? -1 : 1) - (b.type === 'directory' ? -1 : 1) || a.name.localeCompare(b.name));
-      writeJson(res, 200, { path: requestUrl.searchParams.get('path') ?? '', entries });
+      writeJson(res, 200, {
+        path: requestUrl.searchParams.get('path') ?? '',
+        entries,
+      });
     } catch (error) {
-      writeJson(res, statusOf(error), { error: messageOf(error) });
+      writeRouteError(res, error);
     }
     return true;
   }
@@ -233,17 +261,21 @@ export async function tryHandleWarehouseRoutes(
     try {
       target = await openAnchoredTarget(readRoot(), requestUrl.searchParams.get('path'));
       file = await open(join(target.ioDirectory, target.name), constants.O_RDONLY | constants.O_NOFOLLOW);
-      if (!(await file.stat()).isFile()) throw new WarehouseHttpError(400, 'Path is not a file');
-      const body = await file.readFile();
+      const fileInfo = await file.stat();
+      if (!fileInfo.isFile()) throw new WarehouseHttpError(400, 'Path is not a file');
+      if (fileInfo.size > MAX_DOWNLOAD_BYTES) {
+        throw new WarehouseHttpError(413, `Download exceeds ${MAX_DOWNLOAD_BYTES} bytes`);
+      }
       const filename = target.name.replace(/["\\\r\n]/g, '_');
       res.writeHead(200, {
         'Content-Type': 'application/octet-stream',
-        'Content-Length': String(body.length),
+        'Content-Length': String(fileInfo.size),
         'Content-Disposition': `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
       });
-      res.end(body);
+      if (fileInfo.size === 0) res.end();
+      else await pipeline(file.createReadStream({ autoClose: false, start: 0, end: fileInfo.size - 1 }), res);
     } catch (error) {
-      writeJson(res, statusOf(error), { error: messageOf(error) });
+      writeRouteError(res, error);
     } finally {
       await file?.close().catch(() => {});
       await target?.directory.close().catch(() => {});
@@ -260,7 +292,7 @@ export async function tryHandleWarehouseRoutes(
       await writeUpload(target, body, overwrite);
       writeJson(res, 201, { ok: true, path: requestUrl.searchParams.get('path'), size: body.length, overwritten: overwrite });
     } catch (error) {
-      writeJson(res, statusOf(error), { error: messageOf(error) });
+      writeRouteError(res, error);
     } finally {
       await target?.directory.close().catch(() => {});
     }

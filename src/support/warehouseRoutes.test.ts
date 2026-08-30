@@ -1,4 +1,4 @@
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
@@ -10,23 +10,31 @@ const OUTSIDE = await fs.mkdtemp('/var/tmp/openswarm-warehouse-outside-');
 
 type Response = { handled: boolean; status: number; headers: Record<string, string>; body: Buffer };
 
-async function call(method: string, rawUrl: string, body: Buffer = Buffer.alloc(0)): Promise<Response> {
+async function call(
+  method: string,
+  rawUrl: string,
+  body: Buffer = Buffer.alloc(0),
+  abortAfterHeaders = false,
+): Promise<Response> {
   const req = Object.assign(Readable.from(body.length ? [body] : []), { method, headers: {} }) as IncomingMessage;
   let status = 0;
+  let headersSent = false;
   let headers: Record<string, string> = {};
-  let responseBody = Buffer.alloc(0);
-  const res = {
-    writeHead(code: number, values: Record<string, string> = {}) {
-      status = code;
-      headers = values;
-    },
-    end(value?: string | Buffer) {
-      responseBody = Buffer.isBuffer(value) ? value : Buffer.from(value ?? '');
-    },
-  } as unknown as ServerResponse;
+  const chunks: Buffer[] = [];
+  const res = new PassThrough() as unknown as ServerResponse;
+  res.on('data', (chunk: Buffer) => chunks.push(chunk));
+  res.on('error', () => {});
+  Object.defineProperty(res, 'headersSent', { get: () => headersSent });
+  res.writeHead = ((code: number, values: Record<string, string> = {}) => {
+    status = code;
+    headersSent = true;
+    headers = values;
+    if (abortAfterHeaders) res.destroy(new Error('simulated client disconnect'));
+    return res;
+  }) as ServerResponse['writeHead'];
   const requestUrl = new URL(rawUrl, 'http://127.0.0.1');
   const handled = await tryHandleWarehouseRoutes(req, res, requestUrl.pathname, requestUrl);
-  return { handled, status, headers, body: responseBody };
+  return { handled, status, headers, body: Buffer.concat(chunks) };
 }
 
 function json(response: Response): any {
@@ -59,11 +67,28 @@ describe('warehouse HTTP routes', () => {
     ]);
   });
 
+  it('bounds every directory request to 201 reads and requires subdirectories above 200 entries', async () => {
+    const many = path.join(ROOT, 'many');
+    await fs.mkdir(many);
+    await Promise.all(Array.from({ length: 205 }, (_, index) => (
+      fs.writeFile(path.join(many, `item-${String(index).padStart(3, '0')}`), '')
+    )));
+    const response = await call('GET', '/api/warehouse/tree?path=many');
+    expect(response.status).toBe(413);
+    expect(json(response).error).toContain('split it into subdirectories');
+  });
+
   it('downloads the authorized canonical file with attachment headers', async () => {
     const response = await call('GET', '/api/warehouse/file?path=INDEX.md');
     expect(response.status).toBe(200);
     expect(response.headers['Content-Disposition']).toContain('attachment');
     expect(response.body.toString('utf8')).toBe('# Warehouse\n');
+  });
+
+  it('does not attempt a JSON error after download headers are committed', async () => {
+    const response = await call('GET', '/api/warehouse/file?path=INDEX.md', Buffer.alloc(0), true);
+    expect(response.status).toBe(200);
+    expect(response.body).toHaveLength(0);
   });
 
   it('uploads without clobbering, then overwrites only when explicit', async () => {

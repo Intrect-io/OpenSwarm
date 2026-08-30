@@ -53,7 +53,8 @@ using the warehouse with mutually distrusting workers.
 Open `http://<host>:3847/warehouse`. The page can:
 
 - browse names, sizes, and modification times;
-- download a file;
+- browse directories capped at 200 entries (split larger sets into subdirectories);
+- download a file, streamed by the server and capped at 250 MiB;
 - upload into the current directory, capped at 50 MiB;
 - overwrite only when the operator explicitly enables it.
 
