@@ -124,24 +124,26 @@ export async function tryHandleCoordinationThreadRoutes(
       const repoKey = threadRepository(repositoryPath);
       const relatedTaskId = requiredString(body, 'taskId');
       const relatedTaskIds = optionalStrings(body, 'relatedTaskIds') ?? [];
+      const operatorContext = {
+        repository: repositoryPath, repoKey, taskId: 'operator', taskLabel: 'Operator',
+        actor: 'operator-dashboard', actorName: 'Operator', actorRole: 'human',
+      };
       const thread = createCoordinationThread({
         repository: repoKey,
         subject: requiredString(body, 'subject'),
-        actor: 'operator-dashboard',
-        actorName: 'Operator',
-        actorRole: 'human',
-        taskId: 'operator',
-        taskLabel: 'Operator',
+        actor: operatorContext.actor,
+        actorName: operatorContext.actorName,
+        actorRole: operatorContext.actorRole,
+        taskId: operatorContext.taskId,
+        taskLabel: operatorContext.taskLabel,
         body: optionalString(body, 'body'),
         relatedTaskIds: [relatedTaskId, ...relatedTaskIds],
         relatedFiles: optionalStrings(body, 'relatedFiles'),
         relatedPullRequests: optionalStrings(body, 'relatedPullRequests'),
         idempotencyKey: requiredString(body, 'idempotencyKey'),
+        notification: { repository: repositoryPath, repoKey },
       });
-      const notification = await publishCoordinationThreadUpdate({
-        repository: repositoryPath, repoKey, taskId: 'operator', taskLabel: 'Operator',
-        actor: 'operator-dashboard', actorName: 'Operator', actorRole: 'human',
-      }, {
+      const notification = await publishCoordinationThreadUpdate(operatorContext, {
         thread, action: 'created', mutationId: `create:${thread.id}`, body: optionalString(body, 'body'),
       });
       writeJson(res, 201, { thread, notification });
@@ -184,6 +186,7 @@ export async function tryHandleCoordinationThreadRoutes(
         taskLabel: 'Operator',
         body: requiredString(body, 'body'),
         idempotencyKey: requiredString(body, 'idempotencyKey'),
+        notification: { repository: repositoryPath, repoKey: repository },
       });
       const thread = getCoordinationThread({ repository, threadId: path.threadId, messageLimit: 1 }).thread;
       const notification = await publishCoordinationThreadUpdate(operatorContext, {
@@ -228,6 +231,7 @@ export async function tryHandleCoordinationThreadRoutes(
         expectedVersion: body.expectedVersion,
         actor: 'operator-dashboard',
         taskId: 'operator',
+        notification: { repository: repositoryPath, repoKey: repository },
       });
       const notification = await publishCoordinationThreadUpdate(operatorContext, {
         thread, action: 'resolved', mutationId: `resolve:${thread.id}:${thread.version}`,

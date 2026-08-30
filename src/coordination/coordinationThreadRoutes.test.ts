@@ -65,6 +65,7 @@ describe('durable coordination thread HTTP API', () => {
       repository: '/repo', body: 'Operator approves foundation-first.', idempotencyKey: 'operator-approval',
     });
     expect(reply.status).toBe(201);
+    expect(reply.body.notification).toMatchObject({ delivered: 1, warnings: [] });
 
     const detail = await call('GET', `/api/coordination/threads/${threadId}?repository=%2Frepo`);
     expect(detail.body.messages.items.map((message: { body: string }) => message.body)).toEqual([
@@ -80,6 +81,7 @@ describe('durable coordination thread HTTP API', () => {
     expect(resolved.body.thread).toMatchObject({
       status: 'resolved', resolvedByActor: 'operator-dashboard', resolvedByTaskId: 'operator',
     });
+    expect(resolved.body.notification).toMatchObject({ delivered: 1, warnings: [] });
   });
 
   it('returns bounded errors and leaves unrelated paths alone', async () => {
