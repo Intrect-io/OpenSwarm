@@ -184,6 +184,41 @@ describe('TaskScheduler project-fair selection (AGT-4146)', () => {
     expect(selected).toEqual(['a-first', 'b-first', 'a-second']);
   });
 
+  it('exposes the last weighted decision and per-project blocking state', () => {
+    const s = new TaskScheduler({
+      maxConcurrent: 1,
+      worktreeMode: true,
+      allowSameProjectConcurrent: true,
+    });
+    s.enqueue(task('urgent', 1), '/repo-a');
+    s.enqueue(task('low', 4), '/repo-b');
+
+    const selected = s.getNextExecutable()!;
+    s.startTask(selected.task, selected.projectPath, pendingExecutor());
+
+    const fairness = s.getStats().fairness;
+    expect(fairness.lastSelection).toMatchObject({
+      taskId: 'urgent',
+      projectPath: '/repo-a',
+      weight: 4,
+      virtualRuntimeBefore: 0,
+      virtualRuntimeAfter: 0.25,
+    });
+    expect(fairness.lastSelection?.contenders).toEqual([
+      expect.objectContaining({ projectPath: '/repo-a', taskId: 'urgent', weight: 4 }),
+      expect.objectContaining({ projectPath: '/repo-b', taskId: 'low', weight: 1 }),
+    ]);
+    expect(fairness.projects).toEqual([
+      expect.objectContaining({ projectPath: '/repo-a', running: 1, queued: 0 }),
+      expect.objectContaining({
+        projectPath: '/repo-b',
+        running: 0,
+        queued: 1,
+        blockedReason: 'global-capacity',
+      }),
+    ]);
+  });
+
   it('uses only the priority/FIFO head of each project as a fairness candidate', () => {
     const s = new TaskScheduler({
       maxConcurrent: 4,

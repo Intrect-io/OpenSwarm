@@ -113,6 +113,38 @@ export interface SchedulerStats {
   /** Timed-out executors that have not acknowledged cancellation yet. */
   quarantined: number;
   byProject: Map<string, number>;
+  fairness: {
+    projects: SchedulerProjectFairness[];
+    lastSelection?: SchedulerFairSelection;
+  };
+}
+
+export interface SchedulerProjectFairness {
+  projectPath: string;
+  running: number;
+  queued: number;
+  virtualRuntime: number;
+  nextPriority?: number;
+  nextAvailableAt?: number;
+  blockedReason?: 'global-capacity' | 'project-capacity' | 'quarantined' | 'retry-at';
+}
+
+export interface SchedulerFairSelection {
+  selectedAt: number;
+  taskId: string;
+  issueIdentifier?: string;
+  projectPath: string;
+  priority: number;
+  weight: number;
+  virtualRuntimeBefore: number;
+  virtualRuntimeAfter: number;
+  contenders: Array<{
+    projectPath: string;
+    taskId: string;
+    priority: number;
+    weight: number;
+    virtualRuntime: number;
+  }>;
 }
 
 function normalizeSchedulerConfig(config: SchedulerConfig): SchedulerConfig {
@@ -166,6 +198,8 @@ export class TaskScheduler extends EventEmitter {
    * cannot reset every candidate to zero and starve lower-priority projects.
    */
   private projectVirtualRuntime = new Map<string, number>();
+  /** Last fairness decision, exposed through /api/stats for live evidence. */
+  private lastFairSelection?: SchedulerFairSelection;
 
   constructor(config: SchedulerConfig) {
     super();
@@ -447,12 +481,31 @@ export class TaskScheduler extends EventEmitter {
       }
     }
 
+    const selectedScoreAfter = candidates.length > 1
+      ? selectedScore + (1 / selectedCandidate.weight)
+      : selectedScore;
+    const contenderSnapshots = candidates.map((candidate) => ({
+      projectPath: candidate.queued.projectPath,
+      taskId: candidate.queued.task.id,
+      priority: candidate.queued.priority,
+      weight: candidate.weight,
+      virtualRuntime: this.projectVirtualRuntime.get(candidate.project) ?? baseline,
+    }));
     if (candidates.length > 1) {
-      this.projectVirtualRuntime.set(
-        selectedCandidate.project,
-        selectedScore + (1 / selectedCandidate.weight),
-      );
+      this.projectVirtualRuntime.set(selectedCandidate.project, selectedScoreAfter);
     }
+
+    this.lastFairSelection = {
+      selectedAt: Date.now(),
+      taskId: selectedCandidate.queued.task.id,
+      issueIdentifier: selectedCandidate.queued.task.issueIdentifier,
+      projectPath: selectedCandidate.queued.projectPath,
+      priority: selectedCandidate.queued.priority,
+      weight: selectedCandidate.weight,
+      virtualRuntimeBefore: selectedScore,
+      virtualRuntimeAfter: selectedScoreAfter,
+      contenders: contenderSnapshots,
+    };
 
     const [selected] = this.taskQueue.splice(selectedCandidate.index, 1);
     console.log(
@@ -844,11 +897,51 @@ export class TaskScheduler extends EventEmitter {
    */
   getStats(): SchedulerStats {
     const byProject = new Map<string, number>();
+    const runningByProject = this.runningCountByProject();
+    const displayPathByProject = new Map<string, string>();
+    const queuedByProject = new Map<string, QueuedTask[]>();
 
     for (const running of this.runningTasks.values()) {
       const count = byProject.get(running.projectPath) || 0;
       byProject.set(running.projectPath, count + 1);
+      displayPathByProject.set(normalizeProjectPath(running.projectPath), running.projectPath);
     }
+    for (const queued of this.taskQueue) {
+      const project = normalizeProjectPath(queued.projectPath);
+      const tasks = queuedByProject.get(project) ?? [];
+      tasks.push(queued);
+      queuedByProject.set(project, tasks);
+      displayPathByProject.set(project, queued.projectPath);
+    }
+
+    const projectKeys = new Set([
+      ...runningByProject.keys(),
+      ...queuedByProject.keys(),
+      ...this.projectVirtualRuntime.keys(),
+    ]);
+    const now = Date.now();
+    const projects = [...projectKeys].sort().map((project): SchedulerProjectFairness => {
+      const queued = queuedByProject.get(project) ?? [];
+      const runnable = queued.find((entry) => entry.availableAt == null || entry.availableAt <= now);
+      const nextAvailableAt = queued
+        .map((entry) => entry.availableAt)
+        .filter((value): value is number => value != null && value > now)
+        .sort((left, right) => left - right)[0];
+      let blockedReason: SchedulerProjectFairness['blockedReason'];
+      if (queued.length > 0 && !this.hasAvailableSlot()) blockedReason = 'global-capacity';
+      else if (queued.length > 0 && this.quarantinedProjects.has(project)) blockedReason = 'quarantined';
+      else if (queued.length > 0 && this.isProjectBusy(project)) blockedReason = 'project-capacity';
+      else if (queued.length > 0 && !runnable) blockedReason = 'retry-at';
+      return {
+        projectPath: displayPathByProject.get(project) ?? project,
+        running: runningByProject.get(project) ?? 0,
+        queued: queued.length,
+        virtualRuntime: this.projectVirtualRuntime.get(project) ?? 0,
+        nextPriority: queued[0]?.priority,
+        nextAvailableAt,
+        blockedReason,
+      };
+    });
 
     return {
       queued: this.taskQueue.length,
@@ -857,6 +950,10 @@ export class TaskScheduler extends EventEmitter {
       failed: this.failedCount,
       quarantined: this.quarantinedExecutorCount(),
       byProject,
+      fairness: {
+        projects,
+        lastSelection: this.lastFairSelection,
+      },
     };
   }
 

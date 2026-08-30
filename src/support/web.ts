@@ -516,6 +516,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           runningTasks: stats?.schedulerStats?.running ?? 0,
           queuedTasks: stats?.schedulerStats?.queued ?? 0,
           completedToday: stats?.schedulerStats?.completed ?? 0,
+          schedulerFairness: stats?.schedulerStats?.fairness ?? { projects: [] },
           uptime: state?.startedAt ? Date.now() - state.startedAt : 0,
           isRunning: stats?.isRunning ?? false,
           sseClients: getActiveSSECount(),
