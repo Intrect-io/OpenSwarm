@@ -20,6 +20,7 @@ import {
   type PriorityCouncilReason,
   type PriorityCouncilStatus,
 } from './priorityCouncil.js';
+import { t } from '../locale/index.js';
 
 export interface PriorityCouncilToolContext {
   repository: string;
@@ -321,7 +322,10 @@ async function recordCouncilMutation(
         kind: 'council-update',
         status: action === 'opened' ? 'open' : action === 'expired' ? 'expired' : 'completed',
         correlationId: `council:${council.id}`,
-        summary: `Priority council ${action}: ${council.subject}`,
+        summary: t('coordination.council.update', {
+          action: t(`coordination.council.actions.${action}`),
+          subject: council.subject,
+        }),
         detail: body,
         metadata: { councilId: council.id, threadId: council.threadId, action, mutationId },
       });
@@ -369,10 +373,14 @@ export async function executePriorityCouncilTool(
       });
       const audit = await recordCouncilMutation(
         context, council, 'opened', `open:${council.id}`,
-        `[Priority council ${council.id}] Opened from cached snapshot ${council.snapshotVersion}. `
-          + `Options: ${council.options.map((option) => `${option.id}=${option.taskId}`).join(', ')}. `
-          + `Quorum ${council.requiredQuorum}, cross-task ${council.requiredTaskQuorum}, cross-role ${council.requiredRoleQuorum}. `
-          + 'Authority: advisory cohort ranking only.',
+        t('coordination.council.opened', {
+          id: council.id,
+          snapshot: council.snapshotVersion,
+          options: council.options.map((option) => `${option.id}=${option.taskId}`).join(', '),
+          quorum: council.requiredQuorum,
+          taskQuorum: council.requiredTaskQuorum,
+          roleQuorum: council.requiredRoleQuorum,
+        }),
       );
       return { content: JSON.stringify({ accepted: true, council, audit }), isError: false };
     }
@@ -404,8 +412,9 @@ export async function executePriorityCouncilTool(
       const council = getPriorityCouncil({ repository, councilId: evidence.councilId }).council;
       const audit = await recordCouncilMutation(
         context, council, 'evidence', `evidence:${evidence.id}`,
-        `[Priority council ${council.id}] Evidence for ${evidence.optionId}: ${evidence.summary} `
-          + `(refs: ${evidence.refs.join(', ')})`,
+        t('coordination.council.evidence', {
+          id: council.id, option: evidence.optionId, summary: evidence.summary, refs: evidence.refs.join(', '),
+        }),
       );
       return { content: JSON.stringify({ accepted: true, evidence, council, audit }), isError: false };
     }
@@ -422,8 +431,14 @@ export async function executePriorityCouncilTool(
       const council = getPriorityCouncil({ repository, councilId: ballot.councilId }).council;
       const audit = await recordCouncilMutation(
         context, council, 'ballot', `ballot:${ballot.id}`,
-        `[Priority council ${council.id}] Equal-weight ballot recorded by ${context.actor} (${context.actorRole ?? 'unknown'}): `
-          + `${ballot.ranking.join(' > ')}; confidence ${ballot.confidence}; evidence ${ballot.evidenceIds.join(', ')}.`,
+        t('coordination.council.ballot', {
+          id: council.id,
+          actor: context.actor,
+          role: context.actorRole ?? t('coordination.council.unknownRole'),
+          ranking: ballot.ranking.join(' > '),
+          confidence: ballot.confidence,
+          evidence: ballot.evidenceIds.join(', '),
+        }),
       );
       return { content: JSON.stringify({ accepted: true, ballot, council, audit }), isError: false };
     }
@@ -435,12 +450,22 @@ export async function executePriorityCouncilTool(
         idempotencyKey: requiredString(args, 'idempotency_key'),
       });
       const action = council.status === 'expired' ? 'expired' : 'finalized';
+      const outcomeKey = council.outcome === 'tie-break'
+        ? 'tieBreak'
+        : council.outcome === 'no-quorum' ? 'noQuorum' : 'selected';
       const audit = await recordCouncilMutation(
         context, council, action, `finalize:${council.id}:${council.version}`,
-        `[Priority council ${council.id}] ${council.outcome}. `
-          + (council.selectedOptionId ? `Selected ${council.selectedOptionId}; ranking ${council.rankedOptionIds.join(' > ')}. ` : '')
-          + `Tally ${JSON.stringify(council.tally)}. Missing quorum: ${council.noQuorumReasons.join(', ') || 'none'}. `
-          + 'Authority remains advisory cohort ranking only.',
+        t('coordination.council.finalized', {
+          id: council.id,
+          outcome: t(`coordination.council.outcomes.${outcomeKey}`),
+          selection: council.selectedOptionId
+            ? t('coordination.council.selected', {
+              option: council.selectedOptionId, ranking: council.rankedOptionIds.join(' > '),
+            })
+            : '',
+          tally: JSON.stringify(council.tally),
+          missing: council.noQuorumReasons.join(', ') || t('coordination.council.none'),
+        }),
       );
       return { content: JSON.stringify({ accepted: true, council, audit }), isError: false };
     }
@@ -456,8 +481,12 @@ export async function executePriorityCouncilTool(
       const council = getPriorityCouncil({ repository, councilId: consumed.signal.councilId }).council;
       const audit = await recordCouncilMutation(
         context, council, 'consumed', `consume:${consumed.consumption.id}`,
-        `[Priority council ${council.id}] Advisory ranking consumed by orchestrator ${context.actor}; `
-          + `snapshot ${consumed.signal.snapshotVersion}, council version ${consumed.signal.councilVersion}.`,
+        t('coordination.council.consumed', {
+          id: council.id,
+          actor: context.actor,
+          snapshot: consumed.signal.snapshotVersion,
+          version: consumed.signal.councilVersion,
+        }),
       );
       return { content: JSON.stringify({ ...consumed, audit }), isError: false };
     }

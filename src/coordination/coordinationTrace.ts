@@ -187,7 +187,7 @@ export function recordTraceEvent(event: CoordinationEvent): void {
 }
 
 interface TraceRow {
-  event_id: string; board_seq: number; timestamp: number; repository: string;
+  id: number; event_id: string; board_seq: number; timestamp: number; repository: string;
   repo_key: string | null; task_id: string; task_label: string | null;
   source_task_id: string | null; source_task_label: string | null;
   target_task_id: string | null; target_task_label: string | null;
@@ -195,6 +195,37 @@ interface TraceRow {
   actor_role: string | null; recipient: string | null; recipient_name: string | null;
   recipient_role: string | null; kind: string; status: string; correlation_id: string;
   summary: string; detail: string | null; metadata_json: string | null; fingerprint: string;
+}
+
+/**
+ * Cursor-page the complete append-only archive for explicit localization
+ * backfills. Normal UI queries stay newest-first and capped; this path is
+ * oldest-first so a bounded operator action can eventually cover every row.
+ */
+export function scanCoordinationTrace(input: {
+  repository?: string;
+  afterId?: number;
+  limit?: number;
+} = {}): { events: CoordinationEvent[]; nextCursor?: number } {
+  const handle = getTraceDb();
+  if (!handle) return { events: [] };
+  const where = ['id > ?'];
+  const params: Array<string | number> = [Math.max(0, Math.trunc(input.afterId ?? 0))];
+  if (input.repository) {
+    where.push('repository = ?');
+    params.push(resolve(input.repository));
+  }
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 500), 1), 1_000);
+  const rows = handle.prepare(`
+    SELECT * FROM coordination_trace
+    WHERE ${where.join(' AND ')}
+    ORDER BY id ASC LIMIT ?
+  `).all(...params, limit + 1) as TraceRow[];
+  const page = rows.slice(0, limit);
+  return {
+    events: page.map(toEvent),
+    ...(rows.length > limit && page.length > 0 ? { nextCursor: page.at(-1)!.id } : {}),
+  };
 }
 
 function toEvent(row: TraceRow): CoordinationEvent {

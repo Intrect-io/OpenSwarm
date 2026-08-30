@@ -14,6 +14,7 @@ import type { ToolDefinition } from '../adapters/tools.js';
 import type { RoleMcpPolicy } from './mcpPolicy.js';
 import type { AdapterRoutePolicy } from './routingPolicy.js';
 import type { AutonomousConfig } from '../automation/runnerTypes.js';
+import { t } from '../locale/index.js';
 
 /** Config-shaped routing (optional primary) → the worker's strict policy shape. */
 export function normalizeAdapterRouting(
@@ -80,7 +81,9 @@ export async function prepareRunCoordination(input: {
     ...daemonActor,
     kind: 'instruction-snapshot',
     status: instructionCapsule.errors.length > 0 ? 'failed' : 'completed',
-    summary: `Claude Code rules ${instructionCapsule.digest.slice(0, 12)} (${instructionCapsule.sources.length} sources)`,
+    summary: t('coordination.instructionSnapshot', {
+      digest: instructionCapsule.digest.slice(0, 12), count: instructionCapsule.sources.length,
+    }),
     metadata: { digest: instructionCapsule.digest, sourceCount: instructionCapsule.sources.length, errorCount: instructionCapsule.errors.length },
   });
 
@@ -101,7 +104,7 @@ export async function prepareRunCoordination(input: {
       ...daemonActor,
       kind: 'mcp-audit',
       status: 'completed',
-      summary: `Denied MCP tool ${denied.name}: ${denied.reason}`,
+      summary: t('coordination.mcpDenied', { name: denied.name, reason: denied.reason }),
     });
   }
 

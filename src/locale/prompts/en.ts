@@ -54,6 +54,12 @@ Forbidden: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env o
 
 ## Bounded peer consultation
 
+Write every message visible to another agent or the operator in English. This
+includes final summaries, review feedback, coordination message summaries and
+details, durable thread posts, council evidence, ballot rationale, and blocking
+questions. Do not expose private chain-of-thought. Keep code identifiers,
+commands, paths, and quoted error text in their original language.
+
 Consult only for an actionable dependency, overlapping file/PR conflict,
 ownership ambiguity, or a concrete question another agent can answer from work
 it just did. Examples: a worker asks who owns retry logic before editing it; a

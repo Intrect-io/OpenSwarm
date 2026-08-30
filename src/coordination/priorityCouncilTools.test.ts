@@ -13,6 +13,7 @@ import {
   type PriorityCouncilToolContext,
 } from './priorityCouncilTools.js';
 import { PRIORITY_COUNCIL_LIMITS } from './priorityCouncil.js';
+import { initLocale } from '../locale/index.js';
 
 let root: string;
 const repo = { repository: '/repo', repoKey: 'git:repo' };
@@ -47,6 +48,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  initLocale('en');
   resetTraceDbForTests();
   resetCoordinationStoreForTests();
   delete process.env.OPENSWARM_AUTOMATION_DB;
@@ -86,6 +88,22 @@ function openArgs(threadId: string) {
 }
 
 describe('priority council agent tools', () => {
+  it('writes council audit messages in the installation locale', async () => {
+    initLocale('ko');
+    const thread = createCoordinationThread({
+      repository: 'git:repo', subject: 'Shared-file conflict', actor: proposer.actor,
+      actorRole: proposer.actorRole, taskId: proposer.taskId,
+      relatedTaskIds: ['candidate-a', 'candidate-b'], idempotencyKey: 'localized-council',
+    });
+
+    const opened = await executePriorityCouncilTool('coordination_council_open', openArgs(thread.id), proposer);
+    expect(opened.isError).toBe(false);
+    const detail = getCoordinationThread({ repository: 'git:repo', threadId: thread.id, messageLimit: 20 });
+    expect(detail.messages.items.at(-1)?.body).toContain('[우선순위 협의회');
+    expect(getCoordinationStore().list({ repository: '/repo', limit: 20 }))
+      .toContainEqual(expect.objectContaining({ kind: 'council-update', summary: expect.stringContaining('우선순위 협의회 개설') }));
+  });
+
   it('keeps definitions and dispatcher in lockstep', async () => {
     expect([...PRIORITY_COUNCIL_TOOL_NAMES].sort()).toEqual(
       PRIORITY_COUNCIL_TOOL_DEFINITIONS.map((definition) => definition.function.name).sort(),

@@ -11,6 +11,7 @@
 
 import { createHash } from 'node:crypto';
 import { getCoordinationStore, type CoordinationEvent } from './coordinationStore.js';
+import { t } from '../locale/index.js';
 import { answerHint } from './answerHint.js';
 
 export interface HumanQuestionInput {
@@ -179,7 +180,7 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
       kind: 'human-question',
       status: 'running',
       correlationId,
-      summary: 'Operator paged on Discord',
+      summary: t('coordination.humanQuestion.operatorPaged'),
     });
   }
   return { correlationId, delivered, openAskCount };
@@ -216,9 +217,9 @@ export async function answerHumanQuestion(
     kind: 'human-answer',
     status: 'completed',
     correlationId,
-    summary: actorRole === 'human'
-      ? 'Human answered the blocking question'
-      : 'Project supervisor answered the blocking question',
+    summary: t(actorRole === 'human'
+      ? 'coordination.humanQuestion.humanAnswered'
+      : 'coordination.humanQuestion.supervisorAnswered'),
     detail: answer,
   });
 
@@ -251,7 +252,7 @@ export async function answerHumanQuestion(
       kind: 'human-answer',
       status: 'completed',
       correlationId: sibling.correlationId,
-      summary: 'Answered via a differently-worded ask for the same blocker',
+      summary: t('coordination.humanQuestion.siblingAnswered'),
       detail: answer,
     });
   }

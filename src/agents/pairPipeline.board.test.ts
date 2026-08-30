@@ -90,7 +90,7 @@ describe('stage lifecycle on the coordination board', () => {
       initLocale('ko');
       try {
         expect(t('common.fallback.noSummary')).toBe('(요약 없음)');
-        expect(await outcomeSummary('(요약 없음)')).toBe('Finished in 3.3s');
+        expect(await outcomeSummary('(요약 없음)')).toBe('3.3초 만에 완료');
       } finally {
         initLocale('en');
         log.mockRestore();

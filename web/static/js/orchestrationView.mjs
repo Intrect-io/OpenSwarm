@@ -716,7 +716,13 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
   };
 
   const absorb = (event) => {
-    if (event && event.id && !byId.has(event.id)) {
+    if (event && event.id) {
+      const previous = byId.get(event.id);
+      const changed = !previous
+        || previous.summary !== event.summary
+        || previous.detail !== event.detail
+        || previous.localizedLocale !== event.localizedLocale;
+      if (!changed) return false;
       byId.set(event.id, event);
       prune();
       return true;

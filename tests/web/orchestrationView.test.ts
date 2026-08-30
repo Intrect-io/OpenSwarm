@@ -155,6 +155,30 @@ describe('startOrchestrationView', () => {
     view.stop();
   });
 
+  it('replaces an existing transcript row when a locale backfill appears on poll', async () => {
+    const doc = shell();
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          events: [boardEvent({
+            id: 'e1', seq: 1,
+            summary: calls === 1 ? 'Reuse the auth helper?' : '기존 auth helper를 재사용할까요?',
+            ...(calls > 1 ? { localizedLocale: 'ko' } : {}),
+          })],
+          pending: [], lastSeq: 1,
+        }),
+      };
+    });
+    const view = startOrchestrationView(doc, { fetchImpl, eventSourceImpl: null, pollMs: 250 });
+    await vi.waitFor(() => expect(doc.getElementById('feed')!.textContent).toContain('Reuse the auth helper?'));
+    await vi.waitFor(() => expect(doc.getElementById('feed')!.textContent).toContain('기존 auth helper를 재사용할까요?'));
+    expect(doc.getElementById('feed')!.textContent).not.toContain('Reuse the auth helper?');
+    view.stop();
+  });
+
   it('escapes hostile summaries instead of injecting them into the feed', async () => {
     const doc = shell();
     const view = startOrchestrationView(doc, {

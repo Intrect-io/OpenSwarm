@@ -24,6 +24,7 @@ import type { AdapterName } from '../adapters/types.js';
 import type { InstructionCapsule } from '../agents/instructionCapsule.js';
 import { assignCallSign } from './agentNames.js';
 import { repositoryCell } from './repositoryCell.js';
+import { getPrompts, t } from '../locale/index.js';
 import {
   ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS,
   type OrchestratorTrackerBridge,
@@ -100,7 +101,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       kind: 'adapter-route',
       status: 'failed',
       correlationId: routeCorrelationId,
-      summary: `Orchestrator adapter '${adapter.name}' delegates its tool loop and cannot enforce MCP-only supervision`,
+      summary: t('coordination.orchestrator.adapterRejected', { adapter: adapter.name }),
       metadata: { adapter: adapter.name, model },
     });
     throw new Error(
@@ -120,7 +121,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     kind: 'adapter-route',
     status: 'completed',
     correlationId: routeCorrelationId,
-    summary: `Orchestrator routed to ${adapter.name}/${model}`,
+    summary: t('coordination.orchestrator.routed', { adapter: adapter.name, model }),
     metadata: {
       adapter: adapter.name,
       model,
@@ -144,7 +145,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         actorRole: 'orchestrator',
         kind: 'mcp-audit',
         status: 'failed',
-        summary: `External MCP discovery failed; continuing with internal coordination tools (${message.slice(0, 240)})`,
+        summary: t('coordination.orchestrator.discoveryFailed', { error: message.slice(0, 240) }),
         metadata: { adapter: adapter.name, model },
       });
     }
@@ -162,7 +163,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       actorRole: 'orchestrator',
       kind: 'mcp-audit',
       status: 'completed',
-      summary: `Denied MCP tool ${entry.name}: ${entry.reason}`,
+      summary: t('coordination.mcpDenied', { name: entry.name, reason: entry.reason }),
     });
   }
 
@@ -175,7 +176,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       actorRole: 'orchestrator',
       kind: 'mcp-audit',
       status: 'completed',
-      summary: 'No external MCP tools granted; continuing with internal coordination tools',
+      summary: t('coordination.orchestrator.mcpUnavailable'),
       metadata: { adapter: adapter.name, model, deniedCount: denied.length, internalCoordination: true },
     });
   }
@@ -190,7 +191,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     kind: 'mcp-audit',
     status: 'running',
     correlationId: runCorrelationId,
-    summary: `Orchestrator supervision started via ${options.trigger ?? 'manual'}`,
+    summary: t('coordination.orchestrator.started', { trigger: options.trigger ?? 'manual' }),
     metadata: { adapter: adapter.name, model, grantedCount: tools.length, deniedCount: denied.length },
   });
   const scratch = await mkdtemp(join(tmpdir(), 'openswarm-orchestrator-'));
@@ -217,7 +218,11 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       reasoningEffort: options.reasoningEffort,
       maxTurns: options.maxTurns ?? 10,
       timeoutMs: options.timeoutMs ?? 300_000,
-      systemPrompt: options.instructionCapsule?.text,
+      // The repository capsule governs the work; the locale prompt governs
+      // only language on agent/operator-visible coordination surfaces. Hidden
+      // reasoning remains provider-owned and is never requested or exposed.
+      systemPrompt: getPrompts().coordinationConsultationPrompt
+        + (options.instructionCapsule?.text ? `\n${options.instructionCapsule.text}` : ''),
       mcpTools: grantedTools,
       coordinationContext: {
         repository: cell.repositoryPath,
@@ -246,7 +251,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       kind: 'mcp-audit',
       status: 'completed',
       correlationId: runCorrelationId,
-      summary: `Orchestrator run used internal coordination and granted ${tools.length} external MCP tool(s), denied ${denied.length}`,
+      summary: t('coordination.orchestrator.completed', { granted: tools.length, denied: denied.length }),
       metadata: {
         adapter: adapter.name,
         model,
@@ -279,7 +284,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       kind: 'mcp-audit',
       status: 'failed',
       correlationId: runCorrelationId,
-      summary: `Orchestrator supervision failed: ${message.slice(0, 300)}`,
+      summary: t('coordination.orchestrator.failed', { error: message.slice(0, 300) }),
       metadata: { adapter: adapter.name, model },
     });
     throw error;

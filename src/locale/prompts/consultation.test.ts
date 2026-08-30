@@ -30,4 +30,13 @@ describe('bounded peer consultation prompts', () => {
     expect(prompt).toMatch(/broadcast|fan out|여러 에이전트에게 뿌리지/);
     expect(prompt).toMatch(/반복적인\s*'coordination_wait'|repeatedly call 'coordination_wait'/);
   });
+
+  it('binds visible coordination output to the configured locale without requesting private reasoning', () => {
+    expect(enPrompts.coordinationConsultationPrompt).toContain('visible to another agent or the operator in English');
+    expect(koPrompts.coordinationConsultationPrompt).toContain('다른 에이전트나 운영자가 보게 되는 모든 메시지는 한국어');
+    for (const prompt of [enPrompts.coordinationConsultationPrompt, koPrompts.coordinationConsultationPrompt]) {
+      expect(prompt).toMatch(/private chain-of-thought|비공개 내부 추론/);
+      expect(prompt).toMatch(/code identifiers|코드\s*식별자/);
+    }
+  });
 });

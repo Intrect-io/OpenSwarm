@@ -353,6 +353,69 @@ export const en: LocaleMessages = {
     },
   },
 
+  // ── Coordination board ─────────────────
+  coordination: {
+    stage: {
+      takingOn: 'Taking on: {{title}}',
+      failed: 'Failed in {{seconds}}s: {{detail}}',
+      finished: 'Finished in {{seconds}}s',
+      didNotPass: 'Did not pass in {{seconds}}s',
+    },
+    instructionSnapshot: 'Claude Code rules {{digest}} ({{count}} sources)',
+    mcpDenied: 'Denied MCP tool {{name}}: {{reason}}',
+    threadAction: {
+      created: 'Thread created: {{subject}}',
+      replied: 'Thread replied: {{subject}}',
+      resolved: 'Thread resolved: {{subject}}',
+    },
+    humanQuestion: {
+      operatorPaged: 'Operator paged on Discord',
+      humanAnswered: 'Human answered the blocking question',
+      supervisorAnswered: 'Project supervisor answered the blocking question',
+      siblingAnswered: 'Answered via a differently-worded ask for the same blocker',
+    },
+    periodicReview: {
+      title: 'Periodic repository review',
+      description: 'Audit the repository for correctness, security, permissions, and maintainability findings. Do not modify files.',
+      noChangesReason: 'Read-only periodic audit of the existing repository',
+      started: 'Periodic {{profile}} review started',
+      noOutput: '{{profile}} review produced no output',
+    },
+    orchestrator: {
+      adapterRejected: "Orchestrator adapter '{{adapter}}' delegates its tool loop and cannot enforce MCP-only supervision",
+      routed: 'Orchestrator routed to {{adapter}}/{{model}}',
+      discoveryFailed: 'External MCP discovery failed; continuing with internal coordination tools ({{error}})',
+      mcpUnavailable: 'No external MCP tools granted; continuing with internal coordination tools',
+      started: 'Orchestrator supervision started via {{trigger}}',
+      completed: 'Orchestrator run used internal coordination and granted {{granted}} external MCP tool(s), denied {{denied}}',
+      failed: 'Orchestrator supervision failed: {{error}}',
+    },
+    council: {
+      update: 'Priority council {{action}}: {{subject}}',
+      actions: {
+        opened: 'opened',
+        evidence: 'evidence added',
+        ballot: 'ballot recorded',
+        finalized: 'finalized',
+        expired: 'expired',
+        consumed: 'consumed',
+      },
+      outcomes: {
+        selected: 'selected',
+        tieBreak: 'tie-break',
+        noQuorum: 'no quorum',
+      },
+      opened: '[Priority council {{id}}] Opened from cached snapshot {{snapshot}}. Options: {{options}}. Quorum {{quorum}}, cross-task {{taskQuorum}}, cross-role {{roleQuorum}}. Authority: advisory cohort ranking only.',
+      evidence: '[Priority council {{id}}] Evidence for {{option}}: {{summary}} (refs: {{refs}})',
+      ballot: '[Priority council {{id}}] Equal-weight ballot recorded by {{actor}} ({{role}}): {{ranking}}; confidence {{confidence}}; evidence {{evidence}}.',
+      finalized: '[Priority council {{id}}] {{outcome}}. {{selection}}Tally {{tally}}. Missing quorum: {{missing}}. Authority remains advisory cohort ranking only.',
+      selected: 'Selected {{option}}; ranking {{ranking}}. ',
+      consumed: '[Priority council {{id}}] Advisory ranking consumed by orchestrator {{actor}}; snapshot {{snapshot}}, council version {{version}}.',
+      none: 'none',
+      unknownRole: 'unknown',
+    },
+  },
+
   // ── Service ─────────────────────────────
   service: {
     startComplete: 'OpenSwarm service started!',
