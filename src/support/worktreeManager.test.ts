@@ -1,4 +1,4 @@
-import { isBranchForIssue } from './branchNaming.js';
+import { isBranchForIssue, isSwarmBranch } from './branchNaming.js';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -54,13 +54,30 @@ esac
     const previous = process.env.PATH;
     process.env.PATH = `${bin}:${previous}`;
     try {
-      // Only the sibling survives...
-      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'], 'AX-858')).resolves.toEqual([
-        expect.objectContaining({ number: 179 }),
-      ]);
-      // ...and without a self identifier nothing is excluded, so the gate keeps
-      // its pre-AGT-4095 behavior rather than silently switching off.
+      // Only the sibling survives — its run still holds a lease, so its PR
+      // still reserves.
+      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'], {
+        selfIssueIdentifier: 'AX-858', activeIssueIdentifiers: ['AX-863'],
+      })).resolves.toEqual([expect.objectContaining({ number: 179 })]);
+
+      // With no ledger to ask, every swarm PR keeps reserving — omitting the
+      // accessor must not empty the gate.
       await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'])).resolves.toHaveLength(2);
+
+      // AGT-4097: an empty array is an assertion, not a missing value — it says
+      // nothing is held, so no swarm PR reserves.
+      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'], {
+        selfIssueIdentifier: 'AX-858', activeIssueIdentifiers: [],
+      })).resolves.toHaveLength(0);
+
+      // Self-exclusion (AGT-4095) still holds on its own: with AX-858 unnamed
+      // but its run held, its own PR would otherwise block it.
+      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'], {
+        activeIssueIdentifiers: ['AX-858', 'AX-863'],
+      })).resolves.toHaveLength(2);
+      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'], {
+        selfIssueIdentifier: 'AX-858', activeIssueIdentifiers: ['AX-858', 'AX-863'],
+      })).resolves.toEqual([expect.objectContaining({ number: 179 })]);
     } finally {
       process.env.PATH = previous;
       rmSync(root, { recursive: true, force: true });
@@ -91,6 +108,19 @@ describe('isBranchForIssue', () => {
     expect(isBranchForIssue('audit/a', 'AX-864')).toBe(false);
     expect(isBranchForIssue('heewonoh/cgf-answers-20260828', 'AX-864')).toBe(false);
     expect(isBranchForIssue('swarm/AX-864-a2', '')).toBe(false);
+  });
+});
+
+describe('isSwarmBranch', () => {
+  // AGT-4097: this decides whether "no active worker" is knowable at all. A
+  // branch the daemon did not cut has no run to consult, so it keeps reserving.
+  it('recognizes the daemon own namespace and nothing else', () => {
+    expect(isSwarmBranch('swarm/AX-864-a2-slack')).toBe(true);
+    expect(isSwarmBranch('swarm/')).toBe(true);
+    expect(isSwarmBranch('heewonoh/cgf-answers-20260828')).toBe(false);
+    expect(isSwarmBranch('swarming/AX-1')).toBe(false);
+    expect(isSwarmBranch('feature/swarm/AX-1')).toBe(false);
+    expect(isSwarmBranch('')).toBe(false);
   });
 });
 

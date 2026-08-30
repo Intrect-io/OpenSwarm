@@ -199,6 +199,12 @@ export interface ExecutionContext {
   durability?: ExecutionDurabilityHooks;
   /** Current open issue snapshot for same-project duplicate grooming in draft. */
   peerIssues?: TaskItem[];
+  /**
+   * Issues in this project a worker currently holds. Resolved per project (like
+   * getRolesForProject) because the draft gate needs it after the project is
+   * known, while the context itself is built without one. (AGT-4097)
+   */
+  getActiveWorkerIssues?: (projectPath: string) => string[] | undefined;
   mcpPolicies?: import('../automation/runnerTypes.js').AutonomousConfig['mcpPolicies'];
   adapterRouting?: import('../automation/runnerTypes.js').AutonomousConfig['adapterRouting'];
 }
@@ -759,7 +765,8 @@ export async function executePipeline(
       console.log(`[AutonomousRunner] Draft: type=${draftResult.taskType}, files=${draftResult.relevantFiles.length}, ${draftResult.durationMs}ms`);
 
       const draftGate = await applyDraftGates({ task, projectPath, draft: draftResult,
-        peers: ctx.peerIssues, source: taskSource, worktreeMode: ctx.worktreeMode });
+        peers: ctx.peerIssues, source: taskSource, worktreeMode: ctx.worktreeMode,
+        activeWorkerIssues: ctx.getActiveWorkerIssues?.(projectPath) });
       if (draftGate) return draftGate;
     } catch (err) {
       if (err instanceof RateLimitError) throw err; // → outer catch → rate_limited (INT-2521)

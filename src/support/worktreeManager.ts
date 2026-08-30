@@ -120,7 +120,11 @@ async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
 
 // The naming convention lives in its own module (branchNaming.ts) so the one
 // rule that decides "is this branch mine?" is not buried in lifecycle code.
-import { isBranchForIssue } from './branchNaming.js';
+import { isBranchForIssue, isSwarmBranch } from './branchNaming.js';
+// Overlap set arithmetic and rendering live in fileOverlap.ts — pure, and this
+// file is at the pre-commit LOC cap. Re-exported so callers keep one import.
+export { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
+import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -852,18 +856,6 @@ async function ensureLfsSmudged(worktreePath: string): Promise<void> {
 // created, surface which open PRs / active swarm/* branches touch the same
 // files — advisory only, never blocks PR creation.
 
-export interface BranchScope {
-  /** Human label, e.g. "PR #206 (feat/int-2389-…)". */
-  label: string;
-  /** Files this scope changes relative to main. */
-  files: string[];
-}
-
-export interface FileOverlap {
-  label: string;
-  files: string[];
-}
-
 export interface OpenPRFileOverlap extends FileOverlap {
   number: number;
   url: string;
@@ -912,12 +904,28 @@ export async function findOpenPRFileOverlaps(
   repoPath: string,
   plannedFiles: string[],
   /**
-   * The issue being dispatched. Its own open PR is not competing work — it is
-   * this task's parked or in-flight branch — so it must not supersede the
-   * task that owns it. Omitted means "no self to exclude", which is the
-   * pre-AGT-4095 behavior rather than a disabled gate.
+   * Which open PRs count as competing work.
+   *
+   * A PR reserves its files while a worker is editing them, and `publishOnPark`
+   * leaves a PR behind long after its worker exits — so an open PR alone is not
+   * evidence of anyone editing. Two exclusions follow: the dispatched issue's
+   * own PR (AGT-4095), and a `swarm/*` PR whose run no longer holds a lease
+   * (AGT-4097).
+   *
+   * A branch outside the `swarm/` namespace — a human's, another tool's — has
+   * no run to consult, so it always reserves.
+   *
+   * `activeIssueIdentifiers` distinguishes "none are active" from "I cannot
+   * tell": an array, **including an empty one**, asserts it is the complete set
+   * of held leases; `undefined` means the caller has no ledger to ask, and
+   * every `swarm/*` PR keeps reserving. Getting those two confused would empty
+   * the gate on any caller that simply never wired the accessor.
    */
-  selfIssueIdentifier?: string,
+  competing: {
+    selfIssueIdentifier?: string;
+    /** Issues whose runs a worker currently holds; undefined when unknowable. */
+    activeIssueIdentifiers?: readonly string[];
+  } = {},
 ): Promise<OpenPRFileOverlap[]> {
   if (plannedFiles.length === 0) return [];
   const planned = new Set(plannedFiles.map((f) => f.replace(/^\.\//, '')));
@@ -931,7 +939,11 @@ export async function findOpenPRFileOverlaps(
     const prs: { number: number; url: string; headRefName: string; files?: { path: string }[] }[] = JSON.parse(raw || '[]');
     const overlaps: OpenPRFileOverlap[] = [];
     for (const pr of prs) {
-      if (selfIssueIdentifier && isBranchForIssue(pr.headRefName, selfIssueIdentifier)) continue;
+      if (competing.selfIssueIdentifier && isBranchForIssue(pr.headRefName, competing.selfIssueIdentifier)) continue;
+      const active = competing.activeIssueIdentifiers;
+      const heldByAWorker = active === undefined
+        || active.some((id) => isBranchForIssue(pr.headRefName, id));
+      if (isSwarmBranch(pr.headRefName) && !heldByAWorker) continue;
       const shared = (pr.files ?? []).map((f) => f.path).filter((f) => planned.has(f.replace(/^\.\//, '')));
       if (shared.length > 0) overlaps.push({ number: pr.number, url: pr.url, label: `PR #${pr.number} (${pr.headRefName})`, files: shared });
     }
@@ -940,34 +952,6 @@ export async function findOpenPRFileOverlaps(
     console.warn('[Worktree] Preflight open-PR overlap check skipped:', err);
     return [];
   }
-}
-
-/** Pure: intersect this branch's changed files with each other scope's files. */
-export function computeFileOverlaps(selfFiles: string[], others: BranchScope[]): FileOverlap[] {
-  const selfSet = new Set(selfFiles);
-  const out: FileOverlap[] = [];
-  for (const o of others) {
-    const shared = o.files.filter(f => selfSet.has(f));
-    if (shared.length > 0) out.push({ label: o.label, files: shared });
-  }
-  return out;
-}
-
-/** Pure: render overlaps as a PR-body markdown section (empty string if none). */
-export function formatOverlapReport(overlaps: FileOverlap[]): string {
-  if (overlaps.length === 0) return '';
-  const lines = [
-    '## ⚠️ File overlap with in-flight work',
-    '',
-    'This branch changes files that other open PRs / active branches also touch. Coordinate before merging to avoid divergent parallel edits (INT-2388 #3):',
-    '',
-  ];
-  for (const o of overlaps) {
-    const shown = o.files.slice(0, 8).map(f => `\`${f}\``).join(', ');
-    const more = o.files.length > 8 ? ` (+${o.files.length - 8} more)` : '';
-    lines.push(`- **${o.label}** — ${o.files.length} file(s): ${shown}${more}`);
-  }
-  return lines.join('\n');
 }
 
 /** Split git/gh newline output into a trimmed, non-empty list. */

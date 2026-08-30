@@ -1065,3 +1065,82 @@ describe('runRecordToTask', () => {
     expect(runRecordToTask(record({ metadata: undefined })).linearProject).toBeUndefined();
   });
 });
+
+describe('activeWorkerIdentifiers', () => {
+  // AGT-4097: an open PR reserves its files only while a worker holds the run.
+  // The first attempt keyed on WHY a run stopped (lastErrorCode) and did not
+  // survive production: every blocking PR's run had parked on an operator
+  // question, but later dispatches overwrote that code, so only 2 of 10 still
+  // said so. A lease is not overwritten by the next attempt.
+  it('reports runs a worker holds and nothing else', () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    ledger.importRun({
+      issueId: 'ready', source: 'linear', identifier: 'AX-1', title: 'claimable',
+      projectPath: '/repo', state: 'READY',
+    });
+    ledger.importRun({
+      issueId: 'parked', source: 'linear', identifier: 'AX-2', title: 'operator park',
+      projectPath: '/repo', state: 'RETRY_AT', errorCode: 'waiting_on_operator',
+    });
+    ledger.importRun({
+      issueId: 'superseded', source: 'linear', identifier: 'AX-3', title: 'gate park',
+      projectPath: '/repo', state: 'RETRY_AT', errorCode: 'superseded',
+    });
+    ledger.importRun({
+      issueId: 'escalated', source: 'linear', identifier: 'AX-4', title: 'needs human',
+      projectPath: '/repo', state: 'NEEDS_HUMAN',
+    });
+    expect(coordinator.activeWorkerIdentifiers('/repo')).toEqual([]);
+
+    // Claiming one is what makes it reserve: the lease, not the error code.
+    expect(ledger.claimRun('ready', { ownerInstanceId: 'owner', leaseMs: 60_000 })).not.toBeNull();
+    expect(coordinator.activeWorkerIdentifiers('/repo')).toEqual(['AX-1']);
+
+    // Another project's held run must not leak into this project's answer.
+    ledger.importRun({
+      issueId: 'other', source: 'linear', identifier: 'KT-1', title: 'elsewhere',
+      projectPath: '/other', state: 'READY',
+    });
+    expect(ledger.claimRun('other', { ownerInstanceId: 'owner', leaseMs: 60_000 })).not.toBeNull();
+    expect(coordinator.activeWorkerIdentifiers('/repo')).toEqual(['AX-1']);
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('drops a run whose lease has lapsed, since no worker is left holding it', () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    ledger.importRun({
+      issueId: 'held', source: 'linear', identifier: 'AX-5', title: 'held',
+      projectPath: '/repo', state: 'READY',
+    });
+    expect(ledger.claimRun('held', { ownerInstanceId: 'owner', leaseMs: 1_000, now: 1_000 })).not.toBeNull();
+
+    // Inside the lease the PR still reserves; past it the row is only waiting
+    // for a reconciliation sweep, and its files are nobody's.
+    expect(coordinator.activeWorkerIdentifiers('/repo', 1_500)).toEqual(['AX-5']);
+    expect(coordinator.activeWorkerIdentifiers('/repo', 2_001)).toEqual([]);
+    coordinator.close();
+    ledger.close();
+  });
+
+  // A coordinator that never claims cannot say the set is empty — it can only
+  // say it does not know. Returning [] here would assert "nothing is held" and
+  // the overlap gate, which fails closed on undefined, would stop reserving.
+  it('answers undefined rather than empty when it does not claim', () => {
+    const off = new DurableRunCoordinator({ mode: 'off' });
+    expect(off.activeWorkerIdentifiers('/repo')).toBeUndefined();
+    off.close();
+
+    const shadowLedger = new RunLedger(dbPath());
+    const shadow = new DurableRunCoordinator({ mode: 'shadow', ledger: shadowLedger });
+    shadowLedger.importRun({
+      issueId: 'observed', source: 'linear', identifier: 'AX-9', title: 'observed only',
+      projectPath: '/repo', state: 'READY',
+    });
+    expect(shadow.activeWorkerIdentifiers('/repo')).toBeUndefined();
+    shadow.close();
+    shadowLedger.close();
+  });
+});
