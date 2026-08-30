@@ -21,6 +21,30 @@
     #room::-webkit-scrollbar { width: 6px; }
     #room::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
     #room::-webkit-scrollbar-track { background: transparent; }
+    .chat-thread { --thread-accent: var(--cyan); max-width: 1320px; margin: 10px auto; border: 1px solid #202838; border-radius: 8px; background: #0f141d; overflow: hidden; box-shadow: inset 3px 0 var(--thread-accent); }
+    .chat-thread.thread-system { --thread-accent: var(--amber); margin-block: 6px; background: #0d1118; border-color: #292719; box-shadow: inset 2px 0 rgba(232, 179, 57, 0.75); }
+    .thread-head { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 15px; border-bottom: 1px solid #202838; background: #111824; }
+    .thread-system .thread-head { min-height: 27px; padding-block: 4px; background: #14130e; border-color: #292719; }
+    .channel-badge { flex: none; color: #a9d4ff; background: #102c47; border: 1px solid #285f8d; border-radius: 3px; padding: 0 6px; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+    .thread-system .channel-badge { color: #f0ca71; background: #332b12; border-color: #746022; }
+    .thread-kind { margin-left: auto; color: #68758c; font-size: 10.5px; white-space: nowrap; }
+    .issue-link { min-width: 0; display: inline-flex; align-items: baseline; gap: 7px; color: inherit; text-decoration: none; overflow: hidden; }
+    a.issue-link:hover .issue-title { color: #cde6ff; text-decoration: underline; text-underline-offset: 2px; }
+    .issue-code { flex: none; color: #83c2ff; font-weight: 750; }
+    .thread-system .issue-code { color: #e8c466; }
+    .issue-sep { flex: none; color: #4d586b; }
+    .issue-title { color: #aeb9ca; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .issue-link-plain .issue-code { color: #9aa6bd; }
+    .thread-lines { position: relative; }
+    .thread-lines .line { position: relative; max-width: none; margin: 0; padding: 10px 14px 11px 31px; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+    .thread-lines .line + .line { border-top: 1px solid rgba(42, 53, 72, 0.65); }
+    .thread-lines .line::before { content: ""; position: absolute; left: 16px; top: 18px; width: 6px; height: 6px; border-radius: 50%; background: var(--speaker-color); box-shadow: 0 0 7px color-mix(in srgb, var(--speaker-color) 65%, transparent); }
+    .thread-lines .line:not(:last-child)::after { content: ""; position: absolute; left: 18.5px; top: 25px; bottom: -9px; width: 1px; background: #303b4e; }
+    .thread-lines .line:hover { background: #121925; }
+    .thread-system .thread-lines .line { padding-block: 7px 8px; background: transparent; }
+    .thread-system .thread-lines .line:hover { background: #12130f; }
+    .thread-system .line .who, .thread-system .line .tag { color: #8d8b7f !important; }
+    .thread-system .line .text { color: #b9b8ae; font-size: 12.5px; line-height: 1.6; margin-top: 4px; }
     .line { --speaker-color: var(--dim); max-width: 1320px; padding: 11px 14px 12px; margin: 8px auto; border: 1px solid #202838; border-radius: 7px; background: #0f141d; box-shadow: inset 3px 0 var(--speaker-color); overflow-wrap: anywhere; }
     .line:hover { background: #121925; border-color: #2a3548; }
     .line .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0; min-width: 0; font-size: 11.5px; line-height: 1.55; }
@@ -41,6 +65,12 @@
       #room { padding-inline: 8px; }
       .line { padding: 9px 10px 10px; margin-block: 6px; }
       .line .text { padding-left: 0; }
+      .chat-thread { margin-block: 7px; }
+      .thread-head { padding-inline: 10px; }
+      .thread-kind { display: none; }
+      .thread-lines .line { margin: 0; padding-left: 25px; }
+      .thread-lines .line::before { left: 11px; }
+      .thread-lines .line:not(:last-child)::after { left: 13.5px; }
     }
     .composer { display: flex; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--border); }
     .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 6px 10px; font: inherit; font-size: 12px; }

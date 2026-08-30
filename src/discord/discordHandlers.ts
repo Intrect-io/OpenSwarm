@@ -885,6 +885,7 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
             id: issue.id,
             identifier: issue.identifier,
             title: issue.title,
+            url: issue.url,
             description: issue.description,
             priority: issue.priority || 3,
             dueDate: issue.dueDate,

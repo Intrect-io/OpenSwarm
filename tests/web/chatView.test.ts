@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
-import { startChatView, isNearBottom, renderChatText, renderLine, renderMentionText } from '../../web/static/js/chatView.mjs';
+import { buildTaskReferenceIndex, startChatView, isNearBottom, renderChatText, renderIssueReference, renderLine, renderMentionText } from '../../web/static/js/chatView.mjs';
 
 function shell(): Document {
   document.body.innerHTML = `
@@ -44,13 +44,19 @@ function boardEvent(over: Record<string, unknown> = {}) {
   };
 }
 
-function fetchWith(history: unknown[], board: unknown[] = [], messageResponse?: unknown) {
+function fetchWith(history: unknown[], board: unknown[] = [], messageResponse?: unknown, context: { projects?: unknown[]; sessions?: Record<string, unknown> } = {}) {
   return vi.fn(async (url: string) => {
     if (url.startsWith('/api/coordination/message')) {
       return messageResponse ?? { ok: true, json: async () => ({ delivered: true }) };
     }
     if (url.startsWith('/api/coordination/history')) {
       return { ok: true, json: async () => ({ events: history, traceSize: history.length }) };
+    }
+    if (url === '/api/projects') {
+      return { ok: true, json: async () => context.projects ?? [] };
+    }
+    if (url.startsWith('/api/work/sessions')) {
+      return { ok: true, json: async () => context.sessions ?? { sessions: [], recent: [] } };
     }
     return { ok: true, json: async () => ({ events: board, pending: [], lastSeq: 0 }) };
   });
@@ -71,7 +77,9 @@ describe('startChatView', () => {
     const lines = [...doc.querySelectorAll('#room .line')];
     // Oldest first, like a room transcript.
     expect(lines[0].querySelector('.who')!.textContent).toBe('Enginseer Rhodanis-Novum');
-    expect(lines[0].querySelector('.tag')!.textContent).toBe('(worker · AGT-1009)');
+    expect(doc.querySelectorAll('#room .chat-thread')).toHaveLength(1);
+    expect(doc.querySelector('#room .issue-code')!.textContent).toBe('AGT-1009');
+    expect(lines[0].querySelector('.tag')!.textContent).toBe('(worker)');
     expect(lines[0].querySelector('.clock')!.textContent).toMatch(/^\[.+\]$/);
     expect(lines[0].querySelector('.text')!.textContent).toBe('Landed the retry change.');
     // The reply prefers its long form and names its addressee.
@@ -166,6 +174,52 @@ describe('startChatView', () => {
     await vi.waitFor(() => expect(doc.querySelectorAll('#room .line').length).toBe(2));
     expect(doc.querySelectorAll('#room .line.from-operator').length).toBe(1);
     expect(doc.querySelector('#room .line.from-operator .who')!.textContent).toBe('Operator');
+    view.stop();
+  });
+
+  it('renders agent speech and system notices as distinct threaded channels', async () => {
+    const doc = shell();
+    const view = startChatView(doc, {
+      fetchImpl: fetchWith([
+        boardEvent({ id: 'chat', seq: 1, correlationId: 'chat-topic' }),
+        boardEvent({ id: 'system-start', seq: 2, correlationId: 'review-topic', kind: 'review-run', status: 'running', summary: '검토 시작' }),
+        boardEvent({ id: 'system-end', seq: 3, correlationId: 'review-topic', kind: 'review-run', status: 'failed', summary: '196.2초 만에 통과하지 못함' }),
+      ]),
+      eventSourceImpl: null,
+    });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line')).toHaveLength(3));
+    expect(doc.querySelectorAll('#room .thread-chat')).toHaveLength(1);
+    expect(doc.querySelectorAll('#room .thread-system')).toHaveLength(1);
+    expect(doc.querySelector('.thread-chat .channel-badge')?.textContent).toBe('CHAT');
+    expect(doc.querySelector('.thread-system .channel-badge')?.textContent).toBe('SYSTEM');
+    expect(doc.querySelectorAll('.thread-system .line')).toHaveLength(2);
+    view.stop();
+  });
+
+  it('shows the cached Linear card title and canonical hyperlink in the thread header', async () => {
+    const doc = shell();
+    const view = startChatView(doc, {
+      fetchImpl: fetchWith([boardEvent({ id: 'linked', taskId: 'task-1009' })], [], undefined, {
+        projects: [{ pending: [{ id: 'task-1009', issueIdentifier: 'AGT-1009', title: 'Fix retry scheduling', issueUrl: 'https://linear.app/intrect/issue/AGT-1009/fix-retry' }] }],
+      }),
+      eventSourceImpl: null,
+    });
+    await vi.waitFor(() => expect(doc.querySelector('#room .issue-title')?.textContent).toBe('Fix retry scheduling'));
+    const link = doc.querySelector('#room a.issue-link') as HTMLAnchorElement;
+    expect(link.textContent).toContain('AGT-1009');
+    expect(link.href).toBe('https://linear.app/intrect/issue/AGT-1009/fix-retry');
+    view.stop();
+  });
+
+  it('does not let a newer system notice become the composer recipient', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWith([
+      boardEvent({ id: 'agent', seq: 1, actor: 'real-agent', actorName: 'Real Agent' }),
+      boardEvent({ id: 'system', seq: 2, actor: 'daemon', actorName: 'Daemon', actorRole: 'daemon', kind: 'mcp-audit', correlationId: 'audit' }),
+    ]);
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line')).toHaveLength(2));
+    expect((doc.getElementById('composer-text') as HTMLInputElement).placeholder).toBe('Message Real Agent…');
     view.stop();
   });
 
@@ -319,6 +373,24 @@ describe('renderLine', () => {
       '<img src=x onerror=alert(1)>', 'web/router.ts',
     ]);
     expect(document.querySelector('img')).toBeNull();
+  });
+});
+
+describe('Linear task references', () => {
+  it('joins project-cache links with recent-session titles by task id and code', () => {
+    const index = buildTaskReferenceIndex(
+      [{ running: [{ id: 'task-1', issueIdentifier: 'AGT-1', title: 'Cached title', issueUrl: 'https://linear.app/intrect/issue/AGT-1/card' }] }],
+      { sessions: [{ taskId: 'task-1', issueIdentifier: 'AGT-1', title: 'Live title' }], recent: [] },
+    );
+    expect(index.get('task-1')).toMatchObject({ code: 'AGT-1', title: 'Live title' });
+    expect(index.get('AGT-1').url).toBe('https://linear.app/intrect/issue/AGT-1/card');
+  });
+
+  it('renders unsafe issue URLs as non-clickable escaped text', () => {
+    document.body.innerHTML = renderIssueReference({ code: 'AGT-9', title: '<script>bad()</script>', url: 'javascript:alert(1)' });
+    expect(document.querySelector('a')).toBeNull();
+    expect(document.querySelector('script')).toBeNull();
+    expect(document.body.textContent).toContain('<script>bad()</script>');
   });
 });
 

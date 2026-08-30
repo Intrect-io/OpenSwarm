@@ -52,6 +52,7 @@ export interface TaskItem {
   linearProject?: LinearProject;  // Linear project info
   issueId?: string;        // Linear issue ID
   issueIdentifier?: string; // Linear issue identifier (e.g., LIN-123)
+  issueUrl?: string;       // Canonical Linear card URL
   linearState?: string;    // Linear issue state (e.g., 'Todo', 'Backlog', 'In Progress')
   labels?: string[];       // Linear label names (e.g., 'swarm:stuck') — used to gate re-selection
   parentId?: string;       // Parent issue ID (for decomposed sub-tasks)
@@ -977,6 +978,7 @@ export function linearIssueToTask(issue: {
   id: string;
   identifier: string;
   title: string;
+  url?: string;
   description?: string;
   priority: number;
   dueDate?: string;
@@ -995,6 +997,7 @@ export function linearIssueToTask(issue: {
     priority: issue.priority || 3,
     issueId: issue.id,
     issueIdentifier: issue.identifier,
+    issueUrl: issue.url,
     linearState: issue.state,
     labels: issue.labels,
     parentId: issue.parentId,

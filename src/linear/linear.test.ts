@@ -20,15 +20,20 @@ describe('effectCommentId', () => {
 describe('fetchIssuesForStates pagination', () => {
   it('collects every page', async () => {
     let page = 0;
+    const queries: string[] = [];
     const linear = {
       client: {
-        rawRequest: async () => ({ data: { issues: {
+        rawRequest: async (query: string) => {
+          queries.push(query);
+          return ({ data: { issues: {
           nodes: [{ id: `id-${page}`, identifier: `INT-${page}`, title: 't', priority: 2 }],
           pageInfo: { hasNextPage: page++ === 0, endCursor: `cursor-${page}` },
-        } } }),
+          } } });
+        },
       },
     } as unknown as LinearClient;
     expect((await fetchIssuesForStates(linear, ['Todo'])).nodes.map((node) => node.id)).toEqual(['id-0', 'id-1']);
+    expect(queries[0]).toMatch(/\burl\b/);
   });
 
   it('reports explicit truncation instead of silently returning a partial set', async () => {
