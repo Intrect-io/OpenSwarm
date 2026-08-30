@@ -102,6 +102,10 @@ describe('priority council agent tools', () => {
       actorRole: proposer.actorRole, taskId: proposer.taskId,
       relatedTaskIds: ['candidate-a', 'candidate-b'], idempotencyKey: 'shared-conflict',
     });
+    const workerOpen = await executeCoordinationTool('coordination_council_open', openArgs(thread.id), candidate);
+    expect(workerOpen).toMatchObject({ isError: true });
+    expect(workerOpen.content).toContain('Only an orchestrator may open');
+
     const opened = await executeCoordinationTool('coordination_council_open', openArgs(thread.id), proposer);
     expect(opened.isError).toBe(false);
     const councilId = parsed(opened).council.id as string;

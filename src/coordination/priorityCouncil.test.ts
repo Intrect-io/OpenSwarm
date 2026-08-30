@@ -152,7 +152,7 @@ describe('durable priority council', () => {
     expect(detail.evidenceSubmissions[0]).toMatchObject({ optionId: 'a', taskId: 'candidate-a' });
   });
 
-  it('records deterministic proposal-order tie-break, tally, evidence, wall time, and CAS', () => {
+  it('records canonical tie-break, tally, evidence, wall time, and CAS independent of option order', () => {
     const council = createPriorityCouncil(input());
     ballot(council.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'b']);
     ballot(council.id, 'orchestrator-d', 'orchestrator', 'peer-d', ['b', 'a']);
@@ -178,6 +178,23 @@ describe('durable priority council', () => {
       repository: 'git:repo', councilId: council.id, expectedVersion: 3,
       actor: 'orchestrator-d', taskId: 'peer-d', idempotencyKey: 'final', now: now + 9_000,
     }).id).toBe(council.id);
+
+    const reversedInput = input({ idempotencyKey: 'open-council-reversed' });
+    reversedInput.options = [...reversedInput.options].reverse();
+    const reversed = createPriorityCouncil(reversedInput);
+    ballot(reversed.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'b']);
+    ballot(reversed.id, 'orchestrator-d', 'orchestrator', 'peer-d', ['b', 'a']);
+    const reversedFinal = finalizePriorityCouncil({
+      repository: 'git:repo', councilId: reversed.id, expectedVersion: 3,
+      actor: 'orchestrator-d', taskId: 'peer-d', idempotencyKey: 'final-reversed', now: now + 3_000,
+    });
+    expect(reversedFinal).toMatchObject({
+      outcome: 'tie-break', selectedOptionId: 'a', rankedOptionIds: ['a', 'b'], tieOptionIds: ['a', 'b'],
+    });
+    expect(reversedFinal.tally).toEqual([
+      { optionId: 'a', points: 3, firstChoiceCount: 1, proposalOrder: 1 },
+      { optionId: 'b', points: 3, firstChoiceCount: 1, proposalOrder: 0 },
+    ]);
   });
 
   it('records deterministic no-quorum only after expiry', () => {

@@ -473,6 +473,10 @@ function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
+function compareCanonical(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function parseJson<T>(value: string | null, fallback: T): T {
   if (value === null) return fallback;
   try {
@@ -1043,11 +1047,12 @@ function tally(council: PriorityCouncil, ballots: PriorityCouncilBallot[]): {
       if (index === 0) entry.firstChoiceCount += 1;
     });
   }
+  const optionById = new Map(council.options.map((option) => [option.id, option]));
   entries.sort((a, b) =>
     b.points - a.points
     || b.firstChoiceCount - a.firstChoiceCount
-    || a.proposalOrder - b.proposalOrder
-    || a.optionId.localeCompare(b.optionId));
+    || compareCanonical(optionById.get(a.optionId)!.taskId, optionById.get(b.optionId)!.taskId)
+    || compareCanonical(a.optionId, b.optionId));
   const top = entries[0];
   const tieOptionIds = entries
     .filter((entry) => entry.points === top.points && entry.firstChoiceCount === top.firstChoiceCount)

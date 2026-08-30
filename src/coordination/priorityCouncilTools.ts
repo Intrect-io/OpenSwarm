@@ -29,6 +29,8 @@ export interface PriorityCouncilToolContext {
   actor: string;
   actorName?: string;
   actorRole?: string;
+  /** Internal trusted surface; never populated from model tool arguments. */
+  trustedSurface?: 'operator-http';
 }
 
 const stringArray = { type: 'array', items: { type: 'string' }, maxItems: 8 } as const;
@@ -38,7 +40,7 @@ export const PRIORITY_COUNCIL_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'coordination_council_open',
-      description: 'Open a bounded advisory priority council on an existing cross-task thread. Use only for a real deterministic tie, conflict cohort, or explicit high-impact ordering decision. Options must follow the cached tracker/dependency baseline and cite tracker-cache evidence; this tool performs no Linear request.',
+      description: 'For the trusted orchestrator role only: open a bounded advisory priority council on an existing cross-task thread. Use only for a real deterministic tie, conflict cohort, or explicit high-impact ordering decision. Options must follow the cached tracker/dependency baseline and cite tracker-cache evidence; this tool performs no Linear request.',
       parameters: {
         type: 'object',
         properties: {
@@ -143,7 +145,7 @@ export const PRIORITY_COUNCIL_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'coordination_council_finalize',
-      description: 'Finalize a council with the version you read. Quorum selects by equal-weight Borda score; an exact tie uses original cached-baseline proposal order. Missing quorum is recorded only at expiry. This grants no merge, destructive, tracker, dependency, or lease authority.',
+      description: 'Finalize a council with the version you read. Quorum selects by equal-weight Borda score; an exact tie uses canonical taskId then optionId order, never caller array order. Missing quorum is recorded only at expiry. This grants no merge, destructive, tracker, dependency, or lease authority.',
       parameters: {
         type: 'object',
         properties: {
@@ -179,9 +181,10 @@ export const PRIORITY_COUNCIL_GUIDANCE_PROMPT = `
 ## Priority councils
 
 Deterministic cached tracker/dependency order remains the default. Open a
-priority council only for a real tie, conflict cohort, or explicit high-impact
-ordering question and attach it to an existing cross-task thread. Candidate
-workers submit evidence; only the snapshotted active independent peers vote.
+priority council only from the trusted orchestrator role, for a real tie,
+conflict cohort, or explicit high-impact ordering question, and attach it to an
+existing cross-task thread. Candidate workers submit evidence; only the
+snapshotted active independent peers vote.
 For automatic scheduler consumption, copy the cached priority/topology/due/
 dependency fields into every option's scheduling_facts and use snapshot_version
 "auto"; the scheduler recomputes that version from its current task snapshot.
@@ -339,6 +342,9 @@ export async function executePriorityCouncilTool(
   try {
     const repository = councilRepository(context);
     if (name === 'coordination_council_open') {
+      if (context.actorRole !== 'orchestrator' && context.trustedSurface !== 'operator-http') {
+        throw new Error('Only an orchestrator may open a priority council through agent tools');
+      }
       const reason = requiredString(args, 'reason') as PriorityCouncilReason;
       const council = createPriorityCouncil({
         repository,

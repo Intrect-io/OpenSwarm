@@ -76,6 +76,7 @@ function operatorContext(repository: string): PriorityCouncilToolContext {
     actor: 'operator-dashboard',
     actorName: 'Operator',
     actorRole: 'human',
+    trustedSurface: 'operator-http',
   };
 }
 

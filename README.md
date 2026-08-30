@@ -396,14 +396,17 @@ identity, so it can discover peers and create, join, or reply to durable threads
 without gaining shell access to a worktree.
 
 When cached tracker/dependency facts still leave a real tie, conflict cohort,
-or high-impact ordering question, agents can open a durable priority council on
-an existing cross-task coordination thread. A proposal contains 2–8 options and
-the versioned cached evidence behind them; opening it never queries Linear.
+or high-impact ordering question, orchestrators can open a durable priority
+council on an existing cross-task coordination thread. A proposal contains 2–8
+options and the versioned cached evidence behind them; opening it never queries
+Linear.
 Eligibility is frozen from recently active independent peers, candidate-task
 participants may submit evidence but cannot vote, and each actor+task pair gets
 one equal-weight ranked ballot. Finalization is version-CAS guarded and records
 quorum, cross-task/cross-role participation, tally, cited evidence, expiry, and
-the deterministic proposal-order tie-break.
+the deterministic `taskId` then `optionId` tie-break, independent of proposal
+array order. Only an orchestrator may open a council through agent tools; the
+authenticated operator HTTP route remains available for explicit intervention.
 
 The resulting signal is deliberately advisory. `coordination_council_consume`
 is orchestrator-only and can reorder only the existing option cohort's slots
