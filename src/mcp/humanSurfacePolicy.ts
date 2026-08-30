@@ -123,12 +123,13 @@ const HUMAN_SURFACE_IDENTIFIERS = new Set([
   'zulip',
 ]);
 
-// Environment keys need a narrower set than server descriptors. Generic words
-// such as CHAT and CALENDAR occur in harmless model/build settings; stripping
-// them would break execution without removing a usable service credential.
+// Environment keys need a narrower set than server descriptors. Generic CHAT
+// settings occur in harmless model/build configuration; service-specific
+// Calendar credentials are still removed because Calendar is a human surface.
 const HUMAN_SURFACE_ENV_IDENTIFIERS = new Set([
   'airtable',
   'asana',
+  'calendar',
   'canva',
   'clickup',
   'discord',
@@ -326,6 +327,7 @@ export function stripHumanSurfaceEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
 const SHELL_NETWORK_EXECUTORS = new Set([
   'bash',
   'bun',
+  'bunx',
   'curl',
   'deno',
   'discord',
@@ -338,9 +340,13 @@ const SHELL_NETWORK_EXECUTORS = new Set([
   'mutt',
   'node',
   'notion',
+  'npm',
+  'npx',
   'parallel',
   'perl',
   'php',
+  'pipx',
+  'pnpm',
   'python',
   'python3',
   'powershell',
@@ -349,8 +355,10 @@ const SHELL_NETWORK_EXECUTORS = new Set([
   'sendmail',
   'sh',
   'slack',
+  'uvx',
   'wget',
   'xargs',
+  'yarn',
   'zsh',
 ]);
 

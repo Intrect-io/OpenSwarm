@@ -408,8 +408,8 @@ existing role-scoped write contract.
 
 Native-loop shells additionally reject direct writes to known human-service
 endpoints and service CLIs, and both native and delegated worker processes omit
-human-service credentials from inherited environment variables while retaining
-model, DevOps, database, and sandbox-data settings. Delegated CLIs receive none
+product-scoped human-service credentials from inherited environment variables
+while retaining model, DevOps, database, and sandbox-data settings. Delegated CLIs receive none
 of OpenSwarm's MCP grants (`codex` disables inherited MCP and `claude` uses a
 strict MCP config); use a native-loop adapter when the policy must cover shell
 commands too. OpenSwarm cannot classify an arbitrary program that reads a

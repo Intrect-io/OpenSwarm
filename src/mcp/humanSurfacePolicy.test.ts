@@ -70,6 +70,8 @@ describe('human-surface shell boundary', () => {
       DISCORD_WEBHOOK_URL: 'secret',
       NOTION_API_KEY: 'secret',
       GOOGLE_DRIVE_TOKEN: 'secret',
+      GOOGLE_CALENDAR_API_KEY: 'secret',
+      CALENDAR_TOKEN: 'secret',
       GITHUB_TOKEN: 'keep',
       POSTGRES_DSN: 'keep',
       OPENAI_API_KEY: 'keep',
@@ -80,6 +82,8 @@ describe('human-surface shell boundary', () => {
     expect(env).not.toHaveProperty('DISCORD_WEBHOOK_URL');
     expect(env).not.toHaveProperty('NOTION_API_KEY');
     expect(env).not.toHaveProperty('GOOGLE_DRIVE_TOKEN');
+    expect(env).not.toHaveProperty('GOOGLE_CALENDAR_API_KEY');
+    expect(env).not.toHaveProperty('CALENDAR_TOKEN');
     expect(env).toMatchObject({
       GITHUB_TOKEN: 'keep',
       POSTGRES_DSN: 'keep',
@@ -107,6 +111,10 @@ describe('human-surface shell boundary', () => {
     expect(humanSurfaceShellWriteReason('slack chat send --channel ops --text hello')).toContain('service slack');
     expect(humanSurfaceShellWriteReason("bash -c 'slack chat send --channel ops --text hello'"))
       .toContain('service slack');
+    expect(humanSurfaceShellWriteReason('npx @company/slack-cli post --channel ops --text hello'))
+      .toContain('service slack');
+    expect(humanSurfaceShellWriteReason('pnpm dlx notion-cli create page'))
+      .toContain('service notion');
     expect(humanSurfaceShellWriteReason("python -c \"requests.post('https://discord.com/api/webhooks/x')\"")).toContain('discord.com');
 
     expect(humanSurfaceShellWriteReason('curl -X GET https://api.slack.com/methods/conversations.list')).toBeUndefined();
