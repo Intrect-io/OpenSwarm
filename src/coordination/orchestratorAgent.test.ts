@@ -84,10 +84,12 @@ describe('runOrchestrator', () => {
       cwd: string;
       mcpTools: ToolDefinition[];
       readOnly?: boolean;
+      filesystemTools?: boolean;
       coordinationContext?: { repository: string; repoKey: string; taskId: string; actorRole: string };
     };
     expect(passed.cwd).not.toBe('/repo');
     expect(passed.cwd.startsWith(tmpdir())).toBe(true);
+    expect(passed.filesystemTools).toBe(false);
     expect(passed.mcpTools.map((entry) => entry.function.name)).toEqual(['github__get_issue']);
     expect(passed.coordinationContext).toMatchObject({
       repository: '/repo', taskId: 'coordination', actorRole: 'orchestrator',
@@ -95,7 +97,7 @@ describe('runOrchestrator', () => {
     expect(passed.coordinationContext?.repoKey).toMatch(/^(git|path):/);
   });
 
-  it('withholds the shell, which the scratch directory alone does not do', async () => {
+  it('withholds the entire local filesystem and shell tool set', async () => {
     // `bash` is not path-checked, so an isolated cwd is only half the fence for
     // the one agent holding GitHub, Linear, and Cloudflare credentials at once.
     dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-shell-'));
@@ -106,8 +108,9 @@ describe('runOrchestrator', () => {
 
     await runOrchestrator({ repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['github'] } });
 
-    const passed = spawnCli.mock.calls[0][1] as { shellTools?: boolean };
+    const passed = spawnCli.mock.calls[0][1] as { shellTools?: boolean; filesystemTools?: boolean };
     expect(passed.shellTools).toBe(false);
+    expect(passed.filesystemTools).toBe(false);
   });
 
   it('passes the explicit supervisor model and reasoning route to the native loop', async () => {
@@ -133,6 +136,7 @@ describe('runOrchestrator', () => {
       model: 'gpt-5.6-sol',
       reasoningEffort: 'high',
       shellTools: false,
+      filesystemTools: false,
     });
     expect(result).toMatchObject({ adapter: 'codex-responses', model: 'gpt-5.6-sol', reasoningEffort: 'high' });
     const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 20 });

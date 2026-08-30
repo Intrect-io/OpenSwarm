@@ -377,6 +377,37 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
   });
+
+  it('withholds every filesystem tool while preserving MCP and coordination tools', async () => {
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      filesystemTools: false,
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'linear__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      coordinationContext: { repository: '/repo', taskId: 'supervisor', actor: 'orchestrator' },
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toContain('linear__get_issue');
+    expect(toolNames).toContain('coordination_read');
+    expect(toolNames).not.toContain('read_file');
+    expect(toolNames).not.toContain('search_files');
+    expect(toolNames).not.toContain('write_file');
+    expect(toolNames).not.toContain('edit_file');
+    expect(toolNames).not.toContain('bash');
+  });
 });
 
 describe('runAgenticLoop blocking human decision', () => {

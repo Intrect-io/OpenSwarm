@@ -97,6 +97,12 @@ export interface CliRunOptions {
   memoryTools?: boolean;
   /** Expose the `bash` tool. Default true; off for agents that must stay out of the working tree. */
   shellTools?: boolean;
+  /**
+   * Expose built-in filesystem tools (`read_file`, `search_files`, writes, and
+   * patching). Defaults true. This is independent from MCP/coordination tools,
+   * so a supervisor can coordinate without inspecting local checkout data.
+   */
+  filesystemTools?: boolean;
   /** Expose the inline `diagnostics` tool (project tsc/ruff inside the loop). Spike opt-in (INT-3105). */
   diagnosticsTool?: boolean;
   /** Enforce read-only tool exposure/execution where the adapter supports OpenSwarm's tool layer. */

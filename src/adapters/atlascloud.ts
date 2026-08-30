@@ -153,6 +153,7 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       webTools: options.webTools,
       memoryTools: options.memoryTools,
       shellTools: options.shellTools,
+      filesystemTools: options.filesystemTools,
       diagnosticsTool: options.diagnosticsTool,
       readOnly: options.readOnly,
       mcpTools,

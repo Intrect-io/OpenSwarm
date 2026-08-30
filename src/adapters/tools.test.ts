@@ -75,6 +75,20 @@ describe('TOOL_DEFINITIONS', () => {
   });
 });
 
+describe('filesystemTools enforcement', () => {
+  it('rejects a hidden built-in file tool name at execution time', async () => {
+    const result = await executeTool(
+      makeCall('read_file', { path: '/tmp/another-supervisor/secret.txt' }),
+      TMP_DIR,
+      undefined,
+      { filesystemTools: false },
+    );
+
+    expect(result).toMatchObject({ is_error: true });
+    expect(result.content).toContain('FILESYSTEM_DISABLED');
+  });
+});
+
 describe('validatePath realpath containment', () => {
   it('rejects an in-root symlink that resolves outside the root', async () => {
     const link = path.join(TMP_DIR, 'outside-link.txt');

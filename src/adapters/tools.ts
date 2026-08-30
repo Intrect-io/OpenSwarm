@@ -219,6 +219,12 @@ const READ_ONLY_DENIED_TOOLS = new Set([
   'diagnostics',
 ]);
 
+const FILESYSTEM_DENIED_TOOLS = new Set([
+  ...TOOL_DEFINITIONS.map((tool) => tool.function.name),
+  'apply_patch',
+  'diagnostics',
+]);
+
 
 /** Did this spawn fail because the binary is not installed? */
 function isMissingExecutable(error: unknown): boolean {
@@ -347,6 +353,8 @@ export interface ToolExecOptions {
   bashTimeoutMs?: number;
   /** Refuse mutation and shell tools even if a model emits hidden tool names. */
   readOnly?: boolean;
+  /** Refuse every built-in filesystem/shell tool even if its hidden name is emitted. */
+  filesystemTools?: boolean;
   /** Run-scoped identity for worker coordination tool dispatch. */
   coordinationContext?: CoordinationToolContext;
   /**
@@ -571,6 +579,13 @@ export async function executeTool(
 
   try {
     const args = JSON.parse(argsJson);
+    if (execOptions?.filesystemTools === false && FILESYSTEM_DENIED_TOOLS.has(name)) {
+      return {
+        tool_call_id: callId,
+        content: `FILESYSTEM_DISABLED: ${name} is disabled for this coordination-only run.`,
+        is_error: true,
+      };
+    }
     // `web_fetch`/`web_search` are withheld from the tool list in readOnly, but
     // the denial lives here too: a model can emit a call for a tool it was never
     // shown, and an outbound request is the exfiltration path the mode exists to

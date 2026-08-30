@@ -5,11 +5,11 @@
 // The orchestrator coordinates workers through external systems (GitHub,
 // Linear, Cloudflare) rather than by editing code. Read-only is not available
 // to it — that mode withholds MCP entirely (INT-3189) — so containment comes
-// from two things instead: an isolated scratch working directory, which the
-// file tools validate every path against, and `shellTools: false`. Both are
-// required, because `bash` is not path-checked: a scratch `cwd` on its own
-// leaves `cd /repo && …` open to the one agent in the system holding GitHub,
-// Linear, and Cloudflare credentials at once.
+// from two things instead: an isolated scratch working directory and complete
+// removal of the built-in filesystem/shell tool set. The latter is required:
+// the shared path validator intentionally permits `/tmp`, and `bash` is not
+// path-checked at all. This agent may hold several external-service grants at
+// once, so scratch cwd alone is not a security boundary.
 
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -221,10 +221,10 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       },
       webTools: false,
       memoryTools: false,
-      // The scratch cwd confines the file tools, but bash is not path-checked:
-      // a shell would walk straight out of it. The orchestrator coordinates
-      // through MCP and has no reason to run commands at all.
+      // Coordination and approved MCP remain available, but no local file or
+      // shell tool is exposed. Hidden-name execution is denied in tools.ts too.
       shellTools: false,
+      filesystemTools: false,
       signal: options.signal,
     });
     await store.publish({
