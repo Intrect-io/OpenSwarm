@@ -534,6 +534,53 @@ export function canCreateMoreIssues(dailyLimit: number): boolean {
   return getDailyCreationCount() < dailyLimit;
 }
 
+/**
+ * Slots promised to in-flight decompositions but not yet created.
+ *
+ * Deliberately outside the persisted state: `registerDecomposition` writes that
+ * state to disk, so folding a hold into it would persist an inflated count on
+ * every successful decomposition and a restart would read the inflation as real
+ * spending for the rest of the day.
+ */
+let heldDailyCreations = 0;
+
+/**
+ * Claim `count` slots of today's creation budget in one synchronous step, or
+ * refuse.
+ *
+ * Reading the count and acting on it cannot be split: a caller reads it, then
+ * awaits an LLM plan and several Linear round-trips before anything is
+ * registered. Fan-out runs pipelines in parallel by design, so a second run
+ * reads the same pre-creation count in that window and both overshoot the cap.
+ * (AGT-4122)
+ *
+ * Holds live only in this process. A crash drops them, which is the safe
+ * direction — the durable count then reflects exactly what was created.
+ *
+ * Every granted reservation must be released with `releaseDailyReservation`.
+ */
+export function reserveDailyCreations(count: number, dailyLimit: number): boolean {
+  resetDailyCounterIfNeeded();
+  const state = ensureDecompositionStateLoaded();
+  if (state.dailyCreationCount + heldDailyCreations + count > dailyLimit) return false;
+  heldDailyCreations += count;
+  return true;
+}
+
+/**
+ * Drop a hold taken by `reserveDailyCreations`. `registerDecomposition` records
+ * what was actually created, so the whole reservation is released regardless of
+ * the outcome — including when the decomposition failed and created nothing.
+ */
+export function releaseDailyReservation(count: number): void {
+  heldDailyCreations = Math.max(0, heldDailyCreations - count);
+}
+
+/** Slots currently promised to in-flight decompositions. Test seam. */
+export function getHeldDailyCreations(): number {
+  return heldDailyCreations;
+}
+
 export function registerDecomposition(
   issueId: string,
   parentId: string | undefined,

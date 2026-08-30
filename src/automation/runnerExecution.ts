@@ -34,6 +34,7 @@ import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from 
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
+import { plannedNewChildren, refuseForChildCap } from './decompositionLimits.js';
 import { rateLimitedPipelineResult } from './pipelinePreflight.js';
 import { safeConsole } from '../support/safeLog.js';
 export { rateLimitedPipelineResult } from './pipelinePreflight.js';
@@ -62,6 +63,8 @@ import {
   getDailyCreationCount,
   canCreateMoreIssues,
   registerDecomposition,
+  reserveDailyCreations,
+  releaseDailyReservation,
 } from './runnerState.js';
 import {
   buildTaskStateSyncComment,
@@ -565,6 +568,7 @@ export async function decomposeTask(
   const dailyLimit = ctx.decompositionDailyLimit ?? 20;
   const autoBacklog = ctx.decompositionAutoBacklog ?? true;
   let existingChildren = 0;
+  let recoveringPartialDecomposition = false;
 
   // ============================================
   // Pre-checks: Depth, Children, Daily Limit
@@ -594,7 +598,7 @@ export async function decomposeTask(
 
     // Check children count limit
     existingChildren = getChildrenCount(task.issueId);
-    const recoveringPartialDecomposition = existingChildren > 0 && task.linearState === 'In Progress';
+    recoveringPartialDecomposition = existingChildren > 0 && task.linearState === 'In Progress';
     if (existingChildren >= maxChildren && !recoveringPartialDecomposition) {
       console.log(`[AutonomousRunner] Children count limit reached: ${existingChildren}/${maxChildren}`);
       if (autoBacklog) {
@@ -691,16 +695,58 @@ export async function decomposeTask(
     return false;
   }
 
-  return createSubIssuesWithDependencies(
-    task.issueId,
-    task,
-    result.subTasks,
-    result.totalEstimatedMinutes,
-    ctx,
-    taskId,
-    dailyLimit,
-    projectPath,
-  );
+  // maxChildrenPerTask used to gate only a task that ALREADY had children, so a
+  // planner returning more than the cap created all of them — measured at 9
+  // against a cap of 3. Refuse rather than truncate: taking the first N would
+  // silently drop scope the planner judged necessary, and the parent would look
+  // decomposed while part of its work had vanished. Falling through to direct
+  // execution is what the daily-limit branch above already does. (AGT-4122)
+  // Count what the parent will END UP with, not just what this plan adds: the
+  // gate above lets a parent through while it still has fewer than maxChildren,
+  // so comparing the plan alone would let 2 existing + 3 planned reach 5 under a
+  // cap of 3. A recovering run is the exception — its plan re-proposes the
+  // children that already exist and createSubIssuesWithDependencies dedupes them
+  // by idempotencyId, so adding the two would double-count the same issues.
+  // Both caps are enforced against what this run will leave behind, not what it
+  // asks for — the upstream pre-checks ask weaker questions and let an
+  // overshooting plan through. Pure and unit-tested next door. (AGT-4122)
+  const scope = {
+    existingChildren,
+    recovering: recoveringPartialDecomposition,
+    plannedChildren: result.subTasks.length,
+  };
+  const capRefusal = refuseForChildCap(scope, maxChildren);
+  if (capRefusal) {
+    console.log(`[AutonomousRunner] Decomposition ${capRefusal} — skipping and executing directly`);
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail', ...metadata } });
+    return false;
+  }
+
+  // Hold the budget across creation. Checking it here and spending it inside
+  // createSubIssuesWithDependencies would leave an await-wide window for a
+  // parallel pipeline to spend the same slots. (AGT-4122)
+  const newChildren = plannedNewChildren(scope);
+  if (!reserveDailyCreations(newChildren, dailyLimit)) {
+    console.log(`[AutonomousRunner] Decomposition would take the day past its ${dailyLimit}-issue budget`
+      + ` (${newChildren} planned) — skipping and executing directly`);
+    broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'decompose', status: 'fail', ...metadata } });
+    return false;
+  }
+
+  try {
+    return await createSubIssuesWithDependencies(
+      task.issueId,
+      task,
+      result.subTasks,
+      result.totalEstimatedMinutes,
+      ctx,
+      taskId,
+      dailyLimit,
+      projectPath,
+    );
+  } finally {
+    releaseDailyReservation(newChildren);
+  }
 }
 
 export async function executePipeline(

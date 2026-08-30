@@ -215,6 +215,53 @@ describe('service', () => {
     await stopService();
   });
 
+  // AGT-4122: service.ts forwarded only four decomposition fields and never the
+  // object, so maxDepth / maxChildrenPerTask / dailyLimit / autoBacklog silently
+  // fell back to code defaults. Measured in production: a configured dailyLimit
+  // of 5 ran as 20 and produced 23 issues in two minutes. Asserting the whole
+  // object means a field added later cannot go missing the same way.
+  it('releases the instance lock even when startup rollback itself fails', async () => {
+    // A PR review read this path as leaking the lock — "leaving the process
+    // permanently unable to restart" — when cleanup throws. It does not: the
+    // rollback is wrapped in its own swallowing catch, so control always
+    // reaches the release. Asserted rather than argued.
+    const { acquireServiceInstanceLock } = await import('../support/serviceInstanceLock.js');
+    const { startAutonomous, stopAutonomous } = await import('../automation/autonomousRunner.js');
+    const release = vi.fn();
+    vi.mocked(acquireServiceInstanceLock).mockReturnValueOnce({
+      path: '/tmp/test-service-lock.db',
+      release,
+    } as unknown as ReturnType<typeof acquireServiceInstanceLock>);
+    vi.mocked(startAutonomous).mockRejectedValueOnce(new Error('startup exploded'));
+    vi.mocked(stopAutonomous).mockRejectedValueOnce(new Error('rollback exploded'));
+
+    await expect(startService(mockAutonomousConfig)).rejects.toThrow('startup exploded');
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+
+  it('forwards the whole decomposition config, not a hand-picked subset', async () => {
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+    const decomposition = {
+      enabled: true,
+      thresholdMinutes: 60,
+      maxDepth: 1,
+      maxChildrenPerTask: 3,
+      dailyLimit: 5,
+      autoBacklog: false,
+      plannerModel: 'z-ai/glm-5.2',
+    };
+
+    await startService({
+      ...mockAutonomousConfig,
+      autonomous: { ...mockAutonomousConfig.autonomous, decomposition },
+    } as SwarmConfig);
+
+    expect(vi.mocked(startAutonomous)).toHaveBeenCalledWith(
+      expect.objectContaining({ decomposition }),
+    );
+  });
+
   it('reapplies a persisted provider override on boot when it differs from config', async () => {
     const { readProviderOverride } = await import('./providerOverride.js');
     const { setDefaultAdapter } = await import('../adapters/index.js');
