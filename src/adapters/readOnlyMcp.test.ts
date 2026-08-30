@@ -143,4 +143,18 @@ describe('read-only refuses MCP tool calls at execution (INT-3189)', () => {
     expect(callMcpToolMock).toHaveBeenCalledTimes(1);
     expect(result.is_error).toBeFalsy();
   });
+
+  it('does not dispatch an MCP tool outside the run-scoped grant set', async () => {
+    const { executeTool } = await import('./tools.js');
+    const result = await executeTool(
+      { id: '1', function: { name: 'linear__delete_issue', arguments: '{}' } },
+      process.cwd(),
+      undefined,
+      { allowedToolNames: new Set(['linear__get_issue']) },
+    );
+
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('TOOL_NOT_ALLOWED');
+    expect(callMcpToolMock).not.toHaveBeenCalled();
+  });
 });

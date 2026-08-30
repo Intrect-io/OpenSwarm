@@ -281,6 +281,10 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
       ]
     : [];
+  // The provider-visible schema is not an enforcement boundary. Carry the
+  // exact same set into dispatch so a hidden tool call cannot reach a globally
+  // registered MCP route (or another built-in withheld for this run).
+  const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
   let toolCallCount = 0;
   let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
@@ -528,6 +532,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       bashTimeoutMs,
       readOnly,
       filesystemTools,
+      allowedToolNames,
       coordinationContext,
       loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
     });

@@ -408,6 +408,36 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).not.toContain('edit_file');
     expect(toolNames).not.toContain('bash');
   });
+
+  it('refuses a hidden MCP name that was not granted to this run', async () => {
+    let turn = 0;
+    let deniedResult = '';
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      filesystemTools: false,
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 2,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'linear__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      callApi: async (messages, tools) => {
+        if (turn++ === 0) {
+          expect(tools.map((tool) => tool.function.name)).toEqual(['linear__get_issue']);
+          return toolCallResp('hidden-call', 'linear__delete_issue', { id: 'AX-1' });
+        }
+        deniedResult = messages.at(-1)?.content ?? '';
+        return finalResp('done');
+      },
+    });
+
+    expect(deniedResult).toContain('TOOL_NOT_ALLOWED');
+    expect(deniedResult).toContain('linear__delete_issue');
+  });
 });
 
 describe('runAgenticLoop blocking human decision', () => {

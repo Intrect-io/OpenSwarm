@@ -355,6 +355,12 @@ export interface ToolExecOptions {
   readOnly?: boolean;
   /** Refuse every built-in filesystem/shell tool even if its hidden name is emitted. */
   filesystemTools?: boolean;
+  /**
+   * Exact run-scoped execution allow-list. Tool schemas are only a model hint:
+   * providers may still emit a name they were not shown, while the daemon's
+   * process-wide MCP router can remember it from an earlier run.
+   */
+  allowedToolNames?: ReadonlySet<string>;
   /** Run-scoped identity for worker coordination tool dispatch. */
   coordinationContext?: CoordinationToolContext;
   /**
@@ -578,6 +584,13 @@ export async function executeTool(
   const callId = toolCall.id;
 
   try {
+    if (execOptions?.allowedToolNames && !execOptions.allowedToolNames.has(name)) {
+      return {
+        tool_call_id: callId,
+        content: `TOOL_NOT_ALLOWED: ${name} was not granted for this run.`,
+        is_error: true,
+      };
+    }
     const args = JSON.parse(argsJson);
     if (execOptions?.filesystemTools === false && FILESYSTEM_DENIED_TOOLS.has(name)) {
       return {
