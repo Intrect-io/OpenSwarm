@@ -95,6 +95,7 @@ const ISSUES_QUERY = `
         description
         priority
         createdAt
+        updatedAt
         state { name }
         project { id name icon color }
         labels { nodes { name } }
@@ -694,6 +695,7 @@ export async function getMyIssues(
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
           createdAt: issue.createdAt,
+          updatedAt: issue.updatedAt,
         } as LinearIssueInfo);
       }
 
@@ -725,6 +727,8 @@ export async function getMyIssues(
           labels: issue.labels?.nodes?.map((l) => l.name) ?? [],
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
+          createdAt: issue.createdAt,
+          updatedAt: issue.updatedAt,
         });
       }
 
@@ -875,6 +879,7 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
       project,
       blockedBy: blockedBy.size > 0 ? [...blockedBy] : undefined,
       createdAt: issue.createdAt instanceof Date ? issue.createdAt.toISOString() : undefined,
+      updatedAt: issue.updatedAt instanceof Date ? issue.updatedAt.toISOString() : undefined,
     };
   }
 }

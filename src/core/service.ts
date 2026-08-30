@@ -240,6 +240,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
           state: issue.state,
           labels: issue.labels,
           blockedBy: issue.blockedBy,
+          updatedAt: issue.updatedAt,
           project: issue.project ? {
             id: issue.project.id,
             name: issue.project.name,
@@ -265,8 +266,6 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       includeBacklog: config.autonomous.includeBacklog,
       heartbeatSchedule: config.autonomous.schedule,
       autoExecute: true,
-      maxConsecutiveTasks: 3,
-      cooldownSeconds: 300,
       dryRun: false,
       pairMode: config.autonomous.pairMode,
       pairMaxAttempts: config.autonomous.maxAttempts,
@@ -277,6 +276,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       autonomousHeartbeat: heartbeatEnabled,
       triggerNow: heartbeatEnabled,  // Execute immediately on start (heartbeat mode only)
       maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
+      stalledInProgressHours: config.autonomous.stalledInProgressHours,
       maxConcurrentPerProject: config.autonomous.maxConcurrentPerProject,
       automationLedgerMode: config.autonomous.automationLedgerMode,
       automationDbPath: config.autonomous.automationDbPath,
@@ -307,7 +307,6 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       securityAudit: config.autonomous.securityAudit,
       // Bad-edit / reflection self-repair budget
       maxReflections: config.autonomous.maxReflections,
-      interTaskCooldownMs: config.autonomous.interTaskCooldownMs ?? 1_800_000,
       jobProfiles: config.autonomous.jobProfiles,
       coordinationBoardIssueId: config.autonomous.coordinationBoardIssueId,
       mcpPolicies: config.autonomous.mcpPolicies,
@@ -360,7 +359,6 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     prProcessor = new PRProcessor({
       repos: githubRepos,
       schedule: config.prProcessor.schedule,
-      cooldownHours: config.prProcessor.cooldownHours,
       maxIterations: config.prProcessor.maxIterations,
       roles: config.autonomous?.defaultRoles,
       maxRetries: config.prProcessor.maxRetries,

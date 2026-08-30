@@ -309,10 +309,12 @@ const AutonomousConfigSchema = z.object({
   workerTimeoutMs: z.number().min(0).default(0),
   /** Reviewer timeout (ms). 0/unset = pipeline per-stage ceiling (not unlimited). */
   reviewerTimeoutMs: z.number().min(0).default(0),
-  /** Max concurrent tasks. The daemon fills every available slot, up to 32. */
-  maxConcurrentTasks: z.number().int().min(1).max(32).default(32),
+  /** Operator-controlled global task capacity. Safety comes from scopes and leases, not a hidden low cap. */
+  maxConcurrentTasks: z.number().int().min(1).max(256).default(64),
+  /** Retire stale tracker claims so In Progress means a worker actually owns the task. */
+  stalledInProgressHours: z.number().min(1).max(168).default(6),
   /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
-  maxConcurrentPerProject: z.number().int().min(1).max(32).optional(),
+  maxConcurrentPerProject: z.number().int().min(1).max(256).optional(),
   /** SQLite execution-truth rollout. primary is fail-closed; shadow only observes. */
   automationLedgerMode: z.enum(['off', 'shadow', 'primary']).default('primary'),
   automationDbPath: z.string().min(1).optional(),
@@ -340,8 +342,6 @@ const AutonomousConfigSchema = z.object({
   securityAudit: SecurityAuditConfigSchema,
   /** Max objective self-repair attempts (lint/bs/test) before giving up */
   maxReflections: z.number().min(1).max(10).default(3),
-  /** Cooldown between task completions in ms (default: 1800000 = 30min) */
-  interTaskCooldownMs: z.number().min(0).default(1800000),
   coordinationBoardIssueId: z.string().min(1).optional(),
   mcpPolicies: z.record(z.string(), z.object({
     servers: z.array(z.string()).default([]),
@@ -400,7 +400,6 @@ const ConflictResolverConfigSchema = z.object({
 const PRProcessorConfigSchema = z.object({
   enabled: z.boolean().default(false),
   schedule: z.string().default('*/15 * * * *'),
-  cooldownHours: z.number().default(6),
   maxIterations: z.number().min(1).max(10).default(3),
   maxRetries: z.number().min(1).max(10).optional(),
   ciTimeoutMs: z.number().positive().optional(),
@@ -668,6 +667,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       workerTimeoutMs: raw.autonomous.workerTimeoutMs,
       reviewerTimeoutMs: raw.autonomous.reviewerTimeoutMs,
       maxConcurrentTasks: raw.autonomous.maxConcurrentTasks,
+      stalledInProgressHours: raw.autonomous.stalledInProgressHours,
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
       automationLedgerMode: raw.autonomous.automationLedgerMode,
       automationDbPath: raw.autonomous.automationDbPath ? expandPath(raw.autonomous.automationDbPath) : undefined,
@@ -702,7 +702,6 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,
       maxReflections: raw.autonomous.maxReflections,
-      interTaskCooldownMs: raw.autonomous.interTaskCooldownMs,
       // jobProfiles was validated by the schema but dropped here, so per-task
       // model selection silently fell back to defaultRoles. Carry it through.
       jobProfiles: raw.autonomous.jobProfiles,
@@ -716,7 +715,6 @@ function transformConfig(raw: RawConfig): SwarmConfig {
     prProcessor: raw.prProcessor ? {
       enabled: raw.prProcessor.enabled,
       schedule: raw.prProcessor.schedule,
-      cooldownHours: raw.prProcessor.cooldownHours,
       maxIterations: raw.prProcessor.maxIterations,
       maxRetries: raw.prProcessor.maxRetries,
       ciTimeoutMs: raw.prProcessor.ciTimeoutMs,

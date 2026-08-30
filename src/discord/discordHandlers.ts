@@ -890,6 +890,7 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
             dueDate: issue.dueDate,
             state: issue.state,
             labels: issue.labels,
+            updatedAt: issue.updatedAt,
             project: issue.project ? {
               id: issue.project.id,
               name: issue.project.name,
@@ -908,8 +909,6 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
         allowedProjects: ['~/dev/OpenSwarm', '~/dev/tools/pykis', '~/dev'],
         heartbeatSchedule: schedule,
         autoExecute: true, // Auto-execute (no approval needed)
-        maxConsecutiveTasks: 3,
-        cooldownSeconds: 300,
         dryRun: false,
         pairMode: hasPairFlag,
         pairMaxAttempts: pairModeConfig?.maxAttempts ?? 3,
@@ -992,37 +991,5 @@ export async function handleReject(msg: Message): Promise<void> {
     }
   } catch {
     await msg.reply(`❌ ${t('discord.errors.runnerNotStarted')}`);
-  }
-}
-
-/**
- * !turbo [on|off] - Toggle turbo mode
- */
-export async function handleTurbo(msg: Message, arg?: string): Promise<void> {
-  try {
-    const runner = autonomous.getRunner();
-
-    if (!arg || arg === 'status') {
-      const stats = runner.getStats();
-      if (stats.turboMode) {
-        await replyWithEmbed(msg, 'MAX PACE ON (persistent)', 0xff8800);
-      } else {
-        await replyWithEmbed(msg, 'MAX PACE OFF (normal pace)', 0x00ff41);
-      }
-      return;
-    }
-
-    const enabled = arg === 'on';
-    if (arg !== 'on' && arg !== 'off') {
-      await replyWithEmbed(msg, 'Usage: `!turbo [on|off|status]`', 0xffaa00);
-      return;
-    }
-
-    runner.setTurboMode(enabled);
-    const emoji = enabled ? '🔥' : '🐢';
-    const label = enabled ? 'MAX PACE ON — persistent (full concurrency + heartbeat)' : 'MAX PACE OFF — normal pace resumed';
-    await replyWithEmbed(msg, `${emoji} ${label}`, enabled ? 0xff8800 : 0x00ff41);
-  } catch {
-    await msg.reply(`❌ Runner not started`);
   }
 }

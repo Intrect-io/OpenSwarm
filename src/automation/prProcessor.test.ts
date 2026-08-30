@@ -141,7 +141,7 @@ const { PRProcessor } = await import('./prProcessor.js');
 const pr = { repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9' };
 
 function newProcessor(overrides: Partial<import('./prProcessor.js').PRProcessorConfig> = {}) {
-  return new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3, ...overrides });
+  return new PRProcessor({ repos: [], schedule: '0 0 1 1 *', maxIterations: 3, maxRetries: 3, ...overrides });
 }
 
 beforeEach(() => {
@@ -248,7 +248,7 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
 
   it('exhausts retries and fails when the pipeline never succeeds', async () => {
     pipelineRunImpl.run.mockResolvedValue({ success: false, iterations: 1, workerResult: { error: 'boom' } });
-    const processor = new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 2 });
+    const processor = new PRProcessor({ repos: [], schedule: '0 0 1 1 *', maxIterations: 3, maxRetries: 2 });
     const result = await processor.fixOne(pr, '/tmp/proj');
     expect(result.success).toBe(false);
     expect(pipelineRunImpl.run).toHaveBeenCalledTimes(2); // maxRetries
@@ -259,7 +259,7 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     conflictResolverImpl.canResolve.mockResolvedValue(true);
     conflictResolverImpl.resolve.mockResolvedValue(true);
     const processor = new PRProcessor({
-      repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3,
+      repos: [], schedule: '0 0 1 1 *', maxIterations: 3, maxRetries: 3,
       conflictResolver: { enabled: true, ownershipMode: 'auto', maxResolutionAttempts: 3, cascadeCheck: false },
     });
     const result = await processor.fixOne(pr, '/tmp/proj');
@@ -272,7 +272,7 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     gh.checkPRConflicts.mockResolvedValue(true);
     conflictResolverImpl.canResolve.mockResolvedValue(false);
     const processor = new PRProcessor({
-      repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3,
+      repos: [], schedule: '0 0 1 1 *', maxIterations: 3, maxRetries: 3,
       conflictResolver: { enabled: true, ownershipMode: 'auto', maxResolutionAttempts: 3, cascadeCheck: false },
     });
     const result = await processor.fixOne(pr, '/tmp/proj');
@@ -286,7 +286,7 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     conflictResolverImpl.canResolve.mockResolvedValue(true);
     conflictResolverImpl.resolve.mockResolvedValue(false);
     const processor = new PRProcessor({
-      repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3,
+      repos: [], schedule: '0 0 1 1 *', maxIterations: 3, maxRetries: 3,
       conflictResolver: { enabled: true, ownershipMode: 'auto', maxResolutionAttempts: 3, cascadeCheck: false },
     });
     const result = await processor.fixOne(pr, '/tmp/proj');
@@ -299,7 +299,7 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     gh.waitForCICompletion
       .mockResolvedValueOnce({ status: 'failure', failedChecks: [{ name: 'test', conclusion: 'failure' }] })
       .mockResolvedValueOnce({ status: 'success' });
-    const processor = new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 2 });
+    const processor = new PRProcessor({ repos: [], schedule: '0 0 1 1 *', maxIterations: 3, maxRetries: 2 });
     const result = await processor.fixOne(pr, '/tmp/proj');
     expect(result.success).toBe(true);
     expect(pipelineRunImpl.run).toHaveBeenCalledTimes(2);
@@ -781,7 +781,7 @@ describe('PRProcessor state persistence (INT-3282 coverage)', () => {
 describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
   function newScanProcessor(overrides: Partial<import('./prProcessor.js').PRProcessorConfig> = {}) {
     return new PRProcessor({
-      repos: ['o/r'], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 1, maxRetries: 1, ...overrides,
+      repos: ['o/r'], schedule: '0 0 1 1 *', maxIterations: 1, maxRetries: 1, ...overrides,
     });
   }
 
@@ -891,7 +891,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
       .toBeLessThan(gh.getMergedPRsOrThrow.mock.invocationCallOrder[0]);
   });
 
-  it('attempts resolution for a PR with merge conflicts, bypassing cooldown', async () => {
+  it('attempts resolution for a PR with merge conflicts', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     gh.getOpenPRs.mockResolvedValue([pr]);
     gh.checkPRConflicts.mockResolvedValue(true);
@@ -902,7 +902,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     logSpy.mockRestore();
   });
 
-  it('processes a PR with formal CHANGES_REQUESTED feedback even inside the cooldown window', async () => {
+  it('processes a PR with formal CHANGES_REQUESTED feedback', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const recentState = {
       prs: {
@@ -915,14 +915,14 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     gh.getPRReviews.mockResolvedValue([
       { author: 'codex', state: 'CHANGES_REQUESTED', createdAt: '2026-08-05T00:00:00.000Z', body: 'please fix' },
     ]);
-    const processor = newScanProcessor({ cooldownHours: 24 });
+    const processor = newScanProcessor();
     const scanPromise = processor.processPRs();
     await vi.advanceTimersByTimeAsync(5_000); // inter-iteration delay between rounds 1 and 2
     await scanPromise;
     expect(pipelineRunImpl.run).toHaveBeenCalled();
   });
 
-  it('processes a PR with only comment feedback, bypassing cooldown', async () => {
+  it('processes a PR with only comment feedback', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const recentState = {
       prs: {
@@ -933,14 +933,14 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     readFileImpl.mockResolvedValueOnce(JSON.stringify(recentState));
     gh.getOpenPRs.mockResolvedValue([pr]);
     gh.getPRComments.mockResolvedValue([{ author: 'codex', body: 'critical: fix this please', createdAt: new Date().toISOString() }]);
-    const processor = newScanProcessor({ cooldownHours: 24 });
+    const processor = newScanProcessor();
     const scanPromise = processor.processPRs();
     await vi.advanceTimersByTimeAsync(5_000); // inter-iteration delay between rounds 1 and 2
     await scanPromise;
     expect(pipelineRunImpl.run).toHaveBeenCalled();
   });
 
-  it('skips a PR within the cooldown window that has no conflicts or feedback', async () => {
+  it('reprocesses a recently handled PR when CI still has no terminal result', async () => {
     const recentState = {
       prs: {
         'o/r#9': { repo: 'o/r', prNumber: 9, status: 'completed', iterations: 1, lastProcessed: new Date(Date.now() - 60 * 60 * 1000).toISOString() },
@@ -949,9 +949,9 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     };
     readFileImpl.mockResolvedValueOnce(JSON.stringify(recentState));
     gh.getOpenPRs.mockResolvedValue([pr]);
-    const processor = newScanProcessor({ cooldownHours: 24 });
+    const processor = newScanProcessor();
     await processor.processPRs();
-    expect(pipelineRunImpl.run).not.toHaveBeenCalled();
+    expect(pipelineRunImpl.run).toHaveBeenCalled();
   });
 
   it('skips a PR with no conflicts, no feedback, and passing CI', async () => {
@@ -1044,7 +1044,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     conflictResolverImpl.cascadeEnabled.mockReturnValue(true);
     gh.getOpenPRs.mockResolvedValue([]);
     const processor = new PRProcessor({
-      repos: ['o/r'], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 1, maxRetries: 1,
+      repos: ['o/r'], schedule: '0 0 1 1 *', maxIterations: 1, maxRetries: 1,
       conflictResolver: { enabled: true, ownershipMode: 'auto', maxResolutionAttempts: 3, cascadeCheck: true },
     });
     await processor.processPRs();

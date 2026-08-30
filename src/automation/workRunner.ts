@@ -132,9 +132,9 @@ export class WorkDispatchError extends Error {
 let workCounter = 0;
 
 /**
- * Validate the requested issues, claim each accepted one on Linear (move to
- * In Progress — this is what keeps a concurrently-enabled heartbeat from
- * double-dispatching the same issue), and queue them onto the runner.
+ * Validate the requested issues and queue them onto the runner. A queued issue
+ * keeps its original tracker state; the durable execution path moves it to
+ * In Progress only after it owns the execution lease.
  */
 export async function dispatchWork(
   runner: AutonomousRunner,
@@ -197,11 +197,6 @@ export async function dispatchWork(
   // entries would otherwise report one phantom "queued" the scheduler never
   // accepted.
   const seenIssueIds = new Set<string>();
-  // Issues THIS dispatch moved to In Progress (vs. ones already there / being
-  // resumed), mapped to the workflow state they came from — rollback must
-  // restore Backlog issues to Backlog, not blanket-reset everything to Todo.
-  const claimedByUs = new Map<string, 'Todo' | 'Backlog'>();
-
   for (const rawId of request.issueIds) {
     // Distinguish a missing issue from a failed lookup: an expired Linear
     // token used to be reported as `not found`, pointing the operator at the
@@ -248,25 +243,6 @@ export async function dispatchWork(
       continue;
     }
 
-    // Claim before queueing: an issue already In Progress on Linear is
-    // invisible to the heartbeat's Todo scan, so the two dispatch paths
-    // cannot collide. A failed claim means that protection does NOT hold for
-    // this issue — skip it rather than queue unprotected work.
-    if ((issue.state ?? '').toLowerCase() !== 'in progress') {
-      const claimed = await linear.updateIssueState(issue.id, 'In Progress').catch(() => false);
-      if (!claimed) {
-        items.push({
-          issueId: issue.id,
-          identifier: issue.identifier,
-          title: issue.title,
-          status: 'skipped',
-          reason: 'failed to claim on Linear (state transition failed)',
-        });
-        continue;
-      }
-      claimedByUs.set(issue.id, (issue.state ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo');
-    }
-
     const task = enrichTaskFromState(linearIssueToTask({
       id: issue.id,
       identifier: issue.identifier,
@@ -275,10 +251,10 @@ export async function dispatchWork(
       priority: issue.priority,
       state: issue.state,
       labels: issue.labels,
+      updatedAt: issue.updatedAt,
       project: issue.project ? { id: issue.project.id, name: issue.project.name } : undefined,
     }));
-    // Marks the task for durable admission (terminal-record reopen) and for
-    // the shutdown claim-rollback sweep.
+    // Marks the task for durable admission (terminal-record reopen).
     task.explicitDispatch = true;
     tasks.push(task);
     items.push({ issueId: issue.id, identifier: issue.identifier, title: issue.title, status: 'queued' });
@@ -295,23 +271,12 @@ export async function dispatchWork(
       item.status = 'skipped';
       if (rejectionReason === 'duplicate') {
         // Another live dispatch/heartbeat owns this issue on the scheduler.
-        // Its In Progress claim is CORRECT — rolling it back here would reset
-        // an actively-executing issue to Todo (concurrent-dispatch race).
         item.reason = 'already queued or running';
         continue;
       }
       // 'stopping': the runner is shutting down, nobody will ever run this.
+      // No tracker rollback is needed: queueing did not claim In Progress.
       item.reason = 'runner shutting down';
-      // If this dispatch made the claim, roll it back to the exact state the
-      // issue came from so it is not stranded In Progress with no worker.
-      // Best-effort: a failed rollback is reported rather than hidden.
-      const priorState = claimedByUs.get(item.issueId);
-      if (priorState) {
-        const rolledBack = await linear.updateIssueState(item.issueId, priorState).catch(() => false);
-        if (!rolledBack) {
-          item.reason = 'runner shutting down (WARNING: issue left In Progress — manual state reset needed)';
-        }
-      }
     }
     broadcastEvent({
       type: 'work:queued',

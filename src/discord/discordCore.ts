@@ -351,7 +351,6 @@ import {
   handleAuto,
   handleApprove,
   handleReject,
-  handleTurbo,
 } from './discordHandlers.js';
 
 
@@ -534,10 +533,6 @@ async function handleMessage(msg: Message): Promise<void> {
 
       case 'reject':
         await handleReject(msg);
-        break;
-
-      case 'turbo':
-        await handleTurbo(msg, args[0]);
         break;
 
       case 'pair':

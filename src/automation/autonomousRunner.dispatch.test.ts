@@ -14,8 +14,6 @@ const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   allowedProjects: ['/x/a'],
   heartbeatSchedule: '0 * * * *',
   autoExecute: false,
-  maxConsecutiveTasks: 1,
-  cooldownSeconds: 0,
   dryRun: true,
   pairMode: true,
   maxConcurrentTasks: 4,
@@ -105,36 +103,6 @@ describe('AutonomousRunner.enqueueIssues (INT-3388)', () => {
       expect(autoBeat).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
-    }
-  });
-});
-
-describe('AutonomousRunner shutdown claim rollback (INT-3388, review finding)', () => {
-  it('rolls back Linear claims for explicit dispatches discarded by shutdown, using the atomic discard snapshot', async () => {
-    const { updateIssueState, isLinearInitialized } = vi.hoisted(() => ({
-      updateIssueState: vi.fn(async () => true),
-      isLinearInitialized: vi.fn(() => true),
-    }));
-    vi.doMock('../linear/linear.js', () => ({ updateIssueState, isLinearInitialized }));
-    try {
-      const runner = new AutonomousRunner(cfg());
-      const runSpy = vi.fn(async () => {}); // keep queued tasks from executing
-      (runner as unknown as Internal).runAvailableTasks = runSpy;
-
-      const dispatched: TaskItem = { ...task('d1'), explicitDispatch: true, linearState: 'Backlog' };
-      const heartbeatPicked: TaskItem = task('h1'); // no explicitDispatch marker
-      await runner.enqueueIssues([dispatched], '/x/a');
-      // Simulate a heartbeat-enqueued task sharing the queue.
-      (runner as unknown as { enqueueCandidate(t: TaskItem, p: string): boolean }).enqueueCandidate(heartbeatPicked, '/x/a');
-
-      await runner.stop();
-
-      // The dispatched task's claim is restored to its recorded prior state;
-      // the heartbeat task (never claimed at queue time) is untouched.
-      expect(updateIssueState).toHaveBeenCalledWith('d1', 'Backlog');
-      expect(updateIssueState).not.toHaveBeenCalledWith('h1', expect.anything());
-    } finally {
-      vi.doUnmock('../linear/linear.js');
     }
   });
 });

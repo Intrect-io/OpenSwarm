@@ -22,8 +22,6 @@ const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   allowedProjects: ['/repo'],
   heartbeatSchedule: '0 * * * *',
   autoExecute: false,
-  maxConsecutiveTasks: 1,
-  cooldownSeconds: 0,
   dryRun: true,
   ...over,
 });

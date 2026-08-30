@@ -71,6 +71,8 @@ export type LinearIssueInfo = {
   blockedBy?: string[];
   /** ISO timestamp of issue creation — duplicate grooming orders peers by real age. (INT-3387) */
   createdAt?: string;
+  /** ISO timestamp of the last tracker activity — used to retire stale In Progress claims. */
+  updatedAt?: string;
 };
 
 /**
@@ -171,8 +173,6 @@ export type PRProcessorConfig = {
   enabled: boolean;
   /** Check schedule (cron) */
   schedule: string;
-  /** Cooldown after processing (hours) */
-  cooldownHours: number;
   /** Worker-Reviewer max iteration count */
   maxIterations: number;
   /** Max retry attempts per PR (default: 3) */
@@ -558,6 +558,8 @@ export type AutonomousStartupConfig = {
   reviewerTimeoutMs?: number;
   /** Max concurrent tasks */
   maxConcurrentTasks?: number;
+  /** Move unowned In Progress issues back to Backlog after this many idle hours. */
+  stalledInProgressHours?: number;
   /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
   maxConcurrentPerProject?: number;
   /** Durable execution ledger rollout mode. */
@@ -595,8 +597,6 @@ export type AutonomousStartupConfig = {
    * Default: 3.
    */
   maxReflections?: number;
-  /** Cooldown between task completions in ms (default: 1800000 = 30min) */
-  interTaskCooldownMs?: number;
   /** Job profiles used to select models based on task traits */
   jobProfiles?: JobProfile[];
   coordinationBoardIssueId?: string;

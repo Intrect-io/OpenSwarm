@@ -50,7 +50,7 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { t } from '../locale/index.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
-import { getTaskState, upsertTaskState } from '../taskState/store.js';
+import { getTaskState, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { setAutomationDbPath } from './automationDbPath.js';
 import {
   findPullRequestForBranch,
@@ -95,6 +95,8 @@ import {
   deliverTrackerEffect,
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
+import { planStalledInProgress } from './stalledInProgress.js';
+import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 
@@ -299,15 +301,6 @@ export class AutonomousRunner {
   // Cache: linearProjectName → resolvedLocalPath (populated during task execution)
   private projectPathCache = new Map<string, string>();
 
-  // Max pace: the daemon always runs at full throughput (concurrency +
-  // heartbeat come from config). This flag is now ON by default and never
-  // expires — it used to default false and auto-expire after 4h, so every
-  // restart silently dropped the dashboard back to "TURBO off" even though real
-  // throughput (maxConcurrentTasks + heartbeat) was unchanged. Kept as a manual
-  // escape hatch (Discord/dashboard can still toggle it off).
-  private turboMode = true;
-  private turboExpiresAt: number | null = null;
-
   // Track completed/failed task IDs to prevent re-selection (persisted to disk)
   private completedTaskIds = new Set<string>();
   private failedTaskCounts = new Map<string, number>();
@@ -431,8 +424,6 @@ export class AutonomousRunner {
       allowedProjects: config.allowedProjects,
       linearTeamId: config.linearTeamId,
       autoExecute: config.autoExecute,
-      maxConsecutiveTasks: config.maxConsecutiveTasks,
-      cooldownSeconds: config.cooldownSeconds,
       dryRun: config.dryRun,
       includeBacklog: config.includeBacklog,
       // Same-project parallel selection only makes sense when the scheduler can
@@ -1140,13 +1131,9 @@ export class AutonomousRunner {
   /**
    * Trigger the next heartbeat as soon as possible.
    *
-   * Historically this used a "pace-aware cooldown" that grew quadratically
-   * with daily completion count (ratio² × 3 multiplier) on top of a 30-minute
-   * baseline — the swarm would slow itself down dramatically after a few
-   * tasks. That was removed by user request: the cron schedule
-   * (`config.heartbeatSchedule`) is now the only knob, and between cron
-   * ticks we re-fire immediately when a task wraps up so the next backlog
-   * item starts without artificial dead time.
+   * The cron schedule is the periodic reconciliation fallback. Between cron
+   * ticks we re-fire immediately when a task wraps up so the next backlog item
+   * starts without artificial dead time.
    */
   private _nextHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private scheduleNextHeartbeat(): void {
@@ -1621,22 +1608,6 @@ export class AutonomousRunner {
    * artifact reconciliation a heartbeat would, without any task selection.
    * The Linear fetch only feeds the reconciler's issueId→task lookup. (INT-3388)
    */
-  private async rollbackDiscardedDispatchClaims(
-    discarded: Array<{ task: TaskItem }>,
-  ): Promise<void> {
-    const dispatched = discarded.filter(({ task }) => task.explicitDispatch === true && task.issueId);
-    if (dispatched.length === 0) return;
-    const linear = await import('../linear/linear.js');
-    if (!linear.isLinearInitialized()) return;
-    for (const { task } of dispatched) {
-      const prior = (task.linearState ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo';
-      const ok = await linear.updateIssueState(task.issueId!, prior).catch(() => false);
-      console.log(ok
-        ? `[AutonomousRunner] Rolled back queued dispatch claim: ${task.issueIdentifier ?? task.issueId} → ${prior}`
-        : `[AutonomousRunner] WARNING: could not roll back claim for ${task.issueIdentifier ?? task.issueId} — left In Progress`);
-    }
-  }
-
   private async recoverParkedRunsOnly(): Promise<void> {
     if (!this.durableRuns.isPrimary) return;
     const needsArtifactRecovery = this.durableRuns.listRuns(['NEEDS_RECONCILE']).length > 0;
@@ -1705,15 +1676,6 @@ export class AutonomousRunner {
     const deadline = Date.now() + graceMs;
     const heartbeatAtStop = this.heartbeatCompletion;
     const shutdown = await this.scheduler.shutdown(graceMs);
-    // Queued-but-never-started explicit dispatches were discarded by
-    // shutdown() with no cancellation event — roll their Linear claims back
-    // to the state they were dispatched from, or they sit In Progress forever
-    // with no worker. The discard snapshot is taken atomically inside
-    // shutdown() (same synchronous block as stopping+clearQueue), so none of
-    // these can have started. Heartbeat-selected tasks are untouched: they
-    // were never moved to In Progress at queue time. (INT-3388)
-    await this.rollbackDiscardedDispatchClaims(shutdown.discardedQueue).catch((error) =>
-      console.warn('[AutonomousRunner] Queued-dispatch claim rollback failed:', error));
     const remainingGrace = Math.max(0, deadline - Date.now());
     const activityDrained = await this.waitForRunnerActivity(heartbeatAtStop, remainingGrace);
 
@@ -1912,6 +1874,52 @@ export class AutonomousRunner {
     return tasks.filter(task => !moved.has(task.issueId || task.id));
   }
 
+  /**
+   * Keep Linear's In Progress column honest: it represents a scheduler-owned
+   * task or a live durable lease, never an abandoned claim. The bulk heartbeat
+   * fetch already carries updatedAt, so the sweep adds no read-side API calls.
+   */
+  private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
+    const source = getTaskSource();
+    if (source?.kind !== 'linear') return tasks;
+
+    const staleAfterMs = (this.config.stalledInProgressHours ?? 6) * 60 * 60_000;
+    const candidates = planStalledInProgress(tasks, {
+      now,
+      staleAfterMs,
+      isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
+      hasLiveLease: (issueId) => {
+        const run = this.durableRuns.getRun(issueId);
+        return Boolean(
+          run
+          && ACTIVE_LEASE_STATES.includes(run.state)
+          && run.leaseExpiresAt != null
+          && run.leaseExpiresAt > now,
+        );
+      },
+      hasPublishedArtifact: (issueId) => Boolean(this.durableRuns.getRun(issueId)?.prUrl),
+    });
+
+    let moved = 0;
+    for (const { task, targetState } of candidates) {
+      const issueId = task.issueId || task.id;
+      const accepted = await source.updateState(issueId, targetState).catch((error) => {
+        console.warn(`[AutonomousRunner] Failed to retire stalled ${task.issueIdentifier ?? issueId}:`, error);
+        return false;
+      });
+      if (!accepted) {
+        console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
+        continue;
+      }
+      task.linearState = targetState;
+      updateTaskLinearState(issueId, targetState);
+      moved++;
+      this.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
+    }
+    if (moved > 0) this.syslog(`✓ Retired ${moved} stalled In Progress issue(s)`);
+    return tasks;
+  }
+
   async heartbeat(): Promise<void> {
     if (this.stopping) return;
     if (this._heartbeatRunning) {
@@ -1995,13 +2003,6 @@ export class AutonomousRunner {
       // quota gate is irrelevant; it only spammed 401s and could wrongly skip codex
       // work. codex-responses self-protects via RateLimitError (scheduler pause).
 
-      // 1.6 Pace gate (removed)
-      // The 5h rolling window cap (globalCap = projects × dailyTaskCap) and
-      // turbo-mode multiplier used to gate heartbeat here. Both were removed
-      // by user request: speed is now governed only by the cron schedule and
-      // the Linear API rate limiter, not by an internal completion cap.
-      this.syslog(`✓ Pace: unrestricted (cron only)`);
-
       // 2. Fetch tasks from Linear
       this.syslog('⟳ Fetching tasks from Linear...');
       const fetchResult = await fetchLinearTasks();
@@ -2011,17 +2012,17 @@ export class AutonomousRunner {
         await reportToDiscord(`⚠️ Linear fetch failed: ${fetchResult.error}`);
         return;
       }
+      let tasks = await this.reconcileStalledInProgress(fetchResult.tasks);
       const trackerReconcile = await reconcileTrackerTerminalRuns({
         durableRuns: this.durableRuns,
         source: getTaskSource(),
         inScope: this.getDispatchScopePredicate(),
-        knownTasks: fetchResult.tasks,
+        knownTasks: tasks,
       });
       if (trackerReconcile.lookedUp > 0 || trackerReconcile.fromFetch > 0) {
         this.syslog(`✓ Tracker cache: ${trackerReconcile.fromFetch} bulk hit(s), ${trackerReconcile.lookedUp} explicit lookup(s), ${trackerReconcile.terminal} terminal ledger row(s) reconciled`);
       }
       if (this.stopping) return;
-      let tasks = fetchResult.tasks;
       if (tasks.length === 0) {
         this.syslog('— No tasks in backlog');
         return;
@@ -2276,9 +2277,6 @@ export class AutonomousRunner {
         continue;
       }
 
-      // Per-project 5h window cap (removed, INT-2317) — like the global pace
-      // gate above, throughput is governed by the cron schedule and the Linear
-      // rate limiter only. Completions are still recorded for cost telemetry.
       candidates.push({ task, projectPath });
     }
 
@@ -2381,8 +2379,8 @@ export class AutonomousRunner {
    * Throws (rather than queueing work that would never start) when the
    * runner's configuration cannot execute scheduler-queued tasks:
    * runAvailableTasks() is a no-op without pairMode + maxConcurrentTasks, so
-   * silently accepting the queue here would strand the issues In Progress
-   * with no worker ever picking them up.
+   * silently accepting the queue here would claim success for work that can
+   * never start.
    */
   async enqueueIssues(
     tasks: TaskItem[],
@@ -2402,10 +2400,8 @@ export class AutonomousRunner {
       );
     }
     const queued: string[] = [];
-    // The reason distinction matters to the caller's claim-rollback decision:
-    // 'duplicate' means the scheduler already owns this issue (another live
-    // dispatch/heartbeat is working it — its In Progress claim must stand),
-    // while 'stopping' means nobody will ever run it (rollback is safe).
+    // The distinction tells the caller whether another live scheduler entry
+    // owns the task or the runner cannot accept it at all.
     const rejected: Array<{ id: string; reason: 'duplicate' | 'stopping' }> = [];
     for (const task of tasks) {
       if (this.stopping) {
@@ -2668,8 +2664,6 @@ export class AutonomousRunner {
       engineStats: this.engine.getStats(), pendingApproval: !!this.state.pendingApproval,
       schedulerStats: this.scheduler.getStats(),
       automationLedger: this.durableRuns.getMetrics(Date.now(), this.getDispatchScopePredicate()),
-      turboMode: this.turboMode,
-      turboExpiresAt: this.turboExpiresAt,
       dailyPace: getDailyPaceInfo(),
     };
   }
@@ -2773,27 +2767,6 @@ export class AutonomousRunner {
     };
   }
 
-  // ============================================
-  // Max Pace (formerly "Turbo")
-  // ============================================
-
-  getTurboMode(): boolean {
-    // Max pace no longer auto-expires; it stays on until explicitly toggled off.
-    return this.turboMode;
-  }
-
-  setTurboMode(enabled: boolean): void {
-    this.turboMode = enabled;
-    // No auto-expiry: max pace is a persistent state, not a 4h burst. (always-max)
-    this.turboExpiresAt = null;
-    if (enabled) {
-      console.log('[AutonomousRunner] MAX PACE ON (persistent)');
-      broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'turbo', line: 'MAX PACE ON — persistent' } });
-    } else {
-      console.log('[AutonomousRunner] MAX PACE OFF');
-      broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'turbo', line: 'MAX PACE OFF — normal pace resumed' } });
-    }
-  }
 
   async getAdapterSummary() {
     const defaultAdapter = this.config.defaultAdapter ?? 'codex';

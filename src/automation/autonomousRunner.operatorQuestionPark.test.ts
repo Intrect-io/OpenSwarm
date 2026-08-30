@@ -83,7 +83,7 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     const { AutonomousRunner } = await import('./autonomousRunner.js');
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: [REPO], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: dbPath,
     });
     const internal = runner as unknown as InternalRunner;

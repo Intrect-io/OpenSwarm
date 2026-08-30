@@ -182,6 +182,7 @@ export function issueToTask(issue: Issue): TaskItem {
     parentId: issue.parentId,
     estimatedMinutes: issue.estimateMinutes,
     createdAt: new Date(issue.createdAt).getTime(),
+    trackerUpdatedAt: new Date(issue.updatedAt).getTime(),
   };
 }
 

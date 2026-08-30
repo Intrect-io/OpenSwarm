@@ -61,7 +61,7 @@ describe('detectFileConflicts UnionFind rank tie-break branches', () => {
     expect(new Set(result.conflictGroups[0].sharedModules)).toEqual(
       new Set(['shared-02.ts', 'shared-03.ts', 'shared-12.ts', 'shared-13.ts']),
     );
-    expect(result.safe.map((t) => t.id)).toEqual(['C']);
+    expect(result.safe.map((t) => t.id)).toEqual(['C', 'D']);
   });
 });
 

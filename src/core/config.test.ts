@@ -143,6 +143,8 @@ agents:
 
       const config = loadConfig('/tmp/config.json');
       expect(config.autonomous?.maxReflections).toBe(3);
+      expect(config.autonomous?.maxConcurrentTasks).toBe(64);
+      expect(config.autonomous?.stalledInProgressHours).toBe(6);
       expect(config.autonomous?.verify).toEqual({
         enabled: true,
         blockOnNewFailures: true,

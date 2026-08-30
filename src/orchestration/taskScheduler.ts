@@ -11,6 +11,10 @@ import { resolve } from 'node:path';
 import type { TaskItem } from './decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import {
+  SchedulerThroughputTracker,
+  type SchedulerThroughputSnapshot,
+} from './schedulerThroughput.js';
 
 // Absolute upper bound on a single task's wall-clock time — a LAST-RESORT backstop.
 // The fast reclaiming is done by per-stage timeouts (pairPipeline: worker 20min,
@@ -93,6 +97,7 @@ export interface SchedulerStats {
   /** Timed-out executors that have not acknowledged cancellation yet. */
   quarantined: number;
   byProject: Map<string, number>;
+  throughput: SchedulerThroughputSnapshot;
 }
 
 function normalizeSchedulerConfig(config: SchedulerConfig): SchedulerConfig {
@@ -130,6 +135,7 @@ export class TaskScheduler extends EventEmitter {
   private runningTasks: Map<string, RunningTask> = new Map();
   private completedCount = 0;
   private failedCount = 0;
+  private readonly throughput: SchedulerThroughputTracker;
   private paused = false;
   private stopping = false;
   /** A timed-out executor may still mutate its worktree. Keep that repository fail-closed. */
@@ -140,6 +146,7 @@ export class TaskScheduler extends EventEmitter {
   constructor(config: SchedulerConfig) {
     super();
     this.config = normalizeSchedulerConfig(config);
+    this.throughput = new SchedulerThroughputTracker(this.config.maxConcurrent);
   }
 
   // ============================================
@@ -348,7 +355,8 @@ export class TaskScheduler extends EventEmitter {
   startTask(
     task: TaskItem,
     projectPath: string,
-    executor: (signal: AbortSignal) => Promise<PipelineResult>
+    executor: (signal: AbortSignal) => Promise<PipelineResult>,
+    queuedAt?: number,
   ): boolean {
     if (this.stopping || this.paused) {
       console.warn(`[Scheduler] Refusing start while ${this.stopping ? 'stopping' : 'paused'}: ${task.title}`);
@@ -383,17 +391,20 @@ export class TaskScheduler extends EventEmitter {
 
     let settleExecutor!: () => void;
     const executorSettled = new Promise<void>((resolve) => { settleExecutor = resolve; });
+    const startedAt = Date.now();
     const runningTask: RunningTask = {
       runId,
       task,
       projectPath,
-      startedAt: Date.now(),
+      startedAt,
       abortController,
       promise,
       executorSettled,
     };
 
     this.runningTasks.set(task.id, runningTask);
+    this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, startedAt);
+    if (queuedAt !== undefined) this.throughput.recordQueueStart(queuedAt, startedAt);
     this.unsettledExecutors.set(runId, executorSettled);
     console.log(`[Scheduler] Started task: ${task.title}`);
     this.emit('started', runningTask);
@@ -460,7 +471,10 @@ export class TaskScheduler extends EventEmitter {
     const running = this.runningTasks.get(taskId);
     if (!running || running.runId !== runId) return;
 
+    const finishedAt = Date.now();
+    this.throughput.recordResult(result, running.startedAt, finishedAt);
     this.runningTasks.delete(taskId);
+    this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, finishedAt);
 
     if (result.finalStatus === 'superseded') {
       // Existing in-flight work owns this scope. It is neither completed nor
@@ -498,7 +512,10 @@ export class TaskScheduler extends EventEmitter {
     const running = this.runningTasks.get(taskId);
     if (!running || running.runId !== runId) return;
 
+    const finishedAt = Date.now();
+    this.throughput.recordError(running.startedAt, finishedAt);
     this.runningTasks.delete(taskId);
+    this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, finishedAt);
     this.failedCount++;
 
     console.error(`[Scheduler] Task error: ${running.task.title}`, error.message);
@@ -531,8 +548,11 @@ export class TaskScheduler extends EventEmitter {
         break;
       }
 
-      const didStart = this.startTask(next.task, next.projectPath, (signal) =>
-        executor(next.task, next.projectPath, signal)
+      const didStart = this.startTask(
+        next.task,
+        next.projectPath,
+        (signal) => executor(next.task, next.projectPath, signal),
+        next.queuedAt,
       );
       if (didStart) started++;
       else {
@@ -682,12 +702,45 @@ export class TaskScheduler extends EventEmitter {
    * Get current stats
    */
   getStats(): SchedulerStats {
+    const now = Date.now();
     const byProject = new Map<string, number>();
 
     for (const running of this.runningTasks.values()) {
       const count = byProject.get(running.projectPath) || 0;
       byProject.set(running.projectPath, count + 1);
     }
+
+    const hasGlobalSlot = !this.stopping && this.runningTasks.size < this.config.maxConcurrent;
+    const runningByProject = this.runningCountByProject();
+    let runnableQueued = 0;
+    let blockedByProjectCapacity = 0;
+    let blockedByQuarantine = 0;
+    let oldestQueuedAgeMs = 0;
+    for (const queued of this.taskQueue) {
+      oldestQueuedAgeMs = Math.max(oldestQueuedAgeMs, now - queued.queuedAt);
+      const project = normalizeProjectPath(queued.projectPath);
+      if (this.quarantinedProjects.has(project)) {
+        blockedByQuarantine += 1;
+        continue;
+      }
+      const runningCount = runningByProject.get(project) ?? 0;
+      const projectBlocked = this.config.allowSameProjectConcurrent
+        ? this.config.maxConcurrentPerProject != null && runningCount >= this.config.maxConcurrentPerProject
+        : runningCount > 0;
+      if (projectBlocked) blockedByProjectCapacity += 1;
+      else if (hasGlobalSlot) runnableQueued += 1;
+    }
+
+    const throughput = this.throughput.snapshot({
+      running: this.runningTasks.size,
+      maxConcurrent: this.config.maxConcurrent,
+      availableSlots: this.getAvailableSlots(),
+      runnableQueued,
+      blockedByGlobalCapacity: hasGlobalSlot ? 0 : this.taskQueue.length,
+      blockedByProjectCapacity,
+      blockedByQuarantine,
+      oldestQueuedAgeMs,
+    }, now);
 
     return {
       queued: this.taskQueue.length,
@@ -696,6 +749,7 @@ export class TaskScheduler extends EventEmitter {
       failed: this.failedCount,
       quarantined: this.quarantinedExecutorCount(),
       byProject,
+      throughput,
     };
   }
 
@@ -717,7 +771,10 @@ export class TaskScheduler extends EventEmitter {
    * Update configuration
    */
   updateConfig(config: Partial<SchedulerConfig>): void {
+    const now = Date.now();
+    this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, now);
     this.config = normalizeSchedulerConfig({ ...this.config, ...config });
+    this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, now);
     console.log('[Scheduler] Config updated:', this.config);
   }
 }

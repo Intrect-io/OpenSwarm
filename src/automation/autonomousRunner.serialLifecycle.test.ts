@@ -56,8 +56,6 @@ async function runSerial(result: PipelineResult | Error): Promise<HubEvent[]> {
     allowedProjects: ['/repo'],
     heartbeatSchedule: '0 * * * *',
     autoExecute: true,
-    maxConsecutiveTasks: 1,
-    cooldownSeconds: 0,
     dryRun: true,
     pairMode: true,
     // The serial branch: no parallel scheduler, so nothing else emits lifecycle.
