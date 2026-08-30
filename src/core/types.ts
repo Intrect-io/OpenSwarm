@@ -141,7 +141,19 @@ export type SwarmConfig = {
    * Fail-closed human-surface boundary.  When enabled, external collaboration
    * surfaces are read-only and arbitrary agent program execution is disabled.
    */
-  humanSurfaceReadOnly?: { enabled: boolean };
+  humanSurfaceReadOnly?: {
+    enabled: boolean;
+    sandboxExecutor?: {
+      enabled: boolean;
+      socketPath: string;
+      allowedRoots: string[];
+      connectTimeoutMs: number;
+      maxRequestBytes: number;
+      maxOutputBytes: number;
+      maxTimeoutMs: number;
+      maxConcurrent: number;
+    };
+  };
   /** Linear API key */
   linearApiKey: string;
   /** Linear team ID */

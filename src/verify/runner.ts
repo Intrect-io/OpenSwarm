@@ -12,6 +12,7 @@ import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
 import type { VerifyCommand } from './manifest.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
@@ -136,27 +137,7 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
   if (processGroupId && process.platform !== 'win32') {
     try { process.kill(-processGroupId, 'SIGKILL'); } catch { /* already exited */ }
   }
-  if (process.platform === 'win32') return;
-  // A child may have created a new session to escape the original process
-  // group. The per-run marker survives ordinary forks, so reap any such
-  // descendants before deleting their sandbox.
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let stdout = '';
-    try {
-      ({ stdout } = await execFileAsync('ps', ['eww', '-axo', 'pid=,command='], { maxBuffer: 4 * 1024 * 1024 }));
-    } catch {
-      return;
-    }
-    const pids = stdout.split('\n')
-      .filter((line) => line.includes(marker))
-      .map((line) => Number.parseInt(line.trim().split(/\s+/, 1)[0] ?? '', 10))
-      .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid);
-    if (pids.length === 0) return;
-    for (const pid of pids) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* raced with exit */ }
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-  }
+  await terminateProcessesWithEnvMarker(marker);
 }
 
 /** Working sandbox memoized, broken one re-probed — see makeSandboxCache. */

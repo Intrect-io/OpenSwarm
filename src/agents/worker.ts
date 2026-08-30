@@ -389,6 +389,11 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       parsedResult.haltReason = parsedResult.haltReason
         ?? 'Blocked on an operator decision (ask_human posted to Discord)';
     }
+    if (raw.executionOutcomeUnknown) {
+      parsedResult.success = false;
+      parsedResult.executionOutcomeUnknown = true;
+      parsedResult.haltReason = 'OUTCOME_UNKNOWN_DO_NOT_RETRY: inspect the quarantined worktree before resuming';
+    }
 
     // Backfill usage measured by the adapter's own loop (codex-responses/gpt/
     // openrouter/local) so per-stage cost logs work on every provider; adapters

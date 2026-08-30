@@ -21,6 +21,7 @@ interface PublishableResult {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
+  workerResult?: { executionOutcomeUnknown?: boolean };
 }
 
 /** The fields these paths read off the task. */
@@ -46,7 +47,9 @@ export function shouldPublishParkedWork(
   hasWorktree: boolean,
   result: PublishableResult,
 ): boolean {
-  return hasWorktree && result.finalStatus === 'waiting_on_operator' && !result.prUrl;
+  return hasWorktree && result.finalStatus === 'waiting_on_operator'
+    && result.workerResult?.executionOutcomeUnknown !== true
+    && !result.prUrl;
 }
 
 /**

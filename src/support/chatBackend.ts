@@ -317,7 +317,10 @@ async function runChatViaAdapter(
         : BASE_CHAT_SYSTEM_PROMPT,
       enableTools: true,
       webTools: true,
-      shellTools: !isHumanSurfaceReadOnlyEnabled(),
+      // The native loop performs strict companion attestation and withholds
+      // bash itself when the socket/contract is absent. Keep the request on so
+      // strict chat and autonomous workers share the same fail-closed path.
+      shellTools: true,
       diagnosticsTool: false,
       mcpTools,
       // A high safety ceiling, not a task limit — normal work ends when the model

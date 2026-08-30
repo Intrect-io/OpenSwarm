@@ -34,7 +34,7 @@ const TASK: TaskItem = {
   linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
 };
 
-function pipelineResult(correlationIds: string[] = []): PipelineResult {
+function pipelineResult(correlationIds: string[] = [], executionOutcomeUnknown = false): PipelineResult {
   return {
     success: false, sessionId: 'session-1', stages: [], finalStatus: 'waiting_on_operator',
     totalDuration: 0, iterations: 1,
@@ -42,6 +42,7 @@ function pipelineResult(correlationIds: string[] = []): PipelineResult {
       success: false,
       summary: 'asked the operator',
       filesChanged: [], commands: [], output: '', blockedOnOperator: true,
+      executionOutcomeUnknown,
       operatorQuestionCorrelationIds: correlationIds,
     },
   };
@@ -160,6 +161,35 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     });
 
     expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('never turns a quarantined sandbox outcome into RETRY_AT or heartbeat backoff', async () => {
+    const internal = await makeRunner();
+    const quarantined = pipelineResult([], true);
+    await internal.durableRuns.execute(TASK, REPO, async () => quarantined);
+    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      lastErrorCode: 'execution_outcome_unknown',
+      retryAt: undefined,
+    });
+
+    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: quarantined });
+    await vi.waitFor(() => {
+      expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    });
+
+    expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(false);
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      lastErrorCode: 'execution_outcome_unknown',
+      retryAt: undefined,
+    });
+
+    const explicit = { ...TASK, explicitDispatch: true };
+    expect(internal.filterAlreadyProcessed([explicit])).toEqual([explicit]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 

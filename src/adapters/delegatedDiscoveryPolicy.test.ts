@@ -6,16 +6,16 @@ vi.mock('node:child_process', () => ({ execFile: execFileMock }));
 import { ClaudeCliAdapter } from './claude.js';
 import { CodexCliAdapter } from './codex.js';
 import { CursorCliAdapter } from './cursor.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 afterEach(() => {
-  configureHumanSurfaceReadOnly(false);
+  resetHumanSurfaceReadOnlyForTests();
   vi.clearAllMocks();
 });
 
 describe('delegated adapter discovery policy', () => {
   it('does not execute PATH tools or inspect live catalogs in strict mode', async () => {
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     const codex = new CodexCliAdapter();
     const claude = new ClaudeCliAdapter();
     const cursor = new CursorCliAdapter();

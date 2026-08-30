@@ -847,8 +847,8 @@ export class PairPipeline extends EventEmitter {
         // same unanswered question, burning the iteration budget to end up
         // where we already are. The question stays open on the board; the task
         // resumes when the Discord answer lands.
-        if (failedWorker.blockedOnOperator) {
-          safeConsole.log(`[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
+        if (failedWorker.blockedOnOperator || failedWorker.executionOutcomeUnknown) {
+          safeConsole.log(failedWorker.executionOutcomeUnknown ? `[${context.taskPrefix}] Worker sandbox outcome is unknown — quarantining without retry` : `[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
           // First-class status: buildResult derives finalStatus from the
           // session, and anything else here surfaces as a plain 'failed' the
           // scheduler failure-counts and backoff-retries into the same

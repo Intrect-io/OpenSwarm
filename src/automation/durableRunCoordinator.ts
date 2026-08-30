@@ -22,6 +22,7 @@ import {
   normalizeOperatorQuestionCorrelations,
   OPERATOR_QUESTION_PARK_REASON,
 } from '../coordination/operatorAnswers.js';
+import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -696,6 +697,15 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'waiting_on_operator') {
+      if (result.workerResult?.executionOutcomeUnknown) {
+        const reason = 'Sandbox command outcome unknown; inspect the preserved worktree and explicitly redispatch to resume';
+        return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+          errorCode: SANDBOX_OUTCOME_UNKNOWN_PARK_REASON,
+          errorMessage: reason,
+          eventKind: 'sandbox_outcome_quarantined',
+          eventData: { reason, sessionId: result.sessionId },
+        }, now) ? result : fencedResult(result);
+      }
       const correlationIds = normalizeOperatorQuestionCorrelations(
         result.workerResult?.operatorQuestionCorrelationIds ?? [],
       );

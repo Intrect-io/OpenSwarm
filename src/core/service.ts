@@ -30,9 +30,10 @@ import { probeDaemonPort } from '../cli/daemon.js';
 import { rotateServiceLogs } from '../support/logRotation.js';
 import { acquireServiceInstanceLock, type ServiceInstanceLock } from '../support/serviceInstanceLock.js';
 import {
-  configureHumanSurfaceReadOnly,
+  enableHumanSurfaceReadOnly,
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
+import { configureSandboxExecutor } from '../sandboxExecutor/runtime.js';
 
 let state: ServiceState = {
   running: false,
@@ -77,7 +78,11 @@ export async function startService(config: SwarmConfig): Promise<void> {
 }
 
 async function startServiceLocked(config: SwarmConfig): Promise<void> {
-  if (config.humanSurfaceReadOnly?.enabled === true) configureHumanSurfaceReadOnly(true);
+  if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
+  if (config.humanSurfaceReadOnly?.enabled === true
+      && config.humanSurfaceReadOnly.sandboxExecutor?.enabled === true) {
+    configureSandboxExecutor(config.humanSurfaceReadOnly.sandboxExecutor);
+  }
   let postMergeIntegration: PRProcessorConfig['postMergeIntegration'];
   // The lifetime SQLite lock above is the atomic single-instance authority.
   // Keep the port probe as a diagnostic for older daemons or unrelated

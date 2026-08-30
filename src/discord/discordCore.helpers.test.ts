@@ -4,10 +4,10 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clampDiscordText, getChatHistory, questionCorrelationIdFrom, saveChatHistory, startTypingIndicator } from './discordCore.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 afterEach(() => {
-  configureHumanSurfaceReadOnly(false);
+  resetHumanSurfaceReadOnlyForTests();
   vi.useRealTimers();
   vi.restoreAllMocks();
   delete process.env.OPENSWARM_CHAT_HISTORY_FILE;
@@ -55,7 +55,7 @@ describe('Discord outbound bounds', () => {
 
   it('does not emit typing activity in strict mode', async () => {
     const sendTyping = vi.fn(async () => {});
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     const timer = startTypingIndicator({ sendTyping }, 10);
     await new Promise((resolve) => setTimeout(resolve, 20));
     clearTimeout(timer);

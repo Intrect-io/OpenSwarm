@@ -15,7 +15,7 @@ vi.mock('../adapters/index.js', async (importOriginal) => {
 vi.mock('../mcp/mcpClient.js', () => ({ resolveMcpTools }));
 
 import { runChatCompletion } from './chatBackend.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['name'] = 'codex'): CliAdapter {
   return {
@@ -36,7 +36,7 @@ function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['
 }
 
 afterEach(() => {
-  configureHumanSurfaceReadOnly(false);
+  resetHumanSurfaceReadOnlyForTests();
   vi.clearAllMocks();
 });
 
@@ -186,8 +186,8 @@ describe('runChatCompletion CLI fallback', () => {
     expect(seenTools).toEqual([safeTool]);
   });
 
-  it('keeps local web chat on a native loop while forcing shell and diagnostics off in strict mode', async () => {
-    configureHumanSurfaceReadOnly(true);
+  it('keeps strict native chat on the companion-attested shell path while forcing diagnostics off', async () => {
+    enableHumanSurfaceReadOnly();
     let seenOptions: CliRunOptions | undefined;
     const native = cliAdapter(() => ({ command: 'unused', args: [] }));
     getAdapter.mockReturnValue({
@@ -201,11 +201,11 @@ describe('runChatCompletion CLI fallback', () => {
 
     await expect(runChatCompletion({ prompt: 'inspect', provider: 'codex', timeoutMs: 5000 }))
       .resolves.toMatchObject({ response: 'local chat still works' });
-    expect(seenOptions).toMatchObject({ shellTools: false, diagnosticsTool: false, webTools: true });
+    expect(seenOptions).toMatchObject({ shellTools: true, diagnosticsTool: false, webTools: true });
   });
 
   it('refuses delegated chat before buildCommand can reach a fake CLI or HOME credential', async () => {
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
     getAdapter.mockReturnValue(cliAdapter(buildCommand));
     const previousHome = process.env.HOME;

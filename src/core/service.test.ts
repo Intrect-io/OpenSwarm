@@ -11,7 +11,7 @@ import {
 import { setDefaultAdapter } from '../adapters/index.js';
 import { readProviderOverride } from './providerOverride.js';
 import * as autonomousRunner from '../automation/autonomousRunner.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 // Mock external dependencies
 // Mock auth so service.test never reads the real ~/.openswarm/auth-profiles.json
@@ -214,7 +214,7 @@ describe('service', () => {
 
   afterEach(async () => {
     await stopService();
-    configureHumanSurfaceReadOnly(false);
+    resetHumanSurfaceReadOnlyForTests();
   });
 
   // AGT-4122: service.ts forwarded only four decomposition fields and never the

@@ -21,6 +21,7 @@ import {
   isHumanSurfaceReadOnlyEnabled,
   stripHumanSurfaceEnv,
 } from '../mcp/humanSurfacePolicy.js';
+import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -127,7 +128,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked. This tool is unavailable when humanSurfaceReadOnly.enabled is true.',
+      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked. In humanSurfaceReadOnly mode this is exposed only through an attested companion sandbox.',
       parameters: {
         type: 'object',
         properties: {
@@ -290,6 +291,8 @@ export interface ToolResult {
   tool_call_id: string;
   content: string;
   is_error: boolean;
+  /** Stop the enclosing agent loop; retrying could duplicate a partial mutation. */
+  fatal?: 'execution_outcome_unknown';
 }
 
 /**
@@ -368,6 +371,8 @@ export interface ToolExecOptions {
   allowedToolNames?: ReadonlySet<string>;
   /** Run-scoped identity for worker coordination tool dispatch. */
   coordinationContext?: CoordinationToolContext;
+  /** Attested strict-mode companion session. Never accepted by delegated CLIs. */
+  sandboxExecutorSession?: SandboxExecutorSession;
   /**
    * Epoch ms at which the enclosing agentic loop gives up, when it has one.
    * `coordination_wait` clamps itself below this: a fixed ceiling alone would
@@ -813,11 +818,61 @@ export async function executeTool(
       case 'bash': {
         const command: string = args.command;
         if (isHumanSurfaceReadOnlyEnabled()) {
-          return {
-            tool_call_id: callId,
-            content: 'HUMAN_SURFACE_READ_ONLY: arbitrary program execution is disabled while humanSurfaceReadOnly.enabled is true',
-            is_error: true,
-          };
+          if (!execOptions?.sandboxExecutorSession) {
+            return {
+              tool_call_id: callId,
+              content: 'HUMAN_SURFACE_READ_ONLY: attested sandbox executor is unavailable',
+              is_error: true,
+            };
+          }
+          if (isCommandBlocked(command)) {
+            return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
+          }
+          const limit = execOptions.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
+          try {
+            const result = await execOptions.sandboxExecutorSession.execute(command, limit);
+            const output = result.output.length > 8000
+              ? `...[sandbox output tail]\n${result.output.slice(-8000)}`
+              : result.output;
+            if (result.outputLimitExceeded) {
+              return {
+                tool_call_id: callId,
+                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: command hit the output ceiling after it may have modified the workspace\n${output}`,
+                is_error: true,
+                fatal: 'execution_outcome_unknown',
+              };
+            }
+            if (result.timedOut) {
+              return {
+                tool_call_id: callId,
+                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: timeout after ${limit}ms; the process tree was terminated but workspace writes may be partial.\n${output}`,
+                is_error: true,
+                fatal: 'execution_outcome_unknown',
+              };
+            }
+            if (result.exitCode !== 0) {
+              return {
+                tool_call_id: callId,
+                content: `${output || '(no output)'}\n[exit code ${result.exitCode ?? '?'}${result.signal ? `, signal ${result.signal}` : ''}]`,
+                is_error: true,
+              };
+            }
+            return { tool_call_id: callId, content: output || '(no output, exit 0)', is_error: false };
+          } catch (error) {
+            if (error instanceof SandboxOutcomeUnknownError) {
+              return {
+                tool_call_id: callId,
+                content: error.message,
+                is_error: true,
+                fatal: 'execution_outcome_unknown',
+              };
+            }
+            return {
+              tool_call_id: callId,
+              content: `SANDBOX_EXECUTOR_FAILED: ${error instanceof Error ? error.message : String(error)}`,
+              is_error: true,
+            };
+          }
         }
         const humanSurfaceDenial = humanSurfaceShellWriteReason(command);
         if (humanSurfaceDenial) {
@@ -955,8 +1010,19 @@ export async function executeToolCalls(
   while (index < toolCalls.length) {
     const call = toolCalls[index];
     if (!readOnlyTools.has(call.function.name)) {
-      results.push(await executeTool(call, cwd, cache, execOptions));
+      const result = await executeTool(call, cwd, cache, execOptions);
+      results.push(result);
       index++;
+      if (result.fatal) {
+        while (index < toolCalls.length) {
+          results.push({
+            tool_call_id: toolCalls[index++].id,
+            content: 'SKIPPED: a prior command has unknown outcome; no later tool was executed',
+            is_error: true,
+            fatal: 'execution_outcome_unknown',
+          });
+        }
+      }
       continue;
     }
 

@@ -8,7 +8,7 @@ import type { ExecutionDurabilityHooks } from '../automation/durableRunCoordinat
 import type { EffectClaim, EffectInput } from '../automation/runLedger.js';
 import type { RepoMetadata } from '../support/repoMetadata.js';
 import {
-  configureHumanSurfaceReadOnly,
+  resetHumanSurfaceReadOnlyForTests,
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
 import {
@@ -25,7 +25,7 @@ import {
   type WorkCoordinator,
 } from './workCommand.js';
 
-afterEach(() => configureHumanSurfaceReadOnly(false));
+afterEach(() => resetHumanSurfaceReadOnlyForTests());
 
 function issue(overrides: Partial<LinearIssueInfo> = {}): LinearIssueInfo {
   return {

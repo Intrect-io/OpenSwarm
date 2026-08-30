@@ -1,12 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { ToolDefinition } from '../adapters/tools.js';
 import {
   attachMcpToolPolicy,
   describeMcpToolPolicy,
+  enableHumanSurfaceReadOnly,
   filterHumanSurfaceMcpTools,
   humanSurfaceShellWriteReason,
+  isHumanSurfaceReadOnlyEnabled,
+  resetHumanSurfaceReadOnlyForTests,
   stripHumanSurfaceEnv,
 } from './humanSurfacePolicy.js';
+
+afterEach(() => resetHumanSurfaceReadOnlyForTests());
 
 const tool = (name: string, description = ''): ToolDefinition => ({
   type: 'function',
@@ -14,6 +19,13 @@ const tool = (name: string, description = ''): ToolDefinition => ({
 });
 
 describe('human-surface MCP policy', () => {
+  it('has a one-way production setter so later config reads cannot downgrade strict mode', () => {
+    expect(isHumanSurfaceReadOnlyEnabled()).toBe(false);
+    enableHumanSurfaceReadOnly();
+    enableHumanSurfaceReadOnly();
+    expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+  });
+
   it('recognizes server, camelCase action, and descriptor instead of one substring', () => {
     const decision = describeMcpToolPolicy(tool('slack__chat_postMessage'));
     expect(decision).toMatchObject({ server: 'slack', action: 'chat_postMessage', surface: 'human', access: 'write' });

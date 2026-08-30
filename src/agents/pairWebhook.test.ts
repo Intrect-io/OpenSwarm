@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sendDiscordWebhook, sendWebhook, type WebhookPayload } from './pairWebhook.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 import type { PairSession } from './agentPair.js';
 
 // These suites cover parsing and backend selection, not the socket layer, so
@@ -13,7 +13,7 @@ vi.mock('../support/outboundUrl.js', async (importOriginal) => {
 
 
 afterEach(() => {
-  configureHumanSurfaceReadOnly(false);
+  resetHumanSurfaceReadOnlyForTests();
   vi.unstubAllGlobals();
 });
 
@@ -38,7 +38,7 @@ describe('sendWebhook', () => {
   it('does not call generic or Discord webhooks in strict mode', async () => {
     const fetchMock = vi.fn(async () => new Response('ok'));
     vi.stubGlobal('fetch', fetchMock);
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
 
     await expect(sendWebhook('https://example.com/hook', payload))
       .resolves.toMatchObject({ success: false, error: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EmbedBuilder } from 'discord.js';
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]) }));
 import { createNotifier, messageToText } from './notifier.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 // These suites cover parsing and backend selection, not the socket layer, so
 // route publicFetch onto the global fetch they stub. The real implementation —
@@ -14,7 +14,7 @@ vi.mock('../support/outboundUrl.js', async (importOriginal) => {
 
 
 afterEach(() => {
-  configureHumanSurfaceReadOnly(false);
+  resetHumanSurfaceReadOnlyForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -104,7 +104,7 @@ describe('createNotifier — channel selection', () => {
 
     // Toggle after construction as well: an already registered notifier must
     // not retain a latent sender when a config reload tightens the boundary.
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     await Promise.all(notifiers.map((notifier) => notifier.notify('must not leave the process')));
 
     expect(send).not.toHaveBeenCalled();
