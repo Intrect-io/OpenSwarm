@@ -97,9 +97,28 @@ export interface CoordinationPeer {
 }
 
 const AGENT_ROLES = new Set(['worker', 'reviewer', 'orchestrator', 'review-agent']);
+const PRESENCE_TERMINAL_KINDS: ReadonlySet<CoordinationEvent['kind']> = new Set([
+  'delegation-result',
+  'mcp-audit',
+  'review-run',
+]);
+const PRESENCE_TERMINAL_STATUSES: ReadonlySet<CoordinationEvent['status']> = new Set([
+  'completed',
+  'failed',
+  'expired',
+]);
 
 function peerKey(taskId: string, address: string): string {
   return `${taskId}\0${address}`;
+}
+
+function endsAgentPresence(event: CoordinationEvent): boolean {
+  return PRESENCE_TERMINAL_KINDS.has(event.kind) && PRESENCE_TERMINAL_STATUSES.has(event.status);
+}
+
+function isNewerPresenceEvent(next: CoordinationEvent, previous: CoordinationEvent): boolean {
+  if (next.seq !== previous.seq) return next.seq > previous.seq;
+  return next.timestamp >= previous.timestamp;
 }
 
 /** Build a bounded, recent peer directory from durable board presence. */
@@ -120,51 +139,50 @@ export function coordinationPeers(
   const activeWindowMs = options.activeWindowMs ?? 30 * 60_000;
   const roles = options.roles?.length ? new Set(options.roles) : undefined;
   const tasks = options.taskIds?.length ? new Set(options.taskIds) : undefined;
-  const peers = new Map<string, CoordinationPeer>();
+  const presence = new Map<string, { event: CoordinationEvent; peer?: CoordinationPeer }>();
   const legacyRepository = options.repository ? canonicalPath(options.repository) : undefined;
-
-  const touch = (
-    event: CoordinationEvent,
-    address: string | undefined,
-    name: string | undefined,
-    role: string | undefined,
-    taskId: string | undefined,
-    taskLabel: string | undefined,
-  ) => {
-    if (!address || !taskId || !role || !AGENT_ROLES.has(role)) return;
-    if (options.exclude?.address === address && options.exclude.taskId === taskId) return;
-    if (roles && !roles.has(role)) return;
-    if (tasks && !tasks.has(taskId)) return;
-    if (now - event.timestamp > activeWindowMs) return;
-    const key = peerKey(taskId, address);
-    const previous = peers.get(key);
-    if (!previous || event.timestamp >= previous.lastSeen) {
-      peers.set(key, {
-        repoKey: options.repoKey,
-        address,
-        name,
-        role,
-        taskId,
-        taskLabel,
-        lastSeen: event.timestamp,
-      });
-    }
-  };
 
   for (const event of events) {
     if (event.repoKey ? event.repoKey !== options.repoKey : legacyRepository !== undefined && canonicalPath(event.repository) !== legacyRepository) continue;
-    touch(
-      event, event.actor, event.actorName, event.actorRole,
-      event.sourceTaskId ?? event.taskId, event.sourceTaskLabel ?? event.taskLabel,
-    );
-    touch(
-      event, event.recipient, event.recipientName, event.recipientRole,
-      event.targetTaskId ?? event.taskId, event.targetTaskLabel ?? event.taskLabel,
-    );
+    const address = event.actor;
+    const role = event.actorRole;
+    const taskId = event.sourceTaskId ?? event.taskId;
+    if (!address || !taskId || !role || !AGENT_ROLES.has(role)) continue;
+
+    const key = peerKey(taskId, address);
+    const previous = presence.get(key);
+    if (previous && !isNewerPresenceEvent(event, previous.event)) continue;
+
+    // Recipients are routing metadata, not proof that the addressed role has
+    // started. Keep a terminal tombstone so an older running event cannot revive
+    // an agent when callers provide a reordered event slice.
+    if (endsAgentPresence(event)) {
+      presence.set(key, { event });
+      continue;
+    }
+    presence.set(key, {
+      event,
+      peer: {
+        repoKey: options.repoKey,
+        address,
+        name: event.actorName,
+        role,
+        taskId,
+        taskLabel: event.sourceTaskLabel ?? event.taskLabel,
+        lastSeen: event.timestamp,
+      },
+    });
   }
 
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 20), 1), 50);
-  return [...peers.values()]
+  return [...presence.values()]
+    .flatMap(({ peer }) => peer ? [peer] : [])
+    .filter((peer) => !options.exclude
+      || options.exclude.address !== peer.address
+      || options.exclude.taskId !== peer.taskId)
+    .filter((peer) => !roles || (peer.role !== undefined && roles.has(peer.role)))
+    .filter((peer) => !tasks || tasks.has(peer.taskId))
+    .filter((peer) => now - peer.lastSeen <= activeWindowMs)
     .sort((a, b) => b.lastSeen - a.lastSeen || a.address.localeCompare(b.address))
     .slice(0, limit);
 }
