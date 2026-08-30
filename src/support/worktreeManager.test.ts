@@ -323,6 +323,23 @@ describe('preserveWorktree → createWorktree resume roundtrip (INT-2503)', () =
     expect(existsSync(join(resumed.worktreePath, '.openswarm-preserved'))).toBe(false);
   });
 
+  it('reconciles newly provisioned shared paths when a preserved worktree resumes', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial-impl\n');
+    expect(await preserveWorktree(info, 'waiting for runtime input')).toBe(true);
+
+    writeFileSync(join(repo, '.env'), 'SERVICE_URL=https://example.invalid\n');
+    writeFileSync(join(repo, 'openswarm.json'), JSON.stringify({
+      schemaVersion: 1,
+      sandbox: { sharedPaths: ['.env'] },
+    }));
+
+    const resumed = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    const linkedEnv = join(resumed.worktreePath, '.env');
+    expect(lstatSync(linkedEnv).isSymbolicLink()).toBe(true);
+    expect(realpathSync(linkedEnv)).toBe(realpathSync(join(repo, '.env')));
+  });
+
   it('INT-2729: commits the dirty work to the branch so it survives dir removal', async () => {
     const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
     writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial-impl\n');
