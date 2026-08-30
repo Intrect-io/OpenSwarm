@@ -135,6 +135,14 @@ export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
 
 export type RunnableCandidate = { task: TaskItem; projectPath: string };
 
+type CachedDraftScope = {
+  fingerprint: string;
+  fileScope: string[];
+  draft: NonNullable<TaskItem['preAdmissionDraft']>;
+  description?: string;
+  executionCommentsLoaded?: boolean;
+};
+
 // The completion/cancellation effect payload contract (and its delivery) lives
 // in trackerEffects.ts, shared with the `openswarm work` CLI so the marker
 // format cannot drift between the two outbox writers. (INT-3387)
@@ -195,6 +203,10 @@ export class AutonomousRunner {
   private readonly schedulerHandlers = new Set<Promise<void>>();
   /** Adapter default-model cache for the dashboard PAIR bar (INT-2393). */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
+  /** Unknown write scopes deferred by a known-first wave, repaid one at a time. */
+  private unknownScopeDebt = new Set<string>();
+  /** Sufficient drafted scopes survive heartbeat refetches and feed the pipeline. */
+  private preAdmissionScopeCache = new Map<string, CachedDraftScope>();
   private cronJob: Cron | null = null;
   private periodicReviewJobs: Cron[] = [];
   private orchestratorSupervisor: OrchestratorSupervisor | null = null;
@@ -2382,7 +2394,35 @@ export class AutonomousRunner {
     const safeTasks = new Set<string>(); // task IDs safe to enqueue
     for (const [projPath, group] of byProject) {
       try {
-        await Promise.all(group.map(c => resolveTaskFileScope(c.task, projPath)));
+        await Promise.all(group.map(async c => {
+          const cacheKey = `${projPath}\0${c.task.id}`;
+          const fingerprint = JSON.stringify([
+            c.task.title, c.task.description ?? '', c.task.trackerUpdatedAt ?? 0,
+          ]);
+          const cached = this.preAdmissionScopeCache.get(cacheKey);
+          if ((c.task.fileScope?.length ?? 0) === 0 && cached?.fingerprint === fingerprint) {
+            c.task.fileScope = [...cached.fileScope];
+            c.task.fileScopeSource = 'drafted';
+            c.task.preAdmissionDraft = { ...cached.draft, relevantFiles: [...cached.fileScope] };
+            c.task.description = cached.description;
+            c.task.executionCommentsLoaded = cached.executionCommentsLoaded;
+            return;
+          }
+          await resolveTaskFileScope(c.task, projPath, {
+            draftTask: () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath),
+          });
+          if (c.task.fileScopeSource === 'drafted' && c.task.preAdmissionDraft) {
+            this.preAdmissionScopeCache.delete(cacheKey);
+            this.preAdmissionScopeCache.set(cacheKey, {
+              fingerprint, fileScope: [...(c.task.fileScope ?? [])], draft: c.task.preAdmissionDraft,
+              description: c.task.description,
+              executionCommentsLoaded: c.task.executionCommentsLoaded,
+            });
+            if (this.preAdmissionScopeCache.size > 256) {
+              this.preAdmissionScopeCache.delete(this.preAdmissionScopeCache.keys().next().value!);
+            }
+          }
+        }));
 
         // A later heartbeat must compare new candidates with workers that are
         // already editing another worktree. Candidate-vs-candidate detection
@@ -2401,10 +2441,31 @@ export class AutonomousRunner {
         });
         if (runnable.length === 0) continue;
 
-        const result = await detectFileConflicts(runnable.map(c => c.task), projPath);
+        const debtKey = (task: TaskItem) => `${projPath}\0${task.id}`;
+        for (const candidate of runnable) {
+          if ((candidate.task.fileScope?.length ?? 0) > 0) this.unknownScopeDebt.delete(debtKey(candidate.task));
+        }
+        const debtTask = active.length === 0
+          ? runnable.find(candidate =>
+            (candidate.task.fileScope?.length ?? 0) === 0
+            && this.unknownScopeDebt.has(debtKey(candidate.task)))
+          : undefined;
+        const runnableTasks = runnable.map(c => c.task);
+        const result = debtTask
+          ? await detectFileConflicts(runnableTasks, projPath, {
+            preferUnknownExclusive: true,
+            preferredUnknownTaskId: debtTask.task.id,
+          })
+          : await detectFileConflicts(runnableTasks, projPath);
 
         for (const t of result.safe) {
           safeTasks.add(t.id);
+          if ((t.fileScope?.length ?? 0) === 0) this.unknownScopeDebt.delete(debtKey(t));
+        }
+        for (const candidate of runnable) {
+          if ((candidate.task.fileScope?.length ?? 0) === 0 && !safeTasks.has(candidate.task.id)) {
+            this.unknownScopeDebt.add(debtKey(candidate.task));
+          }
         }
 
         for (const cg of result.conflictGroups) {

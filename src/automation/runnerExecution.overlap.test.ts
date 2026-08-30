@@ -69,4 +69,21 @@ describe('executePipeline open-PR preflight (INT-2568)', () => {
 
     expect(runDraftAnalysis.mock.calls[0][0].taskDescription).toBe('original diagnosis');
   });
+
+  it('reuses a sufficient pre-admission draft in the pipeline', async () => {
+    const task: TaskItem = {
+      id: 'cached', issueId: 'cached', issueIdentifier: 'INT-cached',
+      source: 'linear', title: 'Cached draft', priority: 2, createdAt: 1,
+      fileScope: ['src/subtraction.rs'], fileScopeSource: 'drafted',
+      preAdmissionDraft: await runDraftAnalysis(),
+    };
+    runDraftAnalysis.mockClear();
+
+    const result = await executePipeline({
+      allowedProjects: ['/repo'], worktreeMode: true, enableDecomposition: false,
+    } as ExecutionContext, task, '/repo');
+
+    expect(result.finalStatus).toBe('superseded');
+    expect(runDraftAnalysis).not.toHaveBeenCalled();
+  });
 });

@@ -121,7 +121,7 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.conflictGroups).toHaveLength(0);
   });
 
-  it('serializes unknown scope against every peer because merge safety cannot be proven', async () => {
+  it('runs the known maximal wave before an unknown scope', async () => {
     const result = await detectFileConflicts(
       [
         task('unknown', 1, ['unknown-file-scope']),
@@ -131,8 +131,28 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
       PROJECT,
     );
 
-    expect(result.safe.map((t) => t.id)).toEqual(['unknown']);
+    expect(result.safe.map((t) => t.id)).toEqual(['known-a', 'known-b']);
     expect(result.conflictGroups).toHaveLength(1);
     expect(result.conflictGroups[0].sharedModules).toEqual(['unknown-file-scope']);
+  });
+
+  it('admits exactly one task when every scope is unknown', async () => {
+    const result = await detectFileConflicts(
+      [task('first', 2), task('second', 1), task('third', 3)],
+      PROJECT,
+    );
+
+    expect(result.safe.map((t) => t.id)).toEqual(['second']);
+    expect(result.conflictGroups).toHaveLength(1);
+  });
+
+  it('can repay a deferred unknown as an exclusive wave', async () => {
+    const result = await detectFileConflicts(
+      [task('known', 1, ['src/known.ts']), task('unknown', 4)],
+      PROJECT,
+      { preferUnknownExclusive: true, preferredUnknownTaskId: 'unknown' },
+    );
+
+    expect(result.safe.map((t) => t.id)).toEqual(['unknown']);
   });
 });

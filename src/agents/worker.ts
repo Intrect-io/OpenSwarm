@@ -27,6 +27,7 @@ import {
   type AdapterRoutePolicy,
 } from '../coordination/routingPolicy.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
+import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
 
 // Types
 
@@ -122,42 +123,12 @@ export function loadWorkerRepoRules(projectPath: string): string {
   return sections.length > 0 ? `\n\n${sections.join('\n\n')}` : '';
 }
 
-/** Keep Git as the sole changed-file authority and enforce planner scope. */
-/**
- * Does `file` test `scoped`?
- *
- * A task scoped to `src/support/web.ts` whose completion criteria demand tests
- * has nowhere to put them: the test file is outside the declared scope, the
- * worker is rejected for writing it, and the retry writes it again. That
- * contradiction burned every iteration of a real run without ever reaching the
- * reviewer.
- *
- * The allowance is deliberately narrow — same directory, same base name, a
- * `.test`/`.spec` suffix, same extension — so it admits the tests for a file
- * the worker may already rewrite, and nothing else.
- */
-function isTestForScopedFile(file: string, scoped: string): boolean {
-  const match = scoped.match(/^(.*?)([^/]+)\.([cm]?[jt]sx?)$/);
-  if (!match) return false;
-  const [, dir, base, ext] = match;
-  const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // [^/] keeps the infix inside the same directory: `.+` would let
-  // `src/a.x/evil/deep.test.ts` ride on a scope of `src/a.ts`.
-  return new RegExp(`^${escape(dir)}${escape(base)}(\\.[^/]+)?\\.(test|spec)\\.${escape(ext)}$`).test(file);
-}
-
 export function reconcileWorkerFiles(
   gitChangedFiles: string[],
   fileScope: string[] = [],
 ): { filesChanged: string[]; outsideScope: string[] } {
   const filesChanged = [...gitChangedFiles];
-  const scope = fileScope.map((file) => file.replace(/^\.\//, '').replace(/\/$/, ''));
-  const inScope = (file: string): boolean => scope.some((allowed) =>
-    file === allowed
-    || file.startsWith(`${allowed}/`)
-    || isTestForScopedFile(file, allowed));
-  const outsideScope = scope.length === 0 ? [] : filesChanged.filter((file) => !inScope(file));
-  return { filesChanged, outsideScope };
+  return { filesChanged, outsideScope: filesOutsideWriteScope(filesChanged, fileScope) };
 }
 
 /** jobProfile effort → bash timeout. Heavier tasks get longer verification budgets. */

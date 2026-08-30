@@ -330,6 +330,21 @@ describe('PairPipeline model selection', () => {
     expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ fileScope: undefined }));
   });
 
+  it('enforces a canonical drafted scope at the worker boundary', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'], maxIterations: 1,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    await pipeline.run(task({
+      fileScope: ['src/example.ts'],
+      fileScopeSource: 'drafted',
+    }), process.cwd());
+
+    expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ fileScope: ['src/example.ts'] }));
+  });
+
   it('passes preserved WIP files to the worker Git authority boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
     const pipeline = new PairPipeline({

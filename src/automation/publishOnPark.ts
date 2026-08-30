@@ -31,6 +31,8 @@ interface PublishableTask {
   title: string;
   description?: string;
   issueIdentifier?: string;
+  fileScope?: string[];
+  fileScopeSource?: 'declared' | 'validated-direct' | 'drafted' | 'inferred';
 }
 
 /**
@@ -86,7 +88,8 @@ export async function publishParkedWork(
         + ' reviewed — this PR is a draft on purpose.',
       // Draft, and committed work only: nothing reviewed this, and the tree
       // must stay exactly as the worker left it so the resume continues.
-      { draft: true, committedOnly: true },
+      { draft: true, committedOnly: true,
+        fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
     );
     // The ledger records the PR; the pipeline result deliberately does NOT.
     //
@@ -141,6 +144,7 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
+          { fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;

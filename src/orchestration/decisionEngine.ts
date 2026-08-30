@@ -63,9 +63,13 @@ export interface TaskItem {
   trackerUpdatedAt?: number;
   dueDate?: number;
   blockedBy?: string[];    // Other task IDs
-  fileScope?: string[];    // Files/modules this task modifies (planner-declared) — for parallel conflict detection
-  /** Whether fileScope came from an explicit planner declaration or KG inference. */
-  fileScopeSource?: 'declared' | 'inferred';
+  fileScope?: string[];    // Reserved repository-relative write scope for admission/execution/publication
+  /** Provenance of the reserved write boundary (legacy `inferred` stays advisory). */
+  fileScopeSource?: 'declared' | 'validated-direct' | 'drafted' | 'inferred';
+  /** Sufficient pre-admission draft reused by the execution pipeline. */
+  preAdmissionDraft?: import('../agents/draftAnalyzer.js').DraftAnalysis;
+  /** Tracker comments already appended before the pre-admission draft. */
+  executionCommentsLoaded?: boolean;
   impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
   estimatedMinutes?: number;
   priorAttemptFeedback?: string;  // Last failure/rejection feedback from a previous session — injected into the worker's first iteration (INT-2474)

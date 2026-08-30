@@ -159,6 +159,13 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
     runnerExecution = await import('./runnerExecution.js');
     detectFileConflictsMock.mockReset();
     detectFileConflictsMock.mockResolvedValue({ safe: [], conflictGroups: [] });
+    resolveTaskFileScopeMock.mockReset();
+    resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+      candidate.fileScope ??= [`scope/${candidate.id}`];
+      return candidate.fileScope;
+    });
+    fileScopesConflictMock.mockReset();
+    fileScopesConflictMock.mockReturnValue(false);
   }, 30000);
 
   afterEach(() => {
@@ -303,6 +310,62 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
       expect(safe).toEqual(new Set(['first', 'second']));
       expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
+    });
+
+    it('repays a known-first deferred unknown as the next exclusive idle wave', async () => {
+      const r = new AutonomousRunner(cfg({
+        allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+      }));
+      const internal = r as unknown as Internal;
+      const known = task({ id: 'known', fileScope: ['src/known.ts'] });
+      const unknown = task({ id: 'unknown', fileScope: undefined });
+      resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => candidate.fileScope ?? []);
+      detectFileConflictsMock
+        .mockResolvedValueOnce({ safe: [known], conflictGroups: [{ tasks: [known, unknown], sharedModules: ['unknown-file-scope'] }] })
+        .mockResolvedValueOnce({ safe: [unknown], conflictGroups: [{ tasks: [known, unknown], sharedModules: ['unknown-file-scope'] }] });
+
+      const firstWave = await internal.detectSafeCandidateIds([
+        { task: known, projectPath: '/repo' }, { task: unknown, projectPath: '/repo' },
+      ]);
+      const secondWave = await internal.detectSafeCandidateIds([
+        { task: known, projectPath: '/repo' }, { task: unknown, projectPath: '/repo' },
+      ]);
+
+      expect(firstWave).toEqual(new Set(['known']));
+      expect(secondWave).toEqual(new Set(['unknown']));
+      expect(detectFileConflictsMock).toHaveBeenLastCalledWith([known, unknown], '/repo', {
+        preferUnknownExclusive: true,
+        preferredUnknownTaskId: 'unknown',
+      });
+    });
+
+    it('reuses a sufficient drafted scope across heartbeat task refetches', async () => {
+      const r = new AutonomousRunner(cfg({ worktreeMode: true, maxConcurrentTasks: 2 }));
+      const internal = r as unknown as Internal;
+      resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+        candidate.fileScope = ['src/drafted.ts'];
+        candidate.fileScopeSource = 'drafted';
+        candidate.preAdmissionDraft = {
+          taskType: 'bugfix', intentSummary: 'repair the drafted implementation',
+          relevantFiles: ['src/drafted.ts'],
+          suggestedApproach: 'change the existing implementation carefully',
+          completionCriteria: ['focused test passes'], sufficient: true,
+          registrySnapshot: [], durationMs: 1,
+        };
+        return candidate.fileScope;
+      });
+      detectFileConflictsMock.mockImplementation(async (tasks: TaskItem[]) => ({
+        safe: tasks, conflictGroups: [],
+      }));
+      const first = task({ id: 'cached-draft', description: 'stable description', trackerUpdatedAt: 10 });
+      const refetched = task({ id: 'cached-draft', description: 'stable description', trackerUpdatedAt: 10 });
+
+      await internal.detectSafeCandidateIds([{ task: first, projectPath: '/repo' }]);
+      await internal.detectSafeCandidateIds([{ task: refetched, projectPath: '/repo' }]);
+
+      expect(resolveTaskFileScopeMock).toHaveBeenCalledTimes(1);
+      expect(refetched.fileScopeSource).toBe('drafted');
+      expect(refetched.preAdmissionDraft?.relevantFiles).toEqual(['src/drafted.ts']);
     });
 
     it('still defers overlapping scopes when worktree fan-out is disabled', async () => {
