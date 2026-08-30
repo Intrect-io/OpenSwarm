@@ -2523,6 +2523,7 @@ export class AutonomousRunner {
       maxReflections: this.config.maxReflections,
       durability,
       peerIssues: this.lastFetchedTasks,
+      getActiveWorkerIssues: (p) => this.durableRuns.activeWorkerIdentifiers(p),
       mcpPolicies: this.config.mcpPolicies,
       adapterRouting: this.config.adapterRouting,
     };

@@ -30,6 +30,8 @@ export async function applyDraftGates(options: {
   peers?: TaskItem[];
   source: ITaskSource | null;
   worktreeMode?: boolean;
+  /** Issues a worker currently holds; only their PRs reserve files. (AGT-4097) */
+  activeWorkerIssues?: readonly string[];
 }): Promise<PipelineResult | null> {
   const { task, draft, peers, source } = options;
   const duplicateTarget = peers?.find(peer => (peer.issueId || peer.id) === draft.duplicateOfIssueId);
@@ -47,14 +49,21 @@ export async function applyDraftGates(options: {
   }
 
   if (options.worktreeMode && draft.relevantFiles.length > 0) {
-    // Exclude this issue's own PR. `publishOnPark` opens a draft PR for a run
-    // that parks on an operator question, so from the next heartbeat the task
-    // was colliding with itself and superseding forever — measured on
-    // cgf-portal as 15 supersedes and zero real work attempts in 6h. (AGT-4095)
+    // An open PR reserves its files only while a worker is editing them.
+    // `publishOnPark` publishes a run that stops for an operator, so its PR
+    // outlives the worker by hours or days: the task first collided with its
+    // own PR (AGT-4095) and then with every sibling's — seven such PRs held
+    // cgf-portal's hot files for 7-12h, and each blocked attempt doubled the
+    // backoff again. (AGT-4097)
     const overlaps = await findOpenPRFileOverlaps(
       options.projectPath,
       draft.relevantFiles,
-      task.issueIdentifier ?? task.issueId,
+      {
+        selfIssueIdentifier: task.issueIdentifier ?? task.issueId,
+        // Passed through as-is: undefined means the caller could not ask the
+        // ledger, and every swarm PR keeps reserving. See findOpenPRFileOverlaps.
+        activeIssueIdentifiers: options.activeWorkerIssues,
+      },
     );
     if (overlaps.length > 0) {
       const lines = overlaps.map(overlap => `- ${overlap.url}: ${overlap.files.map(file => `\`${file}\``).join(', ')}`);

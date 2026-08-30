@@ -3,6 +3,7 @@ import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
+import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import {
   RunLedger,
   type EffectClaim,
@@ -146,6 +147,18 @@ const REBUILT_TASK_PRIORITY = 4;
  * an admission slot — so the GitHub-authoritative half of reconciliation would
  * wait forever on a card it is never going to be handed. (AGT-4094)
  */
+/**
+ * Is a worker still holding this run, or has its lease lapsed?
+ *
+ * An active state alone is not enough: a process that died leaves its row in
+ * EXECUTING until reconciliation sweeps it, which can be a full lease period
+ * later. Same test the ledger applies when it reclaims those rows, including
+ * treating a missing expiry as lapsed rather than eternal. (AGT-4097)
+ */
+function holdsLiveLease(run: Pick<RunRecord, 'leaseExpiresAt'>, now: number): boolean {
+  return run.leaseExpiresAt != null && run.leaseExpiresAt > now;
+}
+
 export function runRecordToTask(run: RunRecord): TaskItem {
   const metadata = (run.metadata ?? {}) as { projectId?: string; projectName?: string; fileScope?: string[] };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
@@ -212,6 +225,31 @@ export class DurableRunCoordinator {
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     return this.ledger?.listRuns(states) ?? [];
+  }
+
+  /**
+   * Identifiers of this project's runs a worker currently holds.
+   *
+   * This is what decides whether an open PR reserves its files. Not *why* a run
+   * stopped — that was the first attempt and it did not survive contact with
+   * production: the runs whose PRs were blocking siblings had all parked on an
+   * operator question, but each later dispatch overwrote `lastErrorCode`, so
+   * only 2 of 10 still said so. A lease is not overwritten by the next attempt;
+   * it is held or it is not. (AGT-4097)
+   *
+   * `undefined` when this coordinator does not claim: `off` has no ledger at
+   * all, and `shadow` observes without ever transitioning a run into an active
+   * state. Both would otherwise return an empty array, which asserts "nothing
+   * is held" — and a caller that fails closed on the difference (the draft
+   * overlap gate does) would silently stop reserving anything.
+   */
+  activeWorkerIdentifiers(projectPath: string, now = Date.now()): string[] | undefined {
+    if (!this.isPrimary || !this.ledger) return undefined;
+    const normalized = normalizeProjectPath(projectPath);
+    return this.listRuns(ACTIVE_LEASE_STATES)
+      .filter((run) => run.projectPath === normalized && holdsLiveLease(run, now))
+      .map((run) => run.identifier)
+      .filter((identifier): identifier is string => !!identifier);
   }
 
   markReady(issueId: string, now = Date.now()): boolean {

@@ -33,3 +33,15 @@ export function isBranchForIssue(branch: string, issueIdentifier: string): boole
   const prefix = `${BRANCH_NAMESPACE}/${issueIdentifier}`;
   return branch === prefix || branch.startsWith(`${prefix}-`);
 }
+
+/**
+ * Is this branch one the daemon cut for a task?
+ *
+ * Used to decide how much a PR's silence means. A `swarm/*` branch has a run
+ * in the ledger, so "no active worker" is knowable and trustworthy. Any other
+ * branch — a human's, another tool's — has no run to consult, so it keeps
+ * reserving its files. (AGT-4097)
+ */
+export function isSwarmBranch(branch: string): boolean {
+  return branch.startsWith(`${BRANCH_NAMESPACE}/`);
+}
