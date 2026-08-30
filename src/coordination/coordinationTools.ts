@@ -7,6 +7,7 @@ import { getCoordinationStore, type CoordinationKind } from './coordinationStore
 import { postHumanQuestion } from './humanQuestions.js';
 import { callSignAddress } from './agentNames.js';
 import { repositoryKey } from './repositoryCell.js';
+import { getCoordinationThread } from './coordinationThreads.js';
 import {
   COORDINATION_THREAD_GUIDANCE_PROMPT,
   COORDINATION_THREAD_TOOL_DEFINITIONS,
@@ -117,6 +118,7 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
           recipient: { type: 'string', description: "The target agent's call sign or address" },
           target_task_id: { type: 'string', description: 'Task the recipient is working on. Required for a new cross-task exchange; replies can infer it from correlation_id.' },
           target_task_label: { type: 'string', description: 'Optional issue identifier for target_task_id.' },
+          thread_id: { type: 'string', description: 'Durable related/followed thread that gives this consultation persistent context.' },
           correlation_id: { type: 'string' },
           summary: { type: 'string' },
           detail: { type: 'string' },
@@ -280,10 +282,9 @@ export async function executeCoordinationTool(
     targetTaskId ??= context.taskId;
     targetTaskLabel ??= targetTaskId === context.taskId ? context.taskLabel : undefined;
 
-    let targetPeer: ReturnType<typeof store.peers>[number] | undefined;
+    let targetPeer = store.peers({ repoKey, repository: context.repository, taskIds: [targetTaskId], limit: 50 })
+      .find((peer) => peer.address === recipient);
     if (targetTaskId !== context.taskId) {
-      targetPeer = store.peers({ repoKey, repository: context.repository, taskIds: [targetTaskId], limit: 50 })
-        .find((peer) => peer.address === recipient);
       if (!targetPeer) {
         return {
           content: `Cross-task recipient ${args.recipient} is not an active peer on task ${targetTaskId} in this repository cell`,
@@ -292,6 +293,33 @@ export async function executeCoordinationTool(
       }
       targetTaskLabel ??= targetPeer.taskLabel;
     }
+
+    let threadId = typeof args.thread_id === 'string' && args.thread_id.trim()
+      ? args.thread_id.trim()
+      : undefined;
+    if (!threadId && correlationId && isReply) {
+      threadId = store.exchange(correlationId).find((event) =>
+        typeof event.metadata?.threadId === 'string')?.metadata?.threadId as string | undefined;
+    }
+    if (threadId) {
+      let detail;
+      try {
+        detail = getCoordinationThread({ repository: repoKey, threadId, messageLimit: 1 });
+      } catch (error) {
+        return { content: error instanceof Error ? error.message : String(error), isError: true };
+      }
+      const threadTasks = new Set([
+        ...detail.thread.relatedTaskIds,
+        ...detail.participants.map((participant) => participant.taskId),
+      ]);
+      if (!threadTasks.has(context.taskId) || !threadTasks.has(targetTaskId)) {
+        return { content: 'thread_id must be related to both consultation tasks', isError: true };
+      }
+    }
+
+    const consultation = kind === 'advice-request' || kind === 'advice-response';
+    const crossTask = targetTaskId !== context.taskId;
+    const crossRole = Boolean(context.actorRole && targetPeer?.role && context.actorRole !== targetPeer.role);
 
     const event = await store.publish({
       repository: context.repository,
@@ -313,6 +341,15 @@ export async function executeCoordinationTool(
       correlationId,
       summary: args.summary,
       detail: typeof args.detail === 'string' ? args.detail : undefined,
+      metadata: consultation ? {
+        consultation: true,
+        consultationPhase: kind === 'advice-request' ? 'request' : 'response',
+        crossTask,
+        crossRole,
+        ...(context.actorRole ? { sourceRole: context.actorRole } : {}),
+        ...(targetPeer?.role ? { targetRole: targetPeer.role } : {}),
+        ...(threadId ? { threadId } : {}),
+      } : undefined,
     });
     return { content: JSON.stringify({ accepted: true, event }), isError: false };
   }

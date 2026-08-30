@@ -633,11 +633,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       lastCoordinationCheckTurn = turn;
       messages.push({
         role: 'user',
-        content:
-          'It has been a while since you checked your coordination inbox. Call coordination_read ' +
-          'now to see if the operator or another agent has sent you anything. If you find a ' +
-          'message that is not a reply to something you initiated, acknowledge it with ' +
-          'coordination_publish before continuing your work.',
+        content: COORDINATION_CHECK_NUDGE_PROMPT,
       });
     }
   }
@@ -805,6 +801,15 @@ export function shouldNudgeReadLoop(
  * its own never triggers it, since its own calls reset the clock. (AGT-4054)
  */
 export const COORDINATION_CHECK_NUDGE_EVERY = 6;
+
+/** Conditional reminder: checking is periodic, consulting is never automatic fan-out. */
+export const COORDINATION_CHECK_NUDGE_PROMPT =
+  'It has been a while since you checked your coordination inbox. Call coordination_read ' +
+  'now to see if the operator or another agent sent anything. Respond once to an actionable ' +
+  'message. Only if your current work has a concrete dependency, file/PR conflict, or ownership ' +
+  'ambiguity, use coordination_peers (limit 3), then related/following durable threads, and send ' +
+  'one targeted request. With no actionable ambiguity or no suitable peer, send nothing and ' +
+  'continue; never fan out routine status and never park waiting for a peer.';
 
 /** True when a coordination-enabled agent has gone too long without checking its inbox. */
 export function shouldNudgeCoordinationCheck(

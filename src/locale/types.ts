@@ -451,6 +451,8 @@ export interface WorkerContext {
 
 export interface PromptTemplates {
   systemPrompt: string;
+  /** Coordination-only system guidance, appended only when those tools are exposed. */
+  coordinationConsultationPrompt: string;
   buildWorkerPrompt: (opts: {
     taskTitle: string;
     taskDescription: string;

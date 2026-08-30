@@ -51,6 +51,44 @@ describe('GET /api/coordination', () => {
 
     expect((await call('/api/other')).handled).toBe(false);
   });
+
+  it('exposes board-derived consultation activation evidence', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-coordination-telemetry-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    resetCoordinationStoreForTests();
+    const store = getCoordinationStore();
+    const request = await store.publish({
+      repository: '/repo', repoKey: 'git:repo', taskId: 'task-a',
+      sourceTaskId: 'task-a', targetTaskId: 'task-b',
+      actor: 'worker-a', actorRole: 'worker', recipient: 'reviewer-b', recipientRole: 'reviewer',
+      kind: 'advice-request', status: 'open', summary: 'Who owns retry.ts?',
+      metadata: { consultation: true, consultationPhase: 'request', threadId: 'thread-1', crossTask: true, crossRole: true },
+    });
+    await store.publish({
+      repository: '/repo', repoKey: 'git:repo', taskId: 'task-b',
+      sourceTaskId: 'task-b', targetTaskId: 'task-a',
+      actor: 'reviewer-b', actorRole: 'reviewer', recipient: 'worker-a', recipientRole: 'worker',
+      kind: 'advice-response', status: 'completed', correlationId: request.correlationId,
+      summary: 'Task A owns it.',
+      metadata: { consultation: true, consultationPhase: 'response', threadId: 'thread-1', crossTask: true, crossRole: true },
+    });
+    await store.publish({
+      repository: '/repo', repoKey: 'git:repo', taskId: 'task-a',
+      actor: 'worker-a', kind: 'thread-update', status: 'completed',
+      correlationId: 'thread:thread-1', summary: 'Thread replied: Retry ownership',
+      metadata: { threadId: 'thread-1', action: 'replied', acknowledgesCorrelationId: request.correlationId },
+    });
+
+    const response = await call('/api/coordination?repository=%2Frepo');
+    expect(response.body.consultation).toEqual({
+      requests: 1,
+      responses: 1,
+      acknowledgedResponses: 1,
+      threadLinkedRequests: 1,
+      crossTaskRequests: 1,
+      crossRoleRequests: 1,
+    });
+  });
 });
 
 /** Drive a POST through the handler with an injected body reader. */

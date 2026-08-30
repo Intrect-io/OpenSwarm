@@ -93,6 +93,7 @@ export const COORDINATION_THREAD_TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           thread_id: { type: 'string' },
           body: { type: 'string' },
+          acknowledges_correlation_id: { type: 'string', description: 'Correlation ID of one useful advice response this reply records as incorporated.' },
           idempotency_key: { type: 'string', description: 'Stable key unique to this intended reply, reused on retries.' },
         },
         required: ['thread_id', 'body', 'idempotency_key'],
@@ -164,6 +165,7 @@ export async function publishCoordinationThreadUpdate(
     action: ThreadMutationAction;
     mutationId: string;
     body?: string;
+    acknowledgesCorrelationId?: string;
   },
 ): Promise<{ delivered: number; warnings: string[] }> {
   const detail = getCoordinationThread({
@@ -203,6 +205,9 @@ export async function publishCoordinationThreadUpdate(
           threadId: input.thread.id,
           action: input.action,
           mutationId: input.mutationId,
+          ...(input.acknowledgesCorrelationId
+            ? { acknowledgesCorrelationId: input.acknowledgesCorrelationId }
+            : {}),
         },
       });
       delivered += 1;
@@ -299,6 +304,17 @@ export async function executeCoordinationThreadTool(
 
     if (name === 'coordination_thread_reply') {
       const threadId = requiredString(args, 'thread_id');
+      const acknowledgesCorrelationId = optionalString(args, 'acknowledges_correlation_id');
+      if (acknowledgesCorrelationId) {
+        const response = getCoordinationStore().exchange(acknowledgesCorrelationId).find((event) =>
+          event.kind === 'advice-response'
+          && event.recipient === context.actor
+          && (event.targetTaskId ?? event.taskId) === context.taskId);
+        if (!response) throw new Error('acknowledges_correlation_id must identify advice received by this participant');
+        if (response.metadata?.threadId && response.metadata.threadId !== threadId) {
+          throw new Error('acknowledged advice belongs to a different thread');
+        }
+      }
       const message = postCoordinationThreadMessage({
         repository: threadRepository(context),
         threadId,
@@ -313,6 +329,7 @@ export async function executeCoordinationThreadTool(
       const thread = getCoordinationThread({ repository: threadRepository(context), threadId, messageLimit: 1 }).thread;
       const notification = await publishCoordinationThreadUpdate(context, {
         thread, action: 'replied', mutationId: `message:${message.id}`, body: message.body,
+        acknowledgesCorrelationId,
       });
       return { content: JSON.stringify({ accepted: true, message, thread, notification }), isError: false };
     }

@@ -369,7 +369,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     // Gated on coordinationContext itself (not actorName): that's the same
     // condition agenticLoop.ts uses to decide whether coordination tools are
     // even exposed to this run (AGT-4054).
-    const coordinationGuidance = options.coordinationContext ? COORDINATION_GUIDANCE_PROMPT : '';
+    const coordinationGuidance = options.coordinationContext
+      ? COORDINATION_GUIDANCE_PROMPT + getPrompts().coordinationConsultationPrompt
+      : '';
     let systemPrompt = getPrompts().systemPrompt + callSignHeader + coordinationGuidance
       + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd));
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;

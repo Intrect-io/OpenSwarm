@@ -122,4 +122,19 @@ describe('coordination thread tools', () => {
       ...reviewer, repository: '/other', repoKey: 'git:other',
     })).isError).toBe(true);
   });
+
+  it('rejects a fabricated useful-response acknowledgment', async () => {
+    const made = parsed(await execute('coordination_thread_create', {
+      subject: 'Retry ownership', related_task_ids: ['task-b'], idempotency_key: 'ack-validation',
+    }));
+    const result = await execute('coordination_thread_reply', {
+      thread_id: made.thread.id,
+      body: 'Claiming this was incorporated.',
+      acknowledges_correlation_id: 'not-a-received-response',
+      idempotency_key: 'false-ack',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('must identify advice received by this participant');
+  });
 });
