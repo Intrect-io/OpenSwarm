@@ -29,6 +29,10 @@ import { enrichTaskFromState, hydrateTaskStateFromComments, updateTaskLinearStat
 import { probeDaemonPort } from '../cli/daemon.js';
 import { rotateServiceLogs } from '../support/logRotation.js';
 import { acquireServiceInstanceLock, type ServiceInstanceLock } from '../support/serviceInstanceLock.js';
+import {
+  configureHumanSurfaceReadOnly,
+  isHumanSurfaceReadOnlyEnabled,
+} from '../mcp/humanSurfacePolicy.js';
 
 let state: ServiceState = {
   running: false,
@@ -73,6 +77,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
 }
 
 async function startServiceLocked(config: SwarmConfig): Promise<void> {
+  if (config.humanSurfaceReadOnly?.enabled === true) configureHumanSurfaceReadOnly(true);
   let postMergeIntegration: PRProcessorConfig['postMergeIntegration'];
   // The lifetime SQLite lock above is the atomic single-instance authority.
   // Keep the port probe as a diagnostic for older daemons or unrelated
@@ -136,7 +141,13 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   }
 
   // Discord initialization (optional)
-  if (config.discordToken && config.discordChannelId) {
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    // A connected bot can reply, type, and post through many handler paths.
+    // Do not retain that capability in strict mode; local web chat is the
+    // supported human control surface.
+    await discord.stopDiscord();
+    console.log('⏭ Discord disabled by humanSurfaceReadOnly policy');
+  } else if (config.discordToken && config.discordChannelId) {
     console.log('🤖 Connecting Discord bot...');
     await discord.initDiscord(config.discordToken, config.discordChannelId);
     console.log('✅ Discord bot connected successfully');

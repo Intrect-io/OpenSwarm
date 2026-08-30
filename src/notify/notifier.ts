@@ -9,6 +9,7 @@
 
 import type { EmbedBuilder } from 'discord.js';
 import { publicFetch } from '../support/outboundUrl.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 export interface Notifier {
   /** Send one outbound notification. Implementations must not throw. */
@@ -52,6 +53,7 @@ export function messageToText(message: string | EmbedBuilder): string {
 }
 
 async function postJson(url: string, body: unknown): Promise<void> {
+  if (isHumanSurfaceReadOnlyEnabled()) return;
   const controller = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -89,6 +91,7 @@ class NoopNotifier implements Notifier {
 class DiscordNotifier implements Notifier {
   constructor(private readonly send: DiscordSend) {}
   async notify(message: string | EmbedBuilder): Promise<void> {
+    if (isHumanSurfaceReadOnlyEnabled()) return;
     try {
       if (typeof message === 'string') {
         // Lazy import keeps discord.js out of the load path for non-Discord users.
@@ -146,6 +149,7 @@ class WebhookNotifier implements Notifier {
  * optional. Falls back to Noop when the chosen channel lacks its credential.
  */
 export function createNotifier(config: NotificationsConfig | undefined, discordSend?: DiscordSend): Notifier {
+  if (isHumanSurfaceReadOnlyEnabled()) return new NoopNotifier();
   const channel = config?.channel ?? (discordSend ? 'discord' : 'none');
   switch (channel) {
     case 'discord':

@@ -16,7 +16,11 @@ import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
 import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
-import { humanSurfaceShellWriteReason, stripHumanSurfaceEnv } from '../mcp/humanSurfacePolicy.js';
+import {
+  humanSurfaceShellWriteReason,
+  isHumanSurfaceReadOnlyEnabled,
+  stripHumanSurfaceEnv,
+} from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -123,7 +127,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked.',
+      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked. This tool is unavailable when humanSurfaceReadOnly.enabled is true.',
       parameters: {
         type: 'object',
         properties: {
@@ -808,6 +812,13 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        if (isHumanSurfaceReadOnlyEnabled()) {
+          return {
+            tool_call_id: callId,
+            content: 'HUMAN_SURFACE_READ_ONLY: arbitrary program execution is disabled while humanSurfaceReadOnly.enabled is true',
+            is_error: true,
+          };
+        }
         const humanSurfaceDenial = humanSurfaceShellWriteReason(command);
         if (humanSurfaceDenial) {
           return { tool_call_id: callId, content: `HUMAN_SURFACE_READ_ONLY: ${humanSurfaceDenial}`, is_error: true };
@@ -876,6 +887,13 @@ export async function executeTool(
       }
 
       case 'diagnostics': {
+        if (isHumanSurfaceReadOnlyEnabled()) {
+          return {
+            tool_call_id: callId,
+            content: 'HUMAN_SURFACE_READ_ONLY: diagnostics subprocess execution is disabled while humanSurfaceReadOnly.enabled is true',
+            is_error: true,
+          };
+        }
         // Lazy: only loops that opted in (AgenticLoopOptions.diagnosticsTool)
         // expose the schema, so most consumers never load this module.
         const { runDiagnosticsTool } = await import('./diagnosticsTool.js');

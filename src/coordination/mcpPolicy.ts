@@ -5,6 +5,7 @@
 import type { ToolDefinition } from '../adapters/tools.js';
 import {
   describeMcpToolPolicy,
+  isGenericMcpTransport,
   type McpAccess,
 } from '../mcp/humanSurfacePolicy.js';
 
@@ -37,7 +38,8 @@ export function filterMcpToolsForRole(
     const decision = describeMcpToolPolicy(tool);
     const { server, access } = decision;
     let reason: string | undefined;
-    if (decision.surface === 'human' && !decision.humanSurfaceReadAllowed) {
+    const dispatchClassified = isGenericMcpTransport(decision, tool.function.parameters);
+    if (decision.surface === 'human' && !decision.humanSurfaceReadAllowed && !dispatchClassified) {
       reason = 'external human surface is read-only; only read/list/get/search/fetch actions are allowed';
     } else if (!servers.has(server)) reason = `server ${server} is not allowlisted`;
     else if (allow && !allow.has(name)) reason = 'tool is not on the exact allowlist';

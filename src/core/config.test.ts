@@ -10,6 +10,10 @@ import {
   generateSampleConfig,
 } from './config.js';
 import * as fs from 'node:fs';
+import {
+  configureHumanSurfaceReadOnly,
+  isHumanSurfaceReadOnlyEnabled,
+} from '../mcp/humanSurfacePolicy.js';
 
 // Mock fs module
 vi.mock('node:fs', async () => {
@@ -31,6 +35,7 @@ describe('config', () => {
   });
 
   afterEach(() => {
+    configureHumanSurfaceReadOnly(false);
     delete process.env.DISCORD_TOKEN;
     delete process.env.DISCORD_CHANNEL_ID;
     delete process.env.LINEAR_API_KEY;
@@ -42,6 +47,21 @@ describe('config', () => {
   // ============================================
 
   describe('loadConfig', () => {
+    it('wires the explicit strict boundary and never downgrades it from a later utility config load', () => {
+      const base = {
+        language: 'en',
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync)
+        .mockReturnValueOnce(JSON.stringify({ ...base, humanSurfaceReadOnly: { enabled: true } }))
+        .mockReturnValueOnce(JSON.stringify(base));
+
+      expect(loadConfig('/tmp/config.json').humanSurfaceReadOnly).toEqual({ enabled: true });
+      expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+      expect(loadConfig('/tmp/config.json').humanSurfaceReadOnly).toEqual({ enabled: false });
+      expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+    });
     it('should load YAML config file', () => {
       const yamlContent = `
 language: en

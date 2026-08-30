@@ -21,6 +21,8 @@ import { safeInheritedEnv } from '../support/spawnEnv.js';
 import {
   attachMcpToolPolicy,
   filterHumanSurfaceMcpTools,
+  humanSurfaceMcpCallWriteReason,
+  isGenericMcpTransport,
   type McpSurface,
   type McpToolAnnotations,
   type McpToolPolicyDecision,
@@ -259,6 +261,7 @@ interface McpToolRoute {
   cfg: ServerConfig;
   toolName: string;
   policy: McpToolPolicyDecision;
+  inputSchema: Record<string, unknown>;
 }
 
 let serverByTool: Record<string, McpToolRoute> = {};
@@ -330,7 +333,12 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
             serverIdentityHints: [cfg.url ?? '', cfg.command ?? '', ...(cfg.args ?? [])].filter(Boolean),
             annotations: tool.annotations,
           });
-          routing[qualified] = { cfg, toolName: tool.name, policy };
+          routing[qualified] = {
+            cfg,
+            toolName: tool.name,
+            policy,
+            inputSchema: definition.function.parameters,
+          };
           defs.push(definition);
         }
       } catch (err) {
@@ -455,10 +463,18 @@ export interface McpCallResult {
 export async function callMcpTool(qualified: string, args: Record<string, unknown>): Promise<McpCallResult> {
   const entry = serverByTool[qualified];
   if (!entry) return { content: `MCP tool not registered: ${qualified}`, isError: true };
-  if (entry.policy.surface === 'human' && !entry.policy.humanSurfaceReadAllowed) {
+  const dispatchClassified = isGenericMcpTransport(entry.policy, entry.inputSchema);
+  if (entry.policy.surface === 'human' && !entry.policy.humanSurfaceReadAllowed && !dispatchClassified) {
     return {
       content: `HUMAN_SURFACE_READ_ONLY: ${qualified} cannot mutate an external human-facing service. `
         + 'Only read/list/get/search/fetch MCP actions are allowed.',
+      isError: true,
+    };
+  }
+  const dynamicDenial = humanSurfaceMcpCallWriteReason(entry.policy, args, entry.inputSchema);
+  if (dynamicDenial) {
+    return {
+      content: `HUMAN_SURFACE_READ_ONLY: ${qualified}: ${dynamicDenial}`,
       isError: true,
     };
   }

@@ -14,9 +14,13 @@ import {
   prepareCliProcessTreeSpawn,
   trackCliProcessTree,
 } from './processTree.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 
 beforeEach(() => spawnMock.mockReset());
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  configureHumanSurfaceReadOnly(false);
+  vi.restoreAllMocks();
+});
 
 describe('CLI process tree termination', () => {
   it('kills the whole POSIX process group so native CLI and MCP children cannot survive a timeout', () => {
@@ -442,6 +446,50 @@ describe('delegated-CLI capability guards', () => {
     await expect(
       spawnCli(delegated(), { prompt: 'p', cwd: process.cwd(), shellTools: false }),
     ).rejects.toThrow(/cannot withhold shell access/);
+  });
+
+  it('does not construct or spawn a delegated fake CLI in strict mode, even with HOME credentials', async () => {
+    const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
+    const adapter = { ...delegated(), name: 'fake-codex', buildCommand } satisfies CliAdapter;
+    const previousHome = process.env.HOME;
+    process.env.HOME = '/tmp/fake-home-with-human-credentials';
+    configureHumanSurfaceReadOnly(true);
+    try {
+      await expect(spawnCli(adapter, { prompt: 'p', cwd: process.cwd() }))
+        .rejects.toThrow(/HUMAN_SURFACE_READ_ONLY.*delegates to an external CLI/);
+      expect(buildCommand).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('keeps native adapters but forces shell and diagnostics off in strict mode', async () => {
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: 'ok', stderr: '', durationMs: 1 }));
+    const base = delegated();
+    const adapter = {
+      ...base,
+      name: 'native',
+      capabilities: { ...base.capabilities, enforcesHumanSurfaceReadOnly: true },
+      run,
+    } satisfies CliAdapter;
+    configureHumanSurfaceReadOnly(true);
+
+    await expect(spawnCli(adapter, {
+      prompt: 'p', cwd: process.cwd(), shellTools: true, diagnosticsTool: true,
+    })).resolves.toMatchObject({ stdout: 'ok' });
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ shellTools: false, diagnosticsTool: false }));
+  });
+
+  it('refuses a run adapter that has not declared strict-boundary enforcement', async () => {
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: 'unsafe', stderr: '', durationMs: 1 }));
+    const adapter = { ...delegated(), name: 'untrusted-native', run } satisfies CliAdapter;
+    configureHumanSurfaceReadOnly(true);
+
+    await expect(spawnCli(adapter, { prompt: 'p', cwd: process.cwd() }))
+      .rejects.toThrow(/does not declare enforcement/);
+    expect(run).not.toHaveBeenCalled();
   });
 
   it('warns rather than silently dropping MCP and coordination tools', async () => {

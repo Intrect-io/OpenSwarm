@@ -21,6 +21,7 @@ import {
   untrackCliProcessTree,
 } from './processTree.js';
 import { raceWithAbort } from './abortRace.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 export { terminateCliProcessTree } from './processTree.js';
 
@@ -31,8 +32,25 @@ export { terminateCliProcessTree } from './processTree.js';
  */
 export async function spawnCli(
   adapter: CliAdapter,
-  options: CliRunOptions,
+  requestedOptions: CliRunOptions,
 ): Promise<CliRunResult> {
+  const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
+  if (
+    strictHumanSurfaceBoundary
+    && (!adapter.run || adapter.capabilities.enforcesHumanSurfaceReadOnly !== true)
+  ) {
+    const reason = adapter.run
+      ? 'does not declare enforcement of the strict human-surface boundary'
+      : 'delegates to an external CLI with its own tool loop';
+    throw new Error(
+      `HUMAN_SURFACE_READ_ONLY: Adapter '${adapter.name}' ${reason}; `
+      + 'arbitrary program execution is disabled while humanSurfaceReadOnly.enabled is true. '
+      + 'Use a native OpenSwarm-loop adapter.',
+    );
+  }
+  const options: CliRunOptions = strictHumanSurfaceBoundary
+    ? { ...requestedOptions, shellTools: false, diagnosticsTool: false }
+    : requestedOptions;
   // Fail closed before anything runs. `readOnly` is asked for when the input is
   // untrusted, so an adapter that ignores it would hand a full toolset to an
   // agent reading attacker-authored files. Refusing is loud; ignoring is not.

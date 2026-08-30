@@ -10,6 +10,7 @@ import YAML from 'yaml';
 import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResolverConfig, McpConfig } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 import { c, status } from '../support/colors.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 
 // Constants
 
@@ -427,6 +428,14 @@ const NotificationsSchema = z.object({
   webhookUrl: z.string().optional(),
 }).optional();
 
+const HumanSurfaceReadOnlySchema = z.object({
+  /**
+   * Strict mode blocks arbitrary agent programs and all OpenSwarm-owned
+   * Slack/Discord/Telegram/webhook sends.  Local web chat remains available.
+   */
+  enabled: z.boolean().default(false),
+}).default({ enabled: false });
+
 // MCP server entry: stdio (`command`/`args`/`env`) or remote (`url`/`headers`).
 // Mirrors the ~/.openswarm/mcp.json shape so config.yaml is a single source. (INT-1949)
 const McpServerSchema = z
@@ -470,6 +479,7 @@ const RawConfigSchema = z.object({
   language: z.enum(['en', 'ko']).default('en'),
   discord: DiscordConfigSchema,
   notifications: NotificationsSchema,
+  humanSurfaceReadOnly: HumanSurfaceReadOnlySchema,
   linear: LinearConfigSchema,
   github: GitHubConfigSchema,
   timeWindow: TimeWindowConfigSchema,
@@ -630,6 +640,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
           webhookUrl: raw.notifications.webhookUrl,
         }
       : undefined,
+    humanSurfaceReadOnly: { enabled: raw.humanSurfaceReadOnly.enabled },
     linearApiKey: raw.linear?.apiKey ?? '',
     linearTeamId: raw.linear?.teamId ?? '',
     agents: raw.agents.map(agent => ({
@@ -793,6 +804,12 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // 5. Transform to SwarmConfig
   const config = transformConfig(parseResult.data);
 
+  // Enabling is process-lifetime monotonic. Utility callers also load config
+  // (MCP discovery, telemetry, provider lookup); a later lookup resolving a
+  // different/default file must never silently downgrade an active boundary.
+  // Disabling therefore requires a process restart with enabled:false.
+  if (config.humanSurfaceReadOnly?.enabled === true) configureHumanSurfaceReadOnly(true);
+
   // 6. Apply time window config
   if (config.timeWindow) {
     setTimeWindowConfig(config.timeWindow);
@@ -883,6 +900,15 @@ notifications:
   # telegramBotToken: \${TELEGRAM_BOT_TOKEN:-}
   # telegramChatId: \${TELEGRAM_CHAT_ID:-}
   # webhookUrl: \${NOTIFY_WEBHOOK_URL:-}
+
+# Fail closed on writes to human-facing collaboration surfaces. In strict mode
+# agent shell/diagnostics and delegated CLI adapters are disabled, as are core
+# Discord/Slack/Telegram/webhook senders. Local web chat and approved MCP
+# DevOps/data writes remain available. On Linux, no working network-isolating
+# sandbox plus no typed MCP grants is a deployment blocker for autonomous
+# development; never restore an unsandboxed shell as a workaround.
+humanSurfaceReadOnly:
+  enabled: false
 
 # Task source: when the linear block below is unset, OpenSwarm falls back to a
 # local SQLite issue store (~/.openswarm/issues.db) — no external account needed.

@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { getCoordinationStore, type CoordinationEvent } from './coordinationStore.js';
 import { t } from '../locale/index.js';
 import { answerHint } from './answerHint.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 export interface HumanQuestionInput {
   repository: string;
@@ -152,7 +153,7 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
   }
 
   const notify = input.notify ?? notifyOperatorViaDiscord;
-  const delivered = await notify(
+  const delivered = isHumanSurfaceReadOnlyEnabled() ? false : await notify(
     `OpenSwarm needs a decision for ${input.taskLabel ?? input.taskId}` +
       `${input.actorName ? ` (asked by ${input.actorName})` : ''}.\n${input.question}\n\n` +
       answerHint(correlationId),

@@ -41,7 +41,8 @@ export const DIAGNOSTICS_TOOL: ToolDefinition = {
     description:
       'Run the project type checker / linter and return current errors (TypeScript: tsc, Python: ruff). ' +
       'Call this right after editing to catch broken contracts (missed callers, wrong signatures) before finishing. ' +
-      'Pass the files you changed in "paths" to see their errors first; errors elsewhere are summarized.',
+      'Pass the files you changed in "paths" to see their errors first; errors elsewhere are summarized. ' +
+      'This subprocess tool is unavailable when humanSurfaceReadOnly.enabled is true.',
     parameters: {
       type: 'object',
       properties: {

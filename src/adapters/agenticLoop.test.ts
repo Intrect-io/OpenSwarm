@@ -12,6 +12,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+
+afterEach(() => configureHumanSurfaceReadOnly(false));
 
 /** Scripted API response carrying a single tool call. */
 const toolCallResp = (id: string, name: string, args: object) => ({
@@ -376,6 +379,35 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).not.toContain('run_diagnostics');
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
+  });
+
+  it('forces arbitrary program tools off in strict mode while keeping local files, web reads, and MCP', async () => {
+    configureHumanSurfaceReadOnly(true);
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      shellTools: true,
+      diagnosticsTool: true,
+      maxTurns: 1,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'github__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).not.toContain('bash');
+    expect(toolNames).not.toContain('run_diagnostics');
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('write_file');
+    expect(toolNames).toContain('web_fetch');
+    expect(toolNames).toContain('github__get_issue');
   });
 
   it('withholds every filesystem tool while preserving MCP and coordination tools', async () => {

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { sendWebhook, type WebhookPayload } from './pairWebhook.js';
+import { sendDiscordWebhook, sendWebhook, type WebhookPayload } from './pairWebhook.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import type { PairSession } from './agentPair.js';
 
 // These suites cover parsing and backend selection, not the socket layer, so
 // route publicFetch onto the global fetch they stub. The real implementation —
@@ -10,7 +12,10 @@ vi.mock('../support/outboundUrl.js', async (importOriginal) => {
 });
 
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  configureHumanSurfaceReadOnly(false);
+  vi.unstubAllGlobals();
+});
 
 const payload: WebhookPayload = {
   event: 'pair_started',
@@ -28,5 +33,20 @@ describe('sendWebhook', () => {
     await expect(sendWebhook('https://example.com/hook', payload)).resolves.toMatchObject({ success: false, statusCode: 500 });
     expect((fetchMock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('does not call generic or Discord webhooks in strict mode', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok'));
+    vi.stubGlobal('fetch', fetchMock);
+    configureHumanSurfaceReadOnly(true);
+
+    await expect(sendWebhook('https://example.com/hook', payload))
+      .resolves.toMatchObject({ success: false, error: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    await expect(sendDiscordWebhook('https://discord.com/api/webhooks/1/x', {
+      id: 's', taskId: 't', taskTitle: 'task', status: 'running',
+      worker: { attempts: 1, maxAttempts: 2 }, reviewer: {},
+    } as PairSession, 'blocked', 0))
+      .resolves.toMatchObject({ success: false, error: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

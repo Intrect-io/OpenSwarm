@@ -35,6 +35,23 @@ export interface McpToolPolicyDecision {
   evidence: readonly string[];
 }
 
+/**
+ * Process-wide execution boundary loaded from config.  MCP tool descriptors are
+ * always filtered, while this stricter switch also removes arbitrary program
+ * execution and OpenSwarm-owned human-surface senders.  Keeping the switch in
+ * one module lets low-level dispatch paths fail closed even when a caller did
+ * not thread the config object through.
+ */
+let humanSurfaceReadOnlyEnabled = false;
+
+export function configureHumanSurfaceReadOnly(enabled: boolean): void {
+  humanSurfaceReadOnlyEnabled = enabled === true;
+}
+
+export function isHumanSurfaceReadOnlyEnabled(): boolean {
+  return humanSurfaceReadOnlyEnabled;
+}
+
 const READ_ACTIONS = new Set(['read', 'list', 'get', 'search', 'fetch']);
 const WRITE_ACTIONS = new Set([
   'add',
@@ -167,6 +184,8 @@ const HUMAN_SURFACE_HOST_SUFFIXES = [
   'api.twilio.com',
   'api.sendgrid.com',
   'api.mailgun.net',
+  'api.dropboxapi.com',
+  'content.dropboxapi.com',
 ] as const;
 
 // Microsoft Graph mixes human collaboration and administrator APIs behind one
@@ -181,6 +200,14 @@ const MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS = new Set([
   'channels',
   'chat',
   'chats',
+  'communication',
+  'communications',
+  'contact',
+  'contacts',
+  'conversation',
+  'conversations',
+  'call',
+  'calls',
   'drive',
   'drives',
   'event',
@@ -192,9 +219,69 @@ const MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS = new Set([
   'onenote',
   'onlinemeetings',
   'planner',
+  'post',
+  'posts',
   'sites',
+  'team',
+  'teams',
+  'thread',
+  'threads',
   'todo',
 ]);
+
+const GOOGLE_HUMAN_API_PATH_IDENTIFIERS = new Set([
+  'calendar',
+  'chat',
+  'doc',
+  'docs',
+  'document',
+  'documents',
+  'drive',
+  'gmail',
+  'meet',
+  'sheet',
+  'sheets',
+  'spreadsheet',
+  'spreadsheets',
+]);
+
+const GENERIC_TRANSPORT_ACTIONS = new Set([
+  'api',
+  'call',
+  'fetch',
+  'forward',
+  'http',
+  'invoke',
+  'proxy',
+  'request',
+  'transport',
+  'webhook',
+]);
+
+const DESTINATION_FIELD_NAMES = new Set([
+  'baseurl',
+  'destination',
+  'endpoint',
+  'host',
+  'hostname',
+  'origin',
+  'requesturl',
+  'target',
+  'targeturl',
+  'uri',
+  'url',
+  'webhook',
+  'webhookurl',
+]);
+
+const METHOD_FIELD_NAMES = new Set(['httpmethod', 'method', 'requestmethod', 'verb']);
+const BODY_FIELD_NAMES = new Set(['body', 'data', 'form', 'json', 'payload', 'requestbody']);
+const READ_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const WRITE_HTTP_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function normalizedFieldName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
 const descriptorByTool = new WeakMap<ToolDefinition, McpToolPolicyDecision>();
 
@@ -230,6 +317,38 @@ function microsoftGraphHumanPath(hint: string): string | undefined {
     if (url.hostname.toLowerCase() !== 'graph.microsoft.com') return undefined;
     return identifierTokens(decodeURIComponent(url.pathname))
       .find((token) => MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS.has(token));
+  } catch {
+    return undefined;
+  }
+}
+
+function microsoftGraphHumanRelativePath(hint: string): string | undefined {
+  if (!hint.startsWith('/')) return undefined;
+  try {
+    return identifierTokens(decodeURIComponent(hint))
+      .find((token) => MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS.has(token));
+  } catch {
+    return undefined;
+  }
+}
+
+function isMicrosoftGraphBatchDestination(hint: string): boolean {
+  try {
+    const url = new URL(hint);
+    return url.hostname.toLowerCase() === 'graph.microsoft.com'
+      && identifierTokens(decodeURIComponent(url.pathname)).includes('batch');
+  } catch {
+    return false;
+  }
+}
+
+function googleHumanApiPath(hint: string): string | undefined {
+  try {
+    const url = new URL(hint);
+    const host = url.hostname.toLowerCase();
+    if (host !== 'www.googleapis.com' && !host.endsWith('.googleapis.com')) return undefined;
+    return identifierTokens(decodeURIComponent(url.pathname))
+      .find((token) => GOOGLE_HUMAN_API_PATH_IDENTIFIERS.has(token));
   } catch {
     return undefined;
   }
@@ -353,7 +472,8 @@ export function filterHumanSurfaceMcpTools(
   const denied: Array<{ name: string; reason: string }> = [];
   for (const tool of tools) {
     const decision = describeMcpToolPolicy(tool);
-    if (decision.surface === 'human' && !decision.humanSurfaceReadAllowed) {
+    const dispatchClassified = isGenericMcpTransport(decision, tool.function.parameters);
+    if (decision.surface === 'human' && !decision.humanSurfaceReadAllowed && !dispatchClassified) {
       denied.push({
         name: decision.name,
         reason: 'external human surface is read-only; only read/list/get/search/fetch actions are allowed',
@@ -363,6 +483,195 @@ export function filterHumanSurfaceMcpTools(
     }
   }
   return { tools: accepted, denied };
+}
+
+type GenericCallAccess = 'read' | 'write' | 'unknown';
+type DestinationKind = 'human' | 'nonhuman' | 'unresolved';
+
+interface GenericCallFacts {
+  destinationFields: string[];
+  methods: string[];
+  hasBody: boolean;
+  truncated: boolean;
+  schemaSuggestsTransport: boolean;
+}
+
+function isDynamicDestination(value: string): boolean {
+  // OData uses literal lower-case segments such as Graph's `$batch` and
+  // `$filter`; shell/env placeholders conventionally use upper-case names.
+  return /\$\{|\$[A-Z_][A-Z0-9_]*|\{\{/.test(value)
+    || /<[^>]*(?:url|host|target|destination)[^>]*>|\b(?:env|args?|params?)\./i.test(value);
+}
+
+function collectGenericCallFacts(
+  args: Record<string, unknown>,
+  inputSchema?: Record<string, unknown>,
+): GenericCallFacts {
+  const destinationFields: string[] = [];
+  const methods: string[] = [];
+  let hasBody = false;
+  let truncated = false;
+  let visited = 0;
+
+  const visit = (value: unknown, depth: number): void => {
+    if (visited++ >= 512 || depth > 8) {
+      truncated = true;
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [rawKey, item] of Object.entries(value as Record<string, unknown>)) {
+      const key = normalizedFieldName(rawKey);
+      if (DESTINATION_FIELD_NAMES.has(key) && typeof item === 'string' && item.trim()) {
+        destinationFields.push(item.trim());
+      }
+      if (METHOD_FIELD_NAMES.has(key) && typeof item === 'string' && item.trim()) {
+        methods.push(item.trim().toUpperCase());
+      }
+      if (BODY_FIELD_NAMES.has(key) && item !== undefined && item !== null) {
+        hasBody = true;
+        // Microsoft Graph and other generic APIs can carry batched requests in
+        // a JSON body. Inspect bounded structured JSON so a POST to `$batch`
+        // cannot hide `/me/messages` behind a string payload.
+        const trimmedBody = typeof item === 'string' ? item.trimStart() : '';
+        if (trimmedBody.startsWith('{') || trimmedBody.startsWith('[')) {
+          try {
+            visit(JSON.parse(trimmedBody), depth + 1);
+          } catch {
+            // Opaque/non-JSON bodies remain writes; they do not become reads.
+          }
+        }
+      }
+      visit(item, depth + 1);
+    }
+  };
+  visit(args, 0);
+
+  const schemaKeys = new Set<string>();
+  const inspectSchema = (value: unknown, depth: number): void => {
+    if (depth > 8 || !value || typeof value !== 'object') return;
+    for (const [rawKey, item] of Object.entries(value as Record<string, unknown>)) {
+      if (rawKey === 'properties' && item && typeof item === 'object' && !Array.isArray(item)) {
+        for (const propertyName of Object.keys(item as Record<string, unknown>)) {
+          schemaKeys.add(normalizedFieldName(propertyName));
+        }
+      }
+      inspectSchema(item, depth + 1);
+    }
+  };
+  inspectSchema(inputSchema, 0);
+
+  const schemaSuggestsTransport = [...schemaKeys].some((key) => DESTINATION_FIELD_NAMES.has(key))
+    && [...schemaKeys].some((key) => METHOD_FIELD_NAMES.has(key) || BODY_FIELD_NAMES.has(key));
+  return { destinationFields, methods, hasBody, truncated, schemaSuggestsTransport };
+}
+
+function destinationKind(value: string): { kind: DestinationKind; evidence: string } {
+  if (isDynamicDestination(value)) return { kind: 'unresolved', evidence: 'dynamic destination' };
+
+  let candidate = value;
+  if (/^[A-Za-z0-9.-]+(?::\d+)?(?:\/|$)/.test(candidate) && !candidate.includes('://')) {
+    candidate = `https://${candidate}`;
+  }
+  const host = hostFromHint(candidate);
+  if (host) {
+    if (knownHumanHost(host)) return { kind: 'human', evidence: `endpoint ${host}` };
+    const hostIdentifier = hasHumanIdentifier(host);
+    if (hostIdentifier) return { kind: 'human', evidence: `service ${hostIdentifier}` };
+    const graphPath = microsoftGraphHumanPath(candidate);
+    if (graphPath) return { kind: 'human', evidence: `Microsoft Graph human API ${graphPath}` };
+    const googlePath = googleHumanApiPath(candidate);
+    if (googlePath) return { kind: 'human', evidence: `Google human API ${googlePath}` };
+    return { kind: 'nonhuman', evidence: `endpoint ${host}` };
+  }
+
+  const humanIdentifier = hasHumanIdentifier(value);
+  if (humanIdentifier) return { kind: 'human', evidence: `service ${humanIdentifier}` };
+  return { kind: 'unresolved', evidence: 'unparseable destination' };
+}
+
+function genericCallAccess(policy: McpToolPolicyDecision, facts: GenericCallFacts): GenericCallAccess {
+  if (facts.methods.some((method) => WRITE_HTTP_METHODS.has(method))) return 'write';
+  if (facts.methods.length > 0 && facts.methods.every((method) => READ_HTTP_METHODS.has(method)) && !facts.hasBody) {
+    return 'read';
+  }
+  if (facts.methods.length > 0) return 'unknown';
+  if (facts.hasBody) return 'write';
+  if (policy.access === 'write' || policy.access === 'destructive') return 'write';
+  if (identifierTokens(policy.action).some((token) => READ_ACTIONS.has(token))) return 'read';
+  return 'unknown';
+}
+
+/** True when destination/method arguments, not the static action name, decide access. */
+export function isGenericMcpTransport(
+  policy: McpToolPolicyDecision,
+  inputSchema?: Record<string, unknown>,
+): boolean {
+  const actionIsGeneric = identifierTokens(policy.action).some((token) => GENERIC_TRANSPORT_ACTIONS.has(token));
+  if (actionIsGeneric) return true;
+  return collectGenericCallFacts({}, inputSchema).schemaSuggestsTransport;
+}
+
+/**
+ * Reclassify generic HTTP/proxy MCP calls from their actual arguments.
+ *
+ * A static tool name cannot tell whether `request(url, method, body)` points at
+ * Slack or a database.  At dispatch, explicit GET/HEAD/OPTIONS calls to human
+ * surfaces remain readable, while writes and ambiguous/dynamic destinations
+ * fail closed.  Concrete non-human writes retain an explicit devops/data/
+ * sandbox server grant; specialized tools are still governed by their normal
+ * descriptor policy and do not scan arbitrary issue/comment bodies for URLs.
+ */
+export function humanSurfaceMcpCallWriteReason(
+  policy: McpToolPolicyDecision,
+  args: Record<string, unknown>,
+  inputSchema?: Record<string, unknown>,
+): string | undefined {
+  const facts = collectGenericCallFacts(args, inputSchema);
+  if (!isGenericMcpTransport(policy, inputSchema)) return undefined;
+
+  const access = genericCallAccess(policy, facts);
+  const graphTransport = facts.destinationFields.some((value) => hostFromHint(value) === 'graph.microsoft.com');
+  const graphBatch = facts.destinationFields.some(isMicrosoftGraphBatchDestination);
+  const graphRelativeDestinations = facts.destinationFields.filter((value) => value.startsWith('/'));
+  const destinations = facts.destinationFields.map((value) => {
+    const graphPath = graphTransport ? microsoftGraphHumanRelativePath(value) : undefined;
+    if (graphPath) return { kind: 'human' as const, evidence: `Microsoft Graph human API ${graphPath}` };
+    if (graphTransport && value.startsWith('/')) {
+      return { kind: 'nonhuman' as const, evidence: 'Microsoft Graph non-human API path' };
+    }
+    return destinationKind(value);
+  });
+  const humanDestination = destinations.find((entry) => entry.kind === 'human');
+  const unresolvedDestination = destinations.find((entry) => entry.kind === 'unresolved');
+
+  if (humanDestination) {
+    if (access === 'read') return undefined;
+    return `generic MCP ${access === 'write' ? 'write' : 'call'} blocked (${humanDestination.evidence}); `
+      + 'human-surface transports require an explicit GET/HEAD/OPTIONS request';
+  }
+
+  if (access === 'read') return undefined;
+  if (graphBatch && graphRelativeDestinations.length === 0) {
+    return 'generic MCP write blocked because a Microsoft Graph batch has no inspectable nested destinations';
+  }
+  if (facts.truncated) return 'generic MCP write blocked because argument inspection exceeded the safety bound';
+  if (unresolvedDestination) {
+    return `generic MCP write blocked because its ${unresolvedDestination.evidence} cannot be classified`;
+  }
+  if (destinations.length === 0) {
+    return 'generic MCP write blocked because no concrete destination was provided';
+  }
+  if (policy.access === 'read') {
+    return 'generic MCP write blocked because the tool descriptor does not declare a write capability';
+  }
+  if (!['devops', 'data', 'sandbox'].includes(policy.surface)) {
+    return 'generic MCP write blocked because the server has no explicit devops/data/sandbox surface grant';
+  }
+  return undefined;
 }
 
 /** Remove credentials that would turn an agent shell into a human-surface writer. */

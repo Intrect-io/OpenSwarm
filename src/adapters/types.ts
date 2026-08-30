@@ -155,6 +155,12 @@ export interface AdapterCapabilities {
    * flag at all. (INT-3189)
    */
   enforcesReadOnly?: boolean;
+  /**
+   * The adapter executes OpenSwarm's native tool loop and honours the process
+   * humanSurfaceReadOnly boundary.  Strict mode requires both this declaration
+   * and run(); absence fails closed before buildCommand or a child process.
+   */
+  enforcesHumanSurfaceReadOnly?: boolean;
 }
 
 export interface CliCommandSpec {

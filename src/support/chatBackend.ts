@@ -22,6 +22,7 @@ import {
 } from '../adapters/processTree.js';
 import { raceWithAbort } from '../adapters/abortRace.js';
 import { buildWorkerEnv } from '../adapters/envPath.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -316,6 +317,8 @@ async function runChatViaAdapter(
         : BASE_CHAT_SYSTEM_PROMPT,
       enableTools: true,
       webTools: true,
+      shellTools: !isHumanSurfaceReadOnlyEnabled(),
+      diagnosticsTool: false,
       mcpTools,
       // A high safety ceiling, not a task limit — normal work ends when the model
       // stops calling tools; the progress-based stop catches stuck loops earlier.
@@ -363,7 +366,23 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
   const cwd = options.cwd ?? process.cwd();
 
   if (typeof adapter.run === 'function') {
+    if (
+      isHumanSurfaceReadOnlyEnabled()
+      && adapter.capabilities.enforcesHumanSurfaceReadOnly !== true
+    ) {
+      throw new Error(
+        `HUMAN_SURFACE_READ_ONLY: Chat adapter '${adapter.name}' does not declare enforcement of the strict `
+        + 'human-surface boundary; use a native OpenSwarm-loop provider.',
+      );
+    }
     return runChatViaAdapter(adapter, provider, model, cwd, options);
+  }
+
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    throw new Error(
+      `HUMAN_SURFACE_READ_ONLY: Chat adapter '${adapter.name}' delegates to an external CLI with its own tool loop; `
+      + 'use a native OpenSwarm-loop provider while humanSurfaceReadOnly.enabled is true.',
+    );
   }
 
   // CLI command construction can itself perform I/O (Codex enumerates the

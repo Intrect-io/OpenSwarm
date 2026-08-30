@@ -5,6 +5,7 @@
 
 import type { PairSession } from './agentPair.js';
 import { isPotentiallyPublicHttpUrl, publicFetch } from '../support/outboundUrl.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 // Types
 
@@ -208,6 +209,9 @@ export async function notifyPairCancelled(
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
 export async function sendWebhook(url: string, payload: WebhookPayload): Promise<WebhookResult> {
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    return { success: false, error: 'HUMAN_SURFACE_READ_ONLY: outbound webhooks are disabled' };
+  }
   try {
     const response = await publicFetch(url, {
       method: 'POST',
@@ -248,6 +252,9 @@ export async function sendDiscordWebhook(
   title: string,
   color: number
 ): Promise<WebhookResult> {
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    return { success: false, error: 'HUMAN_SURFACE_READ_ONLY: Discord webhooks are disabled' };
+  }
   const embed = {
     title,
     color,

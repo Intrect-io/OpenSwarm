@@ -19,6 +19,7 @@ export class CcRouterAdapter extends CodexResponsesAdapter {
     managedGit: false,
     supportedSkills: [],
     enforcesReadOnly: true,
+    enforcesHumanSurfaceReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {

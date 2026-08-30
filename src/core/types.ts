@@ -133,6 +133,11 @@ export type SwarmConfig = {
   discordWebhookUrl?: string;
   /** Outbound notification channel (Discord/Slack/Telegram/webhook) — INT-1576 */
   notifications?: NotificationsConfig;
+  /**
+   * Fail-closed human-surface boundary.  When enabled, external collaboration
+   * surfaces are read-only and arbitrary agent program execution is disabled.
+   */
+  humanSurfaceReadOnly?: { enabled: boolean };
   /** Linear API key */
   linearApiKey: string;
   /** Linear team ID */

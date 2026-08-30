@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 
 // vitest.setup.ts points this at a temp path; restore it rather than deleting,
 // so a later suite in this worker never falls back to the real ~/.openswarm store.
@@ -12,6 +13,7 @@ const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
 const ORIGINAL_AUTOMATION_DB = process.env.OPENSWARM_AUTOMATION_DB;
 let dir = '';
 afterEach(async () => {
+  configureHumanSurfaceReadOnly(false);
   const store = await import('./coordinationStore.js');
   store.resetCoordinationStoreForTests();
   (await import('./coordinationTrace.js')).resetTraceDbForTests();
@@ -31,6 +33,20 @@ async function modules() {
 }
 
 describe('human questions', () => {
+  it('records the blocker but never invokes an injected operator sender in strict mode', async () => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    configureHumanSurfaceReadOnly(true);
+
+    const posted = await h.postHumanQuestion({
+      repository: '/repo', taskId: 'strict-task', actor: 'a', question: 'Ship?', notify,
+    });
+
+    expect(posted.delivered).toBe(false);
+    expect(notify).not.toHaveBeenCalled();
+    expect((await import('./coordinationStore.js')).getCoordinationStore().findQuestion(posted.correlationId))
+      .toMatchObject({ status: 'waiting', summary: 'Ship?' });
+  });
   it('pages the operator and routes the answer back to the agent that asked', async () => {
     const h = await modules();
     const notify = vi.fn(async () => true);

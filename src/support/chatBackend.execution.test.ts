@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CliAdapter } from '../adapters/types.js';
+import type { CliAdapter, CliRunOptions } from '../adapters/types.js';
 
 const getAdapter = vi.hoisted(() => vi.fn());
 const resolveMcpTools = vi.hoisted(() => vi.fn(async () => []));
@@ -15,6 +15,7 @@ vi.mock('../adapters/index.js', async (importOriginal) => {
 vi.mock('../mcp/mcpClient.js', () => ({ resolveMcpTools }));
 
 import { runChatCompletion } from './chatBackend.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 
 function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['name'] = 'codex'): CliAdapter {
   return {
@@ -34,7 +35,10 @@ function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['
   };
 }
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  configureHumanSurfaceReadOnly(false);
+  vi.clearAllMocks();
+});
 
 describe('runChatCompletion CLI fallback', () => {
   it('stores prompts in an unpredictable owner-only temp path and removes it', async () => {
@@ -180,6 +184,40 @@ describe('runChatCompletion CLI fallback', () => {
       .resolves.toMatchObject({ response: 'done' });
     expect(resolveMcpTools).toHaveBeenCalledOnce();
     expect(seenTools).toEqual([safeTool]);
+  });
+
+  it('keeps local web chat on a native loop while forcing shell and diagnostics off in strict mode', async () => {
+    configureHumanSurfaceReadOnly(true);
+    let seenOptions: CliRunOptions | undefined;
+    const native = cliAdapter(() => ({ command: 'unused', args: [] }));
+    getAdapter.mockReturnValue({
+      ...native,
+      capabilities: { ...native.capabilities, enforcesHumanSurfaceReadOnly: true },
+      run: async (options) => {
+        seenOptions = options;
+        return { exitCode: 0, stdout: 'local chat still works', stderr: '', durationMs: 1 };
+      },
+    });
+
+    await expect(runChatCompletion({ prompt: 'inspect', provider: 'codex', timeoutMs: 5000 }))
+      .resolves.toMatchObject({ response: 'local chat still works' });
+    expect(seenOptions).toMatchObject({ shellTools: false, diagnosticsTool: false, webTools: true });
+  });
+
+  it('refuses delegated chat before buildCommand can reach a fake CLI or HOME credential', async () => {
+    configureHumanSurfaceReadOnly(true);
+    const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
+    getAdapter.mockReturnValue(cliAdapter(buildCommand));
+    const previousHome = process.env.HOME;
+    process.env.HOME = '/tmp/fake-home-with-human-credentials';
+    try {
+      await expect(runChatCompletion({ prompt: 'send', provider: 'codex', timeoutMs: 5000 }))
+        .rejects.toThrow(/HUMAN_SURFACE_READ_ONLY.*delegates to an external CLI/);
+      expect(buildCommand).not.toHaveBeenCalled();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
   });
 
   it.skipIf(process.platform === 'win32')('terminates descendant processes when the caller aborts', async () => {
