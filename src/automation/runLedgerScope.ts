@@ -6,25 +6,18 @@
 // helpers at arm's length so claimRun() reads as a policy decision rather than
 // string normalization, and so the rules can be tested without a database.
 
-/** Scope entries the planner emits when it could not determine a write set. */
-const UNKNOWN_SCOPE_MARKER = 'unknown-file-scope';
+import {
+  conflictScopesOverlap,
+  normalizeConflictScope,
+} from '../orchestration/conflictScope.js';
+
+export { normalizeConflictScope } from '../orchestration/conflictScope.js';
 
 /**
  * Normalize a predicted write set for comparison: repository-relative, forward
  * slashes, case-insensitive. Anything unusable (non-array, non-string entries,
  * the unknown marker) drops out, so an empty result means "scope unknown".
  */
-export function normalizeConflictScope(entries: unknown): Set<string> {
-  if (!Array.isArray(entries)) return new Set();
-  const scope = new Set<string>();
-  for (const entry of entries) {
-    if (typeof entry !== 'string') continue;
-    const normalized = entry.trim().replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
-    if (normalized && normalized !== UNKNOWN_SCOPE_MARKER) scope.add(normalized);
-  }
-  return scope;
-}
-
 /** Read the scope a live run recorded in its metadata blob. */
 export function metadataConflictScope(metadata: unknown): Set<string> {
   if (!metadata || typeof metadata !== 'object') return new Set();
@@ -32,10 +25,7 @@ export function metadataConflictScope(metadata: unknown): Set<string> {
 }
 
 export function scopesOverlap(left: Set<string>, right: Set<string>): boolean {
-  for (const file of left) {
-    if (right.has(file)) return true;
-  }
-  return false;
+  return conflictScopesOverlap(left, right);
 }
 
 /**

@@ -6,6 +6,11 @@
 
 import type { TaskItem } from './decisionEngine.js';
 import { analyzeIssue } from '../knowledge/index.js';
+import {
+  conflictScopeEntriesOverlap,
+  conflictScopesOverlap,
+  normalizeConflictScope,
+} from './conflictScope.js';
 
 // Types
 
@@ -65,39 +70,10 @@ class UnionFind {
  * are dropped.
  */
 function normalizeScope(entries: string[] | undefined): Set<string> {
-  const out = new Set<string>();
-  if (!entries) return out;
-  for (const raw of entries) {
-    if (typeof raw !== 'string') continue;
-    const normalized = raw.trim().replace(/\\/g, '/').replace(/^\.\//, '').toLowerCase();
-    if (isVolatileScopePath(normalized)) continue;
-    if (normalized) out.add(normalized);
-  }
-  return out;
+  return normalizeConflictScope(entries);
 }
 
 const UNKNOWN_SCOPE = 'unknown-file-scope';
-const VOLATILE_SCOPE_SEGMENTS = new Set([
-  'trash',
-  'worktree',
-  '.openswarm',
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '__pycache__',
-  '.pytest_cache',
-  '.mypy_cache',
-  '.ruff_cache',
-]);
-const VOLATILE_SCOPE_PREFIXES = ['worktree_'];
-
-function isVolatileScopePath(path: string): boolean {
-  if (!path || path === UNKNOWN_SCOPE) return true;
-  const parts = path.split('/').filter(Boolean);
-  return parts.some(part => VOLATILE_SCOPE_SEGMENTS.has(part) || VOLATILE_SCOPE_PREFIXES.some(prefix => part.startsWith(prefix)));
-}
-
 /**
  * Resolve the best available preflight write scope for one task. The normalized
  * result is written back to the task so the scheduler and durable admission
@@ -110,6 +86,13 @@ export async function resolveTaskFileScope(task: TaskItem, projectPath: string):
     task.fileScope = scope;
     task.fileScopeSource ??= 'declared';
     return scope;
+  }
+  if (task.fileScope && task.fileScope.some((entry) => typeof entry === 'string' && entry.trim())) {
+    // An explicit but unsafe/generated-only scope is unknown, not permission to
+    // replace the planner's claim with a potentially narrower inference.
+    task.fileScope = undefined;
+    task.fileScopeSource = undefined;
+    return [];
   }
 
   try {
@@ -137,10 +120,7 @@ export function fileScopesConflict(left: string[] | undefined, right: string[] |
   const a = normalizeScope(left);
   const b = normalizeScope(right);
   if (a.size === 0 || b.size === 0) return true;
-  for (const file of a) {
-    if (b.has(file)) return true;
-  }
-  return false;
+  return conflictScopesOverlap(a, b);
 }
 
 /**
@@ -188,11 +168,14 @@ export async function detectFileConflicts(
       if (!modulesI || modulesI.size === 0) continue;
       if (!modulesJ || modulesJ.size === 0) continue;
 
-      // 교집합 계산
+      // Segment-boundary ancestor/descendant scopes conflict too: declaring a
+      // directory owns every file below it.
       const shared: string[] = [];
       for (const mod of modulesI) {
-        if (modulesJ.has(mod)) {
-          shared.push(mod);
+        for (const other of modulesJ) {
+          if (conflictScopeEntriesOverlap(mod, other)) {
+            shared.push(mod === other ? mod : (mod.length <= other.length ? mod : other));
+          }
         }
       }
 

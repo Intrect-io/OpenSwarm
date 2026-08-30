@@ -125,6 +125,17 @@ export async function readWarehouseShell(): Promise<Buffer | null> {
   }
 }
 
+/** Durable repository thread board (AGT-4130). */
+export async function readThreadBoardShell(): Promise<Buffer | null> {
+  const root = resolveStaticRoot();
+  if (!root) return null;
+  try {
+    return await readFile(join(root, 'threads.html'));
+  } catch {
+    return null;
+  }
+}
+
 export async function readAppShell(): Promise<Buffer | null> {
   const root = resolveStaticRoot();
   if (!root) return null;

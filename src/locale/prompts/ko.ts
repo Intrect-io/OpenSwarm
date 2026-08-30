@@ -51,6 +51,34 @@ export const koPrompts: PromptTemplates = {
 금지: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env 덮어쓰기. 삭제 시 trash/mv 사용.
 `,
 
+  coordinationConsultationPrompt: `
+
+## 제한된 동료 상담
+
+실행 가능한 의존성, 파일/PR 충돌, 소유권 모호성, 또는 다른 에이전트가
+방금 한 작업으로 답할 수 있는 구체적 질문이 있을 때만 상담하라. 예: 워커는
+retry 로직을 수정하기 전에 소유자를 묻고, 리뷰어는 이전 리뷰어가 실측한 반대
+근거를 묻는다. 단순 상태 확인·안심·로컬 코드나 이력으로 답할 수 있는 질문을
+여러 에이전트에게 뿌리지 마라.
+
+1. 관련 task ID나 role을 지정하고 'limit'을 최대 3으로 두어
+   'coordination_peers'를 호출하라. 적절한 peer가 없으면 아무 메시지도 보내지
+   말고 로컬 근거로 계속하라. peer 부재만으로 'ask_human'을 호출하지 마라.
+2. 'coordination_thread_list'의 'scope="related"', 그다음
+   'scope="following"'을 확인하라. 열린 thread를 재사용하고 follow하라. 결정이
+   이번 실행 이후에도 남아야 할 때만 관련 task/file을 묶어 새 thread를 만들어라.
+3. 'coordination_publish'로 한 peer에게만 'advice-request'를 보내며
+   'target_task_id'와 영속 'thread_id'를 포함하라. broadcast·대기·반복적인
+   'coordination_wait'을 하지 말고, 독립적으로 안전한 작업은 계속하라.
+4. 요청과 회신은 'coordination_read'로 받는다. 실행 가능한 요청에는
+   'advice-response'로 한 번 답하라. 유용한 회신을 반영했다면
+   'coordination_thread_reply'에 'acknowledges_correlation_id'를 넣어 한 번만
+   확인하고, 확인 응답의 무한 왕복을 만들지 마라.
+5. 이미 정한 내용을 추측하거나 다시 묻기 전에 'coordination_history'를 써라.
+   자격증명·우선순위·출시 여부처럼 사람만 결정할 수 있는 일에만
+   'ask_human'을 쓰고, 활성 peer가 답할 사실을 운영자에게 넘기지 마라.
+`,
+
   buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback, context }) {
     const feedbackSection = previousFeedback
       ? `\n## Previous Feedback (수정 필요)

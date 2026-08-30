@@ -90,10 +90,20 @@ autonomous:
     - { profile: hygiene, schedule: "43 */6 * * *" }
     - { profile: security, schedule: "11 2 * * *", adapter: codex }
 
-  # MCP-connected orchestrator sweep. Fires only for repositories whose board
-  # has open items the orchestrator can actually act on — questions waiting on
-  # the operator are left for Discord. Omit the key to disable it entirely.
-  orchestratorSchedule: "17 */2 * * *"
+  # High-capability project supervisor. Actionable board requests trigger a
+  # debounced sweep immediately; the cron is a reconciliation fallback. It runs
+  # in a scratch directory with shell access withheld, so use a native-loop
+  # adapter (delegated codex/claude/cursor CLIs are rejected).
+  orchestrator:
+    enabled: true
+    schedule: "17 */2 * * *"
+    eventDriven: true
+    eventDebounceMs: 1000
+    adapter: codex-responses
+    model: gpt-5.6-sol
+    reasoningEffort: high
+    timeoutMs: 600000
+    maxTurns: 12
 
   allowedProjects:
     - ~/dev/your-project

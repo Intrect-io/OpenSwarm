@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { defaultAutomationDbPath, setAutomationDbPath } from '../automation/automationDbPath.js';
+import Sqlite from 'better-sqlite3';
 
 import { queryTrace, recordTraceEvent, resetTraceDbForTests, traceSize } from './coordinationTrace.js';
 import type { CoordinationEvent } from './coordinationStore.js';
@@ -66,6 +67,11 @@ describe('coordination trace', () => {
       recipient: 'reviewer-b',
       recipientName: 'Reviewer B',
       recipientRole: 'reviewer',
+      repoKey: 'git:shared',
+      sourceTaskId: 'task-1',
+      sourceTaskLabel: 'AGT-1',
+      targetTaskId: 'task-2',
+      targetTaskLabel: 'AGT-2',
       detail: 'the long form',
       metadata: { digest: 'abc', sourceCount: 3 },
     }));
@@ -73,10 +79,45 @@ describe('coordination trace', () => {
     expect(stored).toMatchObject({
       recipient: 'reviewer-b',
       recipientRole: 'reviewer',
+      repoKey: 'git:shared',
+      sourceTaskId: 'task-1',
+      targetTaskId: 'task-2',
+      targetTaskLabel: 'AGT-2',
       taskLabel: 'AGT-1',
       detail: 'the long form',
       metadata: { digest: 'abc', sourceCount: 3 },
     });
+  });
+
+  it('migrates an existing trace table before recording routed envelopes', () => {
+    const path = process.env.OPENSWARM_AUTOMATION_DB!;
+    const legacy = new Sqlite(path);
+    legacy.exec(`
+      CREATE TABLE coordination_trace (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+        board_seq INTEGER NOT NULL, timestamp INTEGER NOT NULL, repository TEXT NOT NULL,
+        task_id TEXT NOT NULL, task_label TEXT, actor TEXT NOT NULL, actor_name TEXT,
+        actor_role TEXT, recipient TEXT, recipient_name TEXT, recipient_role TEXT,
+        kind TEXT NOT NULL, status TEXT NOT NULL, correlation_id TEXT NOT NULL,
+        summary TEXT NOT NULL, detail TEXT, metadata_json TEXT, fingerprint TEXT NOT NULL
+      )
+    `);
+    legacy.close();
+
+    recordTraceEvent(event({
+      id: 'migrated', repoKey: 'git:shared', sourceTaskId: 'task-1',
+      targetTaskId: 'task-2', targetTaskLabel: 'AGT-2',
+    }));
+
+    expect(queryTrace({ repoKey: 'git:shared', taskId: 'task-2' })).toEqual([
+      expect.objectContaining({ id: 'migrated', sourceTaskId: 'task-1', targetTaskId: 'task-2' }),
+    ]);
+    const check = new Sqlite(path, { readonly: true });
+    const columns = (check.pragma('table_info(coordination_trace)') as Array<{ name: string }>).map((column) => column.name);
+    check.close();
+    expect(columns).toEqual(expect.arrayContaining([
+      'repo_key', 'source_task_id', 'source_task_label', 'target_task_id', 'target_task_label',
+    ]));
   });
 
   it('filters by participant across actor and recipient', () => {

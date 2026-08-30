@@ -1,4 +1,4 @@
-export const AUTOMATION_SCHEMA_VERSION = 3;
+export const AUTOMATION_SCHEMA_VERSION = 4;
 
 export const RUN_STATES = [
   'DISCOVERED',
@@ -41,7 +41,7 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>
   EXECUTING: ['VERIFYING', 'PUBLISHING', 'SYNC_PENDING', 'RETRY_AT', 'WAITING_EXTERNAL', 'NEEDS_SPEC', 'NEEDS_ENV', 'NEEDS_HUMAN', 'NEEDS_RECONCILE', 'DECOMPOSED', 'CANCELLED'],
   VERIFYING: ['PUBLISHING', 'SYNC_PENDING', 'RETRY_AT', 'NEEDS_SPEC', 'NEEDS_ENV', 'NEEDS_HUMAN', 'NEEDS_RECONCILE', 'CANCELLED'],
   PUBLISHING: ['SYNC_PENDING', 'RETRY_AT', 'WAITING_EXTERNAL', 'NEEDS_RECONCILE', 'NEEDS_HUMAN', 'CANCELLED'],
-  SYNC_PENDING: ['DONE', 'RETRY_AT', 'WAITING_EXTERNAL', 'NEEDS_RECONCILE', 'NEEDS_HUMAN', 'CANCELLED'],
+  SYNC_PENDING: ['READY', 'DONE', 'RETRY_AT', 'WAITING_EXTERNAL', 'NEEDS_RECONCILE', 'NEEDS_HUMAN', 'CANCELLED'],
   DONE: ['READY'],
   RETRY_AT: ['CLAIMED', 'READY', 'RETRY_AT', 'NEEDS_RECONCILE', 'CANCELLED'],
   WAITING_EXTERNAL: ['READY', 'SYNC_PENDING', 'NEEDS_RECONCILE', 'NEEDS_HUMAN', 'CANCELLED'],
@@ -118,6 +118,26 @@ export interface RunClaim {
   leaseEpoch: number;
   attemptNo: number;
   leaseExpiresAt: number;
+}
+
+/**
+ * Short-lived fence held while post-merge integration is about to rewrite a
+ * sibling PR branch. Worker admission checks the same SQLite table in its
+ * claim transaction, so exactly one side can win the branch/issue race.
+ */
+export interface IntegrationReservationClaim {
+  projectPath: string;
+  branchName: string;
+  issueIdentifier: string;
+  ownerInstanceId: string;
+  reservationToken: string;
+  leaseExpiresAt: number;
+}
+
+export interface IntegrationReservationOptions {
+  ownerInstanceId: string;
+  leaseMs: number;
+  now?: number;
 }
 
 export interface ClaimOptions {

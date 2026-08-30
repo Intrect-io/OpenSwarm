@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
 
 /** Scripted API response carrying a single tool call. */
@@ -177,6 +177,17 @@ describe('shouldNudgeCoordinationCheck', () => {
   });
   it('does NOT nudge when there is no coordination context, regardless of turns elapsed', () => {
     expect(shouldNudgeCoordinationCheck(false, COORDINATION_CHECK_NUDGE_EVERY + 100)).toBe(false);
+  });
+
+  it('keeps consultation conditional, bounded, and non-blocking', () => {
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('concrete dependency');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('file/PR conflict');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('ownership ambiguity');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('coordination_peers (limit 3)');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('related/following durable threads');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('no suitable peer, send nothing');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('never fan out');
+    expect(COORDINATION_CHECK_NUDGE_PROMPT).toContain('never park');
   });
 });
 
@@ -366,6 +377,67 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
   });
+
+  it('withholds every filesystem tool while preserving MCP and coordination tools', async () => {
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      filesystemTools: false,
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'linear__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      coordinationContext: { repository: '/repo', taskId: 'supervisor', actor: 'orchestrator' },
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toContain('linear__get_issue');
+    expect(toolNames).toContain('coordination_read');
+    expect(toolNames).not.toContain('read_file');
+    expect(toolNames).not.toContain('search_files');
+    expect(toolNames).not.toContain('write_file');
+    expect(toolNames).not.toContain('edit_file');
+    expect(toolNames).not.toContain('bash');
+  });
+
+  it('refuses a hidden MCP name that was not granted to this run', async () => {
+    let turn = 0;
+    let deniedResult = '';
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      filesystemTools: false,
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 2,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'linear__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      callApi: async (messages, tools) => {
+        if (turn++ === 0) {
+          expect(tools.map((tool) => tool.function.name)).toEqual(['linear__get_issue']);
+          return toolCallResp('hidden-call', 'linear__delete_issue', { id: 'AX-1' });
+        }
+        deniedResult = messages.at(-1)?.content ?? '';
+        return finalResp('done');
+      },
+    });
+
+    expect(deniedResult).toContain('TOOL_NOT_ALLOWED');
+    expect(deniedResult).toContain('linear__delete_issue');
+  });
 });
 
 describe('runAgenticLoop blocking human decision', () => {
@@ -413,8 +485,10 @@ describe('runAgenticLoop coordination-inbox nudge (AGT-4054)', () => {
 
   it('nudges to check the coordination inbox after enough turns of silence', async () => {
     const logs: string[] = [];
+    const prompts: string[] = [];
     let call = 0;
-    const callApi = async () => {
+    const callApi = async (messages: ChatMessage[]) => {
+      prompts.push(...messages.flatMap((message) => typeof message.content === 'string' ? [message.content] : []));
       call++;
       if (call <= COORDINATION_CHECK_NUDGE_EVERY + 1) {
         return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
@@ -429,6 +503,7 @@ describe('runAgenticLoop coordination-inbox nudge (AGT-4054)', () => {
     });
 
     expect(logs.some((l) => l.includes('Coordination-inbox nudge'))).toBe(true);
+    expect(prompts).toContain(COORDINATION_CHECK_NUDGE_PROMPT);
   });
 
   it('does NOT nudge when the run has no coordination context', async () => {

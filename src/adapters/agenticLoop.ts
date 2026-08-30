@@ -135,6 +135,8 @@ export interface AgenticLoopOptions {
    * does not stop `cd /repo && ...`.
    */
   shellTools?: boolean;
+  /** Expose built-in filesystem tools independently from MCP/coordination. */
+  filesystemTools?: boolean;
   /** Read-only mode: hide mutation/shell tools and refuse response-text edits. */
   readOnly?: boolean;
   /** Expose the apply_patch (V4A) tool — codex adapters only (codex models are
@@ -215,6 +217,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     webTools = true,
     memoryTools = true,
     shellTools = true,
+    filesystemTools = true,
     readOnly = false,
     applyPatch = false,
     diagnosticsTool = false,
@@ -247,9 +250,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // In search-replace / whole-file mode the model edits via response-text blocks
   // (S/R) or whole write_file calls, so the structured edit_file tool is hidden to
   // force that path; apply_patch is likewise suppressed (it's a structured edit). (INT-1676)
-  const baseTools = editFormat === 'json'
-    ? TOOL_DEFINITIONS
-    : TOOL_DEFINITIONS.filter(t => t.function.name !== 'edit_file');
+  const baseTools = !filesystemTools
+    ? []
+    : editFormat === 'json'
+      ? TOOL_DEFINITIONS
+      : TOOL_DEFINITIONS.filter(t => t.function.name !== 'edit_file');
   const memoryFilteredTools = memoryTools
     ? baseTools
     : baseTools.filter((t) => t.function.name !== 'search_memory');
@@ -262,9 +267,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const tools = enableTools
     ? [
         ...visibleBaseTools,
-        ...(applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
+        ...(filesystemTools && applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
         // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
-        ...(diagnosticsTool && !readOnly && shellTools ? [DIAGNOSTICS_TOOL] : []),
+        ...(filesystemTools && diagnosticsTool && !readOnly && shellTools ? [DIAGNOSTICS_TOOL] : []),
         // Both are withheld in readOnly. A read-only run exists because the
         // material under inspection is untrusted, and a fetch is an outbound
         // channel for anything the agent can read — the provider credential
@@ -276,6 +281,10 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
       ]
     : [];
+  // The provider-visible schema is not an enforcement boundary. Carry the
+  // exact same set into dispatch so a hidden tool call cannot reach a globally
+  // registered MCP route (or another built-in withheld for this run).
+  const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
   let toolCallCount = 0;
   let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
@@ -518,7 +527,15 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       }
     }
 
-    const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, { protectedFiles, bashTimeoutMs, readOnly, coordinationContext, loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined });
+    const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, {
+      protectedFiles,
+      bashTimeoutMs,
+      readOnly,
+      filesystemTools,
+      allowedToolNames,
+      coordinationContext,
+      loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
+    });
     toolCallCount += toolCalls.length;
     // Count only SUCCESSFUL edits — a model whose edit_file calls all fail
     // (old_string not found, protected file) has not modified anything, and
@@ -633,11 +650,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       lastCoordinationCheckTurn = turn;
       messages.push({
         role: 'user',
-        content:
-          'It has been a while since you checked your coordination inbox. Call coordination_read ' +
-          'now to see if the operator or another agent has sent you anything. If you find a ' +
-          'message that is not a reply to something you initiated, acknowledge it with ' +
-          'coordination_publish before continuing your work.',
+        content: COORDINATION_CHECK_NUDGE_PROMPT,
       });
     }
   }
@@ -805,6 +818,15 @@ export function shouldNudgeReadLoop(
  * its own never triggers it, since its own calls reset the clock. (AGT-4054)
  */
 export const COORDINATION_CHECK_NUDGE_EVERY = 6;
+
+/** Conditional reminder: checking is periodic, consulting is never automatic fan-out. */
+export const COORDINATION_CHECK_NUDGE_PROMPT =
+  'It has been a while since you checked your coordination inbox. Call coordination_read ' +
+  'now to see if the operator or another agent sent anything. Respond once to an actionable ' +
+  'message. Only if your current work has a concrete dependency, file/PR conflict, or ownership ' +
+  'ambiguity, use coordination_peers (limit 3), then related/following durable threads, and send ' +
+  'one targeted request. With no actionable ambiguity or no suitable peer, send nothing and ' +
+  'continue; never fan out routine status and never park waiting for a peer.';
 
 /** True when a coordination-enabled agent has gone too long without checking its inbox. */
 export function shouldNudgeCoordinationCheck(

@@ -210,6 +210,17 @@ describe('agents publish under an assigned handle', () => {
     expect(assignedAgentName(ctx as never, 'worker')).toBe(assignedAgentName(ctx as never, 'worker'));
   });
 
+  it('keeps coordination identity stable across sibling worktree paths in one repository cell', async () => {
+    const { coordinationContextFor } = await import('./pipelineCoordination.js');
+    const metadata = { repoKey: 'git:shared', coordinationRepository: '/repo/main' };
+    const first = context({ projectPath: '/repo/worktree/a', config: { runMetadata: metadata } });
+    const second = context({ projectPath: '/repo/worktree/b', config: { runMetadata: metadata } });
+    expect(coordinationContextFor(first as never, 'worker')).toMatchObject({
+      repository: '/repo/main', repoKey: 'git:shared',
+      actor: coordinationContextFor(second as never, 'worker').actor,
+    });
+  });
+
   it('gives the worker and the reviewer different handles', () => {
     const ctx = context({ task: { id: 't-pair', issueId: 'i-pair', issueIdentifier: 'AGT-67', title: 'T' } });
     expect(assignedAgentName(ctx as never, 'worker')).not.toBe(assignedAgentName(ctx as never, 'reviewer'));

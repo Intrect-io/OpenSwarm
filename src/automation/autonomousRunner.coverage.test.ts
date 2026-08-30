@@ -262,13 +262,14 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
     });
 
-    it('fans out overlapping scopes when each issue runs in its own worktree', async () => {
+    it('defers overlapping scopes even when each issue runs in its own worktree', async () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
       }));
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
       const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
+      fileScopesConflictMock.mockReturnValueOnce(true);
       internal.scheduler.getRunningTasks = () => [{
         runId: 'active-run',
         task: activeTask,
@@ -281,9 +282,27 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
-      expect(safe).toEqual(new Set(['candidate']));
-      expect(fileScopesConflictMock).not.toHaveBeenCalled();
+      expect(safe).toEqual(new Set());
+      expect(fileScopesConflictMock).toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope);
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
+    });
+
+    it('still fans out disjoint scopes across isolated worktrees', async () => {
+      const r = new AutonomousRunner(cfg({
+        allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+      }));
+      const internal = r as unknown as Internal;
+      const first = task({ id: 'first', fileScope: ['src/a.ts'] });
+      const second = task({ id: 'second', fileScope: ['src/b.ts'] });
+      detectFileConflictsMock.mockResolvedValue({ safe: [first, second], conflictGroups: [] });
+
+      const safe = await internal.detectSafeCandidateIds([
+        { task: first, projectPath: '/repo' },
+        { task: second, projectPath: '/repo' },
+      ]);
+
+      expect(safe).toEqual(new Set(['first', 'second']));
+      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
     });
 
     it('still defers overlapping scopes when worktree fan-out is disabled', async () => {

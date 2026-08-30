@@ -93,6 +93,28 @@ describe('buildOrchestrationModel', () => {
     expect(node!.taskId).toBe('task-1');
   });
 
+  it('keeps a cross-task edge connected while seating each endpoint in its own lane', () => {
+    const model = buildOrchestrationModel([event({
+      taskId: 'task-a', sourceTaskId: 'task-a', sourceTaskLabel: 'AGT-A',
+      targetTaskId: 'task-b', targetTaskLabel: 'AGT-B',
+      recipient: 'reviewer-b', recipientName: 'Reviewer B', recipientRole: 'reviewer',
+    })]);
+    expect(model.nodes.find((node: Node) => node.id === 'enginseer-rhodanis-novum')).toMatchObject({ taskId: 'task-a', taskLabel: 'AGT-A' });
+    expect(model.nodes.find((node: Node) => node.id === 'reviewer-b')).toMatchObject({ taskId: 'task-b', taskLabel: 'AGT-B' });
+    expect(model.edges).toContainEqual(expect.objectContaining({ from: 'enginseer-rhodanis-novum', to: 'reviewer-b' }));
+  });
+
+  it('preserves two nodes when one address is active on different tasks', () => {
+    const model = buildOrchestrationModel([
+      event({ taskId: 'task-a', sourceTaskId: 'task-a', recipient: undefined }),
+      event({ taskId: 'task-b', sourceTaskId: 'task-b', recipient: undefined }),
+    ]);
+    const reused = model.nodes.filter((node: Node & { address?: string }) => node.address === 'enginseer-rhodanis-novum');
+    expect(reused).toHaveLength(2);
+    expect(reused.map((node: Node) => node.taskId).sort()).toEqual(['task-a', 'task-b']);
+    expect(new Set(reused.map((node: Node) => node.id)).size).toBe(2);
+  });
+
   it('computes activity against the injected clock, not wall time', () => {
     const model = buildOrchestrationModel(
       [event({ timestamp: 1_000 })],

@@ -105,7 +105,9 @@ function reviewerCoordinationGuidance(
   coordinationContext: CoordinationToolContext | undefined,
   readOnly: boolean | undefined,
 ): string {
-  return coordinationContext && !readOnly ? COORDINATION_GUIDANCE_PROMPT : '';
+  return coordinationContext && !readOnly
+    ? COORDINATION_GUIDANCE_PROMPT + getPrompts().coordinationConsultationPrompt
+    : '';
 }
 
 export interface PreCheckResult {

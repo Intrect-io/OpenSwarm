@@ -41,6 +41,13 @@ export interface CancellationEffectPayload {
   comment: string;
 }
 
+export interface IntegrationRequeueEffectPayload {
+  version: 1;
+  marker: string;
+  issueId: string;
+  comment: string;
+}
+
 export function isCompletionEffectPayload(value: unknown): value is CompletionEffectPayload {
   if (!value || typeof value !== 'object') return false;
   const payload = value as Partial<CompletionEffectPayload>;
@@ -59,6 +66,15 @@ export function isCancellationEffectPayload(value: unknown): value is Cancellati
     && typeof payload.marker === 'string'
     && !!payload.task
     && typeof payload.task === 'object'
+    && typeof payload.comment === 'string';
+}
+
+export function isIntegrationRequeueEffectPayload(value: unknown): value is IntegrationRequeueEffectPayload {
+  if (!value || typeof value !== 'object') return false;
+  const payload = value as Partial<IntegrationRequeueEffectPayload>;
+  return payload.version === 1
+    && typeof payload.marker === 'string'
+    && typeof payload.issueId === 'string'
     && typeof payload.comment === 'string';
 }
 
@@ -111,6 +127,20 @@ export function buildCancellationEffect(task: TaskItem, attemptNo: number): Effe
   return { kind: 'tracker.cancel', dedupeKey: marker, payload };
 }
 
+export function buildIntegrationRequeueEffect(
+  issueId: string,
+  marker: string,
+  comment: string,
+): EffectInput {
+  const payload: IntegrationRequeueEffectPayload = {
+    version: 1,
+    marker,
+    issueId,
+    comment: `${comment}\n\n<!-- openswarm-effect:${marker} -->`,
+  };
+  return { kind: 'tracker.integration_requeue', dedupeKey: marker, payload };
+}
+
 /**
  * Deliver one claimed tracker effect. Shared by the daemon's outbox drain and
  * the `openswarm work` CLI so both apply the exact same idempotent transition:
@@ -118,6 +148,43 @@ export function buildCancellationEffect(task: TaskItem, attemptNo: number): Effe
  * Done reconciliation, then local state/dependency reconciliation.
  */
 export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSource | null): Promise<void> {
+  if (effect.kind === 'tracker.integration_requeue') {
+    if (!isIntegrationRequeueEffectPayload(effect.payload)) {
+      throw new Error(`Invalid automation effect payload: ${effect.kind}`);
+    }
+    if (!source) throw new Error('Task source unavailable for outbox delivery');
+    const payload = effect.payload;
+    const comments = source.getExecutionComments
+      ? await source.getExecutionComments(payload.issueId)
+      : [];
+    const markerComment = `<!-- openswarm-effect:${payload.marker} -->`;
+    if (!comments.some((comment) => comment.body.includes(markerComment))) {
+      await source.addComment(payload.issueId, payload.comment, payload.marker);
+    }
+
+    // Evidence is the idempotency fence for the following state transition.
+    // Write it first, then inspect the live tracker state: if this process
+    // crashes after Todo succeeds but before the outbox ack, a retry observes
+    // Todo and must not overwrite a worker/human claim made in the meantime.
+    const lookup = await source.lookupIssueState(payload.issueId);
+    if (!lookup.ok) throw new Error(`Could not refresh tracker state for ${payload.issueId}: ${lookup.error}`);
+    if (!lookup.issue) throw new Error(`Tracker issue disappeared during Todo reconciliation: ${payload.issueId}`);
+    const normalizedState = lookup.issue.state.trim().toLowerCase().replaceAll('_', ' ');
+    if (normalizedState === 'todo') return;
+    if (lookup.issue.stateType === 'started'
+      || lookup.issue.stateType === 'canceled'
+      || normalizedState === 'in progress'
+      || normalizedState === 'in review'
+      || normalizedState === 'cancelled'
+      || normalizedState === 'canceled') {
+      throw new Error(
+        `Refusing Todo reconciliation for ${payload.issueId}; tracker moved to ${lookup.issue.state}`,
+      );
+    }
+    const accepted = await source.updateState(payload.issueId, 'Todo');
+    if (!accepted) throw new Error(`Tracker refused Todo reconciliation for ${payload.issueId}`);
+    return;
+  }
   if (effect.kind === 'tracker.cancel') {
     if (!isCancellationEffectPayload(effect.payload)) {
       throw new Error(`Invalid automation effect payload: ${effect.kind}`);

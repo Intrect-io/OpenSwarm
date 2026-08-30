@@ -45,6 +45,16 @@ export async function tryHandleAppRoutes(
   }
 
   {
+    const { tryHandlePriorityCouncilRoutes } = await import('../coordination/priorityCouncilRoutes.js');
+    if (await tryHandlePriorityCouncilRoutes(req, res, url, requestUrl, readBody)) return true;
+  }
+
+  {
+    const { tryHandleCoordinationThreadRoutes } = await import('../coordination/coordinationThreadRoutes.js');
+    if (await tryHandleCoordinationThreadRoutes(req, res, url, requestUrl, readBody)) return true;
+  }
+
+  {
     const { tryHandleCoordinationRoutes } = await import('../coordination/coordinationRoutes.js');
     if (await tryHandleCoordinationRoutes(req, res, url, requestUrl, readBody)) return true;
   }
@@ -83,6 +93,18 @@ export async function tryHandleAppRoutes(
   if (url === '/warehouse') {
     const { readWarehouseShell } = await import('./staticAssets.js');
     const shell = await readWarehouseShell();
+    if (!shell) {
+      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(shell);
+    }
+    return true;
+  }
+
+  if (url === '/threads') {
+    const { readThreadBoardShell } = await import('./staticAssets.js');
+    const shell = await readThreadBoardShell();
     if (!shell) {
       writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
     } else {

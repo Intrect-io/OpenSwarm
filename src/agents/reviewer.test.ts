@@ -501,6 +501,7 @@ describe('reviewer', () => {
 });
 
 describe('reviewer read-only mode (INT-3189)', () => {
+  beforeAll(() => { initLocale('en'); });
   afterEach(() => { vi.restoreAllMocks(); });
 
   const mockAdapter = () =>
@@ -538,6 +539,43 @@ describe('reviewer read-only mode (INT-3189)', () => {
     await runReviewer({ taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp' });
 
     expect(spawn.mock.calls[0][1].readOnly).toBeUndefined();
+  });
+
+  it('teaches a coordination-enabled reviewer the bounded durable consultation path', async () => {
+    const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
+    spawn.mockClear();
+    mockAdapter();
+
+    await runReviewer({
+      taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp',
+      coordinationContext: {
+        repository: '/tmp', repoKey: 'git:repo', taskId: 'task-b', actor: 'reviewer-b', actorRole: 'reviewer',
+      },
+    });
+
+    const options = spawn.mock.calls[0][1] as { systemPrompt?: string };
+    expect(options.systemPrompt).toContain('## Bounded peer consultation');
+    expect(options.systemPrompt).toContain('coordination_peers');
+    expect(options.systemPrompt).toContain('scope="following"');
+    expect(options.systemPrompt).toContain('one targeted');
+    expect(options.systemPrompt).toContain('acknowledges_correlation_id');
+  });
+
+  it('does not instruct a read-only reviewer to call withheld coordination tools', async () => {
+    const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
+    spawn.mockClear();
+    mockAdapter();
+
+    await runReviewer({
+      taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp', readOnly: true,
+      coordinationContext: {
+        repository: '/tmp', repoKey: 'git:repo', taskId: 'task-b', actor: 'reviewer-b', actorRole: 'reviewer',
+      },
+    });
+
+    const options = spawn.mock.calls[0][1] as { systemPrompt?: string };
+    expect(options.systemPrompt).not.toContain('## Bounded peer consultation');
+    expect(options.systemPrompt).not.toContain('## Coordination inbox');
   });
 });
 

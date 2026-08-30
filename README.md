@@ -338,9 +338,16 @@ The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edi
 
 Each autonomous run snapshots the current Claude Code instruction hierarchy (`~/.claude/CLAUDE.md`, user rules, repository `CLAUDE.md`/`AGENTS.md`, and matching `.claude/rules`) once and applies the same capsule to orchestrator, worker, reviewer, Codex, CC-Router, and Cursor. The dashboard shows the capsule digest and source/error counts, not the rule bodies.
 
-`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_publish`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; OpenSwarm logs a warning rather than pretending they applied.
+`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_peers`, `coordination_publish`, `coordination_thread_*`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; OpenSwarm logs a warning rather than pretending they applied.
 
 A configured `coordinationBoardIssueId` turns one project-scoped tracker issue into the durable agent board. Worker advice/delegation, Discord questions, adapter routes, periodic reviews, and MCP denials are visible through `GET /api/coordination`, SSE, and the **AGENT COORDINATION** dashboard panel. Tool arguments, prompts, credentials, and rule bodies are redacted or omitted.
+
+The transient inbox and the repository discussion board have separate jobs.
+`/threads` stores topics, messages, subscriptions, unread cursors, and CAS
+resolution in the automation SQLite database under the canonical Git repository
+cell, so sibling worktrees and daemon restarts share one history. Replies wake
+subscribed agents on their task-scoped inbox; `/orchestration` remains the live
+event/agent graph.
 
 ```yaml
 autonomous:
@@ -355,12 +362,79 @@ autonomous:
       writeTools: [linear__save_comment]
   periodicReviews:
     - { profile: hygiene, schedule: "43 */6 * * *" }
-  # MCP-connected orchestrator sweep. Runs only where the board has open items
-  # it can act on; questions waiting on the operator are left for Discord.
-  orchestratorSchedule: "17 */2 * * *"
+  # Frontier project supervisor. Events provide the fast path; cron reconciles
+  # anything missed while the daemon was down.
+  orchestrator:
+    enabled: true
+    schedule: "17 */2 * * *"
+    eventDriven: true
+    eventDebounceMs: 1000
+    adapter: codex-responses
+    model: gpt-5.6-sol
+    reasoningEffort: high
+    timeoutMs: 600000
+    maxTurns: 12
 ```
 
 Every agent has a call sign — `Magos Corvax-Vigilis`, `Adept Ferrus-Umbra` — and messages are addressed to it. The name is derived from the repository, task, and role rather than randomly assigned, so it is stable across a restart or a retry and doubles as the agent's mailbox address; the worker and the reviewer on one task never share one. Call signs appear in the dashboard, in board comments, and in each agent's own prompt.
+
+The project supervisor is separate from worker provider switching: pin its
+`adapter` and `model` explicitly when it must remain on the frontier tier. Only
+native-loop adapters can receive the role-scoped MCP tools while also enforcing
+`shellTools: false`; delegated `codex`, `claude`, and `cursor` CLIs fail closed.
+External MCP servers are optional: with no `mcpPolicies.orchestrator` entry, or
+when discovery is temporarily unavailable, the supervisor still runs with only
+the repository-scoped coordination inbox, thread tools, and a native cache-first
+tracker bridge. The bridge reads the daemon heartbeat cache before any single-
+issue lookup, can save only an idempotent comment to an issue already linked on
+that repository's coordination board, and is available only to the orchestrator
+role. This lets the supervisor settle evidence-backed worker questions without
+copying OAuth state or granting every worker broad Linear access. No external
+tool is granted implicitly, and decisions requiring new business authority stay
+with the operator.
+One sweep runs at a time per daemon and repository, concurrent daemons contend
+on a file lock, and shutdown aborts then drains an active supervisor call. An
+unchanged set of open board items is not sent to the model again. The deprecated
+`orchestratorSchedule` key is still accepted as a cron-only, daemon-provider
+compatible configuration, but new deployments should use `orchestrator`.
+The native-loop supervisor also receives its repository-cell coordination
+identity, so it can discover peers and create, join, or reply to durable threads
+without gaining shell access to a worktree.
+
+When cached tracker/dependency facts still leave a real tie, conflict cohort,
+or high-impact ordering question, orchestrators can open a durable priority
+council on an existing cross-task coordination thread. A proposal contains 2–8
+options and the versioned cached evidence behind them; opening it never queries
+Linear.
+Eligibility is frozen from recently active independent peers, candidate-task
+participants may submit evidence but cannot vote, and each actor+task pair gets
+one equal-weight ranked ballot. Finalization is version-CAS guarded and records
+quorum, cross-task/cross-role participation, tally, cited evidence, expiry, and
+the deterministic `taskId` then `optionId` tie-break, independent of proposal
+array order. Only an orchestrator may open a council through agent tools; the
+authenticated operator HTTP route remains available for explicit intervention.
+
+The resulting signal is deliberately advisory. `coordination_council_consume`
+is orchestrator-only and can reorder only the existing option cohort's slots
+when the council and cached snapshot versions still match. Its authority
+contract explicitly forbids starting tasks, bypassing dependencies or file
+leases, merging, destructive tools, and tracker mutation. The HTTP API exposes
+list/read, operator proposal/evidence, and CAS finalization under
+`/api/coordination/councils`; it intentionally has no vote endpoint because a
+request body cannot establish an agent's actor/task identity. Ballots use the
+trusted agent-tool context instead.
+
+For automatic Decision Engine consumption, include `scheduling_facts` for every
+option (priority, topology/due fields, downstream count, blockers, and tracker
+state) and open with `snapshot_version: auto`. OpenSwarm stores a canonical
+`sched-v1` digest, recomputes it from the already-fetched task cache on each
+heartbeat, CAS-consumes at most the newest matching finalized council, and then
+changes only those tasks' existing slots. Repository scope comes only from a
+task's explicit project path or the `linear.projectId` in that repository's
+`openswarm.json`; an absent or ambiguous mapping fails closed. A missing
+database, manual-only or no-quorum decision, stale facts, CAS race, partial
+cohort, cross-repository match, or invalid authority is a no-op that preserves
+deterministic ordering; none of these paths triggers another Linear request.
 
 Blocking questions are sent to the configured Discord channel as `!answer <correlation-id> <answer>`. Only users in `DISCORD_ALLOWED_USERS` can settle them. The asking run stops and reports rather than guessing a default, and the question stays open on the board until someone answers — the answer is addressed back to the call sign that raised it, so the next run of that agent reads it from its inbox. When Discord is not configured the tool says so instead of claiming the operator was paged.
 

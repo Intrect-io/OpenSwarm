@@ -221,7 +221,7 @@ agents:
           adapterRouting: { primary: 'codex', fallbacks: ['cc-router', 'cursor'], allowReasons: ['quota', 'infra'] },
           mcpPolicies: { orchestrator: { servers: ['github', 'linear'], writeTools: ['linear__save_comment'] } },
           periodicReviews: [{ profile: 'hygiene', schedule: '43 */6 * * *' }],
-          orchestratorSchedule: '17 */2 * * *',
+          orchestrator: { schedule: '17 */2 * * *' },
         },
       });
       vi.mocked(existsSync).mockReturnValue(true);
@@ -231,6 +231,29 @@ agents:
       expect(config.autonomous?.adapterRouting?.fallbacks).toEqual(['cc-router', 'cursor']);
       expect(config.autonomous?.mcpPolicies?.orchestrator.servers).toEqual(['github', 'linear']);
       expect(config.autonomous?.periodicReviews?.[0]).toMatchObject({ profile: 'hygiene' });
+      expect(config.autonomous?.orchestrator).toEqual({
+        enabled: true,
+        schedule: '17 */2 * * *',
+        eventDriven: true,
+        eventDebounceMs: 1_000,
+        adapter: 'codex-responses',
+        model: 'gpt-5.6-sol',
+        reasoningEffort: 'high',
+        timeoutMs: 600_000,
+        maxTurns: 12,
+      });
+    });
+
+    it('preserves the legacy orchestratorSchedule for runner-side compatibility', () => {
+      const jsonContent = JSON.stringify({
+        language: 'en',
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: { enabled: true, orchestratorSchedule: '17 */2 * * *' },
+      });
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(jsonContent);
+      const config = loadConfig('/tmp/config.json');
+      expect(config.autonomous?.orchestrator).toBeUndefined();
       expect(config.autonomous?.orchestratorSchedule).toBe('17 */2 * * *');
     });
 

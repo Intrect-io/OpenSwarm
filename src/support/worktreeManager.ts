@@ -758,6 +758,11 @@ export async function createWorktree(
         await clearActiveWorktreeMarker(resumed);
         throw error;
       }
+      // Repository operators may provision a dependency/data/credential path
+      // after the first attempt (for example a read-only `.env` mount in the
+      // daemon container). Reconcile the explicit shared-path contract on
+      // every resume, not only when the worktree directory was first created.
+      await linkSharedPaths(repoPath, worktreePath);
       console.log(`[Worktree] Resuming preserved worktree: ${worktreePath} (branch: ${branchName})`);
       return resumed;
     }
@@ -778,6 +783,7 @@ export async function createWorktree(
       resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
     };
     resumed.activeMarkerToken = await writeActiveWorktreeMarker(resumed);
+    await linkSharedPaths(repoPath, worktreePath);
     console.log(`[Worktree] Resuming crash-recovered worktree: ${worktreePath} (branch: ${branchName})`);
     return resumed;
   }

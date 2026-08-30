@@ -19,6 +19,10 @@ import { saveCognitiveMemory } from '../memory/index.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import type { ImpactAnalysis } from '../knowledge/index.js';
 import { getTaskReadiness } from '../taskState/store.js';
+import {
+  applyDurablePriorityCouncilRanking,
+  resolvePriorityCouncilRepositoryScopes,
+} from './priorityCouncilRanking.js';
 
 // Types
 
@@ -499,7 +503,15 @@ export class DecisionEngine {
     // 5. Priority sorting — dependency-aware (unblockers first), computed over the
     // full fetched set so blocked dependents still count toward a blocker's weight.
     const downstream = computeDownstreamCounts(tasks);
-    const sorted = this.prioritizeTasks(executableTasks, downstream);
+    const baseline = this.prioritizeTasks(executableTasks, downstream);
+    const councilScopes = await resolvePriorityCouncilRepositoryScopes(executableTasks, this.config.allowedProjects);
+    const councilRanking = applyDurablePriorityCouncilRanking(
+      executableTasks, baseline, downstream, councilScopes,
+    );
+    const sorted = councilRanking.tasks;
+    if (councilRanking.applied) {
+      console.log(`[DecisionEngine] Applied advisory priority council ${councilRanking.councilId}`);
+    }
     const selectedTask = sorted[0];
 
     // 6. Scope validation (CRITICAL)
@@ -604,7 +616,15 @@ export class DecisionEngine {
     // 5. Priority sorting — dependency-aware (unblockers first), computed over the
     // full fetched set so blocked dependents still count toward a blocker's weight.
     const downstream = computeDownstreamCounts(tasks);
-    const sorted = this.prioritizeTasks(executableTasks, downstream);
+    const baseline = this.prioritizeTasks(executableTasks, downstream);
+    const councilScopes = await resolvePriorityCouncilRepositoryScopes(executableTasks, this.config.allowedProjects);
+    const councilRanking = applyDurablePriorityCouncilRanking(
+      executableTasks, baseline, downstream, councilScopes,
+    );
+    const sorted = councilRanking.tasks;
+    if (councilRanking.applied) {
+      console.log(`[DecisionEngine] Applied advisory priority council ${councilRanking.councilId}`);
+    }
 
     // 6. Select multiple tasks (round-robin across projects — see
     // selectTasksRoundRobin). (INT-2318)

@@ -3,9 +3,28 @@
 // ============================================
 
 import type { ToolDefinition } from '../adapters/tools.js';
-import { getCoordinationStore, type CoordinationKind } from './coordinationStore.js';
+import { getCoordinationStore, type CoordinationEvent, type CoordinationKind } from './coordinationStore.js';
 import { postHumanQuestion } from './humanQuestions.js';
 import { callSignAddress } from './agentNames.js';
+import { repositoryKey } from './repositoryCell.js';
+import { getCoordinationThread } from './coordinationThreads.js';
+import {
+  COORDINATION_THREAD_GUIDANCE_PROMPT,
+  COORDINATION_THREAD_TOOL_DEFINITIONS,
+  COORDINATION_THREAD_TOOL_NAMES,
+  executeCoordinationThreadTool,
+} from './coordinationThreadTools.js';
+import {
+  PRIORITY_COUNCIL_GUIDANCE_PROMPT,
+  PRIORITY_COUNCIL_TOOL_DEFINITIONS,
+  PRIORITY_COUNCIL_TOOL_NAMES,
+  executePriorityCouncilTool,
+} from './priorityCouncilTools.js';
+import {
+  ORCHESTRATOR_TRACKER_TOOL_NAMES,
+  executeOrchestratorTrackerTool,
+  type OrchestratorTrackerBridge,
+} from './orchestratorTrackerTools.js';
 
 /**
  * Bounds on `coordination_wait`.
@@ -47,6 +66,7 @@ export function resolveWaitMs(requested: unknown, loopDeadlineAt?: number, now: 
 
 export interface CoordinationToolContext {
   repository: string;
+  repoKey?: string;
   taskId: string;
   /** Issue identifier for `taskId`, carried onto everything this agent publishes. */
   taskLabel?: string;
@@ -58,6 +78,8 @@ export interface CoordinationToolContext {
   actorRole?: string;
   /** Overridable operator notifier; defaults to the configured Discord channel. */
   notifyOperator?: (message: string) => Promise<boolean>;
+  /** Cache-first tracker bridge, installed only for the trusted project supervisor. */
+  tracker?: OrchestratorTrackerBridge;
 }
 
 export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
@@ -85,6 +107,21 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'coordination_peers',
+      description: 'Discover recently active agents in this repository cell, including agents working on other tasks or sibling worktrees. Results are bounded and may be filtered to dependency/conflict task IDs or roles.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_ids: { type: 'array', items: { type: 'string' }, description: 'Optional dependency/conflict cohort task IDs.' },
+          roles: { type: 'array', items: { type: 'string' }, description: 'Optional roles such as worker or reviewer.' },
+          limit: { type: 'number', description: 'Maximum peers (default 20, max 50).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'coordination_publish',
       description: 'Publish an advice request/response or delegation request/result to another OpenSwarm agent. Address it by call sign (the name the agent goes by on the board). Use a correlation_id to continue an existing exchange.',
       parameters: {
@@ -92,6 +129,9 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           kind: { type: 'string', enum: ['advice-request', 'advice-response', 'delegation-request', 'delegation-result'] },
           recipient: { type: 'string', description: "The target agent's call sign or address" },
+          target_task_id: { type: 'string', description: 'Task the recipient is working on. Required for a new cross-task exchange; replies can infer it from correlation_id.' },
+          target_task_label: { type: 'string', description: 'Optional issue identifier for target_task_id.' },
+          thread_id: { type: 'string', description: 'Durable related/followed thread that gives this consultation persistent context.' },
           correlation_id: { type: 'string' },
           summary: { type: 'string' },
           detail: { type: 'string' },
@@ -129,6 +169,8 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  ...COORDINATION_THREAD_TOOL_DEFINITIONS,
+  ...PRIORITY_COUNCIL_TOOL_DEFINITIONS,
 ];
 
 /**
@@ -146,7 +188,10 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
  * tool here left it undispatchable until someone noticed. (AGT-4065)
  */
 export const COORDINATION_TOOL_NAMES: ReadonlySet<string> = new Set(
-  COORDINATION_TOOL_DEFINITIONS.map((definition) => definition.function.name),
+  [
+    ...COORDINATION_TOOL_DEFINITIONS.map((definition) => definition.function.name),
+    ...ORCHESTRATOR_TRACKER_TOOL_NAMES,
+  ],
 );
 
 export const COORDINATION_GUIDANCE_PROMPT = `
@@ -158,17 +203,28 @@ coordination board, without you asking first. If you check your inbox
 (\`coordination_read\`) and find a message that is not a reply to something
 you initiated, acknowledge it with \`coordination_publish\` before you finish
 your work — do not just silently fold it into your next edit with no
-response.
-`;
+response. Use \`coordination_peers\` to find an active worker or reviewer on a
+dependency/conflict task before starting a cross-task exchange.
+` + COORDINATION_THREAD_GUIDANCE_PROMPT + PRIORITY_COUNCIL_GUIDANCE_PROMPT;
 
 export async function executeCoordinationTool(
   name: string,
   args: Record<string, unknown>,
   context: CoordinationToolContext,
 ): Promise<{ content: string; isError: boolean }> {
+  if (ORCHESTRATOR_TRACKER_TOOL_NAMES.has(name)) {
+    return executeOrchestratorTrackerTool(name, args, context);
+  }
+  if (PRIORITY_COUNCIL_TOOL_NAMES.has(name)) {
+    return executePriorityCouncilTool(name, args, context);
+  }
+  if (COORDINATION_THREAD_TOOL_NAMES.has(name)) {
+    return executeCoordinationThreadTool(name, args, context);
+  }
   const store = getCoordinationStore();
+  const repoKey = repositoryKey(context.repoKey, context.repository);
   if (name === 'coordination_read') {
-    const events = await store.consume(context.actor, { repository: context.repository, taskId: context.taskId });
+    const events = await store.consume(context.actor, { repository: context.repository, repoKey, taskId: context.taskId });
     return { content: JSON.stringify(events), isError: false };
   }
   if (name === 'coordination_wait') {
@@ -189,6 +245,7 @@ export async function executeCoordinationTool(
     const taskId = requestedTask === '*' ? undefined : requestedTask ?? context.taskId;
     const events = queryTrace({
       repository: context.repository,
+      repoKey,
       taskId,
       taskLabel: typeof args.task_label === 'string' ? args.task_label : undefined,
       correlationId: typeof args.correlation_id === 'string' ? args.correlation_id : undefined,
@@ -197,26 +254,153 @@ export async function executeCoordinationTool(
     });
     return { content: JSON.stringify(events), isError: false };
   }
+  if (name === 'coordination_peers') {
+    const taskIds = Array.isArray(args.task_ids)
+      ? args.task_ids.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : undefined;
+    const roles = Array.isArray(args.roles)
+      ? args.roles.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : undefined;
+    const peers = store.peers({
+      repoKey,
+      repository: context.repository,
+      taskIds,
+      roles,
+      exclude: { address: context.actor, taskId: context.taskId },
+      limit: typeof args.limit === 'number' ? args.limit : undefined,
+    });
+    return { content: JSON.stringify(peers), isError: false };
+  }
   if (name === 'coordination_publish') {
     const kinds = new Set<CoordinationKind>(['advice-request', 'advice-response', 'delegation-request', 'delegation-result']);
     const kind = typeof args.kind === 'string' ? args.kind as CoordinationKind : undefined;
     if (!kind || !kinds.has(kind) || typeof args.recipient !== 'string' || typeof args.summary !== 'string') {
       return { content: 'Invalid coordination_publish arguments', isError: true };
     }
+    const recipient = callSignAddress(args.recipient);
+    const correlationId = typeof args.correlation_id === 'string' ? args.correlation_id : undefined;
+    let targetTaskId = typeof args.target_task_id === 'string' && args.target_task_id.trim()
+      ? args.target_task_id.trim()
+      : undefined;
+    let targetTaskLabel = typeof args.target_task_label === 'string' && args.target_task_label.trim()
+      ? args.target_task_label.trim()
+      : undefined;
+
+    const isReply = kind.endsWith('response') || kind.endsWith('result');
+    const requestKind: CoordinationKind | undefined = kind === 'advice-response'
+      ? 'advice-request'
+      : kind === 'delegation-result'
+        ? 'delegation-request'
+        : undefined;
+    const exchange = correlationId ? store.exchange(correlationId) : [];
+    let replyRequest: CoordinationEvent | undefined;
+    if (isReply && requestKind) {
+      for (let index = exchange.length - 1; index >= 0 && !replyRequest; index -= 1) {
+        const event = exchange[index];
+        if (event.kind === requestKind && event.status === 'open') replyRequest = event;
+      }
+    }
+    if (isReply) {
+      if (!correlationId || !replyRequest) {
+        return { content: `${kind} requires correlation_id for an existing open ${requestKind}`, isError: true };
+      }
+      const requestRepoKey = repositoryKey(replyRequest.repoKey, replyRequest.repository);
+      const requestTargetTask = replyRequest.targetTaskId ?? replyRequest.taskId;
+      const requestSourceTask = replyRequest.sourceTaskId ?? replyRequest.taskId;
+      if (requestRepoKey !== repoKey
+        || replyRequest.recipient !== context.actor
+        || requestTargetTask !== context.taskId) {
+        return { content: `${kind} may only be sent by the original request addressee`, isError: true };
+      }
+      if (recipient !== replyRequest.actor) {
+        return { content: `${kind} must return to the original requester`, isError: true };
+      }
+      if (targetTaskId && targetTaskId !== requestSourceTask) {
+        return { content: `${kind} target_task_id must be the original requester task`, isError: true };
+      }
+      targetTaskId = requestSourceTask;
+      targetTaskLabel = replyRequest.sourceTaskLabel ?? replyRequest.taskLabel;
+    }
+    targetTaskId ??= context.taskId;
+    targetTaskLabel ??= targetTaskId === context.taskId ? context.taskLabel : undefined;
+
+    let targetPeer = store.peers({ repoKey, repository: context.repository, taskIds: [targetTaskId], limit: 50 })
+      .find((peer) => peer.address === recipient);
+    if (!isReply && recipient === context.actor) {
+      return { content: 'coordination_publish cannot address the sending agent itself', isError: true };
+    }
+    if (!isReply && targetTaskId !== context.taskId) {
+      if (!targetPeer) {
+        return {
+          content: `Cross-task recipient ${args.recipient} is not an active peer on task ${targetTaskId} in this repository cell`,
+          isError: true,
+        };
+      }
+      targetTaskLabel ??= targetPeer.taskLabel;
+    }
+
+    let threadId = typeof args.thread_id === 'string' && args.thread_id.trim()
+      ? args.thread_id.trim()
+      : undefined;
+    const requestThreadId = typeof replyRequest?.metadata?.threadId === 'string'
+      ? replyRequest.metadata.threadId
+      : undefined;
+    if (isReply && requestThreadId && threadId && threadId !== requestThreadId) {
+      return { content: `${kind} thread_id must match the original request`, isError: true };
+    }
+    if (!threadId && isReply) threadId = requestThreadId;
+    if (threadId) {
+      let detail;
+      try {
+        detail = getCoordinationThread({ repository: repoKey, threadId, messageLimit: 1 });
+      } catch (error) {
+        return { content: error instanceof Error ? error.message : String(error), isError: true };
+      }
+      const threadTasks = new Set([
+        ...detail.thread.relatedTaskIds,
+        ...detail.participants.map((participant) => participant.taskId),
+      ]);
+      if (!threadTasks.has(context.taskId) || !threadTasks.has(targetTaskId)) {
+        return { content: 'thread_id must be related to both consultation tasks', isError: true };
+      }
+    }
+
+    const consultation = kind === 'advice-request' || kind === 'advice-response';
+    const crossTask = targetTaskId !== context.taskId;
+    const replyTargetRole = replyRequest?.actorRole;
+    const crossRole = Boolean(context.actorRole
+      && (targetPeer?.role ?? replyTargetRole)
+      && context.actorRole !== (targetPeer?.role ?? replyTargetRole));
+
     const event = await store.publish({
       repository: context.repository,
+      repoKey,
       taskId: context.taskId,
       taskLabel: context.taskLabel,
+      sourceTaskId: context.taskId,
+      sourceTaskLabel: context.taskLabel,
+      targetTaskId,
+      targetTaskLabel,
       actor: context.actor,
       actorName: context.actorName,
       actorRole: context.actorRole,
-      recipient: callSignAddress(args.recipient),
-      recipientName: args.recipient,
+      recipient,
+      recipientName: targetPeer?.name ?? replyRequest?.actorName ?? args.recipient,
+      recipientRole: targetPeer?.role ?? replyTargetRole,
       kind,
       status: kind.endsWith('request') ? 'open' : 'completed',
-      correlationId: typeof args.correlation_id === 'string' ? args.correlation_id : undefined,
+      correlationId,
       summary: args.summary,
       detail: typeof args.detail === 'string' ? args.detail : undefined,
+      metadata: consultation ? {
+        consultation: true,
+        consultationPhase: kind === 'advice-request' ? 'request' : 'response',
+        crossTask,
+        crossRole,
+        ...(context.actorRole ? { sourceRole: context.actorRole } : {}),
+        ...((targetPeer?.role ?? replyTargetRole) ? { targetRole: targetPeer?.role ?? replyTargetRole! } : {}),
+        ...(threadId ? { threadId } : {}),
+      } : undefined,
     });
     return { content: JSON.stringify({ accepted: true, event }), isError: false };
   }
@@ -280,11 +464,15 @@ export async function executeCoordinationTool(
 const COORDINATION_WAIT_POLL_MS = 2_000;
 
 export async function waitForInbox(
-  store: { consume: (actor: string, options: { repository: string; taskId: string }) => Promise<unknown[]> },
+  store: { consume: (actor: string, options: { repository: string; repoKey?: string; taskId: string }) => Promise<unknown[]> },
   context: CoordinationToolContext,
   timeoutMs: number,
 ): Promise<unknown[]> {
-  const drain = () => store.consume(context.actor, { repository: context.repository, taskId: context.taskId });
+  const drain = () => store.consume(context.actor, {
+    repository: context.repository,
+    repoKey: repositoryKey(context.repoKey, context.repository),
+    taskId: context.taskId,
+  });
   if (timeoutMs <= 0) return drain();
 
   const { getEventHub } = await import('../core/eventHub.js');

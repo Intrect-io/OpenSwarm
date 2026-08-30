@@ -30,6 +30,9 @@ import {
 } from './runnerState.js';
 import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck, composeDispatchScope, pathIsUnderAny } from '../orchestration/decisionEngine.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
+import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
+import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
+import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
 import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
@@ -84,8 +87,16 @@ import {
   type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
 import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
-import { buildCancellationEffect, buildCompletionEffect, completionStats, deliverTrackerEffect } from './trackerEffects.js';
+import {
+  buildCancellationEffect,
+  buildCompletionEffect,
+  buildIntegrationRequeueEffect,
+  completionStats,
+  deliverTrackerEffect,
+} from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
+import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
+import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -109,7 +120,7 @@ export function effectiveProjectConcurrency(config: Pick<AutonomousConfig,
   return Math.max(1, Math.min(requested, globalCap));
 }
 
-/** Worktrees isolate issue execution; integration conflicts are handled later. */
+/** Worktrees isolate filesystem writes; file-scope admission still protects integration. */
 export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
   'allowSameProjectConcurrent' | 'worktreeMode'
 >): boolean {
@@ -180,7 +191,7 @@ export class AutonomousRunner {
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
   private cronJob: Cron | null = null;
   private periodicReviewJobs: Cron[] = [];
-  private orchestratorJob: Cron | null = null;
+  private orchestratorSupervisor: OrchestratorSupervisor | null = null;
   private startupHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private stopping = false;
   private state: RunnerState = {
@@ -242,6 +253,15 @@ export class AutonomousRunner {
    */
   private shouldFilterByEnabled(): boolean {
     return this.projectSelectionTouched || this.enabledProjects.size > 0;
+  }
+
+  /**
+   * Repositories that background services may touch. Once the operator has
+   * touched project selection, an empty enabled set means exactly zero — never
+   * fall back to every allowed repository behind the UI's back.
+   */
+  private getBackgroundServiceProjects(): string[] {
+    return this.shouldFilterByEnabled() ? this.getEnabledProjects() : this.getAllowedProjects();
   }
 
   private sameProjectCandidateCap(): number | null {
@@ -1188,9 +1208,12 @@ export class AutonomousRunner {
         maxConcurrent: sameRepoParallelAllowed
           ? (metadata?.automation?.maxConcurrent ?? effectiveProjectConcurrency(this.config))
           : 1,
-        // Each issue gets its own worktree in fan-out mode. Overlapping files
-        // may conflict when branches integrate, but must not serialize workers.
-        conflictScope: sameRepoParallelAllowed ? undefined : task.fileScope,
+        // Worktrees isolate live filesystem writes, not the branches that must
+        // later merge. Always carry the predicted write set into the durable
+        // claim so another daemon / `openswarm work` process cannot race past
+        // this heartbeat's in-memory conflict check. An empty scope fails
+        // closed while another same-repository run is active.
+        conflictScope: task.fileScope ?? [],
         // A fixed default attempt budget of 12 made a 32-slot daemon trip its
         // repository circuit before the first pool could even fill. Treat this
         // as an explicit repository policy; failure and cost circuits remain
@@ -1409,6 +1432,13 @@ export class AutonomousRunner {
   }
 
   private async drainDurableOutbox(): Promise<void> {
+    const threadOutcome = await drainCoordinationThreadOutbox();
+    if (threadOutcome.warnings.length > 0) {
+      console.warn(
+        `[ThreadOutbox] delivered=${threadOutcome.delivered} pending=${threadOutcome.pending} `
+        + `warnings=${threadOutcome.warnings.length}`,
+      );
+    }
     if (!this.durableRuns.isPrimary) return;
     if (this.outboxDrain) return this.outboxDrain;
     const finalized = new Set<string>();
@@ -1655,8 +1685,8 @@ export class AutonomousRunner {
     this.stopEventLoopMonitor = null;
     for (const job of this.periodicReviewJobs) job.stop();
     this.periodicReviewJobs = [];
-    this.orchestratorJob?.stop();
-    this.orchestratorJob = null;
+    await this.orchestratorSupervisor?.stop();
+    this.orchestratorSupervisor = null;
 
     if (this.cronJob) {
       this.cronJob.stop();
@@ -2256,10 +2286,6 @@ export class AutonomousRunner {
   }
 
   private async detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
-    if (worktreeFanoutEnabled(this.config)) {
-      return new Set(candidates.map(candidate => candidate.task.id));
-    }
-
     // Group candidates by canonical repository identity for conflict detection.
     // A symlink/relative-path alias must not split one repository into two groups
     // and bypass same-repository conflict serialization.
@@ -2662,7 +2688,7 @@ export class AutonomousRunner {
 
   private async runPeriodicReviewAcrossProjects(review: NonNullable<AutonomousConfig['periodicReviews']>[number]): Promise<void> {
     const { runPeriodicReview } = await import('../coordination/periodicReview.js');
-    const projects = this.getEnabledProjects().length > 0 ? this.getEnabledProjects() : this.getAllowedProjects();
+    const projects = this.getBackgroundServiceProjects();
     for (const repository of projects) {
       await runPeriodicReview({
         repository,
@@ -2674,64 +2700,64 @@ export class AutonomousRunner {
   }
 
   private startOrchestrator(): void {
-    this.orchestratorJob?.stop();
-    this.orchestratorJob = null;
-    const schedule = this.config.orchestratorSchedule;
-    if (!schedule) return;
-    this.orchestratorJob = new Cron(schedule, () => {
-      void this.runOrchestratorAcrossProjects().catch((error) =>
-        console.error('[Orchestrator] sweep failed:', error));
+    const config = resolveOrchestratorConfig(this.config);
+    if (!config?.enabled) return;
+
+    const trackerSource = getTaskSource();
+    const getCachedIssue = (issueIdOrIdentifier: string) => {
+      const requested = issueIdOrIdentifier.toLowerCase();
+      const task = this.lastFetchedTasks.find((candidate) =>
+        candidate.issueId?.toLowerCase() === requested
+        || candidate.issueIdentifier?.toLowerCase() === requested
+        || candidate.id.toLowerCase() === requested);
+      const issueId = task?.issueId ?? task?.id;
+      if (!task || !issueId) return undefined;
+      return {
+        issueId,
+        identifier: task.issueIdentifier ?? issueId,
+        title: task.title,
+        state: task.linearState,
+        priority: task.priority,
+        blockedBy: task.blockedBy,
+      };
+    };
+    const tracker = trackerSource ? {
+      getCachedIssue,
+      resolveIssue: async (issueIdOrIdentifier: string) => {
+        const cached = getCachedIssue(issueIdOrIdentifier);
+        if (cached) return { issueId: cached.issueId, identifier: cached.identifier, source: 'cache' as const };
+        if (!trackerSource.resolveIssue) return null;
+        const resolved = await trackerSource.resolveIssue(issueIdOrIdentifier);
+        if (!resolved.ok) throw new Error(`Tracker issue lookup failed: ${resolved.error}`);
+        return resolved.issue ? {
+          issueId: resolved.issue.id,
+          identifier: resolved.issue.identifier,
+          source: 'tracker' as const,
+        } : null;
+      },
+      addComment: (issueId: string, body: string, idempotencyKey: string) =>
+        trackerSource.addComment(issueId, body, idempotencyKey),
+    } : undefined;
+
+    const supervisor = new OrchestratorSupervisor({
+      config,
+      policy: this.config.mcpPolicies?.orchestrator,
+      getRepositories: () => this.getBackgroundServiceProjects(),
+      buildInstructionCapsule,
+      tracker,
     });
-  }
-
-  /**
-   * Let the MCP-connected orchestrator act on whatever the board is waiting on.
-   *
-   * Only runs where there is something to coordinate: a sweep with an empty
-   * pending list would spend a provider call to conclude nothing, and the
-   * orchestrator's whole job is unblocking work that already exists.
-   */
-  private async runOrchestratorAcrossProjects(): Promise<void> {
-    const policy = this.config.mcpPolicies?.orchestrator;
-    if (!policy) {
-      console.warn('[Orchestrator] no mcpPolicies.orchestrator configured — skipping sweep');
-      return;
-    }
-    // Imported one at a time: concurrent dynamic imports of mocked modules have
-    // raced here before, with the second call resolving the real module.
-    // A delegated CLI adapter runs its own tool loop: it would receive none of
-    // the MCP tools the orchestrator exists to use, and spawnCli refuses to run
-    // it with shell access withheld. Skip with one clear line instead of
-    // throwing once per repository, every sweep.
-    const { getAdapter } = await import('../adapters/index.js');
-    const adapter = getAdapter();
-    if (!adapter.run) {
-      console.warn(
-        `[Orchestrator] adapter '${adapter.name}' delegates to its own CLI tool loop and cannot use MCP — skipping sweep. `
-        + `Use codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, or local.`,
+    try {
+      supervisor.start();
+      this.orchestratorSupervisor = supervisor;
+      console.log(
+        `[Orchestrator] supervisor enabled (${config.eventDriven ? 'events' : 'cron-only'}`
+        + `${config.schedule ? `, ${config.schedule}` : ''}; ${config.adapter ?? 'daemon-default'}/${config.model ?? 'adapter-default'})`,
       );
-      return;
-    }
-    const { buildOrchestratorObjective, runOrchestrator } = await import('../coordination/orchestratorAgent.js');
-    const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
-    const store = getCoordinationStore();
-    const projects = this.getEnabledProjects().length > 0 ? this.getEnabledProjects() : this.getAllowedProjects();
-
-    for (const repository of projects) {
-      const objective = buildOrchestratorObjective(store.snapshot(repository).pending);
-      if (!objective) continue;
-      // Same rule snapshot the workers get, so the orchestrator coordinates
-      // under the runbook it is coordinating against rather than an empty one.
-      const { buildInstructionCapsule } = await import('../agents/instructionCapsule.js');
-      await runOrchestrator({
-        repository,
-        taskId: 'orchestrator:sweep',
-        objective,
-        policy,
-        instructionCapsule: buildInstructionCapsule(repository),
-        // No adapter override: the orchestrator runs on the daemon's configured
-        // provider, the same one the workers it coordinates use.
-      }).catch((error) => console.error(`[Orchestrator] ${repository} failed:`, error));
+    } catch (error) {
+      // A bad optional schedule must not tear down the worker heartbeat after it
+      // has already started. No listener was registered if Cron construction failed.
+      console.error('[Orchestrator] supervisor disabled: invalid lifecycle configuration:', error);
+      void supervisor.stop();
     }
   }
 
@@ -2742,6 +2768,7 @@ export class AutonomousRunner {
       mcpPolicies: this.config.mcpPolicies,
       adapterRouting: this.config.adapterRouting,
       periodicReviews: this.config.periodicReviews ?? [],
+      orchestrator: resolveOrchestratorConfig(this.config),
       orchestratorSchedule: this.config.orchestratorSchedule,
     };
   }
@@ -2912,6 +2939,66 @@ export class AutonomousRunner {
   getRateLimitHoldUntil(): number { return this.rateLimitUntil; }
   /** Durable ledger record for an issue — the authoritative worktree/branch source. */
   getDurableRun(issueId: string) { return this.durableRuns.getRun(issueId); }
+  /** Branch refs currently protected by live durable worker leases. */
+  getActiveIntegrationBranches(projectPath: string): string[] | undefined {
+    return this.durableRuns.activeWorkerBranches(projectPath);
+  }
+  getActiveIntegrationIssues(projectPath: string): string[] | undefined {
+    return this.durableRuns.activeWorkerIdentifiers(projectPath);
+  }
+  withIntegrationReservation(
+    projectPath: string,
+    branch: string,
+    issueIdentifier: string,
+    operation: () => Promise<void>,
+  ): Promise<boolean> {
+    return this.durableRuns.withIntegrationReservation(projectPath, branch, issueIdentifier, operation);
+  }
+
+  /**
+   * Return a conflicted sibling PR to its owning issue with replay evidence.
+   * The coordinator already checks the lease; the ledger repeats that fence
+   * while atomically queuing the tracker effect and SYNC_PENDING transition.
+   */
+  async routeIntegrationConflict(evidence: IntegrationConflictEvidence): Promise<void> {
+    const run = this.durableRuns.listRuns().find((candidate) =>
+      candidate.identifier === evidence.issueIdentifier
+      && candidate.branchName === evidence.branch);
+    if (!run) {
+      throw new Error(`No durable run owns ${evidence.issueIdentifier} branch ${evidence.branch}`);
+    }
+    const activeBranches = this.durableRuns.activeWorkerBranches(run.projectPath);
+    const activeIssues = this.durableRuns.activeWorkerIdentifiers(run.projectPath);
+    if (activeBranches === undefined || activeIssues === undefined) {
+      throw new Error('Durable lease state is unavailable');
+    }
+    if (activeBranches.includes(evidence.branch) || activeIssues.includes(evidence.issueIdentifier)) {
+      throw new Error(`Branch ${evidence.branch} acquired an active worker lease`);
+    }
+    const evidenceBody = JSON.stringify({
+      mergedPR: evidence.mergedPRNumber,
+      mergedBranch: evidence.mergedBranch,
+      mergeCommit: evidence.mergeCommitOid,
+      baseBranch: evidence.baseBranch,
+      baseOid: evidence.baseOid,
+      expectedHeadOid: evidence.expectedHeadOid,
+      conflictFiles: evidence.conflictFiles,
+    }, null, 2);
+    const idempotencyKey = `integration-conflict:${evidence.repo}#${evidence.prNumber}@${evidence.mergeCommitOid}`;
+    const effect = buildIntegrationRequeueEffect(
+      run.issueId,
+      idempotencyKey,
+      `Post-merge integration found a rebase conflict in PR #${evidence.prNumber}. `
+        + `The owning run is queued for retry.\n\n\`\`\`json\n${evidenceBody}\n\`\`\``,
+    );
+    if (!this.durableRuns.queueIntegrationRequeue(run.issueId, run.stateVersion, effect)) {
+      const current = this.durableRuns.getRun(run.issueId);
+      throw new Error(`Refusing to reactivate ${evidence.issueIdentifier} from ${current?.state ?? 'missing'}`);
+    }
+    // Delivery may fail transiently; the durable SYNC_PENDING row and outbox
+    // effect remain authoritative and every normal heartbeat retries them.
+    await this.drainDurableOutbox();
+  }
   getFailureCauseSummary(limit = 50) { return aggregateFailureCauses(getPipelineHistory(limit)); }
 
   private recordPipelineHistory(task: TaskItem, result: PipelineResult): void {

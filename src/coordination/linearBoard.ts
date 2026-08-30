@@ -13,14 +13,22 @@ export function formatCoordinationComment(event: CoordinationEvent): string {
     id: event.id,
     seq: event.seq,
     repository: event.repository,
+    repoKey: event.repoKey,
     taskId: event.taskId,
+    taskLabel: event.taskLabel,
+    sourceTaskId: event.sourceTaskId,
+    sourceTaskLabel: event.sourceTaskLabel,
+    targetTaskId: event.targetTaskId,
+    targetTaskLabel: event.targetTaskLabel,
     actor: event.actor,
     // Call signs travel with the message: a board comment restored on another
     // host would otherwise show routing addresses where the operator expects
     // the name the agent is known by.
     actorName: event.actorName,
+    actorRole: event.actorRole,
     recipient: event.recipient,
     recipientName: event.recipientName,
+    recipientRole: event.recipientRole,
     kind: event.kind,
     status: event.status,
     correlationId: event.correlationId,

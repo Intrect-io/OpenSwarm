@@ -289,8 +289,74 @@ export class DurableRunCoordinator {
       .filter((identifier): identifier is string => !!identifier);
   }
 
+  /**
+   * Branches protected by a currently-live worker lease. Integration uses the
+   * branch name (not the issue identifier) because that is the ref it would
+   * force-update. Undefined preserves the same fail-closed contract as
+   * activeWorkerIdentifiers when the ledger is off/shadow.
+   */
+  activeWorkerBranches(projectPath: string, now = Date.now()): string[] | undefined {
+    if (!this.isPrimary || !this.ledger) return undefined;
+    const normalized = normalizeProjectPath(projectPath);
+    return this.listRuns(ACTIVE_LEASE_STATES)
+      .filter((run) => run.projectPath === normalized && holdsLiveLease(run, now))
+      .map((run) => run.branchName)
+      .filter((branch): branch is string => !!branch);
+  }
+
+  /**
+   * Hold the same durable SQLite fence that claimRun() consults while a
+   * post-merge integration updates one sibling branch. Expiry makes a daemon
+   * crash recoverable; renewal keeps a slow network push fenced.
+   */
+  async withIntegrationReservation(
+    projectPath: string,
+    branchName: string,
+    issueIdentifier: string,
+    operation: () => Promise<void>,
+  ): Promise<boolean> {
+    if (!this.isPrimary || !this.ledger || this.closed) return false;
+    let reservation = this.ledger.acquireIntegrationReservation(
+      normalizeProjectPath(projectPath),
+      branchName,
+      issueIdentifier,
+      { ownerInstanceId: this.instanceId, leaseMs: this.leaseMs },
+    );
+    if (!reservation) return false;
+
+    let leaseLost = false;
+    const renewEveryMs = Math.max(1_000, Math.floor(this.leaseMs / 3));
+    const renewTimer = setInterval(() => {
+      try {
+        const renewed = this.ledger!.renewIntegrationReservation(reservation!, this.leaseMs);
+        if (renewed) reservation = renewed;
+        else leaseLost = true;
+      } catch {
+        leaseLost = true;
+      }
+    }, renewEveryMs);
+    renewTimer.unref?.();
+
+    try {
+      await operation();
+      return !leaseLost;
+    } finally {
+      clearInterval(renewTimer);
+      this.ledger.releaseIntegrationReservation(reservation);
+    }
+  }
+
   markReady(issueId: string, now = Date.now()): boolean {
     return this.ledger?.markReady(issueId, now) ?? false;
+  }
+
+  queueIntegrationRequeue(
+    issueId: string,
+    expectedStateVersion: number,
+    effect: EffectInput,
+    now = Date.now(),
+  ): boolean {
+    return this.ledger?.queueIntegrationRequeue(issueId, expectedStateVersion, effect, now) ?? false;
   }
 
   consecutiveAttemptsWithErrorCode(issueId: string, errorCode: string, sinceMs?: number): number {

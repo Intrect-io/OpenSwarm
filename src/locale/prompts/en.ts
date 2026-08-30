@@ -50,6 +50,34 @@ Reports: List files modified + commands run. Nothing else.
 Forbidden: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env overwrites. Use trash/mv for deletions.
 `,
 
+  coordinationConsultationPrompt: `
+
+## Bounded peer consultation
+
+Consult only for an actionable dependency, overlapping file/PR conflict,
+ownership ambiguity, or a concrete question another agent can answer from work
+it just did. Examples: a worker asks who owns retry logic before editing it; a
+reviewer asks what objection a prior reviewer already measured. Do not fan out
+for routine status, reassurance, or questions local code/history already answers.
+
+1. Call 'coordination_peers' with the relevant task IDs or roles and 'limit'
+   at most 3. If it returns no suitable peer, send nothing and continue from
+   local evidence; no peer is not by itself a reason to call 'ask_human'.
+2. Check 'coordination_thread_list' with 'scope="related"', then
+   'scope="following"'. Reuse and follow an open thread. Create one tied to
+   the involved tasks/files only when the decision must survive this run.
+3. Send one targeted 'advice-request' with 'coordination_publish', including
+   'target_task_id' and the durable 'thread_id'. Do not broadcast, park, or
+   repeatedly call 'coordination_wait'; continue any safe independent work.
+4. 'coordination_read' receives the request or reply. Answer an actionable
+   request once with 'advice-response'. When a reply is useful, acknowledge
+   incorporation once via 'coordination_thread_reply' with
+   'acknowledges_correlation_id'; do not start an acknowledgment loop.
+5. Use 'coordination_history' before guessing or re-asking an already settled
+   question. Use 'ask_human' only for human-owned decisions such as credentials,
+   priorities, or whether to ship—not for facts an active peer can supply.
+`,
+
   buildWorkerPrompt({ taskTitle, taskDescription, previousFeedback, context }) {
     const feedbackSection = previousFeedback
       ? `\n## Previous Feedback (Revision Required)

@@ -34,7 +34,17 @@ const spawnMock = vi.hoisted(() => vi.fn());
 
 vi.mock('node:child_process', () => ({ execFile: execFileMock, spawn: spawnMock }));
 
-import { checkPRConflicts, commentOnPR, getOpenPRs, getPRBaseBranch, getPRComments, getPRReviewComments, getPRReviews } from './github.js';
+import {
+  checkPRConflicts,
+  commentOnPR,
+  getMergedPRsOrThrow,
+  getOpenPRs,
+  getPRBaseBranch,
+  getPRComments,
+  getPRMergeability,
+  getPRReviewComments,
+  getPRReviews,
+} from './github.js';
 
 /** Options object handed to execFileAsync for the Nth gh invocation. */
 function optionsOfCall(index = 0): { maxBuffer?: number } | undefined {
@@ -75,6 +85,42 @@ describe('gh readers use the shared maxBuffer', () => {
       expect(optionsOfCall()?.maxBuffer).toBeGreaterThanOrEqual(4 * 1024 * 1024);
     });
   }
+});
+
+describe('post-merge GitHub state (AGT-4078)', () => {
+  beforeEach(() => {
+    execFileMock.mockReset();
+  });
+
+  it.each(['MERGEABLE', 'CONFLICTING', 'UNKNOWN'] as const)(
+    'preserves the %s mergeability state',
+    async (mergeable) => {
+      mockGhStdout(JSON.stringify({ mergeable }));
+      await expect(getPRMergeability('owner/repo', 1)).resolves.toBe(mergeable);
+    },
+  );
+
+  it('reads merged PR identities in one strict listing', async () => {
+    mockGhStdout(JSON.stringify([{
+      number: 7,
+      headRefName: 'swarm/task-7',
+      baseRefName: 'main',
+      headRefOid: 'head-7',
+      mergedAt: '2026-08-30T00:00:00.000Z',
+      mergeCommit: { oid: 'merge-7' },
+    }]));
+
+    await expect(getMergedPRsOrThrow('owner/repo')).resolves.toEqual([{
+      repo: 'owner/repo',
+      number: 7,
+      state: 'MERGED',
+      branch: 'swarm/task-7',
+      baseBranch: 'main',
+      headOid: 'head-7',
+      mergedAt: '2026-08-30T00:00:00.000Z',
+      mergeCommitOid: 'merge-7',
+    }]);
+  });
 });
 
 describe('commentOnPR stdin handling', () => {

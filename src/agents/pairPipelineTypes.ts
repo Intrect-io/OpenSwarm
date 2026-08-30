@@ -17,6 +17,10 @@ import type { InstructionCapsule } from './instructionCapsule.js';
 export interface PipelineRunMetadata {
   repository?: string;
   projectPath?: string;
+  /** Canonical main-checkout path used by the coordination board. */
+  coordinationRepository?: string;
+  /** Opaque repository-cell identity shared by sibling worktrees. */
+  repoKey?: string;
   worktree?: string;
   branch?: string;
   issueIdentifier?: string;

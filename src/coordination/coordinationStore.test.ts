@@ -166,6 +166,34 @@ describe('CoordinationStore', () => {
     expect(await reopened.consume('worker-b', { repository: '/repo' })).toEqual([]);
   });
 
+  it('routes cross-task mail by target task and preserves exactly-once delivery across reopen', async () => {
+    const s = store();
+    await s.publish(message({
+      repoKey: 'git:shared', taskId: 'task-a', sourceTaskId: 'task-a',
+      targetTaskId: 'task-b', actor: 'same-handle', recipient: 'same-handle',
+    }));
+
+    expect(await s.consume('same-handle', { repository: '/repo', repoKey: 'git:shared', taskId: 'task-a' })).toEqual([]);
+    expect(await s.consume('same-handle', { repository: '/repo', repoKey: 'git:shared', taskId: 'task-b' })).toHaveLength(1);
+    const reopened = new CoordinationStore(join(dir, 'events.json'));
+    expect(await reopened.consume('same-handle', { repository: '/repo', repoKey: 'git:shared', taskId: 'task-b' })).toEqual([]);
+  });
+
+  it('keeps consumed identity scoped when the same address exists on two tasks', async () => {
+    const s = store();
+    await s.publish(message({ repoKey: 'git:shared', targetTaskId: 'task-a', correlationId: 'for-a' }));
+    await s.publish(message({ repoKey: 'git:shared', targetTaskId: 'task-b', correlationId: 'for-b' }));
+    expect((await s.consume('worker-b', { repository: '/repo', repoKey: 'git:shared', taskId: 'task-a' }))[0].correlationId).toBe('for-a');
+    expect((await s.consume('worker-b', { repository: '/repo', repoKey: 'git:shared', taskId: 'task-b' }))[0].correlationId).toBe('for-b');
+  });
+
+  it('does not deduplicate envelopes addressed to different target tasks', async () => {
+    const s = store();
+    await s.publish(message({ repoKey: 'git:shared', targetTaskId: 'task-a' }));
+    await s.publish(message({ repoKey: 'git:shared', targetTaskId: 'task-b' }));
+    expect(s.list()).toHaveLength(2);
+  });
+
   it('redacts secret fields and values before persistence', async () => {
     const s = store();
     await s.publish(message({ detail: 'Bearer abcdefghijk', metadata: { apiKey: 'secret', note: 'ghp_abcdefghijk' } }));

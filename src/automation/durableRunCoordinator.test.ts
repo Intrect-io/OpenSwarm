@@ -1203,7 +1203,7 @@ describe('activeWorkerIdentifiers', () => {
     const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     ledger.importRun({
       issueId: 'ready', source: 'linear', identifier: 'AX-1', title: 'claimable',
-      projectPath: '/repo', state: 'READY',
+      projectPath: '/repo', state: 'READY', branchName: 'swarm/ax-1',
     });
     ledger.importRun({
       issueId: 'parked', source: 'linear', identifier: 'AX-2', title: 'operator park',
@@ -1222,6 +1222,7 @@ describe('activeWorkerIdentifiers', () => {
     // Claiming one is what makes it reserve: the lease, not the error code.
     expect(ledger.claimRun('ready', { ownerInstanceId: 'owner', leaseMs: 60_000 })).not.toBeNull();
     expect(coordinator.activeWorkerIdentifiers('/repo')).toEqual(['AX-1']);
+    expect(coordinator.activeWorkerBranches('/repo')).toEqual(['swarm/ax-1']);
 
     // Another project's held run must not leak into this project's answer.
     ledger.importRun({
@@ -1257,6 +1258,7 @@ describe('activeWorkerIdentifiers', () => {
   it('answers undefined rather than empty when it does not claim', () => {
     const off = new DurableRunCoordinator({ mode: 'off' });
     expect(off.activeWorkerIdentifiers('/repo')).toBeUndefined();
+    expect(off.activeWorkerBranches('/repo')).toBeUndefined();
     off.close();
 
     const shadowLedger = new RunLedger(dbPath());
@@ -1266,7 +1268,39 @@ describe('activeWorkerIdentifiers', () => {
       projectPath: '/repo', state: 'READY',
     });
     expect(shadow.activeWorkerIdentifiers('/repo')).toBeUndefined();
+    expect(shadow.activeWorkerBranches('/repo')).toBeUndefined();
     shadow.close();
     shadowLedger.close();
+  });
+});
+
+describe('post-merge integration requeue', () => {
+  it('uses the observed version and never revives a cancelled run', async () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const done = ledger.importRun({
+      issueId: 'done', source: 'linear', identifier: 'AGT-1', title: 'done PR',
+      projectPath: '/repo', state: 'DONE', branchName: 'swarm/done',
+    }).record;
+    ledger.importRun({
+      issueId: 'cancelled', source: 'linear', identifier: 'AGT-2', title: 'cancelled PR',
+      projectPath: '/repo', state: 'CANCELLED', branchName: 'swarm/cancelled',
+    });
+
+    const effect = {
+      kind: 'tracker.integration_requeue', dedupeKey: 'integration:done', payload: { issueId: 'done' },
+    };
+    expect(coordinator.queueIntegrationRequeue('done', done.stateVersion + 1, effect)).toBe(false);
+    expect(coordinator.getRun('done')?.state).toBe('DONE');
+    expect(coordinator.queueIntegrationRequeue('done', done.stateVersion, effect)).toBe(true);
+    expect(coordinator.getRun('done')?.state).toBe('SYNC_PENDING');
+    await coordinator.drainOutbox(async () => undefined);
+    expect(coordinator.getRun('done')?.state).toBe('READY');
+    expect(coordinator.queueIntegrationRequeue('cancelled', 0, {
+      ...effect, dedupeKey: 'integration:cancelled',
+    })).toBe(false);
+    expect(coordinator.getRun('cancelled')?.state).toBe('CANCELLED');
+    coordinator.close();
+    ledger.close();
   });
 });

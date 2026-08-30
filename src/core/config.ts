@@ -229,6 +229,23 @@ const BacklogGroomingConfigSchema = z.object({
   maxIssues: z.number().min(1).max(250).default(80).optional(),
 }).optional();
 
+/**
+ * Explicit project-level supervisor. These defaults are deliberately frontier
+ * tier: this role arbitrates several concurrent workers and is invoked only for
+ * actionable board state, not for every ordinary implementation turn.
+ */
+const OrchestratorConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  schedule: z.string().min(1).optional(),
+  eventDriven: z.boolean().default(true),
+  eventDebounceMs: z.number().int().min(0).max(60_000).default(1_000),
+  adapter: AdapterNameSchema.default('codex-responses'),
+  model: z.string().min(1).default('gpt-5.6-sol'),
+  reasoningEffort: z.enum(['low', 'medium', 'high']).default('high'),
+  timeoutMs: z.number().int().min(1_000).max(60 * 60_000).default(600_000),
+  maxTurns: z.number().int().min(1).max(50).default(12),
+}).optional();
+
 const PipelineStageSchema = z.enum(['worker', 'reviewer', 'tester', 'documenter', 'auditor', 'skill-documenter']);
 
 const JobProfileSchema = z.object({
@@ -346,6 +363,8 @@ const AutonomousConfigSchema = z.object({
     schedule: z.string().min(1),
     adapter: z.enum(['codex', 'cc-router', 'cursor']).optional(),
   })).optional(),
+  /** High-capability project-level supervisor. */
+  orchestrator: OrchestratorConfigSchema,
   /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
   orchestratorSchedule: z.string().min(1).optional(),
 }).optional();
@@ -691,6 +710,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       mcpPolicies: raw.autonomous.mcpPolicies,
       adapterRouting: raw.autonomous.adapterRouting,
       periodicReviews: raw.autonomous.periodicReviews,
+      orchestrator: raw.autonomous.orchestrator,
       orchestratorSchedule: raw.autonomous.orchestratorSchedule,
     } : undefined,
     prProcessor: raw.prProcessor ? {

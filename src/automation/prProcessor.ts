@@ -16,7 +16,6 @@ import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
 const execFileAsync = promisify(execFile);
-
 /** Safe git command execution (no shell) */
 async function gitExec(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd });
@@ -154,6 +153,7 @@ import {
   checkPRConflicts,
   waitForCICompletion,
   getPRBaseBranchOrThrow,
+  getMergedPRsOrThrow,
   type PRInfo,
 } from '../github/index.js';
 import { runReviewCommand, formatReviewOutput } from '../cli/reviewCommand.js';
@@ -172,6 +172,12 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { DefaultRolesConfig, ConflictResolverConfig, SecurityAuditConfig } from '../core/types.js';
 import { ConflictResolver } from './conflictResolver.js';
 import { DEFAULT_SECURITY_AUDIT_CONFIG } from '../verify/securityAudit.js';
+import {
+  IntegrationCoordinator,
+  type IntegrationCoordinatorConfig,
+  type IntegrationSiblingResult,
+} from './integrationCoordinator.js';
+import { getOwnedPRsForRepo } from './prOwnership.js';
 
 // Types
 
@@ -188,6 +194,9 @@ export interface PRProcessorConfig {
   repoMappings?: Record<string, string>; // Custom repo → local path mappings
   /** Inherited autonomous CodeQL policy for every PR remediation pipeline. */
   securityAudit?: SecurityAuditConfig;
+  /** Runtime-only wiring to the durable runner; not a user configuration surface. */
+  postMergeIntegration?: Pick<IntegrationCoordinatorConfig,
+    'getActiveLeaseBranches' | 'getActiveLeaseIdentifiers' | 'withIntegrationReservation' | 'routeConflict'>;
 }
 
 type PRStateEntry = {
@@ -202,6 +211,19 @@ type PRStateEntry = {
 
 type PRState = {
   prs: Record<string, PRStateEntry>;
+  integrations: Record<string, {
+    repo: string;
+    mergedPRNumber: number;
+    mergedBranch: string;
+    baseBranch: string;
+    mergeCommitOid: string;
+    status: 'baseline' | 'pending' | 'completed';
+    attempts: number;
+    updatedAt: string;
+    results?: IntegrationSiblingResult[];
+    lastError?: string;
+  }>;
+  integrationBaselines: Record<string, string>;
   updatedAt: string;
 };
 
@@ -211,7 +233,18 @@ const PRStateEntrySchema = z.object({
   iterations: z.number().int().nonnegative(),
   lastProcessed: z.string().optional(), lastReviewFeedbackProcessed: z.string().optional(), lastError: z.string().optional(),
 });
-const PRStateSchema = z.object({ prs: z.record(z.string(), PRStateEntrySchema), updatedAt: z.string() });
+const IntegrationStateEntrySchema = z.object({
+  repo: z.string().min(1), mergedPRNumber: z.number().int().positive(),
+  mergedBranch: z.string().min(1), baseBranch: z.string().min(1), mergeCommitOid: z.string().min(1),
+  status: z.enum(['baseline', 'pending', 'completed']), attempts: z.number().int().nonnegative(),
+  updatedAt: z.string(), results: z.array(z.unknown()).optional(), lastError: z.string().optional(),
+});
+const PRStateSchema = z.object({
+  prs: z.record(z.string(), PRStateEntrySchema),
+  integrations: z.record(z.string(), IntegrationStateEntrySchema).default({}),
+  integrationBaselines: z.record(z.string(), z.string()).default({}),
+  updatedAt: z.string(),
+}) as z.ZodType<PRState>;
 
 // Constants
 
@@ -225,15 +258,25 @@ export class PRProcessor {
   private initialRunTimer: NodeJS.Timeout | null = null;
   private processing = false;
   private conflictResolver: ConflictResolver | null = null;
+  private integrationCoordinator: IntegrationCoordinator | null = null;
   private currentPR: string | null = null;
   private lastRun: number | null = null;
   private nextRun: number | null = null;
+  private readonly integrationStartedAt = Date.now();
 
   constructor(config: PRProcessorConfig) {
     this.config = config;
     if (config.conflictResolver?.enabled) {
       this.conflictResolver = new ConflictResolver(config.conflictResolver);
       console.log(`[PRProcessor] ConflictResolver enabled (mode: ${config.conflictResolver.ownershipMode}, maxAttempts: ${config.conflictResolver.maxResolutionAttempts})`);
+    }
+    if (config.postMergeIntegration) {
+      this.integrationCoordinator = new IntegrationCoordinator({
+        getActiveLeaseBranches: config.postMergeIntegration.getActiveLeaseBranches,
+        getActiveLeaseIdentifiers: config.postMergeIntegration.getActiveLeaseIdentifiers,
+        withIntegrationReservation: config.postMergeIntegration.withIntegrationReservation,
+        routeConflict: config.postMergeIntegration.routeConflict,
+      });
     }
   }
 
@@ -291,6 +334,8 @@ export class PRProcessor {
           iterations: 0,
         },
       },
+      integrations: {},
+      integrationBaselines: {},
       updatedAt: new Date().toISOString(),
     };
     await this.processPR(pr, projectPath, state, key);
@@ -589,7 +634,10 @@ export class PRProcessor {
 
       for (const repo of this.config.repos) {
         const prs = await getOpenPRs(repo);
-        if (prs.length === 0) continue;
+        if (prs.length === 0) {
+          await this.processMergedIntegrations(repo, state);
+          continue;
+        }
 
         console.log(`[PRProcessor] ${repo}: ${prs.length} open PRs`);
 
@@ -709,6 +757,10 @@ export class PRProcessor {
           // Otherwise, run full PR processing (handles conflicts, CI failures, then review feedback)
           await this.processPR(pr, projectPath, state, key);
         }
+        // Run reactive integration after this repo's ordinary PR work. A merge
+        // observed during the scan is therefore queued only after any sibling
+        // remediation already in this cycle has durably finished.
+        await this.processMergedIntegrations(repo, state);
       }
 
       // Cascade: check other owned PRs for conflicts after resolution
@@ -1314,6 +1366,115 @@ export class PRProcessor {
     return null;
   }
 
+  /**
+   * Observe each owned merge exactly once into durable PR state, then resume
+   * only pending events. The first scan is a deployment baseline: historical
+   * merges are recorded without rewriting every still-open branch.
+   */
+  private async processMergedIntegrations(repo: string, state: PRState): Promise<void> {
+    if (!this.integrationCoordinator) return;
+    try {
+      const [ownedPRs, mergedPRs] = await Promise.all([
+        getOwnedPRsForRepo(repo),
+        getMergedPRsOrThrow(repo, 1_000),
+      ]);
+      const ownedNumbers = new Set(ownedPRs.map((pr) => pr.prNumber));
+      const ownedMerges = mergedPRs.filter((pr) => ownedNumbers.has(pr.number));
+      const now = new Date().toISOString();
+
+      if (!state.integrationBaselines[repo]) {
+        for (const merged of ownedMerges) {
+          if (!merged.mergeCommitOid) continue;
+          const key = `${repo}#${merged.number}@${merged.mergeCommitOid}`;
+          const mergedAt = merged.mergedAt ? new Date(merged.mergedAt).getTime() : Number.NaN;
+          state.integrations[key] = {
+            repo,
+            mergedPRNumber: merged.number,
+            mergedBranch: merged.branch,
+            baseBranch: merged.baseBranch,
+            mergeCommitOid: merged.mergeCommitOid,
+            // Do not miss a merge in the interval between daemon start and
+            // its first scheduled scan. Only older history is baseline.
+            status: !Number.isNaN(mergedAt) && mergedAt >= this.integrationStartedAt
+              ? 'pending'
+              : 'baseline',
+            attempts: 0,
+            updatedAt: now,
+          };
+        }
+        state.integrationBaselines[repo] = now;
+        await this.saveState(state);
+        console.log(`[IntegrationCoordinator] ${repo}: established post-merge baseline (${ownedMerges.length} owned merges observed)`);
+      } else {
+        let observedNewMerge = false;
+        for (const merged of ownedMerges) {
+          if (!merged.mergeCommitOid) {
+            console.error(`[IntegrationCoordinator] ${repo}#${merged.number}: merged PR has no merge commit OID`);
+            continue;
+          }
+          const key = `${repo}#${merged.number}@${merged.mergeCommitOid}`;
+          if (state.integrations[key]) continue;
+          state.integrations[key] = {
+            repo,
+            mergedPRNumber: merged.number,
+            mergedBranch: merged.branch,
+            baseBranch: merged.baseBranch,
+            mergeCommitOid: merged.mergeCommitOid,
+            status: 'pending',
+            attempts: 0,
+            updatedAt: now,
+          };
+          observedNewMerge = true;
+        }
+        // Persist the event before any rebase/push. A daemon crash can resume a
+        // pending event, but can never rediscover it as a second event.
+        if (observedNewMerge) await this.saveState(state);
+      }
+
+      for (const [key, event] of Object.entries(state.integrations)) {
+        if (event.repo !== repo || event.status !== 'pending') continue;
+        const projectPath = this.mapRepoToProject(repo);
+        if (!projectPath) {
+          event.lastError = 'No local project path is available';
+          event.updatedAt = new Date().toISOString();
+          await this.saveState(state);
+          continue;
+        }
+        try {
+          const result = await this.integrationCoordinator.integrate({
+            repo,
+            prNumber: event.mergedPRNumber,
+            branch: event.mergedBranch,
+            baseBranch: event.baseBranch,
+            mergeCommitOid: event.mergeCommitOid,
+          }, projectPath, ownedPRs);
+          event.attempts += 1;
+          event.results = result.results;
+          event.updatedAt = new Date().toISOString();
+          event.lastError = result.complete
+            ? undefined
+            : result.results.filter((item) =>
+              item.status === 'failed'
+              || item.status === 'skipped-active'
+              || item.status === 'mergeability-unknown')
+              .map((item) => `${item.branch}: ${item.error ?? item.status}`).join('; ') || 'Integration pass deferred';
+          if (result.complete) event.status = 'completed';
+          await this.saveState(state);
+          console.log(`[IntegrationCoordinator] ${key}: ${result.complete ? 'completed' : 'pending'} (${result.results.length} siblings)`);
+        } catch (error) {
+          event.attempts += 1;
+          event.lastError = error instanceof Error ? error.message : String(error);
+          event.updatedAt = new Date().toISOString();
+          await this.saveState(state);
+          console.error(`[IntegrationCoordinator] ${key} pass failed:`, event.lastError);
+        }
+      }
+    } catch (error) {
+      // GitHub/ownership discovery failure must not block ordinary PR repair.
+      console.error(`[IntegrationCoordinator] ${repo} discovery failed:`, error);
+    }
+  }
+
   // ============================================
   // State Persistence
   // ============================================
@@ -1326,7 +1487,7 @@ export class PRProcessor {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw new Error(`PR processor state is invalid at ${PR_STATE_PATH}`, { cause: error });
       }
-      return { prs: {}, updatedAt: new Date().toISOString() };
+      return { prs: {}, integrations: {}, integrationBaselines: {}, updatedAt: new Date().toISOString() };
     }
   }
 

@@ -30,6 +30,7 @@ const require = createRequire(import.meta.url);
 
 export interface TraceQuery {
   repository?: string;
+  repoKey?: string;
   taskId?: string;
   taskLabel?: string;
   correlationId?: string;
@@ -60,8 +61,13 @@ function migrate(handle: Database.Database): void {
       board_seq INTEGER NOT NULL,
       timestamp INTEGER NOT NULL,
       repository TEXT NOT NULL,
+      repo_key TEXT,
       task_id TEXT NOT NULL,
       task_label TEXT,
+      source_task_id TEXT,
+      source_task_label TEXT,
+      target_task_id TEXT,
+      target_task_label TEXT,
       actor TEXT NOT NULL,
       actor_name TEXT,
       actor_role TEXT,
@@ -76,8 +82,26 @@ function migrate(handle: Database.Database): void {
       metadata_json TEXT,
       fingerprint TEXT NOT NULL
     );
+  `);
+  // Existing deployments already have the v1 table. SQLite's IF NOT EXISTS
+  // does not add columns, so evolve it from observed table state before any
+  // index or write refers to the new routing envelope.
+  const columns = new Set((handle.pragma('table_info(coordination_trace)') as Array<{ name: string }>).map((column) => column.name));
+  const additions: Array<[string, string]> = [
+    ['repo_key', 'TEXT'],
+    ['source_task_id', 'TEXT'],
+    ['source_task_label', 'TEXT'],
+    ['target_task_id', 'TEXT'],
+    ['target_task_label', 'TEXT'],
+  ];
+  for (const [name, type] of additions) {
+    if (!columns.has(name)) handle.exec(`ALTER TABLE coordination_trace ADD COLUMN ${name} ${type}`);
+  }
+  handle.exec(`
     CREATE INDEX IF NOT EXISTS coordination_trace_task
       ON coordination_trace(repository, task_id, id);
+    CREATE INDEX IF NOT EXISTS coordination_trace_cell_task
+      ON coordination_trace(repo_key, source_task_id, target_task_id, id);
     CREATE INDEX IF NOT EXISTS coordination_trace_correlation
       ON coordination_trace(correlation_id, id);
     CREATE INDEX IF NOT EXISTS coordination_trace_time
@@ -141,13 +165,17 @@ export function recordTraceEvent(event: CoordinationEvent): void {
   try {
     handle.prepare(`
       INSERT OR IGNORE INTO coordination_trace(
-        event_id, board_seq, timestamp, repository, task_id, task_label,
+        event_id, board_seq, timestamp, repository, repo_key, task_id, task_label,
+        source_task_id, source_task_label, target_task_id, target_task_label,
         actor, actor_name, actor_role, recipient, recipient_name, recipient_role,
         kind, status, correlation_id, summary, detail, metadata_json, fingerprint
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `).run(
-      event.id, event.seq, event.timestamp, event.repository, event.taskId,
-      event.taskLabel ?? null, event.actor, event.actorName ?? null, event.actorRole ?? null,
+      event.id, event.seq, event.timestamp, event.repository, event.repoKey ?? null, event.taskId,
+      event.taskLabel ?? null,
+      event.sourceTaskId ?? null, event.sourceTaskLabel ?? null,
+      event.targetTaskId ?? null, event.targetTaskLabel ?? null,
+      event.actor, event.actorName ?? null, event.actorRole ?? null,
       event.recipient ?? null, event.recipientName ?? null, event.recipientRole ?? null,
       event.kind, event.status, event.correlationId, event.summary,
       event.detail ?? null, event.metadata ? JSON.stringify(event.metadata) : null,
@@ -160,7 +188,10 @@ export function recordTraceEvent(event: CoordinationEvent): void {
 
 interface TraceRow {
   event_id: string; board_seq: number; timestamp: number; repository: string;
-  task_id: string; task_label: string | null; actor: string; actor_name: string | null;
+  repo_key: string | null; task_id: string; task_label: string | null;
+  source_task_id: string | null; source_task_label: string | null;
+  target_task_id: string | null; target_task_label: string | null;
+  actor: string; actor_name: string | null;
   actor_role: string | null; recipient: string | null; recipient_name: string | null;
   recipient_role: string | null; kind: string; status: string; correlation_id: string;
   summary: string; detail: string | null; metadata_json: string | null; fingerprint: string;
@@ -180,8 +211,13 @@ function toEvent(row: TraceRow): CoordinationEvent {
     seq: row.board_seq,
     timestamp: row.timestamp,
     repository: row.repository,
+    repoKey: row.repo_key ?? undefined,
     taskId: row.task_id,
     taskLabel: row.task_label ?? undefined,
+    sourceTaskId: row.source_task_id ?? undefined,
+    sourceTaskLabel: row.source_task_label ?? undefined,
+    targetTaskId: row.target_task_id ?? undefined,
+    targetTaskLabel: row.target_task_label ?? undefined,
     actor: row.actor,
     actorName: row.actor_name ?? undefined,
     actorRole: row.actor_role ?? undefined,
@@ -211,9 +247,24 @@ export function queryTrace(query: TraceQuery = {}): CoordinationEvent[] {
   // Publish resolves the repository before storing it, so the filter has to be
   // resolved the same way or a caller passing a relative or `~`-free path
   // silently matches nothing.
-  if (query.repository) { where.push('repository = ?'); params.push(resolve(query.repository)); }
-  if (query.taskId) { where.push('task_id = ?'); params.push(query.taskId); }
-  if (query.taskLabel) { where.push('task_label = ?'); params.push(query.taskLabel); }
+  if (query.repoKey && query.repository) {
+    where.push('(repo_key = ? OR (repo_key IS NULL AND repository = ?))');
+    params.push(query.repoKey, resolve(query.repository));
+  } else if (query.repoKey) {
+    where.push('repo_key = ?');
+    params.push(query.repoKey);
+  } else if (query.repository) {
+    where.push('repository = ?');
+    params.push(resolve(query.repository));
+  }
+  if (query.taskId) {
+    where.push('(COALESCE(source_task_id, task_id) = ? OR COALESCE(target_task_id, task_id) = ?)');
+    params.push(query.taskId, query.taskId);
+  }
+  if (query.taskLabel) {
+    where.push('(COALESCE(source_task_label, task_label) = ? OR COALESCE(target_task_label, task_label) = ?)');
+    params.push(query.taskLabel, query.taskLabel);
+  }
   if (query.correlationId) { where.push('correlation_id = ?'); params.push(query.correlationId); }
   if (query.actor) { where.push('(actor = ? OR recipient = ?)'); params.push(query.actor, query.actor); }
   if (typeof query.since === 'number') { where.push('timestamp >= ?'); params.push(query.since); }

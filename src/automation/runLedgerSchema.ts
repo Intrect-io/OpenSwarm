@@ -107,6 +107,19 @@ export function migrateAutomationSchema(db: Database.Database): void {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS automation_integration_reservations (
+        project_path TEXT NOT NULL,
+        branch_name TEXT NOT NULL,
+        issue_identifier TEXT NOT NULL,
+        owner_instance_id TEXT NOT NULL,
+        reservation_token TEXT NOT NULL,
+        lease_expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(project_path, branch_name),
+        UNIQUE(project_path, issue_identifier)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_automation_runs_state_retry
         ON automation_runs(state, retry_at, updated_at);
       CREATE INDEX IF NOT EXISTS idx_automation_runs_project_state
@@ -117,6 +130,8 @@ export function migrateAutomationSchema(db: Database.Database): void {
         ON automation_effects(status, available_at, lease_expires_at, id);
       CREATE INDEX IF NOT EXISTS idx_automation_events_issue
         ON automation_events(issue_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_automation_integration_reservations_expiry
+        ON automation_integration_reservations(lease_expires_at);
     `);
 
     // v1 -> v2 is additive and safe under WAL. SQLite has no ADD COLUMN IF NOT

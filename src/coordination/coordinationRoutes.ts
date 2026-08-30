@@ -10,6 +10,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getCoordinationStore } from './coordinationStore.js';
 import { queryTrace, traceSize } from './coordinationTrace.js';
+import { consultationTelemetry } from './consultationTelemetry.js';
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -40,6 +41,7 @@ export async function tryHandleCoordinationRoutes(
       pending: snapshot.pending,
       lastSeq: snapshot.events.at(-1)?.seq ?? 0,
       traceSize: traceSize(),
+      consultation: consultationTelemetry(snapshot.events),
     });
     return true;
   }
@@ -48,16 +50,18 @@ export async function tryHandleCoordinationRoutes(
   // than its window is only readable here.
   if (req.method === 'GET' && url === '/api/coordination/history') {
     const params = requestUrl.searchParams;
+    const events = queryTrace({
+      repository: params.get('repository') || undefined,
+      taskId: params.get('taskId') || undefined,
+      taskLabel: params.get('taskLabel') || undefined,
+      correlationId: params.get('correlationId') || undefined,
+      actor: params.get('actor') || undefined,
+      limit: parseLimit(params.get('limit'), 200, 1_000),
+    });
     writeJson(res, 200, {
-      events: queryTrace({
-        repository: params.get('repository') || undefined,
-        taskId: params.get('taskId') || undefined,
-        taskLabel: params.get('taskLabel') || undefined,
-        correlationId: params.get('correlationId') || undefined,
-        actor: params.get('actor') || undefined,
-        limit: parseLimit(params.get('limit'), 200, 1_000),
-      }),
+      events,
       traceSize: traceSize(),
+      consultation: consultationTelemetry(events),
     });
     return true;
   }
