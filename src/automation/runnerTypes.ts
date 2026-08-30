@@ -34,6 +34,7 @@ export interface AutonomousConfig {
    */
   autonomousHeartbeat?: boolean;
   maxConcurrentTasks?: number;
+  /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   defaultRoles?: DefaultRolesConfig;
   projectAgents?: ProjectAgentConfig[];

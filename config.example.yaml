@@ -50,7 +50,7 @@ autonomous:
   maxConcurrentTasks: 4  # Number of concurrent tasks
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
-  maxConcurrentPerProject: 2  # Optional cap for same-project worktree parallelism
+  maxConcurrentPerProject: 2  # Optional hard cap; omit for weighted, work-conserving project fairness
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
   shutdownGraceMs: 30000         # Wait for real executor exit before service teardown

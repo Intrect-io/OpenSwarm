@@ -446,7 +446,12 @@ export class AutonomousRunner {
     this.scheduler = initScheduler({
       maxConcurrent: config.maxConcurrentTasks ?? 1,
       allowSameProjectConcurrent: config.allowSameProjectConcurrent ?? true,
-      maxConcurrentPerProject: effectiveProjectConcurrency(config),
+      // Preserve omission for TaskScheduler: undefined activates its weighted,
+      // work-conserving fairness without inventing a hidden hard project cap.
+      // Durable admission still receives the effective global safety ceiling.
+      maxConcurrentPerProject: config.maxConcurrentPerProject == null
+        ? undefined
+        : effectiveProjectConcurrency(config),
       worktreeMode: config.worktreeMode ?? false,
     });
 

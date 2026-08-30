@@ -352,6 +352,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       }));
       const internal = r as unknown as Internal;
       expect(internal.sameProjectCandidateCap()).toBe(4);
+      expect((internal.scheduler as unknown as {
+        config: { maxConcurrentPerProject?: number };
+      }).config.maxConcurrentPerProject).toBeUndefined();
     });
 
     it('sameProjectCandidateCap clamps between 1 and maxConcurrentTasks', () => {

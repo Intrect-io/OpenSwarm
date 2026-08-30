@@ -48,6 +48,19 @@ function isSameProjectOrDescendant(candidatePath: string, projectPath: string): 
   return candidate === project || candidate.startsWith(`${project}/`);
 }
 
+/**
+ * Weighted project fairness: Urgent work may consume more parallel capacity,
+ * but every project with executable work receives a slot before a busy peer
+ * can keep filling indefinitely. Running/weight is a compact weighted-fair
+ * virtual load; queue order remains the deterministic tie-breaker.
+ */
+function priorityWeight(priority: number): number {
+  if (priority <= 1) return 4;
+  if (priority === 2) return 3;
+  if (priority === 3) return 2;
+  return 1;
+}
+
 // Types
 
 export interface QueuedTask {
@@ -81,7 +94,10 @@ export interface SchedulerConfig {
   maxConcurrent: number;
   /** Allow concurrent execution on same project */
   allowSameProjectConcurrent?: boolean;
-  /** Maximum concurrent tasks per project when same-project parallelism is enabled. */
+  /**
+   * Hard maximum per project. When omitted, weighted project fairness shares
+   * the pool while still letting a lone project consume every idle slot.
+   */
   maxConcurrentPerProject?: number;
   /** Git worktree mode: each task runs in its own isolated worktree (bypasses project busy check) */
   worktreeMode?: boolean;
@@ -144,6 +160,12 @@ export class TaskScheduler extends EventEmitter {
   private deferredWakeAt?: number;
   /** Queue snapshot being assembled while shutdown waits for in-flight results. */
   private shutdownDiscardedQueue?: QueuedTask[];
+  /**
+   * Persistent weighted-fair service received by each currently active project.
+   * Unlike running counts this survives slot completion, so a one-slot daemon
+   * cannot reset every candidate to zero and starve lower-priority projects.
+   */
+  private projectVirtualRuntime = new Map<string, number>();
 
   constructor(config: SchedulerConfig) {
     super();
@@ -270,10 +292,9 @@ export class TaskScheduler extends EventEmitter {
   }
 
   /**
-   * Check if project is currently busy. One worker per project at a time (so the
-   * global slot budget spreads across projects instead of piling onto one). Only
-   * `allowSameProjectConcurrent` opts out — worktreeMode keeps per-task isolation
-   * but no longer implies same-project parallelism.
+   * Check whether a project has reached its hard concurrency boundary.
+   * Cross-project fairness is handled separately by getNextExecutable; this
+   * method remains the safety/cap gate.
    */
   isProjectBusy(projectPath: string): boolean {
     const normalizedProject = normalizeProjectPath(projectPath);
@@ -361,6 +382,15 @@ export class TaskScheduler extends EventEmitter {
       return null;
     }
 
+    const candidates: Array<{
+      index: number;
+      queued: QueuedTask;
+      project: string;
+      running: number;
+      weight: number;
+    }> = [];
+    const runningByProject = this.runningCountByProject();
+    const candidateProjects = new Set<string>();
     for (let i = 0; i < this.taskQueue.length; i++) {
       const queued = this.taskQueue[i];
 
@@ -373,12 +403,65 @@ export class TaskScheduler extends EventEmitter {
         continue;
       }
 
-      // Executable
-      this.taskQueue.splice(i, 1);
-      return queued;
+      const normalizedProject = normalizeProjectPath(queued.projectPath);
+      // taskQueue is priority-ordered and FIFO within one priority. Only the
+      // first currently executable row from each project may represent that
+      // project in the fairness comparison; a later sibling cannot leapfrog
+      // its own project head because it happens to have a different weight.
+      if (candidateProjects.has(normalizedProject)) continue;
+      candidateProjects.add(normalizedProject);
+      candidates.push({
+        index: i,
+        queued,
+        project: normalizedProject,
+        running: runningByProject.get(normalizedProject) ?? 0,
+        weight: priorityWeight(queued.priority),
+      });
     }
 
-    return null;
+    if (candidates.length === 0) return null;
+
+    const activeProjects = new Set([...candidateProjects, ...runningByProject.keys()]);
+    for (const project of this.projectVirtualRuntime.keys()) {
+      if (!activeProjects.has(project)) this.projectVirtualRuntime.delete(project);
+    }
+    const activeVirtualRuntimes = [...this.projectVirtualRuntime.entries()]
+      .filter(([project]) => activeProjects.has(project))
+      .map(([, virtualRuntime]) => virtualRuntime);
+    const baseline = activeVirtualRuntimes.length > 0 ? Math.min(...activeVirtualRuntimes) : 0;
+    for (const candidate of candidates) {
+      if (!this.projectVirtualRuntime.has(candidate.project)) {
+        this.projectVirtualRuntime.set(candidate.project, baseline);
+      }
+    }
+
+    let selectedCandidate = candidates[0];
+    let selectedScore = this.projectVirtualRuntime.get(selectedCandidate.project)!;
+    for (const candidate of candidates.slice(1)) {
+      const score = this.projectVirtualRuntime.get(candidate.project)!;
+      // candidates retain taskQueue order, so strict < preserves priority/FIFO
+      // as the deterministic tie-breaker.
+      if (score < selectedScore) {
+        selectedCandidate = candidate;
+        selectedScore = score;
+      }
+    }
+
+    if (candidates.length > 1) {
+      this.projectVirtualRuntime.set(
+        selectedCandidate.project,
+        selectedScore + (1 / selectedCandidate.weight),
+      );
+    }
+
+    const [selected] = this.taskQueue.splice(selectedCandidate.index, 1);
+    console.log(
+      `[Scheduler] Fair selection: ${selected.task.title} ` +
+      `(project=${selected.projectPath}, running=${selectedCandidate.running}, ` +
+      `weight=${selectedCandidate.weight}, virtualRuntime=${selectedScore.toFixed(3)}, ` +
+      `contenders=${candidates.length})`,
+    );
+    return selected;
   }
 
   /**

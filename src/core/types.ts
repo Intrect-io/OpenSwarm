@@ -558,7 +558,7 @@ export type AutonomousStartupConfig = {
   reviewerTimeoutMs?: number;
   /** Max concurrent tasks */
   maxConcurrentTasks?: number;
-  /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
+  /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   /** Durable execution ledger rollout mode. */
   automationLedgerMode?: 'off' | 'shadow' | 'primary';
