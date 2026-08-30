@@ -515,6 +515,15 @@ describe('RunLedger claim and fencing races', () => {
       ]),
     ));
     expect(overlapping.filter(({ stdout }) => stdout.trim() === 'claimed')).toHaveLength(1);
+
+    const ancestorPath = createDbPath();
+    const ancestorOverlap = await Promise.all([
+      ['DIRECTORY', 'owner-directory', 'src/coordination'],
+      ['CHILD', 'owner-child', 'src/coordination/store.ts'],
+    ].map(([issueId, owner, scope]) => execFileAsync(process.execPath, [
+      tsxCli, fixture, ancestorPath, issueId, owner, '2000', '2', scope,
+    ])));
+    expect(ancestorOverlap.filter(({ stdout }) => stdout.trim() === 'claimed')).toHaveLength(1);
   }, 30_000);
 
   it('fails closed without a partial claim when the SQLite writer is busy', () => {
