@@ -204,7 +204,7 @@ export class SqliteTaskSource implements ITaskSource {
     return { ok: true, issue: { state: issue.status, stateType } };
   }
   async resolveIssue(issueId: string): Promise<TrackerIssueResolution> {
-    const issue = this.store.getIssue(issueId);
+    const issue = this.store.getIssue(issueId) ?? this.store.getIssueByIdentifier(issueId);
     return {
       ok: true,
       issue: issue ? {

@@ -24,6 +24,7 @@ export interface IIssueStore {
   // 이슈 CRUD
   createIssue(input: CreateIssueInput): Issue;
   getIssue(id: string): Issue | null;
+  getIssueByIdentifier(identifier: string): Issue | null;
   updateIssue(id: string, patch: Partial<CreateIssueInput>): Issue | null;
   deleteIssue(id: string): boolean;
   listIssues(filter?: IssueFilter): { issues: Issue[]; total: number };
@@ -354,6 +355,15 @@ export class SqliteIssueStore implements IIssueStore {
     const row = this.db.prepare('SELECT * FROM issues WHERE id = ?').get(id) as any;
     if (!row) return null;
     return this.rowToIssue(row);
+  }
+
+  getIssueByIdentifier(identifier: string): Issue | null {
+    const row = this.db.prepare(`
+      SELECT * FROM issues
+      WHERE linear_identifier = ? COLLATE NOCASE
+      LIMIT 1
+    `).get(identifier) as any;
+    return row ? this.rowToIssue(row) : null;
   }
 
   getIssueByLinearId(linearId: string): Issue | null {
