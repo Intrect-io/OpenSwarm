@@ -25,6 +25,7 @@ export interface SchedulerThroughputSnapshot {
     blockedByGlobalCapacity: number;
     blockedByProjectCapacity: number;
     blockedByQuarantine: number;
+    deferredByRetryAt: number;
     oldestQueuedAgeMs: number;
   };
 }
@@ -37,6 +38,7 @@ export interface SchedulerPressureSnapshot {
   blockedByGlobalCapacity: number;
   blockedByProjectCapacity: number;
   blockedByQuarantine: number;
+  deferredByRetryAt: number;
   oldestQueuedAgeMs: number;
 }
 
@@ -141,6 +143,7 @@ export class SchedulerThroughputTracker {
         blockedByGlobalCapacity: pressure.blockedByGlobalCapacity,
         blockedByProjectCapacity: pressure.blockedByProjectCapacity,
         blockedByQuarantine: pressure.blockedByQuarantine,
+        deferredByRetryAt: pressure.deferredByRetryAt,
         oldestQueuedAgeMs: Math.max(0, Math.round(pressure.oldestQueuedAgeMs)),
       },
     };

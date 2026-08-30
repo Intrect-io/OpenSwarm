@@ -486,6 +486,22 @@ describe('TaskScheduler.getStats byProject aggregation', () => {
       blockedByQuarantine: 0,
     });
   });
+
+  it('does not count future retry-at work as runnable or globally blocked', () => {
+    const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+    sched.enqueue(task('deferred'), '/repo');
+    sched.getQueuedTasks()[0].availableAt = Date.now() + 60_000;
+
+    const stats = sched.getStats();
+    expect(stats.throughput.current).toMatchObject({
+      runnableQueued: 0,
+      blockedByGlobalCapacity: 0,
+      deferredByRetryAt: 1,
+    });
+    expect(stats.fairness.projects).toEqual([
+      expect.objectContaining({ projectPath: '/repo', blockedReason: 'retry-at' }),
+    ]);
+  });
 });
 
 describe('TaskScheduler.setTaskStage on an unknown id', () => {

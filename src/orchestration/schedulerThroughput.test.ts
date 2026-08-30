@@ -33,6 +33,7 @@ describe('SchedulerThroughputTracker', () => {
       blockedByGlobalCapacity: 0,
       blockedByProjectCapacity: 1,
       blockedByQuarantine: 0,
+      deferredByRetryAt: 0,
       oldestQueuedAgeMs: 90,
     }, 300);
 
@@ -63,6 +64,7 @@ describe('SchedulerThroughputTracker', () => {
       blockedByGlobalCapacity: 0,
       blockedByProjectCapacity: 0,
       blockedByQuarantine: 0,
+      deferredByRetryAt: 0,
       oldestQueuedAgeMs: 0,
     }, 40);
 
