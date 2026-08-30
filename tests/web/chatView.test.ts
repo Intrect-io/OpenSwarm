@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
-import { startChatView, isNearBottom, renderLine, renderMentionText } from '../../web/static/js/chatView.mjs';
+import { startChatView, isNearBottom, renderChatText, renderLine, renderMentionText } from '../../web/static/js/chatView.mjs';
 
 function shell(): Document {
   document.body.innerHTML = `
@@ -306,6 +306,19 @@ describe('renderLine', () => {
     expect(document.querySelector('.to .mention')?.classList.contains('mention-human')).toBe(true);
     expect(document.querySelector('script')).toBeNull();
     expect(document.querySelector('.text')?.textContent).toBe('<script>bad()</script>');
+  });
+
+  it('renders backtick spans as escaped code chips and leaves mentions outside them highlighted', () => {
+    const html = renderChatText(
+      "Tell Operator to inspect `<img src=x onerror=alert(1)>` in `web/router.ts`.",
+      [{ name: 'Operator', role: 'human' }],
+    );
+    document.body.innerHTML = html;
+    expect(document.querySelector('.mention')?.textContent).toBe("@'Operator'");
+    expect([...document.querySelectorAll('code')].map((node) => node.textContent)).toEqual([
+      '<img src=x onerror=alert(1)>', 'web/router.ts',
+    ]);
+    expect(document.querySelector('img')).toBeNull();
   });
 });
 

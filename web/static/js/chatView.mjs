@@ -89,6 +89,16 @@ export function renderMentionText(text, targets = []) {
   return html;
 }
 
+/** Highlight inline code without allowing it to become executable markup. */
+export function renderChatText(text, targets = []) {
+  return String(text ?? '').split(/(`[^`\n]+`)/g).map((part) => {
+    if (part.length >= 2 && part.startsWith('`') && part.endsWith('`')) {
+      return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
+    }
+    return renderMentionText(part, targets);
+  }).join('');
+}
+
 /** `[14:02] name (worker · AGT-1009): message` as one room line. */
 export function renderLine(line, mentionTargets = []) {
   const color = ROLE_COLORS[line.role] ?? ROLE_COLORS.agent;
@@ -99,11 +109,11 @@ export function renderLine(line, mentionTargets = []) {
   const to = line.recipientName
     ? `<span class="to">→ ${mentionMarkup(line.recipientName, line.recipientRole)}</span>`
     : '';
-  return `<div class="line${line.isOperator ? ' from-operator' : ''}${statusClass}" data-line="${escapeHtml(line.id)}">
+  return `<div class="line${line.isOperator ? ' from-operator' : ''}${statusClass}" data-line="${escapeHtml(line.id)}" style="--speaker-color:${color}">
     <span class="meta"><span class="clock">[${escapeHtml(clockOf(line.timestamp))}]</span>
     <span class="who" style="color:${color}">${escapeHtml(line.speakerName)}</span>
     ${tag}${to}<span class="sep">:</span></span>
-    <span class="text">${renderMentionText(line.text, mentionTargets)}</span>
+    <span class="text">${renderChatText(line.text, mentionTargets)}</span>
   </div>`;
 }
 
