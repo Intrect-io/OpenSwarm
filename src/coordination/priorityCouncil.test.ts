@@ -89,6 +89,127 @@ function ballot(councilId: string, actor: string, actorRole: string, taskId: str
 }
 
 describe('durable priority council', () => {
+  it('fails closed across malformed proposal, ballot, and ranking boundaries', () => {
+    const rejected = (idempotencyKey: string, overrides: Partial<CreatePriorityCouncilInput>) =>
+      () => createPriorityCouncil(input({ idempotencyKey, ...overrides }));
+
+    expect(rejected('no-evidence', { snapshotEvidence: [] })).toThrow('snapshotEvidence must contain');
+    expect(rejected('bad-evidence-source', {
+      snapshotEvidence: [
+        { id: 'tracker-a', source: 'invalid' as never, summary: 'A' },
+        { id: 'tracker-b', source: 'tracker-cache', summary: 'B' },
+      ],
+    })).toThrow('Unsupported evidence source');
+    expect(rejected('one-option', {
+      options: [{ id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: ['tracker-a'] }],
+    })).toThrow('options must contain');
+    expect(rejected('no-option-evidence', {
+      options: [
+        { id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: [] },
+        { id: 'b', label: 'Candidate B', taskId: 'candidate-b', evidenceIds: ['tracker-b'] },
+      ],
+    })).toThrow('must reference');
+    expect(rejected('unknown-option-evidence', {
+      options: [
+        { id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: ['missing'] },
+        { id: 'b', label: 'Candidate B', taskId: 'candidate-b', evidenceIds: ['tracker-b'] },
+      ],
+    })).toThrow('references unknown evidence');
+    expect(rejected('no-tracker-evidence', {
+      snapshotEvidence: [
+        { id: 'tracker-a', source: 'operator', summary: 'A' },
+        { id: 'tracker-b', source: 'operator', summary: 'B' },
+      ],
+    })).toThrow('requires cached tracker evidence');
+
+    const facts = { priority: 2, downstreamCount: 0, blockedBy: [] as string[] };
+    expect(rejected('partial-scheduling-facts', {
+      options: [
+        { id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: ['tracker-a'], schedulingFacts: facts },
+        { id: 'b', label: 'Candidate B', taskId: 'candidate-b', evidenceIds: ['tracker-b'] },
+      ],
+    })).toThrow('Every council option must include schedulingFacts');
+    expect(rejected('bad-scheduling-priority', {
+      options: [
+        { id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: ['tracker-a'], schedulingFacts: { ...facts, priority: -1 } },
+        { id: 'b', label: 'Candidate B', taskId: 'candidate-b', evidenceIds: ['tracker-b'], schedulingFacts: facts },
+      ],
+    })).toThrow('priority must be an integer');
+    expect(rejected('too-many-blockers', {
+      options: [
+        { id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: ['tracker-a'], schedulingFacts: { ...facts, blockedBy: Array.from({ length: 101 }, (_, i) => `blocker-${i}`) } },
+        { id: 'b', label: 'Candidate B', taskId: 'candidate-b', evidenceIds: ['tracker-b'], schedulingFacts: facts },
+      ],
+    })).toThrow('blockedBy exceeds');
+    expect(rejected('wrong-scheduling-version', {
+      options: [
+        { id: 'a', label: 'Candidate A', taskId: 'candidate-a', evidenceIds: ['tracker-a'], schedulingFacts: facts },
+        { id: 'b', label: 'Candidate B', taskId: 'candidate-b', evidenceIds: ['tracker-b'], schedulingFacts: facts },
+      ],
+    })).toThrow('Scheduling snapshot version must be auto');
+    expect(rejected('bad-reason', { reason: 'unknown' as never })).toThrow('reason must be');
+    expect(rejected('bad-snapshot-time', { snapshotCapturedAt: Number.NaN })).toThrow('invalid timestamp');
+    expect(rejected('too-few-voters', {
+      eligiblePeers: [{ repoKey: 'git:repo', address: 'only', role: 'reviewer', taskId: 'peer-1', lastSeen: now }],
+    })).toThrow('Not enough active independent peers');
+    expect(rejected('same-voter-actor', {
+      eligiblePeers: [
+        { repoKey: 'git:repo', address: 'same', role: 'reviewer', taskId: 'peer-1', lastSeen: now },
+        { repoKey: 'git:repo', address: 'same', role: 'orchestrator', taskId: 'peer-2', lastSeen: now },
+      ],
+    })).toThrow('distinct active actors');
+    expect(rejected('same-voter-task', {
+      eligiblePeers: [
+        { repoKey: 'git:repo', address: 'first', role: 'reviewer', taskId: 'peer-1', lastSeen: now },
+        { repoKey: 'git:repo', address: 'second', role: 'orchestrator', taskId: 'peer-1', lastSeen: now },
+      ],
+    })).toThrow('distinct tasks');
+
+    const council = createPriorityCouncil(input({ idempotencyKey: 'boundary-ballots' }));
+    expect(() => submitPriorityCouncilEvidence({
+      repository: 'git:repo', councilId: council.id, optionId: 'a', actor: 'worker-a',
+      taskId: 'candidate-a', summary: 'No refs', refs: [], idempotencyKey: 'no-refs', now,
+    })).toThrow('refs must contain');
+    submitPriorityCouncilEvidence({
+      repository: 'git:repo', councilId: council.id, optionId: 'a', actor: 'worker-a',
+      taskId: 'candidate-a', summary: 'First', refs: ['thread:first'], idempotencyKey: 'first', now,
+    });
+    expect(() => submitPriorityCouncilEvidence({
+      repository: 'git:repo', councilId: council.id, optionId: 'a', actor: 'worker-a',
+      taskId: 'candidate-a', summary: 'Changed', refs: ['thread:second'], idempotencyKey: 'second', now,
+    })).toThrow('Duplicate council evidence submission');
+    expect(() => ballot(council.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'b'], { confidence: 0 }))
+      .toThrow('confidence must be');
+    expect(() => ballot(council.id, 'outsider', 'reviewer', 'other-task', ['a', 'b']))
+      .toThrow('not eligible');
+    expect(() => ballot(council.id, 'reviewer-c', 'worker', 'peer-c', ['a', 'b']))
+      .toThrow('role does not match');
+    expect(() => ballot(council.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'a']))
+      .toThrow('must contain every council option');
+    expect(() => ballot(council.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'b'], { evidenceIds: [] }))
+      .toThrow('must cite');
+    expect(() => ballot(council.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'b'], { evidenceIds: ['missing'] }))
+      .toThrow('unknown council evidence');
+    expect(() => ballot(council.id, 'reviewer-c', 'reviewer', 'peer-c', ['a', 'b'], { evidenceIds: ['tracker-b'] }))
+      .toThrow('first-ranked option');
+
+    const ranking = {
+      schemaVersion: 1,
+      outcome: 'selected',
+      rankedTaskIds: ['candidate-a', 'candidate-b'],
+      authority: ADVISORY_RANKING_AUTHORITY,
+    } as never;
+    const tasks = [{ id: 'candidate-a' }, { id: 'candidate-b' }];
+    expect(applyAdvisoryPriorityRanking(tasks, { ...ranking, schemaVersion: 2 } as never, (task) => task.id).reason)
+      .toBe('unsupported-signal');
+    expect(applyAdvisoryPriorityRanking(tasks, { ...ranking, rankedTaskIds: ['candidate-a'] } as never, (task) => task.id).reason)
+      .toBe('invalid-cohort');
+    expect(applyAdvisoryPriorityRanking([tasks[0], tasks[0]], ranking, (task) => task.id).reason)
+      .toBe('duplicate-task');
+    expect(applyAdvisoryPriorityRanking(tasks, { ...ranking, rankedTaskIds: ['candidate-a', 'missing'] } as never, (task) => task.id).reason)
+      .toBe('cohort-mismatch');
+  });
+
   it('persists the bounded proposal and active independent eligibility across reopen', () => {
     const council = createPriorityCouncil(input());
     expect(council).toMatchObject({ status: 'open', version: 1, requiredQuorum: 2, ballotCount: 0 });
