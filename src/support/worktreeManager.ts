@@ -15,6 +15,7 @@ import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import { loadRepoMetadata } from './repoMetadata.js';
+import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1141,7 +1142,7 @@ export async function commitAndCreatePRWithHead(
   title: string,
   issueIdentifier: string,
   description: string,
-  options: { draft?: boolean; committedOnly?: boolean } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[] } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
 
@@ -1198,7 +1199,7 @@ export async function commitAndCreatePRWithHead(
   const headSha = (await git(worktreePath, 'rev-parse', 'HEAD')).trim();
   if (!headSha) throw new Error(`Cannot publish ${branchName}: HEAD identity is unavailable`);
 
-  // Push branch to the resolved remote (always push since we have commits ahead)
+  await assertBranchWithinWriteScope(worktreePath, base.ref, options.fileScope);
   await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
   console.log(`[Worktree] Pushed branch ${branchName}`);
 

@@ -174,6 +174,7 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     projectId?: string;
     projectName?: string;
     fileScope?: string[];
+    fileScopeSource?: TaskItem['fileScopeSource'];
     explicitDispatch?: boolean;
   };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
@@ -192,6 +193,7 @@ export function runRecordToTask(run: RunRecord): TaskItem {
       ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
       : undefined,
     fileScope: metadata.fileScope,
+    fileScopeSource: metadata.fileScopeSource,
     explicitDispatch: metadata.explicitDispatch === true,
     createdAt: run.discoveredAt,
   };
@@ -414,6 +416,7 @@ export class DurableRunCoordinator {
         projectId: task.linearProject?.id,
         projectName: task.linearProject?.name,
         fileScope: task.fileScope,
+        fileScopeSource: task.fileScopeSource,
         explicitDispatch: task.explicitDispatch === true,
       },
     }, now);
