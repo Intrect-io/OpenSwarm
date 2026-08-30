@@ -38,7 +38,7 @@ function impact(directModules: string[], dependentModules: string[] = []): Impac
 }
 
 describe('detectFileConflicts UnionFind rank tie-break branches', () => {
-  it('exercises both non-equal rank comparisons and the same-root early-return when a 4-task overlap chain merges asymmetrically', async () => {
+  it('keeps one diagnostic cohort while admitting both directly disjoint winners from an asymmetric overlap chain', async () => {
     // Overlap graph (by shared file), in the order the i<j pair loop visits them:
     //   0-2 share 'shared-02.ts'   fresh(0) vs fresh(2)              -> equal-rank tie, root=0, rank[0]=1
     //   0-3 share 'shared-03.ts'   root(0,rank1) vs fresh(3,rank0)   -> rankX>rankY branch
@@ -50,7 +50,7 @@ describe('detectFileConflicts UnionFind rank tie-break branches', () => {
       [
         task('A', 3, ['shared-02.ts', 'shared-03.ts']),
         task('B', 3, ['shared-12.ts', 'shared-13.ts']),
-        task('C', 1, ['shared-02.ts', 'shared-12.ts']), // highest priority (1) -> wins the group
+        task('C', 1, ['shared-02.ts', 'shared-12.ts']), // highest priority and directly disjoint from D
         task('D', 3, ['shared-03.ts', 'shared-13.ts']),
       ],
       PROJECT,

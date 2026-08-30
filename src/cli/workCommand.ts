@@ -42,6 +42,7 @@ import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js'
 import { hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { fileScopesConflict, resolveTaskFileScope } from '../orchestration/conflictDetector.js';
+import { buildConflictFreeWaves as partitionConflictFreeWaves } from '../orchestration/conflictAdmission.js';
 import { ensureTaskSource } from './reviewCommand.js';
 import { filterRepoIssues, selectIssuesInteractive, WORK_SKIP_STATES } from './workSelect.js';
 import {
@@ -154,14 +155,10 @@ interface PlanRow {
  * reported as superseded instead of running in the next safe wave.
  */
 export function buildConflictFreeWaves<T extends { task: TaskItem }>(rows: readonly T[]): T[][] {
-  const waves: T[][] = [];
-  for (const row of rows) {
-    const wave = waves.find((candidate) => candidate.every((peer) =>
-      !fileScopesConflict(row.task.fileScope, peer.task.fileScope)));
-    if (wave) wave.push(row);
-    else waves.push([row]);
-  }
-  return waves;
+  return partitionConflictFreeWaves(
+    rows,
+    (left, right) => fileScopesConflict(left.task.fileScope, right.task.fileScope),
+  );
 }
 
 export interface WorkIssueSummary {

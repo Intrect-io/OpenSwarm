@@ -11,6 +11,7 @@ import {
   conflictScopesOverlap,
   normalizeConflictScope,
 } from './conflictScope.js';
+import { selectGreedyMaximalIndependentSet } from './conflictAdmission.js';
 
 // Types
 
@@ -74,6 +75,11 @@ function normalizeScope(entries: string[] | undefined): Set<string> {
 }
 
 const UNKNOWN_SCOPE = 'unknown-file-scope';
+
+function pairKey(left: number, right: number): string {
+  return left < right ? `${left}:${right}` : `${right}:${left}`;
+}
+
 /**
  * Resolve the best available preflight write scope for one task. The normalized
  * result is written back to the task so the scheduler and durable admission
@@ -127,8 +133,9 @@ export function fileScopesConflict(left: string[] | undefined, right: string[] |
  * Detect file-scope overlap between tasks. Each task's scope prefers the
  * planner-declared `fileScope` (authoritative), falling back to Knowledge Graph
  * inference (`analyzeIssue`) only when no explicit scope is available.
- * Overlapping tasks are grouped into a ConflictGroup; only the highest-priority
- * task in each group is returned as safe to run concurrently.
+ * Overlapping tasks are grouped into a ConflictGroup for diagnostics. Within
+ * each group, a priority-stable greedy maximal independent set is returned as
+ * safe, so transitively connected but directly disjoint tasks can still run.
  */
 export async function detectFileConflicts(
   tasks: TaskItem[],
@@ -215,22 +222,11 @@ export async function detectFileConflicts(
       continue;
     }
 
-    // A connected component is not necessarily a clique. Pick a deterministic
-    // maximal independent set so A↔B↔C can run A and C together instead of
-    // serializing the whole transitive component behind one task.
+    // Priority first (1=Urgent > 4=Low), then original input position. The
+    // explicit position tie-break keeps admission deterministic even if the
+    // runtime's Array#sort stability changes.
     const orderedIndices = [...indices].sort((left, right) =>
       tasks[left].priority - tasks[right].priority || left - right);
-    const selectedIndices: number[] = [];
-    for (const candidate of orderedIndices) {
-      const conflictsWithSelected = selectedIndices.some((selected) => {
-        const left = Math.min(candidate, selected);
-        const right = Math.max(candidate, selected);
-        return pairShared.has(`${left}:${right}`);
-      });
-      if (!conflictsWithSelected) selectedIndices.push(candidate);
-    }
-    for (const index of selectedIndices) safe.push(tasks[index]);
-
     const groupTasks = orderedIndices.map(index => tasks[index]);
     const sharedModuleSet = new Set<string>();
     for (let a = 0; a < indices.length; a++) {
@@ -244,6 +240,14 @@ export async function detectFileConflicts(
     }
     const sharedModules = Array.from(sharedModuleSet);
 
+    // The first greedy wave is maximal: every deferred task has a direct edge
+    // to at least one admitted task. Unknown scopes have an edge to every peer,
+    // so uncertainty remains fail-closed and at most one unknown can be safe.
+    const admittedIndices = selectGreedyMaximalIndependentSet(
+      orderedIndices,
+      (left, right) => pairShared.has(pairKey(left, right)),
+    );
+    safe.push(...admittedIndices.map(index => tasks[index]));
     // 나머지는 충돌 그룹으로 기록
     conflictGroups.push({
       tasks: groupTasks,

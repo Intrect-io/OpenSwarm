@@ -79,18 +79,33 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.safe).toHaveLength(2);
   });
 
-  it('runs non-adjacent tasks from a transitive conflict chain concurrently', async () => {
+  it('admits directly disjoint endpoints from a transitive conflict chain', async () => {
     const result = await detectFileConflicts(
       [
-        task('A', 2, ['src/ab.ts']),
-        task('B', 2, ['src/ab.ts', 'src/bc.ts']),
-        task('C', 2, ['src/bc.ts']),
+        task('A', 1, ['src/a-b.ts']),
+        task('B', 2, ['src/a-b.ts', 'src/b-c.ts']),
+        task('C', 1, ['src/b-c.ts']),
       ],
       PROJECT,
     );
 
-    expect(result.safe.map((candidate) => candidate.id)).toEqual(['A', 'C']);
     expect(result.conflictGroups).toHaveLength(1);
+    expect(result.conflictGroups[0].tasks.map((t) => t.id)).toEqual(['A', 'C', 'B']);
+    expect(result.safe.map((t) => t.id)).toEqual(['A', 'C']);
+  });
+
+  it('breaks equal-priority conflicts by stable input order', async () => {
+    const result = await detectFileConflicts(
+      [
+        task('first', 2, ['src/shared.ts']),
+        task('second', 2, ['src/shared.ts']),
+        task('third', 2, ['src/shared.ts']),
+      ],
+      PROJECT,
+    );
+
+    expect(result.conflictGroups[0].tasks.map((t) => t.id)).toEqual(['first', 'second', 'third']);
+    expect(result.safe.map((t) => t.id)).toEqual(['first']);
   });
 
   it('ignores stale generated/worktree scope entries instead of creating false conflicts', async () => {
@@ -106,13 +121,17 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.conflictGroups).toHaveLength(0);
   });
 
-  it('serializes unknown scope because merge safety cannot be proven', async () => {
+  it('serializes unknown scope against every peer because merge safety cannot be proven', async () => {
     const result = await detectFileConflicts(
-      [task('A', 2, ['unknown-file-scope']), task('B', 2, ['src/shared.ts'])],
+      [
+        task('unknown', 1, ['unknown-file-scope']),
+        task('known-a', 2, ['src/a.ts']),
+        task('known-b', 2, ['src/b.ts']),
+      ],
       PROJECT,
     );
 
-    expect(result.safe).toHaveLength(1);
+    expect(result.safe.map((t) => t.id)).toEqual(['unknown']);
     expect(result.conflictGroups).toHaveLength(1);
     expect(result.conflictGroups[0].sharedModules).toEqual(['unknown-file-scope']);
   });
