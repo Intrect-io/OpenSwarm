@@ -6,7 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
-import { startChatView, isNearBottom, renderLine } from '../../web/static/js/chatView.mjs';
+import { startChatView, isNearBottom, renderLine, renderMentionText } from '../../web/static/js/chatView.mjs';
 
 function shell(): Document {
   document.body.innerHTML = `
@@ -24,6 +24,7 @@ function shell(): Document {
 function boardEvent(over: Record<string, unknown> = {}) {
   return {
     id: `id-${Math.random()}`,
+    fingerprint: 'fingerprint-1',
     seq: 1,
     timestamp: Date.now(),
     correlationId: 'c1',
@@ -75,7 +76,7 @@ describe('startChatView', () => {
     expect(lines[0].querySelector('.text')!.textContent).toBe('Landed the retry change.');
     // The reply prefers its long form and names its addressee.
     expect(lines[1].querySelector('.text')!.textContent).toBe('Approved: the retry belongs in the scheduler.');
-    expect(lines[1].querySelector('.to')!.textContent).toBe('→ Enginseer Rhodanis-Novum');
+    expect(lines[1].querySelector('.to')!.textContent).toBe("→ @'Enginseer Rhodanis-Novum'");
     view.stop();
   });
 
@@ -125,6 +126,31 @@ describe('startChatView', () => {
     });
     expect(doc.querySelectorAll('#room .line').length).toBe(2);
     expect(doc.getElementById('room')!.textContent).toContain('Now reviewing the diff.');
+    view.stop();
+  });
+
+  it('replaces an existing line when its Korean projection arrives', async () => {
+    const doc = shell();
+    const listeners: { onmessage?: (msg: { data: string }) => void } = {};
+    class FakeSource {
+      set onmessage(fn: (msg: { data: string }) => void) { listeners.onmessage = fn; }
+      close(): void { /* noop */ }
+    }
+    const original = boardEvent({ id: 'localized-later', summary: 'Mention Operator after review.' });
+    const view = startChatView(doc, { fetchImpl: fetchWith([original]), eventSourceImpl: FakeSource });
+    await vi.waitFor(() => expect(doc.getElementById('room')!.textContent).toContain("Mention @'Operator' after review."));
+
+    listeners.onmessage!({
+      data: JSON.stringify({
+        type: 'coordination:event',
+        data: { ...original, summary: '검토 후 Operator에게 알려 주세요.', localizedLocale: 'ko', originalText: { summary: original.summary } },
+      }),
+    });
+    expect(doc.querySelectorAll('#room .line')).toHaveLength(1);
+    expect(doc.getElementById('room')!.textContent).toContain("검토 후 @'Operator'에게 알려 주세요.");
+
+    listeners.onmessage!({ data: JSON.stringify({ type: 'coordination:event', data: original }) });
+    expect(doc.getElementById('room')!.textContent).toContain("검토 후 @'Operator'에게 알려 주세요.");
     view.stop();
   });
 
@@ -243,6 +269,43 @@ describe('renderLine', () => {
     });
     expect(html).not.toContain('class="tag"');
     expect(html).toContain('boo');
+  });
+
+  it('canonicalizes agent and operator mentions without double-prefixing existing mentions', () => {
+    const html = renderMentionText(
+      "Ask QuarryMaker7826, then notify @'Operator' and @QuarryMaker7826.",
+      [{ name: 'QuarryMaker7826', role: 'worker' }, { name: 'Operator', role: 'human' }],
+    );
+    document.body.innerHTML = html;
+    const mentions = [...document.querySelectorAll('.mention')];
+    expect(mentions.map((mention) => mention.textContent)).toEqual([
+      "@'QuarryMaker7826'", "@'Operator'", "@'QuarryMaker7826'",
+    ]);
+    expect(mentions[1].classList.contains('mention-human')).toBe(true);
+    expect(document.body.textContent).not.toContain("@@'");
+  });
+
+  it('does not highlight names inside ASCII identifiers but accepts Korean particles', () => {
+    const html = renderMentionText(
+      'Sablewood is not Sable, but Sable에게 답하세요.',
+      [{ name: 'Sable', role: 'worker' }],
+    );
+    document.body.innerHTML = html;
+    expect(document.body.textContent).toBe("Sablewood is not @'Sable', but @'Sable'에게 답하세요.");
+    expect(document.querySelectorAll('.mention')).toHaveLength(2);
+  });
+
+  it('highlights a recipient as a canonical mention and escapes untrusted prose', () => {
+    const html = renderLine({
+      id: 'x', seq: 1, timestamp: 0, speakerName: 'Worker', role: 'worker', speakerRole: 'worker',
+      recipientName: 'Operator', recipientRole: 'human', text: '<script>bad()</script>',
+      taskLabel: 'AGT-1', status: 'completed', kind: 'advice-request', isOperator: false,
+    }, [{ name: 'Operator', role: 'human' }]);
+    document.body.innerHTML = html;
+    expect(document.querySelector('.to .mention')?.textContent).toBe("@'Operator'");
+    expect(document.querySelector('.to .mention')?.classList.contains('mention-human')).toBe(true);
+    expect(document.querySelector('script')).toBeNull();
+    expect(document.querySelector('.text')?.textContent).toBe('<script>bad()</script>');
   });
 });
 

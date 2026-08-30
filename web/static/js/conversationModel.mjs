@@ -131,6 +131,7 @@ export function chatLineOf(event) {
     role: event.actorRole || '',
     speakerRole: ROLE_LABELS[event.actorRole] || event.actorRole || '',
     recipientName: event.recipientName || event.recipient || null,
+    recipientRole: event.recipientRole || '',
     text: event.detail || event.summary || '',
     taskLabel: taskLabelOf(event),
     status: event.status,

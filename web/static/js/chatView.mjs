@@ -32,18 +32,77 @@ export function isNearBottom({ scrollHeight, scrollTop, clientHeight }, slack = 
   return scrollHeight - scrollTop - clientHeight <= slack;
 }
 
+function mentionMarkup(name, role = '') {
+  const classes = `mention${role === 'human' ? ' mention-human' : ''}`;
+  return `<span class="${classes}">@&#39;${escapeHtml(name)}&#39;</span>`;
+}
+
+/** Canonicalize known participant names inside prose as highlighted @'name' mentions. */
+export function renderMentionText(text, targets = []) {
+  const byName = new Map();
+  for (const target of targets) {
+    const name = String(target?.name ?? '').trim();
+    if (name.length < 2) continue;
+    const current = byName.get(name);
+    if (!current || target.role === 'human') byName.set(name, { name, role: target.role ?? '' });
+  }
+  const names = [...byName.values()].sort((a, b) => b.name.length - a.name.length);
+  if (names.length === 0) return escapeHtml(text);
+
+  const source = String(text ?? '');
+  let cursor = 0;
+  let html = '';
+  while (cursor < source.length) {
+    let found = null;
+    for (const target of names) {
+      let index = source.indexOf(target.name, cursor);
+      while (index >= 0) {
+        const before = source[index - 1] ?? '';
+        const after = source[index + target.name.length] ?? '';
+        // Callsigns may be followed immediately by a Korean particle (`의`,
+        // `에게`), but must not light up inside another ASCII identifier.
+        if (!/[A-Za-z0-9_-]/.test(before) && !/[A-Za-z0-9_-]/.test(after)) break;
+        index = source.indexOf(target.name, index + 1);
+      }
+      if (index < 0) continue;
+      if (!found || index < found.index || (index === found.index && target.name.length > found.target.name.length)) {
+        found = { index, target };
+      }
+    }
+    if (!found) {
+      html += escapeHtml(source.slice(cursor));
+      break;
+    }
+
+    let mentionStart = found.index;
+    let mentionEnd = found.index + found.target.name.length;
+    if (source.slice(Math.max(cursor, mentionStart - 2), mentionStart) === "@'" && source[mentionEnd] === "'") {
+      mentionStart -= 2;
+      mentionEnd += 1;
+    } else if (mentionStart > cursor && source[mentionStart - 1] === '@') {
+      mentionStart -= 1;
+    }
+    html += escapeHtml(source.slice(cursor, mentionStart));
+    html += mentionMarkup(found.target.name, found.target.role);
+    cursor = mentionEnd;
+  }
+  return html;
+}
+
 /** `[14:02] name (worker · AGT-1009): message` as one room line. */
-export function renderLine(line) {
+export function renderLine(line, mentionTargets = []) {
   const color = ROLE_COLORS[line.role] ?? ROLE_COLORS.agent;
   const tagParts = [line.speakerRole, line.taskLabel].filter(Boolean);
   const tag = tagParts.length ? `<span class="tag">(${escapeHtml(tagParts.join(' · '))})</span> ` : '';
   const statusClass = PENDING.has(line.status) ? ' pending'
     : line.status === 'failed' || line.status === 'expired' ? ' failed' : '';
-  const to = line.recipientName ? `<span class="to">→ ${escapeHtml(line.recipientName)}</span>` : '';
+  const to = line.recipientName
+    ? `<span class="to">→ ${mentionMarkup(line.recipientName, line.recipientRole)}</span>`
+    : '';
   return `<div class="line${line.isOperator ? ' from-operator' : ''}${statusClass}" data-line="${escapeHtml(line.id)}">
     <span class="clock">[${escapeHtml(clockOf(line.timestamp))}]</span>
     <span class="who" style="color:${color}">${escapeHtml(line.speakerName)}</span>
-    ${tag}${to}<span class="sep">:</span> <span class="text">${escapeHtml(line.text)}</span>
+    ${tag}${to}<span class="sep">:</span> <span class="text">${renderMentionText(line.text, mentionTargets)}</span>
   </div>`;
 }
 
@@ -159,8 +218,17 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   const redraw = () => {
     const events = [...byId.values()];
     const lines = buildChatLines(events);
+    const mentionTargets = [
+      // The dashboard user is canonically named Operator even before they have
+      // spoken in this retained window, so agents can mention them immediately.
+      { name: 'Operator', role: 'human' },
+      ...lines.flatMap((line) => [
+        { name: line.speakerName, role: line.role },
+        ...(line.recipientName ? [{ name: line.recipientName, role: line.recipientRole }] : []),
+      ]),
+    ];
     room.innerHTML = lines.length
-      ? lines.map(renderLine).join('')
+      ? lines.map((line) => renderLine(line, mentionTargets)).join('')
       : '<div class="empty">No one has said anything yet.</div>';
     // The composer can only address an agent that exists; without one the
     // POST would be unroutable (the API requires repository/taskId/recipient).
@@ -186,7 +254,20 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   };
 
   const absorb = (event) => {
-    if (event && event.id && !byId.has(event.id)) { byId.set(event.id, event); return true; }
+    if (!event?.id) return false;
+    const existing = byId.get(event.id);
+    if (!existing) { byId.set(event.id, event); return true; }
+    // The SSE channel carries immutable source events, while polling/history
+    // carries their locale projection. A late raw copy of the same fingerprint
+    // must not downgrade a Korean line that is already on screen.
+    if (existing.localizedLocale && !event.localizedLocale
+      && existing.fingerprint && existing.fingerprint === event.fingerprint) return false;
+    if (existing.summary !== event.summary
+      || existing.detail !== event.detail
+      || existing.localizedLocale !== event.localizedLocale) {
+      byId.set(event.id, event);
+      return true;
+    }
     return false;
   };
 
