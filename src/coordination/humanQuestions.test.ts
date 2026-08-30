@@ -162,6 +162,12 @@ describe('human questions', () => {
     expect(accepted.accepted).toBe(true);
 
     expect(store.getCoordinationStore().openQuestionCount('/repo', 't1')).toBe(0);
+    expect(store.getCoordinationStore().resolvedHumanAnswers('t1')).toEqual([
+      expect.objectContaining({
+        correlationIds: [first.correlationId, second.correlationId],
+        answer: 'sheet-abc123',
+      }),
+    ]);
 
     // The reworded ask's own asker gets the answer routed to it too, the same
     // way the directly-answered one does.

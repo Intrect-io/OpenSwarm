@@ -471,6 +471,32 @@ describe('DurableRunCoordinator', () => {
     coordinator.close();
   });
 
+  it('parks the first native ask_human attempt directly in NEEDS_HUMAN with its exact correlations', async () => {
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'exact-park-owner',
+    });
+
+    await coordinator.execute(task('AX-1075'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'waiting_on_operator',
+      workerResult: {
+        success: false,
+        summary: 'asked operator',
+        filesChanged: [], commands: [], output: '', blockedOnOperator: true,
+        operatorQuestionCorrelationIds: ['hq-attempt-5', 'hq-attempt-5'],
+      },
+    }));
+
+    expect(coordinator.getRun('AX-1075')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      attemptNo: 1,
+      retryAt: undefined,
+      lastErrorCode: 'operator_question',
+      lastErrorMessage: expect.stringContaining('hq-attempt-5'),
+    });
+    coordinator.close();
+  });
+
   it('a parked result carrying a prUrl stops being a park (AGT-4076 guard)', async () => {
     // Why the parked-publish path in runnerExecution attaches the PR to the
     // LEDGER but never writes `result.prUrl`. `publishedNeedsReconcile` treats

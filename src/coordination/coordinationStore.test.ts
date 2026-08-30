@@ -13,6 +13,56 @@ function message(over: Record<string, unknown> = {}) {
 }
 
 describe('CoordinationStore', () => {
+  it('recovers full operator answers after board eviction/restart and dedupes sibling settlements', async () => {
+    const s = store();
+    const file = join(dir, 'events.json');
+    const previousDb = process.env.OPENSWARM_AUTOMATION_DB;
+    process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'automation.db');
+    const trace = await import('./coordinationTrace.js');
+    trace.resetTraceDbForTests();
+    try {
+      const taskId = 'AX-1075';
+      await s.publish(message({
+        taskId, kind: 'human-question', status: 'waiting', correlationId: 'hq-attempt-5',
+        summary: 'Should we add a due_date rule?',
+      }));
+      await s.publish(message({
+        taskId, kind: 'human-question', status: 'waiting', correlationId: 'hq-attempt-9',
+        summary: 'Which cutoff path should the retry use?',
+      }));
+      const detail = 'Use the canonical monthly_cutoff path. Do not create a due_date rule.';
+      for (const correlationId of ['hq-attempt-5', 'hq-attempt-9']) {
+        await s.publish(message({
+          taskId, kind: 'human-answer', status: 'completed', correlationId,
+          summary: 'operator answered', detail, metadata: { answerSetId: 'hq-attempt-5' },
+        }));
+      }
+
+      // Simulate ring eviction, then construct a fresh process-facing store.
+      const state = JSON.parse(readFileSync(file, 'utf8'));
+      state.events = [];
+      writeFileSync(file, JSON.stringify(state));
+      trace.resetTraceDbForTests();
+      const restarted = new CoordinationStore(file);
+
+      const resolved = restarted.resolvedHumanAnswers(taskId);
+      expect(resolved).toEqual([expect.objectContaining({
+        correlationIds: ['hq-attempt-5', 'hq-attempt-9'],
+        questions: ['Should we add a due_date rule?', 'Which cutoff path should the retry use?'],
+        answer: detail,
+      })]);
+      const { formatAuthoritativeOperatorFeedback } = await import('./operatorGuidance.js');
+      const formatted = formatAuthoritativeOperatorFeedback(resolved)!;
+      expect(formatted).toContain(detail);
+      expect(formatted.match(/canonical monthly_cutoff/g)).toHaveLength(1);
+      expect(formatted).toContain('hq-attempt-5, hq-attempt-9');
+    } finally {
+      if (previousDb === undefined) delete process.env.OPENSWARM_AUTOMATION_DB;
+      else process.env.OPENSWARM_AUTOMATION_DB = previousDb;
+      trace.resetTraceDbForTests();
+    }
+  });
+
   it('knows a question is answered after the ring has evicted it', async () => {
     // The in-memory board is a ring. A task that has been chatty pushes its own
     // exchange out of it, and a decision read only from memory would call a

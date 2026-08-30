@@ -41,6 +41,7 @@ export interface WorkerResult {
   confidencePercent?: number;   // Agent self-reported 0-100
   haltReason?: string;          // Why the agent halted
   blockedOnOperator?: boolean;  // ask_human posted; wait for the Discord answer, do not retry
+  operatorQuestionCorrelationIds?: string[]; // exact durable questions that stopped this attempt
   noChangesReason?: string;     // Explicit justification for a successful no-edit outcome
   uncertaintySignals?: string[]; // Detected uncertainty phrases
   costInfo?: CostInfo;

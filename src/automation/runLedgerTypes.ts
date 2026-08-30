@@ -164,6 +164,8 @@ export interface TransitionPatch {
   errorMessage?: string | null;
   metadata?: unknown;
   eventData?: unknown;
+  /** Specialized durable lifecycle event; defaults to the generic transition kind. */
+  eventKind?: string;
 }
 
 export interface AttemptResultInput {

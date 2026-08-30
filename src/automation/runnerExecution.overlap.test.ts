@@ -2,24 +2,37 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { ITaskSource } from './taskSource.js';
 
-const { runDraftAnalysis, findOpenPRFileOverlaps, createWorktree } = vi.hoisted(() => ({
+const {
+  runDraftAnalysis,
+  findOpenPRFileOverlaps,
+  createWorktree,
+  loadAuthoritativeOperatorFeedback,
+} = vi.hoisted(() => ({
   runDraftAnalysis: vi.fn(),
   findOpenPRFileOverlaps: vi.fn(),
   createWorktree: vi.fn(),
+  loadAuthoritativeOperatorFeedback: vi.fn(),
 }));
 
 vi.mock('../agents/draftAnalyzer.js', () => ({ runDraftAnalysis }));
+vi.mock('../coordination/operatorGuidance.js', () => ({ loadAuthoritativeOperatorFeedback }));
 vi.mock('../support/worktreeManager.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../support/worktreeManager.js')>()),
   findOpenPRFileOverlaps,
   createWorktree,
 }));
 
-import { executePipeline, setTaskSource, type ExecutionContext } from './runnerExecution.js';
+import {
+  executePipeline,
+  runPreAdmissionDraft,
+  setTaskSource,
+  type ExecutionContext,
+} from './runnerExecution.js';
 
 describe('executePipeline open-PR preflight (INT-2568)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    loadAuthoritativeOperatorFeedback.mockReturnValue(undefined);
     runDraftAnalysis.mockResolvedValue({
       taskType: 'bugfix', relevantFiles: ['src/subtraction.rs'], durationMs: 7,
       intentSummary: 'fix subtraction', completionCriteria: [], sufficient: true,
@@ -68,6 +81,31 @@ describe('executePipeline open-PR preflight (INT-2568)', () => {
     await executePipeline(ctx, task, '/repo');
 
     expect(runDraftAnalysis.mock.calls[0][0].taskDescription).toBe('original diagnosis');
+  });
+
+  it('injects durable operator feedback into a pre-admission draft', async () => {
+    const guidance = 'Operator answer: monthly_cutoff is canonical.';
+    loadAuthoritativeOperatorFeedback.mockReturnValue(guidance);
+    setTaskSource({
+      kind: 'local',
+      getExecutionComments: vi.fn(async () => []),
+    } as unknown as ITaskSource);
+    const candidate: TaskItem = {
+      id: 'task-guidance', source: 'linear', issueId: 'issue-guidance',
+      issueIdentifier: 'AX-guidance', title: 'Use the current decision',
+      description: 'Stale issue: add due_date.', priority: 2, createdAt: Date.now(),
+    };
+
+    await runPreAdmissionDraft({
+      allowedProjects: ['/repo'], enableDraftAnalysis: true,
+    } as ExecutionContext, candidate, '/repo');
+
+    expect(loadAuthoritativeOperatorFeedback).toHaveBeenCalledWith('issue-guidance');
+    expect(runDraftAnalysis).toHaveBeenCalledWith(expect.objectContaining({
+      taskDescription: 'Stale issue: add due_date.',
+      authoritativeOperatorFeedback: guidance,
+    }));
+    expect(candidate.authoritativeOperatorFeedback).toBe(guidance);
   });
 
   it('reuses a sufficient pre-admission draft in the pipeline', async () => {

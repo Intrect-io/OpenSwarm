@@ -23,6 +23,7 @@ import * as planner from '../support/planner.js';
 import type { SubTask } from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
+import { loadAuthoritativeOperatorFeedback } from '../coordination/operatorGuidance.js';
 import { t } from '../locale/index.js';
 import { formatTaskDescription } from '../linear/format.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -200,10 +201,13 @@ export async function runPreAdmissionDraft(
 ): Promise<DraftAnalysis | undefined> {
   if (ctx.enableDraftAnalysis === false) return undefined;
   await prepareTaskExecutionContext(task);
+  const operatorFeedback = loadAuthoritativeOperatorFeedback(task.issueId || task.id);
+  if (operatorFeedback) task.authoritativeOperatorFeedback = operatorFeedback;
   const taskId = taskEventKey(task);
   return runDraftAnalysis({
     taskTitle: task.title,
     taskDescription: task.description || '',
+    authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
     projectPath,
     model: ctx.draftModel,
     peerIssues: projectDraftPeers(task, ctx.peerIssues),
@@ -659,6 +663,7 @@ export async function decomposeTask(
     result = await planner.runPlanner({
       taskTitle: task.title,
       taskDescription: task.description || '',
+      authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
       projectPath,
       projectName: task.linearProject?.name,
       targetMinutes,
@@ -766,6 +771,12 @@ export async function executePipeline(
   // context can keep an autonomous loop on a hypothesis a human already disproved.
   task = await prepareTaskExecutionContext(task);
 
+  // Resolved ask_human answers are durable task state, not tracker prose.
+  // Reload them on every execution so retries and daemon restarts cannot fall
+  // back to a stale issue description after an operator decision.
+  const operatorFeedback = loadAuthoritativeOperatorFeedback(task.issueId || task.id);
+  if (operatorFeedback) task = { ...task, authoritativeOperatorFeedback: operatorFeedback };
+
   // ============================================
   // Draft Analysis (Haiku 사전 분석 — ~3초)
   // Planner + Worker에 enriched context 제공
@@ -787,6 +798,7 @@ export async function executePipeline(
         draftResult = await runDraftAnalysis({
           taskTitle: task.title,
           taskDescription: task.description || '',
+          authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
           projectPath,
           model: ctx.draftModel,
           peerIssues: projectDraftPeers(task, ctx.peerIssues),

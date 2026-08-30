@@ -36,6 +36,8 @@ export interface CliRunResult {
    * back into the same unanswered question.
    */
   blockedOnOperator?: boolean;
+  /** Exact durable question set that caused blockedOnOperator. */
+  operatorQuestionCorrelationIds?: string[];
   /**
    * Token/duration usage measured by the adapter's own loop (codex-responses,
    * gpt, …). parseWorkerOutput/parseReviewerOutput attach it to the stage result

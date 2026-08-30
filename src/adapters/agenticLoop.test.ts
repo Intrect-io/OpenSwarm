@@ -20,6 +20,20 @@ const toolCallResp = (id: string, name: string, args: object) => ({
     finish_reason: 'tool_calls',
   }],
 });
+const multiToolCallResp = (calls: Array<{ id: string; name: string; args: object }>) => ({
+  choices: [{
+    message: {
+      role: 'assistant',
+      content: null,
+      tool_calls: calls.map(({ id, name, args }) => ({
+        id,
+        type: 'function' as const,
+        function: { name, arguments: JSON.stringify(args) },
+      })),
+    },
+    finish_reason: 'tool_calls',
+  }],
+});
 /** Scripted API response with no tool calls (model tries to finish). */
 const finalResp = (content: string) => ({
   choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }],
@@ -498,6 +512,41 @@ describe('runAgenticLoop blocking human decision', () => {
     // turn in which it could answer its own question.
     expect(calls).toEqual(['turn-1', 'turn-2']);
     expect(result.text).toContain('Blocked');
+    expect(result.blockedOnOperator).toBe(true);
+    expect(result.operatorQuestionCorrelationIds).toHaveLength(1);
+    expect(result.operatorQuestionCorrelationIds?.[0]).toMatch(/^hq-/);
+  });
+
+  it('collects every correlation when one model turn posts multiple blocking questions', async () => {
+    let turn = 0;
+    const result = await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      maxTurns: 5,
+      coordinationContext: {
+        repository: process.cwd(),
+        taskId: `t-multi-${Date.now()}`,
+        actor: 'magos-test',
+        actorName: 'Magos Test-Vector',
+        notifyOperator: async () => true,
+      },
+      callApi: async () => {
+        turn += 1;
+        if (turn === 1) {
+          return multiToolCallResp([
+            { id: 'c1', name: 'ask_human', args: { question: 'Which region?' } },
+            { id: 'c2', name: 'ask_human', args: { question: 'Which account?' } },
+          ]);
+        }
+        return finalResp('Blocked on both operator decisions.');
+      },
+    });
+
+    expect(result.blockedOnOperator).toBe(true);
+    expect(result.operatorQuestionCorrelationIds).toHaveLength(2);
+    expect(new Set(result.operatorQuestionCorrelationIds).size).toBe(2);
+    expect(result.operatorQuestionCorrelationIds?.every((id) => id.startsWith('hq-'))).toBe(true);
   });
 });
 

@@ -179,6 +179,8 @@ export interface AgenticLoopResult {
   cachedTokens: number;
   /** A blocking ask_human ended the run; the operator now owns the next step. */
   blockedOnOperator?: boolean;
+  /** Exact correlation IDs returned by the blocking ask_human tool call. */
+  operatorQuestionCorrelationIds?: string[];
   /** 소요 시간 (ms) */
   durationMs: number;
   /** Shell commands the worker actually ran via the `bash` tool — ground truth
@@ -300,6 +302,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
   const seenToolCalls = new Set<string>();
   let blockedOnOperator = false;
+  const operatorQuestionCorrelationIds: string[] = [];
   let noProgressTurns = 0;
   const NO_PROGRESS_LIMIT = 3;
   // Two independent nudge budgets — they fire for different reasons and must NOT
@@ -605,14 +608,21 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     // than trusting the model to honour the tool's instruction. Nothing after
     // this point can be decided without the answer, and continuing is how an
     // agent invents one.
-    const blockingQuestion = toolCalls.findIndex((tc, i) => {
-      if (tc.function.name !== 'ask_human' || results[i]?.is_error) return false;
+    let blockingQuestion = -1;
+    for (let i = 0; i < toolCalls.length; i += 1) {
+      const tc = toolCalls[i];
+      if (tc.function.name !== 'ask_human' || results[i]?.is_error) continue;
       try {
-        return (JSON.parse(results[i].content) as { blocked?: boolean }).blocked === true;
+        const payload = JSON.parse(results[i].content) as { blocked?: boolean; correlationId?: unknown };
+        if (payload.blocked !== true) continue;
+        if (blockingQuestion < 0) blockingQuestion = i;
+        if (typeof payload.correlationId === 'string' && payload.correlationId.trim()) {
+          operatorQuestionCorrelationIds.push(payload.correlationId.trim());
+        }
       } catch {
-        return false;
+        // A malformed tool result cannot establish a durable blocking question.
       }
-    });
+    }
     if (blockingQuestion >= 0) {
       blockedOnOperator = true;
       onLog?.('⏸ Blocking decision sent to the operator — stopping this run');
@@ -733,6 +743,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     durationMs: Date.now() - startTime,
     executedCommands,
     blockedOnOperator,
+    operatorQuestionCorrelationIds: operatorQuestionCorrelationIds.length > 0
+      ? [...new Set(operatorQuestionCorrelationIds)]
+      : undefined,
   };
 }
 
@@ -752,6 +765,7 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     durationMs: result.durationMs,
     executedCommands: result.executedCommands,
     blockedOnOperator: result.blockedOnOperator,
+    operatorQuestionCorrelationIds: result.operatorQuestionCorrelationIds,
     costInfo: {
       costUsd: 0,
       inputTokens: result.inputTokens,

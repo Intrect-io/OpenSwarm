@@ -1,24 +1,4 @@
-// ============================================
-// OpenSwarm - runnerExecution.ts coverage extension
-// ============================================
-//
-// Targets `executePipeline` (the daemon's pipeline-execution orchestrator) plus
-// the smaller exported reporting/state-sync helpers. Strategy mirrors
-// `pairPipeline.coverage.test.ts`: mock every external stage/side-effect
-// dependency as `vi.fn()` and drive the function through its branches.
-//
-// executePipeline itself never calls the real worker/reviewer/tester stages —
-// it delegates to a `PairPipeline` instance built by `createPipelineFromConfig`
-// and only *listens* to that instance's events (stage:start/stage:complete/
-// halt/revision:start). So the key seam here is `createPipelineFromConfig`:
-// we replace it with a factory that returns a plain `EventEmitter` whose `run()`
-// is a controllable `vi.fn()`. Emitting synthetic events from that fake lets us
-// exercise executePipeline's own listener bodies without touching the real
-// (heavy) PairPipeline class or its own dependency tree.
-//
-// All disk/state-touching singletons (taskState/store.ts → ~/.openswarm,
-// runnerState.ts → ~/.claude + ~/.openswarm, memory persistence) are mocked so
-// no test touches real user state.
+// runnerExecution coverage with mocked pipeline stages and user-state stores.
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
@@ -58,6 +38,7 @@ const formatDocReport = vi.fn();
 const saveCognitiveMemory = vi.fn();
 const loadParsedTask = vi.fn();
 const formatParsedTaskSummary = vi.fn();
+const loadAuthoritativeOperatorFeedback = vi.fn();
 
 const markTaskInProgress = vi.fn();
 const buildTaskStateSyncComment = vi.fn();
@@ -120,6 +101,7 @@ vi.mock('../agents/documenter.js', () => ({ formatDocReport }));
 
 vi.mock('../memory/index.js', () => ({ saveCognitiveMemory }));
 vi.mock('../orchestration/taskParser.js', () => ({ loadParsedTask, formatParsedTaskSummary }));
+vi.mock('../coordination/operatorGuidance.js', () => ({ loadAuthoritativeOperatorFeedback }));
 
 vi.mock('../taskState/store.js', () => ({
   markTaskInProgress,
@@ -320,6 +302,7 @@ describe('runnerExecution.ts coverage extension', () => {
     saveCognitiveMemory.mockResolvedValue(undefined);
     loadParsedTask.mockResolvedValue(null);
     formatParsedTaskSummary.mockReturnValue('parsed summary');
+    loadAuthoritativeOperatorFeedback.mockReturnValue(undefined);
 
     formatWorkReport.mockReturnValue('work report');
     formatReviewFeedback.mockReturnValue('review feedback');
@@ -408,6 +391,22 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(result.success).toBe(true);
       expect(result.finalStatus).toBe('approved');
       expect(createPipelineFromConfig).toHaveBeenCalledTimes(1);
+    });
+
+    it('reloads durable operator feedback for each execution and passes it to draft and pipeline', async () => {
+      const guidance = 'Operator answer: use monthly_cutoff; do not create due_date.';
+      loadAuthoritativeOperatorFeedback.mockReturnValue(guidance);
+      const fp = makeFakePipeline(pipelineResult());
+      createPipelineFromConfig.mockReturnValue(fp);
+
+      await executePipeline(makeCtx(), task({ description: 'Stale issue: add due_date.' }), '/repo');
+
+      expect(loadAuthoritativeOperatorFeedback).toHaveBeenCalledWith('issue-1');
+      expect(runDraftAnalysis).toHaveBeenCalledWith(expect.objectContaining({ taskDescription: 'Stale issue: add due_date.', authoritativeOperatorFeedback: guidance }));
+      expect(fp.run).toHaveBeenCalledWith(
+        expect.objectContaining({ authoritativeOperatorFeedback: guidance }),
+        expect.any(String), expect.any(Object),
+      );
     });
 
     it('skips draft analysis when enableDraftAnalysis is false', async () => {

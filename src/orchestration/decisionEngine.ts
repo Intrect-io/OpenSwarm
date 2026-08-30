@@ -73,6 +73,8 @@ export interface TaskItem {
   impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
   estimatedMinutes?: number;
   priorAttemptFeedback?: string;  // Last failure/rejection feedback from a previous session — injected into the worker's first iteration (INT-2474)
+  /** Durable resolved ask_human decisions; newer and authoritative over stale task prose. */
+  authoritativeOperatorFeedback?: string;
   /**
    * The user explicitly chose this issue (POST /api/work, `openswarm work`)
    * rather than the heartbeat selecting it. Durable admission reopens
