@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import { DurableRunCoordinator, retryAtFor } from './durableRunCoordinator.js';
+import { DurableRunCoordinator, retryAtFor, runRecordToTask } from './durableRunCoordinator.js';
 import { RunLedger } from './runLedger.js';
 
 const roots: string[] = [];
@@ -993,5 +993,75 @@ describe('DurableRunCoordinator', () => {
 
     coordinator.close();
     ledger.close();
+  });
+});
+
+describe('runRecordToTask', () => {
+  // AGT-4094: reconciliation has to finish a published run whose tracker card
+  // already went Done, and a Done card is never in the fetch — so the run
+  // record itself has to be able to stand in for the task it was registered
+  // from. This is the inverse of observeTask's mapping; round-tripping it is
+  // what keeps the two from drifting apart.
+  function record(overrides: Partial<Parameters<typeof runRecordToTask>[0]> = {}) {
+    return {
+      issueId: 'f8c57098', source: 'linear', identifier: 'AX-876',
+      title: 'account master', projectPath: '/work/cgf-portal',
+      state: 'NEEDS_RECONCILE' as const, stateVersion: 130, attemptNo: 4, leaseEpoch: 4,
+      discoveredAt: 1_787_897_771_595, updatedAt: 1_788_009_300_002,
+      metadata: { projectId: 'cgf', projectName: 'CGF-Portal', fileScope: ['a.ts'] },
+      ...overrides,
+    };
+  }
+
+  it('carries every field the completion effect reads back off the durable row', () => {
+    expect(runRecordToTask(record())).toMatchObject({
+      id: 'f8c57098',
+      issueId: 'f8c57098',
+      issueIdentifier: 'AX-876',
+      source: 'linear',
+      title: 'account master',
+      projectPath: '/work/cgf-portal',
+      linearProject: { id: 'cgf', name: 'CGF-Portal' },
+      fileScope: ['a.ts'],
+      createdAt: 1_787_897_771_595,
+    });
+  });
+
+  it('round-trips what observeTask wrote, so the two mappings cannot drift apart', () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const original: TaskItem = {
+      id: 'issue-1', issueId: 'issue-1', issueIdentifier: 'AX-1', source: 'linear',
+      title: 'round trip', priority: 2, createdAt: 1_000,
+      linearProject: { id: 'proj', name: 'Proj' }, fileScope: ['x.ts'],
+    };
+    const stored = coordinator.observeTask(original, '/repo');
+    expect(stored).not.toBeNull();
+
+    const rebuilt = runRecordToTask(stored!);
+    expect(rebuilt.issueId).toBe(original.issueId);
+    expect(rebuilt.issueIdentifier).toBe(original.issueIdentifier);
+    expect(rebuilt.title).toBe(original.title);
+    expect(rebuilt.source).toBe(original.source);
+    expect(rebuilt.linearProject).toEqual(original.linearProject);
+    expect(rebuilt.fileScope).toEqual(original.fileScope);
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('names an unrecognized source instead of asserting it into the union', () => {
+    // The column is a free-form string, so a record written by a build that
+    // knew a source this one does not must not be cast into a member it isn't.
+    expect(runRecordToTask(record({ source: 'jira' })).source).toBe('discovered');
+  });
+
+  it('falls back through title -> identifier -> issue id, so a title is never empty', () => {
+    expect(runRecordToTask(record({ title: undefined })).title).toBe('AX-876');
+    expect(runRecordToTask(record({ title: undefined, identifier: undefined })).title).toBe('f8c57098');
+  });
+
+  it('omits linearProject when the row never recorded one', () => {
+    expect(runRecordToTask(record({ metadata: {} })).linearProject).toBeUndefined();
+    expect(runRecordToTask(record({ metadata: undefined })).linearProject).toBeUndefined();
   });
 });

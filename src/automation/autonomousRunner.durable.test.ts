@@ -384,6 +384,132 @@ esac
     internal.durableRuns.close();
   });
 
+  // AGT-4094: the heartbeat fetch asks Linear only for Todo / In Progress /
+  // In Review / Backlog, so a run whose card reached Done is structurally
+  // absent from `tasks`. Reconciliation used to skip such a row before it ever
+  // reached the GitHub lookup, leaving it in NEEDS_RECONCILE forever — and
+  // NEEDS_RECONCILE counts toward the per-project admission cap, so the slot
+  // leaked permanently. Production case: AX-876, merged PR, 11.9h stuck.
+  it('reconciles a published run whose tracker card already went terminal, so its admission slot is returned', async () => {
+    const [{ AutonomousRunner }, execution] = await Promise.all([
+      import('./autonomousRunner.js'),
+      import('./runnerExecution.js'),
+    ]);
+    const { updateProjectAfterTask } = await import('../linear/projectUpdater.js');
+    const bin = join(root, 'terminal-bin');
+    const repo = join(root, 'terminal-repo');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh
+case "$*" in
+  *"pr list --head"*) echo '[{"url":"https://github.com/acme/repo/pull/171","state":"MERGED","isDraft":false,"headRefOid":"abc171"}]';;
+esac
+`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    const logPairComplete = vi.fn(async () => {});
+    execution.setTaskSource({
+      kind: 'linear',
+      fetchTasks: vi.fn(async () => []),
+      getExecutionComments: vi.fn(async () => []),
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
+      logPairComplete, logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(),
+      logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'terminal-card.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.durableRuns.importLegacyRun({
+      issueId: 'terminal', source: 'linear', identifier: 'AX-876', title: 'account master',
+      projectPath: repo, state: 'NEEDS_RECONCILE', branchName: 'swarm/AX-876-a2-3',
+      metadata: { projectId: 'cgf', projectName: 'CGF-Portal' },
+    });
+    internal.executePipeline = vi.fn(async () => resultFixture());
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath}`;
+    try {
+      // The decisive argument: an empty task list, exactly what a Done card
+      // produces. Before the fix this left the row untouched and unlogged.
+      await internal.reconcileDurableArtifacts([]);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+
+    expect(internal.executePipeline).not.toHaveBeenCalled();
+    expect(internal.durableRuns.getRun('terminal')).toMatchObject({
+      state: 'DONE', prUrl: 'https://github.com/acme/repo/pull/171', headSha: 'abc171',
+    });
+    // The completion effect carried a task rebuilt from the durable row, not a
+    // live one — identifier, title and project all came back off the record.
+    expect(logPairComplete).toHaveBeenCalledTimes(1);
+    expect(updateProjectAfterTask).toHaveBeenCalledWith('cgf', 'CGF-Portal', expect.objectContaining({
+      title: 'account master',
+      issueIdentifier: 'AX-876',
+      success: true,
+    }));
+    internal.durableRuns.close();
+  });
+
+  // The other half of AGT-4094: absence stays ambiguous wherever it still
+  // matters. With no PR the only exit is to re-run the work, and re-running a
+  // task whose card cannot be seen is exactly what the original guard existed
+  // to prevent — AGT-4056 narrowed its own fix on this assumption, so it has
+  // to keep holding.
+  it('leaves an unpublished run parked when its task is absent, rather than reopening work it cannot see', async () => {
+    const [{ AutonomousRunner }, execution] = await Promise.all([
+      import('./autonomousRunner.js'),
+      import('./runnerExecution.js'),
+    ]);
+    const bin = join(root, 'unpublished-bin');
+    const repo = join(root, 'unpublished-repo');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh
+case "$*" in
+  *"pr list --head"*) echo '[]';;
+esac
+`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    const logPairComplete = vi.fn(async () => {});
+    execution.setTaskSource({
+      kind: 'linear',
+      fetchTasks: vi.fn(async () => []),
+      getExecutionComments: vi.fn(async () => []),
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
+      logPairComplete, logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(),
+      logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'unpublished.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.durableRuns.importLegacyRun({
+      issueId: 'unpublished', source: 'linear', identifier: 'AX-999', title: 'never pushed',
+      projectPath: repo, state: 'NEEDS_RECONCILE', branchName: 'swarm/AX-999',
+    });
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath}`;
+    try {
+      await internal.reconcileDurableArtifacts([]);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+
+    expect(internal.durableRuns.getRun('unpublished')).toMatchObject({ state: 'NEEDS_RECONCILE' });
+    expect(logPairComplete).not.toHaveBeenCalled();
+    internal.durableRuns.close();
+  });
+
   it('returns at the shutdown deadline but defers ledger close until an abort-ignoring executor exits', async () => {
     const { AutonomousRunner } = await import('./autonomousRunner.js');
     const runner = new AutonomousRunner({

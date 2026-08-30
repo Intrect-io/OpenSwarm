@@ -79,6 +79,7 @@ import {
 } from './backlogGrooming.js';
 import {
   DurableRunCoordinator,
+  runRecordToTask,
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
@@ -1237,8 +1238,13 @@ export class AutonomousRunner {
 
     for (const run of this.durableRuns.listRuns(['NEEDS_RECONCILE'])) {
       if (this.stopping) return;
+      // A task may legitimately be absent: the fetch asks only for Todo /
+      // In Progress / In Review / Backlog, so an issue that reached Done is
+      // structurally invisible here. That makes absence ambiguous for the
+      // worktree path below — which re-runs work — but not for the branch
+      // path, where GitHub is the authority. So the guard moved down to the
+      // one place it actually protects something. (AGT-4094)
       const task = taskById.get(run.issueId);
-      if (!task) continue; // absence from an actionable fetch is ambiguous; keep parked
       if (run.ownerInstanceId || run.leaseToken) {
         console.warn(`[Reconciler] Keeping ${run.identifier ?? run.issueId} fenced until its original executor exits`);
         continue;
@@ -1258,6 +1264,7 @@ export class AutonomousRunner {
             this.durableRuns.markNeedsHuman(run.issueId, `Published PR was closed without merge: ${pr.url}`);
             continue;
           }
+          const publishedTask = task ?? runRecordToTask(run);
           const recoveredResult: PipelineResult = {
             success: true,
             sessionId: `recovered-publication-${run.attemptNo}`,
@@ -1267,16 +1274,16 @@ export class AutonomousRunner {
             iterations: Math.max(1, run.attemptNo),
             prUrl: pr.url,
             taskContext: {
-              issueIdentifier: task.issueIdentifier || run.identifier,
-              projectName: task.linearProject?.name,
+              issueIdentifier: publishedTask.issueIdentifier || run.identifier,
+              projectName: publishedTask.linearProject?.name,
               projectPath: run.projectPath,
-              taskTitle: task.title,
+              taskTitle: publishedTask.title,
             },
           };
           if (this.durableRuns.recoverPublishedRun(
             run.issueId,
             { prUrl: pr.url, headSha: pr.headSha },
-            buildCompletionEffect(task, recoveredResult, run.attemptNo),
+            buildCompletionEffect(publishedTask, recoveredResult, run.attemptNo),
           )) {
             console.log(`[Reconciler] Recovered published run ${run.identifier ?? run.issueId}: ${pr.url}`);
           }
@@ -1284,9 +1291,18 @@ export class AutonomousRunner {
         }
       }
 
-      // No PR exists. Never overlap a replacement with an executor that lost
-      // its lease but still owns the filesystem. Missing/ambiguous markers stay
-      // parked; preserved work or a dead owner is safe for createWorktree to resume.
+      // No PR exists, so nothing was published and the only way out of this
+      // state is to run the work again — which needs a live tracker card.
+      // Log it: this branch used to be the loop's one silent exit, which is
+      // exactly why a row stuck here was invisible to log-reading. (AGT-4094)
+      if (!task) {
+        console.warn(`[Reconciler] Keeping ${run.identifier ?? run.issueId} in NEEDS_RECONCILE (no published PR and no actionable task)`);
+        continue;
+      }
+
+      // Never overlap a replacement with an executor that lost its lease but
+      // still owns the filesystem. Missing/ambiguous markers stay parked;
+      // preserved work or a dead owner is safe for createWorktree to resume.
       const recovery = await inspectWorktreeRecovery(run.projectPath, run.issueId, run.worktreePath)
         .catch((error) => {
           console.warn(`[Reconciler] Worktree evidence unreadable for ${run.identifier ?? run.issueId}:`, error);

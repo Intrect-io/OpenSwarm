@@ -123,6 +123,51 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
+const TASK_SOURCES: readonly TaskItem['source'][] = ['linear', 'local', 'discovered', 'github_pr', 'github_pr_review'];
+
+/**
+ * Priority is not durable — the ledger never stored it, because nothing about a
+ * finished run needs one. A rebuilt task is only ever handed to the completion
+ * effect, which reads id/identifier/title/project and nothing else, so this
+ * fills the required field with the lowest rank rather than inventing a rank
+ * that could outrank live work if the value ever did reach a scheduler.
+ */
+const REBUILT_TASK_PRIORITY = 4;
+
+/**
+ * Rebuild the {@link TaskItem} a run was registered from, using only its
+ * durable record — the exact inverse of {@link DurableRunCoordinator.observeTask}'s
+ * mapping.
+ *
+ * Reconciliation needs this because the heartbeat's fetch structurally cannot
+ * see a terminal tracker card: Linear's slim query asks only for Todo /
+ * In Progress / In Review / Backlog. A run whose issue reached Done therefore
+ * has no live task to pair with, while still owning a branch, a merged PR and
+ * an admission slot — so the GitHub-authoritative half of reconciliation would
+ * wait forever on a card it is never going to be handed. (AGT-4094)
+ */
+export function runRecordToTask(run: RunRecord): TaskItem {
+  const metadata = (run.metadata ?? {}) as { projectId?: string; projectName?: string; fileScope?: string[] };
+  const source = TASK_SOURCES.find((candidate) => candidate === run.source);
+  return {
+    id: run.issueId,
+    issueId: run.issueId,
+    issueIdentifier: run.identifier,
+    // The column is a free-form string; anything the union does not cover was
+    // written by a source this build no longer knows, so say so rather than
+    // asserting it into a member it may not be.
+    source: source ?? 'discovered',
+    title: run.title ?? run.identifier ?? run.issueId,
+    priority: REBUILT_TASK_PRIORITY,
+    projectPath: run.projectPath,
+    linearProject: metadata.projectId
+      ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
+      : undefined,
+    fileScope: metadata.fileScope,
+    createdAt: run.discoveredAt,
+  };
+}
+
 /**
  * Connects pipeline execution to the SQLite run state machine. The coordinator
  * owns lease renewal and turns every late callback into a fenced no-op.
