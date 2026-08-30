@@ -9,6 +9,7 @@ import type { PipelineContext } from './pairPipelineTypes.js';
 import { assignCallSign, type AgentRole } from '../coordination/agentNames.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
 import { t } from '../locale/index.js';
+import { repositoryCell } from '../coordination/repositoryCell.js';
 
 /**
  * Roles that appear on the coordination board as deployed agents.
@@ -44,7 +45,8 @@ function identityKey(context: PipelineContext, role: AgentRole): string {
   // if that changed the handle then an answer addressed to the first attempt
   // would sit in an inbox nobody reads. One (repo, task, role) is one
   // participant in the conversation, however many attempts it takes.
-  return `${context.projectPath}\0${taskEventKey(context.task)}\0${role}`;
+  const repoKey = context.config?.runMetadata?.repoKey ?? repositoryCell(context.projectPath).repoKey;
+  return `${repoKey}\0${taskEventKey(context.task)}\0${role}`;
 }
 
 /**
@@ -70,7 +72,7 @@ function agentIdentity(context: PipelineContext, role: AgentRole): AgentIdentity
   // task deterministically, and `consume` is task-scoped, so a handle shared
   // with a different task cannot cross wires. (AGT-4064, PR review)
   const callSign = assignCallSign({
-    repository: context.projectPath,
+    repository: context.config?.runMetadata?.repoKey ?? repositoryCell(context.projectPath).repoKey,
     executionId: taskEventKey(context.task),
     role,
   });
@@ -93,10 +95,16 @@ export function assignedAgentName(context: PipelineContext, role: AgentRole): st
 export function coordinationContextFor(context: PipelineContext, role: AgentRole) {
   const taskId = taskEventKey(context.task);
   const callSign = agentIdentity(context, role);
+  const cell = repositoryCell(context.projectPath);
   return {
-    repository: context.projectPath,
+    repository: context.config?.runMetadata?.coordinationRepository ?? cell.repositoryPath,
+    repoKey: context.config?.runMetadata?.repoKey ?? cell.repoKey,
     taskId,
     taskLabel: context.task.issueIdentifier,
+    sourceTaskId: taskId,
+    sourceTaskLabel: context.task.issueIdentifier,
+    targetTaskId: taskId,
+    targetTaskLabel: context.task.issueIdentifier,
     actor: callSign.address,
     actorName: callSign.name,
     actorRole: role,
@@ -248,6 +256,8 @@ async function publishStageEvent(
         recipient: recipient.actor,
         recipientName: recipient.actorName,
         recipientRole: recipient.actorRole,
+        targetTaskId: recipient.taskId,
+        targetTaskLabel: recipient.taskLabel,
       } : {}),
       // The daemon delegates the stage and the agent reports back, which is
       // exactly what these two kinds mean elsewhere on the board.

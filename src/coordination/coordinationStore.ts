@@ -10,6 +10,7 @@ import { lastTraceEventOfKind, questionStandings, queryTrace, recordTraceEvent }
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
+import { coordinationPeers, repositoryKey, type CoordinationPeer } from './repositoryCell.js';
 
 export type CoordinationKind =
   | 'advice-request'
@@ -30,6 +31,8 @@ export interface CoordinationEvent {
   seq: number;
   timestamp: number;
   repository: string;
+  /** Canonical repository-cell identity shared by sibling Git worktrees. */
+  repoKey?: string;
   taskId: string;
   /**
    * Human-readable name for `taskId`, which is an issue UUID. Publishers stamp
@@ -37,6 +40,11 @@ export interface CoordinationEvent {
    * can say which issue an event belongs to instead of printing a UUID.
    */
   taskLabel?: string;
+  /** Explicit routing envelope. Absent on legacy events. */
+  sourceTaskId?: string;
+  sourceTaskLabel?: string;
+  targetTaskId?: string;
+  targetTaskLabel?: string;
   actor: string;
   actorName?: string;
   /** Role the actor was running as (worker/reviewer/orchestrator/review-agent/daemon/human). Absent on legacy events. */
@@ -64,8 +72,13 @@ interface CoordinationState {
 export interface PublishCoordinationEvent {
   id?: string;
   repository: string;
+  repoKey?: string;
   taskId: string;
   taskLabel?: string;
+  sourceTaskId?: string;
+  sourceTaskLabel?: string;
+  targetTaskId?: string;
+  targetTaskLabel?: string;
   actor: string;
   actorName?: string;
   actorRole?: string;
@@ -125,6 +138,25 @@ export function redactCoordinationMetadata(
 }
 
 function fingerprint(input: PublishCoordinationEvent): string {
+  return createHash('sha256').update(JSON.stringify({
+    repository: input.repository,
+    repoKey: input.repoKey,
+    taskId: input.taskId,
+    sourceTaskId: input.sourceTaskId,
+    targetTaskId: input.targetTaskId,
+    actor: input.actor,
+    recipient: input.recipient,
+    kind: input.kind,
+    status: input.status,
+    correlationId: input.correlationId,
+    summary: cleanText(input.summary, MAX_SUMMARY),
+    detail: cleanText(input.detail ?? '', MAX_DETAIL),
+    metadata: redactCoordinationMetadata(input.metadata),
+  })).digest('hex');
+}
+
+/** Pre-AGT-4131 digest, retained only to deduplicate same-task replays. */
+function legacyFingerprint(input: PublishCoordinationEvent): string {
   return createHash('sha256').update(JSON.stringify({
     repository: input.repository,
     taskId: input.taskId,
@@ -188,18 +220,37 @@ export class CoordinationStore {
   }
 
   async publish(input: PublishCoordinationEvent): Promise<CoordinationEvent> {
+    const sourceTaskId = input.sourceTaskId ?? input.taskId;
+    const sourceTaskLabel = input.sourceTaskLabel ?? input.taskLabel;
+    const targetTaskId = input.targetTaskId ?? sourceTaskId;
+    const targetTaskLabel = input.targetTaskLabel ?? sourceTaskLabel;
     const normalized: PublishCoordinationEvent = {
       ...input,
       repository: resolve(input.repository),
+      repoKey: repositoryKey(input.repoKey, input.repository),
+      taskId: sourceTaskId,
+      taskLabel: sourceTaskLabel,
+      sourceTaskId,
+      sourceTaskLabel,
+      targetTaskId,
+      targetTaskLabel,
       correlationId: input.correlationId ?? randomUUID(),
       summary: cleanText(input.summary, MAX_SUMMARY),
       detail: input.detail ? cleanText(input.detail, MAX_DETAIL) : undefined,
       metadata: redactCoordinationMetadata(input.metadata),
     };
     const digest = fingerprint(normalized);
+    const legacyDigest = normalized.sourceTaskId === normalized.targetTaskId
+      ? legacyFingerprint(normalized)
+      : undefined;
     let isNew = true;
     const event = await this.mutate((state) => {
-      const existing = state.events.find((candidate) => candidate.fingerprint === digest);
+      const existing = state.events.find((candidate) => candidate.fingerprint === digest
+        || (legacyDigest !== undefined
+          && candidate.repoKey === undefined
+          && candidate.sourceTaskId === undefined
+          && candidate.targetTaskId === undefined
+          && candidate.fingerprint === legacyDigest));
       if (existing) {
         isNew = false;
         return existing;
@@ -209,10 +260,15 @@ export class CoordinationStore {
         seq: state.nextSeq++,
         timestamp: input.timestamp ?? Date.now(),
         repository: normalized.repository,
+        repoKey: normalized.repoKey,
         taskId: normalized.taskId,
         // Outside the fingerprint with the roles below: a label is a display
         // name for the same task, so it must not split content dedup.
         taskLabel: normalized.taskLabel,
+        sourceTaskId: normalized.sourceTaskId,
+        sourceTaskLabel: normalized.sourceTaskLabel,
+        targetTaskId: normalized.targetTaskId,
+        targetTaskLabel: normalized.targetTaskLabel,
         actor: normalized.actor,
         actorName: normalized.actorName,
         // Deliberately outside the fingerprint: roles describe the identity,
@@ -253,12 +309,17 @@ export class CoordinationStore {
     return event;
   }
 
-  list(options: { repository?: string; taskId?: string; afterSeq?: number; limit?: number } = {}): CoordinationEvent[] {
+  list(options: { repository?: string; repoKey?: string; taskId?: string; involvedTaskId?: string; afterSeq?: number; limit?: number } = {}): CoordinationEvent[] {
     const state = this.load();
     const repository = options.repository ? resolve(options.repository) : undefined;
     return state.events
-      .filter((event) => !repository || event.repository === repository)
+      .filter((event) => options.repoKey
+        ? (event.repoKey ? event.repoKey === options.repoKey : !repository || event.repository === repository)
+        : !repository || event.repository === repository)
       .filter((event) => !options.taskId || event.taskId === options.taskId)
+      .filter((event) => !options.involvedTaskId
+        || (event.sourceTaskId ?? event.taskId) === options.involvedTaskId
+        || (event.targetTaskId ?? event.taskId) === options.involvedTaskId)
       .filter((event) => event.seq > (options.afterSeq ?? 0))
       .slice(-(Math.min(Math.max(options.limit ?? 200, 0), 500)));
   }
@@ -417,18 +478,37 @@ export class CoordinationStore {
     return undefined;
   }
 
-  async consume(consumer: string, options: { repository?: string; taskId?: string; includeAll?: boolean }): Promise<CoordinationEvent[]> {
+  async consume(consumer: string, options: { repository?: string; repoKey?: string; taskId?: string; includeAll?: boolean }): Promise<CoordinationEvent[]> {
     return this.mutate((state) => {
-      const seen = new Set(state.consumed[consumer] ?? []);
+      const scope = JSON.stringify([options.repoKey ?? options.repository ?? '', options.taskId ?? '', consumer]);
+      // Read the legacy address-only bucket as well so an upgrade cannot
+      // redeliver mail that this agent consumed before scoped identities existed.
+      const seen = new Set([...(state.consumed[scope] ?? []), ...(state.consumed[consumer] ?? [])]);
       const repository = options.repository ? resolve(options.repository) : undefined;
       const events = state.events.filter((event) =>
-        (!repository || event.repository === repository)
-        && (!options.taskId || event.taskId === options.taskId)
+        (options.repoKey
+          ? (event.repoKey ? event.repoKey === options.repoKey : !repository || event.repository === repository)
+          : !repository || event.repository === repository)
+        && (!options.taskId || (event.targetTaskId ?? event.taskId) === options.taskId)
         && (options.includeAll || !event.recipient || event.recipient === consumer)
         && !seen.has(event.id));
-      state.consumed[consumer] = [...seen, ...events.map((event) => event.id)].slice(-MAX_EVENTS);
+      state.consumed[scope] = [...seen, ...events.map((event) => event.id)].slice(-MAX_EVENTS);
       return events;
     });
+  }
+
+  /** Recent routable participants in one canonical repository cell. */
+  peers(options: {
+    repoKey: string;
+    repository?: string;
+    roles?: string[];
+    taskIds?: string[];
+    exclude?: { address: string; taskId: string };
+    limit?: number;
+    now?: number;
+    activeWindowMs?: number;
+  }): CoordinationPeer[] {
+    return coordinationPeers(this.load().events, options);
   }
 
   snapshot(repository?: string): { events: CoordinationEvent[]; pending: CoordinationEvent[] } {

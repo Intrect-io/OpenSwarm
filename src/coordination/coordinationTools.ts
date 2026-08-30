@@ -6,6 +6,7 @@ import type { ToolDefinition } from '../adapters/tools.js';
 import { getCoordinationStore, type CoordinationKind } from './coordinationStore.js';
 import { postHumanQuestion } from './humanQuestions.js';
 import { callSignAddress } from './agentNames.js';
+import { repositoryKey } from './repositoryCell.js';
 
 /**
  * Bounds on `coordination_wait`.
@@ -47,6 +48,7 @@ export function resolveWaitMs(requested: unknown, loopDeadlineAt?: number, now: 
 
 export interface CoordinationToolContext {
   repository: string;
+  repoKey?: string;
   taskId: string;
   /** Issue identifier for `taskId`, carried onto everything this agent publishes. */
   taskLabel?: string;
@@ -85,6 +87,21 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'coordination_peers',
+      description: 'Discover recently active agents in this repository cell, including agents working on other tasks or sibling worktrees. Results are bounded and may be filtered to dependency/conflict task IDs or roles.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_ids: { type: 'array', items: { type: 'string' }, description: 'Optional dependency/conflict cohort task IDs.' },
+          roles: { type: 'array', items: { type: 'string' }, description: 'Optional roles such as worker or reviewer.' },
+          limit: { type: 'number', description: 'Maximum peers (default 20, max 50).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'coordination_publish',
       description: 'Publish an advice request/response or delegation request/result to another OpenSwarm agent. Address it by call sign (the name the agent goes by on the board). Use a correlation_id to continue an existing exchange.',
       parameters: {
@@ -92,6 +109,8 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           kind: { type: 'string', enum: ['advice-request', 'advice-response', 'delegation-request', 'delegation-result'] },
           recipient: { type: 'string', description: "The target agent's call sign or address" },
+          target_task_id: { type: 'string', description: 'Task the recipient is working on. Required for a new cross-task exchange; replies can infer it from correlation_id.' },
+          target_task_label: { type: 'string', description: 'Optional issue identifier for target_task_id.' },
           correlation_id: { type: 'string' },
           summary: { type: 'string' },
           detail: { type: 'string' },
@@ -158,7 +177,8 @@ coordination board, without you asking first. If you check your inbox
 (\`coordination_read\`) and find a message that is not a reply to something
 you initiated, acknowledge it with \`coordination_publish\` before you finish
 your work — do not just silently fold it into your next edit with no
-response.
+response. Use \`coordination_peers\` to find an active worker or reviewer on a
+dependency/conflict task before starting a cross-task exchange.
 `;
 
 export async function executeCoordinationTool(
@@ -167,8 +187,9 @@ export async function executeCoordinationTool(
   context: CoordinationToolContext,
 ): Promise<{ content: string; isError: boolean }> {
   const store = getCoordinationStore();
+  const repoKey = repositoryKey(context.repoKey, context.repository);
   if (name === 'coordination_read') {
-    const events = await store.consume(context.actor, { repository: context.repository, taskId: context.taskId });
+    const events = await store.consume(context.actor, { repository: context.repository, repoKey, taskId: context.taskId });
     return { content: JSON.stringify(events), isError: false };
   }
   if (name === 'coordination_wait') {
@@ -189,6 +210,7 @@ export async function executeCoordinationTool(
     const taskId = requestedTask === '*' ? undefined : requestedTask ?? context.taskId;
     const events = queryTrace({
       repository: context.repository,
+      repoKey,
       taskId,
       taskLabel: typeof args.task_label === 'string' ? args.task_label : undefined,
       correlationId: typeof args.correlation_id === 'string' ? args.correlation_id : undefined,
@@ -197,24 +219,88 @@ export async function executeCoordinationTool(
     });
     return { content: JSON.stringify(events), isError: false };
   }
+  if (name === 'coordination_peers') {
+    const taskIds = Array.isArray(args.task_ids)
+      ? args.task_ids.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : undefined;
+    const roles = Array.isArray(args.roles)
+      ? args.roles.filter((value): value is string => typeof value === 'string' && value.length > 0)
+      : undefined;
+    const peers = store.peers({
+      repoKey,
+      repository: context.repository,
+      taskIds,
+      roles,
+      exclude: { address: context.actor, taskId: context.taskId },
+      limit: typeof args.limit === 'number' ? args.limit : undefined,
+    });
+    return { content: JSON.stringify(peers), isError: false };
+  }
   if (name === 'coordination_publish') {
     const kinds = new Set<CoordinationKind>(['advice-request', 'advice-response', 'delegation-request', 'delegation-result']);
     const kind = typeof args.kind === 'string' ? args.kind as CoordinationKind : undefined;
     if (!kind || !kinds.has(kind) || typeof args.recipient !== 'string' || typeof args.summary !== 'string') {
       return { content: 'Invalid coordination_publish arguments', isError: true };
     }
+    const recipient = callSignAddress(args.recipient);
+    const correlationId = typeof args.correlation_id === 'string' ? args.correlation_id : undefined;
+    let targetTaskId = typeof args.target_task_id === 'string' && args.target_task_id.trim()
+      ? args.target_task_id.trim()
+      : undefined;
+    let targetTaskLabel = typeof args.target_task_label === 'string' && args.target_task_label.trim()
+      ? args.target_task_label.trim()
+      : undefined;
+
+    // Replies already name an exchange; recover the other participant's task
+    // from that envelope so callers do not have to repeat routing metadata.
+    const isReply = kind.endsWith('response') || kind.endsWith('result');
+    if (!targetTaskId && correlationId && isReply) {
+      const exchange = store.exchange(correlationId);
+      for (let i = exchange.length - 1; i >= 0 && !targetTaskId; i -= 1) {
+        const prior = exchange[i];
+        if (prior.actor === recipient) {
+          targetTaskId = prior.sourceTaskId ?? prior.taskId;
+          targetTaskLabel = prior.sourceTaskLabel ?? prior.taskLabel;
+        } else if (prior.recipient === recipient) {
+          targetTaskId = prior.targetTaskId ?? prior.taskId;
+          targetTaskLabel = prior.targetTaskLabel ?? prior.taskLabel;
+        }
+      }
+    }
+    targetTaskId ??= context.taskId;
+    targetTaskLabel ??= targetTaskId === context.taskId ? context.taskLabel : undefined;
+
+    let targetPeer: ReturnType<typeof store.peers>[number] | undefined;
+    if (targetTaskId !== context.taskId) {
+      targetPeer = store.peers({ repoKey, repository: context.repository, taskIds: [targetTaskId], limit: 50 })
+        .find((peer) => peer.address === recipient);
+      if (!targetPeer) {
+        return {
+          content: `Cross-task recipient ${args.recipient} is not an active peer on task ${targetTaskId} in this repository cell`,
+          isError: true,
+        };
+      }
+      targetTaskLabel ??= targetPeer.taskLabel;
+    }
+
     const event = await store.publish({
       repository: context.repository,
+      repoKey,
       taskId: context.taskId,
       taskLabel: context.taskLabel,
+      sourceTaskId: context.taskId,
+      sourceTaskLabel: context.taskLabel,
+      targetTaskId,
+      targetTaskLabel,
       actor: context.actor,
       actorName: context.actorName,
       actorRole: context.actorRole,
-      recipient: callSignAddress(args.recipient),
-      recipientName: args.recipient,
+      recipient,
+      recipientName: targetPeer?.name ?? args.recipient,
+      recipientRole: targetPeer?.role,
       kind,
       status: kind.endsWith('request') ? 'open' : 'completed',
-      correlationId: typeof args.correlation_id === 'string' ? args.correlation_id : undefined,
+      correlationId,
       summary: args.summary,
       detail: typeof args.detail === 'string' ? args.detail : undefined,
     });
@@ -280,11 +366,15 @@ export async function executeCoordinationTool(
 const COORDINATION_WAIT_POLL_MS = 2_000;
 
 export async function waitForInbox(
-  store: { consume: (actor: string, options: { repository: string; taskId: string }) => Promise<unknown[]> },
+  store: { consume: (actor: string, options: { repository: string; repoKey?: string; taskId: string }) => Promise<unknown[]> },
   context: CoordinationToolContext,
   timeoutMs: number,
 ): Promise<unknown[]> {
-  const drain = () => store.consume(context.actor, { repository: context.repository, taskId: context.taskId });
+  const drain = () => store.consume(context.actor, {
+    repository: context.repository,
+    repoKey: repositoryKey(context.repoKey, context.repository),
+    taskId: context.taskId,
+  });
   if (timeoutMs <= 0) return drain();
 
   const { getEventHub } = await import('../core/eventHub.js');

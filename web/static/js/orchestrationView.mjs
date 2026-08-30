@@ -8,8 +8,8 @@
 // (≤2000 events) and idempotent redraw avoids incremental-DOM drift.
 
 import {
-  ACTIVE_WINDOW_MS, buildOrchestrationModel, dominantKind, filterGraphNodes, KIND_COLORS,
-  RAIL_ROLES, taskLanesOf,
+  ACTIVE_WINDOW_MS, buildOrchestrationModel, collisionAddressesOf, dominantKind, filterGraphNodes, KIND_COLORS,
+  nodeIdForEvent, RAIL_ROLES, taskLanesOf,
 } from './orchestrationModel.mjs';
 import { layoutTiers } from './tierLayout.mjs';
 import {
@@ -381,7 +381,10 @@ export function renderDetail(doc, model, events, selected) {
     holder.innerHTML = '<div class="empty">Select a node</div>';
     return;
   }
-  const involved = events.filter((event) => event.actor === node.id || event.recipient === node.id);
+  const collisions = new Set(model.collidingAddresses ?? []);
+  const involved = events.filter((event) =>
+    nodeIdForEvent(event, 'actor', collisions) === node.id
+    || nodeIdForEvent(event, 'recipient', collisions) === node.id);
   const pending = involved.filter((event) => PENDING.has(event.status));
   holder.innerHTML = `
     <div class="name">${escapeHtml(node.name)}</div>
@@ -451,9 +454,12 @@ function dialogueLine(event, max = 140) {
  * speech (instruction snapshots) stay off the surface entirely.
  */
 export function renderFeed(doc, events, selected, focusedEventId, onFocus) {
+  const collisions = collisionAddressesOf(events);
   const feed = doc.getElementById('feed');
   const shown = (selected
-    ? events.filter((event) => event.actor === selected || event.recipient === selected)
+    ? events.filter((event) =>
+      nodeIdForEvent(event, 'actor', collisions) === selected
+      || nodeIdForEvent(event, 'recipient', collisions) === selected)
     : events
   ).filter(isUtterance).slice(-80).reverse();
   if (shown.length === 0) {
@@ -657,7 +663,10 @@ export function startOrchestrationView(doc, { fetchImpl, eventSourceImpl, pollMs
     renderGraph(doc, model, layout, selected, (id) => {
       selected = selected === id ? null : id;
       redraw();
-    }, focused ? { actor: focused.actor, recipient: focused.recipient ?? null } : null);
+    }, focused ? {
+      actor: nodeIdForEvent(focused, 'actor', new Set(model.collidingAddresses)),
+      recipient: nodeIdForEvent(focused, 'recipient', new Set(model.collidingAddresses)) ?? null,
+    } : null);
     renderDetail(doc, model, events, selected);
     renderFeed(doc, events, selected, focusedEventId, (id) => {
       focusedEventId = focusedEventId === id ? null : id;

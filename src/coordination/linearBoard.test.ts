@@ -25,6 +25,17 @@ describe('TrackerCoordinationBoard', () => {
     expect(parseCoordinationComment(body)).toEqual(named);
   });
 
+  it('preserves repository-cell and cross-task routing fields', () => {
+    const routed = {
+      ...event,
+      repoKey: 'git:shared', taskLabel: 'AGT-A',
+      sourceTaskId: 'task-a', sourceTaskLabel: 'AGT-A',
+      targetTaskId: 'task-b', targetTaskLabel: 'AGT-B',
+      actorRole: 'worker', recipientRole: 'reviewer',
+    };
+    expect(parseCoordinationComment(formatCoordinationComment(routed))).toEqual(routed);
+  });
+
   it('publishes idempotently and reads only board messages', async () => {
     const addComment = vi.fn(async () => {});
     const source = {

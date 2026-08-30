@@ -671,6 +671,8 @@ export class PairPipeline extends EventEmitter {
     return {
       repository: configured.repository ?? context.task.linearProject?.name ?? repoNameFromPath(projectPath),
       projectPath,
+      coordinationRepository: configured.coordinationRepository,
+      repoKey: configured.repoKey,
       worktree: configured.worktree ?? worktreeNameFromPath(projectPath),
       branch: configured.branch,
       issueIdentifier: configured.issueIdentifier ?? context.task.issueIdentifier ?? context.task.issueId,

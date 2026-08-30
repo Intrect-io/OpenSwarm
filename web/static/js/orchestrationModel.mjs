@@ -32,6 +32,42 @@ function roleOf(id, explicit) {
   return SYSTEM_ROLES.get(id) ?? 'agent';
 }
 
+export function sourceTaskIdOf(event) {
+  return event.sourceTaskId ?? event.taskId;
+}
+
+export function targetTaskIdOf(event) {
+  return event.targetTaskId ?? event.taskId;
+}
+
+/** Addresses reused on different tasks need task-scoped graph identities. */
+export function collisionAddressesOf(events) {
+  const tasks = new Map();
+  const rail = new Set();
+  const note = (address, taskId, role) => {
+    if (!address || !taskId) return;
+    if (RAIL_ROLES.has(roleOf(address, role))) rail.add(address);
+    const seen = tasks.get(address) ?? new Set();
+    seen.add(taskId);
+    tasks.set(address, seen);
+  };
+  for (const event of events) {
+    note(event.actor, sourceTaskIdOf(event), event.actorRole);
+    // A legacy recipient inherited the sender's task only as a seating hint;
+    // treating that hint as identity would split the old graph. An explicit
+    // target envelope is a real task claim and may expose a collision.
+    if (event.targetTaskId) note(event.recipient, targetTaskIdOf(event), event.recipientRole);
+  }
+  return new Set([...tasks].filter(([address, taskIds]) => !rail.has(address) && taskIds.size > 1).map(([address]) => address));
+}
+
+export function nodeIdForEvent(event, side, collisions) {
+  const actor = side === 'actor';
+  const address = actor ? event.actor : event.recipient;
+  const taskId = actor ? sourceTaskIdOf(event) : targetTaskIdOf(event);
+  return address && taskId && collisions.has(address) ? `${taskId}::${address}` : address;
+}
+
 /**
  * Build { nodes, edges, stats } from board events.
  *
@@ -47,13 +83,14 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
   const nodes = new Map();
   const edges = new Map();
   const latestByCorrelation = new Map();
+  const collisions = collisionAddressesOf(events);
 
   // Acting inside a task is a claim; being addressed inside one is only a
   // hint. Both are recorded, and `actedTaskId` always wins, so cross-task
   // advice cannot drag a working agent out of its own lane — while an agent
   // that has never acted anywhere still gets seated with the people talking
   // to it instead of stranded in a "no task" lane of one.
-  const touch = (id, name, role, timestamp, taskId, taskLabel, acting) => {
+  const touch = (id, address, name, role, timestamp, taskId, taskLabel, acting) => {
     if (!id) return null;
     const claim = (node) => {
       if (!taskId) return;
@@ -77,8 +114,9 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
     if (!existing) {
       const created = {
         id,
-        name: name || id,
-        role: roleOf(id, role),
+        address,
+        name: name || address,
+        role: roleOf(address, role),
         eventCount: 0,
         // `firstSeen` is written once and never updated. The layout places
         // nodes oldest-first so a newcomer can only take a free slot, which is
@@ -100,7 +138,7 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
     }
     // A named sighting upgrades an address-only one; an explicit role upgrades
     // the generic fallback (legacy events carry no role).
-    if (name && existing.name === existing.id) existing.name = name;
+    if (name && existing.name === existing.address) existing.name = name;
     if (role && existing.role === 'agent') existing.role = role;
     if (timestamp > existing.lastSeen) existing.lastSeen = timestamp;
     if (timestamp < existing.firstSeen) existing.firstSeen = timestamp;
@@ -110,12 +148,14 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
 
   for (const event of events) {
     const from = touch(
-      event.actor, event.actorName, event.actorRole, event.timestamp,
-      event.taskId, event.taskLabel, true);
+      nodeIdForEvent(event, 'actor', collisions), event.actor,
+      event.actorName, event.actorRole, event.timestamp,
+      sourceTaskIdOf(event), event.sourceTaskLabel ?? event.taskLabel, true);
     if (from) from.eventCount += 1;
     const to = touch(
-      event.recipient, event.recipientName, event.recipientRole, event.timestamp,
-      event.taskId, event.taskLabel, false);
+      nodeIdForEvent(event, 'recipient', collisions), event.recipient,
+      event.recipientName, event.recipientRole, event.timestamp,
+      targetTaskIdOf(event), event.targetTaskLabel ?? event.taskLabel, false);
 
     if (from && to && from.id !== to.id) {
       const key = `${from.id}→${to.id}`;
@@ -132,7 +172,8 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
 
   const pending = [...latestByCorrelation.values()].filter((event) => PENDING_STATUSES.has(event.status));
   for (const event of pending) {
-    const owner = nodes.get(event.recipient) ?? nodes.get(event.actor);
+    const owner = nodes.get(nodeIdForEvent(event, 'recipient', collisions))
+      ?? nodes.get(nodeIdForEvent(event, 'actor', collisions));
     if (owner) owner.pendingCount += 1;
   }
 
@@ -141,6 +182,7 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
   // aggregation.
   const nodeList = [...nodes.values()].map((node) => ({
     id: node.id,
+    address: node.address,
     name: node.name,
     role: node.role,
     eventCount: node.eventCount,
@@ -160,11 +202,12 @@ export function buildOrchestrationModel(events, { now = Date.now(), activeWindow
   // to unblock.
   const awaiting = new Set(
     pending.filter((event) => event.kind === 'human-question')
-      .map((event) => event.actor).filter(Boolean));
+      .map((event) => nodeIdForEvent(event, 'actor', collisions)).filter(Boolean));
 
   return {
     nodes: nodeList,
     edges: [...edges.values()],
+    collidingAddresses: [...collisions],
     stats: {
       totalEvents: events.length,
       agentsByRole: byRole,
@@ -197,7 +240,7 @@ export function filterGraphNodes(nodes, { showIdle = false, taskId = null, role 
     if (taskId && !isRail && node.taskId !== taskId) return false;
     if (role && node.role !== role) return false;
     if (needle && !isRail) {
-      const haystack = `${node.name} ${node.id} ${node.taskLabel ?? ''}`.toLowerCase();
+      const haystack = `${node.name} ${node.address ?? node.id} ${node.id} ${node.taskLabel ?? ''}`.toLowerCase();
       if (!haystack.includes(needle)) return false;
     }
     return true;

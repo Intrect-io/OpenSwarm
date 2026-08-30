@@ -9,7 +9,7 @@ import { decompositionChildId, reviewerFollowupId } from './decompositionIds.js'
 import { pathIsUnderAny, taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
-import type { PipelineResult, PipelineRunMetadata } from '../agents/pairPipeline.js';
+import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, PipelineStage, JobProfile } from '../core/types.js';
 import { createPipelineFromConfig, buildTaskPrefix } from '../agents/pairPipeline.js';
 import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
@@ -38,6 +38,7 @@ import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
 import { plannedNewChildren, refuseForChildCap } from './decompositionLimits.js';
 import { rateLimitedPipelineResult } from './pipelinePreflight.js';
 import { safeConsole } from '../support/safeLog.js';
+import { pipelineMetadata } from './pipelineMetadata.js';
 export { rateLimitedPipelineResult } from './pipelinePreflight.js';
 
 export const PIPELINE_EFFECT_TIMEOUT_MS = 30_000;
@@ -82,34 +83,6 @@ import {
 // Notifier (outbound notifications — Discord/Slack/Telegram/webhook, INT-1576)
 
 let notifier: Notifier | null = null;
-
-interface PipelineMetadataTask {
-  id: string;
-  title: string;
-  issueId?: string;
-  issueIdentifier?: string;
-  linearProject?: { id?: string; name?: string };
-}
-
-function pipelineMetadata(task: PipelineMetadataTask, projectPath: string, worktreeInfo?: WorktreeInfo | null): PipelineRunMetadata {
-  const activePath = worktreeInfo?.worktreePath ?? projectPath;
-  return {
-    repository: task.linearProject?.name ?? repoNameFromPath(projectPath),
-    projectPath: activePath,
-    worktree: worktreeInfo?.issueId ?? worktreeNameFromPath(activePath),
-    branch: worktreeInfo?.branchName,
-    issueIdentifier: task.issueIdentifier ?? task.issueId,
-    title: task.title,
-  };
-}
-
-function repoNameFromPath(projectPath: string): string {
-  return projectPath.replace(/\/+$/, '').replace(/\/worktree\/[^/]+$/, '').split('/').pop() || projectPath;
-}
-
-function worktreeNameFromPath(projectPath: string): string | undefined {
-  return projectPath.match(/\/worktree\/([^/]+)\/?$/)?.[1];
-}
 
 export function setNotifier(n: Notifier): void {
   notifier = n;
@@ -947,8 +920,10 @@ export async function executePipeline(
   try {
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
     const { prepareRunCoordination, normalizeAdapterRouting } = await import('../coordination/runCoordination.js');
+    const runMetadata = pipelineMetadata(task, projectPath, worktreeInfo);
     const { instructionCapsule, roleMcpTools } = await prepareRunCoordination({
-      repository: projectPath, taskId: taskEventKey(task), taskLabel: task.issueIdentifier,
+      repository: runMetadata.coordinationRepository ?? projectPath, repoKey: runMetadata.repoKey,
+      taskId: taskEventKey(task), taskLabel: task.issueIdentifier,
       executionPath: actualPath,
       relevantFiles: task.fileScope ?? draftResult?.relevantFiles ?? [],
       policies: { worker: ctx.mcpPolicies?.worker, reviewer: ctx.mcpPolicies?.reviewer },
@@ -970,7 +945,7 @@ export async function executePipeline(
         registrySnapshot: draftResult.registrySnapshot,
       } : undefined,
       ctx.maxReflections,
-      pipelineMetadata(task, actualPath, worktreeInfo),
+      runMetadata,
       ctx.verify, worktreeInfo?.resumedTaskFiles, ctx.securityAudit,
       instructionCapsule,
       roleMcpTools,

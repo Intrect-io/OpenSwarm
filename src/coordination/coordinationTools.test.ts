@@ -57,6 +57,71 @@ describe('coordination tools', () => {
     expect(messages[0]).toMatchObject({ actorName: alice.name, recipientName: bob.name, kind: 'advice-request' });
   });
 
+  it('discovers bounded peers and delivers a cross-task reply exactly once after restart', async () => {
+    const mod = await tools();
+    const { getCoordinationStore, resetCoordinationStoreForTests } = await import('./coordinationStore.js');
+    const alice = assignCallSign({ repository: 'git:shared', executionId: 'task-a', role: 'worker' });
+    const bob = assignCallSign({ repository: 'git:shared', executionId: 'task-b', role: 'reviewer' });
+    const base = { repository: '/repo', repoKey: 'git:shared' };
+
+    // A lifecycle event is presence: peers are discovered from actual board
+    // activity, not from an unbounded global registry.
+    await getCoordinationStore().publish({
+      ...base, taskId: 'task-b', taskLabel: 'AGT-B', actor: bob.address,
+      actorName: bob.name, actorRole: 'reviewer', recipient: 'openswarm-daemon',
+      recipientRole: 'daemon', kind: 'delegation-request',
+      status: 'running', correlationId: 'presence-b', summary: 'reviewing task B',
+    });
+    await getCoordinationStore().publish({
+      ...base, taskId: 'task-a', taskLabel: 'AGT-A', actor: alice.address,
+      actorName: alice.name, actorRole: 'worker', recipient: 'openswarm-daemon',
+      recipientRole: 'daemon', kind: 'delegation-request', status: 'running',
+      correlationId: 'presence-a', summary: 'working on task A', timestamp: Date.now() + 1,
+    });
+    const peers = JSON.parse((await mod.executeCoordinationTool('coordination_peers', {
+      task_ids: ['task-b'], roles: ['reviewer'], limit: 1,
+    }, { ...base, taskId: 'task-a', actor: alice.address, actorRole: 'worker' })).content);
+    expect(peers).toEqual([expect.objectContaining({ address: bob.address, taskId: 'task-b', role: 'reviewer' })]);
+
+    const request = await mod.executeCoordinationTool('coordination_publish', {
+      kind: 'advice-request', recipient: bob.address, target_task_id: 'task-b', summary: 'Can these edits collide?',
+    }, { ...base, taskId: 'task-a', taskLabel: 'AGT-A', actor: alice.address, actorName: alice.name, actorRole: 'worker' });
+    expect(request.isError).toBe(false);
+    const [mail] = JSON.parse((await mod.executeCoordinationTool('coordination_read', {}, {
+      ...base, taskId: 'task-b', actor: bob.address, actorName: bob.name, actorRole: 'reviewer',
+    })).content);
+    expect(mail).toMatchObject({ sourceTaskId: 'task-a', targetTaskId: 'task-b' });
+
+    const reply = await mod.executeCoordinationTool('coordination_publish', {
+      kind: 'advice-response', recipient: alice.address, correlation_id: mail.correlationId, summary: 'Yes; keep file ownership separate.',
+    }, { ...base, taskId: 'task-b', taskLabel: 'AGT-B', actor: bob.address, actorName: bob.name, actorRole: 'reviewer' });
+    expect(reply.isError).toBe(false);
+
+    resetCoordinationStoreForTests();
+    const first = JSON.parse((await mod.executeCoordinationTool('coordination_read', {}, {
+      ...base, taskId: 'task-a', actor: alice.address, actorRole: 'worker',
+    })).content);
+    const second = JSON.parse((await mod.executeCoordinationTool('coordination_read', {}, {
+      ...base, taskId: 'task-a', actor: alice.address, actorRole: 'worker',
+    })).content);
+    expect(first.map((event: { summary: string }) => event.summary)).toContain('Yes; keep file ownership separate.');
+    expect(second).toEqual([]);
+  });
+
+  it('denies cross-task publishing to an unknown or different-cell peer', async () => {
+    const mod = await tools();
+    const { getCoordinationStore } = await import('./coordinationStore.js');
+    await getCoordinationStore().publish({
+      repository: '/other', repoKey: 'git:other', taskId: 'task-b', actor: 'remote-reviewer',
+      actorRole: 'reviewer', kind: 'delegation-request', status: 'running', summary: 'elsewhere',
+    });
+    const denied = await mod.executeCoordinationTool('coordination_publish', {
+      kind: 'advice-request', recipient: 'remote-reviewer', target_task_id: 'task-b', summary: 'hello',
+    }, { repository: '/repo', repoKey: 'git:shared', taskId: 'task-a', actor: 'local-worker', actorRole: 'worker' });
+    expect(denied).toMatchObject({ isError: true });
+    expect(denied.content).toContain('not an active peer');
+  });
+
   it('pages the operator instead of answering its own question', async () => {
     const mod = await tools();
     const paged: string[] = [];

@@ -54,6 +54,7 @@ export interface RunCoordinationSetup {
  */
 export async function prepareRunCoordination(input: {
   repository: string;
+  repoKey?: string;
   taskId: string;
   /** Issue identifier for `taskId`, so board events name the issue, not a UUID. */
   taskLabel?: string;
@@ -69,8 +70,13 @@ export async function prepareRunCoordination(input: {
   );
   await publishCoordination({
     repository: input.repository,
+    repoKey: input.repoKey,
     taskId: input.taskId,
     taskLabel: input.taskLabel,
+    sourceTaskId: input.taskId,
+    sourceTaskLabel: input.taskLabel,
+    targetTaskId: input.taskId,
+    targetTaskLabel: input.taskLabel,
     ...daemonActor,
     kind: 'instruction-snapshot',
     status: instructionCapsule.errors.length > 0 ? 'failed' : 'completed',
@@ -85,8 +91,13 @@ export async function prepareRunCoordination(input: {
   for (const denied of [...worker.denied, ...reviewer.denied]) {
     await publishCoordination({
       repository: input.repository,
+      repoKey: input.repoKey,
       taskId: input.taskId,
       taskLabel: input.taskLabel,
+      sourceTaskId: input.taskId,
+      sourceTaskLabel: input.taskLabel,
+      targetTaskId: input.taskId,
+      targetTaskLabel: input.taskLabel,
       ...daemonActor,
       kind: 'mcp-audit',
       status: 'completed',
