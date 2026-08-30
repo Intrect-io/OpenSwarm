@@ -2909,6 +2909,14 @@ export class AutonomousRunner {
   getActiveIntegrationIssues(projectPath: string): string[] | undefined {
     return this.durableRuns.activeWorkerIdentifiers(projectPath);
   }
+  withIntegrationReservation(
+    projectPath: string,
+    branch: string,
+    issueIdentifier: string,
+    operation: () => Promise<void>,
+  ): Promise<boolean> {
+    return this.durableRuns.withIntegrationReservation(projectPath, branch, issueIdentifier, operation);
+  }
 
   /**
    * Return a conflicted sibling PR to its owning issue with replay evidence.

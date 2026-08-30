@@ -174,7 +174,7 @@ import { ConflictResolver } from './conflictResolver.js';
 import { DEFAULT_SECURITY_AUDIT_CONFIG } from '../verify/securityAudit.js';
 import {
   IntegrationCoordinator,
-  type IntegrationConflictEvidence,
+  type IntegrationCoordinatorConfig,
   type IntegrationSiblingResult,
 } from './integrationCoordinator.js';
 import { getOwnedPRsForRepo } from './prOwnership.js';
@@ -195,11 +195,8 @@ export interface PRProcessorConfig {
   /** Inherited autonomous CodeQL policy for every PR remediation pipeline. */
   securityAudit?: SecurityAuditConfig;
   /** Runtime-only wiring to the durable runner; not a user configuration surface. */
-  postMergeIntegration?: {
-    getActiveLeaseBranches(projectPath: string): string[] | undefined | Promise<string[] | undefined>;
-    getActiveLeaseIdentifiers(projectPath: string): string[] | undefined | Promise<string[] | undefined>;
-    routeConflict(evidence: IntegrationConflictEvidence): Promise<void>;
-  };
+  postMergeIntegration?: Pick<IntegrationCoordinatorConfig,
+    'getActiveLeaseBranches' | 'getActiveLeaseIdentifiers' | 'withIntegrationReservation' | 'routeConflict'>;
 }
 
 type PRStateEntry = {
@@ -277,6 +274,7 @@ export class PRProcessor {
       this.integrationCoordinator = new IntegrationCoordinator({
         getActiveLeaseBranches: config.postMergeIntegration.getActiveLeaseBranches,
         getActiveLeaseIdentifiers: config.postMergeIntegration.getActiveLeaseIdentifiers,
+        withIntegrationReservation: config.postMergeIntegration.withIntegrationReservation,
         routeConflict: config.postMergeIntegration.routeConflict,
       });
     }

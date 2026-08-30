@@ -319,6 +319,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     postMergeIntegration = {
       getActiveLeaseBranches: (projectPath) => runnerInstance.getActiveIntegrationBranches(projectPath),
       getActiveLeaseIdentifiers: (projectPath) => runnerInstance.getActiveIntegrationIssues(projectPath),
+      withIntegrationReservation: (projectPath, branch, issueIdentifier, operation) =>
+        runnerInstance.withIntegrationReservation(projectPath, branch, issueIdentifier, operation),
       routeConflict: (evidence) => runnerInstance.routeIntegrationConflict(evidence),
     };
     if (config.autonomous.coordinationBoardIssueId) {

@@ -807,6 +807,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
       postMergeIntegration: {
         getActiveLeaseBranches: () => [],
         getActiveLeaseIdentifiers: () => [],
+        withIntegrationReservation: async (_projectPath, _branch, _issueIdentifier, operation) => { await operation(); return true; },
         routeConflict: vi.fn(),
       },
     });
@@ -852,6 +853,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
       postMergeIntegration: {
         getActiveLeaseBranches: () => [],
         getActiveLeaseIdentifiers: () => [],
+        withIntegrationReservation: async (_projectPath, _branch, _issueIdentifier, operation) => { await operation(); return true; },
         routeConflict: vi.fn(),
       },
     });
@@ -876,6 +878,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
       postMergeIntegration: {
         getActiveLeaseBranches: () => [],
         getActiveLeaseIdentifiers: () => [],
+        withIntegrationReservation: async (_projectPath, _branch, _issueIdentifier, operation) => { await operation(); return true; },
         routeConflict: vi.fn(),
       },
     });

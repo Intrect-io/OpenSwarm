@@ -12,10 +12,17 @@ import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import {
+  acquireIntegrationReservationInDb,
+  integrationReservationBlocksClaim,
+  releaseIntegrationReservationInDb,
+  renewIntegrationReservationInDb,
+} from './runLedgerIntegrationReservation.js';
+import {
   cacheTrackerObservation as persistTrackerObservation,
   readLedgerMetrics,
   type TrackerTerminalState,
 } from './runLedgerTrackerCache.js';
+import { toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
 import type {
   AttemptResultInput,
   ClaimOptions,
@@ -24,6 +31,8 @@ import type {
   EffectRecord,
   EffectStatus,
   ImportRunInput,
+  IntegrationReservationClaim,
+  IntegrationReservationOptions,
   LedgerMetrics,
   RegisterRunInput,
   RunClaim,
@@ -44,6 +53,8 @@ export type {
   EffectRecord,
   EffectStatus,
   ImportRunInput,
+  IntegrationReservationClaim,
+  IntegrationReservationOptions,
   LedgerMetrics,
   RegisterRunInput,
   RunClaim,
@@ -54,56 +65,6 @@ export type {
   TrackerStateObservation,
   TransitionPatch,
 } from './runLedgerTypes.js';
-
-interface RunRow {
-  issue_id: string;
-  source: string;
-  identifier: string | null;
-  title: string | null;
-  project_path: string;
-  state: string;
-  state_version: number;
-  attempt_no: number;
-  owner_instance_id: string | null;
-  lease_token: string | null;
-  lease_epoch: number;
-  lease_expires_at: number | null;
-  retry_at: number | null;
-  branch_name: string | null;
-  worktree_path: string | null;
-  pr_url: string | null;
-  head_sha: string | null;
-  last_error_code: string | null;
-  last_error_message: string | null;
-  discovered_at: number;
-  started_at: number | null;
-  updated_at: number;
-  completed_at: number | null;
-  tracker_state: string | null;
-  tracker_state_type: string | null;
-  tracker_checked_at: number | null;
-  metadata_json: string | null;
-}
-
-interface EffectRow {
-  id: number;
-  issue_id: string;
-  attempt_no: number;
-  kind: string;
-  dedupe_key: string;
-  payload_json: string;
-  status: EffectStatus;
-  attempts: number;
-  available_at: number;
-  owner_instance_id: string | null;
-  delivery_token: string | null;
-  lease_epoch: number;
-  lease_expires_at: number | null;
-  last_error: string | null;
-  created_at: number;
-  updated_at: number;
-  applied_at: number | null;
-}
 
 function parseJson(value: string | null): unknown {
   if (value == null) return undefined;
@@ -263,14 +224,14 @@ export class RunLedger {
 
   getRun(issueId: string): RunRecord | null {
     const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
-    return row ? this.toRun(row) : null;
+    return row ? toRunRecord(row) : null;
   }
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     const rows = states && states.length > 0
       ? this.db.prepare(`SELECT * FROM automation_runs WHERE state IN (${placeholders(states)}) ORDER BY updated_at`).all(...states) as RunRow[]
       : this.db.prepare('SELECT * FROM automation_runs ORDER BY updated_at').all() as RunRow[];
-    return rows.map((row) => this.toRun(row));
+    return rows.map(toRunRecord);
   }
 
   cacheTrackerObservation(
@@ -458,6 +419,16 @@ export class RunLedger {
       if (!CLAIMABLE_STATES.includes(row.state)) return null;
       if (row.state === 'RETRY_AT' && row.retry_at != null && row.retry_at > now) return null;
 
+      // A post-merge rebase is about to force-update this run's PR branch.
+      // Read and claim share one IMMEDIATE transaction, so a worker cannot
+      // appear between the integration coordinator's final check and push.
+      if (integrationReservationBlocksClaim(this.db, {
+        projectPath: row.project_path,
+        branchName: row.branch_name ?? undefined,
+        issueId: row.issue_id,
+        issueIdentifier: row.identifier ?? undefined,
+      }, now)) return null;
+
       const circuit = this.db.prepare(`
         SELECT reason, open_until FROM automation_repo_circuits WHERE project_path = ?
       `).get(row.project_path) as { reason: string; open_until: number } | undefined;
@@ -591,6 +562,34 @@ export class RunLedger {
     });
 
     return claim.immediate();
+  }
+
+  acquireIntegrationReservation(
+    projectPath: string,
+    branchName: string,
+    issueIdentifier: string,
+    options: IntegrationReservationOptions,
+  ): IntegrationReservationClaim | null {
+    if (!projectPath.trim()) throw new Error('projectPath is required');
+    if (!branchName.trim()) throw new Error('branchName is required');
+    if (!issueIdentifier.trim()) throw new Error('issueIdentifier is required');
+    assertPositiveDuration(options.leaseMs, 'leaseMs');
+    return acquireIntegrationReservationInDb(
+      this.db, projectPath, branchName, issueIdentifier, options,
+    );
+  }
+
+  renewIntegrationReservation(
+    reservation: IntegrationReservationClaim,
+    leaseMs: number,
+    now = Date.now(),
+  ): IntegrationReservationClaim | null {
+    assertPositiveDuration(leaseMs, 'leaseMs');
+    return renewIntegrationReservationInDb(this.db, reservation, leaseMs, now);
+  }
+
+  releaseIntegrationReservation(reservation: IntegrationReservationClaim): boolean {
+    return releaseIntegrationReservationInDb(this.db, reservation);
   }
 
   renewLease(claim: RunClaim, leaseMs: number, now = Date.now()): RunClaim | null {
@@ -950,7 +949,7 @@ export class RunLedger {
       ) {
         throw new Error(`Outbox dedupe key collision: ${effect.dedupeKey}`);
       }
-      return this.toEffect(row);
+      return toEffectRecord(row);
     });
     return enqueue.immediate();
   }
@@ -1136,7 +1135,7 @@ export class RunLedger {
 
   getEffectByDedupeKey(dedupeKey: string): EffectRecord | null {
     const row = this.db.prepare('SELECT * FROM automation_effects WHERE dedupe_key = ?').get(dedupeKey) as EffectRow | undefined;
-    return row ? this.toEffect(row) : null;
+    return row ? toEffectRecord(row) : null;
   }
 
   claimNextEffect(ownerInstanceId: string, leaseMs: number, now = Date.now()): EffectClaim | null {
@@ -1169,7 +1168,7 @@ export class RunLedger {
       `).run(ownerInstanceId, token, epoch, leaseExpiresAt, now, row.id, row.lease_epoch, now, now);
       if (updated.changes !== 1) return null;
       const claimed = this.db.prepare('SELECT * FROM automation_effects WHERE id = ?').get(row.id) as EffectRow;
-      return this.toEffect(claimed) as EffectClaim;
+      return toEffectRecord(claimed) as EffectClaim;
     });
     return claim.immediate();
   }
@@ -1442,58 +1441,4 @@ export class RunLedger {
     `).run(issueId, attemptNo, kind, from, to, stringifyJson(data), now);
   }
 
-  private toRun(row: RunRow): RunRecord {
-    assertRunState(row.state);
-    return {
-      issueId: row.issue_id,
-      source: row.source,
-      identifier: row.identifier ?? undefined,
-      title: row.title ?? undefined,
-      projectPath: row.project_path,
-      state: row.state,
-      stateVersion: row.state_version,
-      attemptNo: row.attempt_no,
-      ownerInstanceId: row.owner_instance_id ?? undefined,
-      leaseToken: row.lease_token ?? undefined,
-      leaseEpoch: row.lease_epoch,
-      leaseExpiresAt: row.lease_expires_at ?? undefined,
-      retryAt: row.retry_at ?? undefined,
-      branchName: row.branch_name ?? undefined,
-      worktreePath: row.worktree_path ?? undefined,
-      prUrl: row.pr_url ?? undefined,
-      headSha: row.head_sha ?? undefined,
-      lastErrorCode: row.last_error_code ?? undefined,
-      lastErrorMessage: row.last_error_message ?? undefined,
-      discoveredAt: row.discovered_at,
-      startedAt: row.started_at ?? undefined,
-      updatedAt: row.updated_at,
-      completedAt: row.completed_at ?? undefined,
-      trackerState: row.tracker_state ?? undefined,
-      trackerStateType: row.tracker_state_type ?? undefined,
-      trackerCheckedAt: row.tracker_checked_at ?? undefined,
-      metadata: parseJson(row.metadata_json),
-    };
-  }
-
-  private toEffect(row: EffectRow): EffectRecord {
-    return {
-      id: row.id,
-      issueId: row.issue_id,
-      attemptNo: row.attempt_no,
-      kind: row.kind,
-      dedupeKey: row.dedupe_key,
-      payload: parseJson(row.payload_json),
-      status: row.status,
-      attempts: row.attempts,
-      availableAt: row.available_at,
-      ownerInstanceId: row.owner_instance_id ?? undefined,
-      deliveryToken: row.delivery_token ?? undefined,
-      leaseEpoch: row.lease_epoch,
-      leaseExpiresAt: row.lease_expires_at ?? undefined,
-      lastError: row.last_error ?? undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      appliedAt: row.applied_at ?? undefined,
-    };
-  }
 }

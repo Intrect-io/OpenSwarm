@@ -1,4 +1,4 @@
-export const AUTOMATION_SCHEMA_VERSION = 3;
+export const AUTOMATION_SCHEMA_VERSION = 4;
 
 export const RUN_STATES = [
   'DISCOVERED',
@@ -118,6 +118,26 @@ export interface RunClaim {
   leaseEpoch: number;
   attemptNo: number;
   leaseExpiresAt: number;
+}
+
+/**
+ * Short-lived fence held while post-merge integration is about to rewrite a
+ * sibling PR branch. Worker admission checks the same SQLite table in its
+ * claim transaction, so exactly one side can win the branch/issue race.
+ */
+export interface IntegrationReservationClaim {
+  projectPath: string;
+  branchName: string;
+  issueIdentifier: string;
+  ownerInstanceId: string;
+  reservationToken: string;
+  leaseExpiresAt: number;
+}
+
+export interface IntegrationReservationOptions {
+  ownerInstanceId: string;
+  leaseMs: number;
+  now?: number;
 }
 
 export interface ClaimOptions {

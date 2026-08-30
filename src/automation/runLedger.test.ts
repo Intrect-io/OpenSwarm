@@ -302,6 +302,31 @@ describe('RunLedger claim and fencing races', () => {
     second.close();
   });
 
+  it('makes a sibling integration reservation mutually exclusive with worker claim', () => {
+    const dbPath = createDbPath();
+    const integration = new RunLedger(dbPath);
+    const worker = new RunLedger(dbPath);
+    register(integration, 'AGT-4078', '/same-repo');
+
+    const reservation = integration.acquireIntegrationReservation(
+      '/same-repo',
+      'swarm/AGT-4078',
+      'AGT-4078',
+      { ownerInstanceId: 'integration', leaseMs: 1_000, now: 2_000 },
+    );
+    expect(reservation).not.toBeNull();
+    expect(worker.claimRun('AGT-4078', {
+      ownerInstanceId: 'worker', leaseMs: 1_000, now: 2_001,
+    })).toBeNull();
+
+    expect(integration.releaseIntegrationReservation(reservation!)).toBe(true);
+    expect(worker.claimRun('AGT-4078', {
+      ownerInstanceId: 'worker', leaseMs: 1_000, now: 2_002,
+    })).not.toBeNull();
+    integration.close();
+    worker.close();
+  });
+
   it('admits disjoint same-repository scopes and rejects an overlapping scope atomically', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'SCOPE-A', '/same-repo', ['src/a.ts']);
@@ -841,7 +866,7 @@ describe('RunLedger schema migration', () => {
     const runColumns = (verify.pragma('table_info(automation_runs)') as Array<{ name: string }>).map((row) => row.name);
     expect(attemptColumns).toEqual(expect.arrayContaining(['result_status', 'success', 'cost_usd']));
     expect(runColumns).toEqual(expect.arrayContaining(['tracker_state', 'tracker_state_type', 'tracker_checked_at']));
-    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('3');
+    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('4');
     verify.close();
   });
 });

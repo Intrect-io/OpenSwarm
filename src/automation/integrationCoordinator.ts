@@ -77,6 +77,16 @@ export interface IntegrationCoordinatorConfig {
   /** Undefined means the durable lease authority is unavailable; fail closed. */
   getActiveLeaseBranches(projectPath: string): string[] | undefined | Promise<string[] | undefined>;
   getActiveLeaseIdentifiers(projectPath: string): string[] | undefined | Promise<string[] | undefined>;
+  /**
+   * Runs the remote branch mutation only while worker admission is fenced by
+   * the same durable authority. False means another worker/integration won.
+   */
+  withIntegrationReservation(
+    projectPath: string,
+    branch: string,
+    issueIdentifier: string,
+    operation: () => Promise<void>,
+  ): Promise<boolean>;
   routeConflict(evidence: IntegrationConflictEvidence): Promise<void>;
   listOpenPRs?: (repo: string, limit: number) => Promise<PRInfo[]>;
   readMergeability?: (repo: string, prNumber: number) => Promise<PRMergeability>;
@@ -238,11 +248,23 @@ export class IntegrationCoordinator {
       if (pushBlocker) {
         return this.result(sibling, owned, 'skipped-active', { error: pushBlocker });
       }
-      await this.git(
-        worktreePath,
-        'push', 'origin', `HEAD:refs/heads/${sibling.branch}`,
-        `--force-with-lease=refs/heads/${sibling.branch}:${expectedHeadOid}`,
+      const pushed = await this.config.withIntegrationReservation(
+        projectPath,
+        sibling.branch,
+        owned.issueIdentifier,
+        async () => {
+          await this.git(
+            worktreePath,
+            'push', 'origin', `HEAD:refs/heads/${sibling.branch}`,
+            `--force-with-lease=refs/heads/${sibling.branch}:${expectedHeadOid}`,
+          );
+        },
       );
+      if (!pushed) {
+        return this.result(sibling, owned, 'skipped-active', {
+          error: 'branch or owning issue acquired a durable worker/integration lease',
+        });
+      }
       return await this.withMergeability(sibling, owned, 'rebased');
     } finally {
       if (worktreeAdded) {
