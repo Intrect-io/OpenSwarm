@@ -75,6 +75,7 @@ interface RawIssueNode {
   id: string;
   identifier: string;
   title: string;
+  url?: string;
   description?: string | null;
   priority: number;
   createdAt?: string;
@@ -92,6 +93,7 @@ const ISSUES_QUERY = `
         id
         identifier
         title
+        url
         description
         priority
         createdAt
@@ -111,6 +113,7 @@ const STUCK_ISSUES_QUERY = `
         id
         identifier
         title
+        url
         description
         priority
         updatedAt
@@ -444,6 +447,7 @@ export async function getInProgressIssues(
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: state?.name ?? 'Unknown',
       priority: issue.priority,
@@ -516,6 +520,7 @@ export async function getNextBacklogIssue(
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
+    url: issue.url,
     description: issue.description ?? undefined,
     state: state?.name ?? 'Unknown',
     priority: issue.priority,
@@ -688,6 +693,7 @@ export async function getMyIssues(
           id: issue.id,
           identifier: issue.identifier,
           title: issue.title,
+          url: issue.url,
           description: issue.description ?? undefined,
           state,
           priority: issue.priority,
@@ -721,6 +727,7 @@ export async function getMyIssues(
           id: issue.id,
           identifier: issue.identifier,
           title: issue.title,
+          url: issue.url,
           description: issue.description ?? undefined,
           state: issue.state?.name ?? 'Unknown',
           priority: issue.priority,
@@ -865,6 +872,7 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: issueState?.name ?? 'Unknown',
       stateType: issueState?.type ?? undefined,
@@ -1382,6 +1390,7 @@ export async function createIssue(
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
+    url: issue.url,
     description: issue.description ?? undefined,
     state: stateName,
     priority: issue.priority,
@@ -1456,6 +1465,7 @@ export async function createSubIssue(
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: stateName,
       priority: issue.priority,
@@ -1631,6 +1641,7 @@ _This issue was auto-created by an agent. Please review and adjust priority or d
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
+    url: issue.url,
     description: issue.description ?? undefined,
     state: 'Backlog',
     priority: 4,
@@ -1684,6 +1695,7 @@ export async function getStuckIssues(): Promise<{
         id: issue.id,
         identifier: issue.identifier,
         title: issue.title,
+        url: issue.url,
         description: issue.description ?? undefined,
         state: issue.state?.name ?? 'Unknown',
         priority: issue.priority,
@@ -1727,6 +1739,7 @@ export async function getStuckIssues(): Promise<{
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: issue.state?.name ?? 'Unknown',
       priority: issue.priority,

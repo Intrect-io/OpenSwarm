@@ -58,6 +58,8 @@ export type LinearIssueInfo = {
   id: string;
   identifier: string;
   title: string;
+  /** Canonical Linear card URL, fetched with the bulk issue projection. */
+  url?: string;
   description?: string;
   state: string;
   /** Linear workflow-state type, populated by explicit single-issue lookups. */

@@ -56,14 +56,14 @@ describe('runnerState persistence and helpers', () => {
 
   it('joins a quiet pinned repository to fetched tasks by Linear project id', () => {
     const projects = mod.buildProjectsInfo([
-      task('cgf-1', 'CGF-Portal'),
+      task('cgf-1', 'CGF-Portal', 1, { issueIdentifier: 'AX-1', issueUrl: 'https://linear.app/intrect/issue/AX-1/card' }),
     ] as any, [], [], new Map(), new Set(['/work/cgf-portal']));
 
     expect(projects[0]).toMatchObject({
       path: '',
       name: 'CGF-Portal',
       linearProjectId: 'CGF-Portal-id',
-      pending: [expect.objectContaining({ id: 'cgf-1' })],
+      pending: [expect.objectContaining({ id: 'cgf-1-issue', issueIdentifier: 'AX-1', issueUrl: 'https://linear.app/intrect/issue/AX-1/card' })],
     });
     expect(mod.projectInfoForRepository(projects, {
       path: '/work/cgf-portal',
@@ -92,8 +92,8 @@ describe('runnerState persistence and helpers', () => {
     expect(projects[0]).toMatchObject({
       name: 'CGF-Portal',
       linearProjectId: 'CGF-Portal-id',
-      running: [expect.objectContaining({ id: 'cgf-2' })],
-      queued: [expect.objectContaining({ id: 'cgf-3' })],
+      running: [expect.objectContaining({ id: 'cgf-2-issue' })],
+      queued: [expect.objectContaining({ id: 'cgf-3-issue' })],
     });
   });
 
@@ -267,13 +267,13 @@ describe('runnerState persistence and helpers', () => {
     const info = mod.buildProjectsInfo(fetched as any, running as any, queued as any, new Map([['Beta', '/repo/beta']]), new Set(['/repo/app']));
     const alpha = info.find(p => p.name === 'Alpha')!;
     expect(alpha.enabled).toBe(true);
-    expect(alpha.running).toEqual([{ id: 'r', title: 'Task r', priority: 9 }]);
-    expect(alpha.pending.map(p => p.id)).toEqual(['a']);
+    expect(alpha.running).toEqual([{ id: 'r-issue', title: 'Task r', priority: 9 }]);
+    expect(alpha.pending.map(p => p.id)).toEqual(['a-issue']);
     const gamma = info.find(p => p.name === 'Gamma')!;
-    expect(gamma.queued[0].id).toBe('q');
+    expect(gamma.queued[0].id).toBe('q-issue');
     expect(gamma.enabled).toBe(false);
     const beta = info.find(p => p.name === 'Beta')!;
-    expect(beta.pending[0]).toMatchObject({ id: 'b', issueIdentifier: 'BET-1', linearState: 'Todo' });
+    expect(beta.pending[0]).toMatchObject({ id: 'b-issue', issueIdentifier: 'BET-1', linearState: 'Todo' });
   });
 
   it('formats retry times in friendly units', () => {

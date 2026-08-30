@@ -112,9 +112,31 @@ export function threadFor(threads, event) {
  */
 export const NON_CONVERSATION_KINDS = new Set(['instruction-snapshot']);
 
+/**
+ * Control-plane notices written by OpenSwarm itself, rather than words from an
+ * agent or the operator. Keep this list explicit: an unfamiliar event should
+ * remain visible as chat until its publisher declares it to be system state.
+ */
+export const SYSTEM_EVENT_KINDS = new Set([
+  'adapter-route',
+  'review-run',
+  'mcp-audit',
+  'council-update',
+]);
+
 /** True when the event is something an agent or the operator actually said. */
 export function isUtterance(event) {
   return !NON_CONVERSATION_KINDS.has(event.kind);
+}
+
+/** True when an event is visible control-plane state, not addressable speech. */
+export function isSystemEvent(event) {
+  return isUtterance(event) && SYSTEM_EVENT_KINDS.has(event.kind);
+}
+
+/** True when the operator can reasonably treat the event as someone's words. */
+export function isAgentMessage(event) {
+  return isUtterance(event) && !isSystemEvent(event);
 }
 
 /**
@@ -136,6 +158,7 @@ export function chatLineOf(event) {
     taskLabel: taskLabelOf(event),
     status: event.status,
     kind: event.kind,
+    channel: isSystemEvent(event) ? 'system' : 'chat',
     isOperator: event.actorRole === 'human',
   };
 }
@@ -146,6 +169,22 @@ export function buildChatLines(events) {
     .filter(isUtterance)
     .sort((a, b) => a.seq - b.seq)
     .map(chatLineOf);
+}
+
+/**
+ * Chat-room threads, oldest topic first. `correlationId` is the publisher's
+ * durable exchange identity, so it groups retries/results without guessing
+ * from similar prose. Events without one remain honest singleton threads.
+ */
+export function buildChatThreads(events) {
+  return buildThreads(events.filter(isUtterance))
+    .map((thread) => ({
+      ...thread,
+      firstSeq: thread.events[0]?.seq ?? 0,
+      channel: thread.events.every(isSystemEvent) ? 'system' : 'chat',
+      lines: thread.events.map(chatLineOf),
+    }))
+    .sort((a, b) => a.firstSeq - b.firstSeq);
 }
 
 /**
@@ -187,7 +226,7 @@ export function openQuestionFor(events, actorAddress, scope = {}) {
 }
 
 export function latestAddressable(events) {
-  const spoken = events.filter(isUtterance).sort((a, b) => a.seq - b.seq);
+  const spoken = events.filter(isAgentMessage).sort((a, b) => a.seq - b.seq);
   for (let i = spoken.length - 1; i >= 0; i -= 1) {
     if (spoken[i].actorRole !== 'human') return spoken[i];
   }

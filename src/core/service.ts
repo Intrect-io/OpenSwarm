@@ -235,6 +235,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
           id: issue.id,
           identifier: issue.identifier,
           title: issue.title,
+          url: issue.url,
           description: issue.description,
           priority: issue.priority,
           state: issue.state,

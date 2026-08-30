@@ -606,8 +606,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(info[0].name).toBe('WAVE');
       expect(info[0].path).toBe('/x/a');
       expect(info[0].enabled).toBe(true);
-      expect(info[0].running.map((t) => t.id)).toEqual(['running-1']);
-      expect(info[0].pending.map((t) => t.id)).toEqual(['pending-1']);
+      // Dashboard task ids use the same event key as coordination/SSE. A
+      // TaskItem may have a local id distinct from its Linear issue id.
+      expect(info[0].running.map((t) => t.id)).toEqual(['ISSUE-RUNNING']);
+      expect(info[0].pending.map((t) => t.id)).toEqual(['ISSUE-PENDING']);
     });
   });
 

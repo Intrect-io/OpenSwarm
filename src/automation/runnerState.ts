@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
-import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 
@@ -687,9 +687,9 @@ export interface ProjectInfo {
   /** Stable tracker identity used to join a pinned repo without name guessing. */
   linearProjectId?: string;
   enabled: boolean;
-  running: { id: string; title: string; priority: number }[];
-  queued: { id: string; title: string; priority: number }[];
-  pending: { id: string; title: string; priority: number; issueIdentifier?: string; linearState?: string }[];
+  running: { id: string; title: string; priority: number; issueIdentifier?: string; issueUrl?: string }[];
+  queued: { id: string; title: string; priority: number; issueIdentifier?: string; issueUrl?: string }[];
+  pending: { id: string; title: string; priority: number; issueIdentifier?: string; issueUrl?: string; linearState?: string }[];
 }
 
 type RunningEntry = { task: TaskItem; projectPath: string };
@@ -753,11 +753,24 @@ export function buildProjectsInfo(
       ...(proj.id ? { linearProjectId: proj.id } : {}),
       enabled: Boolean(projectPath) && isPathEnabled(projectPath, enabledProjects),
       running: running.filter(r => belongsToProject(r.task))
-        .map(r => ({ id: r.task.id, title: r.task.title, priority: r.task.priority })),
+        .map(r => ({
+          id: taskEventKey(r.task), title: r.task.title, priority: r.task.priority,
+          ...(r.task.issueIdentifier ? { issueIdentifier: r.task.issueIdentifier } : {}),
+          ...(r.task.issueUrl ? { issueUrl: r.task.issueUrl } : {}),
+        })),
       queued: queued.filter(q => belongsToProject(q.task))
-        .map(q => ({ id: q.task.id, title: q.task.title, priority: q.task.priority })),
+        .map(q => ({
+          id: taskEventKey(q.task), title: q.task.title, priority: q.task.priority,
+          ...(q.task.issueIdentifier ? { issueIdentifier: q.task.issueIdentifier } : {}),
+          ...(q.task.issueUrl ? { issueUrl: q.task.issueUrl } : {}),
+        })),
       pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id))
-        .map(t => ({ id: t.id, title: t.title, priority: t.priority, issueIdentifier: t.issueIdentifier || t.issueId, linearState: t.linearState })),
+        .map(t => ({
+          id: taskEventKey(t), title: t.title, priority: t.priority,
+          ...(t.issueIdentifier || t.issueId ? { issueIdentifier: t.issueIdentifier || t.issueId } : {}),
+          ...(t.issueUrl ? { issueUrl: t.issueUrl } : {}),
+          ...(t.linearState ? { linearState: t.linearState } : {}),
+        })),
     };
   });
 }
