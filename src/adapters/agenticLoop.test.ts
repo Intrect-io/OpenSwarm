@@ -207,6 +207,25 @@ describe('runAgenticLoop nudge budgets (INT-1925)', () => {
   });
 });
 
+describe('runAgenticLoop warehouse discovery (AGT-4128)', () => {
+  it('points every tool-loop worker at the warehouse index before it asks for local-only data', async () => {
+    let firstMessages: ChatMessage[] = [];
+    await runAgenticLoop({
+      prompt: 'run the repository tests',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      maxTurns: 1,
+      callApi: async (messages) => {
+        firstMessages = messages;
+        return finalResp('done');
+      },
+    });
+    expect(firstMessages[0].content).toContain('/warehouse/INDEX.md');
+    expect(firstMessages[0].content).toContain('never print secret values');
+  });
+});
+
 describe('runAgenticLoop timeout contract', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 

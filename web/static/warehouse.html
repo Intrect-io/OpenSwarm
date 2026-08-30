@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenSwarm Warehouse</title>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/warehouse.css" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <div>
+      <h1>Warehouse</h1>
+      <p>에이전트가 읽는 로컬 전용 자산 창고</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="browser" aria-label="Warehouse files">
+      <div class="toolbar">
+        <button id="up" type="button">← 상위</button>
+        <nav id="breadcrumbs" class="breadcrumbs" aria-label="Current path"></nav>
+        <button id="refresh" type="button">새로고침</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>이름</th><th>종류</th><th>크기</th><th>수정 시각</th><th></th></tr></thead>
+          <tbody id="entries"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside class="upload">
+      <section class="access" aria-labelledby="access-title">
+        <h2 id="access-title">원격 접근</h2>
+        <p>로컬이 아닌 브라우저에서는 배포 시 설정한 웹 토큰이 필요합니다.</p>
+        <label for="web-token">OpenSwarm 웹 토큰</label>
+        <div class="token-row">
+          <input id="web-token" type="password" autocomplete="off" spellcheck="false" />
+          <button id="save-token" type="button">적용</button>
+        </div>
+        <button id="clear-token" class="text-button" type="button">이 탭의 토큰 지우기</button>
+      </section>
+
+      <h2>파일 올리기</h2>
+      <p>현재 폴더: <code id="upload-directory">/</code></p>
+      <label class="dropzone" for="file">
+        <span id="file-label">파일을 선택하세요</span>
+        <input id="file" type="file" />
+      </label>
+      <label class="overwrite"><input id="overwrite" type="checkbox" /> 같은 이름이면 덮어쓰기</label>
+      <button id="upload" class="primary" type="button" disabled>업로드</button>
+      <p id="status" class="status" role="status"></p>
+      <div class="rules">
+        <strong>안전 경계</strong>
+        <span>에이전트 경로 <code>/warehouse</code>는 읽기 전용입니다.</span>
+        <span>삭제 기능은 제공하지 않습니다.</span>
+        <span>기존 파일은 체크박스를 켜야 덮어씁니다.</span>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="/static/js/warehouse.mjs"></script>
+</body>
+</html>

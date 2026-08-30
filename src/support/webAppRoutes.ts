@@ -40,6 +40,11 @@ export async function tryHandleAppRoutes(
   readBody: (req: IncomingMessage) => Promise<string>,
 ): Promise<boolean> {
   {
+    const { tryHandleWarehouseRoutes } = await import('./warehouseRoutes.js');
+    if (await tryHandleWarehouseRoutes(req, res, url, requestUrl)) return true;
+  }
+
+  {
     const { tryHandleCoordinationRoutes } = await import('../coordination/coordinationRoutes.js');
     if (await tryHandleCoordinationRoutes(req, res, url, requestUrl, readBody)) return true;
   }
@@ -66,6 +71,18 @@ export async function tryHandleAppRoutes(
   if (url === '/chat') {
     const { readChatShell } = await import('./staticAssets.js');
     const shell = await readChatShell();
+    if (!shell) {
+      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      res.end(shell);
+    }
+    return true;
+  }
+
+  if (url === '/warehouse') {
+    const { readWarehouseShell } = await import('./staticAssets.js');
+    const shell = await readWarehouseShell();
     if (!shell) {
       writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
     } else {

@@ -239,7 +239,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     `# Working directory\n` +
     `Your project root is: ${cwd}\n` +
     `All file tools operate within this root. Use paths relative to it (e.g. "src/foo.ts" or ".") ` +
-    `or absolute paths under this root. Do NOT use "/" or a bare repo name — those are outside the project and will be rejected.\n\n`;
+    `or absolute paths under this root. Do NOT use "/" or a bare repo name — those are outside the project and will be rejected.\n` +
+    `Local-only data, credentials, and cross-repository artifacts may be available read-only under /warehouse. ` +
+    `Read /warehouse/INDEX.md before asking the operator for missing material, and never print secret values.\n\n`;
   messages.push({ role: 'user', content: cwdNote + prompt });
 
   // In search-replace / whole-file mode the model edits via response-text blocks
