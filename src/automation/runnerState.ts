@@ -684,6 +684,8 @@ export function getPipelineHistory(limit = 50): PipelineHistoryEntry[] {
 export interface ProjectInfo {
   path: string;
   name: string;
+  /** Stable tracker identity used to join a pinned repo without name guessing. */
+  linearProjectId?: string;
   enabled: boolean;
   running: { id: string; title: string; priority: number }[];
   queued: { id: string; title: string; priority: number }[];
@@ -700,30 +702,38 @@ export function buildProjectsInfo(
   pathCache: Map<string, string>,
   enabledProjects: Set<string>,
 ): ProjectInfo[] {
-  const projectMap = new Map<string, { name: string; path: string | null; tasks: TaskItem[] }>();
+  const projectMap = new Map<string, { id?: string; name: string; path: string | null; tasks: TaskItem[] }>();
 
   for (const task of fetchedTasks) {
     const projName = task.linearProject?.name || '(unknown)';
-    if (!projectMap.has(projName)) {
-      projectMap.set(projName, { name: projName, path: pathCache.get(projName) ?? null, tasks: [] });
+    const projectKey = task.linearProject?.id || projName;
+    if (!projectMap.has(projectKey)) {
+      projectMap.set(projectKey, {
+        id: task.linearProject?.id,
+        name: projName,
+        path: pathCache.get(projName) ?? null,
+        tasks: [],
+      });
     }
-    projectMap.get(projName)!.tasks.push(task);
+    projectMap.get(projectKey)!.tasks.push(task);
   }
 
   for (const r of running) {
     const projName = r.task.linearProject?.name || '(unknown)';
-    if (!projectMap.has(projName)) {
-      projectMap.set(projName, { name: projName, path: r.projectPath, tasks: [] });
-    } else if (!projectMap.get(projName)!.path) {
-      projectMap.get(projName)!.path = r.projectPath;
+    const projectKey = r.task.linearProject?.id || projName;
+    if (!projectMap.has(projectKey)) {
+      projectMap.set(projectKey, { id: r.task.linearProject?.id, name: projName, path: r.projectPath, tasks: [] });
+    } else if (!projectMap.get(projectKey)!.path) {
+      projectMap.get(projectKey)!.path = r.projectPath;
     }
   }
   for (const q of queued) {
     const projName = q.task.linearProject?.name || '(unknown)';
-    if (!projectMap.has(projName)) {
-      projectMap.set(projName, { name: projName, path: q.projectPath, tasks: [] });
-    } else if (!projectMap.get(projName)!.path) {
-      projectMap.get(projName)!.path = q.projectPath;
+    const projectKey = q.task.linearProject?.id || projName;
+    if (!projectMap.has(projectKey)) {
+      projectMap.set(projectKey, { id: q.task.linearProject?.id, name: projName, path: q.projectPath, tasks: [] });
+    } else if (!projectMap.get(projectKey)!.path) {
+      projectMap.get(projectKey)!.path = q.projectPath;
     }
   }
 
@@ -734,18 +744,46 @@ export function buildProjectsInfo(
 
   return Array.from(projectMap.values()).map(proj => {
     const projectPath = proj.path ?? '';
+    const belongsToProject = (task: TaskItem): boolean => proj.id
+      ? task.linearProject?.id === proj.id
+      : (task.linearProject?.name || '(unknown)') === proj.name;
     return {
       path: projectPath,
       name: proj.name,
+      ...(proj.id ? { linearProjectId: proj.id } : {}),
       enabled: Boolean(projectPath) && isPathEnabled(projectPath, enabledProjects),
-      running: running.filter(r => r.task.linearProject?.name === proj.name)
+      running: running.filter(r => belongsToProject(r.task))
         .map(r => ({ id: r.task.id, title: r.task.title, priority: r.task.priority })),
-      queued: queued.filter(q => q.task.linearProject?.name === proj.name)
+      queued: queued.filter(q => belongsToProject(q.task))
         .map(q => ({ id: q.task.id, title: q.task.title, priority: q.task.priority })),
       pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id))
         .map(t => ({ id: t.id, title: t.title, priority: t.priority, issueIdentifier: t.issueIdentifier || t.issueId, linearState: t.linearState })),
     };
   });
+}
+
+/**
+ * Join one configured repository to the runner's tracker projection.
+ *
+ * The repository metadata project id is authoritative. Name matching remains
+ * a compatibility fallback for repositories created before openswarm.json,
+ * and is case-insensitive because directory casing is not a tracker identity.
+ */
+export function projectInfoForRepository(
+  projects: readonly ProjectInfo[],
+  input: { path: string; directoryName: string; linearProjectId?: string; linearProjectName?: string },
+): ProjectInfo | undefined {
+  if (input.linearProjectId) {
+    // A configured tracker id is authoritative. Do not fall back to a stale
+    // path/name association and accidentally display another project's tasks.
+    return projects.find((project) => project.linearProjectId === input.linearProjectId);
+  }
+
+  const byPath = projects.find((project) => project.path === input.path);
+  if (byPath) return byPath;
+
+  const expectedName = (input.linearProjectName ?? input.directoryName).toLowerCase();
+  return projects.find((project) => project.name.toLowerCase() === expectedName);
 }
 
 // Exponential Backoff for Failed Task Retries

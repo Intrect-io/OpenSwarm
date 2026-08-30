@@ -35,6 +35,8 @@ import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
+import { projectInfoForRepository } from '../automation/runnerState.js';
+import { loadRepoMetadata } from './repoMetadata.js';
 import type { SubTask } from './planner.js';
 import { buildHealthPayload } from './healthEndpoint.js';
 import { HttpError, readBody } from './httpBody.js';
@@ -555,10 +557,6 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/projects' && req.method === 'GET') {
         const enabledPaths = new Set(runnerRef?.getEnabledProjects() ?? []);
         const taskInfo = runnerRef?.getProjectsInfo() ?? [];
-        const byPath = new Map(taskInfo.filter(p => p.path).map(p => [p.path, p]));
-        // Fallback: match by project name (for tasks not yet executed → path not cached)
-        const byName = new Map(taskInfo.map(p => [p.name, p]));
-
         // Start with pinned projects
         const allPaths = new Set(pinnedProjects);
         // Auto-include enabled projects and projects with active tasks
@@ -571,7 +569,17 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
         const result = await Promise.all(Array.from(allPaths).map(async p => {
           const dirName = p.split('/').pop() ?? p;
-          const info = byPath.get(p) ?? byName.get(dirName);
+          // A fetched project has no path until a task runs. Join it to the
+          // pinned repository by the stable project id from openswarm.json so
+          // a quiet repo does not show zero issues merely because its Linear
+          // name differs in case from the directory (CGF-Portal/cgf-portal).
+          const metadata = await loadRepoMetadata(p).catch(() => null);
+          const info = projectInfoForRepository(taskInfo, {
+            path: p,
+            directoryName: dirName,
+            linearProjectId: metadata?.linear?.projectId,
+            linearProjectName: metadata?.linear?.projectName,
+          });
           const gitInfo = await getProjectGitInfo(p);
           return {
             path: p,
