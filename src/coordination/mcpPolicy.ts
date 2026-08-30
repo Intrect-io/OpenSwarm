@@ -3,8 +3,12 @@
 // ============================================
 
 import type { ToolDefinition } from '../adapters/tools.js';
+import {
+  describeMcpToolPolicy,
+  type McpAccess,
+} from '../mcp/humanSurfacePolicy.js';
 
-export type McpAccess = 'read' | 'write' | 'destructive';
+export type { McpAccess } from '../mcp/humanSurfacePolicy.js';
 
 export interface RoleMcpPolicy {
   servers: string[];
@@ -13,18 +17,8 @@ export interface RoleMcpPolicy {
   destructiveTools?: string[];
 }
 
-const MUTATION_WORDS = /(^|_)(create|update|save|write|edit|delete|remove|archive|close|merge|approve|submit|reply|resolve|trigger|run|execute|upload|move|share|unshare)(_|$)/i;
-const DESTRUCTIVE_WORDS = /(^|_)(delete|remove|archive|merge|execute|run|trigger|unshare)(_|$)/i;
-
 export function classifyMcpTool(toolName: string): McpAccess {
-  // Everything after the server prefix, not just the next segment: a nested
-  // name like `github__pulls__merge` puts the verb in the last segment, and
-  // reading only `pulls` classified a merge as a harmless read.
-  const segments = toolName.split('__');
-  const raw = segments.length > 1 ? segments.slice(1).join('__') : toolName;
-  if (DESTRUCTIVE_WORDS.test(raw)) return 'destructive';
-  if (MUTATION_WORDS.test(raw)) return 'write';
-  return 'read';
+  return describeMcpToolPolicy(toolName).access;
 }
 
 export function filterMcpToolsForRole(
@@ -40,10 +34,12 @@ export function filterMcpToolsForRole(
   const denied: Array<{ name: string; reason: string }> = [];
   for (const tool of tools) {
     const name = tool.function.name;
-    const [server] = name.split('__');
-    const access = classifyMcpTool(name);
+    const decision = describeMcpToolPolicy(tool);
+    const { server, access } = decision;
     let reason: string | undefined;
-    if (!servers.has(server)) reason = `server ${server} is not allowlisted`;
+    if (decision.surface === 'human' && !decision.humanSurfaceReadAllowed) {
+      reason = 'external human surface is read-only; only read/list/get/search/fetch actions are allowed';
+    } else if (!servers.has(server)) reason = `server ${server} is not allowlisted`;
     else if (allow && !allow.has(name)) reason = 'tool is not on the exact allowlist';
     else if (access === 'write' && !writes.has(name)) reason = 'write capability was not granted';
     else if (access === 'destructive' && !destructive.has(name)) reason = 'destructive capability was not granted';

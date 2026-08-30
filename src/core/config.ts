@@ -433,6 +433,8 @@ const McpServerSchema = z
   .object({
     /** Reference a built-in preset (e.g. `linear`) instead of command/url. (INT-1952) */
     preset: z.string().optional(),
+    /** Explicit trust-domain label; `human` makes unknown actions fail closed. */
+    surface: z.enum(['human', 'devops', 'data', 'sandbox', 'unknown']).optional(),
     command: z.string().optional(),
     args: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),

@@ -248,10 +248,18 @@ telemetry:
 mcp:
   servers:
     github:
+      surface: devops
       command: npx
       args: ["-y", "@modelcontextprotocol/server-github"]
     linear:
+      surface: devops
       preset: linear
     cloudflare:
+      surface: devops
       command: npx
       args: ["-y", "@cloudflare/mcp-server-cloudflare"]
+    # Label opaque aliases explicitly. Human-surface tools remain globally
+    # read-only even when a role lists them in writeTools/destructiveTools.
+    # company-comms:
+    #   surface: human
+    #   url: https://mcp.example.com/comms

@@ -265,7 +265,7 @@ agents:
         mcp: {
           servers: {
             linear: { command: 'npx', args: ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp'] },
-            docs: { url: 'https://example.com/mcp', transport: 'http' },
+            docs: { url: 'https://example.com/mcp', transport: 'http', surface: 'human' },
           },
         },
       });
@@ -276,6 +276,7 @@ agents:
       const config = loadConfig('/tmp/config.json');
       expect(config.mcp?.servers.linear.command).toBe('npx');
       expect(config.mcp?.servers.docs.url).toBe('https://example.com/mcp');
+      expect(config.mcp?.servers.docs.surface).toBe('human');
     });
 
     it('should accept an mcp server declared via preset (INT-1952)', () => {

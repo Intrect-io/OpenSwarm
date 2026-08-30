@@ -682,6 +682,29 @@ describe('ToolExecOptions', () => {
     const cargo = path.join(homedir(), '.cargo', 'bin');
     expect((env.PATH ?? '').split(':').filter((p) => p === cargo)).toHaveLength(1);
   });
+
+  it('buildBashToolEnv withholds human-surface credentials but preserves DevOps and DB credentials', () => {
+    const env = buildBashToolEnv({
+      PATH: '/usr/bin:/bin',
+      SLACK_BOT_TOKEN: 'drop',
+      DISCORD_WEBHOOK_URL: 'drop',
+      GITHUB_TOKEN: 'keep',
+      POSTGRES_DSN: 'keep',
+    });
+    expect(env).not.toHaveProperty('SLACK_BOT_TOKEN');
+    expect(env).not.toHaveProperty('DISCORD_WEBHOOK_URL');
+    expect(env).toMatchObject({ GITHUB_TOKEN: 'keep', POSTGRES_DSN: 'keep' });
+  });
+
+  it('bash rejects a literal human-surface webhook write before spawning it', async () => {
+    const result = await executeTool(
+      makeCall('bash', {
+        command: `curl -X POST -d '{"text":"hello"}' https://hooks.slack.com/services/T/B/X`,
+      }),
+      TMP_DIR,
+    );
+    expect(result).toMatchObject({ is_error: true, content: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+  });
 });
 
 describe('search_files without ripgrep', () => {
