@@ -6,7 +6,8 @@
 import { buildBranchName } from '../support/branchNaming.js';
 import { EmbedBuilder } from 'discord.js';
 import { decompositionChildId, reviewerFollowupId } from './decompositionIds.js';
-import { taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
+import { pathIsUnderAny, taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
+import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { PipelineResult, PipelineRunMetadata } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig, PipelineStage, JobProfile } from '../core/types.js';
@@ -220,6 +221,7 @@ export async function resolveProjectPath(
 ): Promise<string | null> {
   const projectName = task.linearProject?.name;
   const projectId = task.linearProject?.id;
+  const isAllowed = (path: string) => ctx.allowedProjects.length === 0 || pathIsUnderAny(normalizeProjectPath(path), ctx.allowedProjects.map(normalizeProjectPath));
 
   if (!projectId || !projectName) {
     console.error(`[AutonomousRunner] Task "${task.title}" has no Linear project info - SKIP`);
@@ -256,20 +258,20 @@ export async function resolveProjectPath(
 
   // 2순위: ~/dev/{name} 직접 경로
   const directPath = `${process.env.HOME}/dev/${projectName}`;
-  if (await isValidProjectPath(directPath)) {
+  if (await isValidProjectPath(directPath) && isAllowed(directPath)) {
     console.log(`[AutonomousRunner] Direct path found: ${projectName} → ${directPath}`);
     return directPath;
   }
 
   const lowerPath = `${process.env.HOME}/dev/${projectName.toLowerCase()}`;
-  if (await isValidProjectPath(lowerPath)) {
+  if (await isValidProjectPath(lowerPath) && isAllowed(lowerPath)) {
     console.log(`[AutonomousRunner] Lowercase path found: ${projectName} → ${lowerPath}`);
     return lowerPath;
   }
 
   // 3순위: ~/dev/tools/ 서브디렉토리
   const toolsPath = `${process.env.HOME}/dev/tools/${projectName}`;
-  if (await isValidProjectPath(toolsPath)) {
+  if (await isValidProjectPath(toolsPath) && isAllowed(toolsPath)) {
     console.log(`[AutonomousRunner] Tools path found: ${projectName} → ${toolsPath}`);
     return toolsPath;
   }
@@ -281,7 +283,7 @@ export async function resolveProjectPath(
     ctx.allowedProjects
   );
 
-  if (mappedPath) {
+  if (mappedPath && isAllowed(mappedPath)) {
     console.log(`[AutonomousRunner] Fuzzy mapped: ${projectName} → ${mappedPath}`);
     return mappedPath;
   }

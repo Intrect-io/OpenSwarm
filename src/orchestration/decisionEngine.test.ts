@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { effectiveProjectScope, isAllowedProjectPath, isUmbrellaIssue, selectTasksRoundRobin, type TaskItem } from './decisionEngine.js';
+import { composeDispatchScope, isAllowedProjectPath, pathIsUnderAny, isUmbrellaIssue, selectTasksRoundRobin, type TaskItem } from './decisionEngine.js';
 
 // INT-1810 R2: parent/EPIC issues are umbrellas, not executable work. INT-1702 (tracking,
 // decomposed into sub-issues) and KT-300 ([EPIC] …) were wrongly picked for the worker.
@@ -32,54 +32,69 @@ describe('isUmbrellaIssue', () => {
   });
 });
 
-describe('effectiveProjectScope', () => {
-  it('returns undefined for the legacy no-restriction configuration', () => {
-    // [] in config means "allow everything"; [] as a scope means "admit
-    // nothing". The translation to undefined happens here, the one place that
-    // knows which meaning applies. (AGT-4127)
-    expect(effectiveProjectScope([], new Set(), false)).toBeUndefined();
+describe('pathIsUnderAny', () => {
+  const projectRoot = '/work/a';
+
+  it('admits a root itself and anything under it', () => {
+    expect(pathIsUnderAny(projectRoot, [projectRoot])).toBe(true);
+    expect(pathIsUnderAny('/work/a/sub/deep', [projectRoot])).toBe(true);
   });
 
-  it('passes the allow-list through when no selection filter applies', () => {
-    expect(effectiveProjectScope(['/work/a'], new Set(['/ignored']), false)).toEqual(['/work/a']);
+  it('refuses siblings and prefix-lookalikes', () => {
+    expect(pathIsUnderAny('/work/ab', [projectRoot])).toBe(false);
+    expect(pathIsUnderAny('/work/b', [projectRoot])).toBe(false);
   });
 
-  it('narrows the allow-list to the enabled selection', () => {
-    expect(effectiveProjectScope(
-      ['/work/cgf-portal', '/work/vega-agent'],
-      new Set(['/work/cgf-portal']),
-      true,
-    )).toEqual(['/work/cgf-portal']);
+  it('admits descendants whose own name begins with two dots', () => {
+    expect(pathIsUnderAny('/work/a/..cache', [projectRoot])).toBe(true);
   });
 
-  it('returns an empty scope when every project is disabled', () => {
-    // Distinct from undefined: a fully-disabled daemon dispatches nothing, and
-    // its metrics must not report the ledger as busy.
-    expect(effectiveProjectScope(['/work/cgf-portal'], new Set(), true)).toEqual([]);
+  it('admits descendants of POSIX and canonical Windows roots', () => {
+    expect(pathIsUnderAny('/work/a', ['/'])).toBe(true);
+    expect(pathIsUnderAny('/', ['/'])).toBe(true);
+    // normalizeProjectPath strips the trailing slash from a drive root and
+    // lowercases it on Windows before the ledger stores it.
+    expect(pathIsUnderAny('c:/work/a', ['c:'])).toBe(true);
+    expect(pathIsUnderAny('c:', ['c:'])).toBe(true);
+    expect(pathIsUnderAny('c:/work/a', ['c:/'])).toBe(true);
   });
 
-  it('keeps the narrower path when allowed and enabled overlap as prefixes', () => {
-    // Keeping the wider /work would sweep sibling projects dispatch refuses
-    // back into the counts.
-    expect(effectiveProjectScope(['/work'], new Set(['/work/cgf-portal']), true))
-      .toEqual(['/work/cgf-portal']);
-    expect(effectiveProjectScope(['/work/cgf-portal'], new Set(['/work']), true))
-      .toEqual(['/work/cgf-portal']);
+  it('performs no normalization of its own', () => {
+    // The caller owns the path space (tier-2 review C1) — a differently-spelt
+    // equivalent is NOT matched here, by design.
+    expect(pathIsUnderAny('/Work/A', [projectRoot])).toBe(false);
+    expect(pathIsUnderAny('/work/a/../a', [projectRoot])).toBe(true);
+    expect(pathIsUnderAny(projectRoot, ['/work/a/../a'])).toBe(false);
+  });
+});
+
+describe('composeDispatchScope', () => {
+  const enabledGate = (p: string) => p.startsWith('/work/cgf-portal');
+  const allowedGate = (p: string) => p.startsWith('/work/');
+
+  it('uses the enabled gate, and only it, while the selection filter is active', () => {
+    // The allow-list gates pre-resolution task metadata, which the daemon's
+    // task source never sets, so it must not narrow this regime — re-deriving
+    // membership from both lists excluded rows dispatch admits. (AGT-4127
+    // review rounds 2–4)
+    const inScope = composeDispatchScope(true, enabledGate, () => false)!;
+    expect(inScope('/work/cgf-portal/apps')).toBe(true);
+    expect(inScope('/work/vega-agent')).toBe(false);
   });
 
-  it('uses the enabled selection alone when the allow-list is empty', () => {
-    expect(effectiveProjectScope([], new Set(['/work/a']), true)).toEqual(['/work/a']);
+  it('falls back to the allowed gate when no selection is active', () => {
+    // Without this regime, an allow-list-only configuration read the raw table
+    // and the stale-row inflation returned. (review round 5)
+    const inScope = composeDispatchScope(false, enabledGate, allowedGate)!;
+    expect(inScope('/work/vega-agent')).toBe(true);
+    expect(inScope('/Users/someone/dev/STONKS')).toBe(false);
   });
 
-  it('matches case-insensitively where the runner admission does', () => {
-    // macOS/Windows filesystems are case-insensitive, and the runner's
-    // enabled-set admission folds case there. A casing difference between
-    // UI-captured and configured paths must not drop a project from the counts
-    // that dispatch admits. (gate round: case-sensitivity mismatch)
-    expect(effectiveProjectScope(['/Work/CGF-Portal'], new Set(['/work/cgf-portal']), true, true))
-      .toEqual(['/Work/CGF-Portal']);
-    expect(effectiveProjectScope(['/Work/CGF-Portal'], new Set(['/work/cgf-portal']), true, false))
-      .toEqual([]);
+  it('returns undefined when nothing restricts dispatch', () => {
+    // Everything is dispatchable; callers read the raw table. The gates are
+    // bound by the caller in the ledger's own path space — this function holds
+    // no path logic to get wrong. (tier-2 review C1)
+    expect(composeDispatchScope(false, enabledGate, undefined)).toBeUndefined();
   });
 });
 

@@ -179,6 +179,14 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(internal.normalizePath('/X/Y')).toBe(isCaseInsensitivePlatform ? '/x/y' : '/X/Y');
     });
 
+    it('keeps descendants in the ledger scope when the allowed-project root is /', () => {
+      const r = new AutonomousRunner(cfg({ allowedProjects: ['/'] }));
+      const inScope = r.getDispatchScopePredicate();
+
+      expect(inScope).toBeDefined();
+      expect(inScope!('/work/agent-repo')).toBe(true);
+    });
+
     it('isProjectEnabled: empty set never matches', () => {
       const r = new AutonomousRunner(cfg());
       const internal = r as unknown as Internal;

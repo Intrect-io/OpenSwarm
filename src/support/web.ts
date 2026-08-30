@@ -524,6 +524,12 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           turboExpiresAt: stats?.turboExpiresAt ?? null,
           dailyPace: stats?.dailyPace ?? null,
           failureCauses: { window: 50, counts: runnerRef?.getFailureCauseSummary(50) ?? {} },
+          // Scoped to the projects dispatch can act on; rows from disabled or
+          // pre-containerisation projects surface as outOfScope instead of
+          // inflating byState. Previously computed but returned by no endpoint,
+          // so the misleading raw totals were what operators actually queried
+          // by hand. (AGT-4127, tier-2 review C2)
+          automationLedger: stats?.automationLedger ?? null,
         }));
 
       // ---- Tasks ----

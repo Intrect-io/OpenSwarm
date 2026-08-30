@@ -28,7 +28,7 @@ import {
   type TaskState,
   type ProjectInfo,
 } from './runnerState.js';
-import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck, effectiveProjectScope } from '../orchestration/decisionEngine.js';
+import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck, composeDispatchScope, pathIsUnderAny } from '../orchestration/decisionEngine.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
@@ -2590,26 +2590,25 @@ export class AutonomousRunner {
   }
 
   /**
-   * The project set the daemon will actually dispatch to right now: the
-   * configured allow-list narrowed by the dashboard's enabled selection, the
-   * same two gates every dispatch decision passes (isProjectEnabled +
-   * decisionEngine's allow-list). Metrics scoped by only the former still
-   * counted repositories the operator had disabled as live work. (AGT-4127
-   * PR review)
-   *
-   * `undefined` means no restriction exists — the legacy allow-everything
-   * configuration — and is deliberately distinct from `[]`, which means the
-   * gates admit nothing (every project disabled). The two collapse to the same
-   * array value but opposite dispatch behaviour, so the translation happens
-   * here, the one place that knows which is which.
+   * The membership test dispatch applies to a resolved project path, for
+   * scoping ledger metrics. Regime choice and rationale live in
+   * `composeDispatchScope`; both gates are built here, bound over
+   * `normalizePath` — taskScheduler's normalizeProjectPath, the same
+   * realpath-inclusive space the ledger stores rows in — so neither can
+   * drift from dispatch or from storage (AGT-4127; tier-2 review C1: a
+   * resolve-only comparison counted every row under a symlinked configured
+   * path as out of scope).
    */
-  getEffectiveProjectScope(): string[] | undefined {
-    return effectiveProjectScope(
-      this.config.allowedProjects ?? [],
-      this.enabledProjects,
+  getDispatchScopePredicate(): ((projectPath: string) => boolean) | undefined {
+    const allowed = (this.config.allowedProjects ?? []).map((p) => this.normalizePath(p));
+    return composeDispatchScope(
       this.shouldFilterByEnabled(),
+      (projectPath) => this.isProjectEnabled(projectPath),
+      allowed.length > 0 ? (projectPath) => pathIsUnderAny(this.normalizePath(projectPath), allowed) : undefined,
     );
   }
+
+
 
 
   updateAllowedProjects(paths: string[]): void {
@@ -2621,7 +2620,7 @@ export class AutonomousRunner {
     return { isRunning: this.state.isRunning, lastHeartbeat: this.state.lastHeartbeat,
       engineStats: this.engine.getStats(), pendingApproval: !!this.state.pendingApproval,
       schedulerStats: this.scheduler.getStats(),
-      automationLedger: this.durableRuns.getMetrics(Date.now(), this.getEffectiveProjectScope()),
+      automationLedger: this.durableRuns.getMetrics(Date.now(), this.getDispatchScopePredicate()),
       turboMode: this.turboMode,
       turboExpiresAt: this.turboExpiresAt,
       dailyPace: getDailyPaceInfo(),

@@ -107,34 +107,18 @@ describe('DurableRunCoordinator', () => {
     const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
 
     await coordinator.execute(task('live-1'), '/work/cgf-portal', async () => result(true));
-    // A path from an earlier deployment: the row is permanent, can never run,
+    // Paths from an earlier deployment: the rows are permanent, can never run,
     // and used to dominate the totals. (AGT-4127)
     await coordinator.execute(task('stale-1'), '/Users/someone/dev/STONKS', async () => result(true));
     await coordinator.execute(task('stale-2'), '/Users/someone/dev/kyte-portal', async () => result(true));
 
-    const scoped = coordinator.getMetrics(Date.now(), ['/work/cgf-portal']);
-    const total = Object.values(scoped.byState).reduce((sum, n) => sum + n, 0);
+    // Membership is dispatch's own predicate, so the counts cannot describe a
+    // different project set than dispatch admits.
+    const inScope = (p: string) => p === '/work/cgf-portal' || p.startsWith('/work/cgf-portal/');
+    const scoped = coordinator.getMetrics(Date.now(), inScope);
 
-    expect(total).toBe(1);
+    expect(Object.values(scoped.byState).reduce((sum, n) => sum + n, 0)).toBe(1);
     expect(scoped.outOfScope).toBe(2);
-  });
-
-  it('treats an empty scope as empty — every row out of it', async () => {
-    const path = dbPath();
-    const ledger = new RunLedger(path);
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
-
-    await coordinator.execute(task('a'), '/work/cgf-portal', async () => result(true));
-    await coordinator.execute(task('b'), '/Users/someone/dev/STONKS', async () => result(true));
-
-    // The scope argument is literal. The daemon's "[] means allow everything"
-    // convention is translated by getEffectiveProjectScope, the one place that
-    // knows whether [] arose from no restriction or from every project being
-    // disabled — a fully-disabled daemon must not report its ledger as busy.
-    const none = coordinator.getMetrics(Date.now(), []);
-
-    expect(Object.values(none.byState).reduce((sum, n) => sum + n, 0)).toBe(0);
-    expect(none.outOfScope).toBe(2);
   });
 
   it('scopes the expired-lease count alongside byState', async () => {
@@ -156,8 +140,9 @@ describe('DurableRunCoordinator', () => {
 
     // Probe past every renewal the coordinator could have written.
     const past = Date.now() + 24 * 60 * 60_000;
+    const inScope = (p: string) => p === '/work/cgf-portal' || p.startsWith('/work/cgf-portal/');
     const raw = coordinator.getMetrics(past);
-    const scoped = coordinator.getMetrics(past, ['/work/cgf-portal']);
+    const scoped = coordinator.getMetrics(past, inScope);
 
     expect(raw.expiredActiveLeases).toBe(2);
     expect(scoped.expiredActiveLeases).toBe(1);
@@ -169,7 +154,7 @@ describe('DurableRunCoordinator', () => {
     ledger.close();
   });
 
-  it('keeps the raw totals when no scope is given', async () => {
+  it('keeps the raw totals when no predicate is given', async () => {
     const path = dbPath();
     const ledger = new RunLedger(path);
     const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
@@ -188,12 +173,12 @@ describe('DurableRunCoordinator', () => {
     const ledger = new RunLedger(path);
     const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
 
-    // Shares admission's predicate, so a subdirectory of an allowed project is
-    // in scope here exactly as it is there — the two cannot describe different
-    // project sets.
+    // Shares dispatch's predicate, so a subdirectory of an allowed project is
+    // in scope here exactly as it is there.
     await coordinator.execute(task('nested'), '/work/cgf-portal/apps/pipelines', async () => result(true));
 
-    expect(coordinator.getMetrics(Date.now(), ['/work/cgf-portal']).outOfScope).toBe(0);
+    const inScope = (p: string) => p === '/work/cgf-portal' || p.startsWith('/work/cgf-portal/');
+    expect(coordinator.getMetrics(Date.now(), inScope).outOfScope).toBe(0);
   });
 
   it('admits only one concurrent run per repository across coordinator instances', async () => {
