@@ -33,20 +33,38 @@ describe('isUmbrellaIssue', () => {
 });
 
 describe('pathIsUnderAny', () => {
+  const projectRoot = '/work/a';
+
   it('admits a root itself and anything under it', () => {
-    expect(pathIsUnderAny('/work/a', ['/work/a'])).toBe(true);
-    expect(pathIsUnderAny('/work/a/sub/deep', ['/work/a'])).toBe(true);
+    expect(pathIsUnderAny(projectRoot, [projectRoot])).toBe(true);
+    expect(pathIsUnderAny('/work/a/sub/deep', [projectRoot])).toBe(true);
   });
 
   it('refuses siblings and prefix-lookalikes', () => {
-    expect(pathIsUnderAny('/work/ab', ['/work/a'])).toBe(false);
-    expect(pathIsUnderAny('/work/b', ['/work/a'])).toBe(false);
+    expect(pathIsUnderAny('/work/ab', [projectRoot])).toBe(false);
+    expect(pathIsUnderAny('/work/b', [projectRoot])).toBe(false);
+  });
+
+  it('admits descendants whose own name begins with two dots', () => {
+    expect(pathIsUnderAny('/work/a/..cache', [projectRoot])).toBe(true);
+  });
+
+  it('admits descendants of POSIX and canonical Windows roots', () => {
+    expect(pathIsUnderAny('/work/a', ['/'])).toBe(true);
+    expect(pathIsUnderAny('/', ['/'])).toBe(true);
+    // normalizeProjectPath strips the trailing slash from a drive root and
+    // lowercases it on Windows before the ledger stores it.
+    expect(pathIsUnderAny('c:/work/a', ['c:'])).toBe(true);
+    expect(pathIsUnderAny('c:', ['c:'])).toBe(true);
+    expect(pathIsUnderAny('c:/work/a', ['c:/'])).toBe(true);
   });
 
   it('performs no normalization of its own', () => {
     // The caller owns the path space (tier-2 review C1) — a differently-spelt
     // equivalent is NOT matched here, by design.
-    expect(pathIsUnderAny('/Work/A', ['/work/a'])).toBe(false);
+    expect(pathIsUnderAny('/Work/A', [projectRoot])).toBe(false);
+    expect(pathIsUnderAny('/work/a/../a', [projectRoot])).toBe(true);
+    expect(pathIsUnderAny(projectRoot, ['/work/a/../a'])).toBe(false);
   });
 });
 

@@ -293,7 +293,12 @@ function normalizeProjectPath(input: string): string {
  * AGT-4127's tier-2 review, C1).
  */
 export function pathIsUnderAny(path: string, roots: readonly string[]): boolean {
-  return roots.some((root) => path === root || path.startsWith(root + '/'));
+  // taskScheduler.normalizeProjectPath canonicalizes separators to '/' on
+  // every platform before either operand reaches this helper. Do not use the
+  // host separator here: Windows ledger rows are deliberately forward-slashed.
+  // Avoid doubling the separator for '/' or an already-slashed drive root.
+  // (PR #477 review)
+  return roots.some((root) => path === root || path.startsWith(root.endsWith('/') ? root : root + '/'));
 }
 
 export function composeDispatchScope(
