@@ -18,6 +18,7 @@ import { buildBranchName } from '../support/branchNaming.js';
 import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { linearIssueToTask } from '../orchestration/decisionEngine.js';
@@ -316,6 +317,12 @@ async function runWorkCommandInner(
     log(`Could not load config: ${err instanceof Error ? err.message : String(err)}`);
     return WORK_EXIT_NOT_RUN;
   }
+  // The normal CLI preAction and loadConfig() both activate this boundary.
+  // Apply it from the resolved config here as well so an embedded caller that
+  // supplies WorkCommandDeps.loadConfig cannot bypass the same execution
+  // contract. Enabling remains monotonic; a false value never downgrades an
+  // already strict process.
+  if (config.humanSurfaceReadOnly?.enabled === true) configureHumanSurfaceReadOnly(true);
 
   const source = await (deps.ensureTaskSource ?? ensureTaskSource)();
   if (!source) {
