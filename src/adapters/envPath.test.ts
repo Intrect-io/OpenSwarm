@@ -15,6 +15,7 @@ describe('buildWorkerEnv human-surface boundary', () => {
       NOTION_API_KEY: 'drop',
       TELEGRAM_BOT_TOKEN: 'drop',
       GOOGLE_CALENDAR_TOKEN: 'drop',
+      MS_GRAPH_TOKEN: 'drop',
     });
 
     expect(env).toMatchObject({
@@ -29,5 +30,6 @@ describe('buildWorkerEnv human-surface boundary', () => {
     expect(env).not.toHaveProperty('NOTION_API_KEY');
     expect(env).not.toHaveProperty('TELEGRAM_BOT_TOKEN');
     expect(env).not.toHaveProperty('GOOGLE_CALENDAR_TOKEN');
+    expect(env).not.toHaveProperty('MS_GRAPH_TOKEN');
   });
 });

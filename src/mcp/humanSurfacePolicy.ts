@@ -169,6 +169,33 @@ const HUMAN_SURFACE_HOST_SUFFIXES = [
   'api.mailgun.net',
 ] as const;
 
+// Microsoft Graph mixes human collaboration and administrator APIs behind one
+// host. Blocking graph.microsoft.com wholesale would also remove legitimate
+// device/directory DevOps access, so only human-facing path families tighten
+// the shell policy.
+const MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS = new Set([
+  'calendar',
+  'calendars',
+  'calendarview',
+  'channel',
+  'channels',
+  'chat',
+  'chats',
+  'drive',
+  'drives',
+  'event',
+  'events',
+  'mail',
+  'mailfolders',
+  'message',
+  'messages',
+  'onenote',
+  'onlinemeetings',
+  'planner',
+  'sites',
+  'todo',
+]);
+
 const descriptorByTool = new WeakMap<ToolDefinition, McpToolPolicyDecision>();
 
 export function identifierTokens(value: string): string[] {
@@ -197,6 +224,17 @@ function knownHumanHost(host: string): boolean {
   return HUMAN_SURFACE_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
 }
 
+function microsoftGraphHumanPath(hint: string): string | undefined {
+  try {
+    const url = new URL(hint);
+    if (url.hostname.toLowerCase() !== 'graph.microsoft.com') return undefined;
+    return identifierTokens(decodeURIComponent(url.pathname))
+      .find((token) => MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS.has(token));
+  } catch {
+    return undefined;
+  }
+}
+
 function hasHumanIdentifier(value: string): string | undefined {
   const tokens = identifierTokens(value);
   const exact = tokens.find((token) => HUMAN_SURFACE_IDENTIFIERS.has(token));
@@ -222,10 +260,18 @@ function classifyAccess(action: string, annotations?: McpToolAnnotations): McpAc
 
 function inferSurface(source: McpToolPolicySource): { surface: McpSurface; evidence: string[] } {
   const evidence: string[] = [];
+  let microsoftGraphIdentity = false;
   if (source.declaredSurface === 'human') evidence.push('server is declared as a human surface');
 
   for (const hint of [source.server, ...(source.serverIdentityHints ?? [])]) {
     const host = hostFromHint(hint);
+    const tokens = identifierTokens(hint);
+    if (
+      host === 'graph.microsoft.com'
+      || tokens.includes('msgraph')
+      || tokens.includes('microsoftgraph')
+      || (tokens.includes('microsoft') && tokens.includes('graph'))
+    ) microsoftGraphIdentity = true;
     if (host && knownHumanHost(host)) {
       evidence.push(`known human-surface endpoint ${host}`);
       continue;
@@ -239,6 +285,14 @@ function inferSurface(source: McpToolPolicySource): { surface: McpSurface; evide
   // never relax it or prove that a tool is read-only.
   const descriptionIdentifier = hasHumanIdentifier(source.description ?? '');
   if (descriptionIdentifier) evidence.push(`tool descriptor identifies ${descriptionIdentifier}`);
+  const actionIdentifier = hasHumanIdentifier(source.action ?? '');
+  if (actionIdentifier) evidence.push(`tool action identifies ${actionIdentifier}`);
+  if (
+    microsoftGraphIdentity
+    && identifierTokens(source.action ?? '').some((token) => MICROSOFT_GRAPH_HUMAN_PATH_IDENTIFIERS.has(token))
+  ) {
+    evidence.push('Microsoft Graph action targets a human-facing API');
+  }
 
   if (evidence.length > 0) return { surface: 'human', evidence: [...new Set(evidence)] };
   return { surface: source.declaredSurface ?? 'unknown', evidence: [] };
@@ -318,7 +372,16 @@ export function stripHumanSurfaceEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
     const tokens = identifierTokens(key);
     const googleCollaborationCredential = tokens.includes('google')
       && (tokens.includes('drive') || tokens.includes('docs') || tokens.includes('sheets'));
-    if (googleCollaborationCredential || tokens.some((token) => HUMAN_SURFACE_ENV_IDENTIFIERS.has(token))) continue;
+    const microsoftGraphProduct = tokens.includes('msgraph')
+      || tokens.includes('microsoftgraph')
+      || (tokens.includes('graph') && (tokens.includes('ms') || tokens.includes('microsoft')));
+    const microsoftGraphCredential = microsoftGraphProduct
+      && tokens.some((token) => ['credential', 'key', 'password', 'pat', 'secret', 'token', 'webhook'].includes(token));
+    if (
+      googleCollaborationCredential
+      || microsoftGraphCredential
+      || tokens.some((token) => HUMAN_SURFACE_ENV_IDENTIFIERS.has(token))
+    ) continue;
     env[key] = value;
   }
   return env;
@@ -409,22 +472,32 @@ function shellExecutors(command: string): string[] {
  * stripHumanSurfaceEnv; this catches literal webhooks and service CLIs.
  */
 export function humanSurfaceShellWriteReason(command: string): string | undefined {
-  const hosts = [...command.matchAll(/https?:\/\/[^\s'"`]+/gi)]
-    .map((match) => hostFromHint(match[0]))
+  const urls = [...command.matchAll(/https?:\/\/[^\s'"`]+/gi)].map((match) => match[0]);
+  const hosts = urls
+    .map((url) => hostFromHint(url))
     .filter((host): host is string => !!host);
   const humanIdentifier = hasHumanIdentifier(command);
   const humanHost = hosts.find(knownHumanHost);
-  if (!humanIdentifier && !humanHost) return undefined;
+  const graphHumanPath = urls.map(microsoftGraphHumanPath).find((identifier) => !!identifier);
+  if (!humanIdentifier && !humanHost && !graphHumanPath) return undefined;
   if (!hasShellWriteSignal(command)) return undefined;
 
   // A literal protected endpoint plus a write signal is sufficient evidence,
   // regardless of how many shell wrappers surround the network client. This
   // closes `bash -c`, `xargs`, aliases, and variable-command wrappers without
   // treating a plain `rg 'slack post'` search as network execution.
-  if (!humanHost && !shellExecutors(command).some((executable) => SHELL_NETWORK_EXECUTORS.has(executable))) {
+  if (
+    !humanHost
+    && !graphHumanPath
+    && !shellExecutors(command).some((executable) => SHELL_NETWORK_EXECUTORS.has(executable))
+  ) {
     return undefined;
   }
 
-  const target = humanHost ? `endpoint ${humanHost}` : `service ${humanIdentifier}`;
+  const target = humanHost
+    ? `endpoint ${humanHost}`
+    : graphHumanPath
+      ? `Microsoft Graph human API ${graphHumanPath}`
+      : `service ${humanIdentifier}`;
   return `external human-surface write blocked (${target}); use read-only access or ask the operator`;
 }

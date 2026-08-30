@@ -23,6 +23,22 @@ describe('human-surface MCP policy', () => {
     expect(describeMcpToolPolicy(tool('slackarchive__get_record')).surface).toBe('unknown');
     expect(describeMcpToolPolicy(tool('google-drive__create_file')).surface).toBe('human');
     expect(describeMcpToolPolicy(tool('relay__create_page', 'Create a page in Notion')).surface).toBe('human');
+    expect(describeMcpToolPolicy(tool('relay__sendMail')).surface).toBe('human');
+  });
+
+  it('narrows Microsoft Graph classification to human-facing actions', () => {
+    const identity = { serverIdentityHints: ['https://graph.microsoft.com/v1.0'] };
+    expect(describeMcpToolPolicy(tool('graph__create_message'), identity)).toMatchObject({
+      surface: 'human',
+      access: 'write',
+      humanSurfaceReadAllowed: false,
+    });
+    expect(describeMcpToolPolicy(tool('graph__list_messages'), identity)).toMatchObject({
+      surface: 'human',
+      access: 'read',
+      humanSurfaceReadAllowed: true,
+    });
+    expect(describeMcpToolPolicy(tool('graph__update_device'), identity).surface).toBe('unknown');
   });
 
   it('allows only explicit read/list/get/search/fetch actions on a human surface', () => {
@@ -72,7 +88,11 @@ describe('human-surface shell boundary', () => {
       GOOGLE_DRIVE_TOKEN: 'secret',
       GOOGLE_CALENDAR_API_KEY: 'secret',
       CALENDAR_TOKEN: 'secret',
+      MS_GRAPH_TOKEN: 'secret',
+      MICROSOFT_GRAPH_ACCESS_TOKEN: 'secret',
       GITHUB_TOKEN: 'keep',
+      AZURE_CLIENT_SECRET: 'keep',
+      GRAPH_DATABASE_PASSWORD: 'keep',
       POSTGRES_DSN: 'keep',
       OPENAI_API_KEY: 'keep',
       OPENAI_CHAT_MODEL: 'keep',
@@ -84,8 +104,12 @@ describe('human-surface shell boundary', () => {
     expect(env).not.toHaveProperty('GOOGLE_DRIVE_TOKEN');
     expect(env).not.toHaveProperty('GOOGLE_CALENDAR_API_KEY');
     expect(env).not.toHaveProperty('CALENDAR_TOKEN');
+    expect(env).not.toHaveProperty('MS_GRAPH_TOKEN');
+    expect(env).not.toHaveProperty('MICROSOFT_GRAPH_ACCESS_TOKEN');
     expect(env).toMatchObject({
       GITHUB_TOKEN: 'keep',
+      AZURE_CLIENT_SECRET: 'keep',
+      GRAPH_DATABASE_PASSWORD: 'keep',
       POSTGRES_DSN: 'keep',
       OPENAI_API_KEY: 'keep',
       OPENAI_CHAT_MODEL: 'keep',
@@ -116,8 +140,21 @@ describe('human-surface shell boundary', () => {
     expect(humanSurfaceShellWriteReason('pnpm dlx notion-cli create page'))
       .toContain('service notion');
     expect(humanSurfaceShellWriteReason("python -c \"requests.post('https://discord.com/api/webhooks/x')\"")).toContain('discord.com');
+    expect(humanSurfaceShellWriteReason(
+      "curl -X POST -H 'Authorization: Bearer '$MS_GRAPH_TOKEN -d '{}' https://graph.microsoft.com/v1.0/me/messages",
+    )).toContain('Microsoft Graph human API messages');
+    expect(humanSurfaceShellWriteReason(
+      "curl -X POST -d '{}' https://graph.microsoft.com/v1.0/chats/123/messages",
+    )).toContain('Microsoft Graph human API chats');
+    expect(humanSurfaceShellWriteReason(
+      "curl -X POST -d '{}' https://graph.microsoft.com/v1.0/me/sendMail",
+    )).toContain('Microsoft Graph human API mail');
 
     expect(humanSurfaceShellWriteReason('curl -X GET https://api.slack.com/methods/conversations.list')).toBeUndefined();
+    expect(humanSurfaceShellWriteReason('curl -X GET https://graph.microsoft.com/v1.0/me/messages')).toBeUndefined();
+    expect(humanSurfaceShellWriteReason(
+      "curl -X PATCH -d '{}' https://graph.microsoft.com/v1.0/devices/123/extensionAttributes",
+    )).toBeUndefined();
     expect(humanSurfaceShellWriteReason("curl -G -d'channel=C1' https://api.slack.com/methods/conversations.list")).toBeUndefined();
     expect(humanSurfaceShellWriteReason("curl -X POST -d '{}' https://api.github.com/repos/o/r/issues")).toBeUndefined();
     expect(humanSurfaceShellWriteReason("psql '$POSTGRES_DSN' -c 'select 1'")).toBeUndefined();
