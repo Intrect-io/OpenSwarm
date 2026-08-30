@@ -228,6 +228,10 @@ describe('dispatchWork', () => {
     const result = await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
     expect(result.items[0]).toMatchObject({ status: 'skipped', reason: 'runner shutting down' });
     expect(linear.updateIssueState).toHaveBeenCalledWith('1', 'Todo');
+    expect(runner.enqueueIssues).toHaveBeenCalledWith(
+      [expect.objectContaining({ explicitDispatch: true, explicitDispatchPriorState: 'Todo' })],
+      '/tmp/repo',
+    );
   });
 
   it('rolls a Backlog-claimed issue back to Backlog, not Todo (review finding)', async () => {
@@ -247,6 +251,10 @@ describe('dispatchWork', () => {
     });
     await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
     expect(linear.updateIssueState).not.toHaveBeenCalled();
+    expect(runner.enqueueIssues).toHaveBeenCalledWith(
+      [expect.objectContaining({ explicitDispatch: true, explicitDispatchPriorState: undefined })],
+      '/tmp/repo',
+    );
   });
 
   it('surfaces a failed rollback in the item reason instead of hiding it', async () => {

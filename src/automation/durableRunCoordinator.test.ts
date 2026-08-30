@@ -55,6 +55,11 @@ describe('DurableRunCoordinator', () => {
     expect(retryAtFor(superseded, 1_000, 20)).toBe(1_000 + 6 * 60 * 60_000);
   });
 
+  it('honors a deferred admission deadline with a one-second anti-spin floor', () => {
+    expect(retryAtFor({ ...result(false), finalStatus: 'deferred', retryAt: 5_000 }, 1_000)).toBe(5_000);
+    expect(retryAtFor({ ...result(false), finalStatus: 'deferred', retryAt: 1_100 }, 1_000)).toBe(2_000);
+  });
+
   it('reports the deadline the age sweep will actually act on', () => {
     const coordinator = new DurableRunCoordinator({
       mode: 'primary', dbPath: dbPath(), instanceId: 'daemon', reconcileAbandonMs: 10 * 60_000,
@@ -198,9 +203,35 @@ describe('DurableRunCoordinator', () => {
     });
     const secondResult = await second.execute(task('B'), '/repo', async () => result());
 
-    expect(secondResult.finalStatus).toBe('superseded');
+    expect(secondResult.finalStatus).toBe('deferred');
+    expect(secondResult.retryAt).toBe(second.getRun('B')?.retryAt);
     expect(second.getRun('B')).toMatchObject({ state: 'RETRY_AT' });
     expect(second.getRun('B')?.retryAt).toBeGreaterThan(Date.now());
+    release();
+    expect((await firstRun).success).toBe(true);
+    first.close();
+    second.close();
+  });
+
+  it('keeps a concurrent duplicate of the same issue superseded instead of requeueing it', async () => {
+    const path = dbPath();
+    const first = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'a' });
+    const second = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'b' });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+
+    const firstRun = first.execute(task('SAME'), '/repo', async () => {
+      await held;
+      return result();
+    });
+    const duplicateExecutor = vi.fn(async () => result());
+    const duplicate = await second.execute(task('SAME'), '/repo', duplicateExecutor);
+
+    expect(duplicate.finalStatus).toBe('superseded');
+    expect(duplicate.retryAt).toBeUndefined();
+    expect(duplicateExecutor).not.toHaveBeenCalled();
+    expect(second.getRun('SAME')?.state).toBe('EXECUTING');
+
     release();
     expect((await firstRun).success).toBe(true);
     first.close();
@@ -422,8 +453,19 @@ describe('DurableRunCoordinator', () => {
       finalStatus: 'waiting_on_operator',
     }));
 
+    const parked = coordinator.getRun('AGT-PARK');
+    expect(parked).toMatchObject({
+      state: 'RETRY_AT',
+      lastErrorCode: 'waiting_on_operator',
+    });
+
+    const prematureExecutor = vi.fn(async () => result());
+    const premature = await coordinator.execute(task('AGT-PARK'), '/repo', prematureExecutor);
+    expect(premature).toMatchObject({ finalStatus: 'deferred', retryAt: parked?.retryAt });
+    expect(prematureExecutor).not.toHaveBeenCalled();
     expect(coordinator.getRun('AGT-PARK')).toMatchObject({
       state: 'RETRY_AT',
+      retryAt: parked?.retryAt,
       lastErrorCode: 'waiting_on_operator',
     });
     coordinator.close();

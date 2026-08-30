@@ -73,6 +73,12 @@ export interface TaskItem {
    * of the autonomous Todo-only reopen rule. (INT-3388)
    */
   explicitDispatch?: boolean;
+  /**
+   * Original tracker state only when this dispatch itself transitioned the
+   * issue to In Progress. Shutdown may roll back exactly this owned claim;
+   * an already-In-Progress resume has no value and must remain untouched.
+   */
+  explicitDispatchPriorState?: 'Todo' | 'Backlog';
 }
 
 /**

@@ -762,6 +762,25 @@ describe('RunLedger claim and fencing races', () => {
     ledger.close();
   });
 
+  it('does not count a transient admission deferral as a repository failure', () => {
+    const ledger = new RunLedger(createDbPath());
+    for (const id of ['DEFERRED-1', 'DEFERRED-2']) register(ledger, id, '/busy-repo');
+    const held = claim(ledger, 'DEFERRED-1', 'daemon', 2_000, 2);
+    expect(ledger.recordAttemptResult(held, {
+      success: false,
+      finalStatus: 'deferred',
+      maxFailuresPerHour: 1,
+      circuitCooldownMs: 60_000,
+    }, 2_100)).toBe(true);
+
+    expect(ledger.getMetrics(2_100).openCircuits).toBe(0);
+    expect(ledger.claimRun('DEFERRED-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
+      maxActiveForProject: 2, maxFailuresPerHour: 1,
+    })).not.toBeNull();
+    ledger.close();
+  });
+
   it('opens the circuit for a git worktree add failure regardless of admission-check timing (AGT-4038)', () => {
     // The two circuit checks — inline in claimRun's own budget check, and in
     // recordAttemptResult right after the attempt that trips it — must agree

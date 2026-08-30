@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AutonomousRunner } from './autonomousRunner.js';
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+import type { PipelineResult } from '../agents/pairPipeline.js';
 
 const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   linearTeamId: 'team',
@@ -107,6 +108,74 @@ describe('AutonomousRunner.enqueueIssues (INT-3388)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('retries a transiently deferred explicit dispatch even when heartbeat is disabled', async () => {
+    vi.useFakeTimers();
+    try {
+      const runner = new AutonomousRunner(cfg({
+        autonomousHeartbeat: false,
+        autoExecute: true,
+        maxConcurrentTasks: 2,
+        allowSameProjectConcurrent: true,
+        worktreeMode: true,
+      }));
+      type DispatchInternal = Internal & {
+        executeDurably(task: TaskItem, projectPath: string, signal?: AbortSignal): Promise<PipelineResult>;
+        scheduler: { getQueuedTasks(): Array<{ task: TaskItem; availableAt?: number }> };
+      };
+      const internal = runner as unknown as DispatchInternal;
+      let releaseFirst!: (result: PipelineResult) => void;
+      const firstHeld = new Promise<PipelineResult>((resolve) => { releaseFirst = resolve; });
+      let secondAttempts = 0;
+      internal.executeDurably = vi.fn(async (queuedTask) => {
+        if (queuedTask.id === '1') return firstHeld;
+        secondAttempts++;
+        if (secondAttempts === 1) {
+          return {
+            success: false,
+            sessionId: 'deferred-attempt',
+            stages: [],
+            finalStatus: 'deferred',
+            retryAt: Date.now() + 1_000,
+            totalDuration: 0,
+            iterations: 0,
+          };
+        }
+        return {
+          success: true,
+          sessionId: 'approved-attempt',
+          stages: [],
+          finalStatus: 'approved',
+          totalDuration: 1,
+          iterations: 1,
+        };
+      });
+
+      await runner.enqueueIssues([task('1'), task('2')], '/x/a');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(secondAttempts).toBe(1);
+      expect(internal.scheduler.getQueuedTasks()).toEqual([
+        expect.objectContaining({ task: expect.objectContaining({ id: '2' }), availableAt: expect.any(Number) }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(secondAttempts).toBe(2);
+      expect(internal.scheduler.getQueuedTasks()).toEqual([]);
+
+      releaseFirst({
+        success: true,
+        sessionId: 'first-approved',
+        stages: [],
+        finalStatus: 'approved',
+        totalDuration: 1,
+        iterations: 1,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('AutonomousRunner shutdown claim rollback (INT-3388, review finding)', () => {
@@ -121,7 +190,12 @@ describe('AutonomousRunner shutdown claim rollback (INT-3388, review finding)', 
       const runSpy = vi.fn(async () => {}); // keep queued tasks from executing
       (runner as unknown as Internal).runAvailableTasks = runSpy;
 
-      const dispatched: TaskItem = { ...task('d1'), explicitDispatch: true, linearState: 'Backlog' };
+      const dispatched: TaskItem = {
+        ...task('d1'),
+        explicitDispatch: true,
+        explicitDispatchPriorState: 'Backlog',
+        linearState: 'Backlog',
+      };
       const heartbeatPicked: TaskItem = task('h1'); // no explicitDispatch marker
       await runner.enqueueIssues([dispatched], '/x/a');
       // Simulate a heartbeat-enqueued task sharing the queue.
@@ -133,6 +207,29 @@ describe('AutonomousRunner shutdown claim rollback (INT-3388, review finding)', 
       // the heartbeat task (never claimed at queue time) is untouched.
       expect(updateIssueState).toHaveBeenCalledWith('d1', 'Backlog');
       expect(updateIssueState).not.toHaveBeenCalledWith('h1', expect.anything());
+
+      // An abort-ignoring executor can settle after shutdown's grace snapshot.
+      // The scheduler emits `discarded` in that case; the runner must still
+      // restore the explicit claim instead of leaving Linear In Progress.
+      const late: TaskItem = {
+        ...task('d2'),
+        explicitDispatch: true,
+        explicitDispatchPriorState: 'Todo',
+        linearState: 'Todo',
+      };
+      (runner as unknown as { scheduler: { emit(event: string, value: unknown): void } })
+        .scheduler.emit('discarded', { task: late });
+      await vi.waitFor(() => expect(updateIssueState).toHaveBeenCalledWith('d2', 'Todo'));
+
+      const resumed: TaskItem = {
+        ...task('d3'),
+        explicitDispatch: true,
+        linearState: 'In Progress',
+      };
+      (runner as unknown as { scheduler: { emit(event: string, value: unknown): void } })
+        .scheduler.emit('discarded', { task: resumed });
+      await Promise.resolve();
+      expect(updateIssueState).not.toHaveBeenCalledWith('d3', expect.anything());
     } finally {
       vi.doUnmock('../linear/linear.js');
     }

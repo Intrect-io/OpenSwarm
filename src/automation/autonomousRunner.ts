@@ -565,6 +565,39 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
+    this.scheduler.on('deferred', ({ task, result, projectPath, retryAt }: {
+      task: TaskItem; result: PipelineResult; projectPath: string; retryAt: number;
+    }) => {
+      const taskCtx = this.formatTaskContext(task);
+      const retryLabel = new Date(retryAt).toISOString();
+      console.log(`[Scheduler] Task deferred: ${taskCtx} ${task.title} — retry at ${retryLabel}`);
+      this.recordPipelineHistory(task, result);
+      broadcastEvent({
+        type: 'log',
+        data: {
+          taskId: taskEventKey(task),
+          stage: 'admission',
+          line: `Transient admission conflict; kept queued until ${retryLabel}`,
+        },
+      });
+      // A started attempt ended, but the task itself is still scheduler-owned.
+      // Return the dashboard session to queued instead of reporting terminal
+      // completion; the scheduler wake timer works even when heartbeat is off.
+      broadcastEvent({
+        type: 'task:queued',
+        data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier },
+      });
+    });
+
+    this.scheduler.on('discarded', (queued: { task: TaskItem }) => {
+      this.trackSchedulerHandler(
+        'discarded',
+        this.rollbackDiscardedDispatchClaims([queued]).catch((error) => {
+          console.warn('[AutonomousRunner] Late deferred-dispatch claim rollback failed:', error);
+        }),
+      );
+    });
+
     this.scheduler.on('cancelled', ({ task, result }) => {
       this.trackSchedulerHandler('cancelled', (async () => {
         const taskCtx = this.formatTaskContext(task);
@@ -1624,12 +1657,13 @@ export class AutonomousRunner {
   private async rollbackDiscardedDispatchClaims(
     discarded: Array<{ task: TaskItem }>,
   ): Promise<void> {
-    const dispatched = discarded.filter(({ task }) => task.explicitDispatch === true && task.issueId);
+    const dispatched = discarded.filter(({ task }) =>
+      task.explicitDispatch === true && task.issueId && task.explicitDispatchPriorState != null);
     if (dispatched.length === 0) return;
     const linear = await import('../linear/linear.js');
     if (!linear.isLinearInitialized()) return;
     for (const { task } of dispatched) {
-      const prior = (task.linearState ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo';
+      const prior = task.explicitDispatchPriorState!;
       const ok = await linear.updateIssueState(task.issueId!, prior).catch(() => false);
       console.log(ok
         ? `[AutonomousRunner] Rolled back queued dispatch claim: ${task.issueIdentifier ?? task.issueId} → ${prior}`

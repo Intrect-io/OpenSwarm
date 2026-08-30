@@ -280,6 +280,7 @@ export async function dispatchWork(
     // Marks the task for durable admission (terminal-record reopen) and for
     // the shutdown claim-rollback sweep.
     task.explicitDispatch = true;
+    task.explicitDispatchPriorState = claimedByUs.get(issue.id);
     tasks.push(task);
     items.push({ issueId: issue.id, identifier: issue.identifier, title: issue.title, status: 'queued' });
   }

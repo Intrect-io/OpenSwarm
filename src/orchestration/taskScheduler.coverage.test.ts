@@ -296,6 +296,39 @@ describe('TaskScheduler graceful shutdown races', () => {
     expect(sched.startTask(task('late'), '/other', pendingExecutor())).toBe(false);
   });
 
+  it('includes a shutdown-racing deferred task in the atomic discard snapshot', async () => {
+    const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+    const d = deferredExecutor();
+    const deferred = vi.fn();
+    sched.on('deferred', deferred);
+    sched.startTask(task('running'), '/repo', d.exec, 123);
+
+    const stopping = sched.shutdown(1_000);
+    d.resolve({ ...failResult(), finalStatus: 'deferred', retryAt: Date.now() + 30_000 });
+
+    const stopped = await stopping;
+    expect(stopped.discardedQueue).toEqual([
+      expect.objectContaining({ task: expect.objectContaining({ id: 'running' }), queuedAt: 123 }),
+    ]);
+    expect(deferred).not.toHaveBeenCalled();
+  });
+
+  it('emits a late discard when a deferred executor settles after shutdown returned', async () => {
+    const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+    const d = deferredExecutor();
+    const discarded = vi.fn();
+    sched.on('discarded', discarded);
+    sched.startTask(task('late-deferred'), '/repo', d.exec, 456);
+
+    await expect(sched.shutdown(0)).resolves.toMatchObject({ drained: false, discardedQueue: [] });
+    d.resolve({ ...failResult(), finalStatus: 'deferred', retryAt: Date.now() + 30_000 });
+    await flush();
+
+    expect(discarded).toHaveBeenCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ id: 'late-deferred' }), queuedAt: 456 }),
+    );
+  });
+
   it('returns a bounded non-drained result when an executor ignores abort', async () => {
     vi.useFakeTimers();
     try {
@@ -352,6 +385,41 @@ describe('TaskScheduler.runAvailable', () => {
     const executor = vi.fn(() => new Promise<PipelineResult>(() => {}));
     const started = await sched.runAvailable(executor);
     expect(started).toBe(1);
+  });
+
+  it('keeps a transient admission deferral queued and wakes it without a heartbeat', async () => {
+    vi.useFakeTimers();
+    try {
+      const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+      const retryAt = Date.now() + 1_000;
+      const executor = vi.fn(async (): Promise<PipelineResult> => {
+        if (executor.mock.calls.length === 1) {
+          return { ...failResult(), finalStatus: 'deferred', retryAt };
+        }
+        return okResult();
+      });
+      sched.on('slotFreed', () => { void sched.runAvailable(executor); });
+      sched.enqueue(task('deferred'), '/repo');
+
+      await sched.runAvailable(executor);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(sched.getQueuedTasks()).toEqual([
+        expect.objectContaining({ task: expect.objectContaining({ id: 'deferred' }), availableAt: retryAt }),
+      ]);
+      expect(sched.getStats()).toMatchObject({ queued: 1, running: 0, completed: 0, failed: 0 });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(executor).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(executor).toHaveBeenCalledTimes(2);
+      expect(sched.getStats()).toMatchObject({ queued: 0, running: 0, completed: 1, failed: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

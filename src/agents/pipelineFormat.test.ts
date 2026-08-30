@@ -32,9 +32,9 @@ describe('formatPipelineResult (Discord plain-text message)', () => {
 
   it('maps each finalStatus to its emoji', () => {
     const statuses: PipelineResult['finalStatus'][] = [
-      'approved', 'rejected', 'failed', 'cancelled', 'decomposed', 'rate_limited', 'infra_error',
+      'approved', 'rejected', 'failed', 'cancelled', 'decomposed', 'deferred', 'rate_limited', 'infra_error',
     ];
-    const emojis = ['✅', '❌', '💥', '🚫', '🔀', '⏸', '🔌'];
+    const emojis = ['✅', '❌', '💥', '🚫', '🔀', '⏳', '⏸', '🔌'];
     statuses.forEach((status, i) => {
       const text = formatPipelineResult(baseResult({ finalStatus: status }));
       expect(text).toContain(`${emojis[i]} **Pipeline ${status.toUpperCase()}**`);
