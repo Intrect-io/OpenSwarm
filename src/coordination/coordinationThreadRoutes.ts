@@ -14,8 +14,14 @@ import {
   unfollowCoordinationThread,
   type CoordinationThreadStatus,
 } from './coordinationThreads.js';
+import { repositoryKey } from './repositoryCell.js';
+import { publishCoordinationThreadUpdate } from './coordinationThreadTools.js';
 
 type BodyReader = (req: IncomingMessage) => Promise<string>;
+
+function threadRepository(path: string): string {
+  return repositoryKey(undefined, path);
+}
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -102,7 +108,7 @@ export async function tryHandleCoordinationThreadRoutes(
       }
       const limit = Number.parseInt(requestUrl.searchParams.get('limit') ?? '', 10);
       writeJson(res, 200, listCoordinationThreads({
-        repository,
+        repository: threadRepository(repository),
         status: statusRaw as CoordinationThreadStatus | undefined,
         relatedTaskId: requestUrl.searchParams.get('taskId') ?? undefined,
         ...(actor && participantTaskId ? { participant: { actor, taskId: participantTaskId } } : {}),
@@ -114,10 +120,12 @@ export async function tryHandleCoordinationThreadRoutes(
 
     if (url === '/api/coordination/threads' && req.method === 'POST') {
       const body = await readJson(req, readBody);
+      const repositoryPath = requiredString(body, 'repository');
+      const repoKey = threadRepository(repositoryPath);
       const relatedTaskId = requiredString(body, 'taskId');
       const relatedTaskIds = optionalStrings(body, 'relatedTaskIds') ?? [];
       const thread = createCoordinationThread({
-        repository: requiredString(body, 'repository'),
+        repository: repoKey,
         subject: requiredString(body, 'subject'),
         actor: 'operator-dashboard',
         actorName: 'Operator',
@@ -130,7 +138,13 @@ export async function tryHandleCoordinationThreadRoutes(
         relatedPullRequests: optionalStrings(body, 'relatedPullRequests'),
         idempotencyKey: requiredString(body, 'idempotencyKey'),
       });
-      writeJson(res, 201, { thread });
+      const notification = await publishCoordinationThreadUpdate({
+        repository: repositoryPath, repoKey, taskId: 'operator', taskLabel: 'Operator',
+        actor: 'operator-dashboard', actorName: 'Operator', actorRole: 'human',
+      }, {
+        thread, action: 'created', mutationId: `create:${thread.id}`, body: optionalString(body, 'body'),
+      });
+      writeJson(res, 201, { thread, notification });
       return true;
     }
 
@@ -143,7 +157,7 @@ export async function tryHandleCoordinationThreadRoutes(
       const messageLimit = Number.parseInt(requestUrl.searchParams.get('messageLimit') ?? '', 10);
       const messageAfterSeq = Number.parseInt(requestUrl.searchParams.get('messageAfterSeq') ?? '', 10);
       writeJson(res, 200, getCoordinationThread({
-        repository,
+        repository: threadRepository(repository),
         threadId: path.threadId,
         messageLimit: Number.isSafeInteger(messageLimit) ? messageLimit : undefined,
         messageAfterSeq: Number.isSafeInteger(messageAfterSeq) ? messageAfterSeq : undefined,
@@ -152,7 +166,12 @@ export async function tryHandleCoordinationThreadRoutes(
     }
 
     const body = await readJson(req, readBody);
-    const repository = requiredString(body, 'repository');
+    const repositoryPath = requiredString(body, 'repository');
+    const repository = threadRepository(repositoryPath);
+    const operatorContext = {
+      repository: repositoryPath, repoKey: repository, taskId: 'operator', taskLabel: 'Operator',
+      actor: 'operator-dashboard', actorName: 'Operator', actorRole: 'human',
+    };
 
     if (req.method === 'POST' && path.action === 'messages') {
       const message = postCoordinationThreadMessage({
@@ -166,7 +185,11 @@ export async function tryHandleCoordinationThreadRoutes(
         body: requiredString(body, 'body'),
         idempotencyKey: requiredString(body, 'idempotencyKey'),
       });
-      writeJson(res, 201, { message });
+      const thread = getCoordinationThread({ repository, threadId: path.threadId, messageLimit: 1 }).thread;
+      const notification = await publishCoordinationThreadUpdate(operatorContext, {
+        thread, action: 'replied', mutationId: `message:${message.id}`, body: message.body,
+      });
+      writeJson(res, 201, { message, notification });
       return true;
     }
 
@@ -206,7 +229,10 @@ export async function tryHandleCoordinationThreadRoutes(
         actor: 'operator-dashboard',
         taskId: 'operator',
       });
-      writeJson(res, 200, { thread });
+      const notification = await publishCoordinationThreadUpdate(operatorContext, {
+        thread, action: 'resolved', mutationId: `resolve:${thread.id}:${thread.version}`,
+      });
+      writeJson(res, 200, { thread, notification });
       return true;
     }
 

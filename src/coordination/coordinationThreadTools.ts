@@ -12,11 +12,15 @@ import {
   postCoordinationThreadMessage,
   resolveCoordinationThread,
   unfollowCoordinationThread,
+  type CoordinationThread,
   type CoordinationThreadStatus,
 } from './coordinationThreads.js';
+import { repositoryKey } from './repositoryCell.js';
+import { getCoordinationStore } from './coordinationStore.js';
 
 export interface CoordinationThreadToolContext {
   repository: string;
+  repoKey?: string;
   taskId: string;
   taskLabel?: string;
   actor: string;
@@ -142,6 +146,73 @@ conflict with another task. Reply with evidence, and resolve only the version
 you actually read.
 `;
 
+function threadRepository(context: CoordinationThreadToolContext): string {
+  return repositoryKey(context.repoKey, context.repository);
+}
+
+export type ThreadMutationAction = 'created' | 'replied' | 'resolved';
+
+/**
+ * Mirror a durable mutation onto the live board. The SQLite thread remains
+ * authoritative; a board failure is reported as warning evidence and never
+ * rolls back a discussion that was already committed.
+ */
+export async function publishCoordinationThreadUpdate(
+  context: CoordinationThreadToolContext,
+  input: {
+    thread: CoordinationThread;
+    action: ThreadMutationAction;
+    mutationId: string;
+    body?: string;
+  },
+): Promise<{ delivered: number; warnings: string[] }> {
+  const detail = getCoordinationThread({
+    repository: threadRepository(context), threadId: input.thread.id, messageLimit: 1,
+  });
+  const otherParticipants = detail.participants.filter((participant) =>
+    participant.actor !== context.actor || participant.taskId !== context.taskId);
+  // A new or single-participant thread still needs one observable lifecycle
+  // event; once others follow, addressed copies wake their task-scoped inboxes.
+  const targets = otherParticipants.length > 0 ? otherParticipants : [undefined];
+  const store = getCoordinationStore();
+  const warnings: string[] = [];
+  let delivered = 0;
+  for (const participant of targets) {
+    try {
+      await store.publish({
+        repository: context.repository,
+        repoKey: repositoryKey(context.repoKey, context.repository),
+        taskId: context.taskId,
+        taskLabel: context.taskLabel,
+        sourceTaskId: context.taskId,
+        sourceTaskLabel: context.taskLabel,
+        targetTaskId: participant?.taskId ?? context.taskId,
+        targetTaskLabel: participant?.taskLabel ?? context.taskLabel,
+        actor: context.actor,
+        actorName: context.actorName,
+        actorRole: context.actorRole,
+        recipient: participant?.actor,
+        recipientName: participant?.actorName,
+        recipientRole: participant?.actorRole,
+        kind: 'thread-update',
+        status: input.action === 'created' ? 'open' : 'completed',
+        correlationId: `thread:${input.thread.id}`,
+        summary: `Thread ${input.action}: ${input.thread.subject}`,
+        detail: input.body,
+        metadata: {
+          threadId: input.thread.id,
+          action: input.action,
+          mutationId: input.mutationId,
+        },
+      });
+      delivered += 1;
+    } catch (error) {
+      warnings.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return { delivered, warnings };
+}
+
 function requiredString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} must be a non-empty string`);
@@ -173,7 +244,7 @@ export async function executeCoordinationThreadTool(
   try {
     if (name === 'coordination_thread_create') {
       const thread = createCoordinationThread({
-        repository: context.repository,
+        repository: threadRepository(context),
         subject: requiredString(args, 'subject'),
         actor: context.actor,
         actorName: context.actorName,
@@ -186,7 +257,10 @@ export async function executeCoordinationThreadTool(
         relatedPullRequests: optionalStrings(args, 'related_pull_requests'),
         idempotencyKey: requiredString(args, 'idempotency_key'),
       });
-      return { content: JSON.stringify({ accepted: true, thread }), isError: false };
+      const notification = await publishCoordinationThreadUpdate(context, {
+        thread, action: 'created', mutationId: `create:${thread.id}`, body: optionalString(args, 'body'),
+      });
+      return { content: JSON.stringify({ accepted: true, thread, notification }), isError: false };
     }
 
     if (name === 'coordination_thread_list') {
@@ -197,7 +271,7 @@ export async function executeCoordinationThreadTool(
       const status = optionalString(args, 'status') as CoordinationThreadStatus | undefined;
       if (status && status !== 'open' && status !== 'resolved') throw new Error('status must be open or resolved');
       const page = listCoordinationThreads({
-        repository: context.repository,
+        repository: threadRepository(context),
         status,
         ...(scope === 'related' ? { relatedTaskId: context.taskId } : {}),
         ...(scope === 'following' ? { participant: { actor: context.actor, taskId: context.taskId } } : {}),
@@ -210,14 +284,14 @@ export async function executeCoordinationThreadTool(
     if (name === 'coordination_thread_get') {
       const threadId = requiredString(args, 'thread_id');
       const detail = getCoordinationThread({
-        repository: context.repository,
+        repository: threadRepository(context),
         threadId,
         messageLimit: typeof args.message_limit === 'number' ? args.message_limit : undefined,
         messageAfterSeq: typeof args.message_after_seq === 'number' ? args.message_after_seq : undefined,
       });
       if (args.mark_read === true) {
         markCoordinationThreadRead({
-          repository: context.repository, threadId, actor: context.actor, taskId: context.taskId,
+          repository: threadRepository(context), threadId, actor: context.actor, taskId: context.taskId,
         });
       }
       return { content: JSON.stringify(detail), isError: false };
@@ -226,7 +300,7 @@ export async function executeCoordinationThreadTool(
     if (name === 'coordination_thread_reply') {
       const threadId = requiredString(args, 'thread_id');
       const message = postCoordinationThreadMessage({
-        repository: context.repository,
+        repository: threadRepository(context),
         threadId,
         actor: context.actor,
         actorName: context.actorName,
@@ -236,8 +310,11 @@ export async function executeCoordinationThreadTool(
         body: requiredString(args, 'body'),
         idempotencyKey: requiredString(args, 'idempotency_key'),
       });
-      const thread = getCoordinationThread({ repository: context.repository, threadId, messageLimit: 1 }).thread;
-      return { content: JSON.stringify({ accepted: true, message, thread }), isError: false };
+      const thread = getCoordinationThread({ repository: threadRepository(context), threadId, messageLimit: 1 }).thread;
+      const notification = await publishCoordinationThreadUpdate(context, {
+        thread, action: 'replied', mutationId: `message:${message.id}`, body: message.body,
+      });
+      return { content: JSON.stringify({ accepted: true, message, thread, notification }), isError: false };
     }
 
     if (name === 'coordination_thread_follow') {
@@ -245,7 +322,7 @@ export async function executeCoordinationThreadTool(
       if (typeof args.following !== 'boolean') throw new Error('following must be a boolean');
       if (args.following) {
         const participants = followCoordinationThread({
-          repository: context.repository,
+          repository: threadRepository(context),
           threadId,
           actor: context.actor,
           actorName: context.actorName,
@@ -256,7 +333,7 @@ export async function executeCoordinationThreadTool(
         return { content: JSON.stringify({ following: true, participants }), isError: false };
       }
       const changed = unfollowCoordinationThread({
-        repository: context.repository, threadId, actor: context.actor, taskId: context.taskId,
+        repository: threadRepository(context), threadId, actor: context.actor, taskId: context.taskId,
       });
       return { content: JSON.stringify({ following: false, changed }), isError: false };
     }
@@ -267,13 +344,16 @@ export async function executeCoordinationThreadTool(
         throw new Error('expected_version must be a positive integer');
       }
       const thread = resolveCoordinationThread({
-        repository: context.repository,
+        repository: threadRepository(context),
         threadId: requiredString(args, 'thread_id'),
         expectedVersion,
         actor: context.actor,
         taskId: context.taskId,
       });
-      return { content: JSON.stringify({ accepted: true, thread }), isError: false };
+      const notification = await publishCoordinationThreadUpdate(context, {
+        thread, action: 'resolved', mutationId: `resolve:${thread.id}:${thread.version}`,
+      });
+      return { content: JSON.stringify({ accepted: true, thread, notification }), isError: false };
     }
 
     return { content: `Unknown coordination thread tool: ${name}`, isError: true };

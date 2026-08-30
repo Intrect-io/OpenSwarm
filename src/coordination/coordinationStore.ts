@@ -22,6 +22,7 @@ export type CoordinationKind =
   | 'adapter-route'
   | 'review-run'
   | 'mcp-audit'
+  | 'thread-update'
   | 'instruction-snapshot';
 
 export type CoordinationStatus = 'open' | 'waiting' | 'running' | 'completed' | 'failed' | 'expired';

@@ -305,6 +305,7 @@ export const KIND_COLORS = {
   'adapter-route': '#9d7cd8',
   'review-run': '#4cc38a',
   'mcp-audit': '#9d7cd8',
+  'thread-update': '#3b9eff',
   'instruction-snapshot': '#6c7086',
 };
 

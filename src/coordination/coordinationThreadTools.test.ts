@@ -9,24 +9,29 @@ import {
   type CoordinationThreadToolContext,
 } from './coordinationThreadTools.js';
 import { resetTraceDbForTests } from './coordinationTrace.js';
+import { getCoordinationStore, resetCoordinationStoreForTests } from './coordinationStore.js';
 
 let root: string;
 const worker: CoordinationThreadToolContext = {
-  repository: '/repo', taskId: 'task-a', taskLabel: 'AGT-1', actor: 'worker-a', actorRole: 'worker',
+  repository: '/repo', repoKey: 'git:repo', taskId: 'task-a', taskLabel: 'AGT-1', actor: 'worker-a', actorRole: 'worker',
 };
 const reviewer: CoordinationThreadToolContext = {
-  repository: '/repo', taskId: 'task-b', taskLabel: 'AGT-2', actor: 'reviewer-b', actorRole: 'reviewer',
+  repository: '/repo', repoKey: 'git:repo', taskId: 'task-b', taskLabel: 'AGT-2', actor: 'reviewer-b', actorRole: 'reviewer',
 };
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'coordination-thread-tools-'));
   process.env.OPENSWARM_AUTOMATION_DB = join(root, 'automation.db');
+  process.env.OPENSWARM_COORDINATION_FILE = join(root, 'coordination.json');
   resetTraceDbForTests();
+  resetCoordinationStoreForTests();
 });
 
 afterEach(() => {
   resetTraceDbForTests();
+  resetCoordinationStoreForTests();
   delete process.env.OPENSWARM_AUTOMATION_DB;
+  delete process.env.OPENSWARM_COORDINATION_FILE;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -57,7 +62,7 @@ describe('coordination thread tools', () => {
     });
     expect(made.isError).toBe(false);
     const thread = parsed(made).thread;
-    expect(thread).toMatchObject({ repository: '/repo', createdByActor: 'worker-a' });
+    expect(thread).toMatchObject({ repository: 'git:repo', createdByActor: 'worker-a' });
 
     const related = parsed(await execute('coordination_thread_list', {}, reviewer));
     expect(related.items.map((item: { id: string }) => item.id)).toEqual([thread.id]);
@@ -83,6 +88,13 @@ describe('coordination thread tools', () => {
     await execute('coordination_thread_reply', {
       thread_id: threadId, body: 'I will integrate it.', idempotency_key: 'integrate',
     });
+    const notified = await getCoordinationStore().consume('reviewer-b', {
+      repository: '/repo', repoKey: 'git:repo', taskId: 'task-b',
+    });
+    expect(notified).toContainEqual(expect.objectContaining({
+      kind: 'thread-update', sourceTaskId: 'task-a', targetTaskId: 'task-b',
+      metadata: expect.objectContaining({ threadId, action: 'replied' }),
+    }));
     expect(parsed(await execute('coordination_thread_list', { scope: 'following' }, reviewer)).items[0].unreadCount)
       .toBe(1);
 
@@ -98,6 +110,7 @@ describe('coordination thread tools', () => {
     expect(parsed(resolved).thread).toMatchObject({
       status: 'resolved', resolvedByActor: 'reviewer-b', resolvedByTaskId: 'task-b',
     });
+    expect(parsed(resolved).notification.warnings).toEqual([]);
   });
 
   it('returns validation and repository isolation failures as tool errors', async () => {
@@ -106,7 +119,7 @@ describe('coordination thread tools', () => {
       subject: 'Private to repo', idempotency_key: 'private',
     }));
     expect((await execute('coordination_thread_get', { thread_id: made.thread.id }, {
-      ...reviewer, repository: '/other',
+      ...reviewer, repository: '/other', repoKey: 'git:other',
     })).isError).toBe(true);
   });
 });

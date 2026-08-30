@@ -8,7 +8,6 @@
 // trace in automation.db; the live board only announces their mutations.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
 import type Database from 'better-sqlite3';
 import { getTraceDb } from './coordinationTrace.js';
 
@@ -249,7 +248,10 @@ function optionalText(value: string | undefined, field: string, max: number): st
 }
 
 function repository(value: string): string {
-  return resolve(identity(value, 'repository'));
+  // This is the repository CELL identity, not necessarily a filesystem path.
+  // `repositoryKey()` deliberately produces an opaque `git:<digest>` key, and
+  // path resolution here would corrupt it into a cwd-relative pseudo-path.
+  return identity(value, 'repository');
 }
 
 function idempotencyKey(value: string | undefined): string | undefined {

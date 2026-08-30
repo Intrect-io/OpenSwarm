@@ -5,18 +5,23 @@ import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tryHandleCoordinationThreadRoutes } from './coordinationThreadRoutes.js';
 import { resetTraceDbForTests } from './coordinationTrace.js';
+import { resetCoordinationStoreForTests } from './coordinationStore.js';
 
 let root: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'coordination-thread-routes-'));
   process.env.OPENSWARM_AUTOMATION_DB = join(root, 'automation.db');
+  process.env.OPENSWARM_COORDINATION_FILE = join(root, 'coordination.json');
   resetTraceDbForTests();
+  resetCoordinationStoreForTests();
 });
 
 afterEach(() => {
   resetTraceDbForTests();
+  resetCoordinationStoreForTests();
   delete process.env.OPENSWARM_AUTOMATION_DB;
+  delete process.env.OPENSWARM_COORDINATION_FILE;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -46,6 +51,7 @@ describe('durable coordination thread HTTP API', () => {
       idempotencyKey: 'merge-order',
     });
     expect(created).toMatchObject({ handled: true, status: 201 });
+    expect(created.body.notification).toMatchObject({ delivered: 1, warnings: [] });
     const threadId = created.body.thread.id as string;
 
     const related = await call('GET', '/api/coordination/threads?repository=%2Frepo&taskId=task-b');
