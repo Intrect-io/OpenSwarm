@@ -355,12 +355,31 @@ autonomous:
       writeTools: [linear__save_comment]
   periodicReviews:
     - { profile: hygiene, schedule: "43 */6 * * *" }
-  # MCP-connected orchestrator sweep. Runs only where the board has open items
-  # it can act on; questions waiting on the operator are left for Discord.
-  orchestratorSchedule: "17 */2 * * *"
+  # Frontier project supervisor. Events provide the fast path; cron reconciles
+  # anything missed while the daemon was down.
+  orchestrator:
+    enabled: true
+    schedule: "17 */2 * * *"
+    eventDriven: true
+    eventDebounceMs: 1000
+    adapter: codex-responses
+    model: gpt-5.6-sol
+    reasoningEffort: high
+    timeoutMs: 600000
+    maxTurns: 12
 ```
 
 Every agent has a call sign — `Magos Corvax-Vigilis`, `Adept Ferrus-Umbra` — and messages are addressed to it. The name is derived from the repository, task, and role rather than randomly assigned, so it is stable across a restart or a retry and doubles as the agent's mailbox address; the worker and the reviewer on one task never share one. Call signs appear in the dashboard, in board comments, and in each agent's own prompt.
+
+The project supervisor is separate from worker provider switching: pin its
+`adapter` and `model` explicitly when it must remain on the frontier tier. Only
+native-loop adapters can receive the role-scoped MCP tools while also enforcing
+`shellTools: false`; delegated `codex`, `claude`, and `cursor` CLIs fail closed.
+One sweep runs at a time per daemon and repository, concurrent daemons contend
+on a file lock, and shutdown aborts then drains an active supervisor call. An
+unchanged set of open board items is not sent to the model again. The deprecated
+`orchestratorSchedule` key is still accepted as a cron-only, daemon-provider
+compatible configuration, but new deployments should use `orchestrator`.
 
 Blocking questions are sent to the configured Discord channel as `!answer <correlation-id> <answer>`. Only users in `DISCORD_ALLOWED_USERS` can settle them. The asking run stops and reports rather than guessing a default, and the question stays open on the board until someone answers — the answer is addressed back to the call sign that raised it, so the next run of that agent reads it from its inbox. When Discord is not configured the tool says so instead of claiming the operator was paged.
 

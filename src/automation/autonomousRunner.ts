@@ -30,6 +30,8 @@ import {
 } from './runnerState.js';
 import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck, composeDispatchScope, pathIsUnderAny } from '../orchestration/decisionEngine.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
+import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
+import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
 import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
@@ -86,6 +88,7 @@ import {
 import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
 import { buildCancellationEffect, buildCompletionEffect, completionStats, deliverTrackerEffect } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
+import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -180,7 +183,7 @@ export class AutonomousRunner {
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
   private cronJob: Cron | null = null;
   private periodicReviewJobs: Cron[] = [];
-  private orchestratorJob: Cron | null = null;
+  private orchestratorSupervisor: OrchestratorSupervisor | null = null;
   private startupHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private stopping = false;
   private state: RunnerState = {
@@ -1655,8 +1658,8 @@ export class AutonomousRunner {
     this.stopEventLoopMonitor = null;
     for (const job of this.periodicReviewJobs) job.stop();
     this.periodicReviewJobs = [];
-    this.orchestratorJob?.stop();
-    this.orchestratorJob = null;
+    await this.orchestratorSupervisor?.stop();
+    this.orchestratorSupervisor = null;
 
     if (this.cronJob) {
       this.cronJob.stop();
@@ -2674,64 +2677,30 @@ export class AutonomousRunner {
   }
 
   private startOrchestrator(): void {
-    this.orchestratorJob?.stop();
-    this.orchestratorJob = null;
-    const schedule = this.config.orchestratorSchedule;
-    if (!schedule) return;
-    this.orchestratorJob = new Cron(schedule, () => {
-      void this.runOrchestratorAcrossProjects().catch((error) =>
-        console.error('[Orchestrator] sweep failed:', error));
+    const config = resolveOrchestratorConfig(this.config);
+    if (!config?.enabled) return;
+
+    const supervisor = new OrchestratorSupervisor({
+      config,
+      policy: this.config.mcpPolicies?.orchestrator,
+      getRepositories: () => {
+        const enabled = this.getEnabledProjects();
+        return enabled.length > 0 ? enabled : this.getAllowedProjects();
+      },
+      buildInstructionCapsule,
     });
-  }
-
-  /**
-   * Let the MCP-connected orchestrator act on whatever the board is waiting on.
-   *
-   * Only runs where there is something to coordinate: a sweep with an empty
-   * pending list would spend a provider call to conclude nothing, and the
-   * orchestrator's whole job is unblocking work that already exists.
-   */
-  private async runOrchestratorAcrossProjects(): Promise<void> {
-    const policy = this.config.mcpPolicies?.orchestrator;
-    if (!policy) {
-      console.warn('[Orchestrator] no mcpPolicies.orchestrator configured — skipping sweep');
-      return;
-    }
-    // Imported one at a time: concurrent dynamic imports of mocked modules have
-    // raced here before, with the second call resolving the real module.
-    // A delegated CLI adapter runs its own tool loop: it would receive none of
-    // the MCP tools the orchestrator exists to use, and spawnCli refuses to run
-    // it with shell access withheld. Skip with one clear line instead of
-    // throwing once per repository, every sweep.
-    const { getAdapter } = await import('../adapters/index.js');
-    const adapter = getAdapter();
-    if (!adapter.run) {
-      console.warn(
-        `[Orchestrator] adapter '${adapter.name}' delegates to its own CLI tool loop and cannot use MCP — skipping sweep. `
-        + `Use codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, or local.`,
+    try {
+      supervisor.start();
+      this.orchestratorSupervisor = supervisor;
+      console.log(
+        `[Orchestrator] supervisor enabled (${config.eventDriven ? 'events' : 'cron-only'}`
+        + `${config.schedule ? `, ${config.schedule}` : ''}; ${config.adapter ?? 'daemon-default'}/${config.model ?? 'adapter-default'})`,
       );
-      return;
-    }
-    const { buildOrchestratorObjective, runOrchestrator } = await import('../coordination/orchestratorAgent.js');
-    const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
-    const store = getCoordinationStore();
-    const projects = this.getEnabledProjects().length > 0 ? this.getEnabledProjects() : this.getAllowedProjects();
-
-    for (const repository of projects) {
-      const objective = buildOrchestratorObjective(store.snapshot(repository).pending);
-      if (!objective) continue;
-      // Same rule snapshot the workers get, so the orchestrator coordinates
-      // under the runbook it is coordinating against rather than an empty one.
-      const { buildInstructionCapsule } = await import('../agents/instructionCapsule.js');
-      await runOrchestrator({
-        repository,
-        taskId: 'orchestrator:sweep',
-        objective,
-        policy,
-        instructionCapsule: buildInstructionCapsule(repository),
-        // No adapter override: the orchestrator runs on the daemon's configured
-        // provider, the same one the workers it coordinates use.
-      }).catch((error) => console.error(`[Orchestrator] ${repository} failed:`, error));
+    } catch (error) {
+      // A bad optional schedule must not tear down the worker heartbeat after it
+      // has already started. No listener was registered if Cron construction failed.
+      console.error('[Orchestrator] supervisor disabled: invalid lifecycle configuration:', error);
+      void supervisor.stop();
     }
   }
 
@@ -2742,6 +2711,7 @@ export class AutonomousRunner {
       mcpPolicies: this.config.mcpPolicies,
       adapterRouting: this.config.adapterRouting,
       periodicReviews: this.config.periodicReviews ?? [],
+      orchestrator: resolveOrchestratorConfig(this.config),
       orchestratorSchedule: this.config.orchestratorSchedule,
     };
   }

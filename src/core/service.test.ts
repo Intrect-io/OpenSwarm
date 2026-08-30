@@ -298,6 +298,12 @@ describe('service', () => {
         adapterRouting: { primary: 'codex-responses' as const, fallbacks: ['cc-router' as const], allowReasons: ['quota' as const] },
         mcpPolicies: { orchestrator: { servers: ['github'] } },
         periodicReviews: [{ profile: 'hygiene' as const, schedule: '43 */6 * * *' }],
+        orchestrator: {
+          enabled: true,
+          adapter: 'codex-responses' as const,
+          model: 'gpt-5.6-sol',
+          reasoningEffort: 'high' as const,
+        },
         orchestratorSchedule: '17 */2 * * *',
       },
     } as SwarmConfig;
@@ -309,6 +315,12 @@ describe('service', () => {
       adapterRouting: { primary: 'codex-responses' },
       mcpPolicies: { orchestrator: { servers: ['github'] } },
       periodicReviews: [{ profile: 'hygiene', schedule: '43 */6 * * *' }],
+      orchestrator: {
+        enabled: true,
+        adapter: 'codex-responses',
+        model: 'gpt-5.6-sol',
+        reasoningEffort: 'high',
+      },
       orchestratorSchedule: '17 */2 * * *',
     });
   });

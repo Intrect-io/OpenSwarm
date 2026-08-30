@@ -11,6 +11,7 @@
 // leaves `cd /repo && …` open to the one agent in the system holding GitHub,
 // Linear, and Cloudflare credentials at once.
 
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,8 +30,11 @@ export interface OrchestratorRunOptions {
   policy?: RoleMcpPolicy;
   adapterName?: AdapterName;
   model?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high';
   timeoutMs?: number;
   maxTurns?: number;
+  /** Why this run started (`cron`, `coordination-event`, or a coalesced set). */
+  trigger?: string;
   instructionCapsule?: InstructionCapsule;
   signal?: AbortSignal;
 }
@@ -41,6 +45,10 @@ export interface OrchestratorRunResult {
   output: string;
   toolsGranted: string[];
   toolsDenied: Array<{ name: string; reason: string }>;
+  adapter: AdapterName;
+  model: string;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  skippedReason?: 'mcp-discovery-failed' | 'no-approved-mcp-tools';
 }
 
 /**
@@ -65,10 +73,83 @@ export function buildOrchestratorObjective(pending: readonly CoordinationEvent[]
 }
 
 export async function runOrchestrator(options: OrchestratorRunOptions): Promise<OrchestratorRunResult> {
-  const discovered = await getMcpTools().catch(() => []);
-  const { tools, denied } = filterMcpToolsForRole(discovered, options.policy);
+  options.signal?.throwIfAborted();
   const store = getCoordinationStore();
   const callSign = assignCallSign({ repository: options.repository, executionId: options.taskId, role: 'orchestrator' });
+  const adapter = getAdapter(options.adapterName);
+  const routeCorrelationId = `orchestrator-route:${randomUUID()}`;
+  if (!adapter.run) {
+    // Do not invoke delegated adapter discovery here. Some implementations
+    // consult a live account/model catalog, which is unnecessary provider work
+    // for a route that must be rejected before any delegated CLI activity.
+    const model = options.model ?? 'adapter-default';
+    await store.publish({
+      repository: options.repository,
+      taskId: options.taskId,
+      actor: callSign.address,
+      actorName: callSign.name,
+      actorRole: 'orchestrator',
+      kind: 'adapter-route',
+      status: 'failed',
+      correlationId: routeCorrelationId,
+      summary: `Orchestrator adapter '${adapter.name}' delegates its tool loop and cannot enforce MCP-only supervision`,
+      metadata: { adapter: adapter.name, model },
+    });
+    throw new Error(
+      `Orchestrator adapter '${adapter.name}' delegates to its own CLI tool loop and cannot use MCP with shell access withheld. `
+      + 'Use codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, or local.',
+    );
+  }
+
+  const model = options.model ?? await adapter.getDefaultModel();
+  options.signal?.throwIfAborted();
+  await store.publish({
+    repository: options.repository,
+    taskId: options.taskId,
+    actor: callSign.address,
+    actorName: callSign.name,
+    actorRole: 'orchestrator',
+    kind: 'adapter-route',
+    status: 'completed',
+    correlationId: routeCorrelationId,
+    summary: `Orchestrator routed to ${adapter.name}/${model}`,
+    metadata: {
+      adapter: adapter.name,
+      model,
+      ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}),
+      ...(options.trigger ? { trigger: options.trigger } : {}),
+    },
+  });
+
+  let discovered;
+  try {
+    discovered = await getMcpTools();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await store.publish({
+      repository: options.repository,
+      taskId: options.taskId,
+      actor: callSign.address,
+      actorName: callSign.name,
+      actorRole: 'orchestrator',
+      kind: 'mcp-audit',
+      status: 'failed',
+      summary: `Orchestrator skipped: MCP discovery failed (${message.slice(0, 240)})`,
+      metadata: { adapter: adapter.name, model },
+    });
+    return {
+      callSign: callSign.name,
+      output: '',
+      toolsGranted: [],
+      toolsDenied: [],
+      adapter: adapter.name as AdapterName,
+      model,
+      reasoningEffort: options.reasoningEffort,
+      skippedReason: 'mcp-discovery-failed',
+    };
+  }
+  options.signal?.throwIfAborted();
+  const { tools, denied } = filterMcpToolsForRole(discovered, options.policy);
   for (const entry of denied) {
     await store.publish({
       repository: options.repository,
@@ -82,9 +163,46 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     });
   }
 
+  if (tools.length === 0) {
+    await store.publish({
+      repository: options.repository,
+      taskId: options.taskId,
+      actor: callSign.address,
+      actorName: callSign.name,
+      actorRole: 'orchestrator',
+      kind: 'mcp-audit',
+      status: 'completed',
+      summary: 'Orchestrator skipped: no policy-approved MCP tools are available',
+      metadata: { adapter: adapter.name, model, deniedCount: denied.length },
+    });
+    return {
+      callSign: callSign.name,
+      output: '',
+      toolsGranted: [],
+      toolsDenied: denied,
+      adapter: adapter.name as AdapterName,
+      model,
+      reasoningEffort: options.reasoningEffort,
+      skippedReason: 'no-approved-mcp-tools',
+    };
+  }
+
+  const runCorrelationId = `orchestrator-run:${randomUUID()}`;
+  await store.publish({
+    repository: options.repository,
+    taskId: options.taskId,
+    actor: callSign.address,
+    actorName: callSign.name,
+    actorRole: 'orchestrator',
+    kind: 'mcp-audit',
+    status: 'running',
+    correlationId: runCorrelationId,
+    summary: `Orchestrator supervision started via ${options.trigger ?? 'manual'}`,
+    metadata: { adapter: adapter.name, model, grantedCount: tools.length, deniedCount: denied.length },
+  });
   const scratch = await mkdtemp(join(tmpdir(), 'openswarm-orchestrator-'));
   try {
-    const raw = await spawnCli(getAdapter(options.adapterName), {
+    const raw = await spawnCli(adapter, {
       prompt: [
         '# Worker orchestrator',
         '',
@@ -98,7 +216,8 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         `Objective: ${options.objective}`,
       ].join('\n'),
       cwd: scratch,
-      model: options.model,
+      model,
+      reasoningEffort: options.reasoningEffort,
       maxTurns: options.maxTurns ?? 10,
       timeoutMs: options.timeoutMs ?? 300_000,
       systemPrompt: options.instructionCapsule?.text,
@@ -119,15 +238,43 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       actorRole: 'orchestrator',
       kind: 'mcp-audit',
       status: 'completed',
+      correlationId: runCorrelationId,
       summary: `Orchestrator run granted ${tools.length} MCP tool(s), denied ${denied.length}`,
-      metadata: { grantedCount: tools.length, deniedCount: denied.length },
+      metadata: {
+        adapter: adapter.name,
+        model,
+        grantedCount: tools.length,
+        deniedCount: denied.length,
+        durationMs: raw.durationMs,
+        ...(raw.costInfo?.inputTokens !== undefined ? { inputTokens: raw.costInfo.inputTokens } : {}),
+        ...(raw.costInfo?.outputTokens !== undefined ? { outputTokens: raw.costInfo.outputTokens } : {}),
+        ...(raw.costInfo?.costUsd !== undefined ? { costUsd: raw.costInfo.costUsd } : {}),
+      },
     });
     return {
       callSign: callSign.name,
       output: raw.stdout,
       toolsGranted: tools.map((tool) => tool.function.name),
       toolsDenied: denied,
+      adapter: adapter.name as AdapterName,
+      model,
+      reasoningEffort: options.reasoningEffort,
     };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await store.publish({
+      repository: options.repository,
+      taskId: options.taskId,
+      actor: callSign.address,
+      actorName: callSign.name,
+      actorRole: 'orchestrator',
+      kind: 'mcp-audit',
+      status: 'failed',
+      correlationId: runCorrelationId,
+      summary: `Orchestrator supervision failed: ${message.slice(0, 300)}`,
+      metadata: { adapter: adapter.name, model },
+    });
+    throw error;
   } finally {
     await rm(scratch, { recursive: true, force: true }).catch(() => {});
   }

@@ -4,7 +4,7 @@
 
 import type { DecisionResult, TaskItem } from '../orchestration/decisionEngine.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
-import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
+import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, JobProfile, OrchestratorConfig, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import type { RoleMcpPolicy } from '../coordination/mcpPolicy.js';
 
 export interface AutonomousConfig {
@@ -70,7 +70,10 @@ export interface AutonomousConfig {
   adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
   /** Periodic read-only repository review jobs. */
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
+  /** Explicit high-capability project supervisor. */
+  orchestrator?: OrchestratorConfig;
   /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
+  /** @deprecated Use `orchestrator.schedule`. */
   orchestratorSchedule?: string;
 }
 

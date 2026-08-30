@@ -344,6 +344,32 @@ export type RoleConfig = {
 };
 
 /**
+ * Project-level supervisor configuration.
+ *
+ * Unlike a worker/reviewer role, this agent never enters a repository worktree.
+ * It watches the coordination board and uses an explicitly selected native-loop
+ * adapter from a scratch directory with shell access withheld.
+ */
+export type OrchestratorConfig = {
+  /** Explicit kill switch. Defaults true when the object is present. */
+  enabled?: boolean;
+  /** Reconciliation sweep cadence. Event-driven supervision may run without it. */
+  schedule?: string;
+  /** React to actionable coordination events instead of waiting for the cron. */
+  eventDriven?: boolean;
+  /** Coalesce bursts of board events before one supervisor sweep. */
+  eventDebounceMs?: number;
+  /** Must be an adapter that runs OpenSwarm's native tool loop. */
+  adapter?: AgentAdapterName;
+  /** High-capability model used for project-level supervision. */
+  model?: string;
+  /** Native-loop reasoning level. */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  timeoutMs?: number;
+  maxTurns?: number;
+};
+
+/**
  * Pipeline stage
  */
 export type PipelineStage = 'worker' | 'reviewer' | 'tester' | 'documenter' | 'auditor' | 'skill-documenter';
@@ -577,7 +603,10 @@ export type AutonomousStartupConfig = {
   mcpPolicies?: Record<string, { servers: string[]; allowTools?: string[]; writeTools?: string[]; destructiveTools?: string[] }>;
   adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
+  /** Explicit high-capability project supervisor. */
+  orchestrator?: OrchestratorConfig;
   /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
+  /** @deprecated Use `orchestrator.schedule`. */
   orchestratorSchedule?: string;
 };
 

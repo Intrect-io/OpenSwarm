@@ -7,7 +7,12 @@ import { buildOrchestratorObjective } from './orchestratorAgent.js';
 
 const spawnCli = vi.hoisted(() => vi.fn(async () => ({ exitCode: 0, stdout: 'coordinated', stderr: '', durationMs: 1 })));
 const getMcpTools = vi.hoisted(() => vi.fn());
-vi.mock('../adapters/index.js', () => ({ getAdapter: () => ({ name: 'codex' }), spawnCli }));
+const getAdapter = vi.hoisted(() => vi.fn(() => ({
+  name: 'codex-responses',
+  run: vi.fn(),
+  getDefaultModel: vi.fn(async () => 'gpt-5.6-terra'),
+})));
+vi.mock('../adapters/index.js', () => ({ getAdapter, spawnCli }));
 vi.mock('../mcp/mcpClient.js', () => ({ getMcpTools }));
 
 const tool = (name: string): ToolDefinition => ({ type: 'function', function: { name, description: '', parameters: { type: 'object' } } });
@@ -18,6 +23,11 @@ const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
 let dir = '';
 afterEach(async () => {
   vi.clearAllMocks();
+  getAdapter.mockReturnValue({
+    name: 'codex-responses',
+    run: vi.fn(),
+    getDefaultModel: vi.fn(async () => 'gpt-5.6-terra'),
+  });
   (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
   process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE;
   if (dir) rmSync(dir, { recursive: true, force: true });
@@ -89,5 +99,93 @@ describe('runOrchestrator', () => {
 
     const passed = spawnCli.mock.calls[0][1] as { shellTools?: boolean };
     expect(passed.shellTools).toBe(false);
+  });
+
+  it('passes the explicit supervisor model and reasoning route to the native loop', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-route-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    getMcpTools.mockResolvedValue([tool('linear__get_issue')]);
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    const result = await runOrchestrator({
+      repository: '/repo',
+      taskId: 'coordination',
+      objective: 'x',
+      policy: { servers: ['linear'] },
+      adapterName: 'codex-responses',
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'high',
+      trigger: 'coordination-event',
+    });
+
+    expect(getAdapter).toHaveBeenCalledWith('codex-responses');
+    expect(spawnCli.mock.calls[0][1]).toMatchObject({
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'high',
+      shellTools: false,
+    });
+    expect(result).toMatchObject({ adapter: 'codex-responses', model: 'gpt-5.6-sol', reasoningEffort: 'high' });
+    const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 20 });
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'adapter-route', status: 'completed', metadata: expect.objectContaining({ model: 'gpt-5.6-sol', trigger: 'coordination-event' }) }),
+      expect.objectContaining({ kind: 'mcp-audit', status: 'running' }),
+      expect.objectContaining({ kind: 'mcp-audit', status: 'completed', metadata: expect.objectContaining({ model: 'gpt-5.6-sol' }) }),
+    ]));
+  });
+
+  it('fails closed before spawn when a delegated adapter cannot withhold shell access', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-delegated-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    const getDefaultModel = vi.fn(async () => 'gpt-5-codex');
+    getAdapter.mockReturnValue({
+      name: 'codex',
+      run: undefined as never,
+      getDefaultModel,
+    });
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    await expect(runOrchestrator({
+      repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['linear'] }, adapterName: 'codex',
+    })).rejects.toThrow(/delegates to its own CLI tool loop/);
+
+    expect(spawnCli).not.toHaveBeenCalled();
+    expect(getMcpTools).not.toHaveBeenCalled();
+    expect(getDefaultModel).not.toHaveBeenCalled();
+    const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 10 });
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'adapter-route', status: 'failed' }));
+  });
+
+  it('records MCP discovery failure and skips the provider call', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-mcp-down-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    getMcpTools.mockRejectedValue(new Error('catalog offline'));
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    const result = await runOrchestrator({
+      repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['linear'] },
+    });
+
+    expect(result.skippedReason).toBe('mcp-discovery-failed');
+    expect(spawnCli).not.toHaveBeenCalled();
+    const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 10 });
+    expect(events).toContainEqual(expect.objectContaining({ kind: 'mcp-audit', status: 'failed', summary: expect.stringContaining('catalog offline') }));
+  });
+
+  it('does not spend a model call when policy grants no discovered tool', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-no-tools-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    getMcpTools.mockResolvedValue([tool('github__get_issue')]);
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    const result = await runOrchestrator({
+      repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['linear'] },
+    });
+
+    expect(result.skippedReason).toBe('no-approved-mcp-tools');
+    expect(spawnCli).not.toHaveBeenCalled();
   });
 });

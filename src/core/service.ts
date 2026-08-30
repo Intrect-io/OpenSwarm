@@ -312,6 +312,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       mcpPolicies: config.autonomous.mcpPolicies,
       adapterRouting: config.autonomous.adapterRouting,
       periodicReviews: config.autonomous.periodicReviews,
+      orchestrator: config.autonomous.orchestrator,
       orchestratorSchedule: config.autonomous.orchestratorSchedule,
     });
     if (config.autonomous.coordinationBoardIssueId) {
