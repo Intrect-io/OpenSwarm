@@ -34,10 +34,16 @@ const TASK: TaskItem = {
   linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
 };
 
-function pipelineResult(): PipelineResult {
+function pipelineResult(correlationIds: string[] = []): PipelineResult {
   return {
     success: false, sessionId: 'session-1', stages: [], finalStatus: 'waiting_on_operator',
     totalDuration: 0, iterations: 1,
+    workerResult: {
+      success: false,
+      summary: 'asked the operator',
+      filesChanged: [], commands: [], output: '', blockedOnOperator: true,
+      operatorQuestionCorrelationIds: correlationIds,
+    },
   };
 }
 
@@ -54,13 +60,9 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     process.env.OPENSWARM_RUNNER_REJECTION_STATE_FILE = join(root, 'rejections.json');
     process.env.OPENSWARM_RUNNER_PIPELINE_HISTORY_FILE = join(root, 'history.json');
     process.env.OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE = join(root, 'decomposition.json');
-    // lastAnsweredAt reads the durable coordination trace, a separate SQLite
-    // file keyed off this env var (not `dbPath` above, which is only the
-    // ledger's own file) and not reset by resetCoordinationStoreForTests.
-    // Every test in this file reuses the same repository/taskId, and without
-    // a fresh path per test the trace accumulates across the whole file's
-    // run — a later test's answer could otherwise read as an earlier test's.
-    process.env.OPENSWARM_AUTOMATION_DB = join(root, 'automation.db');
+    // The exact resume gate joins run and coordination truth in one durable
+    // SQLite database. Production config does the same; tests must not split it.
+    process.env.OPENSWARM_AUTOMATION_DB = dbPath;
   });
 
   afterEach(async () => {
@@ -118,17 +120,17 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     ledger.close();
   }
 
-  it('parks the run once it has asked twice with no answer, instead of retrying on a clock', async () => {
+  it('parks the first unanswered attempt immediately instead of retrying on a clock', async () => {
     const internal = await makeRunner();
-    await seedConsecutiveUnansweredAttempts(2);
+    await seedConsecutiveUnansweredAttempts(1);
 
-    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: pipelineResult() });
+    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: pipelineResult(['hq-first']) });
     await vi.waitFor(() => {
       expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
     });
 
     const run = internal.durableRuns.getRun('AGT-1');
-    expect(run?.lastErrorMessage).toMatch(/^\[operator-question\]/);
+    expect(run?.lastErrorCode).toBe('operator_question');
     expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(false); // no fixed-backoff ladder entry either
     internal.durableRuns.close();
   });
@@ -141,14 +143,14 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     const internal = await makeRunner();
     await seedConsecutiveUnansweredAttempts(2);
 
-    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: pipelineResult() });
+    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: pipelineResult(['hq-identical']) });
     await vi.waitFor(() => {
       expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
     });
     internal.durableRuns.close();
   });
 
-  it('still uses the ordinary backoff on the first unanswered ask', async () => {
+  it('fails closed to ordinary backoff when an old adapter omits the exact correlation', async () => {
     const internal = await makeRunner();
     await seedConsecutiveUnansweredAttempts(1);
 
@@ -173,10 +175,10 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
       repository: REPO, taskId: 'AGT-1', actor: 'worker-x', recipient: 'human',
       kind: 'human-question', status: 'running', correlationId: 'hq-still-open', summary: 'ask',
     });
-    internal.durableRuns.markNeedsHuman(
-      'AGT-1',
-      '[operator-question] asked 2 times with no answer — stopped retrying automatically',
-    );
+    await seedConsecutiveUnansweredAttempts(1);
+    expect(internal.durableRuns.markNeedsHumanForQuestions(
+      'AGT-1', ['hq-still-open'], 'waiting for exact answer',
+    )).toBe(true);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
 
     const selected = internal.filterAlreadyProcessed([TASK]); // TASK.linearState === 'Todo'
@@ -194,10 +196,10 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
       repository: REPO, taskId: 'AGT-1', actor: 'worker-x', recipient: 'human',
       kind: 'human-question', status: 'running', correlationId: 'hq-only', summary: 'ask',
     });
-    internal.durableRuns.markNeedsHuman(
-      'AGT-1',
-      '[operator-question] asked 2 times with no answer — stopped retrying automatically',
-    );
+    await seedConsecutiveUnansweredAttempts(1);
+    expect(internal.durableRuns.markNeedsHumanForQuestions(
+      'AGT-1', ['hq-only'], 'waiting for exact answer',
+    )).toBe(true);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
 
     // The card stays in Todo throughout — resuming does not depend on the
@@ -214,13 +216,7 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     internal.durableRuns.close();
   });
 
-  it('does not park a new, distinct question on its first ask just because an earlier one was answered', async () => {
-    // The gate finding this closes: consecutiveAttemptsWithErrorCode used to
-    // walk the ledger unbounded, so a resumed run's first ask on a brand-new
-    // blocker shared its error code with the already-answered attempt before
-    // it and got folded into the same streak — parking on a first ask instead
-    // of getting the ordinary backoff. Bounding the walk by the task's most
-    // recent answer timestamp is what this test pins.
+  it('parks a new question independently and does not let an earlier answer resume it', async () => {
     const internal = await makeRunner();
     const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
     const store = getCoordinationStore();
@@ -255,12 +251,27 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     }, resumedAt)).toBe(true);
     ledger.close();
 
-    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: pipelineResult() });
+    await store.publish({
+      repository: REPO, taskId: 'AGT-1', actor: 'worker-x', recipient: 'human',
+      kind: 'human-question', status: 'waiting', correlationId: 'hq-b', summary: 'question B',
+      timestamp: resumedAt + 100,
+    });
+    internal.scheduler.emit('waiting_on_operator', { task: TASK, result: pipelineResult(['hq-b']) });
     await vi.waitFor(() => {
-      expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(true);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
     });
 
-    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    // Answer A is durable but cannot satisfy the exact question-B park.
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+
+    await store.publish({
+      repository: REPO, taskId: 'AGT-1', actor: 'operator', recipient: 'worker-x',
+      kind: 'human-answer', status: 'completed', correlationId: 'hq-b', summary: 'answered B',
+      detail: 'Use monthly_cutoff; do not create due_date.', timestamp: resumedAt + 200,
+    });
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 

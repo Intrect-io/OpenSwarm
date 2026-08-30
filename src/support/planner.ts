@@ -19,6 +19,7 @@ import { z } from 'zod';
 export interface PlannerOptions {
   taskTitle: string;
   taskDescription: string;
+  authoritativeOperatorFeedback?: string;
   projectPath: string;
   projectName?: string;
   timeoutMs?: number;
@@ -113,6 +114,7 @@ function buildPlannerPrompt(options: PlannerOptions): string {
   return getPrompts().buildPlannerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
+    authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
     projectName: options.projectName || options.projectPath,
     targetMinutes: options.targetMinutes ?? 25,
     impactAnalysis: options.impactAnalysis ?? undefined,

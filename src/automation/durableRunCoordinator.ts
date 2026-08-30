@@ -18,6 +18,10 @@ import {
 } from './runLedger.js';
 import type { TrackerTerminalState } from './runLedgerTrackerCache.js';
 import { pickPipelineFailureDetail } from './runnerState.js';
+import {
+  normalizeOperatorQuestionCorrelations,
+  OPERATOR_QUESTION_PARK_REASON,
+} from '../coordination/operatorAnswers.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -393,8 +397,21 @@ export class DurableRunCoordinator {
     return this.ledger?.markNeedsHuman(issueId, reason, now) ?? false;
   }
 
+  markNeedsHumanForQuestions(
+    issueId: string,
+    correlationIds: readonly string[],
+    reason: string,
+    now = Date.now(),
+  ): boolean {
+    return this.ledger?.markNeedsHumanForQuestions(issueId, correlationIds, reason, now) ?? false;
+  }
+
   resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
     return this.ledger?.resumeNeedsHuman(issueId, now) ?? null;
+  }
+
+  resumeNeedsHumanForQuestions(issueId: string, now = Date.now()): RunState | null {
+    return this.ledger?.resumeNeedsHumanForQuestions(issueId, now) ?? null;
   }
 
   importLegacyRun(input: ImportRunInput, now = Date.now()): { record: RunRecord; imported: boolean } | null {
@@ -673,6 +690,24 @@ export class DurableRunCoordinator {
       }
       if (!options.successEffect) this.ledger.finalizeSyncedRun(issueId, now);
       return result;
+    }
+
+    if (result.finalStatus === 'waiting_on_operator') {
+      const correlationIds = normalizeOperatorQuestionCorrelations(
+        result.workerResult?.operatorQuestionCorrelationIds ?? [],
+      );
+      if (correlationIds.length > 0) {
+        const reason = `Waiting for operator answer (${correlationIds.join(', ')})`;
+        return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+          errorCode: OPERATOR_QUESTION_PARK_REASON,
+          errorMessage: reason,
+          eventKind: 'operator_question_parked',
+          eventData: { reason, correlationIds },
+        }, now) ? result : fencedResult(result);
+      }
+      // Old/non-native adapters may identify the wait without returning the
+      // durable tool correlation. Do not invent a broad resume condition: the
+      // default RETRY_AT below is the fail-closed compatibility path.
     }
 
     let target: RunState;

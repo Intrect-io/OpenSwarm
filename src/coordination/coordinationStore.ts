@@ -6,7 +6,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { coordinationFilePath, coordinationStateDir } from './coordinationPaths.js';
-import { lastTraceEventOfKind, questionStandings, queryTrace, recordTraceEvent } from './coordinationTrace.js';
+import {
+  lastTraceEventOfKind,
+  questionStandings,
+  queryTrace,
+  recordTraceEvent,
+  resolvedHumanAnswers,
+  type ResolvedHumanAnswer,
+} from './coordinationTrace.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -347,6 +354,11 @@ export class CoordinationStore {
     const standings = questionStandings(taskId);
     if (!standings) return false;
     return standings.asked > 0 && standings.unanswered === 0;
+  }
+
+  /** Durable task-scoped operator decisions, including full answer detail. */
+  resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
+    return resolvedHumanAnswers(taskId);
   }
 
   /**

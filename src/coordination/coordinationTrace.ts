@@ -197,6 +197,24 @@ interface TraceRow {
   summary: string; detail: string | null; metadata_json: string | null; fingerprint: string;
 }
 
+export interface ResolvedHumanAnswer {
+  /** Every correlation settled by this one operator response (rephrased retries included). */
+  correlationIds: string[];
+  questions: string[];
+  answer: string;
+  answeredAt: number;
+  answerEventIds: string[];
+}
+
+interface ResolvedHumanAnswerRow {
+  correlation_id: string;
+  question: string;
+  answer: string;
+  answered_at: number;
+  answer_event_id: string;
+  metadata_json: string | null;
+}
+
 /**
  * Cursor-page the complete append-only archive for explicit localization
  * backfills. Normal UI queries stay newest-first and capped; this path is
@@ -383,6 +401,96 @@ export function questionStandings(taskId: string): { asked: number; unanswered: 
   } catch (error) {
     console.warn('[CoordinationTrace] Question standings failed:', error);
     return null;
+  }
+}
+
+/**
+ * Return every resolved operator decision for one task from the append-only
+ * trace. Unlike {@link queryTrace}, this control-plane read has no recency
+ * window: an old answer remains authoritative after board eviction and daemon
+ * restart.
+ *
+ * `answerSetId` is stamped by answerHumanQuestion when one visible reply also
+ * settles rephrased sibling questions. Grouping on it prevents the same answer
+ * being injected once per sibling while retaining every correlation used by
+ * the resume gate. Legacy rows without that metadata remain separate rather
+ * than risking an unsafe content-based dedupe of two genuinely distinct "yes"
+ * answers.
+ */
+export function resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
+  const handle = getTraceDb();
+  if (!handle) return [];
+  try {
+    const rows = handle.prepare(`
+      SELECT
+        q.correlation_id,
+        q.summary AS question,
+        COALESCE(a.detail, a.summary) AS answer,
+        a.timestamp AS answered_at,
+        a.event_id AS answer_event_id,
+        a.metadata_json
+      FROM coordination_trace q
+      JOIN coordination_trace a
+        ON a.task_id = q.task_id
+       AND a.correlation_id = q.correlation_id
+       AND a.kind = 'human-answer'
+       AND a.status = 'completed'
+       AND a.id = (
+         SELECT MIN(a2.id)
+         FROM coordination_trace a2
+         WHERE a2.task_id = q.task_id
+           AND a2.correlation_id = q.correlation_id
+           AND a2.kind = 'human-answer'
+           AND a2.status = 'completed'
+       )
+      WHERE q.task_id = ?
+        AND q.kind = 'human-question'
+        AND q.id = (
+          SELECT MIN(q2.id)
+          FROM coordination_trace q2
+          WHERE q2.task_id = q.task_id
+            AND q2.correlation_id = q.correlation_id
+            AND q2.kind = 'human-question'
+        )
+      ORDER BY a.id ASC, q.id ASC
+    `).all(taskId) as ResolvedHumanAnswerRow[];
+
+    const grouped = new Map<string, ResolvedHumanAnswer>();
+    for (const row of rows) {
+      let answerSetId: string | undefined;
+      if (row.metadata_json) {
+        try {
+          const metadata = JSON.parse(row.metadata_json) as { answerSetId?: unknown };
+          if (typeof metadata.answerSetId === 'string' && metadata.answerSetId.trim()) {
+            answerSetId = metadata.answerSetId;
+          }
+        } catch {
+          // A malformed historical metadata blob must not hide the answer.
+        }
+      }
+      const key = answerSetId
+        ? `set:${answerSetId}\u0000answer:${row.answer}`
+        : `correlation:${row.correlation_id}`;
+      const existing = grouped.get(key);
+      if (existing) {
+        if (!existing.correlationIds.includes(row.correlation_id)) existing.correlationIds.push(row.correlation_id);
+        if (!existing.questions.includes(row.question)) existing.questions.push(row.question);
+        if (!existing.answerEventIds.includes(row.answer_event_id)) existing.answerEventIds.push(row.answer_event_id);
+        existing.answeredAt = Math.max(existing.answeredAt, row.answered_at);
+      } else {
+        grouped.set(key, {
+          correlationIds: [row.correlation_id],
+          questions: [row.question],
+          answer: row.answer,
+          answeredAt: row.answered_at,
+          answerEventIds: [row.answer_event_id],
+        });
+      }
+    }
+    return [...grouped.values()].sort((a, b) => a.answeredAt - b.answeredAt);
+  } catch (error) {
+    console.warn('[CoordinationTrace] Resolved human-answer query failed:', error);
+    return [];
   }
 }
 

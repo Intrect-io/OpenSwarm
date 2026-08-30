@@ -221,6 +221,7 @@ export async function answerHumanQuestion(
       ? 'coordination.humanQuestion.humanAnswered'
       : 'coordination.humanQuestion.supervisorAnswered'),
     detail: answer,
+    metadata: { answerSetId: correlationId },
   });
 
   // A re-dispatch that rephrased this same blocker minted its own correlation
@@ -254,6 +255,7 @@ export async function answerHumanQuestion(
       correlationId: sibling.correlationId,
       summary: t('coordination.humanQuestion.siblingAnswered'),
       detail: answer,
+      metadata: { answerSetId: correlationId },
     });
   }
 

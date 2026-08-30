@@ -33,7 +33,12 @@ import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
 import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
 import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
-import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
+import {
+  normalizeOperatorQuestionCorrelations,
+  OPERATOR_PARK_REASON,
+  OPERATOR_QUESTION_PARK_REASON,
+  shouldReadmitEarly,
+} from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
@@ -644,38 +649,32 @@ export class AutonomousRunner {
         // park, so record the stand-in signal the heartbeat reads instead.
         if (!this.durableRuns.isPrimary) setOperatorPark(parkedId, true);
 
-        // A re-dispatch is a fresh worker session, and asking again is not
-        // free — a worker+reviewer cycle burned on a question the operator
-        // has already been paged for once and not answered. Past the first
-        // unanswered ask, stop the automatic retry loop entirely instead of
-        // paying for another one on a fixed clock: NEEDS_HUMAN drops the
-        // task out of heartbeat selection until the resume check finds it
-        // answered, or an operator otherwise reopens it (AGT-4042). Durable
-        // mode only — legacy mode has no ledger error code to gate the stop
-        // on, so it keeps the fixed-backoff ladder above.
-        //
-        // Counted as consecutive ATTEMPTS, not distinct board correlation
-        // IDs: a worker that asks with identical wording every time never
-        // mints a second correlation ID (the paging gate above collapses it
-        // to one), so a count keyed on wording would never see more than 1 no
-        // matter how many times it was actually re-dispatched and asked.
-        // Bounded by the task's last operator answer, so a resumed run's
-        // first ask on a brand-new question does not share a streak with the
-        // answered attempt before it.
-        const lastAnsweredAt = getCoordinationStore().lastAnsweredAt(parkedId);
-        const consecutiveAsks = this.durableRuns.consecutiveAttemptsWithErrorCode(
-          parkedId, OPERATOR_PARK_REASON, lastAnsweredAt,
+        const correlationIds = normalizeOperatorQuestionCorrelations(
+          result.workerResult?.operatorQuestionCorrelationIds ?? [],
         );
-        if (this.durableRuns.isPrimary && consecutiveAsks >= 2) {
-          this.durableRuns.markNeedsHuman(
-            parkedId,
-            `${OPERATOR_QUESTION_PARK_MARKER} asked ${consecutiveAsks} times with no answer — stopped retrying automatically`,
+        // The primary coordinator normally persisted NEEDS_HUMAN atomically
+        // before this event. The RETRY_AT conversion remains as a recovery path
+        // for callers that emit the scheduler event around a legacy coordinator.
+        // If an old adapter omits the correlation, keep bounded backoff rather
+        // than inventing a broad task-level resume condition.
+        const existingRun = this.durableRuns.getRun(parkedId);
+        const durablyParked = this.durableRuns.isPrimary
+          && correlationIds.length > 0
+          && (
+            (existingRun?.state === 'NEEDS_HUMAN'
+              && existingRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON)
+            || this.durableRuns.markNeedsHumanForQuestions(
+              parkedId,
+              correlationIds,
+              `Waiting for operator answer (${correlationIds.join(', ')})`,
+            )
           );
-          console.log(`[Scheduler] Parking ${taskCtx} — asked ${consecutiveAsks}x with no answer, stopped auto-retry until the operator answers or reopens it`);
+        if (durablyParked) {
+          console.log(`[Scheduler] Parking ${taskCtx} on exact operator question set: ${correlationIds.join(', ')}`);
         } else {
           const nextRetryTime = setRetryTime(parkedId, 4, this.failedTaskRetryTimes);
           this.saveTaskState();
-          console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)}, or sooner if the operator answers`);
+          console.log(`[Scheduler] Exact question park unavailable; re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)}`);
         }
       }
       this.scheduleNextHeartbeat();
@@ -1005,16 +1004,20 @@ export class AutonomousRunner {
         // elsewhere in this file, which share NEEDS_HUMAN but DO move the
         // card (a STUCK label / Backlog), keep resuming only on that Linear
         // change.
-        const isOperatorQuestionPark = durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false;
+        const isExactOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON;
+        const isLegacyOperatorQuestionPark = durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false;
+        const isOperatorQuestionPark = isExactOperatorQuestionPark || isLegacyOperatorQuestionPark;
         const linearReopened = !isOperatorQuestionPark
           && ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '');
         // Read from the durable trace, not the live board: a busy task's own
         // traffic can push its unanswered question out of a board window, and
         // `openQuestionCount` would then read that as "no questions open" —
         // resuming a run that is still genuinely waiting.
-        const questionAnswered = isOperatorQuestionPark && getCoordinationStore().allQuestionsAnswered(id);
-        if (linearReopened || questionAnswered) {
-          const resumed = this.durableRuns.resumeNeedsHuman(id);
+        const legacyQuestionAnswered = isLegacyOperatorQuestionPark && getCoordinationStore().allQuestionsAnswered(id);
+        if (linearReopened || legacyQuestionAnswered || isExactOperatorQuestionPark) {
+          const resumed = isExactOperatorQuestionPark
+            ? this.durableRuns.resumeNeedsHumanForQuestions(id)
+            : this.durableRuns.resumeNeedsHuman(id);
           if (resumed) {
             durableRun = this.durableRuns.getRun(id);
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();

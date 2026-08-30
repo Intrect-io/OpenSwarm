@@ -582,6 +582,37 @@ describe('PairPipeline model selection', () => {
     expect(runWorker.mock.calls[0][0].previousFeedback).toContain('Previous attempt failed');
   });
 
+  it('injects authoritative operator feedback into every worker iteration and the reviewer', async () => {
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'Use the stale due_date rule from the issue.' })
+      .mockResolvedValueOnce({ decision: 'approve', feedback: 'monthly_cutoff contract preserved.' });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 2,
+      roles: {
+        worker: { enabled: true, model: 'worker', timeoutMs: 0 },
+        reviewer: { enabled: true, model: 'reviewer', timeoutMs: 0 },
+      },
+    });
+    const guidance = 'Operator answer: Use the canonical monthly_cutoff path. Do not create a due_date rule.';
+
+    const result = await pipeline.run(task({
+      description: 'Stale issue text: add a due_date argument.',
+      priorAttemptFeedback: 'Earlier feedback also requested due_date.',
+      authoritativeOperatorFeedback: guidance,
+    }), process.cwd());
+
+    expect(result.success).toBe(true);
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    for (const call of runWorker.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({ authoritativeOperatorFeedback: guidance }));
+    }
+    for (const call of runReviewer.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({ authoritativeOperatorFeedback: guidance }));
+    }
+  });
+
   it('escalates the worker once on repeated revise feedback, then aborts if it still repeats', async () => {
     // Reviewer says the same thing twice → escalate the worker (effort bump);
     // if the ESCALATED attempt gets the same feedback again, stop burning

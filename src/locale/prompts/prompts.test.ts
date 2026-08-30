@@ -43,6 +43,26 @@ describe('buildWorkerPrompt', () => {
     expect(result).toContain('Session expires too fast');
   });
 
+  it('gives durable operator feedback explicit precedence in English and Korean', () => {
+    const authoritativeOperatorFeedback = 'Use canonical monthly_cutoff. Do not add a due_date rule.';
+    const opts = {
+      ...base,
+      taskDescription: 'Stale description: add due_date.',
+      previousFeedback: 'Earlier reviewer: add due_date.',
+      authoritativeOperatorFeedback,
+    };
+    const en = enPrompts.buildWorkerPrompt(opts);
+    const ko = koPrompts.buildWorkerPrompt(opts);
+    expect(en).toContain('Authoritative Operator Feedback');
+    expect(en).toContain('issue description, draft analysis, completion criteria, reviewer feedback, or earlier feedback');
+    expect(ko).toContain('운영자 확정 피드백');
+    expect(ko).toContain('이슈 설명, draft 분석, 완료 기준, reviewer 피드백 또는 이전 피드백');
+    for (const prompt of [en, ko]) {
+      expect(prompt).toContain('monthly_cutoff');
+      expect(prompt.indexOf('monthly_cutoff')).toBeLessThan(prompt.indexOf('Previous Feedback'));
+    }
+  });
+
   it('does not force a JSON success block (git diff is the success signal)', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     // JSON is now optional, only for flagging a halt/low-confidence.
@@ -348,6 +368,16 @@ describe('buildReviewerPrompt', () => {
     expect(result).toContain('Added Redis cache layer');
   });
 
+  it('carries authoritative operator feedback into both reviewer locales', () => {
+    const guidance = 'Use monthly_cutoff; never create due_date.';
+    const en = enPrompts.buildReviewerPrompt({ ...opts, authoritativeOperatorFeedback: guidance });
+    const ko = koPrompts.buildReviewerPrompt({ ...opts, authoritativeOperatorFeedback: guidance });
+    expect(en).toContain('Authoritative Operator Feedback');
+    expect(ko).toContain('운영자 확정 피드백');
+    expect(en).toContain(guidance);
+    expect(ko).toContain(guidance);
+  });
+
   it('contains decision options (approve/revise/reject)', () => {
     const result = enPrompts.buildReviewerPrompt(opts);
     expect(result).toContain('approve');
@@ -528,6 +558,16 @@ describe('buildPlannerPrompt', () => {
     expect(result).toContain('Refactor auth module');
     expect(result).toContain('OpenSwarm');
     expect(result).toContain('30');
+  });
+
+  it('carries authoritative operator feedback into the planner', () => {
+    const guidance = 'Use monthly_cutoff; never create due_date.';
+    const en = enPrompts.buildPlannerPrompt({ ...base, authoritativeOperatorFeedback: guidance });
+    const ko = koPrompts.buildPlannerPrompt({ ...base, authoritativeOperatorFeedback: guidance });
+    expect(en).toContain('Authoritative Operator Feedback');
+    expect(ko).toContain('운영자 확정 피드백');
+    expect(en).toContain(guidance);
+    expect(ko).toContain(guidance);
   });
 
   it('with draftAnalysis: includes pre-analysis section', () => {

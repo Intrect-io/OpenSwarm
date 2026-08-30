@@ -3,6 +3,9 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
+import {
+  OPERATOR_QUESTION_PARK_REASON,
+} from '../coordination/operatorAnswers.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
 import {
   ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION,
@@ -11,6 +14,10 @@ import {
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
+import {
+  markNeedsHumanForQuestionsInDb,
+  resumeNeedsHumanForQuestionsInDb,
+} from './runLedgerOperatorQuestions.js';
 import {
   acquireIntegrationReservationInDb,
   integrationReservationBlocksClaim,
@@ -357,6 +364,9 @@ export class RunLedger {
     const resume = this.db.transaction((): RunState | null => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
+      // An ask_human park carries its own exact-correlation resume contract.
+      // Linear state changes and generic operator recovery must not bypass it.
+      if (row.last_error_code === OPERATOR_QUESTION_PARK_REASON) return null;
       const deadEffects = (this.db.prepare(`
         SELECT COUNT(*) AS count FROM automation_effects
         WHERE issue_id = ? AND status = 'dead'
@@ -782,7 +792,7 @@ export class RunLedger {
         claim.attemptNo,
         claim.leaseEpoch,
       );
-      this.insertEvent(claim.issueId, claim.attemptNo, 'transition', row.state, to, patch.eventData, now);
+      this.insertEvent(claim.issueId, claim.attemptNo, patch.eventKind ?? 'transition', row.state, to, patch.eventData, now);
       return true;
     });
     return transition.immediate();
@@ -1131,6 +1141,28 @@ export class RunLedger {
       return true;
     });
     return transition.immediate();
+  }
+
+  /**
+   * Convert the RETRY_AT written by the completed primary attempt into an
+   * immediate NEEDS_HUMAN park tied to exactly the questions that stopped it.
+   */
+  markNeedsHumanForQuestions(
+    issueId: string,
+    correlationIds: readonly string[],
+    reason: string,
+    now = Date.now(),
+  ): boolean {
+    return markNeedsHumanForQuestionsInDb(this.db, issueId, correlationIds, reason, now);
+  }
+
+  /**
+   * Resume an ask_human park only when every correlation recorded by the park
+   * has a durable completed answer for this same task. Missing trace/schema is
+   * unknown and therefore remains parked.
+   */
+  resumeNeedsHumanForQuestions(issueId: string, now = Date.now()): RunState | null {
+    return resumeNeedsHumanForQuestionsInDb(this.db, issueId, now);
   }
 
   getEffectByDedupeKey(dedupeKey: string): EffectRecord | null {

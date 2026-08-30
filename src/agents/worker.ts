@@ -33,6 +33,7 @@ import { getCoordinationStore } from '../coordination/coordinationStore.js';
 export interface WorkerOptions {
   taskTitle: string;
   taskDescription: string;
+  authoritativeOperatorFeedback?: string;
   projectPath: string;
   previousFeedback?: string;   // Previous feedback from Reviewer (for revisions)
   timeoutMs?: number;
@@ -209,6 +210,7 @@ function buildWorkerPrompt(options: WorkerOptions): string {
   return getPrompts().buildWorkerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
+    authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
     previousFeedback: options.previousFeedback,
     context: options.workerContext,
   });
@@ -412,6 +414,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     if (raw.blockedOnOperator) {
       parsedResult.success = false;
       parsedResult.blockedOnOperator = true;
+      parsedResult.operatorQuestionCorrelationIds = raw.operatorQuestionCorrelationIds;
       parsedResult.haltReason = parsedResult.haltReason
         ?? 'Blocked on an operator decision (ask_human posted to Discord)';
     }

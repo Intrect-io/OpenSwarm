@@ -382,6 +382,7 @@ export class PairPipeline extends EventEmitter {
           const workerOptions: WorkerOptions = {
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
+            authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
             projectPath: context.projectPath,
             previousFeedback: combinedFeedback,
             timeoutMs: stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs),
@@ -484,6 +485,7 @@ export class PairPipeline extends EventEmitter {
           const reviewerOptions = {
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
+            authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
