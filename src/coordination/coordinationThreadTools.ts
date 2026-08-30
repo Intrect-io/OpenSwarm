@@ -17,6 +17,11 @@ import {
 } from './coordinationThreads.js';
 import { repositoryKey } from './repositoryCell.js';
 import { getCoordinationStore } from './coordinationStore.js';
+import { validAdviceExchange } from './consultationTelemetry.js';
+import {
+  drainCoordinationThreadOutbox,
+  type ThreadMutationAction,
+} from './coordinationThreadOutbox.js';
 
 export interface CoordinationThreadToolContext {
   repository: string;
@@ -151,15 +156,14 @@ function threadRepository(context: CoordinationThreadToolContext): string {
   return repositoryKey(context.repoKey, context.repository);
 }
 
-export type ThreadMutationAction = 'created' | 'replied' | 'resolved';
+export type { ThreadMutationAction } from './coordinationThreadOutbox.js';
 
 /**
- * Mirror a durable mutation onto the live board. The SQLite thread remains
- * authoritative; a board failure is reported as warning evidence and never
- * rolls back a discussion that was already committed.
+ * Drain the mutation copies already committed atomically with the thread.
+ * A board failure leaves the outbox row pending for startup/heartbeat replay.
  */
 export async function publishCoordinationThreadUpdate(
-  context: CoordinationThreadToolContext,
+  _context: CoordinationThreadToolContext,
   input: {
     thread: CoordinationThread;
     action: ThreadMutationAction;
@@ -168,54 +172,8 @@ export async function publishCoordinationThreadUpdate(
     acknowledgesCorrelationId?: string;
   },
 ): Promise<{ delivered: number; warnings: string[] }> {
-  const detail = getCoordinationThread({
-    repository: threadRepository(context), threadId: input.thread.id, messageLimit: 1,
-  });
-  const otherParticipants = detail.participants.filter((participant) =>
-    participant.actor !== context.actor || participant.taskId !== context.taskId);
-  // A new or single-participant thread still needs one observable lifecycle
-  // event; once others follow, addressed copies wake their task-scoped inboxes.
-  const targets = otherParticipants.length > 0 ? otherParticipants : [undefined];
-  const store = getCoordinationStore();
-  const warnings: string[] = [];
-  let delivered = 0;
-  for (const participant of targets) {
-    try {
-      await store.publish({
-        repository: context.repository,
-        repoKey: repositoryKey(context.repoKey, context.repository),
-        taskId: context.taskId,
-        taskLabel: context.taskLabel,
-        sourceTaskId: context.taskId,
-        sourceTaskLabel: context.taskLabel,
-        targetTaskId: participant?.taskId ?? context.taskId,
-        targetTaskLabel: participant?.taskLabel ?? context.taskLabel,
-        actor: context.actor,
-        actorName: context.actorName,
-        actorRole: context.actorRole,
-        recipient: participant?.actor,
-        recipientName: participant?.actorName,
-        recipientRole: participant?.actorRole,
-        kind: 'thread-update',
-        status: input.action === 'created' ? 'open' : 'completed',
-        correlationId: `thread:${input.thread.id}`,
-        summary: `Thread ${input.action}: ${input.thread.subject}`,
-        detail: input.body,
-        metadata: {
-          threadId: input.thread.id,
-          action: input.action,
-          mutationId: input.mutationId,
-          ...(input.acknowledgesCorrelationId
-            ? { acknowledgesCorrelationId: input.acknowledgesCorrelationId }
-            : {}),
-        },
-      });
-      delivered += 1;
-    } catch (error) {
-      warnings.push(error instanceof Error ? error.message : String(error));
-    }
-  }
-  return { delivered, warnings };
+  const result = await drainCoordinationThreadOutbox({ mutationId: input.mutationId });
+  return { delivered: result.delivered, warnings: result.warnings };
 }
 
 function requiredString(args: Record<string, unknown>, key: string): string {
@@ -261,6 +219,10 @@ export async function executeCoordinationThreadTool(
         relatedFiles: optionalStrings(args, 'related_files'),
         relatedPullRequests: optionalStrings(args, 'related_pull_requests'),
         idempotencyKey: requiredString(args, 'idempotency_key'),
+        notification: {
+          repository: context.repository,
+          repoKey: threadRepository(context),
+        },
       });
       const notification = await publishCoordinationThreadUpdate(context, {
         thread, action: 'created', mutationId: `create:${thread.id}`, body: optionalString(args, 'body'),
@@ -295,9 +257,13 @@ export async function executeCoordinationThreadTool(
         messageAfterSeq: typeof args.message_after_seq === 'number' ? args.message_after_seq : undefined,
       });
       if (args.mark_read === true) {
-        markCoordinationThreadRead({
-          repository: threadRepository(context), threadId, actor: context.actor, taskId: context.taskId,
-        });
+        const throughSeq = detail.messages.items.at(-1)?.seq;
+        if (throughSeq !== undefined) {
+          markCoordinationThreadRead({
+            repository: threadRepository(context), threadId, actor: context.actor,
+            taskId: context.taskId, throughSeq,
+          });
+        }
       }
       return { content: JSON.stringify(detail), isError: false };
     }
@@ -306,12 +272,16 @@ export async function executeCoordinationThreadTool(
       const threadId = requiredString(args, 'thread_id');
       const acknowledgesCorrelationId = optionalString(args, 'acknowledges_correlation_id');
       if (acknowledgesCorrelationId) {
-        const response = getCoordinationStore().exchange(acknowledgesCorrelationId).find((event) =>
-          event.kind === 'advice-response'
-          && event.recipient === context.actor
-          && (event.targetTaskId ?? event.taskId) === context.taskId);
-        if (!response) throw new Error('acknowledges_correlation_id must identify advice received by this participant');
-        if (response.metadata?.threadId && response.metadata.threadId !== threadId) {
+        const exchange = validAdviceExchange(
+          getCoordinationStore().exchange(acknowledgesCorrelationId),
+          acknowledgesCorrelationId,
+        );
+        if (!exchange
+          || exchange.response.recipient !== context.actor
+          || (exchange.response.targetTaskId ?? exchange.response.taskId) !== context.taskId) {
+          throw new Error('acknowledges_correlation_id must identify valid advice received by this participant');
+        }
+        if (exchange.response.metadata?.threadId && exchange.response.metadata.threadId !== threadId) {
           throw new Error('acknowledged advice belongs to a different thread');
         }
       }
@@ -325,6 +295,11 @@ export async function executeCoordinationThreadTool(
         taskLabel: context.taskLabel,
         body: requiredString(args, 'body'),
         idempotencyKey: requiredString(args, 'idempotency_key'),
+        notification: {
+          repository: context.repository,
+          repoKey: threadRepository(context),
+          acknowledgesCorrelationId,
+        },
       });
       const thread = getCoordinationThread({ repository: threadRepository(context), threadId, messageLimit: 1 }).thread;
       const notification = await publishCoordinationThreadUpdate(context, {
@@ -365,7 +340,14 @@ export async function executeCoordinationThreadTool(
         threadId: requiredString(args, 'thread_id'),
         expectedVersion,
         actor: context.actor,
+        actorName: context.actorName,
+        actorRole: context.actorRole,
         taskId: context.taskId,
+        taskLabel: context.taskLabel,
+        notification: {
+          repository: context.repository,
+          repoKey: threadRepository(context),
+        },
       });
       const notification = await publishCoordinationThreadUpdate(context, {
         thread, action: 'resolved', mutationId: `resolve:${thread.id}:${thread.version}`,

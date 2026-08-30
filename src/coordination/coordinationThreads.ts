@@ -10,6 +10,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { getTraceDb } from './coordinationTrace.js';
+import {
+  enqueueCoordinationThreadMutation,
+  migrateCoordinationThreadOutbox,
+  type ThreadMutationAction,
+} from './coordinationThreadOutbox.js';
 
 export type CoordinationThreadStatus = 'open' | 'resolved';
 
@@ -70,6 +75,7 @@ export interface CreateThreadInput {
   relatedFiles?: string[];
   relatedPullRequests?: string[];
   idempotencyKey?: string;
+  notification?: ThreadNotificationContext;
   now?: number;
 }
 
@@ -83,7 +89,16 @@ export interface PostThreadMessageInput {
   taskLabel?: string;
   body: string;
   idempotencyKey?: string;
+  notification?: ThreadNotificationContext;
   now?: number;
+}
+
+export interface ThreadNotificationContext {
+  /** Runtime path used by the transient board. */
+  repository: string;
+  /** Canonical repository-cell key shared by sibling worktrees. */
+  repoKey: string;
+  acknowledgesCorrelationId?: string;
 }
 
 export interface ThreadPage<T> {
@@ -230,6 +245,7 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS coordination_thread_subscriptions_actor
       ON coordination_thread_subscriptions(actor, task_id, thread_id);
   `);
+  migrateCoordinationThreadOutbox(db);
 }
 
 function boundedText(value: string, field: string, max: number): string {
@@ -540,7 +556,9 @@ export function createCoordinationThread(input: CreateThreadInput): Coordination
         now,
       });
     }
-    return toThread(requireThreadRow(db, repo, threadId));
+    const thread = toThread(requireThreadRow(db, repo, threadId));
+    enqueueThreadNotification(db, thread, 'created', `create:${threadId}`, input, input.notification, body);
+    return thread;
   });
   return create.immediate();
 }
@@ -548,7 +566,14 @@ export function createCoordinationThread(input: CreateThreadInput): Coordination
 /** Add one idempotent reply and follow the thread as the speaker. */
 export function postCoordinationThreadMessage(input: PostThreadMessageInput): CoordinationThreadMessage {
   const db = database();
-  return db.transaction(() => insertMessage(db, input)).immediate();
+  return db.transaction(() => {
+    const message = insertMessage(db, input);
+    const thread = toThread(requireThreadRow(db, repository(input.repository), identity(input.threadId, 'threadId')));
+    enqueueThreadNotification(
+      db, thread, 'replied', `message:${message.id}`, input, input.notification, message.body,
+    );
+    return message;
+  }).immediate();
 }
 
 export function followCoordinationThread(input: {
@@ -608,6 +633,8 @@ export function markCoordinationThreadRead(input: {
   threadId: string;
   actor: string;
   taskId: string;
+  /** Last message sequence actually returned to the caller. Defaults to latest for direct callers. */
+  throughSeq?: number;
 }): number {
   const db = database();
   const repo = repository(input.repository);
@@ -616,12 +643,16 @@ export function markCoordinationThreadRead(input: {
   const latest = (db.prepare(`
     SELECT COALESCE(MAX(seq), 0) AS seq FROM coordination_thread_messages WHERE thread_id = ?
   `).get(threadId) as { seq: number }).seq;
+  const through = input.throughSeq ?? latest;
+  if (!Number.isSafeInteger(through) || through < 0 || through > latest) {
+    throw new Error('throughSeq must identify a message in the current thread page');
+  }
   const updated = db.prepare(`
-    UPDATE coordination_thread_subscriptions SET last_read_seq = ?
+    UPDATE coordination_thread_subscriptions SET last_read_seq = MAX(last_read_seq, ?)
     WHERE thread_id = ? AND actor = ? AND task_id = ?
-  `).run(latest, threadId, identity(input.actor, 'actor'), identity(input.taskId, 'taskId'));
+  `).run(through, threadId, identity(input.actor, 'actor'), identity(input.taskId, 'taskId'));
   if (updated.changes === 0) throw new Error('Thread participant is not subscribed');
-  return latest;
+  return through;
 }
 
 export function resolveCoordinationThread(input: {
@@ -629,7 +660,11 @@ export function resolveCoordinationThread(input: {
   threadId: string;
   expectedVersion: number;
   actor: string;
+  actorName?: string;
+  actorRole?: string;
   taskId: string;
+  taskLabel?: string;
+  notification?: ThreadNotificationContext;
   now?: number;
 }): CoordinationThread {
   const db = database();
@@ -637,20 +672,29 @@ export function resolveCoordinationThread(input: {
   const threadId = identity(input.threadId, 'threadId');
   const actor = identity(input.actor, 'actor');
   const taskId = identity(input.taskId, 'taskId');
-  const current = requireThreadRow(db, repo, threadId);
-  if (current.status === 'resolved') return toThread(current);
-  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
-    throw new Error('expectedVersion must be a positive integer');
-  }
-  const now = input.now ?? Date.now();
-  const result = db.prepare(`
-    UPDATE coordination_threads
-    SET status = 'resolved', version = version + 1, updated_at = ?, resolved_at = ?,
-        resolved_by_actor = ?, resolved_by_task_id = ?
-    WHERE repository = ? AND thread_id = ? AND version = ? AND status = 'open'
-  `).run(now, now, actor, taskId, repo, threadId, input.expectedVersion);
-  if (result.changes === 0) throw new Error('Thread version conflict');
-  return toThread(requireThreadRow(db, repo, threadId));
+  return db.transaction(() => {
+    const current = requireThreadRow(db, repo, threadId);
+    if (current.status === 'resolved') return toThread(current);
+    const participant = db.prepare(`
+      SELECT 1 FROM coordination_thread_subscriptions
+      WHERE thread_id = ? AND actor = ? AND task_id = ?
+    `).get(threadId, actor, taskId);
+    if (!participant) throw new Error('Only a thread participant may resolve this thread');
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new Error('expectedVersion must be a positive integer');
+    }
+    const now = input.now ?? Date.now();
+    const result = db.prepare(`
+      UPDATE coordination_threads
+      SET status = 'resolved', version = version + 1, updated_at = ?, resolved_at = ?,
+          resolved_by_actor = ?, resolved_by_task_id = ?
+      WHERE repository = ? AND thread_id = ? AND version = ? AND status = 'open'
+    `).run(now, now, actor, taskId, repo, threadId, input.expectedVersion);
+    if (result.changes === 0) throw new Error('Thread version conflict');
+    const thread = toThread(requireThreadRow(db, repo, threadId));
+    enqueueThreadNotification(db, thread, 'resolved', `resolve:${threadId}:${thread.version}`, input, input.notification);
+    return thread;
+  }).immediate();
 }
 
 function listParticipants(db: Database.Database, threadId: string): ThreadParticipant[] {
@@ -660,6 +704,52 @@ function listParticipants(db: Database.Database, threadId: string): ThreadPartic
     WHERE thread_id = ? ORDER BY followed_at, actor, task_id
   `).all(threadId) as ParticipantRow[];
   return rows.map(toParticipant);
+}
+
+function enqueueThreadNotification(
+  db: Database.Database,
+  thread: CoordinationThread,
+  action: ThreadMutationAction,
+  mutationId: string,
+  source: {
+    actor: string;
+    actorName?: string;
+    actorRole?: string;
+    taskId: string;
+    taskLabel?: string;
+  },
+  notification?: ThreadNotificationContext,
+  body?: string,
+): void {
+  if (!notification) return;
+  const participants = listParticipants(db, thread.id)
+    .filter((participant) => participant.actor !== source.actor || participant.taskId !== source.taskId)
+    .map((participant) => ({
+      actor: participant.actor,
+      actorName: participant.actorName,
+      actorRole: participant.actorRole,
+      taskId: participant.taskId,
+      taskLabel: participant.taskLabel,
+    }));
+  enqueueCoordinationThreadMutation(db, {
+    mutationId,
+    repository: notification.repository,
+    repoKey: notification.repoKey,
+    threadId: thread.id,
+    subject: thread.subject,
+    action,
+    body,
+    acknowledgesCorrelationId: notification.acknowledgesCorrelationId,
+    source: {
+      actor: source.actor,
+      actorName: source.actorName,
+      actorRole: source.actorRole,
+      taskId: source.taskId,
+      taskLabel: source.taskLabel,
+    },
+    targets: participants,
+    now: thread.updatedAt,
+  });
 }
 
 function encodeThreadCursor(updatedAt: number, id: string): string {

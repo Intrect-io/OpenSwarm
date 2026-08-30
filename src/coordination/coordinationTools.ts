@@ -3,7 +3,7 @@
 // ============================================
 
 import type { ToolDefinition } from '../adapters/tools.js';
-import { getCoordinationStore, type CoordinationKind } from './coordinationStore.js';
+import { getCoordinationStore, type CoordinationEvent, type CoordinationKind } from './coordinationStore.js';
 import { postHumanQuestion } from './humanQuestions.js';
 import { callSignAddress } from './agentNames.js';
 import { repositoryKey } from './repositoryCell.js';
@@ -263,28 +263,50 @@ export async function executeCoordinationTool(
       ? args.target_task_label.trim()
       : undefined;
 
-    // Replies already name an exchange; recover the other participant's task
-    // from that envelope so callers do not have to repeat routing metadata.
     const isReply = kind.endsWith('response') || kind.endsWith('result');
-    if (!targetTaskId && correlationId && isReply) {
-      const exchange = store.exchange(correlationId);
-      for (let i = exchange.length - 1; i >= 0 && !targetTaskId; i -= 1) {
-        const prior = exchange[i];
-        if (prior.actor === recipient) {
-          targetTaskId = prior.sourceTaskId ?? prior.taskId;
-          targetTaskLabel = prior.sourceTaskLabel ?? prior.taskLabel;
-        } else if (prior.recipient === recipient) {
-          targetTaskId = prior.targetTaskId ?? prior.taskId;
-          targetTaskLabel = prior.targetTaskLabel ?? prior.taskLabel;
-        }
+    const requestKind: CoordinationKind | undefined = kind === 'advice-response'
+      ? 'advice-request'
+      : kind === 'delegation-result'
+        ? 'delegation-request'
+        : undefined;
+    const exchange = correlationId ? store.exchange(correlationId) : [];
+    let replyRequest: CoordinationEvent | undefined;
+    if (isReply && requestKind) {
+      for (let index = exchange.length - 1; index >= 0 && !replyRequest; index -= 1) {
+        const event = exchange[index];
+        if (event.kind === requestKind && event.status === 'open') replyRequest = event;
       }
+    }
+    if (isReply) {
+      if (!correlationId || !replyRequest) {
+        return { content: `${kind} requires correlation_id for an existing open ${requestKind}`, isError: true };
+      }
+      const requestRepoKey = repositoryKey(replyRequest.repoKey, replyRequest.repository);
+      const requestTargetTask = replyRequest.targetTaskId ?? replyRequest.taskId;
+      const requestSourceTask = replyRequest.sourceTaskId ?? replyRequest.taskId;
+      if (requestRepoKey !== repoKey
+        || replyRequest.recipient !== context.actor
+        || requestTargetTask !== context.taskId) {
+        return { content: `${kind} may only be sent by the original request addressee`, isError: true };
+      }
+      if (recipient !== replyRequest.actor) {
+        return { content: `${kind} must return to the original requester`, isError: true };
+      }
+      if (targetTaskId && targetTaskId !== requestSourceTask) {
+        return { content: `${kind} target_task_id must be the original requester task`, isError: true };
+      }
+      targetTaskId = requestSourceTask;
+      targetTaskLabel = replyRequest.sourceTaskLabel ?? replyRequest.taskLabel;
     }
     targetTaskId ??= context.taskId;
     targetTaskLabel ??= targetTaskId === context.taskId ? context.taskLabel : undefined;
 
     let targetPeer = store.peers({ repoKey, repository: context.repository, taskIds: [targetTaskId], limit: 50 })
       .find((peer) => peer.address === recipient);
-    if (targetTaskId !== context.taskId) {
+    if (!isReply && recipient === context.actor) {
+      return { content: 'coordination_publish cannot address the sending agent itself', isError: true };
+    }
+    if (!isReply && targetTaskId !== context.taskId) {
       if (!targetPeer) {
         return {
           content: `Cross-task recipient ${args.recipient} is not an active peer on task ${targetTaskId} in this repository cell`,
@@ -297,10 +319,13 @@ export async function executeCoordinationTool(
     let threadId = typeof args.thread_id === 'string' && args.thread_id.trim()
       ? args.thread_id.trim()
       : undefined;
-    if (!threadId && correlationId && isReply) {
-      threadId = store.exchange(correlationId).find((event) =>
-        typeof event.metadata?.threadId === 'string')?.metadata?.threadId as string | undefined;
+    const requestThreadId = typeof replyRequest?.metadata?.threadId === 'string'
+      ? replyRequest.metadata.threadId
+      : undefined;
+    if (isReply && requestThreadId && threadId && threadId !== requestThreadId) {
+      return { content: `${kind} thread_id must match the original request`, isError: true };
     }
+    if (!threadId && isReply) threadId = requestThreadId;
     if (threadId) {
       let detail;
       try {
@@ -319,7 +344,10 @@ export async function executeCoordinationTool(
 
     const consultation = kind === 'advice-request' || kind === 'advice-response';
     const crossTask = targetTaskId !== context.taskId;
-    const crossRole = Boolean(context.actorRole && targetPeer?.role && context.actorRole !== targetPeer.role);
+    const replyTargetRole = replyRequest?.actorRole;
+    const crossRole = Boolean(context.actorRole
+      && (targetPeer?.role ?? replyTargetRole)
+      && context.actorRole !== (targetPeer?.role ?? replyTargetRole));
 
     const event = await store.publish({
       repository: context.repository,
@@ -334,8 +362,8 @@ export async function executeCoordinationTool(
       actorName: context.actorName,
       actorRole: context.actorRole,
       recipient,
-      recipientName: targetPeer?.name ?? args.recipient,
-      recipientRole: targetPeer?.role,
+      recipientName: targetPeer?.name ?? replyRequest?.actorName ?? args.recipient,
+      recipientRole: targetPeer?.role ?? replyTargetRole,
       kind,
       status: kind.endsWith('request') ? 'open' : 'completed',
       correlationId,
@@ -347,7 +375,7 @@ export async function executeCoordinationTool(
         crossTask,
         crossRole,
         ...(context.actorRole ? { sourceRole: context.actorRole } : {}),
-        ...(targetPeer?.role ? { targetRole: targetPeer.role } : {}),
+        ...((targetPeer?.role ?? replyTargetRole) ? { targetRole: targetPeer?.role ?? replyTargetRole! } : {}),
         ...(threadId ? { threadId } : {}),
       } : undefined,
     });

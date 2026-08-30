@@ -32,6 +32,7 @@ import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngi
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
 import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
+import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
 import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
@@ -1431,6 +1432,13 @@ export class AutonomousRunner {
   }
 
   private async drainDurableOutbox(): Promise<void> {
+    const threadOutcome = await drainCoordinationThreadOutbox();
+    if (threadOutcome.warnings.length > 0) {
+      console.warn(
+        `[ThreadOutbox] delivered=${threadOutcome.delivered} pending=${threadOutcome.pending} `
+        + `warnings=${threadOutcome.warnings.length}`,
+      );
+    }
     if (!this.durableRuns.isPrimary) return;
     if (this.outboxDrain) return this.outboxDrain;
     const finalized = new Set<string>();

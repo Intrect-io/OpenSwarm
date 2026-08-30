@@ -135,6 +135,6 @@ describe('coordination thread tools', () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.content).toContain('must identify advice received by this participant');
+    expect(result.content).toContain('must identify valid advice received by this participant');
   });
 });

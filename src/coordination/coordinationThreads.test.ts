@@ -101,16 +101,20 @@ describe('durable coordination threads', () => {
 
   it('resolves with compare-and-swap and refuses posts afterwards', () => {
     const thread = create();
+    followCoordinationThread({
+      repository: '/repo', threadId: thread.id, actor: 'reviewer-b', taskId: 'task-b', now: 1_100,
+    });
+    const followed = getCoordinationThread({ repository: '/repo', threadId: thread.id }).thread;
     expect(() => resolveCoordinationThread({
-      repository: '/repo', threadId: thread.id, expectedVersion: thread.version - 1,
+      repository: '/repo', threadId: thread.id, expectedVersion: followed.version - 1,
       actor: 'reviewer-b', taskId: 'task-b',
     })).toThrow('version conflict');
     const resolved = resolveCoordinationThread({
-      repository: '/repo', threadId: thread.id, expectedVersion: thread.version,
+      repository: '/repo', threadId: thread.id, expectedVersion: followed.version,
       actor: 'reviewer-b', taskId: 'task-b', now: 2_000,
     });
     expect(resolved).toMatchObject({
-      status: 'resolved', version: thread.version + 1, resolvedAt: 2_000,
+      status: 'resolved', version: followed.version + 1, resolvedAt: 2_000,
       resolvedByActor: 'reviewer-b', resolvedByTaskId: 'task-b',
     });
     expect(() => postCoordinationThreadMessage({
@@ -120,6 +124,15 @@ describe('durable coordination threads', () => {
       repository: '/repo', threadId: thread.id, expectedVersion: 0,
       actor: 'reviewer-b', taskId: 'task-b',
     }).status).toBe('resolved');
+  });
+
+  it('refuses resolution by an unrelated repository agent', () => {
+    const thread = create();
+    expect(() => resolveCoordinationThread({
+      repository: '/repo', threadId: thread.id, expectedVersion: thread.version,
+      actor: 'worker-c', taskId: 'task-c', now: 2_000,
+    })).toThrow('Only a thread participant');
+    expect(getCoordinationThread({ repository: '/repo', threadId: thread.id }).thread.status).toBe('open');
   });
 
   it('tracks subscriptions and unread messages without changing thread history', () => {
@@ -141,6 +154,29 @@ describe('durable coordination threads', () => {
     expect(() => unfollowCoordinationThread({
       repository: '/repo', threadId: thread.id, actor: 'worker-a', taskId: 'task-a', now: 1_400,
     })).toThrow('creator cannot unfollow');
+  });
+
+  it('marks only the returned message page as read', () => {
+    const thread = create();
+    followCoordinationThread({ repository: '/repo', threadId: thread.id, actor: 'reviewer-b', taskId: 'task-b', now: 1_100 });
+    for (let index = 0; index < 3; index += 1) {
+      postCoordinationThreadMessage({
+        repository: '/repo', threadId: thread.id, actor: 'worker-a', taskId: 'task-a',
+        body: `evidence ${index}`, now: 1_200 + index,
+      });
+    }
+    const lastReadSeq = getCoordinationThread({ repository: '/repo', threadId: thread.id })
+      .participants.find((participant) => participant.actor === 'reviewer-b')!.lastReadSeq;
+    const page = getCoordinationThread({
+      repository: '/repo', threadId: thread.id, messageLimit: 1, messageAfterSeq: lastReadSeq,
+    });
+    const throughSeq = page.messages.items[0].seq;
+    markCoordinationThreadRead({
+      repository: '/repo', threadId: thread.id, actor: 'reviewer-b', taskId: 'task-b', throughSeq,
+    });
+    expect(listCoordinationThreads({
+      repository: '/repo', participant: { actor: 'reviewer-b', taskId: 'task-b' },
+    }).items[0].unreadCount).toBe(2);
   });
 
   it('paginates topics and messages with stable cursors', () => {

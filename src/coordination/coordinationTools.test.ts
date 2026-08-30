@@ -244,6 +244,33 @@ describe('coordination tools', () => {
     expect(durableAck?.metadata).toMatchObject({ threadId, acknowledgesCorrelationId: requestEvent.correlationId });
   });
 
+  it('rejects a self-authored response and counts only the original addressee topology', async () => {
+    const mod = await tools();
+    const { getCoordinationStore } = await import('./coordinationStore.js');
+    const alice = assignCallSign({ repository: '/repo', executionId: 'alice', role: 'worker' });
+    const bob = assignCallSign({ repository: '/repo', executionId: 'bob', role: 'reviewer' });
+    const base = { repository: '/repo', repoKey: 'git:repo', taskId: 'task-a' };
+    const request = JSON.parse((await mod.executeCoordinationTool('coordination_publish', {
+      kind: 'advice-request', recipient: bob.address, summary: 'Check the retry owner.',
+    }, { ...base, actor: alice.address, actorRole: 'worker' })).content).event;
+
+    const forged = await mod.executeCoordinationTool('coordination_publish', {
+      kind: 'advice-response', recipient: alice.address,
+      correlation_id: request.correlationId, summary: 'I approve myself.',
+    }, { ...base, actor: alice.address, actorRole: 'worker' });
+    expect(forged).toMatchObject({ isError: true });
+    expect(forged.content).toContain('original request addressee');
+
+    const valid = await mod.executeCoordinationTool('coordination_publish', {
+      kind: 'advice-response', recipient: alice.address,
+      correlation_id: request.correlationId, summary: 'Reviewer approves the ownership split.',
+    }, { ...base, actor: bob.address, actorRole: 'reviewer' });
+    expect(valid.isError).toBe(false);
+
+    const events = getCoordinationStore().list({ repoKey: 'git:repo', limit: 100 });
+    expect(consultationTelemetry(events)).toMatchObject({ requests: 1, responses: 1 });
+  });
+
   it('denies cross-task publishing to an unknown or different-cell peer', async () => {
     const mod = await tools();
     const { getCoordinationStore } = await import('./coordinationStore.js');
@@ -349,6 +376,11 @@ describe('coordination_wait', () => {
     const bob = assignCallSign({ repository: '/repo', executionId: 'w-xp-b', role: 'reviewer' });
     const { getEventHub } = await import('../core/eventHub.js');
     const hub = getEventHub();
+    const opened = JSON.parse((await mod.executeCoordinationTool(
+      'coordination_publish',
+      { kind: 'advice-request', recipient: bob.address, summary: 'please answer from another process' },
+      { repository: '/repo', taskId: 't1', actor: alice.address },
+    )).content);
 
     const waiting = mod.executeCoordinationTool(
       'coordination_wait', { timeout_ms: 8_000 },
@@ -360,7 +392,10 @@ describe('coordination_wait', () => {
       hub.removeAllListeners('coordination:published');
       void mod.executeCoordinationTool(
         'coordination_publish',
-        { kind: 'advice-response', recipient: alice.address, summary: 'from another process' },
+        {
+          kind: 'advice-response', recipient: alice.address,
+          correlation_id: opened.event.correlationId, summary: 'from another process',
+        },
         { repository: '/repo', taskId: 't1', actor: bob.address },
       ).then(() => {
         for (const l of listeners) hub.on('coordination:published', l as () => void);
@@ -420,6 +455,11 @@ describe('coordination_wait', () => {
     const mod = await tools();
     const alice = assignCallSign({ repository: '/repo', executionId: 'w-a', role: 'worker' });
     const bob = assignCallSign({ repository: '/repo', executionId: 'w-b', role: 'reviewer' });
+    const opened = JSON.parse((await mod.executeCoordinationTool(
+      'coordination_publish',
+      { kind: 'advice-request', recipient: bob.address, summary: 'please answer' },
+      { repository: '/repo', taskId: 't1', actor: alice.address },
+    )).content);
 
     const started = Date.now();
     // A generous deadline: the point is that it returns long before it.
@@ -431,7 +471,10 @@ describe('coordination_wait', () => {
     setTimeout(() => {
       void mod.executeCoordinationTool(
         'coordination_publish',
-        { kind: 'advice-response', recipient: alice.address, summary: 'here is the answer' },
+        {
+          kind: 'advice-response', recipient: alice.address,
+          correlation_id: opened.event.correlationId, summary: 'here is the answer',
+        },
         { repository: '/repo', taskId: 't1', actor: bob.address },
       );
     }, 30);
