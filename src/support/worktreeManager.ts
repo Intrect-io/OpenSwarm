@@ -118,14 +118,9 @@ async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
 
 // Branch & Path Utilities
 
-/** Generate branch name: swarm/INT-512-llm-tool-interface */
-export function buildBranchName(issueIdentifier: string, title: string): string {
-  const slug = title.toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40);
-  return `swarm/${issueIdentifier}-${slug}`;
-}
+// The naming convention lives in its own module (branchNaming.ts) so the one
+// rule that decides "is this branch mine?" is not buried in lifecycle code.
+import { isBranchForIssue } from './branchNaming.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -916,6 +911,13 @@ export async function findPullRequestForBranch(
 export async function findOpenPRFileOverlaps(
   repoPath: string,
   plannedFiles: string[],
+  /**
+   * The issue being dispatched. Its own open PR is not competing work — it is
+   * this task's parked or in-flight branch — so it must not supersede the
+   * task that owns it. Omitted means "no self to exclude", which is the
+   * pre-AGT-4095 behavior rather than a disabled gate.
+   */
+  selfIssueIdentifier?: string,
 ): Promise<OpenPRFileOverlap[]> {
   if (plannedFiles.length === 0) return [];
   const planned = new Set(plannedFiles.map((f) => f.replace(/^\.\//, '')));
@@ -929,6 +931,7 @@ export async function findOpenPRFileOverlaps(
     const prs: { number: number; url: string; headRefName: string; files?: { path: string }[] }[] = JSON.parse(raw || '[]');
     const overlaps: OpenPRFileOverlap[] = [];
     for (const pr of prs) {
+      if (selfIssueIdentifier && isBranchForIssue(pr.headRefName, selfIssueIdentifier)) continue;
       const shared = (pr.files ?? []).map((f) => f.path).filter((f) => planned.has(f.replace(/^\.\//, '')));
       if (shared.length > 0) overlaps.push({ number: pr.number, url: pr.url, label: `PR #${pr.number} (${pr.headRefName})`, files: shared });
     }

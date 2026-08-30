@@ -7,22 +7,13 @@
 // reach: pure-function edges, retry/resume error paths, the file-overlap
 // report's real gh+git integration, and defensive fs-permission fallbacks.
 
+import { buildBranchName } from './branchNaming.js';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  buildBranchName,
-  commitAndCreatePR,
-  createWorktree,
-  inspectWorktreeRecovery,
-  preserveWorktree,
-  pruneWorktrees,
-  removePreservedWorktreeAt,
-  resolveBaseRef,
-  resolveSharedPaths,
-} from './worktreeManager.js';
+import {commitAndCreatePR, createWorktree, inspectWorktreeRecovery, preserveWorktree, pruneWorktrees, removePreservedWorktreeAt, resolveBaseRef, resolveSharedPaths,  } from './worktreeManager.js';
 
 // registerOwnedPR persists to a REAL file under the user's home directory
 // (~/.openswarm/pr-ownership.json) — its target path is resolved once at

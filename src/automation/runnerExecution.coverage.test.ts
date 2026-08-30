@@ -40,7 +40,6 @@ const plannerNeedsDecomposition = vi.fn();
 const plannerEstimateTaskDuration = vi.fn();
 const plannerRunPlanner = vi.fn();
 const plannerFormatPlannerResult = vi.fn();
-const buildBranchName = vi.fn();
 const createWorktree = vi.fn();
 // Stand-in for the real class — the instanceof check under test resolves
 // through this same mock, so identity (not origin) is what matters (AGT-4038).
@@ -99,7 +98,6 @@ vi.mock('../support/planner.js', () => ({
 }));
 
 vi.mock('../support/worktreeManager.js', () => ({
-  buildBranchName,
   createWorktree,
   commitAndCreatePR,
   findOpenPRFileOverlaps,
@@ -306,7 +304,6 @@ describe('runnerExecution.ts coverage extension', () => {
     plannerEstimateTaskDuration.mockReturnValue(45);
     plannerFormatPlannerResult.mockReturnValue('planner result summary');
 
-    buildBranchName.mockReturnValue('swarm/INT-100-fix-the-flaky-retry-logic');
     commitAndCreatePR.mockResolvedValue('https://github.com/org/repo/pull/1');
     findOpenPRFileOverlaps.mockResolvedValue([]);
     hasRecoverableWorktree.mockResolvedValue(false);

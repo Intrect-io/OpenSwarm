@@ -3,6 +3,7 @@
 // Execution/reporting/integration logic extracted from AutonomousRunner
 // ============================================
 
+import { buildBranchName } from '../support/branchNaming.js';
 import { EmbedBuilder } from 'discord.js';
 import { decompositionChildId, reviewerFollowupId } from './decompositionIds.js';
 import { taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
@@ -26,14 +27,7 @@ import { formatTaskDescription } from '../linear/format.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import type { Notifier } from '../notify/notifier.js';
 import type { ITaskSource } from './taskSource.js';
-import {
-  buildBranchName,
-  createWorktree,
-  hasRecoverableWorktree,
-  preserveWorktree,
-  removeWorktree,
-  WorktreeCoordinationError,
-} from '../support/worktreeManager.js';
+import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree, WorktreeCoordinationError,  } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from './publishOnPark.js';

@@ -25,7 +25,6 @@ vi.mock('../support/planner.js', () => ({
   formatPlannerResult: vi.fn(),
 }));
 vi.mock('../support/worktreeManager.js', () => ({
-  buildBranchName: vi.fn(),
   createWorktree: vi.fn(),
   commitAndCreatePR: vi.fn(),
   findOpenPRFileOverlaps: vi.fn(),

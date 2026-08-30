@@ -1,3 +1,4 @@
+import { isBranchForIssue } from './branchNaming.js';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { isProofCapableSpace, processNamespaceId } from './processLiveness.js';
-import { createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWorktree, resolveSharedPaths, computeFileOverlaps, formatOverlapReport, findOpenPRFileOverlaps, resolveBaseRef, commitAndCreatePR, type WorktreeInfo } from './worktreeManager.js';
+import {createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWorktree, resolveSharedPaths, computeFileOverlaps, formatOverlapReport, findOpenPRFileOverlaps, resolveBaseRef, commitAndCreatePR, type WorktreeInfo } from './worktreeManager.js';
 
 // The fast-path proof needs a REAL pid space, which only Linux can give (boot
 // id + pid-namespace inode). Elsewhere the recorded id is a machine hint, good
@@ -35,6 +36,61 @@ esac
       process.env.PATH = previous;
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  // AGT-4095: publishOnPark opens a draft PR for a run that parked on an
+  // operator question, so from the next heartbeat the task was colliding with
+  // its own branch and superseding itself forever.
+  it('does not report the dispatched issue own PR, but still reports another issue', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-pr-self-'));
+    const bin = join(root, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh
+case "$*" in
+  *"pr list --state open"*) echo '[{"number":180,"url":"https://example.test/180","headRefName":"swarm/AX-858-a3-4-sheet-lead-id","files":[{"path":"src/jobs.py"}]},{"number":179,"url":"https://example.test/179","headRefName":"swarm/AX-863-a2-4","files":[{"path":"src/jobs.py"}]}]';;
+esac
+`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous}`;
+    try {
+      // Only the sibling survives...
+      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'], 'AX-858')).resolves.toEqual([
+        expect.objectContaining({ number: 179 }),
+      ]);
+      // ...and without a self identifier nothing is excluded, so the gate keeps
+      // its pre-AGT-4095 behavior rather than silently switching off.
+      await expect(findOpenPRFileOverlaps(root, ['src/jobs.py'])).resolves.toHaveLength(2);
+    } finally {
+      process.env.PATH = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('isBranchForIssue', () => {
+  it('matches a branch whose slug no longer matches the current title', () => {
+    // Live case: the stored branch is `swarm/AX-864-a2-slack` while the current
+    // title now derives `swarm/AX-864-a2-6-slack`. An equality test would miss it.
+    expect(isBranchForIssue('swarm/AX-864-a2-slack', 'AX-864')).toBe(true);
+    expect(isBranchForIssue('swarm/AX-864-a2-6-slack', 'AX-864')).toBe(true);
+  });
+
+  it('does not let a shorter identifier match a longer sibling', () => {
+    // The trailing delimiter is the whole point: without it `AX-86` would claim
+    // AX-863's branch and silently suppress a real overlap.
+    expect(isBranchForIssue('swarm/AX-863-a2-4', 'AX-86')).toBe(false);
+    expect(isBranchForIssue('swarm/AX-863-a2-4', 'AX-863')).toBe(true);
+  });
+
+  it('accepts a bare branch with no slug', () => {
+    expect(isBranchForIssue('swarm/AX-864', 'AX-864')).toBe(true);
+  });
+
+  it('rejects foreign branches and an empty identifier', () => {
+    expect(isBranchForIssue('audit/a', 'AX-864')).toBe(false);
+    expect(isBranchForIssue('heewonoh/cgf-answers-20260828', 'AX-864')).toBe(false);
+    expect(isBranchForIssue('swarm/AX-864-a2', '')).toBe(false);
   });
 });
 

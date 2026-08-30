@@ -47,7 +47,15 @@ export async function applyDraftGates(options: {
   }
 
   if (options.worktreeMode && draft.relevantFiles.length > 0) {
-    const overlaps = await findOpenPRFileOverlaps(options.projectPath, draft.relevantFiles);
+    // Exclude this issue's own PR. `publishOnPark` opens a draft PR for a run
+    // that parks on an operator question, so from the next heartbeat the task
+    // was colliding with itself and superseding forever — measured on
+    // cgf-portal as 15 supersedes and zero real work attempts in 6h. (AGT-4095)
+    const overlaps = await findOpenPRFileOverlaps(
+      options.projectPath,
+      draft.relevantFiles,
+      task.issueIdentifier ?? task.issueId,
+    );
     if (overlaps.length > 0) {
       const lines = overlaps.map(overlap => `- ${overlap.url}: ${overlap.files.map(file => `\`${file}\``).join(', ')}`);
       console.warn(`[AutonomousRunner] Existing open PR owns planned files — skipping duplicate worker: ${lines.join(' ')}`);
