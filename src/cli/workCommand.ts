@@ -14,6 +14,7 @@
 // 2 = nothing was deployed at all (validation failed / nothing selected),
 // 130 = interrupted.
 
+import { buildBranchName } from '../support/branchNaming.js';
 import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
@@ -38,7 +39,7 @@ import {
 import type { EffectClaim } from '../automation/runLedger.js';
 import { setAutomationDbPath } from '../automation/automationDbPath.js';
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
-import { buildBranchName, hasRecoverableWorktree } from '../support/worktreeManager.js';
+import {hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { ensureTaskSource } from './reviewCommand.js';
 import { filterRepoIssues, selectIssuesInteractive, WORK_SKIP_STATES } from './workSelect.js';
