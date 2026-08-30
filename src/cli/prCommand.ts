@@ -393,6 +393,14 @@ export async function runPrCommand(
           continue;
         }
 
+        if (status.blocker === 'unknown_ci') {
+          return {
+            message: `Blocked: CI head identity is unknown for ${resolved.repo}#${resolved.number}\n${resolved.url}`,
+            exitCode: 1,
+            status,
+          };
+        }
+
         // conflicts / comments / ci → one fix pass
         const result = await fix(resolved, cwd, opts);
         if (!result.success) {

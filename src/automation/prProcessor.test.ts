@@ -46,8 +46,13 @@ const gh = vi.hoisted(() => ({
     url: 'https://example/pr/9', author: 'someone', body: '', diff: 'diff --git a/x b/x',
   })),
   checkPRConflicts: vi.fn(async () => false),
+  checkPRCIStatus: vi.fn(async () => ({
+    status: 'failure' as const,
+    headSha: 'head-a',
+    failedChecks: [{ name: 'unit', conclusion: 'failure' }],
+  })),
   commentOnPR: vi.fn(async () => undefined),
-  waitForCICompletion: vi.fn(async () => ({ status: 'success' as const })),
+  waitForCICompletion: vi.fn(async () => ({ status: 'success' as const, headSha: 'head-b' })),
   getPRReviews: vi.fn(async () => [] as Array<{ author: string; state?: string; createdAt: string; body: string }>),
   getPRComments: vi.fn(async () => [] as PRIssueComment[]),
   getPRReviewComments: vi.fn(async () => [] as Array<{ author: string; body: string; path?: string; line?: number; createdAt: string }>),
@@ -138,7 +143,7 @@ vi.mock('../agents/pairPipeline.js', () => ({
 
 const { PRProcessor } = await import('./prProcessor.js');
 
-const pr = { repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9' };
+const pr = { repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', headSha: 'head-a', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9' };
 
 function newProcessor(overrides: Partial<import('./prProcessor.js').PRProcessorConfig> = {}) {
   return new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 3, ...overrides });
@@ -146,7 +151,10 @@ function newProcessor(overrides: Partial<import('./prProcessor.js').PRProcessorC
 
 beforeEach(() => {
   vi.clearAllMocks();
-  gitExecImpl.mockResolvedValue({ stdout: '', stderr: '' });
+  gitExecImpl.mockImplementation(async (args: string[]) => ({
+    stdout: args[0] === 'rev-parse' && args[1] === 'HEAD' ? 'head-b\n' : '',
+    stderr: '',
+  }));
   readFileImpl.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
   existsSyncImpl.mockReturnValue(true);
   schedulerImpl.isProjectBusy.mockReturnValue(false);
@@ -165,8 +173,13 @@ beforeEach(() => {
     url: 'https://example/pr/9', author: 'someone', body: '', diff: 'diff --git a/x b/x',
   });
   gh.checkPRConflicts.mockResolvedValue(false);
+  gh.checkPRCIStatus.mockResolvedValue({
+    status: 'failure',
+    headSha: 'head-a',
+    failedChecks: [{ name: 'unit', conclusion: 'failure' }],
+  });
   gh.commentOnPR.mockResolvedValue(undefined);
-  gh.waitForCICompletion.mockResolvedValue({ status: 'success' });
+  gh.waitForCICompletion.mockResolvedValue({ status: 'success', headSha: 'head-b' });
   gh.getPRReviews.mockResolvedValue([]);
   gh.getPRComments.mockResolvedValue([]);
   gh.getPRReviewComments.mockResolvedValue([]);
@@ -297,8 +310,8 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
 
   it('retries once after a CI failure and succeeds on the second attempt', async () => {
     gh.waitForCICompletion
-      .mockResolvedValueOnce({ status: 'failure', failedChecks: [{ name: 'test', conclusion: 'failure' }] })
-      .mockResolvedValueOnce({ status: 'success' });
+      .mockResolvedValueOnce({ status: 'failure', headSha: 'head-b', failedChecks: [{ name: 'test', conclusion: 'failure' }] })
+      .mockResolvedValueOnce({ status: 'success', headSha: 'head-b' });
     const processor = new PRProcessor({ repos: [], schedule: '0 0 1 1 *', cooldownHours: 0, maxIterations: 3, maxRetries: 2 });
     const result = await processor.fixOne(pr, '/tmp/proj');
     expect(result.success).toBe(true);
@@ -307,13 +320,34 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
   });
 
   it('breaks out immediately with a CI-timeout error when CI neither succeeds nor fails', async () => {
-    gh.waitForCICompletion.mockResolvedValueOnce({ status: 'pending' });
+    gh.waitForCICompletion.mockResolvedValueOnce({ status: 'pending', headSha: 'head-b' });
     const processor = newProcessor();
     const result = await processor.fixOne(pr, '/tmp/proj');
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/CI timeout/);
     expect(pipelineRunImpl.run).toHaveBeenCalledTimes(1);
     expect(gh.commentOnPR).toHaveBeenCalledWith('o/r', 9, expect.stringContaining('Auto-fix failed'));
+  });
+
+  it('waits only for checks belonging to the commit it just pushed', async () => {
+    const processor = newProcessor();
+    const result = await processor.fixOne(pr, '/tmp/proj');
+    expect(result.success).toBe(true);
+    expect(gh.waitForCICompletion).toHaveBeenCalledWith('o/r', 9, expect.objectContaining({
+      expectedHeadSha: 'head-b',
+    }));
+  });
+
+  it('reports an explicit identity failure instead of treating unknown CI as a timeout or success', async () => {
+    gh.waitForCICompletion.mockResolvedValueOnce({
+      status: 'unknown',
+      reason: 'head_mismatch',
+      expectedHeadSha: 'head-b',
+      observedHeadSha: 'head-a',
+    });
+    const result = await newProcessor().fixOne(pr, '/tmp/proj');
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/CI head identity unknown.*head_mismatch/);
   });
 
   it('catches a synchronous pipeline throw and reports it as the error', async () => {
@@ -328,6 +362,9 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     gitExecImpl.mockImplementation(async (args: string[]) => {
       if (args[0] === 'checkout' && args[1] !== pr.branch) {
         throw new Error('checkout restore failed');
+      }
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
+        return { stdout: 'head-b\n', stderr: '' };
       }
       return { stdout: '', stderr: '' };
     });
@@ -357,6 +394,9 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
       if (args[0] === 'stash' && args[1] === 'list') {
         if (!stashedMessage) return { stdout: '', stderr: '' };
         return { stdout: `abc123\x00stash@{0}\x00${stashedMessage}\n`, stderr: '' };
+      }
+      if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
+        return { stdout: 'head-b\n', stderr: '' };
       }
       return { stdout: '', stderr: '' };
     });
@@ -873,7 +913,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
 
   it('observes merged events after ordinary PR work for the repo', async () => {
     gh.getOpenPRs.mockResolvedValue([pr]);
-    gh.getPRChecks.mockResolvedValue([{ conclusion: 'success' }]);
+    gh.checkPRCIStatus.mockResolvedValue({ status: 'success', headSha: 'head-a' });
     const processor = newScanProcessor({
       postMergeIntegration: {
         getActiveLeaseBranches: () => [],
@@ -885,9 +925,9 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
 
     await processor.processPRs();
 
-    expect(gh.getPRChecks).toHaveBeenCalled();
+    expect(gh.checkPRCIStatus).toHaveBeenCalledWith('o/r', 9, 'head-a');
     expect(gh.getMergedPRsOrThrow).toHaveBeenCalled();
-    expect(gh.getPRChecks.mock.invocationCallOrder[0])
+    expect(gh.checkPRCIStatus.mock.invocationCallOrder[0])
       .toBeLessThan(gh.getMergedPRsOrThrow.mock.invocationCallOrder[0]);
   });
 
@@ -956,9 +996,25 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
 
   it('skips a PR with no conflicts, no feedback, and passing CI', async () => {
     gh.getOpenPRs.mockResolvedValue([pr]);
-    gh.getPRChecks.mockResolvedValue([{ conclusion: 'success' }]);
+    gh.checkPRCIStatus.mockResolvedValue({ status: 'success', headSha: 'head-a' });
     const processor = newScanProcessor();
     await processor.processPRs();
+    expect(pipelineRunImpl.run).not.toHaveBeenCalled();
+  });
+
+  it('does not mutate a PR when its listed head and CI observation disagree', async () => {
+    gh.getOpenPRs.mockResolvedValue([pr]);
+    gh.checkPRCIStatus.mockResolvedValue({
+      status: 'unknown',
+      reason: 'head_mismatch',
+      expectedHeadSha: 'head-a',
+      observedHeadSha: 'head-b',
+    });
+
+    const processor = newScanProcessor();
+    await processor.processPRs();
+
+    expect(gh.checkPRCIStatus).toHaveBeenCalledWith('o/r', 9, 'head-a');
     expect(pipelineRunImpl.run).not.toHaveBeenCalled();
   });
 
@@ -992,7 +1048,7 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     gh.getPRReviews.mockResolvedValue([
       { author: 'codex', state: 'CHANGES_REQUESTED', createdAt: '2026-08-05T00:00:00.000Z', body: 'please fix' },
     ]);
-    gh.getPRChecks.mockResolvedValue([{ conclusion: 'success' }]);
+    gh.checkPRCIStatus.mockResolvedValue({ status: 'success', headSha: 'head-a' });
     const processor = newScanProcessor();
     const scanPromise = processor.processPRs();
     await vi.advanceTimersByTimeAsync(5_000); // inter-iteration delay between rounds 1 and 2

@@ -151,6 +151,7 @@ import {
   commentOnPR,
   commentOnPROrThrow,
   checkPRConflicts,
+  checkPRCIStatus,
   waitForCICompletion,
   getPRBaseBranchOrThrow,
   getMergedPRsOrThrow,
@@ -690,15 +691,11 @@ export class PRProcessor {
             console.log(`[PRProcessor] ${key}: review feedback detected (bypassing cooldown)`);
           }
 
-          // If no conflicts and no review feedback, check CI status — only process PRs with failures
           if (!hasConflicts && !hasReviewFeedback) {
-            const { getPRChecks } = await import('../github/index.js');
-            const checks = await getPRChecks(repo, pr.number);
-            const hasFailure = checks.some(
-              (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
-            );
-            if (!hasFailure && checks.length > 0) {
-              console.log(`[PRProcessor] ${key}: no conflicts, no review feedback, and CI passing, skipping`);
+            const ciStatus = await checkPRCIStatus(repo, pr.number, pr.headSha);
+            if (ciStatus.status !== 'failure') {
+              const detail = ciStatus.status === 'unknown' ? `CI identity unknown (${ciStatus.reason})` : `CI ${ciStatus.status} at ${ciStatus.headSha}`;
+              console.log(`[PRProcessor] ${key}: no conflicts or review feedback; ${detail}, skipping`);
               continue;
             }
           } else if (hasConflicts) {
@@ -739,17 +736,18 @@ export class PRProcessor {
           };
           await this.saveState(state);
 
-          // If only review feedback (no conflicts, CI passing), handle review feedback directly
           if (hasReviewFeedback && !hasConflicts) {
-            const { getPRChecks } = await import('../github/index.js');
-            const checks = await getPRChecks(repo, pr.number);
-            const hasFailure = checks.some(
-              (c) => c.conclusion === 'failure' || c.conclusion === 'timed_out'
-            );
-            if (!hasFailure && checks.length > 0) {
-              // CI is passing, only need to handle review feedback
+            const ciStatus = await checkPRCIStatus(repo, pr.number, pr.headSha);
+            if (ciStatus.status === 'success') {
               console.log(`[PRProcessor] ${key}: Handling review feedback only (CI passing)`);
               await this.processReviewFeedback(pr, projectPath, state, key, 0);
+              continue;
+            }
+            if (ciStatus.status === 'pending' || ciStatus.status === 'unknown') {
+              const detail = ciStatus.status === 'unknown' ? `identity unknown (${ciStatus.reason})` : `pending at ${ciStatus.headSha}`;
+              state.prs[key].status = 'pending';
+              state.prs[key].lastError = `CI ${detail}`;
+              console.log(`[PRProcessor] ${key}: CI ${detail}; deferring review feedback`);
               continue;
             }
           }
@@ -947,15 +945,15 @@ export class PRProcessor {
           continue;
         }
 
-        // 4c. Pipeline succeeded - push changes
         console.log(`[PRProcessor] ${key}: Pipeline succeeded, pushing changes...`);
+        const publishedHeadSha = (await gitExec(projectPath, 'rev-parse', 'HEAD')).trim();
+        if (!publishedHeadSha) throw new Error('Cannot publish CI remediation: HEAD identity is unavailable');
         await gitExec(projectPath, 'push', 'origin', pr.branch);
-
-        // 4d. Wait for CI completion
         console.log(`[PRProcessor] ${key}: Waiting for CI checks...`);
         const ciStatus = await waitForCICompletion(pr.repo, pr.number, {
           timeoutMs: ciTimeoutMs,
           pollIntervalMs: ciPollIntervalMs,
+          expectedHeadSha: publishedHeadSha,
           onProgress: (status, elapsed) => {
             if (status.status === 'pending') {
               console.log(`[PRProcessor] ${key}: CI pending (${Math.floor(elapsed / 1000)}s elapsed)...`);
@@ -1016,6 +1014,10 @@ export class PRProcessor {
           await gitExec(projectPath, 'pull', 'origin', pr.branch);
           continue;
 
+        } else if (ciStatus.status === 'unknown') {
+          lastError = `CI head identity unknown (${ciStatus.reason};${ciStatus.expectedHeadSha ? ` expected ${ciStatus.expectedHeadSha}` : ''}${ciStatus.observedHeadSha ? ` observed ${ciStatus.observedHeadSha}` : ''})`;
+          console.log(`[PRProcessor] ${key}: ${lastError}`);
+          break;
         } else {
           // CI timeout
           lastError = 'CI timeout - checks did not complete in time';

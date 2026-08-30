@@ -5,7 +5,7 @@
 
 import type { CIStatus, PRReviewComment } from '../github/github.js';
 
-export type PrBlocker = 'conflicts' | 'comments' | 'ci' | 'pending_ci' | 'none';
+export type PrBlocker = 'conflicts' | 'comments' | 'ci' | 'pending_ci' | 'unknown_ci' | 'none';
 
 export interface PrCommentSummary {
   author: string;
@@ -57,6 +57,7 @@ export function classifyBlocker(input: {
   if (input.changesRequestedCount > 0 || input.criticalCommentCount > 0) return 'comments';
   if (input.ci.status === 'failure') return 'ci';
   if (input.ci.status === 'pending') return 'pending_ci';
+  if (input.ci.status === 'unknown') return 'unknown_ci';
   return 'none';
 }
 
@@ -162,15 +163,20 @@ export function formatPrStatus(s: PrStatusSnapshot): string {
   lines.push(`${s.repo}#${s.number} — ${s.title}`);
   lines.push(`  url:      ${s.url}`);
   lines.push(`  branch:   ${s.branch}`);
+  const observedHead = s.ci.status === 'unknown' ? s.ci.observedHeadSha : s.ci.headSha;
+  lines.push(`  head:     ${observedHead ?? 'unknown'}`);
   lines.push(`  conflicts:${s.hasConflicts ? ' YES' : ' no'}`);
 
   if (s.ci.status === 'success') {
     lines.push('  ci:       green');
   } else if (s.ci.status === 'pending') {
     lines.push('  ci:       pending');
-  } else {
+  } else if (s.ci.status === 'failure') {
     const names = s.ci.failedChecks.map((c) => c.name).join(', ');
     lines.push(`  ci:       FAIL (${names})`);
+  } else {
+    const expected = s.ci.expectedHeadSha ? ` expected=${s.ci.expectedHeadSha}` : '';
+    lines.push(`  ci:       unknown (${s.ci.reason}${expected})`);
   }
 
   if (s.changesRequested.length) {
@@ -191,6 +197,7 @@ export function formatPrStatus(s: PrStatusSnapshot): string {
     comments: 'review / critical comments',
     ci: 'failing CI',
     pending_ci: 'CI still running',
+    unknown_ci: 'CI head identity unknown',
     none: 'none — merge-ready',
   };
   lines.push(`  blocker:  ${blockerLabel[s.blocker]}`);

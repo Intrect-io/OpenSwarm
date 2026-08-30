@@ -98,10 +98,10 @@ vi.mock('../support/planner.js', () => ({
   runPlanner: plannerRunPlanner,
   formatPlannerResult: plannerFormatPlannerResult,
 }));
-
 vi.mock('../support/worktreeManager.js', () => ({
   createWorktree,
   commitAndCreatePR,
+  commitAndCreatePRWithHead: commitAndCreatePR,
   findOpenPRFileOverlaps,
   hasRecoverableWorktree,
   preserveWorktree,
@@ -311,7 +311,7 @@ describe('runnerExecution.ts coverage extension', () => {
     plannerEstimateTaskDuration.mockReturnValue(45);
     plannerFormatPlannerResult.mockReturnValue('planner result summary');
 
-    commitAndCreatePR.mockResolvedValue('https://github.com/org/repo/pull/1');
+    commitAndCreatePR.mockResolvedValue({ prUrl: 'https://github.com/org/repo/pull/1', headSha: 'published-head' });
     findOpenPRFileOverlaps.mockResolvedValue([]);
     hasRecoverableWorktree.mockResolvedValue(false);
     removeWorktree.mockResolvedValue(undefined);
@@ -772,7 +772,7 @@ describe('runnerExecution.ts coverage extension', () => {
   describe('worktree mode', () => {
     it('creates a worktree, runs the pipeline, and opens a PR on approval', async () => {
       createWorktree.mockResolvedValue(worktreeInfoFixture());
-      commitAndCreatePR.mockResolvedValue('https://github.com/org/repo/pull/1');
+      commitAndCreatePR.mockResolvedValue({ prUrl: 'https://github.com/org/repo/pull/1', headSha: 'published-head' });
       createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult({ finalStatus: 'approved', success: true })));
 
       const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
