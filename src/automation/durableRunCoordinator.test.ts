@@ -101,6 +101,101 @@ describe('DurableRunCoordinator', () => {
     );
   });
 
+  it('counts only the projects the daemon dispatches to, and reports the rest', async () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
+
+    await coordinator.execute(task('live-1'), '/work/cgf-portal', async () => result(true));
+    // A path from an earlier deployment: the row is permanent, can never run,
+    // and used to dominate the totals. (AGT-4127)
+    await coordinator.execute(task('stale-1'), '/Users/someone/dev/STONKS', async () => result(true));
+    await coordinator.execute(task('stale-2'), '/Users/someone/dev/kyte-portal', async () => result(true));
+
+    const scoped = coordinator.getMetrics(Date.now(), ['/work/cgf-portal']);
+    const total = Object.values(scoped.byState).reduce((sum, n) => sum + n, 0);
+
+    expect(total).toBe(1);
+    expect(scoped.outOfScope).toBe(2);
+  });
+
+  it('treats an empty scope as empty — every row out of it', async () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
+
+    await coordinator.execute(task('a'), '/work/cgf-portal', async () => result(true));
+    await coordinator.execute(task('b'), '/Users/someone/dev/STONKS', async () => result(true));
+
+    // The scope argument is literal. The daemon's "[] means allow everything"
+    // convention is translated by getEffectiveProjectScope, the one place that
+    // knows whether [] arose from no restriction or from every project being
+    // disabled — a fully-disabled daemon must not report its ledger as busy.
+    const none = coordinator.getMetrics(Date.now(), []);
+
+    expect(Object.values(none.byState).reduce((sum, n) => sum + n, 0)).toBe(0);
+    expect(none.outOfScope).toBe(2);
+  });
+
+  it('scopes the expired-lease count alongside byState', async () => {
+    // Both metrics derive from the runs table, so a sibling metric must not
+    // keep counting the projects byState just excluded. Two genuinely expired
+    // active leases — held EXECUTING runs probed after their lease lapsed —
+    // one in scope, one out. (gate round 2: the first version of this test
+    // never created an expired lease and asserted <=, which nothing can fail.)
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', ledger, instanceId: 'expiry-owner', leaseMs: 3_000,
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const live = coordinator.execute(task('LIVE-EXP'), '/work/cgf-portal', async () => { await held; return result(); });
+    const stale = coordinator.execute(task('STALE-EXP'), '/Users/someone/dev/STONKS', async () => { await held; return result(); });
+    await Promise.resolve();
+
+    // Probe past every renewal the coordinator could have written.
+    const past = Date.now() + 24 * 60 * 60_000;
+    const raw = coordinator.getMetrics(past);
+    const scoped = coordinator.getMetrics(past, ['/work/cgf-portal']);
+
+    expect(raw.expiredActiveLeases).toBe(2);
+    expect(scoped.expiredActiveLeases).toBe(1);
+    expect(scoped.outOfScope).toBe(1);
+
+    release();
+    await Promise.all([live, stale]);
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('keeps the raw totals when no scope is given', async () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
+
+    await coordinator.execute(task('live-1'), '/work/cgf-portal', async () => result(true));
+    await coordinator.execute(task('stale-1'), '/Users/someone/dev/STONKS', async () => result(true));
+
+    const raw = coordinator.getMetrics(Date.now());
+
+    expect(Object.values(raw.byState).reduce((sum, n) => sum + n, 0)).toBe(2);
+    expect(raw.outOfScope).toBe(0);
+  });
+
+  it('counts a nested path under an allowed project as in scope', async () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'daemon', ledger });
+
+    // Shares admission's predicate, so a subdirectory of an allowed project is
+    // in scope here exactly as it is there — the two cannot describe different
+    // project sets.
+    await coordinator.execute(task('nested'), '/work/cgf-portal/apps/pipelines', async () => result(true));
+
+    expect(coordinator.getMetrics(Date.now(), ['/work/cgf-portal']).outOfScope).toBe(0);
+  });
+
   it('admits only one concurrent run per repository across coordinator instances', async () => {
     const path = dbPath();
     const first = new DurableRunCoordinator({ mode: 'primary', dbPath: path, instanceId: 'a' });

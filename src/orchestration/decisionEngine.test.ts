@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isAllowedProjectPath, isUmbrellaIssue, selectTasksRoundRobin, type TaskItem } from './decisionEngine.js';
+import { effectiveProjectScope, isAllowedProjectPath, isUmbrellaIssue, selectTasksRoundRobin, type TaskItem } from './decisionEngine.js';
 
 // INT-1810 R2: parent/EPIC issues are umbrellas, not executable work. INT-1702 (tracking,
 // decomposed into sub-issues) and KT-300 ([EPIC] …) were wrongly picked for the worker.
@@ -29,6 +29,57 @@ describe('isUmbrellaIssue', () => {
     expect(isUmbrellaIssue(task({ issueId: 'leaf', title: 'fix(adapters): codex flag' }), parentIds)).toBe(false);
     // "epic" inside a word must not false-positive
     expect(isUmbrellaIssue(task({ issueId: 'l2', title: 'add epicenter map widget' }), parentIds)).toBe(false);
+  });
+});
+
+describe('effectiveProjectScope', () => {
+  it('returns undefined for the legacy no-restriction configuration', () => {
+    // [] in config means "allow everything"; [] as a scope means "admit
+    // nothing". The translation to undefined happens here, the one place that
+    // knows which meaning applies. (AGT-4127)
+    expect(effectiveProjectScope([], new Set(), false)).toBeUndefined();
+  });
+
+  it('passes the allow-list through when no selection filter applies', () => {
+    expect(effectiveProjectScope(['/work/a'], new Set(['/ignored']), false)).toEqual(['/work/a']);
+  });
+
+  it('narrows the allow-list to the enabled selection', () => {
+    expect(effectiveProjectScope(
+      ['/work/cgf-portal', '/work/vega-agent'],
+      new Set(['/work/cgf-portal']),
+      true,
+    )).toEqual(['/work/cgf-portal']);
+  });
+
+  it('returns an empty scope when every project is disabled', () => {
+    // Distinct from undefined: a fully-disabled daemon dispatches nothing, and
+    // its metrics must not report the ledger as busy.
+    expect(effectiveProjectScope(['/work/cgf-portal'], new Set(), true)).toEqual([]);
+  });
+
+  it('keeps the narrower path when allowed and enabled overlap as prefixes', () => {
+    // Keeping the wider /work would sweep sibling projects dispatch refuses
+    // back into the counts.
+    expect(effectiveProjectScope(['/work'], new Set(['/work/cgf-portal']), true))
+      .toEqual(['/work/cgf-portal']);
+    expect(effectiveProjectScope(['/work/cgf-portal'], new Set(['/work']), true))
+      .toEqual(['/work/cgf-portal']);
+  });
+
+  it('uses the enabled selection alone when the allow-list is empty', () => {
+    expect(effectiveProjectScope([], new Set(['/work/a']), true)).toEqual(['/work/a']);
+  });
+
+  it('matches case-insensitively where the runner admission does', () => {
+    // macOS/Windows filesystems are case-insensitive, and the runner's
+    // enabled-set admission folds case there. A casing difference between
+    // UI-captured and configured paths must not drop a project from the counts
+    // that dispatch admits. (gate round: case-sensitivity mismatch)
+    expect(effectiveProjectScope(['/Work/CGF-Portal'], new Set(['/work/cgf-portal']), true, true))
+      .toEqual(['/Work/CGF-Portal']);
+    expect(effectiveProjectScope(['/Work/CGF-Portal'], new Set(['/work/cgf-portal']), true, false))
+      .toEqual([]);
   });
 });
 
