@@ -21,6 +21,13 @@ function errorStatus(message: string): number {
   return 400;
 }
 
+function publicError(statusCode: number): string {
+  if (statusCode === 404) return 'Priority council not found';
+  if (statusCode === 409) return 'Priority council conflict';
+  if (statusCode === 503) return 'Priority council store unavailable';
+  return 'Invalid priority council request';
+}
+
 async function readJson(req: IncomingMessage, readBody: BodyReader | undefined): Promise<Record<string, unknown>> {
   if (!readBody) throw new Error('Body reader unavailable');
   try {
@@ -222,7 +229,8 @@ export async function tryHandlePriorityCouncilRoutes(
     return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    writeJson(res, errorStatus(message), { error: message });
+    const statusCode = errorStatus(message);
+    writeJson(res, statusCode, { error: publicError(statusCode) });
     return true;
   }
 }

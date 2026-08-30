@@ -85,9 +85,11 @@ describe('durable coordination thread HTTP API', () => {
   });
 
   it('returns bounded errors and leaves unrelated paths alone', async () => {
-    expect(await call('GET', '/api/coordination/threads')).toMatchObject({ handled: true, status: 400 });
+    expect(await call('GET', '/api/coordination/threads')).toMatchObject({
+      handled: true, status: 400, body: { error: 'Invalid coordination thread request' },
+    });
     expect(await call('POST', '/api/coordination/threads', { repository: '/repo' }))
-      .toMatchObject({ handled: true, status: 400 });
+      .toMatchObject({ handled: true, status: 400, body: { error: 'Invalid coordination thread request' } });
     expect((await call('GET', '/api/not-coordination')).handled).toBe(false);
   });
 
@@ -96,6 +98,8 @@ describe('durable coordination thread HTTP API', () => {
       repository: '/repo', taskId: 'task-a', subject: 'Private', idempotencyKey: 'private',
     });
     const result = await call('GET', `/api/coordination/threads/${created.body.thread.id}?repository=%2Fother`);
-    expect(result).toMatchObject({ handled: true, status: 404 });
+    expect(result).toMatchObject({
+      handled: true, status: 404, body: { error: 'Coordination thread not found' },
+    });
   });
 });

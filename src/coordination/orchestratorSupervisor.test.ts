@@ -490,4 +490,27 @@ describe('OrchestratorSupervisor', () => {
     expect(run).toHaveBeenCalledTimes(2);
     await supervisor.stop();
   });
+
+  it('logs a user-controlled repository path as data rather than a format string', async () => {
+    const root = tempState();
+    const repository = join(root, '%s-repository');
+    mkdirSync(repository);
+    const failure = new Error('provider unavailable');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const supervisor = new OrchestratorSupervisor({
+      config: { enabled: true, eventDriven: false, eventDebounceMs: 0, timeoutMs: 10_000, maxTurns: 5, legacy: false },
+      getRepositories: () => [repository],
+      getPending: () => [event()],
+      buildInstructionCapsule: () => capsule,
+      run: async () => { throw failure; },
+    });
+
+    await supervisor.requestSweep('manual');
+
+    expect(supervisor.getLastSweep()).toMatchObject({ failed: 1, ran: 0 });
+    expect(log).toHaveBeenCalledWith(
+      '[Orchestrator] repository failed:', repositoryCell(repository).repositoryPath, failure,
+    );
+    await supervisor.stop();
+  });
 });

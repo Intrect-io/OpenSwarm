@@ -310,7 +310,9 @@ export class OrchestratorSupervisor {
           continue;
         }
         stats.failed++;
-        console.error(`[Orchestrator] ${repository} failed:`, error);
+        // Keep the format string constant: a repository path may contain `%`
+        // directives that Node's console formatter would otherwise interpret.
+        console.error('[Orchestrator] repository failed:', repository, error);
       }
     }
     return stats;

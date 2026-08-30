@@ -36,6 +36,13 @@ function errorStatus(error: unknown): number {
   return 400;
 }
 
+function publicError(statusCode: number): string {
+  if (statusCode === 404) return 'Coordination thread not found';
+  if (statusCode === 409) return 'Coordination thread conflict';
+  if (statusCode === 503) return 'Coordination thread store unavailable';
+  return 'Invalid coordination thread request';
+}
+
 async function readJson(req: IncomingMessage, readBody: BodyReader | undefined): Promise<Record<string, unknown>> {
   if (!readBody) throw new Error('Body reader unavailable');
   let parsed: unknown;
@@ -242,7 +249,8 @@ export async function tryHandleCoordinationThreadRoutes(
 
     return false;
   } catch (error) {
-    writeJson(res, errorStatus(error), { error: error instanceof Error ? error.message : String(error) });
+    const statusCode = errorStatus(error);
+    writeJson(res, statusCode, { error: publicError(statusCode) });
     return true;
   }
 }

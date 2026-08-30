@@ -117,7 +117,9 @@ describe('priority council HTTP API', () => {
   });
 
   it('returns bounded errors and repository isolation', async () => {
-    expect(await call('GET', '/api/coordination/councils')).toMatchObject({ handled: true, status: 400 });
+    expect(await call('GET', '/api/coordination/councils')).toMatchObject({
+      handled: true, status: 400, body: { error: 'Invalid priority council request' },
+    });
     expect((await call('GET', '/api/not-a-council')).handled).toBe(false);
     const thread = createCoordinationThread({
       repository: repoKey, subject: 'Private', actor: 'operator-dashboard', taskId: 'operator',
@@ -126,6 +128,6 @@ describe('priority council HTTP API', () => {
     const opened = await call('POST', '/api/coordination/councils', openBody(thread.id));
     const councilId = opened.body.council.id as string;
     expect(await call('GET', `/api/coordination/councils/${councilId}?repository=%2Fother`))
-      .toMatchObject({ handled: true, status: 404 });
+      .toMatchObject({ handled: true, status: 404, body: { error: 'Priority council not found' } });
   });
 });
