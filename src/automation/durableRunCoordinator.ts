@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { isAllowedProjectPath } from '../orchestration/decisionEngine.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
@@ -712,11 +713,54 @@ export class DurableRunCoordinator {
     return outcome;
   }
 
-  getMetrics(now = Date.now()) {
-    return this.ledger?.getMetrics(now) ?? {
+  /**
+   * Ledger metrics, counted within the projects the daemon actually works on.
+   *
+   * The raw table is a permanent record of everything the daemon has ever seen,
+   * including projects that were later disabled and paths from an earlier
+   * deployment that do not exist in this one. Those rows can never execute, but
+   * they dominate a whole-table `GROUP BY state` and make the totals read as a
+   * backlog. Measured on one host: 158 of 254 rows referenced host paths from
+   * before containerisation, so `RETRY_AT` reported 88 where the live figure was
+   * 48, and `READY` reported 24 where it was 4. Both readings produced a wrong
+   * diagnosis before the scope was applied. (AGT-4127)
+   *
+   * Scoping uses `isAllowedProjectPath`, the same predicate admission uses, so
+   * the counts cannot describe a different set of projects than the daemon
+   * dispatches to. Out-of-scope rows are reported as a single number rather than
+   * dropped — hiding them would trade one misleading total for another.
+   *
+   * `allowedProjects` is literal: the scope passed is the scope counted.
+   * Omitted means unscoped — the raw table. An empty array means an empty
+   * scope — every row is out of it. The daemon's config uses `[]` to mean
+   * "allow everything", but that translation belongs to the caller
+   * (`getEffectiveProjectScope`), which alone knows whether an empty array
+   * arose from "no restriction" or from "every project disabled"; conflating
+   * them here made metrics report a fully-disabled daemon as fully busy.
+   *
+   * `byState` and `expiredActiveLeases` are scoped because both are derived from
+   * the runs table. `effectsByStatus` and `openCircuits` are not: effects and
+   * circuits are keyed by their own identifiers rather than by project path, so
+   * scoping them needs a join this method deliberately does not do. They stay
+   * global, and this comment is the record of that.
+   */
+  getMetrics(now = Date.now(), allowedProjects?: readonly string[]) {
+    const base = this.ledger?.getMetrics(now) ?? {
       byState: {}, effectsByStatus: {}, expiredActiveLeases: 0, oldestPendingEffectAgeMs: 0,
       openCircuits: 0,
     };
+    if (!this.ledger || allowedProjects === undefined) return { ...base, outOfScope: 0 };
+
+    const scope = [...allowedProjects];
+    const byState: Record<string, number> = {};
+    let outOfScope = 0;
+    let expiredActiveLeases = 0;
+    for (const run of this.ledger.listRuns()) {
+      if (!isAllowedProjectPath(run.projectPath, scope)) { outOfScope++; continue; }
+      byState[run.state] = (byState[run.state] ?? 0) + 1;
+      if (ACTIVE_LEASE_STATES.includes(run.state) && !holdsLiveLease(run, now)) expiredActiveLeases++;
+    }
+    return { ...base, byState, expiredActiveLeases, outOfScope };
   }
 
   close(): void {

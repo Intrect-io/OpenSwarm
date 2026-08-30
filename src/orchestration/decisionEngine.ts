@@ -261,6 +261,52 @@ function normalizeProjectPath(input: string): string {
   return resolve(expandHomePath(input));
 }
 
+/**
+ * The project set dispatch will actually admit: the configured allow-list
+ * narrowed by the enabled selection, when a selection is being applied.
+ *
+ * `undefined` means no restriction exists (the legacy allow-everything
+ * configuration); `[]` means the gates admit nothing (every project disabled).
+ * The two collapse to the same array value but opposite dispatch behaviour, so
+ * callers scoping metrics or reports must preserve the distinction rather than
+ * defaulting one into the other. (AGT-4127)
+ *
+ * Pure so it can be tested without the runner harness; the runner delegates.
+ */
+export function effectiveProjectScope(
+  allowedProjects: readonly string[],
+  enabledProjects: ReadonlySet<string>,
+  applyEnabledFilter: boolean,
+  caseInsensitivePaths = process.platform === 'darwin' || process.platform === 'win32',
+): string[] | undefined {
+  if (!applyEnabledFilter) return allowedProjects.length === 0 ? undefined : [...allowedProjects];
+  if (allowedProjects.length === 0) return [...enabledProjects];
+  // The runner's enabled-set admission compares case-insensitively on macOS and
+  // Windows (their filesystems are), so this intersection must too — a casing
+  // difference between UI-captured and configured paths would otherwise drop a
+  // project from the counts that dispatch happily admits. Comparison only: the
+  // returned entries keep their original casing.
+  const fold = (p: string) => (caseInsensitivePaths ? normalizeProjectPath(p).toLowerCase() : normalizeProjectPath(p));
+  const allowed = [...allowedProjects];
+  const enabled = [...enabledProjects];
+  const allowedFolded = allowed.map(fold);
+  const enabledFolded = enabled.map(fold);
+  // Both lists are prefix-closed (a path is in if it is under an entry), so the
+  // effective scope is their intersection: from each overlapping pair keep the
+  // NARROWER path. Keeping the wider one — allowed `/work` when only
+  // `/work/cgf-portal` is enabled — would sweep sibling projects dispatch
+  // refuses back into the counts.
+  const scope = new Map<string, string>();
+  for (const p of [
+    ...allowed.filter((_, i) => isAllowedProjectPath(allowedFolded[i], enabledFolded)),
+    ...enabled.filter((_, i) => isAllowedProjectPath(enabledFolded[i], allowedFolded)),
+  ]) {
+    // Dedupe on the folded key: the same directory spelt two ways is one entry.
+    if (!scope.has(fold(p))) scope.set(fold(p), normalizeProjectPath(p));
+  }
+  return [...scope.values()];
+}
+
 export function isAllowedProjectPath(projectPath: string, allowedProjects: string[]): boolean {
   const normalizedProjectPath = normalizeProjectPath(projectPath);
 
