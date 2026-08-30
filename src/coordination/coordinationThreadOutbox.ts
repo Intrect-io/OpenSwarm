@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { getTraceDb } from './coordinationTrace.js';
+import { t } from '../locale/index.js';
 import {
   getCoordinationStore,
   type PublishCoordinationEvent,
@@ -206,7 +207,7 @@ export async function drainCoordinationThreadOutbox(options: {
         kind: 'thread-update',
         status: row.action === 'created' ? 'open' : 'completed',
         correlationId: `thread:${row.thread_id}`,
-        summary: `Thread ${row.action}: ${row.subject}`,
+        summary: t(`coordination.threadAction.${row.action}`, { subject: row.subject }),
         detail: row.body ?? undefined,
         metadata,
       });

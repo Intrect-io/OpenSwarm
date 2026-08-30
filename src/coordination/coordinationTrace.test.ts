@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { defaultAutomationDbPath, setAutomationDbPath } from '../automation/automationDbPath.js';
 import Sqlite from 'better-sqlite3';
 
-import { queryTrace, recordTraceEvent, resetTraceDbForTests, traceSize } from './coordinationTrace.js';
+import { queryTrace, recordTraceEvent, resetTraceDbForTests, scanCoordinationTrace, traceSize } from './coordinationTrace.js';
 import type { CoordinationEvent } from './coordinationStore.js';
 
 let root: string;
@@ -52,6 +52,17 @@ describe('coordination trace', () => {
     const oldest = queryTrace({ taskId: 'task-1', limit: 1_000 })[0];
     expect(oldest.summary).toBe('event 1500');
     expect(queryTrace({ correlationId: 'corr-1', limit: 1 })).toHaveLength(1);
+
+    const scanned: CoordinationEvent[] = [];
+    let cursor: number | undefined;
+    do {
+      const page = scanCoordinationTrace({ afterId: cursor, limit: 400 });
+      scanned.push(...page.events);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    expect(scanned).toHaveLength(2_500);
+    expect(scanned[0].summary).toBe('event 0');
+    expect(scanned.at(-1)?.summary).toBe('event 2499');
   });
 
   it('is idempotent on event id so a replayed publish does not duplicate', () => {

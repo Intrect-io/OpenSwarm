@@ -1,17 +1,33 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getCoordinationStore, resetCoordinationStoreForTests } from './coordinationStore.js';
-import { tryHandleCoordinationRoutes } from './coordinationRoutes.js';
+import { resetCoordinationRouteLocalizationForTests, tryHandleCoordinationRoutes } from './coordinationRoutes.js';
+import { initLocale } from '../locale/index.js';
+import { recordTraceEvent, resetTraceDbForTests } from './coordinationTrace.js';
+
+const runChatCompletion = vi.hoisted(() => vi.fn());
+vi.mock('../support/chatBackend.js', () => ({ runChatCompletion }));
 
 // vitest.setup.ts points this at a temp path; restore it rather than deleting,
 // so a later suite in this worker never falls back to the real ~/.openswarm store.
 const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
 let dir = '';
-afterEach(() => { delete process.env.OPENSWARM_ATTACHMENT_TOTAL_BYTES; resetCoordinationStoreForTests(); process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE; if (dir) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => {
+  delete process.env.OPENSWARM_ATTACHMENT_TOTAL_BYTES;
+  delete process.env.OPENSWARM_COORDINATION_TRANSLATIONS_FILE;
+  delete process.env.OPENSWARM_AUTOMATION_DB;
+  resetTraceDbForTests();
+  initLocale('en');
+  runChatCompletion.mockReset();
+  resetCoordinationRouteLocalizationForTests();
+  resetCoordinationStoreForTests();
+  process.env.OPENSWARM_COORDINATION_FILE = ORIGINAL_COORDINATION_FILE;
+  if (dir) rmSync(dir, { recursive: true, force: true });
+});
 
 async function call(url: string) {
   let status = 0; let payload = '';
@@ -34,6 +50,107 @@ describe('GET /api/coordination', () => {
     expect(response.body.events).toHaveLength(1);
     expect(response.body.pending).toHaveLength(1);
     expect(response.body.lastSeq).toBe(2);
+  });
+
+  it('backfills Korean display text without replacing retained English evidence', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-coordination-translation-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    process.env.OPENSWARM_COORDINATION_TRANSLATIONS_FILE = join(dir, 'translations.json');
+    process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'automation.db');
+    resetTraceDbForTests();
+    resetCoordinationStoreForTests();
+    initLocale('ko');
+    await getCoordinationStore().publish({
+      repository: '/repo', taskId: 't1', actor: 'worker-a', kind: 'advice-response',
+      status: 'completed', summary: 'Use the existing retry helper.',
+    });
+    recordTraceEvent({
+      id: 'trace-only', seq: 0, timestamp: 0, repository: '/old-repo', taskId: 'old-task',
+      actor: 'worker-old', kind: 'advice-response', status: 'completed', correlationId: 'old-correlation',
+      summary: 'This event has already aged out of the live board.', fingerprint: 'trace-only-fingerprint',
+    });
+    runChatCompletion.mockImplementation(async ({ prompt }: { prompt: string }) => {
+      const items = JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1)) as Array<{ id: string }>;
+      return { response: JSON.stringify(items.map(({ id }) => ({
+        id,
+        summary: id === 'trace-only' ? '이 이벤트는 이미 live board에서 밀려났습니다.' : '기존 retry helper를 사용하세요.',
+      }))) };
+    });
+
+    const backfill = await post('/api/coordination/translations/backfill', {});
+    expect(backfill).toMatchObject({ status: 200, body: { locale: 'ko', translated: 2, events: 2, failed: 0 } });
+    const repeated = await post('/api/coordination/translations/backfill', {});
+    expect(repeated).toMatchObject({ status: 200, body: { translated: 0, cached: 2, failed: 0 } });
+    const boardOnly = await post('/api/coordination/translations/backfill', { repository: '/repo', includeHistory: false });
+    expect(boardOnly).toMatchObject({ status: 200, body: { events: 1, boardEvents: 1, cached: 1 } });
+    expect(runChatCompletion).toHaveBeenCalledTimes(1);
+    const response = await call('/api/coordination');
+    expect(response.body.events[0]).toMatchObject({
+      summary: '기존 retry helper를 사용하세요.',
+      localizedLocale: 'ko',
+      originalText: { summary: 'Use the existing retry helper.' },
+    });
+    const history = await call('/api/coordination/history?repository=%2Fold-repo');
+    expect(history.body.events[0]).toMatchObject({
+      id: 'trace-only', summary: '이 이벤트는 이미 live board에서 밀려났습니다.',
+      originalText: { summary: 'This event has already aged out of the live board.' },
+    });
+  });
+
+  it('automatically backfills retained English when the Korean dashboard is read', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-coordination-auto-translation-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    process.env.OPENSWARM_COORDINATION_TRANSLATIONS_FILE = join(dir, 'translations.json');
+    process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'automation.db');
+    resetTraceDbForTests();
+    resetCoordinationStoreForTests();
+    initLocale('ko');
+    await getCoordinationStore().publish({
+      repository: '/repo', taskId: 't-auto', actor: 'worker-a', kind: 'advice-response',
+      status: 'completed', summary: 'Review the existing implementation before editing.',
+    });
+    recordTraceEvent({
+      id: 'older-trace-only', seq: 0, timestamp: 0, repository: '/repo', taskId: 't-old',
+      actor: 'worker-old', kind: 'advice-response', status: 'completed', correlationId: 'old-auto-correlation',
+      summary: 'Do not translate the entire archive from a dashboard poll.', fingerprint: 'older-trace-fingerprint',
+    });
+    runChatCompletion.mockImplementation(async ({ prompt }: { prompt: string }) => {
+      const items = JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1)) as Array<{ id: string }>;
+      return { response: JSON.stringify(items.map(({ id }) => ({
+        id,
+        summary: id === 'older-trace-only'
+          ? '대시보드 poll에서 전체 이력을 번역하지 마세요.'
+          : '수정하기 전에 기존 구현을 검토하세요.',
+      }))) };
+    });
+
+    const first = await call('/api/coordination?repository=%2Frepo');
+    expect(first.status).toBe(200);
+    expect(first.body.events[0].summary).toBe('Review the existing implementation before editing.');
+
+    await vi.waitFor(async () => {
+      const translated = await call('/api/coordination?repository=%2Frepo');
+      expect(translated.body.events[0]).toMatchObject({
+        summary: '수정하기 전에 기존 구현을 검토하세요.',
+        localizedLocale: 'ko',
+        originalText: { summary: 'Review the existing implementation before editing.' },
+      });
+    });
+    expect(runChatCompletion).toHaveBeenCalledTimes(1);
+    expect(runChatCompletion.mock.calls[0]![0].prompt).not.toContain('older-trace-only');
+
+    const history = await call('/api/coordination/history?repository=%2Frepo');
+    expect(history.body.events.find((item: { id: string }) => item.id === 'older-trace-only')).toMatchObject({
+      summary: '대시보드 poll에서 전체 이력을 번역하지 마세요.',
+      localizedLocale: 'ko',
+    });
+    expect(runChatCompletion).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects transcript backfill when the installation locale is English', async () => {
+    initLocale('en');
+    const response = await post('/api/coordination/translations/backfill', {});
+    expect(response).toMatchObject({ status: 409, body: { error: expect.stringMatching(/non-English/) } });
   });
 
   it('returns only what the client has not seen, and leaves other routes alone', async () => {

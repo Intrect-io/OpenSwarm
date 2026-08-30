@@ -13,6 +13,7 @@ import type { AdapterName } from '../adapters/types.js';
 import type { WorkerResult } from '../agents/agentPair.js';
 import { withFileLock } from '../support/fileLock.js';
 import { assignCallSign } from './agentNames.js';
+import { t } from '../locale/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -70,16 +71,16 @@ async function execute(input: PeriodicReviewInput): Promise<{ success: boolean; 
   }
   const workerResult: WorkerResult = {
     success: true,
-    summary: 'Periodic repository review',
+    summary: t('coordination.periodicReview.title'),
     filesChanged: [],
     commands: [],
     output: '',
-    noChangesReason: 'Read-only periodic audit of the existing repository',
+    noChangesReason: t('coordination.periodicReview.noChangesReason'),
   };
   const callSign = assignCallSign({ repository: input.repository, executionId: input.profile, role: 'review-agent' });
   const review = await runReviewer({
-    taskTitle: 'Periodic repository review',
-    taskDescription: 'Audit the repository for correctness, security, permissions, and maintainability findings. Do not modify files.',
+    taskTitle: t('coordination.periodicReview.title'),
+    taskDescription: t('coordination.periodicReview.description'),
     workerResult,
     projectPath: input.repository,
     adapterName: input.adapter,
@@ -103,10 +104,10 @@ export async function runPeriodicReview(input: PeriodicReviewInput): Promise<Per
     return await withFileLock(lockPath(input), async () => {
       const callSign = assignCallSign({ repository: input.repository, executionId: input.profile, role: 'review-agent' });
       await getCoordinationStore().publish({
-        repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, actorRole: 'review-agent', kind: 'review-run', status: 'running', correlationId: leaseKey, summary: `Periodic ${input.profile} review started`,
+        repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, actorRole: 'review-agent', kind: 'review-run', status: 'running', correlationId: leaseKey, summary: t('coordination.periodicReview.started', { profile: input.profile }),
       });
       const result = await execute(input);
-      const summary = result.output.slice(-4_000) || `${input.profile} review produced no output`;
+      const summary = result.output.slice(-4_000) || t('coordination.periodicReview.noOutput', { profile: input.profile });
       const fingerprint = createHash('sha256').update(`${input.profile}\0${summary}`).digest('hex');
       await getCoordinationStore().publish({
         repository: input.repository, taskId: input.taskId, actor: callSign.address, actorName: callSign.name, actorRole: 'review-agent', kind: 'review-run', status: result.success ? 'completed' : 'failed', correlationId: leaseKey, summary, metadata: { profile: input.profile, fingerprint, agent: callSign.name },

@@ -296,6 +296,69 @@ export interface LocaleMessages {
     };
   };
 
+  // ── Coordination board ─────────────────
+  coordination: {
+    stage: {
+      takingOn: string;             // {{title}}
+      failed: string;               // {{seconds}}, {{detail}}
+      finished: string;             // {{seconds}}
+      didNotPass: string;           // {{seconds}}
+    };
+    instructionSnapshot: string;    // {{digest}}, {{count}}
+    mcpDenied: string;              // {{name}}, {{reason}}
+    threadAction: {
+      created: string;              // {{subject}}
+      replied: string;              // {{subject}}
+      resolved: string;             // {{subject}}
+    };
+    humanQuestion: {
+      operatorPaged: string;
+      humanAnswered: string;
+      supervisorAnswered: string;
+      siblingAnswered: string;
+    };
+    periodicReview: {
+      title: string;
+      description: string;
+      noChangesReason: string;
+      started: string;              // {{profile}}
+      noOutput: string;             // {{profile}}
+    };
+    orchestrator: {
+      adapterRejected: string;      // {{adapter}}
+      routed: string;               // {{adapter}}, {{model}}
+      discoveryFailed: string;      // {{error}}
+      mcpUnavailable: string;
+      started: string;              // {{trigger}}
+      completed: string;            // {{granted}}, {{denied}}
+      failed: string;               // {{error}}
+    };
+    council: {
+      update: string;               // {{action}}, {{subject}}
+      actions: {
+        opened: string;
+        evidence: string;
+        ballot: string;
+        finalized: string;
+        expired: string;
+        consumed: string;
+      };
+      outcomes: {
+        selected: string;
+        tieBreak: string;
+        noQuorum: string;
+      };
+      opened: string;               // {{id}}, {{snapshot}}, {{options}}, {{quorum}}, {{taskQuorum}}, {{roleQuorum}}
+      evidence: string;             // {{id}}, {{option}}, {{summary}}, {{refs}}
+      ballot: string;               // {{id}}, {{actor}}, {{role}}, {{ranking}}, {{confidence}}, {{evidence}}
+      finalized: string;            // {{id}}, {{outcome}}, {{selection}}, {{tally}}, {{missing}}
+      selected: string;             // {{option}}, {{ranking}}
+      consumed: string;             // {{id}}, {{actor}}, {{snapshot}}, {{version}}
+      none: string;
+      unknownRole: string;
+    };
+  };
+
   // ── Service ─────────────────────────────
   service: {
     startComplete: string;

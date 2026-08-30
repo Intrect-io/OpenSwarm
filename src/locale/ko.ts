@@ -353,6 +353,69 @@ export const ko: LocaleMessages = {
     },
   },
 
+  // ── Coordination board ─────────────────
+  coordination: {
+    stage: {
+      takingOn: '작업 시작: {{title}}',
+      failed: '{{seconds}}초 만에 실패: {{detail}}',
+      finished: '{{seconds}}초 만에 완료',
+      didNotPass: '{{seconds}}초 만에 통과하지 못함',
+    },
+    instructionSnapshot: 'Claude Code 규칙 {{digest}} (출처 {{count}}개)',
+    mcpDenied: 'MCP 도구 {{name}} 거부: {{reason}}',
+    threadAction: {
+      created: '스레드 생성: {{subject}}',
+      replied: '스레드 답변: {{subject}}',
+      resolved: '스레드 해결: {{subject}}',
+    },
+    humanQuestion: {
+      operatorPaged: 'Discord로 운영자에게 질문을 보냄',
+      humanAnswered: '사용자가 차단 질문에 답변함',
+      supervisorAnswered: '프로젝트 감독자가 차단 질문에 답변함',
+      siblingAnswered: '같은 차단 사유를 다르게 표현한 질문의 답변으로 처리됨',
+    },
+    periodicReview: {
+      title: '정기 저장소 리뷰',
+      description: '저장소의 정확성, 보안, 권한, 유지보수성 문제를 감사하라. 파일을 수정하지 마라.',
+      noChangesReason: '기존 저장소에 대한 읽기 전용 정기 감사',
+      started: '정기 {{profile}} 리뷰 시작',
+      noOutput: '{{profile}} 리뷰 결과 없음',
+    },
+    orchestrator: {
+      adapterRejected: "오케스트레이터 어댑터 '{{adapter}}'는 자체 도구 루프에 위임하므로 MCP 전용 감독을 강제할 수 없음",
+      routed: '오케스트레이터가 {{adapter}}/{{model}}로 라우팅됨',
+      discoveryFailed: '외부 MCP 탐색 실패. 내부 coordination 도구로 계속함 ({{error}})',
+      mcpUnavailable: '승인된 외부 MCP 도구 없음. 내부 coordination 도구로 계속함',
+      started: '{{trigger}} 트리거로 오케스트레이터 감독 시작',
+      completed: '오케스트레이터가 내부 coordination과 외부 MCP 도구 {{granted}}개를 사용했고 {{denied}}개를 거부함',
+      failed: '오케스트레이터 감독 실패: {{error}}',
+    },
+    council: {
+      update: '우선순위 협의회 {{action}}: {{subject}}',
+      actions: {
+        opened: '개설',
+        evidence: '근거 추가',
+        ballot: '투표 기록',
+        finalized: '확정',
+        expired: '만료',
+        consumed: '반영',
+      },
+      outcomes: {
+        selected: '선택 완료',
+        tieBreak: '동률 규칙으로 결정',
+        noQuorum: '정족수 미달',
+      },
+      opened: '[우선순위 협의회 {{id}}] 캐시 스냅샷 {{snapshot}} 기준으로 개설. 선택지: {{options}}. 정족수 {{quorum}}, 교차 작업 {{taskQuorum}}, 교차 역할 {{roleQuorum}}. 권한은 후보군 내부의 자문 순위에만 한정됨.',
+      evidence: '[우선순위 협의회 {{id}}] {{option}} 근거: {{summary}} (참조: {{refs}})',
+      ballot: '[우선순위 협의회 {{id}}] {{actor}}({{role}})의 동등 가중치 투표 기록: {{ranking}}; 확신도 {{confidence}}; 근거 {{evidence}}.',
+      finalized: '[우선순위 협의회 {{id}}] {{outcome}}. {{selection}}집계 {{tally}}. 미충족 정족수: {{missing}}. 권한은 계속 후보군 내부의 자문 순위에만 한정됨.',
+      selected: '{{option}} 선택; 순위 {{ranking}}. ',
+      consumed: '[우선순위 협의회 {{id}}] 오케스트레이터 {{actor}}가 자문 순위를 반영함. 스냅샷 {{snapshot}}, 협의회 버전 {{version}}.',
+      none: '없음',
+      unknownRole: '역할 미상',
+    },
+  },
+
   // ── Service ─────────────────────────────
   service: {
     startComplete: 'OpenSwarm 서비스 시작 완료!',

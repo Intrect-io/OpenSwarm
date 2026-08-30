@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolDefinition } from '../adapters/tools.js';
 import { buildOrchestratorObjective } from './orchestratorAgent.js';
+import { initLocale } from '../locale/index.js';
 
 const spawnCli = vi.hoisted(() => vi.fn(async () => ({ exitCode: 0, stdout: 'coordinated', stderr: '', durationMs: 1 })));
 const getMcpTools = vi.hoisted(() => vi.fn());
@@ -22,6 +23,7 @@ const tool = (name: string): ToolDefinition => ({ type: 'function', function: { 
 const ORIGINAL_COORDINATION_FILE = process.env.OPENSWARM_COORDINATION_FILE;
 let dir = '';
 afterEach(async () => {
+  initLocale('en');
   vi.clearAllMocks();
   getAdapter.mockReturnValue({
     name: 'codex-responses',
@@ -62,6 +64,20 @@ describe('buildOrchestratorObjective', () => {
 });
 
 describe('runOrchestrator', () => {
+  it('instructs the native supervisor to keep visible coordination in the installation locale', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-locale-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    initLocale('ko');
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    await runOrchestrator({ repository: '/repo', taskId: 'coordination', objective: 'x' });
+
+    const passed = spawnCli.mock.calls[0][1] as { systemPrompt?: string };
+    expect(passed.systemPrompt).toContain('모든 메시지는 한국어로 작성하라');
+    expect(passed.systemPrompt).toContain('비공개 내부 추론은 노출하지 마라');
+  });
+
   it('grants only policy-approved MCP tools and never runs in the repository tree', async () => {
     dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-'));
     process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');

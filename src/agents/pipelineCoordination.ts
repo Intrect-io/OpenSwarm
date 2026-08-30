@@ -125,7 +125,9 @@ export function publishStageFailureToBoard(
   correlationId?: string,
 ): void {
   const detail = (error instanceof Error ? error.message : String(error)).slice(0, 200);
-  void publishStageToBoard(context, stage, 'failed', `Failed in ${(durationMs / 1000).toFixed(1)}s: ${detail}`, { correlationId });
+  void publishStageToBoard(context, stage, 'failed', t('coordination.stage.failed', {
+    seconds: (durationMs / 1000).toFixed(1), detail,
+  }), { correlationId });
 }
 
 // Call sites publish fire-and-forget, and each publish awaits a dynamic import
@@ -193,7 +195,7 @@ export function publishStageOutcomeToBoard(
     context,
     stage,
     outcome.success ? 'completed' : 'failed',
-    said || (outcome.success ? `Finished in ${seconds}s` : `Did not pass in ${seconds}s`),
+    said || t(outcome.success ? 'coordination.stage.finished' : 'coordination.stage.didNotPass', { seconds }),
     {
       correlationId: exchangeId,
       durationMs: outcome.durationMs,

@@ -28,7 +28,6 @@ import * as memory from '../memory/index.js';
 import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
-import { initLocale } from '../locale/index.js';
 import { detectTailscaleIP, isLoopbackAddress, isTailscaleAddress } from './tailscaleNetwork.js';
 export { detectTailscaleIP, isTailscaleAddress } from './tailscaleNetwork.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
@@ -215,7 +214,6 @@ function startExecTask(
   // Run pipeline asynchronously
   (async () => {
     try {
-      initLocale('en');
       entry.status = 'running';
 
       let stages: PipelineStage[];

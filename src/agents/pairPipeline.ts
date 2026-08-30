@@ -12,6 +12,7 @@ import type { SkillDocumenterResult } from './skillDocumenter.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
 import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
 import { broadcastEvent } from '../core/eventHub.js';
+import { t } from '../locale/index.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
 import { runGuards } from './pipelineGuards.js';
@@ -314,7 +315,7 @@ export class PairPipeline extends EventEmitter {
     // One exchange id for this stage attempt, captured before anything can
     // move the iteration counter (AGT-4018).
     const exchangeId = stageCorrelationId(context, stage);
-    void publishStageToBoard(context, stage, 'running', `Taking on: ${context.task.title}`, {
+    void publishStageToBoard(context, stage, 'running', t('coordination.stage.takingOn', { title: context.task.title }), {
       model: stageModel,
       correlationId: exchangeId,
       recipientRole: stage === 'reviewer' ? 'worker' : (stage === 'worker' ? 'reviewer' : undefined),
