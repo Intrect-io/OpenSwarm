@@ -23,6 +23,7 @@ function plan(overrides: Partial<Parameters<typeof planStalledInProgress>[1]> = 
   return planStalledInProgress(tasks, {
     now: 10 * HOUR,
     staleAfterMs: 6 * HOUR,
+    hasOpenSwarmClaim: () => true,
     isSchedulerOwned: () => false,
     hasLiveLease: () => false,
     hasPublishedArtifact: () => false,
@@ -39,6 +40,10 @@ describe('planStalledInProgress', () => {
     expect(plan({}, [task({ trackerUpdatedAt: 4 * HOUR + 1 })])).toEqual([]);
     expect(plan({ isSchedulerOwned: () => true })).toEqual([]);
     expect(plan({ hasLiveLease: () => true })).toEqual([]);
+  });
+
+  it('never retires an In Progress claim without a current canonical OpenSwarm claim', () => {
+    expect(plan({ hasOpenSwarmClaim: () => false })).toEqual([]);
   });
 
   it('moves a published artifact to In Review instead of discarding it', () => {

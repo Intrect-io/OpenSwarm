@@ -9,6 +9,8 @@ export interface StalledInProgressCandidate {
 export interface StalledInProgressContext {
   now: number;
   staleAfterMs: number;
+  /** Current canonical OpenSwarm claim; never retire a human/foreign claim. */
+  hasOpenSwarmClaim: (issueId: string) => boolean;
   isSchedulerOwned: (issueId: string) => boolean;
   hasLiveLease: (issueId: string) => boolean;
   hasPublishedArtifact: (issueId: string) => boolean;
@@ -35,6 +37,7 @@ export function planStalledInProgress(
     const updatedAt = task.trackerUpdatedAt;
     if (!Number.isFinite(updatedAt) || updatedAt! > context.now) return [];
     if (context.now - updatedAt! < context.staleAfterMs) return [];
+    if (!context.hasOpenSwarmClaim(issueId)) return [];
     if (context.isSchedulerOwned(issueId) || context.hasLiveLease(issueId)) return [];
     return [{
       task,

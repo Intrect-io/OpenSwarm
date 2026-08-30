@@ -677,14 +677,41 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
   describe('stalled In Progress reconciliation', () => {
     it('moves an unowned stale Linear task to Backlog and updates the current snapshot', async () => {
       const updateState = vi.fn(async () => true);
-      runnerExecution.setTaskSource({ kind: 'linear', updateState } as unknown as ITaskSource);
+      const lookupIssueState = vi.fn(async () => ({
+        ok: true as const,
+        issue: { state: 'In Progress', updatedAt: 1_000 },
+      }));
+      runnerExecution.setTaskSource({ kind: 'linear', updateState, lookupIssueState } as unknown as ITaskSource);
       const r = new AutonomousRunner(cfg({ stalledInProgressHours: 6 }));
+      const internal = r as unknown as Internal;
+      vi.spyOn(internal.durableRuns, 'getRun').mockReturnValue({ state: 'RETRY_AT' });
+      (await import('../taskState/store.js')).markTaskInProgress('ISSUE-1', { sessionId: 'owned-session' });
       const stale = task({ linearState: 'In Progress', trackerUpdatedAt: 1_000 });
 
-      await (r as unknown as Internal).reconcileStalledInProgress([stale], 6 * 60 * 60_000 + 1_000);
+      await internal.reconcileStalledInProgress([stale], 6 * 60 * 60_000 + 1_000);
 
+      expect(lookupIssueState).toHaveBeenCalledWith('INT-1');
       expect(updateState).toHaveBeenCalledWith('ISSUE-1', 'Backlog');
       expect(stale.linearState).toBe('Backlog');
+    });
+
+    it('fails closed when the tracker changed after the heartbeat snapshot', async () => {
+      const updateState = vi.fn(async () => true);
+      const lookupIssueState = vi.fn(async () => ({
+        ok: true as const,
+        issue: { state: 'In Progress', updatedAt: 1_001 },
+      }));
+      runnerExecution.setTaskSource({ kind: 'linear', updateState, lookupIssueState } as unknown as ITaskSource);
+      const r = new AutonomousRunner(cfg({ stalledInProgressHours: 6 }));
+      const internal = r as unknown as Internal;
+      vi.spyOn(internal.durableRuns, 'getRun').mockReturnValue({ state: 'RETRY_AT' });
+      (await import('../taskState/store.js')).markTaskInProgress('ISSUE-1', { sessionId: 'owned-session' });
+      const stale = task({ linearState: 'In Progress', trackerUpdatedAt: 1_000 });
+
+      await internal.reconcileStalledInProgress([stale], 6 * 60 * 60_000 + 1_000);
+
+      expect(updateState).not.toHaveBeenCalled();
+      expect(stale.linearState).toBe('In Progress');
     });
   });
 
