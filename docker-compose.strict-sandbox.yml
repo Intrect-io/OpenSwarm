@@ -1,5 +1,5 @@
 # Opt-in strict native-shell companion. Use together with the base file:
-#   install -d -m 0700 sandbox-socket
+#   sudo install -d -o 1001 -g 1001 -m 0700 sandbox-socket
 #   docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml up -d
 # The host directory must be owned by uid/gid 1001. The server refuses a
 # different owner/mode and never opens its socket when a production isolation
@@ -24,6 +24,12 @@ services:
   # with one workspace RW, known sensitive files masked, git/dependencies RO,
   # /run hidden and PID-tree ownership. network_mode:none remains the egress
   # boundary; bwrap shares that loopback-only namespace so localhost tests work.
+  # Docker starts only the tiny launcher as root. setpriv immediately changes to
+  # uid/gid 1001 while retaining ambient SYS_ADMIN, SETUID, and DAC_READ_SEARCH.
+  # bwrap 0.8 rejects ambient caps at non-root uid, so SETUID exists only to
+  # enter uid 0 for the bwrap launcher. DAC_READ_SEARCH is required because its
+  # fd-bind implementation resolves /proc/self/fd through mode-0700 worktrees.
+  # The requested command returns to uid 1001 with active caps cleared.
   sandbox-executor:
     build:
       context: .
@@ -32,7 +38,7 @@ services:
     image: openswarm:latest
     container_name: openswarm-sandbox-executor
     restart: unless-stopped
-    user: "1001:1001"
+    user: "0:0"
     network_mode: none
     read_only: true
     stop_grace_period: 60s
@@ -41,6 +47,16 @@ services:
       - TZ=Asia/Seoul
 
     command:
+      - /usr/bin/setpriv
+      - --reuid
+      - "1001"
+      - --regid
+      - "1001"
+      - --clear-groups
+      - --inh-caps
+      - +sys_admin,+setuid,+dac_read_search
+      - --ambient-caps
+      - +sys_admin,+setuid,+dac_read_search
       - node
       - dist/sandboxExecutor/entrypoint.js
       - serve
@@ -72,7 +88,7 @@ services:
       - /tmp:rw,nosuid,nodev,mode=1777,size=512m
 
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN]
+    cap_add: [SYS_ADMIN, SETUID, SETGID, DAC_READ_SEARCH]
     security_opt:
       - no-new-privileges:true
       - seccomp=unconfined
@@ -83,6 +99,12 @@ services:
     healthcheck:
       test:
         - CMD
+        - /usr/bin/setpriv
+        - --reuid
+        - "1001"
+        - --regid
+        - "1001"
+        - --clear-groups
         - node
         - dist/sandboxExecutor/entrypoint.js
         - health

@@ -1,10 +1,20 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ambientCredentialKeys } from '../cli/sandboxExecutorCommand.js';
-import { discoverWorkspaceSecretMasks } from './bubblewrap.js';
+import {
+  assertOpenPathIdentity,
+  assertSecretMaskWitnesses,
+  discoverWorkspaceSecretMasks,
+  SANDBOX_BWRAP_ISOLATION_ARGS,
+  SANDBOX_BWRAP_LAUNCHER_ARGS,
+  SANDBOX_CHILD_IDENTITY_PROBE,
+  SANDBOX_CHILD_PRIVILEGE_DROP_ARGS,
+  sandboxFdBindArgs,
+} from './bubblewrap.js';
 import { parseSandboxExecutorArgs } from './entrypoint.js';
 
 describe('sandbox executor secret and environment preflight', () => {
@@ -38,9 +48,91 @@ describe('sandbox executor secret and environment preflight', () => {
     const paths = masks.map((mask) => mask.path);
 
     for (const name of masked) expect(paths).toContain(join(workspace, name));
-    expect(masks).toContainEqual({ path: join(workspace, '.aws'), kind: 'directory' });
-    expect(masks).toContainEqual({ path: linkedSsh, kind: 'directory' });
+    expect(masks).toContainEqual(expect.objectContaining({ path: join(workspace, '.aws'), kind: 'directory' }));
+    expect(masks).toContainEqual(expect.objectContaining({ path: linkedSsh, kind: 'directory' }));
     for (const name of examples) expect(paths).not.toContain(join(workspace, name));
+  });
+
+  it('masks an empty sensitive file instead of leaving a populate-after-scan race', async () => {
+    disposableRoot = await mkdtemp(join(tmpdir(), 'openswarm-sandbox-empty-secret-'));
+    const root = await realpath(disposableRoot);
+    const workspace = join(root, 'repo');
+    await mkdir(workspace);
+    await writeFile(join(workspace, '.env'), '');
+
+    await expect(discoverWorkspaceSecretMasks(workspace, [root])).resolves.toContainEqual(
+      expect.objectContaining({ path: join(workspace, '.env'), kind: 'file' }),
+    );
+  });
+
+  it('rejects a workspace root replaced after secret scanning before spawn', async () => {
+    disposableRoot = await mkdtemp(join(tmpdir(), 'openswarm-sandbox-root-race-'));
+    const root = await realpath(disposableRoot);
+    const workspace = join(root, 'repo');
+    const moved = join(root, 'repo-before-race');
+    await mkdir(join(workspace, '.git'), { recursive: true });
+    await writeFile(join(workspace, '.env'), 'secret=value\n');
+    const handle = await open(workspace, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      const identity = await handle.stat({ bigint: true });
+      await discoverWorkspaceSecretMasks(workspace, [root]);
+      await rename(workspace, moved);
+      await mkdir(join(workspace, '.git'), { recursive: true });
+
+      await expect(assertOpenPathIdentity(
+        workspace,
+        handle,
+        { dev: identity.dev, ino: identity.ino },
+        'directory',
+        'Sandbox workspace',
+      )).rejects.toThrow('identity changed before sandbox spawn');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('rejects a sensitive symlink retargeted after scanning', async () => {
+    disposableRoot = await mkdtemp(join(tmpdir(), 'openswarm-sandbox-mask-race-'));
+    const root = await realpath(disposableRoot);
+    const workspace = join(root, 'repo');
+    const first = join(root, 'first-ssh');
+    const second = join(root, 'second-ssh');
+    const witness = join(workspace, '.ssh');
+    await Promise.all([mkdir(workspace), mkdir(first), mkdir(second)]);
+    await symlink(first, witness);
+    const [mask] = await discoverWorkspaceSecretMasks(workspace, [root]);
+    await rm(witness);
+    await symlink(second, witness);
+
+    await expect(assertSecretMaskWitnesses(mask)).rejects.toThrow(
+      'Sensitive mask witness changed before sandbox spawn',
+    );
+  });
+
+  it('rejects a sensitive target replaced after its file descriptor is fixed', async () => {
+    disposableRoot = await mkdtemp(join(tmpdir(), 'openswarm-sandbox-mask-target-race-'));
+    const root = await realpath(disposableRoot);
+    const workspace = join(root, 'repo');
+    const secret = join(workspace, '.env');
+    const moved = join(workspace, '.env-before-race');
+    await mkdir(workspace);
+    await writeFile(secret, 'first=value\n');
+    const handle = await open(secret, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const identity = await handle.stat({ bigint: true });
+      await rename(secret, moved);
+      await writeFile(secret, 'replacement=value\n');
+
+      await expect(assertOpenPathIdentity(
+        secret,
+        handle,
+        { dev: identity.dev, ino: identity.ino },
+        'file',
+        'Sensitive mask target',
+      )).rejects.toThrow('identity changed before sandbox spawn');
+    } finally {
+      await handle.close();
+    }
   });
 
   it('rejects representative cloud, database, agent, cookie, and generic key credentials from ambient env', () => {
@@ -78,6 +170,29 @@ describe('sandbox executor secret and environment preflight', () => {
 });
 
 describe('sandbox executor standalone entrypoint and compose boundary', () => {
+  it('uses the measured non-userns bwrap path and proves the child has uid 1001 with no capabilities', () => {
+    expect(SANDBOX_BWRAP_ISOLATION_ARGS).not.toContain('--unshare-user');
+    expect(SANDBOX_BWRAP_ISOLATION_ARGS).toEqual(expect.arrayContaining([
+      '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
+      '--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID', '--cap-add', 'CAP_DAC_READ_SEARCH', '--clearenv',
+    ]));
+    expect(SANDBOX_BWRAP_LAUNCHER_ARGS).toEqual(['--reuid', '0', '/usr/bin/bwrap']);
+    expect(SANDBOX_CHILD_PRIVILEGE_DROP_ARGS).toEqual([
+      '/usr/bin/setpriv', '--reuid', '1001',
+      '--inh-caps', '-all', '--ambient-caps', '-all',
+    ]);
+    expect(SANDBOX_CHILD_IDENTITY_PROBE).toEqual([
+      'test "$(id -u)" = 1001',
+      'test "$(awk \'/^CapEff:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+      'test "$(awk \'/^CapPrm:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+      'test "$(awk \'/^CapInh:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+      'test "$(awk \'/^CapAmb:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+    ]);
+    expect(sandboxFdBindArgs(true, 3, '/work/repo')).toEqual(['--bind-fd', '3', '/work/repo']);
+    expect(sandboxFdBindArgs(false, 4, '/work/repo/.git')).toEqual(['--ro-bind-fd', '4', '/work/repo/.git']);
+    expect(sandboxFdBindArgs(true, 3, '/work/repo').join(' ')).not.toContain('/proc/self/fd');
+  });
+
   it('parses only the standalone serve/health vocabulary and exact numeric options', () => {
     expect(parseSandboxExecutorArgs([
       'node', 'entrypoint.js', 'serve', '--socket', '/run/openswarm-sandbox/executor.sock',
@@ -92,7 +207,8 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
 
   it('keeps the base compose unchanged and makes every privileged mount/capability strict-opt-in', async () => {
     const base = parse(await readFile(join(process.cwd(), 'docker-compose.yml'), 'utf8')) as Record<string, any>;
-    const strict = parse(await readFile(join(process.cwd(), 'docker-compose.strict-sandbox.yml'), 'utf8')) as Record<string, any>;
+    const strictSource = await readFile(join(process.cwd(), 'docker-compose.strict-sandbox.yml'), 'utf8');
+    const strict = parse(strictSource) as Record<string, any>;
     const baseDaemon = base.services.openswarm;
     const strictDaemon = strict.services.openswarm;
     const sidecar = strict.services['sandbox-executor'];
@@ -101,6 +217,7 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
     ));
 
     expect(base.services).not.toHaveProperty('sandbox-executor');
+    expect(strictSource).toContain('sudo install -d -o 1001 -g 1001 -m 0700 sandbox-socket');
     expect(JSON.stringify(baseDaemon.volumes)).not.toContain('/run/openswarm-sandbox');
     expect(strictDaemon.depends_on).toEqual({ 'sandbox-executor': { condition: 'service_healthy' } });
     expect(strictDaemon.stop_grace_period).toBe('60s');
@@ -109,12 +226,12 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
     }));
 
     expect(sidecar.network_mode).toBe('none');
-    expect(sidecar.user).toBe('1001:1001');
+    expect(sidecar.user).toBe('0:0');
     expect(sidecar.read_only).toBe(true);
     expect(sidecar.stop_grace_period).toBe('60s');
     expect(sidecar).not.toHaveProperty('env_file');
     expect(sidecar.cap_drop).toEqual(['ALL']);
-    expect(sidecar.cap_add).toEqual(['SYS_ADMIN']);
+    expect(sidecar.cap_add).toEqual(['SYS_ADMIN', 'SETUID', 'SETGID', 'DAC_READ_SEARCH']);
     expect(sidecar.security_opt).toEqual(expect.arrayContaining(['no-new-privileges:true', 'seccomp=unconfined']));
     expect(sidecar.security_opt).not.toContain('apparmor=unconfined');
     expect(targets).toEqual(expect.arrayContaining(['/work', '/run/openswarm-sandbox']));
@@ -123,7 +240,15 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
       '/app/config.yaml', '/warehouse', '/warehouse-rw',
     ]));
     expect(sidecar.environment).toEqual(['TZ=Asia/Seoul']);
+    expect(sidecar.command.slice(0, 11)).toEqual([
+      '/usr/bin/setpriv', '--reuid', '1001', '--regid', '1001', '--clear-groups',
+      '--inh-caps', '+sys_admin,+setuid,+dac_read_search',
+      '--ambient-caps', '+sys_admin,+setuid,+dac_read_search', 'node',
+    ]);
     expect(sidecar.command).toEqual(expect.arrayContaining(['dist/sandboxExecutor/entrypoint.js', 'serve']));
+    expect(sidecar.healthcheck.test.slice(0, 8)).toEqual([
+      'CMD', '/usr/bin/setpriv', '--reuid', '1001', '--regid', '1001', '--clear-groups', 'node',
+    ]);
     expect(sidecar.healthcheck.test).toEqual(expect.arrayContaining(['dist/sandboxExecutor/entrypoint.js', 'health']));
   });
 });

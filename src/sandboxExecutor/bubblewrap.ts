@@ -32,6 +32,36 @@ export interface SandboxIsolationBackend {
   close(): Promise<void>;
 }
 
+export const SANDBOX_BWRAP_ISOLATION_ARGS = Object.freeze([
+  '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
+  '--die-with-parent', '--new-session',
+  // bwrap 0.8 refuses a non-setuid invocation with ambient SYS_ADMIN. The
+  // uid-1001 server therefore uses CAP_SETUID to launch bwrap as uid 0. bwrap
+  // retains SETUID and read-only DAC traversal solely until the next setpriv,
+  // which returns the command to uid 1001 and clears every active capability.
+  '--cap-drop', 'ALL',
+  '--cap-add', 'CAP_SETUID',
+  '--cap-add', 'CAP_DAC_READ_SEARCH',
+  '--clearenv',
+] as const);
+
+export const SANDBOX_CHILD_IDENTITY_PROBE = Object.freeze([
+  'test "$(id -u)" = 1001',
+  'test "$(awk \'/^CapEff:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+  'test "$(awk \'/^CapPrm:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+  'test "$(awk \'/^CapInh:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+  'test "$(awk \'/^CapAmb:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+] as const);
+
+export const SANDBOX_BWRAP_LAUNCHER_ARGS = Object.freeze([
+  '--reuid', '0', '/usr/bin/bwrap',
+] as const);
+
+export const SANDBOX_CHILD_PRIVILEGE_DROP_ARGS = Object.freeze([
+  '/usr/bin/setpriv', '--reuid', '1001',
+  '--inh-caps', '-all', '--ambient-caps', '-all',
+] as const);
+
 class TailCapture {
   private readonly retained: Buffer;
   private retainedBytes = 0;
@@ -167,7 +197,23 @@ async function dependencyTargets(workspace: string, roots: string[]): Promise<st
   return [...new Set(targets)];
 }
 
-export interface SecretMask { path: string; kind: 'file' | 'directory' }
+export interface SecretMask {
+  path: string;
+  kind: 'file' | 'directory';
+  /** Every workspace entry whose current resolution requires this mask. */
+  witnessPaths: string[];
+}
+
+interface FixedPathIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+interface FixedSecretMask {
+  mask: SecretMask;
+  handle: FileHandle;
+  identity: FixedPathIdentity;
+}
 
 const SECRET_DIRECTORIES = new Set(['.aws', '.ssh', '.gnupg', '.kube', '.docker']);
 const SKIP_SCAN_DIRECTORIES = new Set(['.git', 'node_modules', '.venv', '.venv-verify', 'venv', 'target', 'dist', 'build']);
@@ -193,7 +239,9 @@ export async function discoverWorkspaceSecretMasks(workspace: string, roots: str
       if (entries > 100_000) throw new Error('Sandbox secret-mask preflight exceeded its workspace scan ceiling');
       const candidate = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (SECRET_DIRECTORIES.has(entry.name)) masks.push({ path: candidate, kind: 'directory' });
+        if (SECRET_DIRECTORIES.has(entry.name)) {
+          masks.push({ path: candidate, kind: 'directory', witnessPaths: [candidate] });
+        }
         else if (!SKIP_SCAN_DIRECTORIES.has(entry.name)) pending.push(candidate);
         continue;
       }
@@ -201,21 +249,88 @@ export async function discoverWorkspaceSecretMasks(workspace: string, roots: str
       if (!sensitiveDirectoryLink && !looksSensitiveFile(entry.name)) continue;
       if (entry.isSymbolicLink()) {
         let target: string;
-        try { target = await realpath(candidate); } catch { continue; }
+        try {
+          target = await realpath(candidate);
+        } catch {
+          throw new Error(`Sensitive workspace link cannot be resolved safely: ${candidate}`);
+        }
         if (!roots.some((root) => pathInside(root, target))) {
           throw new Error(`Sensitive workspace link escapes sandbox roots: ${candidate}`);
         }
         const targetMetadata = await stat(target);
-        if (targetMetadata.isDirectory()) masks.push({ path: target, kind: 'directory' });
-        else if (targetMetadata.isFile() && targetMetadata.size > 0) masks.push({ path: target, kind: 'file' });
-      } else if (entry.isFile() && (await stat(candidate)).size > 0) {
-        masks.push({ path: candidate, kind: 'file' });
+        if (targetMetadata.isDirectory()) {
+          masks.push({ path: target, kind: 'directory', witnessPaths: [candidate] });
+        } else if (targetMetadata.isFile()) {
+          masks.push({ path: target, kind: 'file', witnessPaths: [candidate] });
+        } else {
+          throw new Error(`Sensitive workspace link has an unsupported target: ${candidate}`);
+        }
+      } else if (entry.isFile()) {
+        // Mask the name even while empty: otherwise a concurrent writer could
+        // populate it after preflight and before bwrap starts.
+        masks.push({ path: candidate, kind: 'file', witnessPaths: [candidate] });
       }
       if (masks.length > 512) throw new Error('Sandbox secret-mask preflight exceeded its mask ceiling');
     }
   }
-  const unique = new Map(masks.map((mask) => [`${mask.kind}:${mask.path}`, mask]));
+  const unique = new Map<string, SecretMask>();
+  for (const mask of masks) {
+    const key = `${mask.kind}:${mask.path}`;
+    const current = unique.get(key);
+    if (!current) {
+      unique.set(key, mask);
+      continue;
+    }
+    current.witnessPaths = [...new Set([...current.witnessPaths, ...mask.witnessPaths])];
+  }
   return [...unique.values()];
+}
+
+export function sandboxFdBindArgs(writable: boolean, fd: number, destination: string): string[] {
+  return [writable ? '--bind-fd' : '--ro-bind-fd', String(fd), destination];
+}
+
+export async function assertOpenPathIdentity(
+  path: string,
+  handle: FileHandle,
+  expected: FixedPathIdentity,
+  kind: 'file' | 'directory',
+  label: string,
+): Promise<void> {
+  let opened;
+  let named;
+  let canonical: string;
+  try {
+    [opened, named, canonical] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+      realpath(path),
+    ]);
+  } catch {
+    throw new Error(`${label} identity changed before sandbox spawn: ${path}`);
+  }
+  const expectedKind = kind === 'directory'
+    ? opened.isDirectory() && named.isDirectory()
+    : opened.isFile() && named.isFile();
+  if (!expectedKind || named.isSymbolicLink() || canonical !== path
+      || opened.dev !== expected.dev || opened.ino !== expected.ino
+      || named.dev !== expected.dev || named.ino !== expected.ino) {
+    throw new Error(`${label} identity changed before sandbox spawn: ${path}`);
+  }
+}
+
+export async function assertSecretMaskWitnesses(mask: SecretMask): Promise<void> {
+  for (const witness of mask.witnessPaths) {
+    let target: string;
+    try {
+      target = await realpath(witness);
+    } catch {
+      throw new Error(`Sensitive mask witness changed before sandbox spawn: ${witness}`);
+    }
+    if (target !== mask.path) {
+      throw new Error(`Sensitive mask witness changed before sandbox spawn: ${witness}`);
+    }
+  }
 }
 
 function noExternalIpv4Routes(routeTable: string): boolean {
@@ -325,6 +440,7 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       const parentPidNs = await readlink('/proc/self/ns/pid');
       const parentMountNs = await readlink('/proc/self/ns/mnt');
       const command = [
+        ...SANDBOX_CHILD_IDENTITY_PROBE,
         `test "$(cat inside)" = inside`,
         'test -w .',
         'touch child-write',
@@ -375,6 +491,7 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
     );
     const handles: FileHandle[] = [workspaceHandle];
+    const fixedSecretMasks: FixedSecretMask[] = [];
     try {
       const current = await workspaceHandle.stat({ bigint: true });
       if (!current.isDirectory() || current.dev !== workspace.dev || current.ino !== workspace.ino) {
@@ -406,10 +523,31 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
 
       const childEnv = safeChildEnv(process.env, marker);
       const secretMasks = await discoverWorkspaceSecretMasks(workspace.path, this.allowedRoots);
+      for (const mask of secretMasks) {
+        const flags = constants.O_RDONLY | constants.O_NOFOLLOW
+          | (mask.kind === 'directory' ? constants.O_DIRECTORY : 0);
+        const handle = await open(mask.path, flags);
+        let metadata;
+        try {
+          metadata = await handle.stat({ bigint: true });
+        } catch (error) {
+          await handle.close();
+          throw error;
+        }
+        if ((mask.kind === 'directory' && !metadata.isDirectory())
+            || (mask.kind === 'file' && !metadata.isFile())) {
+          await handle.close();
+          throw new Error(`Sensitive mask target changed type before sandbox spawn: ${mask.path}`);
+        }
+        fixedSecretMasks.push({
+          mask,
+          handle,
+          identity: { dev: metadata.dev, ino: metadata.ino },
+        });
+      }
       const destinations = [workspace.path, ...support.map((entry) => entry.path)];
       const args: string[] = [
-        '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
-        '--die-with-parent', '--new-session', '--cap-drop', 'ALL', '--clearenv',
+        ...SANDBOX_BWRAP_ISOLATION_ARGS,
       ];
       for (const systemPath of ['/usr', '/bin', '/lib', '/lib64', '/etc', '/app', '/opt']) {
         try { await access(systemPath); args.push('--ro-bind', systemPath, systemPath); } catch { /* image path absent */ }
@@ -423,7 +561,7 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       for (const directory of mountDirectories(mountPoints)) args.push('--dir', directory);
       destinations.forEach((destination, index) => {
         const writable = index === 0 || support[index - 1]?.writable === true;
-        args.push(writable ? '--bind' : '--ro-bind', `/proc/self/fd/${index + 3}`, destination);
+        args.push(...sandboxFdBindArgs(writable, index + 3, destination));
       });
       for (const mask of secretMasks) {
         args.push(mask.kind === 'file' ? '--ro-bind' : '--tmpfs', ...(mask.kind === 'file' ? ['/dev/null', mask.path] : [mask.path]));
@@ -438,7 +576,11 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       for (const [key, value] of Object.entries(childEnv)) {
         if (value !== undefined) args.push('--setenv', key, value);
       }
-      args.push('--chdir', workspace.path, '--', '/bin/bash', '--noprofile', '--norc', '-c', command);
+      args.push(
+        '--chdir', workspace.path,
+        '--', ...SANDBOX_CHILD_PRIVILEGE_DROP_ARGS,
+        '/bin/bash', '--noprofile', '--norc', '-c', command,
+      );
 
       const wrapperEnv: NodeJS.ProcessEnv = {
         PATH: '/usr/bin:/bin',
@@ -446,7 +588,25 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
         LANG: 'C.UTF-8',
         OPENSWARM_SANDBOX_PROCESS_MARKER: marker,
       };
-      const spec = prepareCliProcessTreeSpawn('/usr/bin/bwrap', args, wrapperEnv);
+      await assertOpenPathIdentity(
+        workspace.path,
+        workspaceHandle,
+        workspace,
+        'directory',
+        'Sandbox workspace',
+      );
+      for (const fixed of fixedSecretMasks) {
+        await assertOpenPathIdentity(
+          fixed.mask.path,
+          fixed.handle,
+          fixed.identity,
+          fixed.mask.kind,
+          'Sensitive mask target',
+        );
+        await assertSecretMaskWitnesses(fixed.mask);
+      }
+      const launcherArgs = [...SANDBOX_BWRAP_LAUNCHER_ARGS, ...args];
+      const spec = prepareCliProcessTreeSpawn('/usr/bin/setpriv', launcherArgs, wrapperEnv);
       return await new Promise((resolveResult, rejectResult) => {
         const capture = new TailCapture(maxOutputBytes);
         const child = spawn(spec.command, spec.args, {
@@ -502,7 +662,10 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
         });
       });
     } finally {
-      await Promise.all(handles.map((handle) => handle.close().catch(() => undefined)));
+      await Promise.all([
+        ...handles,
+        ...fixedSecretMasks.map((fixed) => fixed.handle),
+      ].map((handle) => handle.close().catch(() => undefined)));
     }
   }
 
