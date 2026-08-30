@@ -2,7 +2,7 @@
 // OpenSwarm - Stage model resolution (INT-2393)
 // ============================================
 
-import { getAdapter } from '../adapters/index.js';
+import { getAdapter, resolveBoundarySafeDefaultModel } from '../adapters/index.js';
 
 /**
  * Resolve (and cache) an adapter's default model. `getDefaultModel` is heavy
@@ -18,7 +18,7 @@ export function resolveAdapterDefaultModel(
   let pending = cache.get(cacheKey);
   if (!pending) {
     pending = Promise.resolve()
-      .then(() => getAdapter(adapterName).getDefaultModel())
+      .then(() => resolveBoundarySafeDefaultModel(getAdapter(adapterName)))
       .catch(() => {
         // Drop the failure from the cache so a later call tries again. Storing
         // it meant one transient lookup error — a provider blip during startup

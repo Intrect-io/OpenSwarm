@@ -20,6 +20,17 @@ discord:
   channelId: ${DISCORD_CHANNEL_ID}
   webhookUrl: ${DISCORD_WEBHOOK_URL:-}  # Optional
 
+# Optional fail-closed boundary for unattended agents. When enabled, all
+# external human collaboration surfaces are read-only. OpenSwarm disables
+# arbitrary agent programs (native shell/diagnostics and delegated CLIs) and
+# its own Discord/Slack/Telegram/webhook senders. The local web chat remains
+# available through native-loop adapters, as do typed DevOps/data MCP writes.
+# On Linux, no working network-isolating sandbox plus no typed MCP grants is a
+# deployment blocker for autonomous development; never restore an unsandboxed
+# shell as a workaround.
+humanSurfaceReadOnly:
+  enabled: false
+
 linear:
   apiKey: ${LINEAR_API_KEY}
   teamId: ${LINEAR_TEAM_ID}

@@ -294,6 +294,7 @@ export class CodexResponsesAdapter implements CliAdapter {
     supportedSkills: [],
     // The agentic loop honours CliRunOptions.readOnly (see agenticLoop/tools). (INT-3189)
     enforcesReadOnly: true,
+    enforcesHumanSurfaceReadOnly: true,
   };
 
   async isAvailable(): Promise<boolean> {

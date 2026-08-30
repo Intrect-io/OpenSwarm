@@ -53,6 +53,18 @@ describe('MCP role policy', () => {
     ]));
   });
 
+  it('keeps generic human reads dispatchable and requires exact grants for generic DevOps writes', () => {
+    const humanRequest = tool('slack__request');
+    const devopsRequest = tool('github__http_post_request');
+
+    expect(filterMcpToolsForRole([humanRequest], { servers: ['slack'] }).tools).toEqual([humanRequest]);
+    expect(filterMcpToolsForRole([devopsRequest], { servers: ['github'] }).tools).toEqual([]);
+    expect(filterMcpToolsForRole([devopsRequest], {
+      servers: ['github'],
+      writeTools: ['github__http_post_request'],
+    }).tools).toEqual([devopsRequest]);
+  });
+
   it('preserves exact DevOps and data mutations', () => {
     const tools = [tool('github__create_issue'), tool('cloudflare__delete_worker'), tool('postgres__update_row')];
     const result = filterMcpToolsForRole(tools, {

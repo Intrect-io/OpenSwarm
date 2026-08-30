@@ -16,7 +16,7 @@ import { select, input, password, confirm } from '@inquirer/prompts';
 import { writeEnvVars } from '../core/envFile.js';
 import { generateSampleConfig } from '../core/config.js';
 import { AuthProfileStore, loginAndSaveLinearProfile, ensureValidToken } from '../auth/index.js';
-import { getAdapter } from '../adapters/index.js';
+import { getAdapter, probeAdapterAvailability } from '../adapters/index.js';
 import { type LinearCredential } from '../linear/index.js';
 import { pickAndSaveLinearMapping } from './linearMapping.js';
 import { banner } from '../support/banner.js';
@@ -104,7 +104,7 @@ async function bootstrapProvider(
 ): Promise<{ doAuthNow: boolean; plan: ReturnType<typeof authPlanFor> }> {
   let available = false;
   try {
-    available = await getAdapter(provider).isAvailable();
+    available = await probeAdapterAvailability(getAdapter(provider));
   } catch { // cxt-ignore: error_swallow,exception_hiding — unknown/unconfigured provider treated as unavailable
     available = false;
   }

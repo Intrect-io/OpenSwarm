@@ -1,17 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const execFileMock = vi.hoisted(() => vi.fn());
-vi.mock('node:child_process', () => ({ execFile: execFileMock }));
-
 import { CcRouterAdapter } from './ccRouter.js';
 
-// The adapter awaits promisify(execFile); the generic promisify wrapper
-// resolves with the callback's first success value, so the mock hands back the
-// { stdout } object the real promisified execFile would.
-type ExecCb = (err: Error | null, result?: { stdout: string; stderr: string }) => void;
 function statusReply(payload: unknown): void {
-  execFileMock.mockImplementation((_c: string, _a: string[], _o: unknown, cb: ExecCb) =>
-    cb(null, { stdout: JSON.stringify(payload), stderr: '' }));
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(payload)));
 }
 
 const ENV_KEYS = ['CC_ROUTER_TOKEN', 'CC_ROUTER_BASE_URL', 'CC_ROUTER_MODEL'] as const;
@@ -43,14 +35,20 @@ describe('CcRouterAdapter availability', () => {
     await expect(new CcRouterAdapter().isAvailable()).resolves.toBe(false);
   });
 
-  it('reports unavailable on a missing binary or non-JSON status', async () => {
-    execFileMock.mockImplementation((_c: string, _a: string[], _o: unknown, cb: ExecCb) =>
-      cb(new Error('ENOENT')));
+  it('probes only the approved loopback health endpoint and fails closed on invalid responses', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('down'));
     await expect(new CcRouterAdapter().isAvailable()).resolves.toBe(false);
 
-    execFileMock.mockImplementation((_c: string, _a: string[], _o: unknown, cb: ExecCb) =>
-      cb(null, { stdout: 'not json', stderr: '' }));
+    fetchMock.mockResolvedValueOnce(new Response('not json'));
     await expect(new CcRouterAdapter().isAvailable()).resolves.toBe(false);
+
+    fetchMock.mockResolvedValueOnce(new Response('{}', { status: 503 }));
+    await expect(new CcRouterAdapter().isAvailable()).resolves.toBe(false);
+    expect(fetchMock.mock.calls.every(([url]) => url === 'http://127.0.0.1:3456/cc-router/health')).toBe(true);
+
+    process.env.CC_ROUTER_BASE_URL = 'https://evil.example.com';
+    await expect(new CcRouterAdapter().isAvailable()).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -78,11 +76,20 @@ describe('CcRouterAdapter model discovery', () => {
   });
 
   it('normalizes a configured base URL whether or not it already ends in /v1', async () => {
-    process.env.CC_ROUTER_BASE_URL = 'http://10.0.0.5:9999/v1/';
+    process.env.CC_ROUTER_BASE_URL = 'http://localhost:9999/v1/';
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ data: [] })));
     await new CcRouterAdapter().listModels();
-    expect(fetchMock.mock.calls[0][0]).toBe('http://10.0.0.5:9999/v1/models');
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:9999/v1/models');
+  });
+
+  it('does not send model-probe credentials to a configured remote endpoint', async () => {
+    process.env.CC_ROUTER_BASE_URL = 'https://evil.example.com';
+    process.env.CC_ROUTER_TOKEN = 'router-secret';
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    await expect(new CcRouterAdapter().listModels()).resolves.toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('returns no models on a non-OK response instead of throwing into the router', async () => {

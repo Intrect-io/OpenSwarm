@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -6,6 +6,9 @@ import * as os from 'node:os';
 import { TOOL_DEFINITIONS, executeTool, createReadCache, ToolCall, buildBashToolEnv, validatePath } from './tools.js';
 import { homedir } from 'node:os';
 import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+
+afterEach(() => configureHumanSurfaceReadOnly(false));
 
 // search_memory loads the memory core lazily; stub the shared helper so the tool
 // test stays fast and deterministic (no LanceDB / embedding model).
@@ -392,6 +395,18 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
     // Should not be blocked (may still fail for other reasons, but not BLOCKED)
     expect(result.content).not.toContain('BLOCKED');
+  });
+
+  it.each([
+    'curl --config ./request.conf',
+    'bash ./send-message.sh',
+    'curl -X GET "$DYNAMIC_URL"',
+    'node ./arbitrary-program.js',
+  ])('blocks arbitrary program execution in strict mode: %s', async (cmd) => {
+    configureHumanSurfaceReadOnly(true);
+    const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
+    expect(result).toMatchObject({ is_error: true });
+    expect(result.content).toContain('HUMAN_SURFACE_READ_ONLY');
   });
 
   it('refuses mutation and shell tools in read-only mode', async () => {

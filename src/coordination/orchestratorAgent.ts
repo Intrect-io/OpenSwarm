@@ -15,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAdapter, spawnCli } from '../adapters/index.js';
+import { adapterCanRunUnderHumanSurfaceBoundary, getAdapter, spawnCli } from '../adapters/index.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 import { getMcpTools } from '../mcp/mcpClient.js';
 import { filterMcpToolsForRole, type RoleMcpPolicy } from './mcpPolicy.js';
@@ -87,7 +87,7 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
   const callSign = assignCallSign({ repository: cell.repoKey, executionId: options.taskId, role: 'orchestrator' });
   const adapter = getAdapter(options.adapterName);
   const routeCorrelationId = `orchestrator-route:${randomUUID()}`;
-  if (!adapter.run) {
+  if (!adapter.run || !adapterCanRunUnderHumanSurfaceBoundary(adapter)) {
     // Do not invoke delegated adapter discovery here. Some implementations
     // consult a live account/model catalog, which is unnecessary provider work
     // for a route that must be rejected before any delegated CLI activity.

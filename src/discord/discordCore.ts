@@ -23,6 +23,7 @@ import * as memory from '../memory/index.js';
 import { t, getPrompts, getDateLocale } from '../locale/index.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 // Handler module (for routing)
 import { handlePair } from './discordPair.js';
@@ -298,6 +299,11 @@ export function setCallbacks(callbacks: {
  * Initialize and start Discord bot
  */
 export async function initDiscord(token: string, channelId: string): Promise<void> {
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    await stopDiscord();
+    reportChannelId = '';
+    return;
+  }
   reportChannelId = channelId;
 
   // Reconfiguration/restart must not leave the old websocket client alive.
@@ -401,6 +407,7 @@ async function tryAnswerByReply(msg: Message): Promise<boolean> {
  * Message handler
  */
 async function handleMessage(msg: Message): Promise<void> {
+  if (isHumanSurfaceReadOnlyEnabled()) return;
   if (msg.author.bot) return;
 
   // A reply to a question we posted answers that question.
@@ -563,6 +570,7 @@ async function handleHelp(msg: Message): Promise<void> {
  * Report event to Discord
  */
 export async function reportEvent(event: SwarmEvent): Promise<void> {
+  if (isHumanSurfaceReadOnlyEnabled()) return;
   if (!client) return;
 
   let channel: TextChannel | null = null;
@@ -638,6 +646,11 @@ export function startTypingIndicator(
   channel: { sendTyping: () => Promise<unknown> },
   intervalMs = 8_000,
 ): NodeJS.Timeout {
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    const timer = setTimeout(() => {}, 0);
+    timer.unref?.();
+    return timer;
+  }
   const send = () => {
     void channel.sendTyping().catch((error) => {
       console.warn('[Discord] Typing indicator failed:', error instanceof Error ? error.message : String(error));
@@ -667,13 +680,14 @@ export async function stopDiscord(): Promise<void> {
  * question, for one — check here first rather than assuming the send landed.
  */
 export function hasDiscordChannel(): boolean {
-  return Boolean(client && reportChannelId);
+  return !isHumanSurfaceReadOnlyEnabled() && Boolean(client && reportChannelId);
 }
 
 /**
  * Send message to default Discord channel (for external callers)
  */
 export async function sendToChannel(content: string | { embeds: EmbedBuilder[] }): Promise<void> {
+  if (isHumanSurfaceReadOnlyEnabled()) return;
   if (!client || !reportChannelId) return;
 
   try {
@@ -761,6 +775,7 @@ function splitForDiscord(text: string, maxLen: number): string[] {
  * Send message to Discord thread (for external callers)
  */
 export async function sendToThread(threadId: string, content: string | EmbedBuilder): Promise<void> {
+  if (isHumanSurfaceReadOnlyEnabled()) return;
   if (!client) return;
 
   try {

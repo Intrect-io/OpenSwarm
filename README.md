@@ -413,18 +413,53 @@ decision but cannot turn a mutating action into a read. GitHub, Linear,
 Cloudflare, database/server tools, and sandbox-local data tools keep their
 existing role-scoped write contract.
 
-Native-loop shells additionally reject direct writes to known human-service
-endpoints and service CLIs. Microsoft Graph is narrowed to mail, message,
-calendar, chat, drive, and other human-facing path/action families so its
-device/directory DevOps APIs retain their existing contract. Both native and
-delegated worker processes omit
-product-scoped human-service credentials from inherited environment variables
-while retaining model, DevOps, database, and sandbox-data settings. Delegated
-CLIs receive none of OpenSwarm's MCP grants (`codex` disables inherited MCP and `claude` uses a
-strict MCP config); use a native-loop adapter when the policy must cover shell
-commands too. OpenSwarm cannot classify an arbitrary program that reads a
-credential embedded inside the repository and implements its own network
-protocol, so such credentials must not be placed in an agent worktree.
+Generic MCP HTTP/proxy tools are reclassified again at dispatch from their
+actual destination, method, and body arguments. An explicit `GET`, `HEAD`, or
+`OPTIONS` to Slack, Discord, Notion, Gmail, or a human-facing Microsoft Graph
+path remains readable; a write, dynamic destination, or ambiguous call fails
+before the MCP server is invoked. Concrete writes through a generic transport
+also require a write-declaring tool descriptor, the server to declare
+`surface: devops`, `data`, or `sandbox`, and (for autonomous roles) the same
+exact `writeTools` grant as any other mutation.
+Microsoft Graph device/directory paths remain DevOps; mail, message, calendar,
+chat, drive, and other human-facing paths do not. Specialized tools do not scan
+ordinary payload text, so a GitHub issue body that merely quotes a Slack URL is
+not mistaken for a network destination.
+
+For unattended deployments, enable the complete execution boundary explicitly:
+
+```yaml
+humanSurfaceReadOnly:
+  enabled: true
+```
+
+With this switch on, OpenSwarm does not attempt to classify arbitrary programs:
+it removes native `bash` and compiler-spawning diagnostics, refuses delegated
+CLI adapters before availability/model discovery or command construction, and
+blocks the same hidden tool calls at dispatch. This closes `curl --config`,
+scripts, dynamic URLs, fake CLIs, and
+credentials found through inherited `HOME` by making their execution impossible.
+Use a native-loop adapter; local web chat remains available with file tools,
+read-only web access, and policy-filtered MCP tools. Approved typed DevOps/data
+writes keep their existing role grants. OpenSwarm-owned Discord, Slack,
+Telegram, and generic webhook notification/send paths are all disabled—there is
+no operator-control-plane exception. The default is `false` for compatibility;
+the MCP human-surface descriptor and dispatch checks still apply regardless.
+Once enabled, the boundary is monotonic for that process so an incidental config
+lookup cannot downgrade it; restart with `enabled: false` to disable it.
+
+**Linux deployment readiness gate:** strict mode does not turn an unsandboxed
+shell back on just to recover build throughput. Repository-local build/test
+execution is safe only through an OS sandbox that proves network isolation, and
+server/database mutations are safe only through explicitly surfaced, role-
+granted DevOps/data MCP tools. If the host cannot create the verification
+namespace (for example, `bwrap` is blocked by the container runtime) **and** no
+typed MCP grant is provisioned, the deployment is coordination/file-only and is
+blocked for autonomous development. Do not compensate by enabling native or
+delegated shell access: that would also restore the unclassifiable human-API
+write path. On such a host, first make the existing sandbox probe pass or add
+the narrowly scoped MCP server/tool grants, then re-run the build/test and
+zero-write checks.
 
 One sweep runs at a time per daemon and repository, concurrent daemons contend
 on a file lock, and shutdown aborts then drains an active supervisor call. An

@@ -15,6 +15,7 @@ vi.mock('../adapters/index.js', () => ({
   getAdapter: () => ({ isAvailable: mocks.isAvailable }),
   getDefaultAdapterName: () => 'test',
   listAvailableAdapters: mocks.availableAdapters,
+  probeAdapterAvailability: (adapter: { isAvailable(): Promise<boolean> }) => adapter.isAvailable(),
 }));
 
 vi.mock('../agents/pairPipeline.js', () => ({

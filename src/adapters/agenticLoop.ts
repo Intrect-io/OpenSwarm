@@ -14,7 +14,7 @@ import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
 import type { CliRunResult } from './types.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
-import { filterHumanSurfaceMcpTools } from '../mcp/humanSurfacePolicy.js';
+import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 // ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
 
@@ -219,16 +219,23 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
-    shellTools = true,
+    shellTools: requestedShellTools = true,
     filesystemTools = true,
     readOnly = false,
     applyPatch = false,
-    diagnosticsTool = false,
+    diagnosticsTool: requestedDiagnosticsTool = false,
     mcpTools,
     coordinationContext,
     signal,
     editFormat = 'json',
   } = options;
+
+  // In strict mode the native loop remains available for local web chat and
+  // typed MCP/file operations, but arbitrary programs do not.  Enforce this in
+  // the loop itself as well as spawnCli so direct adapter.run callers cannot
+  // accidentally re-enable bash or compiler-spawning diagnostics.
+  const shellTools = requestedShellTools && !isHumanSurfaceReadOnlyEnabled();
+  const diagnosticsTool = requestedDiagnosticsTool && !isHumanSurfaceReadOnlyEnabled();
 
   const humanSurfaceFilteredMcp = filterHumanSurfaceMcpTools(mcpTools ?? []);
   for (const entry of humanSurfaceFilteredMcp.denied) {

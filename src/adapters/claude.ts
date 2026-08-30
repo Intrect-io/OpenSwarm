@@ -21,6 +21,7 @@ import { extractResultFromStreamJson } from '../agents/cliStreamParser.js';
 import { t } from '../locale/index.js';
 import { extractSummary } from './resultParsing.js';
 import { writeClaudeMcpConfig } from './memoryMcp.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -59,6 +60,7 @@ export class ClaudeCliAdapter implements CliAdapter {
   };
 
   async isAvailable(): Promise<boolean> {
+    if (isHumanSurfaceReadOnlyEnabled()) return false;
     try {
       await execFileAsync('which', ['claude']);
       return true;
