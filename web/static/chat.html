@@ -21,19 +21,25 @@
     #room::-webkit-scrollbar { width: 6px; }
     #room::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
     #room::-webkit-scrollbar-track { background: transparent; }
-    .line { padding: 5px 9px; margin: 1px 0; border-left: 2px solid transparent; border-radius: 0 4px 4px 0; overflow-wrap: anywhere; line-height: 1.65; }
-    .line:hover { background: rgba(255, 255, 255, 0.025); }
-    .line .clock { color: #5f687c; font-variant-numeric: tabular-nums; margin-right: 6px; }
+    .line { padding: 8px 11px 9px; margin: 3px 0; border-left: 2px solid transparent; border-bottom: 1px solid rgba(119, 129, 151, 0.09); border-radius: 0 5px 5px 0; overflow-wrap: anywhere; }
+    .line:hover { background: rgba(255, 255, 255, 0.032); }
+    .line .meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0; min-width: 0; font-size: 11px; line-height: 1.45; }
+    .line .clock { color: #68738a; font-variant-numeric: tabular-nums; margin-right: 7px; }
     .line .who { font-weight: 700; }
-    .line .tag { color: #778197; font-size: 11px; margin: 0 6px 0 2px; }
+    .line .tag { color: #8490a8; margin: 0 7px 0 4px; }
     .line .to { color: var(--dim); margin-right: 6px; }
-    .line .sep { color: var(--dim); }
-    .line .text { color: #d5d9e2; white-space: pre-wrap; }
+    .line .sep { color: #596276; }
+    .line .text { display: block; color: #dde2ec; white-space: pre-wrap; margin-top: 3px; padding-left: 17px; font-size: 13px; line-height: 1.65; }
     .mention { display: inline; color: #89c4ff; background: rgba(59, 158, 255, 0.13); border: 1px solid rgba(59, 158, 255, 0.28); border-radius: 4px; padding: 0 3px; font-weight: 700; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .mention-human { color: #ff9fa3; background: rgba(229, 72, 77, 0.13); border-color: rgba(229, 72, 77, 0.3); }
     .line.from-operator { border-left-color: var(--red); background: rgba(229, 72, 77, 0.045); }
     .line.pending { border-left-color: var(--amber); }
-    .line.failed .text { color: var(--red); }
+    .line.failed .text { color: #ff7479; }
+    @media (max-width: 760px) {
+      #room { padding-inline: 8px; }
+      .line { padding-inline: 8px; }
+      .line .text { padding-left: 0; }
+    }
     .composer { display: flex; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--border); }
     .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 6px 10px; font: inherit; font-size: 12px; }
     .composer input:disabled { color: var(--dim); }
