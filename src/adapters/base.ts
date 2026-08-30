@@ -38,7 +38,7 @@ export async function spawnCli(
   const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
   assertAdapterCanRunUnderHumanSurfaceBoundary(adapter);
   const options: CliRunOptions = strictHumanSurfaceBoundary
-    ? { ...requestedOptions, shellTools: false, diagnosticsTool: false }
+    ? { ...requestedOptions, diagnosticsTool: false }
     : requestedOptions;
   // Fail closed before anything runs. `readOnly` is asked for when the input is
   // untrusted, so an adapter that ignores it would hand a full toolset to an

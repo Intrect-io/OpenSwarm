@@ -43,11 +43,11 @@ import {
   sendToThread,
   stopDiscord,
 } from './discordCore.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 describe('Discord client lifecycle', () => {
   afterEach(async () => {
-    configureHumanSurfaceReadOnly(false);
+    resetHumanSurfaceReadOnlyForTests();
     await stopDiscord();
     discord.instances.length = 0;
     discord.nextLoginError = null;
@@ -78,7 +78,7 @@ describe('Discord client lifecycle', () => {
     const send = vi.fn(async () => {});
     first.channels.fetch.mockResolvedValue({ send, isThread: () => true });
 
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     expect(hasDiscordChannel()).toBe(false);
     await sendToChannel('blocked');
     await sendToThread('thread', 'blocked');

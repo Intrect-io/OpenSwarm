@@ -36,6 +36,8 @@ export interface CliRunResult {
    * back into the same unanswered question.
    */
   blockedOnOperator?: boolean;
+  /** Side-effecting companion RPC lost its result; never retry automatically. */
+  executionOutcomeUnknown?: boolean;
   /** Exact durable question set that caused blockedOnOperator. */
   operatorQuestionCorrelationIds?: string[];
   /**

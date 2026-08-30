@@ -6,9 +6,10 @@ import * as os from 'node:os';
 import { TOOL_DEFINITIONS, executeTool, createReadCache, ToolCall, buildBashToolEnv, validatePath } from './tools.js';
 import { homedir } from 'node:os';
 import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
+import { SandboxOutcomeUnknownError } from '../sandboxExecutor/protocol.js';
 
-afterEach(() => configureHumanSurfaceReadOnly(false));
+afterEach(() => resetHumanSurfaceReadOnlyForTests());
 
 // search_memory loads the memory core lazily; stub the shared helper so the tool
 // test stays fast and deterministic (no LanceDB / embedding model).
@@ -403,10 +404,50 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     'curl -X GET "$DYNAMIC_URL"',
     'node ./arbitrary-program.js',
   ])('blocks arbitrary program execution in strict mode: %s', async (cmd) => {
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
     expect(result).toMatchObject({ is_error: true });
     expect(result.content).toContain('HUMAN_SURFACE_READ_ONLY');
+  });
+
+  it('runs strict bash only through the attested companion session', async () => {
+    enableHumanSurfaceReadOnly();
+    const execute = vi.fn(async () => ({
+      output: 'green\n', exitCode: 0, signal: null,
+      timedOut: false, truncated: false, outputLimitExceeded: false,
+    }));
+
+    const result = await executeTool(makeCall('bash', { command: 'npm test' }), TMP_DIR, undefined, {
+      sandboxExecutorSession: { execute },
+      bashTimeoutMs: 12_345,
+    });
+
+    expect(result).toMatchObject({ is_error: false, content: 'green\n' });
+    expect(execute).toHaveBeenCalledWith('npm test', 12_345);
+  });
+
+  it.each([
+    ['transport loss', async () => { throw new SandboxOutcomeUnknownError('lost response'); }],
+    ['timeout after possible writes', async () => ({
+      output: 'partial', exitCode: null, signal: 'SIGKILL' as const,
+      timedOut: true, truncated: false, outputLimitExceeded: false,
+    })],
+    ['output ceiling after possible writes', async () => ({
+      output: 'partial', exitCode: null, signal: 'SIGKILL' as const,
+      timedOut: false, truncated: true, outputLimitExceeded: true,
+    })],
+  ])('marks strict sandbox %s as a fatal non-retryable unknown outcome', async (_label, execute) => {
+    enableHumanSurfaceReadOnly();
+
+    const result = await executeTool(makeCall('bash', { command: 'npm test' }), TMP_DIR, undefined, {
+      sandboxExecutorSession: { execute },
+    });
+
+    expect(result).toMatchObject({
+      is_error: true,
+      fatal: 'execution_outcome_unknown',
+      content: expect.stringContaining('OUTCOME_UNKNOWN_DO_NOT_RETRY'),
+    });
   });
 
   it('refuses mutation and shell tools in read-only mode', async () => {

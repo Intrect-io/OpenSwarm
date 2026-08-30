@@ -1,0 +1,143 @@
+# Opt-in strict native-shell companion. Use together with the base file:
+#   sudo install -m 0644 deploy/apparmor/openswarm-sandbox-executor \
+#     /etc/apparmor.d/openswarm-sandbox-executor
+#   sudo apparmor_parser -r /etc/apparmor.d/openswarm-sandbox-executor
+#   sudo install -d -o 1001 -g 1001 -m 0700 sandbox-socket
+#   docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml up -d
+# The host directory must be owned by uid/gid 1001. The server refuses a
+# different owner/mode and never opens its socket when a production isolation
+# probe fails.
+services:
+  openswarm:
+    depends_on:
+      sandbox-executor:
+        condition: service_healthy
+    stop_grace_period: 60s
+    volumes:
+      - type: bind
+        source: ${OPENSWARM_SANDBOX_SOCKET_HOST:-./sandbox-socket}
+        target: /run/openswarm-sandbox
+        read_only: true
+        bind:
+          create_host_path: false
+
+  # This process receives no config, env_file, provider credential, warehouse,
+  # host HOME, Docker socket, SSH agent, or database socket. Its TCB sees /work
+  # to register an inode-stable checkout; every command gets a bwrap namespace
+  # with one workspace RW, known sensitive files masked, git/dependencies RO,
+  # /run hidden and PID-tree ownership. network_mode:none remains the outer
+  # egress boundary; every bwrap child gets a distinct loopback-only netns.
+  # Docker starts only the tiny launcher as root. setpriv immediately changes to
+  # uid/gid 1001 while retaining SYS_ADMIN, SETUID, DAC_READ_SEARCH, NET_ADMIN.
+  # bwrap 0.8 rejects ambient caps at non-root uid, so SETUID exists only to
+  # enter uid 0 for the bwrap launcher. DAC_READ_SEARCH is required because its
+  # fd-bind implementation resolves /proc/self/fd through mode-0700 worktrees.
+  # NET_ADMIN raises only the new per-execution namespace's loopback interface.
+  # The requested command returns to uid 1001 with active caps cleared.
+  sandbox-executor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: ${OPENSWARM_IMAGE:-openswarm:latest}
+    container_name: openswarm-sandbox-executor
+    restart: unless-stopped
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    stop_grace_period: 60s
+
+    environment:
+      - TZ=Asia/Seoul
+
+    command:
+      - /usr/bin/setpriv
+      - --reuid
+      - "1001"
+      - --regid
+      - "1001"
+      - --clear-groups
+      - --inh-caps
+      - +sys_admin,+setuid,+dac_read_search,+net_admin
+      - --ambient-caps
+      - +sys_admin,+setuid,+dac_read_search,+net_admin
+      - node
+      - dist/sandboxExecutor/entrypoint.js
+      - serve
+      - --socket
+      - /run/openswarm-sandbox/executor.sock
+      - --allow-root
+      - /work
+      - --connect-timeout-ms
+      - "1000"
+      - --max-request-bytes
+      - "65536"
+      - --max-output-bytes
+      - "524288"
+      - --max-timeout-ms
+      - "900000"
+      - --max-concurrent
+      - "8"
+
+    volumes:
+      - ${OPENSWARM_WORKSPACE:-./workspace}:/work
+      - type: bind
+        source: ${OPENSWARM_SANDBOX_SOCKET_HOST:-./sandbox-socket}
+        target: /run/openswarm-sandbox
+        read_only: false
+        bind:
+          create_host_path: false
+
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777,size=512m
+
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, SETUID, SETGID, DAC_READ_SEARCH, NET_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+      # Docker's default profile denies the mount operations bubblewrap needs,
+      # while Ubuntu's global bwrap profile strips NET_ADMIN before loopback
+      # setup. The repo-shipped profile keeps AppArmor enforced and scopes the
+      # exception to this credential-less, network-none companion.
+      - apparmor=openswarm-sandbox-executor
+    pids_limit: 512
+    mem_limit: ${OPENSWARM_SANDBOX_MEMORY_LIMIT:-8g}
+    cpus: ${OPENSWARM_SANDBOX_CPUS:-8}
+
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/setpriv
+        - --reuid
+        - "1001"
+        - --regid
+        - "1001"
+        - --clear-groups
+        - node
+        - dist/sandboxExecutor/entrypoint.js
+        - health
+        - --socket
+        - /run/openswarm-sandbox/executor.sock
+        - --allow-root
+        - /work
+        - --connect-timeout-ms
+        - "1000"
+        - --max-request-bytes
+        - "65536"
+        - --max-output-bytes
+        - "524288"
+        - --max-timeout-ms
+        - "900000"
+        - --max-concurrent
+        - "8"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

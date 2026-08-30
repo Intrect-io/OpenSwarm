@@ -38,6 +38,13 @@ describe('shouldPublishParkedWork (AGT-4076)', () => {
   it('does not publish without a worktree — there is nothing to publish from', () => {
     expect(shouldPublishParkedWork(false, { finalStatus: 'waiting_on_operator' })).toBe(false);
   });
+
+  it('does not publish a worktree whose sandbox command outcome is unknown', () => {
+    expect(shouldPublishParkedWork(true, {
+      finalStatus: 'waiting_on_operator',
+      workerResult: { executionOutcomeUnknown: true },
+    })).toBe(false);
+  });
 });
 
 describe('publication identity (AGT-4145)', () => {

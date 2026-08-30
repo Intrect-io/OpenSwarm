@@ -44,12 +44,25 @@ export interface McpToolPolicyDecision {
  */
 let humanSurfaceReadOnlyEnabled = false;
 
-export function configureHumanSurfaceReadOnly(enabled: boolean): void {
-  humanSurfaceReadOnlyEnabled = enabled === true;
+/**
+ * Tighten the process-wide boundary. This is deliberately one-way: callers
+ * that load a second config must not restore human-surface write authority in
+ * a process that has already handled strict work.
+ */
+export function enableHumanSurfaceReadOnly(): void {
+  humanSurfaceReadOnlyEnabled = true;
 }
 
 export function isHumanSurfaceReadOnlyEnabled(): boolean {
   return humanSurfaceReadOnlyEnabled;
+}
+
+/** Tests exercise multiple daemon configurations inside one Node process. */
+export function resetHumanSurfaceReadOnlyForTests(): void {
+  if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
+    throw new Error('resetHumanSurfaceReadOnlyForTests is available only to tests');
+  }
+  humanSurfaceReadOnlyEnabled = false;
 }
 
 const READ_ACTIONS = new Set(['read', 'list', 'get', 'search', 'fetch']);

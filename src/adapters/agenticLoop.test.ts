@@ -12,9 +12,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
+import { SandboxOutcomeUnknownError } from '../sandboxExecutor/protocol.js';
 
-afterEach(() => configureHumanSurfaceReadOnly(false));
+afterEach(() => resetHumanSurfaceReadOnlyForTests());
 
 /** Scripted API response carrying a single tool call. */
 const toolCallResp = (id: string, name: string, args: object) => ({
@@ -389,14 +390,14 @@ describe('runAgenticLoop tool exposure options', () => {
     });
 
     expect(toolNames).not.toContain('bash');
-    // run_diagnostics spawns compilers, so it goes with the shell.
-    expect(toolNames).not.toContain('run_diagnostics');
+    // diagnostics spawns compilers, so it goes with the shell.
+    expect(toolNames).not.toContain('diagnostics');
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
   });
 
   it('forces arbitrary program tools off in strict mode while keeping local files, web reads, and MCP', async () => {
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
     let toolNames: string[] = [];
 
     await runAgenticLoop({
@@ -417,11 +418,76 @@ describe('runAgenticLoop tool exposure options', () => {
     });
 
     expect(toolNames).not.toContain('bash');
-    expect(toolNames).not.toContain('run_diagnostics');
+    expect(toolNames).not.toContain('diagnostics');
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
     expect(toolNames).toContain('web_fetch');
     expect(toolNames).toContain('github__get_issue');
+  });
+
+  it('exposes strict bash only after companion attestation and executes through that session', async () => {
+    enableHumanSurfaceReadOnly();
+    const execute = vi.fn(async () => ({
+      output: 'tests passed\n', exitCode: 0, signal: null,
+      timedOut: false, truncated: false, outputLimitExceeded: false,
+    }));
+    const sessionFactory = vi.fn(async () => ({ execute }));
+    let turn = 0;
+    let firstToolNames: string[] = [];
+
+    const result = await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      shellTools: true,
+      diagnosticsTool: true,
+      maxTurns: 2,
+      sandboxExecutorSessionFactory: sessionFactory,
+      callApi: async (_messages, tools) => {
+        if (turn++ === 0) {
+          firstToolNames = tools.map((tool) => tool.function.name);
+          return toolCallResp('sandbox-bash', 'bash', { command: 'npm test' });
+        }
+        return finalResp('done');
+      },
+    });
+
+    expect(firstToolNames).toContain('bash');
+    expect(firstToolNames).not.toContain('diagnostics');
+    expect(sessionFactory).toHaveBeenCalledWith(process.cwd());
+    expect(execute).toHaveBeenCalledWith('npm test', 30_000);
+    expect(result.executedCommands).toEqual(['npm test']);
+    expect(result.executionOutcomeUnknown).toBe(false);
+  });
+
+  it('quarantines a lost sandbox response immediately and skips every later tool and model turn', async () => {
+    enableHumanSurfaceReadOnly();
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'sandbox-loop-'));
+    const laterFile = path.join(cwd, 'must-not-exist.txt');
+    const execute = vi.fn(async () => {
+      throw new SandboxOutcomeUnknownError('socket closed after command start');
+    });
+    const callApi = vi.fn(async () => multiToolCallResp([
+      { id: 'unknown-bash', name: 'bash', args: { command: 'npm test' } },
+      { id: 'later-write', name: 'write_file', args: { path: laterFile, content: 'unsafe continuation' } },
+    ]));
+    try {
+      const result = await runAgenticLoop({
+        prompt: 'x', cwd, model: 'test', maxTurns: 5,
+        sandboxExecutorSessionFactory: async () => ({ execute }),
+        callApi,
+      });
+
+      expect(result).toMatchObject({
+        executionOutcomeUnknown: true,
+        apiCallCount: 1,
+        text: expect.stringContaining('OUTCOME_UNKNOWN_DO_NOT_RETRY'),
+      });
+      expect(callApi).toHaveBeenCalledOnce();
+      await expect(fs.stat(laterFile)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it('withholds every filesystem tool while preserving MCP and coordination tools', async () => {

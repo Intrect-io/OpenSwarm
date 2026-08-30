@@ -10,7 +10,8 @@ import YAML from 'yaml';
 import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResolverConfig, McpConfig } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 import { c, status } from '../support/colors.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { configureSandboxExecutor } from '../sandboxExecutor/runtime.js';
 
 // Constants
 
@@ -427,12 +428,30 @@ const NotificationsSchema = z.object({
   webhookUrl: z.string().optional(),
 }).optional();
 
+const SandboxExecutorConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  socketPath: z.string().refine(
+    (value) => resolve(value) === value && value.startsWith('/run/openswarm-sandbox/'),
+    'Must be a normalized absolute path under /run/openswarm-sandbox',
+  ).default('/run/openswarm-sandbox/executor.sock'),
+  allowedRoots: z.array(z.string().refine((value) => {
+    const canonical = resolve(value);
+    return canonical === value && (canonical === '/work' || canonical.startsWith('/work/'));
+  }, 'Must be /work or a normalized descendant of /work')).min(1).default(['/work']),
+  connectTimeoutMs: z.number().int().min(100).max(10_000).default(1_000),
+  maxRequestBytes: z.number().int().min(4 * 1024).max(1024 * 1024).default(64 * 1024),
+  maxOutputBytes: z.number().int().min(1024).max(4 * 1024 * 1024).default(512 * 1024),
+  maxTimeoutMs: z.number().int().min(1_000).max(60 * 60_000).default(15 * 60_000),
+  maxConcurrent: z.number().int().min(1).max(64).default(8),
+}).optional();
+
 const HumanSurfaceReadOnlySchema = z.object({
   /**
    * Strict mode blocks arbitrary agent programs and all OpenSwarm-owned
    * Slack/Discord/Telegram/webhook sends.  Local web chat remains available.
    */
   enabled: z.boolean().default(false),
+  sandboxExecutor: SandboxExecutorConfigSchema,
 }).default({ enabled: false });
 
 // MCP server entry: stdio (`command`/`args`/`env`) or remote (`url`/`headers`).
@@ -639,7 +658,12 @@ function transformConfig(raw: RawConfig): SwarmConfig {
           webhookUrl: raw.notifications.webhookUrl,
         }
       : undefined,
-    humanSurfaceReadOnly: { enabled: raw.humanSurfaceReadOnly.enabled },
+    humanSurfaceReadOnly: {
+      enabled: raw.humanSurfaceReadOnly.enabled,
+      ...(raw.humanSurfaceReadOnly.sandboxExecutor ? {
+        sandboxExecutor: { ...raw.humanSurfaceReadOnly.sandboxExecutor },
+      } : {}),
+    },
     linearApiKey: raw.linear?.apiKey ?? '',
     linearTeamId: raw.linear?.teamId ?? '',
     agents: raw.agents.map(agent => ({
@@ -806,7 +830,11 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // (MCP discovery, telemetry, provider lookup); a later lookup resolving a
   // different/default file must never silently downgrade an active boundary.
   // Disabling therefore requires a process restart with enabled:false.
-  if (config.humanSurfaceReadOnly?.enabled === true) configureHumanSurfaceReadOnly(true);
+  if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
+  if (config.humanSurfaceReadOnly?.enabled === true
+      && config.humanSurfaceReadOnly.sandboxExecutor?.enabled === true) {
+    configureSandboxExecutor(config.humanSurfaceReadOnly.sandboxExecutor);
+  }
 
   // 6. Apply time window config
   if (config.timeWindow) {
@@ -899,14 +927,21 @@ notifications:
   # telegramChatId: \${TELEGRAM_CHAT_ID:-}
   # webhookUrl: \${NOTIFY_WEBHOOK_URL:-}
 
-# Fail closed on writes to human-facing collaboration surfaces. In strict mode
-# agent shell/diagnostics and delegated CLI adapters are disabled, as are core
-# Discord/Slack/Telegram/webhook senders. Local web chat and approved MCP
-# DevOps/data writes remain available. On Linux, no working network-isolating
-# sandbox plus no typed MCP grants is a deployment blocker for autonomous
-# development; never restore an unsandboxed shell as a workaround.
+# Fail closed on writes to human-facing collaboration surfaces. Delegated CLIs
+# and diagnostics remain disabled. Native bash requires the separately deployed
+# network-none companion and exact health/contract attestation; any failure
+# leaves bash hidden. Approved typed DevOps/data MCP writes remain available.
 humanSurfaceReadOnly:
   enabled: false
+  sandboxExecutor:
+    enabled: false
+    socketPath: /run/openswarm-sandbox/executor.sock
+    allowedRoots: [/work]
+    connectTimeoutMs: 1000
+    maxRequestBytes: 65536
+    maxOutputBytes: 524288
+    maxTimeoutMs: 900000
+    maxConcurrent: 8
 
 # Task source: when the linear block below is unset, OpenSwarm falls back to a
 # local SQLite issue store (~/.openswarm/issues.db) — no external account needed.

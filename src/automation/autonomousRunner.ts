@@ -53,6 +53,7 @@ import type { DefaultRolesConfig } from '../core/types.js';
 import * as execution from './runnerExecution.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { t } from '../locale/index.js';
+import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
@@ -196,6 +197,16 @@ function setOperatorPark(issueId: string, parked: boolean): void {
     } as Parameters<typeof upsertTaskState>[1]);
   } catch (error) { // cxt-ignore: error_swallow — the backoff is the fallback
     console.warn(`[AutonomousRunner] Could not record the operator park for ${issueId}:`, error);
+  }
+}
+
+function setSandboxOutcomePark(issueId: string, parked: boolean): void {
+  try {
+    upsertTaskState(issueId, {
+      execution: { blockedReason: parked ? SANDBOX_OUTCOME_UNKNOWN_PARK_REASON : undefined },
+    } as Parameters<typeof upsertTaskState>[1]);
+  } catch (error) {
+    console.warn(`[AutonomousRunner] Could not record sandbox outcome quarantine for ${issueId}:`, error);
   }
 }
 
@@ -657,9 +668,13 @@ export class AutonomousRunner {
       // operator's answer cannot shorten it.
       const parkedId = task.issueId || task.id;
       if (parkedId) {
+        const outcomeUnknown = result.workerResult?.executionOutcomeUnknown === true;
         // Without an authoritative ledger there is no error code to carry the
         // park, so record the stand-in signal the heartbeat reads instead.
-        if (!this.durableRuns.isPrimary) setOperatorPark(parkedId, true);
+        if (!this.durableRuns.isPrimary) {
+          if (outcomeUnknown) setSandboxOutcomePark(parkedId, true);
+          else setOperatorPark(parkedId, true);
+        }
 
         const correlationIds = normalizeOperatorQuestionCorrelations(
           result.workerResult?.operatorQuestionCorrelationIds ?? [],
@@ -670,19 +685,26 @@ export class AutonomousRunner {
         // If an old adapter omits the correlation, keep bounded backoff rather
         // than inventing a broad task-level resume condition.
         const existingRun = this.durableRuns.getRun(parkedId);
-        const durablyParked = this.durableRuns.isPrimary
-          && correlationIds.length > 0
-          && (
-            (existingRun?.state === 'NEEDS_HUMAN'
-              && existingRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON)
-            || this.durableRuns.markNeedsHumanForQuestions(
-              parkedId,
-              correlationIds,
-              `Waiting for operator answer (${correlationIds.join(', ')})`,
+        const durablyParked = this.durableRuns.isPrimary && (
+          outcomeUnknown
+            ? existingRun?.state === 'NEEDS_HUMAN'
+              && existingRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
+            : correlationIds.length > 0 && (
+              (existingRun?.state === 'NEEDS_HUMAN'
+                && existingRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON)
+              || this.durableRuns.markNeedsHumanForQuestions(
+                parkedId,
+                correlationIds,
+                `Waiting for operator answer (${correlationIds.join(', ')})`,
+              )
             )
-          );
+        );
         if (durablyParked) {
-          console.log(`[Scheduler] Parking ${taskCtx} on exact operator question set: ${correlationIds.join(', ')}`);
+          console.log(outcomeUnknown
+            ? `[Scheduler] Quarantining ${taskCtx} until explicit operator redispatch`
+            : `[Scheduler] Parking ${taskCtx} on exact operator question set: ${correlationIds.join(', ')}`);
+        } else if (outcomeUnknown) {
+          console.error(`[Scheduler] Sandbox outcome quarantine could not be persisted for ${taskCtx}; refusing automatic retry`);
         } else {
           const nextRetryTime = setRetryTime(parkedId, 4, this.failedTaskRetryTimes);
           this.saveTaskState();
@@ -1004,6 +1026,15 @@ export class AutonomousRunner {
       }
 
       if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
+        const isSandboxOutcomeQuarantine = durableRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
+        if (isSandboxOutcomeQuarantine) {
+          if (task.explicitDispatch === true) {
+            const resumed = this.durableRuns.resumeNeedsHuman(id);
+            if (resumed) durableRun = this.durableRuns.getRun(id);
+          }
+          if (durableRun?.state === 'NEEDS_HUMAN') return false;
+          if (!durableRun) return false;
+        }
         // The two resume conditions are mutually exclusive by why the run was
         // parked, not layered as "either one fires it." An ask_human park
         // (marker prefix) leaves the Linear card exactly where it already was
@@ -1072,6 +1103,12 @@ export class AutonomousRunner {
       }
 
       const legacyIsAuthority = !this.durableRuns.isPrimary || !durableRun;
+
+      if (legacyIsAuthority
+          && getTaskState(id)?.execution?.blockedReason === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON) {
+        if (task.explicitDispatch !== true) return false;
+        setSandboxOutcomePark(id, false);
+      }
 
       // Check rejection limit first. Once an issue has a durable row, the
       // imported ledger state replaces legacy JSON counters as authority.

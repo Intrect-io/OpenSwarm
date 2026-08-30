@@ -12,6 +12,8 @@ import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
+import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import type { VerifyCommand } from './manifest.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
@@ -29,6 +31,8 @@ export interface VerifyEvidence {
   baseStatus: 'pass' | 'fail' | 'infra' | 'skipped';
   headStatus: 'pass' | 'fail' | 'infra';
   newFailure: boolean;
+  /** A containment/attestation failure that policy must never make non-blocking. */
+  securityFailure?: boolean;
   rawOutputTail: string;
   durationMs: number;
 }
@@ -38,11 +42,16 @@ export interface RunVerifyOptions {
   commands: VerifyCommand[];
   baseRef: string;
   trustedPackageJsonByDirectory?: Record<string, string>;
+  /** Strict-mode companion seam. When present, Linux/macOS host execution is bypassed. */
+  sandboxExecutorSessionFactory?: (workspace: string) => Promise<SandboxExecutorSession>;
+  /** Parent for disposable Git sandboxes; must be inside the companion's allowed root. */
+  sandboxScratchRoot?: string;
 }
 
 interface CommandResult {
   status: 'pass' | 'fail' | 'infra';
   output: string;
+  securityFailure?: boolean;
   outputFingerprint?: string;
   environmentFailure?: boolean;
   baselineEnvironmentChanged?: boolean;
@@ -136,27 +145,7 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
   if (processGroupId && process.platform !== 'win32') {
     try { process.kill(-processGroupId, 'SIGKILL'); } catch { /* already exited */ }
   }
-  if (process.platform === 'win32') return;
-  // A child may have created a new session to escape the original process
-  // group. The per-run marker survives ordinary forks, so reap any such
-  // descendants before deleting their sandbox.
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let stdout = '';
-    try {
-      ({ stdout } = await execFileAsync('ps', ['eww', '-axo', 'pid=,command='], { maxBuffer: 4 * 1024 * 1024 }));
-    } catch {
-      return;
-    }
-    const pids = stdout.split('\n')
-      .filter((line) => line.includes(marker))
-      .map((line) => Number.parseInt(line.trim().split(/\s+/, 1)[0] ?? '', 10))
-      .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid);
-    if (pids.length === 0) return;
-    for (const pid of pids) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* raced with exit */ }
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-  }
+  await terminateProcessesWithEnvMarker(marker);
 }
 
 /** Working sandbox memoized, broken one re-probed — see makeSandboxCache. */
@@ -166,7 +155,76 @@ const linuxSandbox = makeSandboxCache(() => describeLinuxSandbox(makeSystemProbe
   spawn: (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
 })));
 
-async function runCommand(command: VerifyCommand, root: string, env: NodeJS.ProcessEnv = process.env): Promise<CommandResult> {
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function runWithSandboxExecutor(
+  command: VerifyCommand,
+  root: string,
+  cwd: string,
+  isolatedHome: string,
+  isolatedTmp: string,
+  createSession: (workspace: string) => Promise<SandboxExecutorSession>,
+): Promise<CommandResult> {
+  const timeoutMs = command.timeoutMs ?? 300_000;
+  try {
+    const session = await createSession(root);
+    const cwdBin = join(cwd, 'node_modules', '.bin');
+    const rootBin = join(root, 'node_modules', '.bin');
+    const relativeCwd = relative(root, cwd) || '.';
+    const result = await session.execute([
+      `cd -- ${shellQuote(relativeCwd)}`,
+      `export PATH=${shellQuote(`${cwdBin}${delimiter}${rootBin}`)}:"$PATH"`,
+      command.run,
+    ].join(' && '), timeoutMs);
+    let status: CommandResult['status'];
+    let extra = '';
+    let output = result.output;
+    if (result.outputLimitExceeded || result.truncated) {
+      status = 'fail';
+      output = `[security] verification output exceeded the strict sandbox limit\n${result.output}`;
+    } else if (result.timedOut) {
+      const error = new Error(`timeout after ${timeoutMs}ms`);
+      status = isInfraError(error) ? 'infra' : 'fail';
+      extra = `\n${error.message}`;
+    } else if (result.exitCode === 0) {
+      status = 'pass';
+    } else if (result.exitCode === 126 || result.exitCode === 127 || result.signal) {
+      const error = new Error(
+        `spawn command exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal ${result.signal}` : ''}`,
+      );
+      status = isInfraError(error) ? 'infra' : 'fail';
+      extra = `\n${error.message}`;
+    } else {
+      status = 'fail';
+    }
+    output += extra;
+    return {
+      status,
+      output,
+      securityFailure: result.outputLimitExceeded || result.truncated || undefined,
+      outputFingerprint: createHash('sha256').update(normalizeFailureOutput(output, [
+        [root, '<PROJECT>'], [isolatedHome, '<HOME>'], [isolatedTmp, '<TMP>'],
+        [dirname(root), '<SANDBOX>'],
+      ])).digest('hex'),
+      environmentFailure: status === 'fail' && isEnvironmentFailure(output),
+    };
+  } catch (error) {
+    return {
+      status: 'fail',
+      output: `[security] strict verification sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      securityFailure: true,
+    };
+  }
+}
+
+async function runCommand(
+  command: VerifyCommand,
+  root: string,
+  env: NodeJS.ProcessEnv = process.env,
+  sandboxExecutorSessionFactory?: (workspace: string) => Promise<SandboxExecutorSession>,
+): Promise<CommandResult> {
   const candidate = command.cwd ? resolve(root, command.cwd) : root;
   let cwd: string;
   try {
@@ -196,6 +254,11 @@ async function runCommand(command: VerifyCommand, root: string, env: NodeJS.Proc
   };
   for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (env[key] !== undefined) safeEnv[key] = env[key];
+  }
+  if (sandboxExecutorSessionFactory) {
+    return await runWithSandboxExecutor(
+      command, root, cwd, isolatedHome, isolatedTmp, sandboxExecutorSessionFactory,
+    );
   }
   const shell = process.env.SHELL || '/bin/sh';
   let executable = shell;
@@ -324,8 +387,11 @@ async function runTrustedCommand(
   root: string,
   trustedPackageJsonByDirectory?: Record<string, string>,
   env: NodeJS.ProcessEnv = process.env,
+  sandboxExecutorSessionFactory?: (workspace: string) => Promise<SandboxExecutorSession>,
 ): Promise<CommandResult> {
-  if (trustedPackageJsonByDirectory === undefined) return await runCommand(command, root, env);
+  if (trustedPackageJsonByDirectory === undefined) {
+    return await runCommand(command, root, env, sandboxExecutorSessionFactory);
+  }
   const projectRoot = await realpath(root);
   const candidate = resolve(projectRoot, command.cwd ?? '.');
   let directory: string;
@@ -367,7 +433,7 @@ async function runTrustedCommand(
     if (directory === projectRoot) break;
     directory = dirname(directory);
   }
-  if (!trustedPackageJson) return await runCommand(command, root, env);
+  if (!trustedPackageJson) return await runCommand(command, root, env, sandboxExecutorSessionFactory);
   const packagePath = join(directory, 'package.json');
   const current = await readFile(packagePath, 'utf8');
   const currentPackage = JSON.parse(current) as Record<string, unknown>;
@@ -376,7 +442,7 @@ async function runTrustedCommand(
   // Atomic replacement also cannot follow a package.json symlink introduced in
   // a race between validation and this write.
   atomicWriteFileSync(packagePath, `${JSON.stringify({ ...currentPackage, scripts: trustedPackage.scripts }, null, 2)}\n`);
-  return await runCommand(command, root, env);
+  return await runCommand(command, root, env, sandboxExecutorSessionFactory);
 }
 
 async function validateSandboxSymlinks(projectPath: string, sharedPaths: string[]): Promise<void> {
@@ -417,8 +483,16 @@ async function validateSandboxSymlinks(projectPath: string, sharedPaths: string[
   await visit(projectRoot);
 }
 
-async function createHeadSandbox(projectPath: string, commands: VerifyCommand[]): Promise<{ root: string; project: string }> {
-  const root = await mkdtemp(join(tmpdir(), 'openswarm-verify-head-'));
+async function createVerifySandboxRoot(prefix: string, scratchRoot?: string): Promise<string> {
+  return await mkdtemp(join(scratchRoot ?? tmpdir(), prefix));
+}
+
+async function createHeadSandbox(
+  projectPath: string,
+  commands: VerifyCommand[],
+  scratchRoot?: string,
+): Promise<{ root: string; project: string }> {
+  const root = await createVerifySandboxRoot('.openswarm-verify-head-', scratchRoot);
   const project = join(root, 'worktree');
   try {
     const headCommit = await git(projectPath, ['rev-parse', 'HEAD']);
@@ -512,6 +586,8 @@ async function runAtBase(
   baseRef: string,
   command: VerifyCommand,
   trustedPackageJsonByDirectory?: Record<string, string>,
+  sandboxExecutorSessionFactory?: (workspace: string) => Promise<SandboxExecutorSession>,
+  scratchRoot?: string,
 ): Promise<CommandResult> {
   let root: string | undefined;
   let worktreePath: string | undefined;
@@ -522,7 +598,7 @@ async function runAtBase(
     const untrackedFiles = await git(projectPath, ['ls-files', '--others', '--exclude-standard']);
     const dependencyChanges = `${changedFiles}\n${untrackedFiles}`.split('\n')
       .some((file) => DEPENDENCY_INPUTS.has(file.split('/').pop() ?? ''));
-    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-base-'));
+    root = await createVerifySandboxRoot('.openswarm-verify-base-', scratchRoot);
     worktreePath = join(root, 'worktree');
     await git(projectPath, ['worktree', 'add', '--detach', worktreePath, baseCommit]);
     worktreeAdded = true;
@@ -542,7 +618,9 @@ async function runAtBase(
     }
     const baseBin = join(worktreePath, 'node_modules', '.bin');
     const env = { ...process.env, PATH: `${baseBin}${delimiter}${process.env.PATH ?? ''}` };
-    const result = await runTrustedCommand(command, worktreePath, trustedPackageJsonByDirectory, env);
+    const result = await runTrustedCommand(
+      command, worktreePath, trustedPackageJsonByDirectory, env, sandboxExecutorSessionFactory,
+    );
     return { ...result, baselineEnvironmentChanged: dependencyChanges };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -562,22 +640,39 @@ async function runAtBase(
 
 export async function runVerify(options: RunVerifyOptions): Promise<VerifyEvidence[]> {
   const evidence: VerifyEvidence[] = [];
+  const scratchRoot = options.sandboxScratchRoot
+    ? await realpath(options.sandboxScratchRoot)
+    : undefined;
+  if (scratchRoot) {
+    const canonicalProject = await realpath(options.projectPath);
+    const rel = relative(scratchRoot, canonicalProject);
+    if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new Error('[security] strict verification scratch root must contain, but not equal, the project checkout');
+    }
+  }
   for (const command of options.commands) {
     const started = Date.now();
     let sandbox: Awaited<ReturnType<typeof createHeadSandbox>>;
     try {
-      sandbox = await createHeadSandbox(options.projectPath, [command]);
+      sandbox = await createHeadSandbox(options.projectPath, [command], scratchRoot);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.startsWith('[security]')) throw error;
       evidence.push({
         command, baseStatus: 'skipped', headStatus: 'fail', newFailure: true,
+        securityFailure: true,
         rawOutputTail: message, durationMs: Date.now() - started,
       });
       continue;
     }
     try {
-      const head = await runTrustedCommand(command, sandbox.project, options.trustedPackageJsonByDirectory);
+      const head = await runTrustedCommand(
+        command,
+        sandbox.project,
+        options.trustedPackageJsonByDirectory,
+        process.env,
+        options.sandboxExecutorSessionFactory,
+      );
       if (head.status === 'pass') {
         evidence.push({
           command,
@@ -600,16 +695,22 @@ export async function runVerify(options: RunVerifyOptions): Promise<VerifyEviden
         });
         continue;
       }
-      if (head.output.startsWith('[security]')) {
+      if (head.securityFailure || head.output.startsWith('[security]')) {
         evidence.push({
           command, baseStatus: 'skipped', headStatus: 'fail', newFailure: true,
+          securityFailure: true,
           rawOutputTail: head.output, durationMs: Date.now() - started,
         });
         continue;
       }
 
       const base = await runAtBase(
-        options.projectPath, options.baseRef, command, options.trustedPackageJsonByDirectory,
+        options.projectPath,
+        options.baseRef,
+        command,
+        options.trustedPackageJsonByDirectory,
+        options.sandboxExecutorSessionFactory,
+        scratchRoot,
       );
       const rawOutputTail = Buffer.from(`[base]\n${base.output}\n[head]\n${head.output}`, 'utf8')
         .subarray(-OUTPUT_TAIL_BYTES)
@@ -620,6 +721,7 @@ export async function runVerify(options: RunVerifyOptions): Promise<VerifyEviden
         command,
         baseStatus: base.status,
         headStatus: 'fail',
+        securityFailure: base.securityFailure || undefined,
         newFailure: base.status === 'pass'
           || (base.status === 'fail' && (!sameFailure || (!!base.baselineEnvironmentChanged && !sameEnvironmentFailure))),
         rawOutputTail,

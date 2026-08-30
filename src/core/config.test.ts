@@ -11,9 +11,10 @@ import {
 } from './config.js';
 import * as fs from 'node:fs';
 import {
-  configureHumanSurfaceReadOnly,
+  resetHumanSurfaceReadOnlyForTests,
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
+import { getSandboxExecutorConfig, resetSandboxExecutorForTests } from '../sandboxExecutor/runtime.js';
 
 // Mock fs module
 vi.mock('node:fs', async () => {
@@ -35,7 +36,8 @@ describe('config', () => {
   });
 
   afterEach(() => {
-    configureHumanSurfaceReadOnly(false);
+    resetHumanSurfaceReadOnlyForTests();
+    resetSandboxExecutorForTests();
     delete process.env.DISCORD_TOKEN;
     delete process.env.DISCORD_CHANNEL_ID;
     delete process.env.LINEAR_API_KEY;
@@ -61,6 +63,52 @@ describe('config', () => {
       expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
       expect(loadConfig('/tmp/config.json').humanSurfaceReadOnly).toEqual({ enabled: false });
       expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+    });
+
+    it('parses and process-locks the strict companion contract only when both gates are enabled', () => {
+      const base = {
+        language: 'en',
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base,
+        humanSurfaceReadOnly: {
+          enabled: true,
+          sandboxExecutor: {
+            enabled: true,
+            socketPath: '/run/openswarm-sandbox/executor.sock',
+            allowedRoots: ['/work'],
+            connectTimeoutMs: 750,
+            maxRequestBytes: 8192,
+            maxOutputBytes: 16384,
+            maxTimeoutMs: 120000,
+            maxConcurrent: 3,
+          },
+        },
+      }));
+
+      const config = loadConfig('/tmp/config.json');
+
+      expect(config.humanSurfaceReadOnly?.sandboxExecutor).toEqual({
+        enabled: true,
+        socketPath: '/run/openswarm-sandbox/executor.sock',
+        allowedRoots: ['/work'],
+        connectTimeoutMs: 750,
+        maxRequestBytes: 8192,
+        maxOutputBytes: 16384,
+        maxTimeoutMs: 120000,
+        maxConcurrent: 3,
+      });
+      expect(getSandboxExecutorConfig()).toEqual({
+        socketPath: '/run/openswarm-sandbox/executor.sock',
+        allowedRoots: ['/work'],
+        connectTimeoutMs: 750,
+        maxRequestBytes: 8192,
+        maxOutputBytes: 16384,
+        maxTimeoutMs: 120000,
+        maxConcurrent: 3,
+      });
     });
     it('should load YAML config file', () => {
       const yamlContent = `

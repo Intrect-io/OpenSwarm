@@ -18,7 +18,7 @@ import { buildBranchName } from '../support/branchNaming.js';
 import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { linearIssueToTask } from '../orchestration/decisionEngine.js';
@@ -322,7 +322,7 @@ async function runWorkCommandInner(
   // supplies WorkCommandDeps.loadConfig cannot bypass the same execution
   // contract. Enabling remains monotonic; a false value never downgrades an
   // already strict process.
-  if (config.humanSurfaceReadOnly?.enabled === true) configureHumanSurfaceReadOnly(true);
+  if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
 
   const source = await (deps.ensureTaskSource ?? ensureTaskSource)();
   if (!source) {

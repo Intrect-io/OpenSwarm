@@ -7,10 +7,10 @@ import {
   probeAdapterAvailability,
   resolveBoundarySafeDefaultModel,
 } from './index.js';
-import { configureHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 afterEach(() => {
-  configureHumanSurfaceReadOnly(false);
+  resetHumanSurfaceReadOnlyForTests();
   vi.restoreAllMocks();
 });
 
@@ -60,7 +60,7 @@ describe('adapter discovery human-surface boundary', () => {
 
   it('does not invoke delegated availability or model probes in strict mode', async () => {
     const delegated = adapter();
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
 
     await expect(probeAdapterAvailability(delegated)).resolves.toBe(false);
     await expect(resolveBoundarySafeDefaultModel(delegated)).rejects.toThrow('HUMAN_SURFACE_READ_ONLY');
@@ -85,7 +85,7 @@ describe('adapter discovery human-surface boundary', () => {
       },
       run: vi.fn(),
     });
-    configureHumanSurfaceReadOnly(true);
+    enableHumanSurfaceReadOnly();
 
     await expect(probeAdapterAvailability(native)).resolves.toBe(true);
     await expect(resolveBoundarySafeDefaultModel(native)).resolves.toBe('model-a');

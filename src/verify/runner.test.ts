@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VerifyCommand } from './manifest.js';
 import { runVerify } from './runner.js';
 
@@ -34,6 +34,48 @@ afterEach(async () => {
 });
 
 describe('runVerify', () => {
+  it('routes strict verification through the companion and keeps scratch checkouts under its allowed root', async () => {
+    const canonicalScratchRoot = await realpath(root);
+    const execute = vi.fn(async () => ({
+      output: 'companion-pass', exitCode: 0, signal: null, timedOut: false,
+      truncated: false, outputLimitExceeded: false,
+    }));
+    const createSession = vi.fn(async (workspace: string) => {
+      expect(workspace.startsWith(`${canonicalScratchRoot}/.openswarm-verify-head-`)).toBe(true);
+      return { execute };
+    });
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf must-not-run-in-main-container')],
+      baseRef: 'HEAD',
+      sandboxExecutorSessionFactory: createSession,
+      sandboxScratchRoot: root,
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
+    expect(evidence.rawOutputTail).toBe('companion-pass');
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledWith(expect.stringContaining('must-not-run-in-main-container'), 2_000);
+  });
+
+  it('fails closed when the strict companion cannot attest instead of falling back to host execution', async () => {
+    const createSession = vi.fn(async () => {
+      throw new Error('socket unavailable');
+    });
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf host-fallback-would-pass')],
+      baseRef: 'HEAD',
+      sandboxExecutorSessionFactory: createSession,
+      sandboxScratchRoot: root,
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'skipped', newFailure: true });
+    expect(evidence.rawOutputTail).toContain('[security] strict verification sandbox unavailable: socket unavailable');
+    expect(evidence.rawOutputTail).not.toContain('host-fallback-would-pass');
+  });
+
   it('skips the base worktree when head passes', async () => {
     const [evidence] = await runVerify({ projectPath: repo, commands: [verify('printf head-pass')], baseRef: 'HEAD' });
     expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });

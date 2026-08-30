@@ -497,6 +497,31 @@ describe('DurableRunCoordinator', () => {
     coordinator.close();
   });
 
+  it('quarantines an unknown sandbox outcome in NEEDS_HUMAN without a retry deadline or question correlation', async () => {
+    const coordinator = new DurableRunCoordinator({
+      mode: 'primary', dbPath: dbPath(), instanceId: 'sandbox-quarantine-owner',
+    });
+
+    await coordinator.execute(task('AGT-SANDBOX-UNKNOWN'), '/repo', async () => ({
+      ...result(false),
+      finalStatus: 'waiting_on_operator',
+      workerResult: {
+        success: false,
+        summary: 'sandbox command outcome unknown',
+        filesChanged: [], commands: [], output: 'OUTCOME_UNKNOWN_DO_NOT_RETRY',
+        executionOutcomeUnknown: true,
+      },
+    }));
+
+    expect(coordinator.getRun('AGT-SANDBOX-UNKNOWN')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      retryAt: undefined,
+      lastErrorCode: 'execution_outcome_unknown',
+      lastErrorMessage: expect.stringContaining('inspect'),
+    });
+    coordinator.close();
+  });
+
   it('a parked result carrying a prUrl stops being a park (AGT-4076 guard)', async () => {
     // Why the parked-publish path in runnerExecution attaches the PR to the
     // LEDGER but never writes `result.prUrl`. `publishedNeedsReconcile` treats
