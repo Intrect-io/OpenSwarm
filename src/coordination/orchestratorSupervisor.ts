@@ -41,7 +41,7 @@ export interface OrchestratorSupervisorOptions {
 export function isActionableOrchestratorEvent(event: CoordinationEvent): boolean {
   if (event.kind === 'review-run' && event.status === 'failed') return true;
   return event.status === 'open'
-    && (event.kind === 'advice-request' || event.kind === 'delegation-request');
+    && (event.kind === 'advice-request' || event.kind === 'delegation-request' || event.kind === 'thread-update');
 }
 
 /**

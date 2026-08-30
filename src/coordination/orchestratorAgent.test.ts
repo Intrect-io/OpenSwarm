@@ -80,10 +80,19 @@ describe('runOrchestrator', () => {
 
     expect(result.toolsGranted).toEqual(['github__get_issue']);
     expect(result.toolsDenied.map((entry) => entry.name)).toEqual(['cloudflare__delete_worker', 'evil__read']);
-    const passed = spawnCli.mock.calls[0][1] as { cwd: string; mcpTools: ToolDefinition[]; readOnly?: boolean };
+    const passed = spawnCli.mock.calls[0][1] as {
+      cwd: string;
+      mcpTools: ToolDefinition[];
+      readOnly?: boolean;
+      coordinationContext?: { repository: string; repoKey: string; taskId: string; actorRole: string };
+    };
     expect(passed.cwd).not.toBe('/repo');
     expect(passed.cwd.startsWith(tmpdir())).toBe(true);
     expect(passed.mcpTools.map((entry) => entry.function.name)).toEqual(['github__get_issue']);
+    expect(passed.coordinationContext).toMatchObject({
+      repository: '/repo', taskId: 'coordination', actorRole: 'orchestrator',
+    });
+    expect(passed.coordinationContext?.repoKey).toMatch(/^(git|path):/);
   });
 
   it('withholds the shell, which the scratch directory alone does not do', async () => {

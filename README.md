@@ -338,9 +338,16 @@ The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edi
 
 Each autonomous run snapshots the current Claude Code instruction hierarchy (`~/.claude/CLAUDE.md`, user rules, repository `CLAUDE.md`/`AGENTS.md`, and matching `.claude/rules`) once and applies the same capsule to orchestrator, worker, reviewer, Codex, CC-Router, and Cursor. The dashboard shows the capsule digest and source/error counts, not the rule bodies.
 
-`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_publish`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; OpenSwarm logs a warning rather than pretending they applied.
+`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_peers`, `coordination_publish`, `coordination_thread_*`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; OpenSwarm logs a warning rather than pretending they applied.
 
 A configured `coordinationBoardIssueId` turns one project-scoped tracker issue into the durable agent board. Worker advice/delegation, Discord questions, adapter routes, periodic reviews, and MCP denials are visible through `GET /api/coordination`, SSE, and the **AGENT COORDINATION** dashboard panel. Tool arguments, prompts, credentials, and rule bodies are redacted or omitted.
+
+The transient inbox and the repository discussion board have separate jobs.
+`/threads` stores topics, messages, subscriptions, unread cursors, and CAS
+resolution in the automation SQLite database under the canonical Git repository
+cell, so sibling worktrees and daemon restarts share one history. Replies wake
+subscribed agents on their task-scoped inbox; `/orchestration` remains the live
+event/agent graph.
 
 ```yaml
 autonomous:
@@ -380,6 +387,9 @@ on a file lock, and shutdown aborts then drains an active supervisor call. An
 unchanged set of open board items is not sent to the model again. The deprecated
 `orchestratorSchedule` key is still accepted as a cron-only, daemon-provider
 compatible configuration, but new deployments should use `orchestrator`.
+The native-loop supervisor also receives its repository-cell coordination
+identity, so it can discover peers and create, join, or reply to durable threads
+without gaining shell access to a worktree.
 
 Blocking questions are sent to the configured Discord channel as `!answer <correlation-id> <answer>`. Only users in `DISCORD_ALLOWED_USERS` can settle them. The asking run stops and reports rather than guessing a default, and the question stays open on the board until someone answers — the answer is addressed back to the call sign that raised it, so the next run of that agent reads it from its inbox. When Discord is not configured the tool says so instead of claiming the operator was paged.
 

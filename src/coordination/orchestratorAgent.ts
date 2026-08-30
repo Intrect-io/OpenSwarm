@@ -22,6 +22,7 @@ import { getCoordinationStore, type CoordinationEvent } from './coordinationStor
 import type { AdapterName } from '../adapters/types.js';
 import type { InstructionCapsule } from '../agents/instructionCapsule.js';
 import { assignCallSign } from './agentNames.js';
+import { repositoryCell } from './repositoryCell.js';
 
 export interface OrchestratorRunOptions {
   repository: string;
@@ -75,7 +76,8 @@ export function buildOrchestratorObjective(pending: readonly CoordinationEvent[]
 export async function runOrchestrator(options: OrchestratorRunOptions): Promise<OrchestratorRunResult> {
   options.signal?.throwIfAborted();
   const store = getCoordinationStore();
-  const callSign = assignCallSign({ repository: options.repository, executionId: options.taskId, role: 'orchestrator' });
+  const cell = repositoryCell(options.repository);
+  const callSign = assignCallSign({ repository: cell.repoKey, executionId: options.taskId, role: 'orchestrator' });
   const adapter = getAdapter(options.adapterName);
   const routeCorrelationId = `orchestrator-route:${randomUUID()}`;
   if (!adapter.run) {
@@ -211,6 +213,8 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         'Coordinate the autonomous workers for this repository using the connected MCP tools only.',
         'You have no access to the repository working tree: your file tools are confined to a scratch directory.',
         'Never attempt a write or destructive MCP operation that was not granted; report it as a blocker instead.',
+        'Use coordination_peers and the durable coordination_thread_* tools to consult active workers/reviewers.',
+        'For a contested priority, ownership, or integration decision, create or join a repository thread, ask the relevant peer by coordination_publish, and incorporate a useful response before deciding. If no response arrives within this run, leave the thread open and report the uncertainty.',
         '',
         `Repository: ${options.repository}`,
         `Objective: ${options.objective}`,
@@ -222,6 +226,15 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       timeoutMs: options.timeoutMs ?? 300_000,
       systemPrompt: options.instructionCapsule?.text,
       mcpTools: tools,
+      coordinationContext: {
+        repository: cell.repositoryPath,
+        repoKey: cell.repoKey,
+        taskId: options.taskId,
+        taskLabel: 'Project supervisor',
+        actor: callSign.address,
+        actorName: callSign.name,
+        actorRole: 'orchestrator',
+      },
       webTools: false,
       memoryTools: false,
       // The scratch cwd confines the file tools, but bash is not path-checked:

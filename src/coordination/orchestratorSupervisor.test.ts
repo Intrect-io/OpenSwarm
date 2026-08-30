@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getEventHub } from '../core/eventHub.js';
 import type { CoordinationEvent } from './coordinationStore.js';
-import { OrchestratorSupervisor, selectOrchestratorItems } from './orchestratorSupervisor.js';
+import {
+  isActionableOrchestratorEvent, OrchestratorSupervisor, selectOrchestratorItems,
+} from './orchestratorSupervisor.js';
 
 const originalCoordinationFile = process.env.OPENSWARM_COORDINATION_FILE;
 const dirs: string[] = [];
@@ -58,6 +60,11 @@ afterEach(() => {
 });
 
 describe('OrchestratorSupervisor', () => {
+  it('treats a newly opened durable thread as actionable supervision work', () => {
+    expect(isActionableOrchestratorEvent(event({ kind: 'thread-update', status: 'open' }))).toBe(true);
+    expect(isActionableOrchestratorEvent(event({ kind: 'thread-update', status: 'completed' }))).toBe(false);
+  });
+
   it('includes the latest failed review in the supervisor view until its exchange advances', () => {
     const failed = event({ kind: 'review-run', status: 'failed', correlationId: 'review-1' });
     const completed = event({
