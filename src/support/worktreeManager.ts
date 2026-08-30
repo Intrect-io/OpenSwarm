@@ -1134,16 +1134,15 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
     '--json', 'url', '--jq', '.[0].url',
   )).trim();
 }
-
-
-/** Commit changes + push + gh pr create */
-export async function commitAndCreatePR(
+/** PR URL plus the immutable commit this publication call pushed. */
+export type PublishedPullRequest = { prUrl: string; headSha: string };
+export async function commitAndCreatePRWithHead(
   info: WorktreeInfo,
   title: string,
   issueIdentifier: string,
   description: string,
   options: { draft?: boolean; committedOnly?: boolean } = {},
-): Promise<string> {
+): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
 
   // Check for uncommitted changes and commit them.
@@ -1195,6 +1194,10 @@ export async function commitAndCreatePR(
 
   console.log(`[Worktree] Branch ${branchName} has ${commitsAhead} commit(s) ahead of ${base.ref}`);
 
+  // A successful push below publishes exactly this tip; capture it in-operation.
+  const headSha = (await git(worktreePath, 'rev-parse', 'HEAD')).trim();
+  if (!headSha) throw new Error(`Cannot publish ${branchName}: HEAD identity is unavailable`);
+
   // Push branch to the resolved remote (always push since we have commits ahead)
   await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
   console.log(`[Worktree] Pushed branch ${branchName}`);
@@ -1218,7 +1221,7 @@ export async function commitAndCreatePR(
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
-    return existing;
+    return { prUrl: existing, headSha };
   }
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
@@ -1291,7 +1294,15 @@ export async function commitAndCreatePR(
     }
   }
 
-  return url;
+  return { prUrl: url, headSha };
+}
+
+/** Backwards-compatible URL-only publication surface. */
+export async function commitAndCreatePR(
+  info: WorktreeInfo, title: string, issueIdentifier: string, description: string,
+  options: { draft?: boolean; committedOnly?: boolean } = {},
+): Promise<string> {
+  return (await commitAndCreatePRWithHead(info, title, issueIdentifier, description, options)).prUrl;
 }
 
 // Audit-fix PR (INT-2905)

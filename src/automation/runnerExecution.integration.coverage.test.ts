@@ -27,6 +27,7 @@ vi.mock('../support/planner.js', () => ({
 vi.mock('../support/worktreeManager.js', () => ({
   createWorktree: vi.fn(),
   commitAndCreatePR: vi.fn(),
+  commitAndCreatePRWithHead: vi.fn(),
   findOpenPRFileOverlaps: vi.fn(),
   hasRecoverableWorktree: vi.fn(async () => false),
   preserveWorktree: vi.fn(),

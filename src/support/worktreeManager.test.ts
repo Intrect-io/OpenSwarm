@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { isProofCapableSpace, processNamespaceId } from './processLiveness.js';
-import {createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWorktree, resolveSharedPaths, computeFileOverlaps, formatOverlapReport, findOpenPRFileOverlaps, resolveBaseRef, commitAndCreatePR, type WorktreeInfo } from './worktreeManager.js';
+import {createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWorktree, resolveSharedPaths, computeFileOverlaps, formatOverlapReport, findOpenPRFileOverlaps, resolveBaseRef, commitAndCreatePR, commitAndCreatePRWithHead, type WorktreeInfo } from './worktreeManager.js';
 
 // The fast-path proof needs a REAL pid space, which only Linux can give (boot
 // id + pid-namespace inode). Elsewhere the recorded id is a machine hint, good
@@ -679,8 +679,17 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
     const prevPath = process.env.PATH;
     process.env.PATH = `${bin}:${prevPath}`;
     try {
-      const url = await commitAndCreatePR(info, 'parked', 'INT-76', 'desc', { draft: true, committedOnly: true });
-      expect(url).toBe('https://example.test/park');
+      const publication = await commitAndCreatePRWithHead(
+        info,
+        'parked',
+        'INT-76',
+        'desc',
+        { draft: true, committedOnly: true },
+      );
+      expect(publication).toEqual({
+        prUrl: 'https://example.test/park',
+        headSha: String(git(info.worktreePath, 'rev-parse', 'HEAD')).trim(),
+      });
     } finally {
       process.env.PATH = prevPath;
     }

@@ -90,6 +90,7 @@ vi.mock('../support/planner.js', () => ({
 vi.mock('../support/worktreeManager.js', () => ({
   createWorktree,
   commitAndCreatePR,
+  commitAndCreatePRWithHead: commitAndCreatePR,
   findOpenPRFileOverlaps,
   hasRecoverableWorktree,
   preserveWorktree,
@@ -282,7 +283,10 @@ describe('decomposition limits', () => {
     plannerEstimateTaskDuration.mockReturnValue(45);
     plannerFormatPlannerResult.mockReturnValue('planner result summary');
 
-    commitAndCreatePR.mockResolvedValue('https://github.com/org/repo/pull/1');
+    commitAndCreatePR.mockResolvedValue({
+      prUrl: 'https://github.com/org/repo/pull/1',
+      headSha: 'published-head',
+    });
     findOpenPRFileOverlaps.mockResolvedValue([]);
     hasRecoverableWorktree.mockResolvedValue(false);
     removeWorktree.mockResolvedValue(undefined);

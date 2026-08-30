@@ -13,7 +13,7 @@
 // Split out of runnerExecution.ts, which sits on the 1500-line pre-commit cap.
 
 import { broadcastEvent } from '../core/eventHub.js';
-import { commitAndCreatePR, type WorktreeInfo } from '../support/worktreeManager.js';
+import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
 /** The fields these paths read; narrower than the full pipeline result. */
@@ -77,7 +77,7 @@ export async function publishParkedWork(
     return;
   }
   try {
-    const prUrl = await commitAndCreatePR(
+    const publication = await commitAndCreatePRWithHead(
       worktreeInfo,
       task.title,
       task.issueIdentifier || '',
@@ -96,7 +96,8 @@ export async function publishParkedWork(
     // which frees the repository admission slot and resumes on the answer —
     // into a reconcile row that holds a slot until a sweep releases it. That is
     // the phantom-row shape that idled the whole loop on 2026-08-29.
-    const attached = await durability?.onPublication(prUrl) ?? true;
+    const { prUrl, headSha } = publication;
+    const attached = await durability?.onPublication(prUrl, headSha) ?? true;
     if (attached) {
       console.log(`[Runner] Parked run published as draft for ${task.issueIdentifier}: ${prUrl}`);
     } else {
@@ -135,14 +136,15 @@ export async function publishApprovedWork(
       console.warn(`[Worktree] Publication fenced for ${task.issueIdentifier}; preserving worktree`);
     } else {
       try {
-        const prUrl = await commitAndCreatePR(
+        const publication = await commitAndCreatePRWithHead(
           worktreeInfo,
           task.title,
           task.issueIdentifier || '',
           task.description || '',
         );
+        const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
-        const publicationRecorded = await durability?.onPublication(prUrl) ?? true;
+        const publicationRecorded = await durability?.onPublication(prUrl, headSha) ?? true;
         if (!publicationRecorded) {
           throw new Error('Durable lease fence rejected publication attachment');
         }
