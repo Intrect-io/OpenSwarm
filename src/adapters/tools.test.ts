@@ -547,8 +547,9 @@ describe('Path validation', () => {
 
     const result = await executeTool(
       makeCall('read_file', { path: filePath }),
-      // Use a different cwd to prove /tmp is allowed regardless
-      '/Users/unohee/dev/OpenSwarm',
+      // Use a deliberately absent, platform-neutral cwd to prove /tmp is
+      // allowed regardless and the optional linked-worktree lookup is inert.
+      path.join(TMP_DIR, 'absent-project-cwd'),
     );
     expect(result.is_error).toBe(false);
     expect(result.content).toContain('ok');

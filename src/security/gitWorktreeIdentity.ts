@@ -23,7 +23,15 @@ function canonicalizeExistingPath(candidate: string): string {
  * from granting reads or mounts from a sibling repository.
  */
 export function linkedMainCheckoutOf(root: string): string | null {
-  const canonicalRoot = realpathSync(root);
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch {
+    // This helper is an optional worktree exception, not cwd validation.
+    // Callers may still safely authorize another absolute root (for example
+    // /tmp) when the supplied project cwd is absent on the current host.
+    return null;
+  }
   const dotGit = path.join(canonicalRoot, '.git');
   let raw: string;
   try {
