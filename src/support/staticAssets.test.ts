@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { contentTypeFor, readStaticAsset, resolveStaticRoot, StaticAssetError } from './staticAssets.js';
+import {
+  contentTypeFor, readStaticAsset, readThreadBoardShell, resolveStaticRoot, StaticAssetError,
+} from './staticAssets.js';
 
 describe('contentTypeFor', () => {
   it('maps known extensions and falls back to octet-stream', () => {
@@ -19,6 +21,10 @@ describe('resolveStaticRoot', () => {
   it('finds the source web/static directory in a dev checkout', () => {
     // This repo has web/static committed, so resolution must succeed.
     expect(resolveStaticRoot()).toBeTruthy();
+  });
+
+  it('ships the durable repository thread shell', async () => {
+    expect((await readThreadBoardShell())?.toString()).toContain('REPOSITORY THREADS');
   });
 });
 
