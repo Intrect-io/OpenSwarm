@@ -243,6 +243,30 @@ export class DurableRunCoordinator {
    * is held" — and a caller that fails closed on the difference (the draft
    * overlap gate does) would silently stop reserving anything.
    */
+  /**
+   * When the age sweeper will free `run` if its owner stays silent.
+   *
+   * Read from the same field the sweep compares against, so a caller reporting
+   * the deadline and the sweep acting on it cannot drift apart. Exposed because
+   * the reconciler in autonomousRunner logs the wait but lives in another file,
+   * and named the executor's exit — a condition no one can observe once the
+   * container holding it has been replaced. (AGT-4126)
+   */
+  reconcileAbandonDeadline(run: { updatedAt: number }): number {
+    return run.updatedAt + this.reconcileAbandonMs;
+  }
+
+  /**
+   * The sentence the reconciler prints while a claim is still held.
+   *
+   * Owned here because this class owns the policy it describes: the wait ends
+   * when the age sweep fires, not when a process exits, and the two must not be
+   * described by different files that can drift. (AGT-4126)
+   */
+  fenceWaitMessage(run: { updatedAt: number; identifier?: string | null; issueId: string }): string {
+    return formatFenceWait(run.identifier ?? run.issueId, this.reconcileAbandonDeadline(run));
+  }
+
   activeWorkerIdentifiers(projectPath: string, now = Date.now()): string[] | undefined {
     if (!this.isPrimary || !this.ledger) return undefined;
     const normalized = normalizeProjectPath(projectPath);
@@ -727,4 +751,23 @@ export class DurableRunCoordinator {
       onPublication: async () => true,
     };
   }
+}
+
+/**
+ * Why a `NEEDS_RECONCILE` row is still fenced, and when that ends.
+ *
+ * Names both exits the sweep actually has — age, or a pid probe that shows the
+ * owner gone — and pins the first to a clock time. There is deliberately no
+ * "unless the owner renews": reaching `NEEDS_RECONCILE` already required a full
+ * lease of silence, and nothing renews a row in that state, so offering renewal
+ * as an alternative would describe a transition the state machine does not have.
+ *
+ * The previous wording — "until its original executor exits" — named an event
+ * that is never observed when a container restart replaced the process holding
+ * the claim, so a self-healing wait read as a permanent wedge. (AGT-4126)
+ */
+export function formatFenceWait(identifier: string, freesAtMs: number): string {
+  return `[Reconciler] Keeping ${identifier} fenced — its claim is still held;`
+    + ` frees at ${new Date(freesAtMs).toISOString()} by age,`
+    + ' or sooner if its owner process is seen to have exited';
 }
