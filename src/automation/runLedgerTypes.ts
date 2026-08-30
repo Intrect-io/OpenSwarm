@@ -243,6 +243,7 @@ export interface RunLedgerOptions {
 export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
   'cancelled',
   'superseded',
+  'deferred',
   'rate_limited',
   'publication_reconcile',
   'operator_remediated',

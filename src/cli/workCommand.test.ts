@@ -575,6 +575,18 @@ describe('runWorkCommand — exit code matrix', () => {
     expect(code).toBe(WORK_EXIT_OK);
     expect(deps.outs.join('\n')).toContain('owned by another process');
   });
+
+  it('deferred (no current owner) remains incomplete → 1', async () => {
+    const deps = baseDeps();
+    deps.exec.mockResolvedValue(pipelineResult({
+      success: false,
+      finalStatus: 'deferred',
+      retryAt: Date.now() + 30_000,
+    }));
+    const code = await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_FAILED);
+    expect(deps.outs.join('\n')).toContain('durable admission deferred until');
+  });
 });
 
 describe('runWorkCommand — options plumbing', () => {
@@ -772,6 +784,15 @@ describe('pure helpers', () => {
     });
     expect(summary.note).toContain('owned by another process');
     expect(summary.worktreePreserved).toBe(false);
+  });
+
+  it('summarizeSettled exposes a transient durable-admission deferral', () => {
+    const retryAt = Date.parse('2026-09-01T00:00:00.000Z');
+    const summary = summarizeSettled(row, {
+      value: pipelineResult({ success: false, finalStatus: 'deferred', retryAt }),
+    });
+    expect(summary).toMatchObject({ status: 'deferred', success: false, worktreePreserved: true });
+    expect(summary.note).toContain('2026-09-01T00:00:00.000Z');
   });
 
   it('formatWorkSummary renders one aligned row per issue', () => {

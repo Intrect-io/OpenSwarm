@@ -59,6 +59,8 @@ export interface QueuedTask {
   projectPath: string;
   queuedAt: number;
   priority: number; // 1=Urgent, 2=High, 3=Normal, 4=Low
+  /** Transient admission deferrals stay queued but cannot run before this time. */
+  availableAt?: number;
 }
 
 export interface RunningTask {
@@ -67,6 +69,8 @@ export interface RunningTask {
   task: TaskItem;
   projectPath: string;
   startedAt: number;
+  /** Original queue arrival, retained across transient admission deferrals. */
+  queuedAt: number;
   promise: Promise<PipelineResult>;
   /** Settles only when the underlying executor really exits, not when a watchdog frees the slot. */
   executorSettled: Promise<void>;
@@ -142,6 +146,10 @@ export class TaskScheduler extends EventEmitter {
   private quarantinedProjects = new Map<string, Map<string, { taskId: string; projectPath: string }>>();
   /** Includes executors whose logical task promise was already timed out/rejected. */
   private unsettledExecutors = new Map<string, Promise<void>>();
+  private deferredWakeTimer?: ReturnType<typeof setTimeout>;
+  private deferredWakeAt?: number;
+  /** Queue snapshot being assembled while shutdown waits for in-flight results. */
+  private shutdownDiscardedQueue?: QueuedTask[];
 
   constructor(config: SchedulerConfig) {
     super();
@@ -174,7 +182,15 @@ export class TaskScheduler extends EventEmitter {
       priority: task.priority,
     };
 
-    // Insert by priority
+    this.insertQueuedTask(queuedTask);
+
+    console.log(`[Scheduler] Enqueued task: ${task.title} (priority: ${task.priority})`);
+    this.emit('enqueued', queuedTask);
+    return true;
+  }
+
+  private insertQueuedTask(queuedTask: QueuedTask): void {
+    // Insert by priority while retaining FIFO order within one priority.
     const insertIdx = this.taskQueue.findIndex(
       (t) => t.priority > queuedTask.priority
     );
@@ -184,10 +200,27 @@ export class TaskScheduler extends EventEmitter {
     } else {
       this.taskQueue.splice(insertIdx, 0, queuedTask);
     }
+  }
 
-    console.log(`[Scheduler] Enqueued task: ${task.title} (priority: ${task.priority})`);
-    this.emit('enqueued', queuedTask);
-    return true;
+  private scheduleDeferredWake(): void {
+    const now = Date.now();
+    const nextWake = this.taskQueue.reduce<number | undefined>((earliest, queued) => {
+      if (queued.availableAt == null || queued.availableAt <= now) return earliest;
+      return earliest == null ? queued.availableAt : Math.min(earliest, queued.availableAt);
+    }, undefined);
+
+    if (nextWake === this.deferredWakeAt && this.deferredWakeTimer) return;
+    if (this.deferredWakeTimer) clearTimeout(this.deferredWakeTimer);
+    this.deferredWakeTimer = undefined;
+    this.deferredWakeAt = nextWake;
+    if (nextWake == null || this.stopping) return;
+
+    this.deferredWakeTimer = setTimeout(() => {
+      this.deferredWakeTimer = undefined;
+      this.deferredWakeAt = undefined;
+      if (!this.stopping && !this.paused) this.emit('slotFreed');
+    }, Math.max(0, nextWake - now));
+    this.deferredWakeTimer.unref?.();
   }
 
   /**
@@ -212,6 +245,7 @@ export class TaskScheduler extends EventEmitter {
     if (idx === -1) return false;
 
     this.taskQueue.splice(idx, 1);
+    this.scheduleDeferredWake();
     return true;
   }
 
@@ -220,6 +254,7 @@ export class TaskScheduler extends EventEmitter {
    */
   clearQueue(): void {
     this.taskQueue = [];
+    this.scheduleDeferredWake();
     console.log('[Scheduler] Queue cleared');
   }
 
@@ -336,6 +371,10 @@ export class TaskScheduler extends EventEmitter {
     for (let i = 0; i < this.taskQueue.length; i++) {
       const queued = this.taskQueue[i];
 
+      if (queued.availableAt != null && queued.availableAt > Date.now()) {
+        continue;
+      }
+
       // Project duplication check
       if (this.isProjectBusy(queued.projectPath)) {
         continue;
@@ -356,7 +395,7 @@ export class TaskScheduler extends EventEmitter {
     task: TaskItem,
     projectPath: string,
     executor: (signal: AbortSignal) => Promise<PipelineResult>,
-    queuedAt?: number,
+    queuedAt = Date.now(),
   ): boolean {
     if (this.stopping || this.paused) {
       console.warn(`[Scheduler] Refusing start while ${this.stopping ? 'stopping' : 'paused'}: ${task.title}`);
@@ -397,6 +436,7 @@ export class TaskScheduler extends EventEmitter {
       task,
       projectPath,
       startedAt,
+      queuedAt,
       abortController,
       promise,
       executorSettled,
@@ -404,7 +444,7 @@ export class TaskScheduler extends EventEmitter {
 
     this.runningTasks.set(task.id, runningTask);
     this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, startedAt);
-    if (queuedAt !== undefined) this.throughput.recordQueueStart(queuedAt, startedAt);
+    this.throughput.recordQueueStart(queuedAt, startedAt);
     this.unsettledExecutors.set(runId, executorSettled);
     console.log(`[Scheduler] Started task: ${task.title}`);
     this.emit('started', runningTask);
@@ -476,7 +516,32 @@ export class TaskScheduler extends EventEmitter {
     this.runningTasks.delete(taskId);
     this.throughput.observeOccupancy(this.runningTasks.size, this.config.maxConcurrent, finishedAt);
 
-    if (result.finalStatus === 'superseded') {
+    if (result.finalStatus === 'deferred') {
+      const retryAt = Math.max(Date.now() + 1_000, result.retryAt ?? 0);
+      const queuedTask: QueuedTask = {
+        task: running.task,
+        projectPath: running.projectPath,
+        queuedAt: running.queuedAt,
+        priority: running.task.priority,
+        availableAt: retryAt,
+      };
+      if (!this.stopping) {
+        this.insertQueuedTask(queuedTask);
+        this.scheduleDeferredWake();
+      } else if (this.shutdownDiscardedQueue) {
+        // shutdown() owns the task now. Include it in the same atomic snapshot
+        // as tasks that had never started, so explicit Linear claims roll back.
+        this.shutdownDiscardedQueue.push(queuedTask);
+      } else {
+        // The grace deadline already returned, but an abort-ignoring executor
+        // finally settled. Give the runner a late rollback hook.
+        this.emit('discarded', queuedTask);
+      }
+      console.log(`[Scheduler] Task deferred until ${new Date(retryAt).toISOString()}: ${running.task.title}`);
+      if (!this.stopping) {
+        this.emit('deferred', { task: running.task, result, projectPath: running.projectPath, retryAt });
+      }
+    } else if (result.finalStatus === 'superseded') {
       // Existing in-flight work owns this scope. It is neither completed nor
       // failed; free the slot and let the runner schedule a delayed re-check.
       console.log(`[Scheduler] Task superseded: ${running.task.title}`);
@@ -561,6 +626,8 @@ export class TaskScheduler extends EventEmitter {
       }
     }
 
+    this.scheduleDeferredWake();
+
     console.log(`[Scheduler] runAvailable: started ${started} tasks`);
     return started;
   }
@@ -633,11 +700,15 @@ export class TaskScheduler extends EventEmitter {
     if (!Number.isFinite(graceMs) || graceMs < 0) throw new Error('graceMs must be a non-negative finite number');
     this.stopping = true;
     this.paused = true;
+    if (this.deferredWakeTimer) clearTimeout(this.deferredWakeTimer);
+    this.deferredWakeTimer = undefined;
+    this.deferredWakeAt = undefined;
     // Snapshotted in the same synchronous block that sets stopping and clears
     // the queue — none of these tasks can ever start after this point, so a
     // caller can safely roll back their external claims (Linear In Progress
     // from explicit dispatch) without racing a freed slot. (INT-3388)
     const discardedQueue = [...this.taskQueue];
+    this.shutdownDiscardedQueue = discardedQueue;
     this.clearQueue();
 
     const running = Array.from(this.runningTasks.values());
@@ -653,12 +724,14 @@ export class TaskScheduler extends EventEmitter {
       await Promise.resolve();
     }
 
-    return {
+    const result = {
       drained: this.unsettledExecutors.size === 0 && this.runningTasks.size === 0 && this.quarantinedProjects.size === 0,
       remaining: this.unsettledExecutors.size,
       quarantined: this.quarantinedExecutorCount(),
       discardedQueue,
     };
+    this.shutdownDiscardedQueue = undefined;
+    return result;
   }
 
   // ============================================
@@ -685,6 +758,7 @@ export class TaskScheduler extends EventEmitter {
     this.paused = false;
     console.log('[Scheduler] Resumed');
     this.emit('resumed');
+    if (this.taskQueue.length > 0) this.emit('slotFreed');
   }
 
   /**

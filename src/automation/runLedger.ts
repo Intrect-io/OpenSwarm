@@ -705,7 +705,7 @@ export class RunLedger {
         UPDATE automation_attempts
         SET result_status = 'operator_remediated'
         WHERE issue_id = ? AND attempt_no = ? AND COALESCE(success, 0) = 0
-          AND COALESCE(result_status, '') NOT IN ('cancelled', 'superseded', 'rate_limited', 'operator_remediated')
+          AND COALESCE(result_status, '') NOT IN ('cancelled', 'superseded', 'deferred', 'rate_limited', 'operator_remediated')
       `).run(issueId, attemptNo);
       if (updated.changes !== 1) return false;
       this.db.prepare('DELETE FROM automation_repo_circuits WHERE project_path = ?').run(run.project_path);

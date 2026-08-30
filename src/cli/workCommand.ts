@@ -203,7 +203,20 @@ export function summarizeSettled(
       status: 'superseded',
       success: false,
       worktreePreserved: false,
-      note: 'owned by another process (daemon or another session), or its circuit is open',
+      note: 'owned by another process (daemon or another session), or awaiting reconciliation',
+    };
+  }
+  if (result.finalStatus === 'deferred') {
+    return {
+      ...base,
+      status: 'deferred',
+      success: false,
+      // The pipeline never started, so no cleanup ran. Any resumable worktree
+      // remains untouched for the later durable retry.
+      worktreePreserved: true,
+      note: result.retryAt
+        ? `durable admission deferred until ${new Date(result.retryAt).toISOString()}`
+        : 'durable admission deferred',
     };
   }
   const delivered = result.success && result.finalStatus === 'approved';

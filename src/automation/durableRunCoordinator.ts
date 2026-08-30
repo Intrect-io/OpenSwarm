@@ -71,12 +71,18 @@ export interface OutboxDrainResult {
   dead: number;
 }
 
-function nonExecutingResult(task: TaskItem, projectPath: string, reason: string): PipelineResult {
+function nonExecutingResult(
+  task: TaskItem,
+  projectPath: string,
+  reason: string,
+  disposition: { status: 'deferred'; retryAt: number } | { status: 'superseded' },
+): PipelineResult {
   return {
     success: false,
     sessionId: `durable-admission-${Date.now()}`,
     stages: [],
-    finalStatus: 'superseded',
+    finalStatus: disposition.status,
+    retryAt: disposition.status === 'deferred' ? disposition.retryAt : undefined,
     totalDuration: 0,
     iterations: 0,
     taskContext: {
@@ -99,6 +105,7 @@ function fencedResult(result: PipelineResult): PipelineResult {
 
 export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): number {
   if (result.finalStatus === 'rate_limited') return result.rateLimitResetsAt ?? now + 60_000;
+  if (result.finalStatus === 'deferred') return Math.max(now + 1_000, result.retryAt ?? 0);
   if (result.finalStatus === 'superseded') {
     // A first overlap can disappear quickly, but a still-open PR or persistent
     // file-scope conflict should not burn a fresh Draft/worker admission every
@@ -450,20 +457,44 @@ export class DurableRunCoordinator {
     if (!claim) {
       if (this.isPrimary) {
         const now = Date.now();
+        const existing = this.ledger.getRun(issueId);
+        // A future RETRY_AT can carry a more specific contract (for example an
+        // operator wait). Preserve both its reason and its deadline instead of
+        // rewriting it as a generic 30-second admission conflict.
+        if (existing?.state === 'RETRY_AT' && existing.retryAt != null && existing.retryAt > now) {
+          return nonExecutingResult(task, projectPath, 'durable retry deadline has not arrived', {
+            status: 'deferred',
+            retryAt: existing.retryAt,
+          });
+        }
         const circuitOpenUntil = this.ledger.getCircuitOpenUntil(issueId, now);
-        this.ledger.deferUnclaimedRun(
+        const retryAt = Math.max(now + 30_000, circuitOpenUntil ?? 0);
+        const didDefer = this.ledger.deferUnclaimedRun(
           issueId,
-          Math.max(now + 30_000, circuitOpenUntil ?? 0),
+          retryAt,
           'Durable claim unavailable (repository admission, circuit, budget, or concurrent owner)',
           now,
         );
-        return nonExecutingResult(task, projectPath, 'durable claim unavailable');
+        const parked = this.ledger.getRun(issueId);
+        // A repository slot/budget/circuit refusal parks this task in RETRY_AT:
+        // it still owns queued work and must be retried. An already-running copy
+        // of this same issue or NEEDS_RECONCILE instead means this invocation is
+        // genuinely superseded and must not create a duplicate scheduler entry.
+        if (didDefer && parked?.state === 'RETRY_AT') {
+          return nonExecutingResult(task, projectPath, 'durable claim unavailable', {
+            status: 'deferred',
+            retryAt: parked.retryAt ?? retryAt,
+          });
+        }
+        return nonExecutingResult(task, projectPath, 'durable claim unavailable', { status: 'superseded' });
       }
       return executor(this.noopHooks(), new AbortController().signal);
     }
 
     if (!this.ledger.transition(claim, 'EXECUTING')) {
-      if (this.isPrimary) return nonExecutingResult(task, projectPath, 'claim fence rejected');
+      if (this.isPrimary) {
+        return nonExecutingResult(task, projectPath, 'claim fence rejected', { status: 'superseded' });
+      }
       return executor(this.noopHooks(), new AbortController().signal);
     }
 
