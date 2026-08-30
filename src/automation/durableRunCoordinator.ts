@@ -289,8 +289,32 @@ export class DurableRunCoordinator {
       .filter((identifier): identifier is string => !!identifier);
   }
 
+  /**
+   * Branches protected by a currently-live worker lease. Integration uses the
+   * branch name (not the issue identifier) because that is the ref it would
+   * force-update. Undefined preserves the same fail-closed contract as
+   * activeWorkerIdentifiers when the ledger is off/shadow.
+   */
+  activeWorkerBranches(projectPath: string, now = Date.now()): string[] | undefined {
+    if (!this.isPrimary || !this.ledger) return undefined;
+    const normalized = normalizeProjectPath(projectPath);
+    return this.listRuns(ACTIVE_LEASE_STATES)
+      .filter((run) => run.projectPath === normalized && holdsLiveLease(run, now))
+      .map((run) => run.branchName)
+      .filter((branch): branch is string => !!branch);
+  }
+
   markReady(issueId: string, now = Date.now()): boolean {
     return this.ledger?.markReady(issueId, now) ?? false;
+  }
+
+  queueIntegrationRequeue(
+    issueId: string,
+    expectedStateVersion: number,
+    effect: EffectInput,
+    now = Date.now(),
+  ): boolean {
+    return this.ledger?.queueIntegrationRequeue(issueId, expectedStateVersion, effect, now) ?? false;
   }
 
   consecutiveAttemptsWithErrorCode(issueId: string, errorCode: string, sinceMs?: number): number {

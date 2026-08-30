@@ -86,9 +86,16 @@ import {
   type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
 import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
-import { buildCancellationEffect, buildCompletionEffect, completionStats, deliverTrackerEffect } from './trackerEffects.js';
+import {
+  buildCancellationEffect,
+  buildCompletionEffect,
+  buildIntegrationRequeueEffect,
+  completionStats,
+  deliverTrackerEffect,
+} from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
+import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -2881,6 +2888,58 @@ export class AutonomousRunner {
   getRateLimitHoldUntil(): number { return this.rateLimitUntil; }
   /** Durable ledger record for an issue — the authoritative worktree/branch source. */
   getDurableRun(issueId: string) { return this.durableRuns.getRun(issueId); }
+  /** Branch refs currently protected by live durable worker leases. */
+  getActiveIntegrationBranches(projectPath: string): string[] | undefined {
+    return this.durableRuns.activeWorkerBranches(projectPath);
+  }
+  getActiveIntegrationIssues(projectPath: string): string[] | undefined {
+    return this.durableRuns.activeWorkerIdentifiers(projectPath);
+  }
+
+  /**
+   * Return a conflicted sibling PR to its owning issue with replay evidence.
+   * The coordinator already checks the lease; the ledger repeats that fence
+   * while atomically queuing the tracker effect and SYNC_PENDING transition.
+   */
+  async routeIntegrationConflict(evidence: IntegrationConflictEvidence): Promise<void> {
+    const run = this.durableRuns.listRuns().find((candidate) =>
+      candidate.identifier === evidence.issueIdentifier
+      && candidate.branchName === evidence.branch);
+    if (!run) {
+      throw new Error(`No durable run owns ${evidence.issueIdentifier} branch ${evidence.branch}`);
+    }
+    const activeBranches = this.durableRuns.activeWorkerBranches(run.projectPath);
+    const activeIssues = this.durableRuns.activeWorkerIdentifiers(run.projectPath);
+    if (activeBranches === undefined || activeIssues === undefined) {
+      throw new Error('Durable lease state is unavailable');
+    }
+    if (activeBranches.includes(evidence.branch) || activeIssues.includes(evidence.issueIdentifier)) {
+      throw new Error(`Branch ${evidence.branch} acquired an active worker lease`);
+    }
+    const evidenceBody = JSON.stringify({
+      mergedPR: evidence.mergedPRNumber,
+      mergedBranch: evidence.mergedBranch,
+      mergeCommit: evidence.mergeCommitOid,
+      baseBranch: evidence.baseBranch,
+      baseOid: evidence.baseOid,
+      expectedHeadOid: evidence.expectedHeadOid,
+      conflictFiles: evidence.conflictFiles,
+    }, null, 2);
+    const idempotencyKey = `integration-conflict:${evidence.repo}#${evidence.prNumber}@${evidence.mergeCommitOid}`;
+    const effect = buildIntegrationRequeueEffect(
+      run.issueId,
+      idempotencyKey,
+      `Post-merge integration found a rebase conflict in PR #${evidence.prNumber}. `
+        + `The owning run is queued for retry.\n\n\`\`\`json\n${evidenceBody}\n\`\`\``,
+    );
+    if (!this.durableRuns.queueIntegrationRequeue(run.issueId, run.stateVersion, effect)) {
+      const current = this.durableRuns.getRun(run.issueId);
+      throw new Error(`Refusing to reactivate ${evidence.issueIdentifier} from ${current?.state ?? 'missing'}`);
+    }
+    // Delivery may fail transiently; the durable SYNC_PENDING row and outbox
+    // effect remain authoritative and every normal heartbeat retries them.
+    await this.drainDurableOutbox();
+  }
   getFailureCauseSummary(limit = 50) { return aggregateFailureCauses(getPipelineHistory(limit)); }
 
   private recordPipelineHistory(task: TaskItem, result: PipelineResult): void {

@@ -58,6 +58,77 @@ describe('AutonomousRunner durable completion race', () => {
     vi.resetModules();
   });
 
+  it('reopens the owning durable run with idempotent post-merge conflict evidence', async () => {
+    const [{ AutonomousRunner }, execution] = await Promise.all([
+      import('./autonomousRunner.js'),
+      import('./runnerExecution.js'),
+    ]);
+    const updateState = vi.fn(async () => true);
+    const addComment = vi.fn(async () => undefined);
+    execution.setTaskSource({
+      kind: 'linear', fetchTasks: vi.fn(async () => []), updateState, addComment,
+      lookupIssueState: vi.fn(async () => ({
+        ok: true as const,
+        issue: { state: 'Done', stateType: 'completed' },
+      })),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
+      logPairComplete: vi.fn(), logBlocked: vi.fn(), logStuck: vi.fn(),
+      unstick: vi.fn(), logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'integration-conflict.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.durableRuns.importLegacyRun({
+      issueId: 'issue-4078', source: 'linear', identifier: 'AGT-4078', title: 'sibling fix',
+      projectPath: '/repo', state: 'DONE', branchName: 'swarm/agt-4078',
+    });
+
+    await runner.routeIntegrationConflict({
+      repo: 'owner/repo', prNumber: 18, branch: 'swarm/agt-4078', issueIdentifier: 'AGT-4078',
+      mergedPRNumber: 17, mergedBranch: 'swarm/merged', mergeCommitOid: 'merge-17',
+      baseBranch: 'main', baseOid: 'base-new', expectedHeadOid: 'head-old',
+      conflictFiles: ['src/shared.ts'],
+    });
+
+    expect(internal.durableRuns.getRun('issue-4078')?.state).toBe('READY');
+    expect(updateState).toHaveBeenCalledWith('issue-4078', 'Todo');
+    expect(addComment).toHaveBeenCalledWith(
+      'issue-4078',
+      expect.stringContaining('"conflictFiles": [\n    "src/shared.ts"'),
+      'integration-conflict:owner/repo#18@merge-17',
+    );
+
+    // A tracker outage leaves one atomic local truth: SYNC_PENDING + pending
+    // outbox effect. It must never expose READY while Todo/evidence failed.
+    internal.durableRuns.importLegacyRun({
+      issueId: 'delivery-failed', source: 'linear', identifier: 'AGT-DELIVERY', title: 'delivery failure',
+      projectPath: '/repo', state: 'DONE', branchName: 'swarm/delivery-failed',
+    });
+    updateState.mockResolvedValueOnce(false);
+    await runner.routeIntegrationConflict({
+      repo: 'owner/repo', prNumber: 20, branch: 'swarm/delivery-failed', issueIdentifier: 'AGT-DELIVERY',
+      mergedPRNumber: 17, mergedBranch: 'swarm/merged', mergeCommitOid: 'merge-17',
+      baseBranch: 'main', baseOid: 'base-new', expectedHeadOid: 'head-old', conflictFiles: ['src/b.ts'],
+    });
+    expect(internal.durableRuns.getRun('delivery-failed')?.state).toBe('SYNC_PENDING');
+
+    internal.durableRuns.importLegacyRun({
+      issueId: 'cancelled-4078', source: 'linear', identifier: 'AGT-CANCELLED', title: 'cancelled sibling',
+      projectPath: '/repo', state: 'CANCELLED', branchName: 'swarm/cancelled',
+    });
+    await expect(runner.routeIntegrationConflict({
+      repo: 'owner/repo', prNumber: 19, branch: 'swarm/cancelled', issueIdentifier: 'AGT-CANCELLED',
+      mergedPRNumber: 17, mergedBranch: 'swarm/merged', mergeCommitOid: 'merge-17',
+      baseBranch: 'main', baseOid: 'base-new', expectedHeadOid: 'head-old', conflictFiles: ['src/a.ts'],
+    })).rejects.toThrow('Refusing to reactivate AGT-CANCELLED from CANCELLED');
+    expect(internal.durableRuns.getRun('cancelled-4078')?.state).toBe('CANCELLED');
+    expect(updateState).toHaveBeenCalledTimes(2);
+    internal.durableRuns.close();
+  });
+
   it('recovers remote comment success before local ack without posting it twice', async () => {
     const [{ AutonomousRunner }, execution] = await Promise.all([
       import('./autonomousRunner.js'),

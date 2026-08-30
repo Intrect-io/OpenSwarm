@@ -527,6 +527,21 @@ export type PRInfo = {
   author?: string;
   /** True when the PR's head branch lives in a different repo (a fork). */
   isFork?: boolean;
+  /** Target branch when the listing surface requested it. */
+  baseBranch?: string;
+};
+
+export type PRMergeability = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+
+export type PRLifecycle = {
+  repo: string;
+  number: number;
+  state: 'OPEN' | 'CLOSED' | 'MERGED';
+  branch: string;
+  baseBranch: string;
+  headOid?: string;
+  mergedAt?: string;
+  mergeCommitOid?: string;
 };
 
 /**
@@ -567,7 +582,7 @@ export async function getOpenPRs(repo: string, limit = 30): Promise<PRInfo[]> {
 export async function getOpenPRsOrThrow(repo: string, limit = 30): Promise<PRInfo[]> {
   const stdout = await ghExec(
     'pr', 'list', '-R', repo, '--state', 'open', '--limit', String(limit),
-    '--json', 'number,title,headRefName,createdAt,url,author,isCrossRepository'
+    '--json', 'number,title,headRefName,baseRefName,createdAt,url,author,isCrossRepository'
   );
   const prs = JSON.parse(stdout);
   return prs.map((pr: any) => ({
@@ -579,7 +594,44 @@ export async function getOpenPRsOrThrow(repo: string, limit = 30): Promise<PRInf
     url: pr.url,
     author: pr.author?.login,
     isFork: !!pr.isCrossRepository,
+    baseBranch: pr.baseRefName,
   }));
+}
+
+/**
+ * Read lifecycle fields needed to identify immutable merge events in one API
+ * call (rather than polling every owned PR separately).
+ * Unlike the best-effort list helpers this propagates GitHub/auth failures:
+ * callers must not record a merge as processed when its identity was unknown.
+ */
+export async function getMergedPRsOrThrow(repo: string, limit = 100): Promise<PRLifecycle[]> {
+  const stdout = await ghExec(
+    'pr', 'list', '-R', repo, '--state', 'merged', '--limit', String(limit),
+    '--json', 'number,headRefName,baseRefName,headRefOid,mergedAt,mergeCommit',
+  );
+  const views = JSON.parse(stdout) as Array<{
+    number?: number;
+    headRefName?: string;
+    baseRefName?: string;
+    headRefOid?: string;
+    mergedAt?: string | null;
+    mergeCommit?: { oid?: string } | null;
+  }>;
+  return views.map((view) => {
+    if (!view.number || !view.headRefName || !view.baseRefName) {
+      throw new Error(`gh pr list returned incomplete merged PR data for ${repo}`);
+    }
+    return {
+      repo,
+      number: view.number,
+      state: 'MERGED' as const,
+      branch: view.headRefName,
+      baseBranch: view.baseRefName,
+      headOid: view.headRefOid || undefined,
+      mergedAt: view.mergedAt || undefined,
+      mergeCommitOid: view.mergeCommit?.oid || undefined,
+    };
+  });
 }
 
 /**
@@ -804,16 +856,20 @@ export async function getPRBaseBranchOrThrow(repo: string, prNumber: number): Pr
  * Check if PR has merge conflicts
  */
 export async function checkPRConflicts(repo: string, prNumber: number): Promise<boolean> {
+  return (await getPRMergeability(repo, prNumber)) === 'CONFLICTING';
+}
+
+/** Preserve GitHub's tri-state response instead of treating UNKNOWN as clean. */
+export async function getPRMergeability(repo: string, prNumber: number): Promise<PRMergeability> {
   try {
     const stdout = await ghExec(
       'pr', 'view', String(prNumber), '-R', repo, '--json', 'mergeable'
     );
-    const { mergeable } = JSON.parse(stdout);
-    // mergeable can be: "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
-    return mergeable === 'CONFLICTING';
+    const { mergeable } = JSON.parse(stdout) as { mergeable?: string };
+    return mergeable === 'MERGEABLE' || mergeable === 'CONFLICTING' ? mergeable : 'UNKNOWN';
   } catch (err) {
-    console.error(`[GitHub] Failed to check PR conflicts for ${repo}#${prNumber}:`, err);
-    return false;
+    console.error(`[GitHub] Failed to check PR mergeability for ${repo}#${prNumber}:`, err);
+    return 'UNKNOWN';
   }
 }
 

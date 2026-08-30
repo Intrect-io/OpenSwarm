@@ -21,7 +21,8 @@ vi.mock('node:child_process', () => {
   return { execFile };
 });
 
-vi.mock('../support/atomicFile.js', () => ({ atomicWriteFileSync: vi.fn() }));
+const { atomicWriteFileSyncImpl } = vi.hoisted(() => ({ atomicWriteFileSyncImpl: vi.fn() }));
+vi.mock('../support/atomicFile.js', () => ({ atomicWriteFileSync: atomicWriteFileSyncImpl }));
 
 const { readFileImpl } = vi.hoisted(() => ({
   readFileImpl: vi.fn(async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); }),
@@ -37,6 +38,9 @@ vi.mock('node:fs', () => ({ existsSync: existsSyncImpl }));
 
 const gh = vi.hoisted(() => ({
   getOpenPRs: vi.fn(async () => []),
+  getOpenPRsOrThrow: vi.fn(async () => []),
+  getMergedPRsOrThrow: vi.fn(async () => []),
+  getPRMergeability: vi.fn(async () => 'MERGEABLE' as const),
   getPRContext: vi.fn(async () => ({
     repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z',
     url: 'https://example/pr/9', author: 'someone', body: '', diff: 'diff --git a/x b/x',
@@ -102,6 +106,21 @@ vi.mock('./conflictResolver.js', () => ({
   ConflictResolver: vi.fn().mockImplementation(function ConflictResolverMock() { return conflictResolverImpl; }),
 }));
 
+const { integrationCoordinatorImpl, getOwnedPRsForRepoImpl } = vi.hoisted(() => ({
+  integrationCoordinatorImpl: {
+    integrate: vi.fn(async () => ({
+      repo: 'o/r', mergedPRNumber: 10, mergeCommitOid: 'merge-10', complete: true, results: [],
+    })),
+  },
+  getOwnedPRsForRepoImpl: vi.fn(async () => []),
+}));
+vi.mock('./integrationCoordinator.js', () => ({
+  IntegrationCoordinator: vi.fn().mockImplementation(function IntegrationCoordinatorMock() {
+    return integrationCoordinatorImpl;
+  }),
+}));
+vi.mock('./prOwnership.js', () => ({ getOwnedPRsForRepo: getOwnedPRsForRepoImpl }));
+
 const { pipelineRunImpl, createPipelineFromConfigImpl } = vi.hoisted(() => {
   const pipelineRunImpl = {
     run: vi.fn(async () => ({
@@ -138,6 +157,9 @@ beforeEach(() => {
   conflictResolverImpl.cascadeEnabled.mockReturnValue(false);
   conflictResolverImpl.checkCascade.mockResolvedValue(undefined);
   gh.getOpenPRs.mockResolvedValue([]);
+  gh.getOpenPRsOrThrow.mockResolvedValue([]);
+  gh.getMergedPRsOrThrow.mockResolvedValue([]);
+  gh.getPRMergeability.mockResolvedValue('MERGEABLE');
   gh.getPRContext.mockResolvedValue({
     repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z',
     url: 'https://example/pr/9', author: 'someone', body: '', diff: 'diff --git a/x b/x',
@@ -151,6 +173,10 @@ beforeEach(() => {
   gh.getPRChecks.mockResolvedValue([]);
   gh.getPRBaseBranchOrThrow.mockResolvedValue('main');
   gh.commentOnPROrThrow.mockResolvedValue(undefined);
+  integrationCoordinatorImpl.integrate.mockResolvedValue({
+    repo: 'o/r', mergedPRNumber: 10, mergeCommitOid: 'merge-10', complete: true, results: [],
+  });
+  getOwnedPRsForRepoImpl.mockResolvedValue([]);
   runReviewCommandImpl.mockResolvedValue({ decision: 'approve', feedback: 'looks good' });
   formatReviewOutputImpl.mockImplementation((r: { decision: string }) => `Decision: ${r.decision.toUpperCase()}`);
   pipelineRunImpl.run.mockResolvedValue({
@@ -765,6 +791,101 @@ describe('PRProcessor.processPRs (INT-3282 coverage)', () => {
     await processor.processPRs();
     expect(gh.checkPRConflicts).not.toHaveBeenCalled();
     expect(pipelineRunImpl.run).not.toHaveBeenCalled();
+  });
+
+  it('records one durable event for a newly merged owned PR and does not trigger it twice', async () => {
+    const ownedMerged = {
+      repo: 'o/r', prNumber: 10, branch: 'swarm/merged', issueIdentifier: 'AGT-10',
+      createdAt: '2026-08-30T00:00:00.000Z',
+    };
+    getOwnedPRsForRepoImpl.mockResolvedValue([ownedMerged]);
+    gh.getMergedPRsOrThrow.mockResolvedValue([{
+      repo: 'o/r', number: 10, state: 'MERGED', branch: 'swarm/merged', baseBranch: 'main',
+      mergedAt: '2026-08-30T01:00:00.000Z', mergeCommitOid: 'merge-10',
+    }]);
+    const processor = newScanProcessor({
+      postMergeIntegration: {
+        getActiveLeaseBranches: () => [],
+        getActiveLeaseIdentifiers: () => [],
+        routeConflict: vi.fn(),
+      },
+    });
+
+    // First observation establishes a non-destructive historical baseline.
+    await processor.processPRs();
+    expect(integrationCoordinatorImpl.integrate).not.toHaveBeenCalled();
+    let persisted = String(atomicWriteFileSyncImpl.mock.calls.at(-1)?.[1]);
+
+    // A different merge SHA appears after the baseline and is durably queued.
+    readFileImpl.mockResolvedValueOnce(persisted);
+    getOwnedPRsForRepoImpl.mockResolvedValue([
+      ownedMerged,
+      { ...ownedMerged, prNumber: 11, branch: 'swarm/new-merge', issueIdentifier: 'AGT-11' },
+    ]);
+    gh.getMergedPRsOrThrow.mockResolvedValue([
+      {
+        repo: 'o/r', number: 11, state: 'MERGED', branch: 'swarm/new-merge', baseBranch: 'main',
+        mergedAt: '2026-08-30T02:00:00.000Z', mergeCommitOid: 'merge-11',
+      },
+      {
+        repo: 'o/r', number: 10, state: 'MERGED', branch: 'swarm/merged', baseBranch: 'main',
+        mergedAt: '2026-08-30T01:00:00.000Z', mergeCommitOid: 'merge-10',
+      },
+    ]);
+    integrationCoordinatorImpl.integrate.mockResolvedValueOnce({
+      repo: 'o/r', mergedPRNumber: 11, mergeCommitOid: 'merge-11', complete: true, results: [],
+    });
+    await processor.processPRs();
+    expect(integrationCoordinatorImpl.integrate).toHaveBeenCalledTimes(1);
+    persisted = String(atomicWriteFileSyncImpl.mock.calls.at(-1)?.[1]);
+
+    // The completed event survives a scan/restart boundary and is not emitted again.
+    readFileImpl.mockResolvedValueOnce(persisted);
+    await processor.processPRs();
+    expect(integrationCoordinatorImpl.integrate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not lose a merge between daemon start and its first scheduled scan', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-30T00:00:00.000Z'));
+    const processor = newScanProcessor({
+      postMergeIntegration: {
+        getActiveLeaseBranches: () => [],
+        getActiveLeaseIdentifiers: () => [],
+        routeConflict: vi.fn(),
+      },
+    });
+    getOwnedPRsForRepoImpl.mockResolvedValue([{
+      repo: 'o/r', prNumber: 12, branch: 'swarm/just-merged', issueIdentifier: 'AGT-12',
+      createdAt: '2026-08-30T00:00:00.000Z',
+    }]);
+    gh.getMergedPRsOrThrow.mockResolvedValue([{
+      repo: 'o/r', number: 12, state: 'MERGED', branch: 'swarm/just-merged', baseBranch: 'main',
+      mergedAt: '2026-08-30T00:00:01.000Z', mergeCommitOid: 'merge-12',
+    }]);
+
+    await processor.processPRs();
+
+    expect(integrationCoordinatorImpl.integrate).toHaveBeenCalledTimes(1);
+  });
+
+  it('observes merged events after ordinary PR work for the repo', async () => {
+    gh.getOpenPRs.mockResolvedValue([pr]);
+    gh.getPRChecks.mockResolvedValue([{ conclusion: 'success' }]);
+    const processor = newScanProcessor({
+      postMergeIntegration: {
+        getActiveLeaseBranches: () => [],
+        getActiveLeaseIdentifiers: () => [],
+        routeConflict: vi.fn(),
+      },
+    });
+
+    await processor.processPRs();
+
+    expect(gh.getPRChecks).toHaveBeenCalled();
+    expect(gh.getMergedPRsOrThrow).toHaveBeenCalled();
+    expect(gh.getPRChecks.mock.invocationCallOrder[0])
+      .toBeLessThan(gh.getMergedPRsOrThrow.mock.invocationCallOrder[0]);
   });
 
   it('attempts resolution for a PR with merge conflicts, bypassing cooldown', async () => {

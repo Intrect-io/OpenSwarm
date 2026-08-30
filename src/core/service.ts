@@ -15,7 +15,7 @@ import * as web from '../support/web.js';
 import * as autonomous from '../automation/autonomousRunner.js';
 import { createNotifier } from '../notify/notifier.js';
 import { selectTaskSource } from '../automation/taskSource.js';
-import { PRProcessor } from '../automation/prProcessor.js';
+import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.js';
 import { startCIWorker, stopCIWorker } from '../automation/ciWorker.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
 import * as dailyReporter from '../automation/dailyReporter.js';
@@ -73,6 +73,7 @@ export async function startService(config: SwarmConfig): Promise<void> {
 }
 
 async function startServiceLocked(config: SwarmConfig): Promise<void> {
+  let postMergeIntegration: PRProcessorConfig['postMergeIntegration'];
   // The lifetime SQLite lock above is the atomic single-instance authority.
   // Keep the port probe as a diagnostic for older daemons or unrelated
   // processes that predate/do not own that lock. Refuse to start if another instance — however it was
@@ -315,6 +316,11 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       orchestrator: config.autonomous.orchestrator,
       orchestratorSchedule: config.autonomous.orchestratorSchedule,
     });
+    postMergeIntegration = {
+      getActiveLeaseBranches: (projectPath) => runnerInstance.getActiveIntegrationBranches(projectPath),
+      getActiveLeaseIdentifiers: (projectPath) => runnerInstance.getActiveIntegrationIssues(projectPath),
+      routeConflict: (evidence) => runnerInstance.routeIntegrationConflict(evidence),
+    };
     if (config.autonomous.coordinationBoardIssueId) {
       const { TrackerCoordinationBoard } = await import('../coordination/linearBoard.js');
       const board = new TrackerCoordinationBoard(selectedTaskSource, config.autonomous.coordinationBoardIssueId);
@@ -359,6 +365,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       ciTimeoutMs: config.prProcessor.ciTimeoutMs,
       ciPollIntervalMs: config.prProcessor.ciPollIntervalMs,
       conflictResolver: config.prProcessor.conflictResolver,
+      repoMappings: config.prProcessor.repoMappings,
+      postMergeIntegration,
       // PR remediation is an autonomous editing path; inherit the same
       // baseline-diff CodeQL policy as heartbeat-dispatched work.
       securityAudit: config.autonomous?.securityAudit,

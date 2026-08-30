@@ -10,6 +10,7 @@ import {
 } from './runLedgerTypes.js';
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
+import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import {
   cacheTrackerObservation as persistTrackerObservation,
   readLedgerMetrics,
@@ -287,6 +288,10 @@ export class RunLedger {
       'NEEDS_HUMAN', 'NEEDS_RECONCILE', 'DONE', 'DECOMPOSED', 'CANCELLED',
     ];
     return this.unfencedTransition(issueId, eligible, 'READY', {}, now);
+  }
+
+  queueIntegrationRequeue(issueId: string, expectedStateVersion: number, effect: EffectInput, now = Date.now()): boolean {
+    return queueIntegrationRequeueInDb(this.db, issueId, expectedStateVersion, effect, now);
   }
 
   /**
@@ -955,7 +960,8 @@ export class RunLedger {
    * The outbox row and SYNC_PENDING transition become visible together, so a
    * second daemon can never deliver tracker effects for a still-executing run.
    * The effect kind determines the terminal state after acknowledgement
-   * (`tracker.cancel` -> CANCELLED, all other current effects -> DONE).
+   * (`tracker.cancel` -> CANCELLED, `tracker.integration_requeue` -> READY,
+   * all other current effects -> DONE).
    */
   commitRunForSync(
     claim: RunClaim,
@@ -1397,29 +1403,26 @@ export class RunLedger {
       WHERE issue_id = ? AND attempt_no = ?
       ORDER BY id
     `).all(issueId, run.attempt_no) as Array<{ kind: string }>;
-    const terminalState: Extract<RunState, 'DONE' | 'CANCELLED'> =
-      currentKinds.some((effect) => effect.kind === 'tracker.cancel') ? 'CANCELLED' : 'DONE';
-    if (!ALLOWED_TRANSITIONS.SYNC_PENDING.includes(terminalState)) return false;
+    const targetState: Extract<RunState, 'READY' | 'DONE' | 'CANCELLED'> = currentKinds
+      .some((effect) => effect.kind === 'tracker.cancel') ? 'CANCELLED' : currentKinds
+        .some((effect) => effect.kind === 'tracker.integration_requeue') ? 'READY' : 'DONE';
+    if (!ALLOWED_TRANSITIONS.SYNC_PENDING.includes(targetState)) return false;
     const result = this.db.prepare(`
       UPDATE automation_runs
       SET state = ?, state_version = state_version + 1,
           owner_instance_id = NULL, lease_token = NULL, lease_expires_at = NULL,
           completed_at = ?, updated_at = ?
       WHERE issue_id = ? AND state_version = ? AND state = 'SYNC_PENDING'
-    `).run(terminalState, now, now, issueId, run.state_version);
+    `).run(targetState, targetState === 'READY' ? null : now, now, issueId, run.state_version);
     if (result.changes !== 1) return false;
-    this.db.prepare(`
-      UPDATE automation_attempts
-      SET status = ?, stage = ?, finished_at = ?
-      WHERE issue_id = ? AND attempt_no = ?
-    `).run(
-      terminalState === 'CANCELLED' ? 'cancelled' : 'completed',
-      terminalState,
-      now,
-      issueId,
-      run.attempt_no,
-    );
-    this.insertEvent(issueId, run.attempt_no, 'effects_applied', 'SYNC_PENDING', terminalState, undefined, now);
+    if (targetState !== 'READY') {
+      this.db.prepare(`
+        UPDATE automation_attempts
+        SET status = ?, stage = ?, finished_at = ?
+        WHERE issue_id = ? AND attempt_no = ?
+      `).run(targetState === 'CANCELLED' ? 'cancelled' : 'completed', targetState, now, issueId, run.attempt_no);
+    }
+    this.insertEvent(issueId, run.attempt_no, 'effects_applied', 'SYNC_PENDING', targetState, undefined, now);
     return true;
   }
 
