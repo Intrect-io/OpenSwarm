@@ -60,6 +60,8 @@ export type LinearIssueInfo = {
   title: string;
   description?: string;
   state: string;
+  /** Linear workflow-state type, populated by explicit single-issue lookups. */
+  stateType?: string;
   priority: number;
   labels: string[];
   comments: LinearComment[];

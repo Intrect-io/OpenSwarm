@@ -510,6 +510,49 @@ esac
     internal.durableRuns.close();
   });
 
+  it('reconciles a stale Done tracker row even when the slim heartbeat fetch is empty', async () => {
+    vi.setSystemTime(new Date('2026-07-21T16:00:00Z')); // 01:00 KST: work window allowed
+    const [{ AutonomousRunner }, execution] = await Promise.all([
+      import('./autonomousRunner.js'),
+      import('./runnerExecution.js'),
+    ]);
+    const source = {
+      kind: 'linear',
+      fetchTasks: vi.fn(async () => []),
+      lookupIssueState: vi.fn(async () => ({
+        ok: true as const,
+        issue: { state: 'Done', stateType: 'completed' },
+      })),
+      updateState: vi.fn(async () => true), addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
+      logPairComplete: vi.fn(), logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(),
+      logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource;
+    execution.setTaskSource(source);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'terminal-lookup.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.refreshKnowledgeGraphs = vi.fn();
+    const now = Date.now();
+    internal.durableRuns.importLegacyRun({
+      issueId: 'stale-done', source: 'linear', identifier: 'AX-856', title: 'done upstream',
+      projectPath: '/repo', state: 'RETRY_AT', retryAt: now - 2 * 60 * 60_000,
+    }, now - 2 * 60 * 60_000);
+
+    await runner.heartbeat();
+
+    expect(source.fetchTasks).toHaveBeenCalledTimes(1);
+    expect(source.lookupIssueState).toHaveBeenCalledWith('AX-856');
+    expect(internal.durableRuns.listRuns()).toHaveLength(1);
+    expect(internal.durableRuns.getRun('stale-done')).toMatchObject({
+      state: 'DONE', trackerState: 'Done', trackerStateType: 'completed',
+    });
+    internal.durableRuns.close();
+  });
+
   it('returns at the shutdown deadline but defers ledger close until an abort-ignoring executor exits', async () => {
     const { AutonomousRunner } = await import('./autonomousRunner.js');
     const runner = new AutonomousRunner({

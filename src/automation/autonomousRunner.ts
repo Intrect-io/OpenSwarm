@@ -85,6 +85,7 @@ import {
 } from './durableRunCoordinator.js';
 import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
 import { buildCancellationEffect, buildCompletionEffect, completionStats, deliverTrackerEffect } from './trackerEffects.js';
+import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -1608,13 +1609,23 @@ export class AutonomousRunner {
 
   private async recoverParkedRunsOnly(): Promise<void> {
     if (!this.durableRuns.isPrimary) return;
-    if (this.durableRuns.listRuns(['NEEDS_RECONCILE']).length === 0) return;
-    const fetchResult = await fetchLinearTasks();
-    if (fetchResult.error) {
-      console.warn(`[AutonomousRunner] Explicit-mode recovery fetch failed: ${fetchResult.error}`);
-      return;
+    const needsArtifactRecovery = this.durableRuns.listRuns(['NEEDS_RECONCILE']).length > 0;
+    let tasks: TaskItem[] = [];
+    if (needsArtifactRecovery) {
+      const fetchResult = await fetchLinearTasks();
+      if (fetchResult.error) {
+        console.warn(`[AutonomousRunner] Explicit-mode recovery fetch failed: ${fetchResult.error}`);
+      } else {
+        tasks = fetchResult.tasks;
+        await this.reconcileDurableArtifacts(tasks);
+      }
     }
-    await this.reconcileDurableArtifacts(fetchResult.tasks);
+    await reconcileTrackerTerminalRuns({
+      durableRuns: this.durableRuns,
+      source: getTaskSource(),
+      inScope: this.getDispatchScopePredicate(),
+      knownTasks: tasks,
+    });
   }
 
   /**
@@ -1970,6 +1981,16 @@ export class AutonomousRunner {
         await reportToDiscord(`⚠️ Linear fetch failed: ${fetchResult.error}`);
         return;
       }
+      const trackerReconcile = await reconcileTrackerTerminalRuns({
+        durableRuns: this.durableRuns,
+        source: getTaskSource(),
+        inScope: this.getDispatchScopePredicate(),
+        knownTasks: fetchResult.tasks,
+      });
+      if (trackerReconcile.lookedUp > 0 || trackerReconcile.fromFetch > 0) {
+        this.syslog(`✓ Tracker cache: ${trackerReconcile.fromFetch} bulk hit(s), ${trackerReconcile.lookedUp} explicit lookup(s), ${trackerReconcile.terminal} terminal ledger row(s) reconciled`);
+      }
+      if (this.stopping) return;
       let tasks = fetchResult.tasks;
       if (tasks.length === 0) {
         this.syslog('— No tasks in backlog');

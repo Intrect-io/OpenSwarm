@@ -10,6 +10,11 @@ import {
 } from './runLedgerTypes.js';
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
+import {
+  cacheTrackerObservation as persistTrackerObservation,
+  readLedgerMetrics,
+  type TrackerTerminalState,
+} from './runLedgerTrackerCache.js';
 import type {
   AttemptResultInput,
   ClaimOptions,
@@ -24,6 +29,7 @@ import type {
   RunLedgerOptions,
   RunRecord,
   RunState,
+  TrackerStateObservation,
   TransitionPatch,
 } from './runLedgerTypes.js';
 
@@ -44,6 +50,7 @@ export type {
   RunLedgerOptions,
   RunRecord,
   RunState,
+  TrackerStateObservation,
   TransitionPatch,
 } from './runLedgerTypes.js';
 
@@ -71,6 +78,9 @@ interface RunRow {
   started_at: number | null;
   updated_at: number;
   completed_at: number | null;
+  tracker_state: string | null;
+  tracker_state_type: string | null;
+  tracker_checked_at: number | null;
   metadata_json: string | null;
 }
 
@@ -260,6 +270,15 @@ export class RunLedger {
       ? this.db.prepare(`SELECT * FROM automation_runs WHERE state IN (${placeholders(states)}) ORDER BY updated_at`).all(...states) as RunRow[]
       : this.db.prepare('SELECT * FROM automation_runs ORDER BY updated_at').all() as RunRow[];
     return rows.map((row) => this.toRun(row));
+  }
+
+  cacheTrackerObservation(
+    expected: Pick<RunRecord, 'issueId' | 'state' | 'stateVersion'>,
+    observation: TrackerStateObservation,
+    terminalState?: TrackerTerminalState,
+    now = Date.now(),
+  ): boolean {
+    return persistTrackerObservation(this.db, expected, observation, terminalState, now);
   }
 
   markReady(issueId: string, now = Date.now()): boolean {
@@ -1282,33 +1301,7 @@ export class RunLedger {
   }
 
   getMetrics(now = Date.now()): LedgerMetrics {
-    const byState: Record<string, number> = {};
-    for (const row of this.db.prepare('SELECT state, COUNT(*) AS count FROM automation_runs GROUP BY state').all() as { state: string; count: number }[]) {
-      byState[row.state] = row.count;
-    }
-    const effectsByStatus: Record<string, number> = {};
-    for (const row of this.db.prepare('SELECT status, COUNT(*) AS count FROM automation_effects GROUP BY status').all() as { status: string; count: number }[]) {
-      effectsByStatus[row.status] = row.count;
-    }
-    const expiredActiveLeases = (this.db.prepare(`
-      SELECT COUNT(*) AS count FROM automation_runs
-      WHERE state IN (${placeholders(ACTIVE_LEASE_STATES)})
-        AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
-    `).get(...ACTIVE_LEASE_STATES, now) as { count: number }).count;
-    const oldest = this.db.prepare(`
-      SELECT MIN(created_at) AS created_at FROM automation_effects
-      WHERE status IN ('pending', 'in_flight')
-    `).get() as { created_at: number | null };
-    const openCircuits = (this.db.prepare(`
-      SELECT COUNT(*) AS count FROM automation_repo_circuits WHERE open_until > ?
-    `).get(now) as { count: number }).count;
-    return {
-      byState,
-      effectsByStatus,
-      expiredActiveLeases,
-      oldestPendingEffectAgeMs: oldest.created_at == null ? 0 : Math.max(0, now - oldest.created_at),
-      openCircuits,
-    };
+    return readLedgerMetrics(this.db, now);
   }
 
   close(): void {
@@ -1472,6 +1465,9 @@ export class RunLedger {
       startedAt: row.started_at ?? undefined,
       updatedAt: row.updated_at,
       completedAt: row.completed_at ?? undefined,
+      trackerState: row.tracker_state ?? undefined,
+      trackerStateType: row.tracker_state_type ?? undefined,
+      trackerCheckedAt: row.tracker_checked_at ?? undefined,
       metadata: parseJson(row.metadata_json),
     };
   }
