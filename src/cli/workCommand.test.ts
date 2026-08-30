@@ -123,7 +123,7 @@ function baseDeps(overrides: Partial<WorkCommandDeps> = {}): WorkCommandDeps & {
   ) => pipelineResult());
   const deps: WorkCommandDeps = {
     loadConfig: () => ({ autonomous: { maxConcurrentTasks: 4 } }) as unknown as SwarmConfig,
-    ensureTaskSource: async () => fakeSource,
+    resolveTaskSource: async () => ({ source: fakeSource }),
     registerTaskSource: vi.fn(),
     isValidProjectPath: async () => true,
     isGitRepo: () => true,
@@ -332,10 +332,63 @@ describe('runWorkCommand — bootstrap validation', () => {
   });
 
   it('exits 2 with guidance when Linear is not configured', async () => {
-    const deps = baseDeps({ ensureTaskSource: async () => null });
+    const deps = baseDeps({
+      resolveTaskSource: async () => ({ source: null, reason: 'unconfigured' }),
+    });
     expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps))
       .toBe(WORK_EXIT_NOT_RUN);
     expect(deps.logs.join('\n')).toContain('Linear is not configured');
+  });
+
+  // A revoked token used to render as "not configured", sending the operator to
+  // set an apiKey that was already present and also dead. (AGT-4148)
+  it('exits 2 naming the rejected credential, not a missing configuration', async () => {
+    const deps = baseDeps({
+      resolveTaskSource: async () => ({
+        source: null,
+        reason: 'credential-rejected',
+        detail: 'Token refresh failed (400): {"error_description":"Refresh token revoked"}',
+      }),
+    });
+    expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps))
+      .toBe(WORK_EXIT_NOT_RUN);
+    const out = deps.logs.join('\n');
+    expect(out).toContain('rejected the stored credential');
+    expect(out).toContain('Refresh token revoked');
+    expect(out).toContain('openswarm auth login --provider linear');
+    expect(out).not.toContain('Linear is not configured');
+  });
+
+  // ensureValidToken already appends the re-auth command to its message; saying
+  // it again just makes the operator read the same instruction twice.
+  it('does not repeat the re-auth command already carried in the provider detail', async () => {
+    const deps = baseDeps({
+      resolveTaskSource: async () => ({
+        source: null,
+        reason: 'credential-rejected',
+        detail: 'Token refresh failed (400): revoked. Run: openswarm auth login --provider linear',
+      }),
+    });
+    await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    const occurrences = deps.logs.join('\n').split('auth login --provider linear').length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it('exits 2 calling an unreachable Linear temporary rather than a credential problem', async () => {
+    const deps = baseDeps({
+      resolveTaskSource: async () => ({
+        source: null,
+        reason: 'transient',
+        detail: 'fetch failed',
+      }),
+    });
+    expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps))
+      .toBe(WORK_EXIT_NOT_RUN);
+    const out = deps.logs.join('\n');
+    expect(out).toContain('looks temporary');
+    expect(out).toContain('fetch failed');
+    expect(out).not.toContain('Linear is not configured');
+    expect(out).not.toContain('re-authenticate');
   });
 
   it('exits 2 when the config cannot be loaded', async () => {

@@ -44,7 +44,43 @@ import { hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { fileScopesConflict, resolveTaskFileScope } from '../orchestration/conflictDetector.js';
 import { buildConflictFreeWaves as partitionConflictFreeWaves } from '../orchestration/conflictAdmission.js';
-import { ensureTaskSource } from './reviewCommand.js';
+import { resolveTaskSource, type TaskSourceResult } from './reviewCommand.js';
+
+/**
+ * Turn a task-source failure into operator guidance. Each reason points at a
+ * different repair, which is the whole reason the cause is carried this far:
+ * telling someone with a revoked token to "set linearApiKey" wastes their time
+ * on a setting that is already present. (AGT-4148)
+ */
+function describeTaskSourceFailure(failure: Extract<TaskSourceResult, { source: null }>): string[] {
+  switch (failure.reason) {
+    case 'credential-rejected': {
+      const lines = [
+        'Linear rejected the stored credential — it is configured, but no longer valid.',
+        `  ${failure.detail}`,
+      ];
+      // The provider's own message often already carries the remediation
+      // (ensureValidToken appends it). Only add ours when it does not, so the
+      // operator is not told the same command twice.
+      if (!failure.detail.includes('auth login --provider linear')) {
+        lines.push('Run `openswarm auth login --provider linear` to re-authenticate, then re-run.');
+      }
+      return lines;
+    }
+    case 'transient':
+      return [
+        'Could not reach Linear to build a task source. This looks temporary rather than a credential problem.',
+        `  ${failure.detail}`,
+        'Re-run once it is reachable; if it persists, check connectivity and Linear status.',
+      ];
+    case 'unconfigured':
+    default:
+      return [
+        'Linear is not configured — `openswarm work` picks issues from your tracker.',
+        'Run `openswarm auth login --provider linear` (or set linearApiKey + linearTeamId in config.yaml), then re-run.',
+      ];
+  }
+}
 import { filterRepoIssues, selectIssuesInteractive, WORK_SKIP_STATES } from './workSelect.js';
 import {
   buildWorkCancellationEffect,
@@ -110,7 +146,11 @@ export interface WorkCoordinator {
 
 export interface WorkCommandDeps {
   loadConfig?: () => SwarmConfig;
-  ensureTaskSource?: () => Promise<ITaskSource | null>;
+  /**
+   * Resolves the task source and, on failure, why. The command surfaces the
+   * reason to a person, so it needs more than availability. (AGT-4148)
+   */
+  resolveTaskSource?: () => Promise<TaskSourceResult>;
   /** Registers the source as runnerExecution's module-global task source. */
   registerTaskSource?: (source: ITaskSource) => void;
   isValidProjectPath?: (path: string) => Promise<boolean>;
@@ -324,12 +364,12 @@ async function runWorkCommandInner(
   // already strict process.
   if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
 
-  const source = await (deps.ensureTaskSource ?? ensureTaskSource)();
-  if (!source) {
-    log('Linear is not configured — `openswarm work` picks issues from your tracker.');
-    log('Run `openswarm auth login --provider linear` (or set linearApiKey + linearTeamId in config.yaml), then re-run.');
+  const resolved = await (deps.resolveTaskSource ?? resolveTaskSource)();
+  if (!resolved.source) {
+    for (const line of describeTaskSourceFailure(resolved)) log(line);
     return WORK_EXIT_NOT_RUN;
   }
+  const source = resolved.source;
   // executePipeline routes In Progress transitions and audit comments through
   // runnerExecution's module-global task source — registration is mandatory.
   (deps.registerTaskSource ?? setTaskSource)(source);

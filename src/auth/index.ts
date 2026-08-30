@@ -2,7 +2,7 @@
 // OpenSwarm - Auth Module
 // ============================================
 
-export { AuthProfileStore, ensureValidToken, type AuthProfile } from './oauthStore.js';
+export { AuthProfileStore, ensureValidToken, TokenRefreshError, type AuthProfile } from './oauthStore.js';
 export {
   runOAuthPkceFlow,
   loginAndSaveProfile,
