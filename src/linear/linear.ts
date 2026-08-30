@@ -75,6 +75,7 @@ interface RawIssueNode {
   id: string;
   identifier: string;
   title: string;
+  url?: string;
   description?: string | null;
   priority: number;
   createdAt?: string;
@@ -92,9 +93,11 @@ const ISSUES_QUERY = `
         id
         identifier
         title
+        url
         description
         priority
         createdAt
+        updatedAt
         state { name }
         project { id name icon color }
         labels { nodes { name } }
@@ -110,6 +113,7 @@ const STUCK_ISSUES_QUERY = `
         id
         identifier
         title
+        url
         description
         priority
         updatedAt
@@ -443,6 +447,7 @@ export async function getInProgressIssues(
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: state?.name ?? 'Unknown',
       priority: issue.priority,
@@ -515,6 +520,7 @@ export async function getNextBacklogIssue(
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
+    url: issue.url,
     description: issue.description ?? undefined,
     state: state?.name ?? 'Unknown',
     priority: issue.priority,
@@ -687,6 +693,7 @@ export async function getMyIssues(
           id: issue.id,
           identifier: issue.identifier,
           title: issue.title,
+          url: issue.url,
           description: issue.description ?? undefined,
           state,
           priority: issue.priority,
@@ -694,6 +701,7 @@ export async function getMyIssues(
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
           createdAt: issue.createdAt,
+          updatedAt: issue.updatedAt,
         } as LinearIssueInfo);
       }
 
@@ -719,12 +727,15 @@ export async function getMyIssues(
           id: issue.id,
           identifier: issue.identifier,
           title: issue.title,
+          url: issue.url,
           description: issue.description ?? undefined,
           state: issue.state?.name ?? 'Unknown',
           priority: issue.priority,
           labels: issue.labels?.nodes?.map((l) => l.name) ?? [],
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
+          createdAt: issue.createdAt,
+          updatedAt: issue.updatedAt,
         });
       }
 
@@ -861,6 +872,7 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: issueState?.name ?? 'Unknown',
       stateType: issueState?.type ?? undefined,
@@ -875,6 +887,7 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
       project,
       blockedBy: blockedBy.size > 0 ? [...blockedBy] : undefined,
       createdAt: issue.createdAt instanceof Date ? issue.createdAt.toISOString() : undefined,
+      updatedAt: issue.updatedAt instanceof Date ? issue.updatedAt.toISOString() : undefined,
     };
   }
 }
@@ -1377,6 +1390,7 @@ export async function createIssue(
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
+    url: issue.url,
     description: issue.description ?? undefined,
     state: stateName,
     priority: issue.priority,
@@ -1451,6 +1465,7 @@ export async function createSubIssue(
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: stateName,
       priority: issue.priority,
@@ -1626,6 +1641,7 @@ _This issue was auto-created by an agent. Please review and adjust priority or d
     id: issue.id,
     identifier: issue.identifier,
     title: issue.title,
+    url: issue.url,
     description: issue.description ?? undefined,
     state: 'Backlog',
     priority: 4,
@@ -1679,6 +1695,7 @@ export async function getStuckIssues(): Promise<{
         id: issue.id,
         identifier: issue.identifier,
         title: issue.title,
+        url: issue.url,
         description: issue.description ?? undefined,
         state: issue.state?.name ?? 'Unknown',
         priority: issue.priority,
@@ -1722,6 +1739,7 @@ export async function getStuckIssues(): Promise<{
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description ?? undefined,
       state: issue.state?.name ?? 'Unknown',
       priority: issue.priority,

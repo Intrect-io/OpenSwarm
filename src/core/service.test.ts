@@ -11,6 +11,7 @@ import {
 import { setDefaultAdapter } from '../adapters/index.js';
 import { readProviderOverride } from './providerOverride.js';
 import * as autonomousRunner from '../automation/autonomousRunner.js';
+import { resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 // Mock external dependencies
 // Mock auth so service.test never reads the real ~/.openswarm/auth-profiles.json
@@ -213,6 +214,7 @@ describe('service', () => {
 
   afterEach(async () => {
     await stopService();
+    resetHumanSurfaceReadOnlyForTests();
   });
 
   // AGT-4122: service.ts forwarded only four decomposition fields and never the
@@ -366,6 +368,20 @@ describe('service', () => {
         mockConfig.discordToken,
         mockConfig.discordChannelId
       );
+    });
+
+    it('keeps local web serving but never initializes Discord in strict human-surface mode', async () => {
+      const { initDiscord, stopDiscord } = await import('../discord/index.js');
+      const { startWebServer } = await import('../support/web.js');
+
+      await startService({
+        ...mockConfig,
+        humanSurfaceReadOnly: { enabled: true },
+      });
+
+      expect(initDiscord).not.toHaveBeenCalled();
+      expect(stopDiscord).toHaveBeenCalled();
+      expect(startWebServer).toHaveBeenCalledWith(3847);
     });
 
     it('should reapply a persisted provider override when it differs from config default', async () => {
@@ -636,7 +652,6 @@ describe('service', () => {
         prProcessor: {
           enabled: true,
           schedule: '*/15 * * * *',
-          cooldownHours: 6,
           maxIterations: 3,
         },
       };
@@ -713,7 +728,6 @@ describe('service', () => {
         prProcessor: {
           enabled: false,
           schedule: '*/15 * * * *',
-          cooldownHours: 6,
           maxIterations: 3,
         },
       };
@@ -733,7 +747,6 @@ describe('service', () => {
         prProcessor: {
           enabled: true,
           schedule: '*/15 * * * *',
-          cooldownHours: 6,
           maxIterations: 3,
         },
       };

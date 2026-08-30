@@ -1,6 +1,6 @@
 // Purpose: targeted coverage for AutonomousRunner's safely-reachable public/private
-// helpers that the four existing companion test files (cancel/enable/infraError/
-// maxpace) don't touch. Follows their established pattern — `new
+// helpers that the existing companion test files (cancel/enable/infraError)
+// don't touch. Follows their established pattern — `new
 // AutonomousRunner(cfg())` with `dryRun: true`, direct calls to public
 // methods/getters, and casting to reach small private helpers exactly like
 // `autonomousRunner.enable.test.ts` already does for `shouldFilterByEnabled` /
@@ -68,8 +68,6 @@ const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   allowedProjects: ['/repo'],
   heartbeatSchedule: '0 * * * *',
   autoExecute: false,
-  maxConsecutiveTasks: 1,
-  cooldownSeconds: 0,
   dryRun: true,
   ...over,
 });
@@ -137,11 +135,13 @@ type Internal = {
   engine: { heartbeat: ReturnType<typeof vi.fn> };
   durableRuns: {
     listRuns(states?: readonly string[]): Array<{ issueId: string; lastErrorCode?: string }>;
+    getRun(issueId: string): { state: string; leaseExpiresAt?: number; prUrl?: string } | null;
     markReady(issueId: string): boolean;
   };
   rateLimitUntil: number;
   scheduleNextHeartbeat(): void;
   executeTaskPairMode: ReturnType<typeof vi.fn>;
+  reconcileStalledInProgress(tasks: TaskItem[], now?: number): Promise<TaskItem[]>;
   state: { pendingApproval?: TaskItem };
 };
 
@@ -159,6 +159,13 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
     runnerExecution = await import('./runnerExecution.js');
     detectFileConflictsMock.mockReset();
     detectFileConflictsMock.mockResolvedValue({ safe: [], conflictGroups: [] });
+    resolveTaskFileScopeMock.mockReset();
+    resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+      candidate.fileScope ??= [`scope/${candidate.id}`];
+      return candidate.fileScope;
+    });
+    fileScopesConflictMock.mockReset();
+    fileScopesConflictMock.mockReturnValue(false);
   }, 30000);
 
   afterEach(() => {
@@ -305,6 +312,62 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
     });
 
+    it('repays a known-first deferred unknown as the next exclusive idle wave', async () => {
+      const r = new AutonomousRunner(cfg({
+        allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+      }));
+      const internal = r as unknown as Internal;
+      const known = task({ id: 'known', fileScope: ['src/known.ts'] });
+      const unknown = task({ id: 'unknown', fileScope: undefined });
+      resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => candidate.fileScope ?? []);
+      detectFileConflictsMock
+        .mockResolvedValueOnce({ safe: [known], conflictGroups: [{ tasks: [known, unknown], sharedModules: ['unknown-file-scope'] }] })
+        .mockResolvedValueOnce({ safe: [unknown], conflictGroups: [{ tasks: [known, unknown], sharedModules: ['unknown-file-scope'] }] });
+
+      const firstWave = await internal.detectSafeCandidateIds([
+        { task: known, projectPath: '/repo' }, { task: unknown, projectPath: '/repo' },
+      ]);
+      const secondWave = await internal.detectSafeCandidateIds([
+        { task: known, projectPath: '/repo' }, { task: unknown, projectPath: '/repo' },
+      ]);
+
+      expect(firstWave).toEqual(new Set(['known']));
+      expect(secondWave).toEqual(new Set(['unknown']));
+      expect(detectFileConflictsMock).toHaveBeenLastCalledWith([known, unknown], '/repo', {
+        preferUnknownExclusive: true,
+        preferredUnknownTaskId: 'unknown',
+      });
+    });
+
+    it('reuses a sufficient drafted scope across heartbeat task refetches', async () => {
+      const r = new AutonomousRunner(cfg({ worktreeMode: true, maxConcurrentTasks: 2 }));
+      const internal = r as unknown as Internal;
+      resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+        candidate.fileScope = ['src/drafted.ts'];
+        candidate.fileScopeSource = 'drafted';
+        candidate.preAdmissionDraft = {
+          taskType: 'bugfix', intentSummary: 'repair the drafted implementation',
+          relevantFiles: ['src/drafted.ts'],
+          suggestedApproach: 'change the existing implementation carefully',
+          completionCriteria: ['focused test passes'], sufficient: true,
+          registrySnapshot: [], durationMs: 1,
+        };
+        return candidate.fileScope;
+      });
+      detectFileConflictsMock.mockImplementation(async (tasks: TaskItem[]) => ({
+        safe: tasks, conflictGroups: [],
+      }));
+      const first = task({ id: 'cached-draft', description: 'stable description', trackerUpdatedAt: 10 });
+      const refetched = task({ id: 'cached-draft', description: 'stable description', trackerUpdatedAt: 10 });
+
+      await internal.detectSafeCandidateIds([{ task: first, projectPath: '/repo' }]);
+      await internal.detectSafeCandidateIds([{ task: refetched, projectPath: '/repo' }]);
+
+      expect(resolveTaskFileScopeMock).toHaveBeenCalledTimes(1);
+      expect(refetched.fileScopeSource).toBe('drafted');
+      expect(refetched.preAdmissionDraft?.relevantFiles).toEqual(['src/drafted.ts']);
+    });
+
     it('still defers overlapping scopes when worktree fan-out is disabled', async () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: false, worktreeMode: true, maxConcurrentTasks: 3,
@@ -352,6 +415,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       }));
       const internal = r as unknown as Internal;
       expect(internal.sameProjectCandidateCap()).toBe(4);
+      expect((internal.scheduler as unknown as {
+        config: { maxConcurrentPerProject?: number };
+      }).config.maxConcurrentPerProject).toBeUndefined();
     });
 
     it('sameProjectCandidateCap clamps between 1 and maxConcurrentTasks', () => {
@@ -606,8 +672,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(info[0].name).toBe('WAVE');
       expect(info[0].path).toBe('/x/a');
       expect(info[0].enabled).toBe(true);
-      expect(info[0].running.map((t) => t.id)).toEqual(['running-1']);
-      expect(info[0].pending.map((t) => t.id)).toEqual(['pending-1']);
+      // Dashboard task ids use the same event key as coordination/SSE. A
+      // TaskItem may have a local id distinct from its Linear issue id.
+      expect(info[0].running.map((t) => t.id)).toEqual(['ISSUE-RUNNING']);
+      expect(info[0].pending.map((t) => t.id)).toEqual(['ISSUE-PENDING']);
     });
   });
 
@@ -642,7 +710,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const r = new AutonomousRunner(cfg());
       const internal = r as unknown as Internal;
       internal.state.pendingApproval = task();
-      internal.engine.heartbeat = vi.fn(async (): Promise<DecisionResult> => ({ action: 'defer', reason: 'cooldown' }));
+      internal.engine.heartbeat = vi.fn(async (): Promise<DecisionResult> => ({ action: 'defer', reason: 'waiting' }));
       internal.executeTaskPairMode = vi.fn(async () => {});
       expect(await r.approve()).toBe(false);
       expect(internal.state.pendingApproval).toBeUndefined();
@@ -671,6 +739,47 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const r = new AutonomousRunner(cfg());
       await expect(r.stop()).resolves.toBeUndefined();
       expect(r.getState().isRunning).toBe(false);
+    });
+  });
+
+  describe('stalled In Progress reconciliation', () => {
+    it('moves an unowned stale Linear task to Backlog and updates the current snapshot', async () => {
+      const updateState = vi.fn(async () => true);
+      const lookupIssueState = vi.fn(async () => ({
+        ok: true as const,
+        issue: { state: 'In Progress', updatedAt: 1_000 },
+      }));
+      runnerExecution.setTaskSource({ kind: 'linear', updateState, lookupIssueState } as unknown as ITaskSource);
+      const r = new AutonomousRunner(cfg({ stalledInProgressHours: 6 }));
+      const internal = r as unknown as Internal;
+      vi.spyOn(internal.durableRuns, 'getRun').mockReturnValue({ state: 'RETRY_AT' });
+      (await import('../taskState/store.js')).markTaskInProgress('ISSUE-1', { sessionId: 'owned-session' });
+      const stale = task({ linearState: 'In Progress', trackerUpdatedAt: 1_000 });
+
+      await internal.reconcileStalledInProgress([stale], 6 * 60 * 60_000 + 1_000);
+
+      expect(lookupIssueState).toHaveBeenCalledWith('INT-1');
+      expect(updateState).toHaveBeenCalledWith('ISSUE-1', 'Backlog');
+      expect(stale.linearState).toBe('Backlog');
+    });
+
+    it('fails closed when the tracker changed after the heartbeat snapshot', async () => {
+      const updateState = vi.fn(async () => true);
+      const lookupIssueState = vi.fn(async () => ({
+        ok: true as const,
+        issue: { state: 'In Progress', updatedAt: 1_001 },
+      }));
+      runnerExecution.setTaskSource({ kind: 'linear', updateState, lookupIssueState } as unknown as ITaskSource);
+      const r = new AutonomousRunner(cfg({ stalledInProgressHours: 6 }));
+      const internal = r as unknown as Internal;
+      vi.spyOn(internal.durableRuns, 'getRun').mockReturnValue({ state: 'RETRY_AT' });
+      (await import('../taskState/store.js')).markTaskInProgress('ISSUE-1', { sessionId: 'owned-session' });
+      const stale = task({ linearState: 'In Progress', trackerUpdatedAt: 1_000 });
+
+      await internal.reconcileStalledInProgress([stale], 6 * 60 * 60_000 + 1_000);
+
+      expect(updateState).not.toHaveBeenCalled();
+      expect(stale.linearState).toBe('In Progress');
     });
   });
 

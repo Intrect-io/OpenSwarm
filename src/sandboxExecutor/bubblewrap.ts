@@ -1,0 +1,753 @@
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { promises as dns } from 'node:dns';
+import dgram from 'node:dgram';
+import { constants } from 'node:fs';
+import { access, lstat, mkdtemp, mkdir, open, readFile, readdir, readlink, realpath, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
+import net from 'node:net';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import {
+  prepareCliProcessTreeSpawn,
+  terminateCliProcessTree,
+  terminateProcessesWithEnvMarker,
+  trackCliProcessTree,
+  untrackCliProcessTree,
+} from '../adapters/processTree.js';
+import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
+import type { SandboxExecutionResult } from './protocol.js';
+
+export interface WorkspaceIdentity {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+export interface SandboxIsolationBackend {
+  prove(allowedRoots: string[], socketPath: string): Promise<void>;
+  execute(
+    workspace: WorkspaceIdentity,
+    command: string,
+    timeoutMs: number,
+    maxOutputBytes: number,
+  ): Promise<SandboxExecutionResult>;
+  close(): Promise<void>;
+}
+
+export const SANDBOX_BWRAP_ISOLATION_ARGS = Object.freeze([
+  '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup', '--unshare-net',
+  '--die-with-parent', '--new-session',
+  // bwrap 0.8 refuses a non-setuid invocation with ambient SYS_ADMIN. The
+  // uid-1001 server therefore uses CAP_SETUID to launch bwrap as uid 0. bwrap
+  // retains SETUID and read-only DAC traversal solely until the next setpriv,
+  // which returns the command to uid 1001 and clears every active capability.
+  '--cap-drop', 'ALL',
+  '--cap-add', 'CAP_SETUID',
+  '--cap-add', 'CAP_DAC_READ_SEARCH',
+  '--cap-add', 'CAP_NET_ADMIN',
+  '--clearenv',
+] as const);
+
+export const SANDBOX_CHILD_IDENTITY_PROBE = Object.freeze([
+  'test "$(id -u)" = 1001',
+  'test "$(awk \'/^CapEff:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+  'test "$(awk \'/^CapPrm:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+  'test "$(awk \'/^CapInh:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+  'test "$(awk \'/^CapAmb:/ {print $2}\' /proc/self/status)" = 0000000000000000',
+] as const);
+
+export const SANDBOX_BWRAP_LAUNCHER_ARGS = Object.freeze([
+  '--reuid', '0', '/usr/bin/bwrap',
+] as const);
+
+export const SANDBOX_CHILD_PRIVILEGE_DROP_ARGS = Object.freeze([
+  '/usr/bin/setpriv', '--reuid', '1001',
+  '--inh-caps', '-all', '--ambient-caps', '-all',
+] as const);
+
+export const SANDBOX_NETWORK_INIT_SCRIPT = [
+  "/usr/bin/python3 -c 'import fcntl,socket,struct;",
+  's=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);',
+  'r=struct.pack("16sH",b"lo",0);',
+  'flags=struct.unpack("16sH",fcntl.ioctl(s.fileno(),0x8913,r))[1];',
+  "fcntl.ioctl(s.fileno(),0x8914,struct.pack(\"16sH\",b\"lo\",flags|1))'",
+  '&& exec "$@"',
+].join(' ');
+
+const ISOLATED_LOOPBACK_PROBE = [
+  'import socket,time',
+  's=socket.socket()',
+  's.bind(("127.0.0.1",45123))',
+  's.listen()',
+  'time.sleep(1)',
+  'c=socket.create_connection(s.getsockname(),1)',
+  'a,_=s.accept()',
+  'c.send(b"isolated")',
+  'assert a.recv(8)==b"isolated"',
+].join(';');
+
+class TailCapture {
+  private readonly retained: Buffer;
+  private retainedBytes = 0;
+  private writeOffset = 0;
+  private totalBytes = 0;
+
+  constructor(private readonly maxBytes: number) {
+    this.retained = Buffer.allocUnsafe(maxBytes);
+  }
+
+  append(stream: 'stdout' | 'stderr', chunk: Buffer): boolean {
+    const decorated = stream === 'stderr'
+      ? Buffer.concat([Buffer.from('\n[stderr] '), chunk])
+      : chunk;
+    this.totalBytes += decorated.length;
+    if (decorated.length >= this.maxBytes) {
+      decorated.copy(this.retained, 0, decorated.length - this.maxBytes);
+      this.retainedBytes = this.maxBytes;
+      this.writeOffset = 0;
+      return this.totalBytes > this.maxBytes;
+    }
+    const first = Math.min(decorated.length, this.maxBytes - this.writeOffset);
+    decorated.copy(this.retained, this.writeOffset, 0, first);
+    if (first < decorated.length) decorated.copy(this.retained, 0, first);
+    this.writeOffset = (this.writeOffset + decorated.length) % this.maxBytes;
+    this.retainedBytes = Math.min(this.maxBytes, this.retainedBytes + decorated.length);
+    return this.totalBytes > this.maxBytes;
+  }
+
+  result(): { output: string; truncated: boolean } {
+    const truncated = this.totalBytes > this.retainedBytes;
+    const start = this.retainedBytes === this.maxBytes ? this.writeOffset : 0;
+    const bytes = start === 0
+      ? this.retained.subarray(0, this.retainedBytes)
+      : Buffer.concat([this.retained.subarray(start), this.retained.subarray(0, start)]);
+    const prefix = truncated
+      ? `[output limit exceeded; showing last ${this.retainedBytes} bytes]\n`
+      : '';
+    return { output: prefix + bytes.toString('utf8'), truncated };
+  }
+}
+
+function pathInside(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === '' || (!!rel && rel !== '..' && !rel.startsWith(`..${sep}`));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function mountDirectories(paths: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const target of paths) {
+    let current = target;
+    while (current !== '/' && current !== '/work' && current !== '/home') {
+      dirs.add(current);
+      current = dirname(current);
+    }
+  }
+  return [...dirs].sort((a, b) => a.split('/').length - b.split('/').length);
+}
+
+function safeChildEnv(base: NodeJS.ProcessEnv, marker: string): NodeJS.ProcessEnv {
+  const home = '/tmp/openswarm-home';
+  return {
+    PATH: '/usr/local/bin:/usr/bin:/bin',
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: `${home}/.config`,
+    XDG_CACHE_HOME: `${home}/.cache`,
+    XDG_DATA_HOME: `${home}/.local/share`,
+    TMPDIR: '/tmp',
+    TMP: '/tmp',
+    TEMP: '/tmp',
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    LC_CTYPE: 'C.UTF-8',
+    NO_COLOR: '1',
+    TZ: base.TZ ?? 'UTC',
+    PYTHONDONTWRITEBYTECODE: '1',
+    UV_PYTHON_INSTALL_DIR: '/home/openswarm/.local/share/uv/python',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'safe.directory',
+    GIT_CONFIG_VALUE_0: '*',
+    ...(base.CI !== undefined ? { CI: base.CI } : {}),
+    OPENSWARM_SANDBOX_PROCESS_MARKER: marker,
+  };
+}
+
+async function directoryIdentity(path: string): Promise<WorkspaceIdentity> {
+  const canonical = await realpath(path);
+  const metadata = await stat(canonical, { bigint: true });
+  if (!metadata.isDirectory()) throw new Error(`Sandbox workspace is not a directory: ${path}`);
+  return { path: canonical, dev: metadata.dev, ino: metadata.ino };
+}
+
+export async function validatedGitCommonDirectory(workspace: string): Promise<string | undefined> {
+  const dotGit = join(workspace, '.git');
+  try {
+    const metadata = await lstat(dotGit);
+    if (metadata.isDirectory()) return dotGit;
+    if (!metadata.isFile()) return undefined;
+    const mainCheckout = linkedMainCheckoutOf(workspace);
+    if (!mainCheckout) return undefined;
+    const common = await realpath(join(mainCheckout, '.git'));
+    return (await stat(common)).isDirectory() ? common : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function validatedDependencyTargets(workspace: string, roots: string[]): Promise<string[]> {
+  const targets: string[] = [];
+  const mainCheckout = linkedMainCheckoutOf(workspace);
+  for (const name of ['node_modules', '.venv-verify', '.venv', 'venv']) {
+    try {
+      const entry = join(workspace, name);
+      const entryMetadata = await lstat(entry);
+      if (!entryMetadata.isSymbolicLink() && !entryMetadata.isDirectory()) continue;
+      const target = entryMetadata.isSymbolicLink() ? await realpath(entry) : entry;
+      if (!roots.some((root) => pathInside(root, target))) continue;
+      if (!(await stat(target)).isDirectory()) continue;
+      if (pathInside(workspace, target)) {
+        targets.push(target);
+        continue;
+      }
+      if (!entryMetadata.isSymbolicLink() || !mainCheckout) continue;
+      const expectedEntry = join(mainCheckout, name);
+      const expectedMetadata = await lstat(expectedEntry).catch(() => undefined);
+      if (!expectedMetadata?.isDirectory() || expectedMetadata.isSymbolicLink()) continue;
+      const expected = await realpath(expectedEntry);
+      if (pathInside(mainCheckout, expected) && expected === target) targets.push(target);
+    } catch {
+      // Optional dependency path is absent or broken.
+    }
+  }
+  return [...new Set(targets)];
+}
+
+export interface SecretMask {
+  path: string;
+  kind: 'file' | 'directory';
+  /** Every workspace entry whose current resolution requires this mask. */
+  witnessPaths: string[];
+}
+
+interface FixedPathIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+interface FixedSecretMask {
+  mask: SecretMask;
+  handle: FileHandle;
+  identity: FixedPathIdentity;
+}
+
+const SECRET_DIRECTORIES = new Set(['.aws', '.ssh', '.gnupg', '.kube', '.docker']);
+const SKIP_SCAN_DIRECTORIES = new Set(['.git', 'node_modules', '.venv', '.venv-verify', 'venv', 'target', 'dist', 'build']);
+
+function looksSensitiveFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (lower === '.env' || (lower.startsWith('.env.')
+      && !['.env.example', '.env.sample', '.env.template'].includes(lower))) return true;
+  if (['.dev.vars', '.envrc', '.npmrc', '.pypirc', '.netrc', 'credentials', 'credentials.json', 'service-account.json',
+    'id_rsa', 'id_ed25519'].includes(lower)) return true;
+  return /\.(?:pem|key|p12|pfx)$/.test(lower)
+    || /(?:credential|service-account|private-key).+\.json$/.test(lower);
+}
+
+export async function discoverWorkspaceSecretMasks(workspace: string, roots: string[]): Promise<SecretMask[]> {
+  const masks: SecretMask[] = [];
+  const pending = [workspace];
+  let entries = 0;
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      entries += 1;
+      if (entries > 100_000) throw new Error('Sandbox secret-mask preflight exceeded its workspace scan ceiling');
+      const candidate = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (SECRET_DIRECTORIES.has(entry.name)) {
+          masks.push({ path: candidate, kind: 'directory', witnessPaths: [candidate] });
+        }
+        else if (!SKIP_SCAN_DIRECTORIES.has(entry.name)) pending.push(candidate);
+        continue;
+      }
+      const sensitiveDirectoryLink = entry.isSymbolicLink() && SECRET_DIRECTORIES.has(entry.name);
+      if (!sensitiveDirectoryLink && !looksSensitiveFile(entry.name)) continue;
+      if (entry.isSymbolicLink()) {
+        let target: string;
+        try {
+          target = await realpath(candidate);
+        } catch {
+          throw new Error(`Sensitive workspace link cannot be resolved safely: ${candidate}`);
+        }
+        if (!roots.some((root) => pathInside(root, target))) {
+          throw new Error(`Sensitive workspace link escapes sandbox roots: ${candidate}`);
+        }
+        const targetMetadata = await stat(target);
+        if (targetMetadata.isDirectory()) {
+          masks.push({ path: target, kind: 'directory', witnessPaths: [candidate] });
+        } else if (targetMetadata.isFile()) {
+          masks.push({ path: target, kind: 'file', witnessPaths: [candidate] });
+        } else {
+          throw new Error(`Sensitive workspace link has an unsupported target: ${candidate}`);
+        }
+      } else if (entry.isFile()) {
+        // Mask the name even while empty: otherwise a concurrent writer could
+        // populate it after preflight and before bwrap starts.
+        masks.push({ path: candidate, kind: 'file', witnessPaths: [candidate] });
+      }
+      if (masks.length > 512) throw new Error('Sandbox secret-mask preflight exceeded its mask ceiling');
+    }
+  }
+  const unique = new Map<string, SecretMask>();
+  for (const mask of masks) {
+    const key = `${mask.kind}:${mask.path}`;
+    const current = unique.get(key);
+    if (!current) {
+      unique.set(key, mask);
+      continue;
+    }
+    current.witnessPaths = [...new Set([...current.witnessPaths, ...mask.witnessPaths])];
+  }
+  return [...unique.values()];
+}
+
+export function sandboxFdBindArgs(writable: boolean, fd: number, destination: string): string[] {
+  return [writable ? '--bind-fd' : '--ro-bind-fd', String(fd), destination];
+}
+
+export async function assertOpenPathIdentity(
+  path: string,
+  handle: FileHandle,
+  expected: FixedPathIdentity,
+  kind: 'file' | 'directory',
+  label: string,
+): Promise<void> {
+  let opened;
+  let named;
+  let canonical: string;
+  try {
+    [opened, named, canonical] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+      realpath(path),
+    ]);
+  } catch {
+    throw new Error(`${label} identity changed before sandbox spawn: ${path}`);
+  }
+  const expectedKind = kind === 'directory'
+    ? opened.isDirectory() && named.isDirectory()
+    : opened.isFile() && named.isFile();
+  if (!expectedKind || named.isSymbolicLink() || canonical !== path
+      || opened.dev !== expected.dev || opened.ino !== expected.ino
+      || named.dev !== expected.dev || named.ino !== expected.ino) {
+    throw new Error(`${label} identity changed before sandbox spawn: ${path}`);
+  }
+}
+
+export async function assertSecretMaskWitnesses(mask: SecretMask): Promise<void> {
+  for (const witness of mask.witnessPaths) {
+    let target: string;
+    try {
+      target = await realpath(witness);
+    } catch {
+      throw new Error(`Sensitive mask witness changed before sandbox spawn: ${witness}`);
+    }
+    if (target !== mask.path) {
+      throw new Error(`Sensitive mask witness changed before sandbox spawn: ${witness}`);
+    }
+  }
+}
+
+function noExternalIpv4Routes(routeTable: string): boolean {
+  return routeTable.split('\n').slice(1).filter(Boolean).every((line) => {
+    const fields = line.trim().split(/\s+/);
+    return fields[0] === 'lo';
+  });
+}
+
+function noExternalIpv6Routes(routeTable: string): boolean {
+  return routeTable.split('\n').filter(Boolean).every((line) => line.trim().split(/\s+/).at(-1) === 'lo');
+}
+
+async function proveLoopbackWorks(): Promise<boolean> {
+  return await new Promise((resolveProof) => {
+    const server = net.createServer((socket) => socket.end('ok'));
+    const finish = (ok: boolean) => server.close(() => resolveProof(ok));
+    server.once('error', () => resolveProof(false));
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') return finish(false);
+      const client = net.createConnection({ host: '127.0.0.1', port: address.port });
+      const timer = setTimeout(() => { client.destroy(); finish(false); }, 500);
+      client.once('data', () => { clearTimeout(timer); client.destroy(); finish(true); });
+      client.once('error', () => { clearTimeout(timer); finish(false); });
+    });
+  });
+}
+
+async function externalTcpFails(): Promise<boolean> {
+  return await new Promise((resolveProof) => {
+    const socket = net.createConnection({ host: '1.1.1.1', port: 443 });
+    const finish = (failed: boolean) => { socket.destroy(); resolveProof(failed); };
+    socket.once('connect', () => finish(false));
+    socket.once('error', () => finish(true));
+    setTimeout(() => finish(true), 500);
+  });
+}
+
+async function externalUdpFails(): Promise<boolean> {
+  return await new Promise((resolveProof) => {
+    const socket = dgram.createSocket('udp4');
+    let settled = false;
+    const finish = (failed: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.close();
+      resolveProof(failed);
+    };
+    socket.once('error', () => finish(true));
+    socket.send(Buffer.from([0]), 53, '1.1.1.1', (error) => finish(error !== null));
+    setTimeout(() => finish(true), 500);
+  });
+}
+
+async function externalDnsFails(): Promise<boolean> {
+  const resolver = new dns.Resolver();
+  resolver.setServers(['1.1.1.1']);
+  try {
+    return await Promise.race([
+      resolver.resolve4('example.com').then(() => false, () => true),
+      new Promise<boolean>((resolveProof) => setTimeout(() => resolveProof(true), 750)),
+    ]);
+  } catch {
+    return true;
+  } finally {
+    resolver.cancel();
+  }
+}
+
+async function proveNetworkNone(): Promise<void> {
+  if (process.platform !== 'linux') throw new Error('Sandbox executor is supported only on Linux');
+  const interfaces = (await readdir('/sys/class/net')).sort();
+  const [ipv4, ipv6, loopback, tcpFailed, udpFailed, dnsFailed] = await Promise.all([
+    readFile('/proc/net/route', 'utf8'),
+    readFile('/proc/net/ipv6_route', 'utf8').catch(() => ''),
+    proveLoopbackWorks(),
+    externalTcpFails(),
+    externalUdpFails(),
+    externalDnsFails(),
+  ]);
+  if (interfaces.length !== 1 || interfaces[0] !== 'lo'
+      || !noExternalIpv4Routes(ipv4) || !noExternalIpv6Routes(ipv6)
+      || !loopback || !tcpFailed || !udpFailed || !dnsFailed) {
+    throw new Error('Sandbox executor network proof failed: require loopback-only with no external TCP/UDP/DNS reachability');
+  }
+}
+
+export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
+  private readonly active = new Set<ReturnType<typeof spawn>>();
+  private allowedRoots: string[] = [];
+
+  async prove(allowedRoots: string[], socketPath: string): Promise<void> {
+    await access('/usr/bin/bwrap', constants.X_OK);
+    await proveNetworkNone();
+    this.allowedRoots = [...allowedRoots];
+    const root = allowedRoots[0];
+    const probeDir = await mkdtemp(join(root, '.openswarm-sandbox-probe-'));
+    const peerProbeDir = await mkdtemp(join(root, '.openswarm-sandbox-peer-probe-'));
+    const sibling = join(root, `.openswarm-sandbox-sibling-${randomUUID()}`);
+    try {
+      await Promise.all([
+        mkdir(join(probeDir, '.git')),
+        mkdir(join(peerProbeDir, '.git')),
+        writeFile(join(probeDir, 'inside'), 'inside\n'),
+        writeFile(sibling, 'outside\n'),
+      ]);
+      const identity = await directoryIdentity(probeDir);
+      const parentPidNs = await readlink('/proc/self/ns/pid');
+      const parentMountNs = await readlink('/proc/self/ns/mnt');
+      const parentNetNs = await readlink('/proc/self/ns/net');
+      const command = [
+        ...SANDBOX_CHILD_IDENTITY_PROBE,
+        `test "$(cat inside)" = inside`,
+        'test -w .',
+        'touch child-write',
+        'test ! -s .env.intrect',
+        `test ! -e ${shellQuote(sibling)}`,
+        `test ! -e ${shellQuote(socketPath)}`,
+        'test ! -e /var/run/docker.sock',
+        'command -v curl ssh psql docker >/dev/null',
+        '! curl -sS --connect-timeout 1 --max-time 2 -o /dev/null http://1.1.1.1',
+        '! ssh -o BatchMode=yes -o ConnectTimeout=1 1.1.1.1 true >/dev/null 2>&1',
+        '! PGCONNECT_TIMEOUT=1 PGPASSWORD=none psql -h 1.1.1.1 -p 5432 -U none -d none -c "select 1" >/dev/null 2>&1',
+        '! docker version >/dev/null 2>&1',
+        'test ! -e /home/openswarm/.gitconfig',
+        'test "$HOME" = /tmp/openswarm-home',
+        `test "$(readlink /proc/self/ns/pid)" != ${shellQuote(parentPidNs)}`,
+        `test "$(readlink /proc/self/ns/mnt)" != ${shellQuote(parentMountNs)}`,
+        "test \"$(awk -F: 'NR > 2 {gsub(/ /, \"\", $1); print $1}' /proc/net/dev)\" = lo",
+      ].join(' && ');
+      await writeFile(join(probeDir, '.env.intrect'), 'HUMAN_API_TOKEN=must-not-be-visible\n');
+      const result = await this.execute(identity, command, 5_000, 16 * 1024);
+      if (result.exitCode !== 0 || result.timedOut) {
+        throw new Error(`Bubblewrap isolation proof failed: ${result.output || `exit ${result.exitCode}`}`);
+      }
+      const peerIdentity = await directoryIdentity(peerProbeDir);
+      const loopbackCommand = [
+        `/usr/bin/python3 -c ${shellQuote(ISOLATED_LOOPBACK_PROBE)}`,
+        'readlink /proc/self/ns/net',
+      ].join(' && ');
+      const loopbackResults = await Promise.all([
+        this.execute(identity, loopbackCommand, 5_000, 4 * 1024),
+        this.execute(peerIdentity, loopbackCommand, 5_000, 4 * 1024),
+      ]);
+      const childNetNamespaces = loopbackResults.map((probe) => probe.output.trim());
+      if (loopbackResults.some((probe) => probe.exitCode !== 0 || probe.timedOut)
+          || new Set(childNetNamespaces).size !== 2
+          || childNetNamespaces.includes(parentNetNs)) {
+        throw new Error('Bubblewrap per-execution network namespace proof failed: localhost listeners collided or failed');
+      }
+      const escape = await this.execute(
+        identity,
+        "setsid /bin/sh -c 'sleep 30' >/dev/null 2>&1 & exit 0",
+        2_000,
+        4 * 1024,
+      );
+      if (escape.timedOut || escape.exitCode !== 0) {
+        throw new Error(`Bubblewrap PID namespace proof failed: ${escape.output || `exit ${escape.exitCode}`}`);
+      }
+    } finally {
+      await rm(probeDir, { recursive: true, force: true });
+      await rm(peerProbeDir, { recursive: true, force: true });
+      await rm(sibling, { force: true });
+    }
+  }
+
+  async execute(
+    workspace: WorkspaceIdentity,
+    command: string,
+    timeoutMs: number,
+    maxOutputBytes: number,
+  ): Promise<SandboxExecutionResult> {
+    const marker = `openswarm-sandbox-${randomUUID()}`;
+    const workspaceHandle = await open(
+      workspace.path,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    const handles: FileHandle[] = [workspaceHandle];
+    const fixedSecretMasks: FixedSecretMask[] = [];
+    try {
+      const current = await workspaceHandle.stat({ bigint: true });
+      if (!current.isDirectory() || current.dev !== workspace.dev || current.ino !== workspace.ino) {
+        throw new Error('Sandbox workspace identity changed after registration');
+      }
+      const canonical = await realpath(workspace.path);
+      if (canonical !== workspace.path || !this.allowedRoots.some((root) => pathInside(root, canonical))) {
+        throw new Error('Sandbox workspace escaped its registered root');
+      }
+
+      const support: Array<{ path: string; writable: boolean; kind: 'directory' | 'file' }> = [];
+      const dotGit = join(workspace.path, '.git');
+      const dotGitMetadata = await lstat(dotGit).catch(() => undefined);
+      const commonGit = await validatedGitCommonDirectory(workspace.path);
+      if (commonGit && !pathInside(workspace.path, commonGit)
+          && this.allowedRoots.some((root) => pathInside(root, commonGit))) {
+        support.push({ path: commonGit, writable: false, kind: 'directory' });
+      }
+      for (const target of await validatedDependencyTargets(workspace.path, this.allowedRoots)) {
+        support.push({ path: target, writable: false, kind: 'directory' });
+      }
+      if (dotGitMetadata?.isDirectory()) support.push({ path: dotGit, writable: false, kind: 'directory' });
+      else if (dotGitMetadata?.isFile()) support.push({ path: dotGit, writable: false, kind: 'file' });
+      for (const entry of support) {
+        const flags = constants.O_RDONLY | constants.O_NOFOLLOW
+          | (entry.kind === 'directory' ? constants.O_DIRECTORY : 0);
+        handles.push(await open(entry.path, flags));
+      }
+
+      const childEnv = safeChildEnv(process.env, marker);
+      const secretMasks = await discoverWorkspaceSecretMasks(workspace.path, this.allowedRoots);
+      for (const mask of secretMasks) {
+        const flags = constants.O_RDONLY | constants.O_NOFOLLOW
+          | (mask.kind === 'directory' ? constants.O_DIRECTORY : 0);
+        const handle = await open(mask.path, flags);
+        let metadata;
+        try {
+          metadata = await handle.stat({ bigint: true });
+        } catch (error) {
+          await handle.close();
+          throw error;
+        }
+        if ((mask.kind === 'directory' && !metadata.isDirectory())
+            || (mask.kind === 'file' && !metadata.isFile())) {
+          await handle.close();
+          throw new Error(`Sensitive mask target changed type before sandbox spawn: ${mask.path}`);
+        }
+        fixedSecretMasks.push({
+          mask,
+          handle,
+          identity: { dev: metadata.dev, ino: metadata.ino },
+        });
+      }
+      const destinations = [workspace.path, ...support.map((entry) => entry.path)];
+      const args: string[] = [
+        ...SANDBOX_BWRAP_ISOLATION_ARGS,
+      ];
+      for (const systemPath of ['/usr', '/bin', '/lib', '/lib64', '/etc', '/app', '/opt']) {
+        try { await access(systemPath); args.push('--ro-bind', systemPath, systemPath); } catch { /* image path absent */ }
+      }
+      args.push('--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/run', '--tmpfs', '/home', '--tmpfs', '/work');
+      const mountPoints = [
+        workspace.path,
+        ...support.map((entry) => entry.kind === 'file' ? dirname(entry.path) : entry.path),
+        ...secretMasks.map((mask) => mask.kind === 'file' ? dirname(mask.path) : mask.path),
+      ];
+      for (const directory of mountDirectories(mountPoints)) args.push('--dir', directory);
+      destinations.forEach((destination, index) => {
+        const writable = index === 0 || support[index - 1]?.writable === true;
+        args.push(...sandboxFdBindArgs(writable, index + 3, destination));
+      });
+      for (const mask of secretMasks) {
+        args.push(mask.kind === 'file' ? '--ro-bind' : '--tmpfs', ...(mask.kind === 'file' ? ['/dev/null', mask.path] : [mask.path]));
+      }
+      const uvPython = '/home/openswarm/.local/share/uv/python';
+      try {
+        await access(uvPython);
+        for (const directory of mountDirectories([uvPython])) args.push('--dir', directory);
+        args.push('--ro-bind', uvPython, uvPython);
+      } catch { /* distribution Python remains available */ }
+      args.push('--dir', '/tmp/openswarm-home');
+      for (const [key, value] of Object.entries(childEnv)) {
+        if (value !== undefined) args.push('--setenv', key, value);
+      }
+      args.push(
+        '--chdir', workspace.path,
+        '--', '/bin/sh', '-c', SANDBOX_NETWORK_INIT_SCRIPT, 'sandbox-network-init',
+        ...SANDBOX_CHILD_PRIVILEGE_DROP_ARGS,
+        '/bin/bash', '--noprofile', '--norc', '-c', command,
+      );
+
+      const wrapperEnv: NodeJS.ProcessEnv = {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp',
+        LANG: 'C.UTF-8',
+        OPENSWARM_SANDBOX_PROCESS_MARKER: marker,
+      };
+      await assertOpenPathIdentity(
+        workspace.path,
+        workspaceHandle,
+        workspace,
+        'directory',
+        'Sandbox workspace',
+      );
+      for (const fixed of fixedSecretMasks) {
+        await assertOpenPathIdentity(
+          fixed.mask.path,
+          fixed.handle,
+          fixed.identity,
+          fixed.mask.kind,
+          'Sensitive mask target',
+        );
+        await assertSecretMaskWitnesses(fixed.mask);
+      }
+      const launcherArgs = [...SANDBOX_BWRAP_LAUNCHER_ARGS, ...args];
+      const spec = prepareCliProcessTreeSpawn('/usr/bin/setpriv', launcherArgs, wrapperEnv);
+      return await new Promise((resolveResult, rejectResult) => {
+        const capture = new TailCapture(maxOutputBytes);
+        const child = spawn(spec.command, spec.args, {
+          cwd: '/',
+          env: spec.env,
+          detached: process.platform !== 'win32',
+          stdio: ['ignore', 'pipe', 'pipe', ...handles.map((handle) => handle.fd)],
+          windowsHide: true,
+        });
+        this.active.add(child);
+        trackCliProcessTree(child);
+        let timedOut = false;
+        let outputLimitExceeded = false;
+        let settled = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          terminateCliProcessTree(child);
+        }, timeoutMs);
+        const record = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+          if (capture.append(stream, chunk) && !outputLimitExceeded) {
+            outputLimitExceeded = true;
+            terminateCliProcessTree(child);
+          }
+        };
+        child.stdout?.on('data', record('stdout'));
+        child.stderr?.on('data', record('stderr'));
+        child.once('error', (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.active.delete(child);
+          untrackCliProcessTree(child);
+          rejectResult(error);
+        });
+        child.once('close', (exitCode, signal) => {
+          void (async () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            this.active.delete(child);
+            untrackCliProcessTree(child);
+            await terminateProcessesWithEnvMarker(marker);
+            const output = capture.result();
+            resolveResult({
+              output: output.output,
+              truncated: output.truncated,
+              exitCode,
+              signal,
+              timedOut,
+              outputLimitExceeded,
+            });
+          })().catch(rejectResult);
+        });
+      });
+    } finally {
+      await Promise.all([
+        ...handles,
+        ...fixedSecretMasks.map((fixed) => fixed.handle),
+      ].map((handle) => handle.close().catch(() => undefined)));
+    }
+  }
+
+  async close(): Promise<void> {
+    for (const child of this.active) terminateCliProcessTree(child);
+    this.active.clear();
+  }
+}
+
+export async function canonicalWorkspaceIdentity(path: string, roots: string[]): Promise<WorkspaceIdentity> {
+  const requested = resolve(path);
+  const requestedMetadata = await lstat(requested);
+  if (!requestedMetadata.isDirectory() || requestedMetadata.isSymbolicLink()) {
+    throw new Error(`Sandbox workspace must be a real directory: ${path}`);
+  }
+  const identity = await directoryIdentity(path);
+  if (identity.path !== requested) {
+    throw new Error(`Sandbox workspace path must not traverse symlinks: ${path}`);
+  }
+  if (!roots.some((root) => pathInside(root, identity.path))) {
+    throw new Error(`Sandbox workspace is outside configured roots: ${identity.path}`);
+  }
+  const git = await lstat(join(identity.path, '.git')).catch(() => undefined);
+  if (!git || (!git.isDirectory() && !git.isFile())) {
+    throw new Error(`Sandbox workspace is not a Git checkout: ${identity.path}`);
+  }
+  return identity;
+}
+
+export async function canonicalAllowedRoots(roots: string[]): Promise<string[]> {
+  const canonical = await Promise.all(roots.map(async (root) => {
+    const value = await realpath(root);
+    if (!(await stat(value)).isDirectory()) throw new Error(`Sandbox allowed root is not a directory: ${root}`);
+    return value;
+  }));
+  return [...new Set(canonical)].sort();
+}

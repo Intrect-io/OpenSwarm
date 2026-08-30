@@ -516,14 +516,14 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           runningTasks: stats?.schedulerStats?.running ?? 0,
           queuedTasks: stats?.schedulerStats?.queued ?? 0,
           completedToday: stats?.schedulerStats?.completed ?? 0,
+          schedulerFairness: stats?.schedulerStats?.fairness ?? { projects: [] },
           uptime: state?.startedAt ? Date.now() - state.startedAt : 0,
           isRunning: stats?.isRunning ?? false,
           sseClients: getActiveSSECount(),
           adapters,
-          turboMode: stats?.turboMode ?? false,
-          turboExpiresAt: stats?.turboExpiresAt ?? null,
           dailyPace: stats?.dailyPace ?? null,
           failureCauses: { window: 50, counts: runnerRef?.getFailureCauseSummary(50) ?? {} },
+          throughput: stats?.schedulerStats?.throughput ?? null,
           // Scoped to the projects dispatch can act on; rows from disabled or
           // pre-containerisation projects surface as outOfScope instead of
           // inflating byState. Previously computed but returned by no endpoint,
@@ -744,24 +744,6 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true, provider }));
-        } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid JSON' }));
-        }
-
-      // ---- Turbo Mode Toggle ----
-      } else if (url === '/api/turbo' && req.method === 'POST') {
-        const body = await readBody(req);
-        try {
-          const { enabled } = JSON.parse(body) as { enabled: boolean };
-          if (typeof enabled !== 'boolean') {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'enabled must be boolean' }));
-            return;
-          }
-          runnerRef?.setTurboMode(enabled);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, turboMode: enabled }));
         } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Invalid JSON' }));

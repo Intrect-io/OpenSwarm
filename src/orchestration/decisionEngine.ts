@@ -52,20 +52,29 @@ export interface TaskItem {
   linearProject?: LinearProject;  // Linear project info
   issueId?: string;        // Linear issue ID
   issueIdentifier?: string; // Linear issue identifier (e.g., LIN-123)
+  issueUrl?: string;       // Canonical Linear card URL
   linearState?: string;    // Linear issue state (e.g., 'Todo', 'Backlog', 'In Progress')
   labels?: string[];       // Linear label names (e.g., 'swarm:stuck') — used to gate re-selection
   parentId?: string;       // Parent issue ID (for decomposed sub-tasks)
   topoRank?: number;       // Planner topological rank within a decomposed tree
   workflowId?: string;     // Mapped workflow
   createdAt: number;
+  /** Last issue-tracker activity, as epoch milliseconds. */
+  trackerUpdatedAt?: number;
   dueDate?: number;
   blockedBy?: string[];    // Other task IDs
-  fileScope?: string[];    // Files/modules this task modifies (planner-declared) — for parallel conflict detection
-  /** Whether fileScope came from an explicit planner declaration or KG inference. */
-  fileScopeSource?: 'declared' | 'inferred';
+  fileScope?: string[];    // Reserved repository-relative write scope for admission/execution/publication
+  /** Provenance of the reserved write boundary (legacy `inferred` stays advisory). */
+  fileScopeSource?: 'declared' | 'validated-direct' | 'drafted' | 'inferred';
+  /** Sufficient pre-admission draft reused by the execution pipeline. */
+  preAdmissionDraft?: import('../agents/draftAnalyzer.js').DraftAnalysis;
+  /** Tracker comments already appended before the pre-admission draft. */
+  executionCommentsLoaded?: boolean;
   impactAnalysis?: ImpactAnalysis;  // Knowledge graph impact analysis
   estimatedMinutes?: number;
   priorAttemptFeedback?: string;  // Last failure/rejection feedback from a previous session — injected into the worker's first iteration (INT-2474)
+  /** Durable resolved ask_human decisions; newer and authoritative over stale task prose. */
+  authoritativeOperatorFeedback?: string;
   /**
    * The user explicitly chose this issue (POST /api/work, `openswarm work`)
    * rather than the heartbeat selecting it. Durable admission reopens
@@ -212,12 +221,6 @@ export interface DecisionEngineConfig {
   /** Allow auto-execution */
   autoExecute: boolean;
 
-  /** Maximum consecutive tasks */
-  maxConsecutiveTasks: number;
-
-  /** Cooldown between tasks (seconds) */
-  cooldownSeconds: number;
-
   /** Dry run mode */
   dryRun: boolean;
 
@@ -249,8 +252,6 @@ const DISCOVERED_TASKS_FILE = resolve(homedir(), '.openswarm/discovered-tasks.js
 const DEFAULT_CONFIG: DecisionEngineConfig = {
   allowedProjects: [],
   autoExecute: false,       // Default is manual approval
-  maxConsecutiveTasks: 3,
-  cooldownSeconds: 300,     // 5 minutes
   dryRun: false,
   includeBacklog: false,    // Backlog is parked, not a queue (R5)
 };
@@ -406,8 +407,6 @@ export async function selectTasksRoundRobin(
 // Engine State
 
 interface EngineState {
-  lastRunAt: number;
-  consecutiveTasksRun: number;
   lastTaskId?: string;
   totalTasksCompleted: number;
   totalTasksFailed: number;
@@ -416,20 +415,18 @@ interface EngineState {
 async function loadState(): Promise<EngineState> {
   try {
     const content = await fs.readFile(ENGINE_STATE_FILE, 'utf-8');
-    return JSON.parse(content);
+    const saved = JSON.parse(content) as Partial<EngineState>;
+    return {
+      lastTaskId: saved.lastTaskId,
+      totalTasksCompleted: saved.totalTasksCompleted ?? 0,
+      totalTasksFailed: saved.totalTasksFailed ?? 0,
+    };
   } catch {
     return {
-      lastRunAt: 0,
-      consecutiveTasksRun: 0,
       totalTasksCompleted: 0,
       totalTasksFailed: 0,
     };
   }
-}
-
-async function saveState(state: EngineState): Promise<void> {
-  await fs.mkdir(resolve(homedir(), '.openswarm'), { recursive: true });
-  await fs.writeFile(ENGINE_STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 // Decision Engine
@@ -437,8 +434,6 @@ async function saveState(state: EngineState): Promise<void> {
 export class DecisionEngine {
   private config: DecisionEngineConfig;
   private state: EngineState = {
-    lastRunAt: 0,
-    consecutiveTasksRun: 0,
     totalTasksCompleted: 0,
     totalTasksFailed: 0,
   };
@@ -470,28 +465,7 @@ export class DecisionEngine {
       };
     }
 
-    // 2. Cooldown check
-    const now = Date.now();
-    const timeSinceLastRun = (now - this.state.lastRunAt) / 1000;
-    if (timeSinceLastRun < this.config.cooldownSeconds) {
-      return {
-        action: 'defer',
-        reason: `Cooldown: ${Math.ceil(this.config.cooldownSeconds - timeSinceLastRun)}s remaining`,
-      };
-    }
-
-    // 3. Consecutive task limit check
-    if (this.state.consecutiveTasksRun >= this.config.maxConsecutiveTasks) {
-      console.log('[DecisionEngine] Max consecutive tasks reached, resetting');
-      this.state.consecutiveTasksRun = 0;
-      await saveState(this.state);
-      return {
-        action: 'defer',
-        reason: 'Max consecutive tasks reached, taking a break',
-      };
-    }
-
-    // 4. Filter executable tasks
+    // 2. Filter executable tasks
     const executableTasks = this.filterExecutableTasks(tasks);
     if (executableTasks.length === 0) {
       return {
@@ -571,32 +545,7 @@ export class DecisionEngine {
       };
     }
 
-    // 2. Cooldown check
-    const now = Date.now();
-    const timeSinceLastRun = (now - this.state.lastRunAt) / 1000;
-    if (timeSinceLastRun < this.config.cooldownSeconds) {
-      return {
-        action: 'defer',
-        tasks: [],
-        reason: `Cooldown: ${Math.ceil(this.config.cooldownSeconds - timeSinceLastRun)}s remaining`,
-        skippedCount: tasks.length,
-      };
-    }
-
-    // 3. Consecutive task limit check
-    if (this.state.consecutiveTasksRun >= this.config.maxConsecutiveTasks) {
-      console.log('[DecisionEngine] Max consecutive tasks reached, resetting');
-      this.state.consecutiveTasksRun = 0;
-      await saveState(this.state);
-      return {
-        action: 'defer',
-        tasks: [],
-        reason: 'Max consecutive tasks reached, taking a break',
-        skippedCount: tasks.length,
-      };
-    }
-
-    // 4. Filter executable tasks
+    // 2. Filter executable tasks
     const excludedProjects = new Set(excludeProjects.filter(Boolean));
     const executableTasks = this.filterExecutableTasks(tasks).filter(task => {
       return !(
@@ -661,12 +610,6 @@ export class DecisionEngine {
    */
   async executeTask(task: TaskItem, _workflow: WorkflowConfig): Promise<ExecutorResult> {
     console.log(`[DecisionEngine] Executing task: ${task.title}`);
-
-    // Update state
-    this.state.lastRunAt = Date.now();
-    this.state.consecutiveTasksRun++;
-    this.state.lastTaskId = task.id;
-    await saveState(this.state);
 
     // Legacy tmux-based workflow executor removed — use pair pipeline instead
     throw new Error('Legacy workflow executor has been removed. Use pair mode (pairMode: true) for task execution.');
@@ -932,14 +875,10 @@ export class DecisionEngine {
   getStats(): {
     totalCompleted: number;
     totalFailed: number;
-    consecutiveRun: number;
-    lastRunAt: number;
   } {
     return {
       totalCompleted: this.state.totalTasksCompleted,
       totalFailed: this.state.totalTasksFailed,
-      consecutiveRun: this.state.consecutiveTasksRun,
-      lastRunAt: this.state.lastRunAt,
     };
   }
 }
@@ -977,6 +916,7 @@ export function linearIssueToTask(issue: {
   id: string;
   identifier: string;
   title: string;
+  url?: string;
   description?: string;
   priority: number;
   dueDate?: string;
@@ -986,6 +926,7 @@ export function linearIssueToTask(issue: {
   parentId?: string;
   blockedBy?: string[];
   topoRank?: number;
+  updatedAt?: string;
 }): TaskItem {
   return {
     id: issue.id,
@@ -995,6 +936,7 @@ export function linearIssueToTask(issue: {
     priority: issue.priority || 3,
     issueId: issue.id,
     issueIdentifier: issue.identifier,
+    issueUrl: issue.url,
     linearState: issue.state,
     labels: issue.labels,
     parentId: issue.parentId,
@@ -1005,6 +947,7 @@ export function linearIssueToTask(issue: {
       name: issue.project.name,
     } : undefined,
     createdAt: Date.now(),
+    trackerUpdatedAt: issue.updatedAt ? new Date(issue.updatedAt).getTime() : undefined,
     dueDate: issue.dueDate ? new Date(issue.dueDate).getTime() : undefined,
   };
 }

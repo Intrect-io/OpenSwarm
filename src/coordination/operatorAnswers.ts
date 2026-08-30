@@ -22,6 +22,20 @@
  */
 export const OPERATOR_PARK_REASON = 'waiting_on_operator';
 
+/** NEEDS_HUMAN reason whose resume is fenced by an exact correlation set. */
+export const OPERATOR_QUESTION_PARK_REASON = 'operator_question';
+
+const MAX_OPERATOR_CORRELATIONS = 100;
+const MAX_CORRELATION_ID_LENGTH = 200;
+
+/** One canonical normalization for the tool result, scheduler, and ledger. */
+export function normalizeOperatorQuestionCorrelations(ids: readonly string[]): string[] {
+  const normalized = ids
+    .map((id) => id.trim().slice(0, MAX_CORRELATION_ID_LENGTH))
+    .filter(Boolean);
+  return [...new Set(normalized)].slice(0, MAX_OPERATOR_CORRELATIONS);
+}
+
 /**
  * Whether a backoff may be cut short because the operator replied.
  *

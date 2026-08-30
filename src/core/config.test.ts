@@ -10,6 +10,11 @@ import {
   generateSampleConfig,
 } from './config.js';
 import * as fs from 'node:fs';
+import {
+  resetHumanSurfaceReadOnlyForTests,
+  isHumanSurfaceReadOnlyEnabled,
+} from '../mcp/humanSurfacePolicy.js';
+import { getSandboxExecutorConfig, resetSandboxExecutorForTests } from '../sandboxExecutor/runtime.js';
 
 // Mock fs module
 vi.mock('node:fs', async () => {
@@ -31,6 +36,8 @@ describe('config', () => {
   });
 
   afterEach(() => {
+    resetHumanSurfaceReadOnlyForTests();
+    resetSandboxExecutorForTests();
     delete process.env.DISCORD_TOKEN;
     delete process.env.DISCORD_CHANNEL_ID;
     delete process.env.LINEAR_API_KEY;
@@ -42,6 +49,67 @@ describe('config', () => {
   // ============================================
 
   describe('loadConfig', () => {
+    it('wires the explicit strict boundary and never downgrades it from a later utility config load', () => {
+      const base = {
+        language: 'en',
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync)
+        .mockReturnValueOnce(JSON.stringify({ ...base, humanSurfaceReadOnly: { enabled: true } }))
+        .mockReturnValueOnce(JSON.stringify(base));
+
+      expect(loadConfig('/tmp/config.json').humanSurfaceReadOnly).toEqual({ enabled: true });
+      expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+      expect(loadConfig('/tmp/config.json').humanSurfaceReadOnly).toEqual({ enabled: false });
+      expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+    });
+
+    it('parses and process-locks the strict companion contract only when both gates are enabled', () => {
+      const base = {
+        language: 'en',
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base,
+        humanSurfaceReadOnly: {
+          enabled: true,
+          sandboxExecutor: {
+            enabled: true,
+            socketPath: '/run/openswarm-sandbox/executor.sock',
+            allowedRoots: ['/work'],
+            connectTimeoutMs: 750,
+            maxRequestBytes: 8192,
+            maxOutputBytes: 16384,
+            maxTimeoutMs: 120000,
+            maxConcurrent: 3,
+          },
+        },
+      }));
+
+      const config = loadConfig('/tmp/config.json');
+
+      expect(config.humanSurfaceReadOnly?.sandboxExecutor).toEqual({
+        enabled: true,
+        socketPath: '/run/openswarm-sandbox/executor.sock',
+        allowedRoots: ['/work'],
+        connectTimeoutMs: 750,
+        maxRequestBytes: 8192,
+        maxOutputBytes: 16384,
+        maxTimeoutMs: 120000,
+        maxConcurrent: 3,
+      });
+      expect(getSandboxExecutorConfig()).toEqual({
+        socketPath: '/run/openswarm-sandbox/executor.sock',
+        allowedRoots: ['/work'],
+        connectTimeoutMs: 750,
+        maxRequestBytes: 8192,
+        maxOutputBytes: 16384,
+        maxTimeoutMs: 120000,
+        maxConcurrent: 3,
+      });
+    });
     it('should load YAML config file', () => {
       const yamlContent = `
 language: en
@@ -143,6 +211,8 @@ agents:
 
       const config = loadConfig('/tmp/config.json');
       expect(config.autonomous?.maxReflections).toBe(3);
+      expect(config.autonomous?.maxConcurrentTasks).toBe(64);
+      expect(config.autonomous?.stalledInProgressHours).toBe(6);
       expect(config.autonomous?.verify).toEqual({
         enabled: true,
         blockOnNewFailures: true,
@@ -265,7 +335,7 @@ agents:
         mcp: {
           servers: {
             linear: { command: 'npx', args: ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp'] },
-            docs: { url: 'https://example.com/mcp', transport: 'http' },
+            docs: { url: 'https://example.com/mcp', transport: 'http', surface: 'human' },
           },
         },
       });
@@ -276,6 +346,7 @@ agents:
       const config = loadConfig('/tmp/config.json');
       expect(config.mcp?.servers.linear.command).toBe('npx');
       expect(config.mcp?.servers.docs.url).toBe('https://example.com/mcp');
+      expect(config.mcp?.servers.docs.surface).toBe('human');
     });
 
     it('should accept an mcp server declared via preset (INT-1952)', () => {

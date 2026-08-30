@@ -7,8 +7,11 @@
 // It also never exercises the Knowledge-Graph fallback path taken when a
 // task has no declared fileScope (analyzeIssue's success/empty/throw
 // outcomes), since every fixture there declares an explicit fileScope.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { detectFileConflicts } from './conflictDetector.js';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest';
+import { detectFileConflicts, resolveTaskFileScope } from './conflictDetector.js';
 import type { TaskItem } from './decisionEngine.js';
 import type { ImpactAnalysis } from '../knowledge/types.js';
 
@@ -38,7 +41,7 @@ function impact(directModules: string[], dependentModules: string[] = []): Impac
 }
 
 describe('detectFileConflicts UnionFind rank tie-break branches', () => {
-  it('exercises both non-equal rank comparisons and the same-root early-return when a 4-task overlap chain merges asymmetrically', async () => {
+  it('keeps one diagnostic cohort while admitting both directly disjoint winners from an asymmetric overlap chain', async () => {
     // Overlap graph (by shared file), in the order the i<j pair loop visits them:
     //   0-2 share 'shared-02.ts'   fresh(0) vs fresh(2)              -> equal-rank tie, root=0, rank[0]=1
     //   0-3 share 'shared-03.ts'   root(0,rank1) vs fresh(3,rank0)   -> rankX>rankY branch
@@ -50,7 +53,7 @@ describe('detectFileConflicts UnionFind rank tie-break branches', () => {
       [
         task('A', 3, ['shared-02.ts', 'shared-03.ts']),
         task('B', 3, ['shared-12.ts', 'shared-13.ts']),
-        task('C', 1, ['shared-02.ts', 'shared-12.ts']), // highest priority (1) -> wins the group
+        task('C', 1, ['shared-02.ts', 'shared-12.ts']), // highest priority and directly disjoint from D
         task('D', 3, ['shared-03.ts', 'shared-13.ts']),
       ],
       PROJECT,
@@ -61,7 +64,7 @@ describe('detectFileConflicts UnionFind rank tie-break branches', () => {
     expect(new Set(result.conflictGroups[0].sharedModules)).toEqual(
       new Set(['shared-02.ts', 'shared-03.ts', 'shared-12.ts', 'shared-13.ts']),
     );
-    expect(result.safe.map((t) => t.id)).toEqual(['C']);
+    expect(result.safe.map((t) => t.id)).toEqual(['C', 'D']);
   });
 });
 
@@ -88,9 +91,15 @@ describe('detectFileConflicts normalizeScope entry sanitization', () => {
 });
 
 describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)', () => {
+  let project = '';
+
   beforeEach(() => {
     mockAnalyzeIssue.mockReset();
+    project = mkdtempSync(join(tmpdir(), 'openswarm-scope-'));
+    mkdirSync(join(project, 'src'));
   });
+
+  afterEach(() => rmSync(project, { recursive: true, force: true }));
 
   it('detects a conflict from overlapping KG-inferred modules', async () => {
     mockAnalyzeIssue.mockImplementation(async (_projectPath: string, title: string) => {
@@ -98,17 +107,54 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
       if (title === 'task B') return impact(['src/shared.ts']);
       return null;
     });
+    writeFileSync(join(project, 'src/shared.ts'), 'shared');
+    writeFileSync(join(project, 'src/a-only.ts'), 'a');
 
     const result = await detectFileConflicts(
       [task('A', 3), task('B', 1)], // no fileScope declared -> falls back to analyzeIssue
-      PROJECT,
+      project,
     );
 
     expect(result.conflictGroups).toHaveLength(1);
     expect(result.conflictGroups[0].sharedModules).toEqual(['src/shared.ts']);
     expect(result.safe.map((t) => t.id)).toEqual(['B']); // higher priority (1 < 3) wins
-    expect(mockAnalyzeIssue).toHaveBeenCalledWith(PROJECT, 'task A', undefined);
-    expect(mockAnalyzeIssue).toHaveBeenCalledWith(PROJECT, 'task B', undefined);
+    expect(mockAnalyzeIssue).toHaveBeenCalledWith(project, 'task A', undefined);
+    expect(mockAnalyzeIssue).toHaveBeenCalledWith(project, 'task B', undefined);
+  });
+
+  it('does not reserve a common dependent when direct writers are disjoint', async () => {
+    writeFileSync(join(project, 'src/a.ts'), 'a');
+    writeFileSync(join(project, 'src/b.ts'), 'b');
+    writeFileSync(join(project, 'src/common.ts'), 'common');
+    mockAnalyzeIssue.mockImplementation(async (_projectPath: string, title: string) =>
+      title === 'task A'
+        ? impact(['src/a.ts'], ['src/common.ts'])
+        : impact(['src/b.ts'], ['src/common.ts']));
+
+    const result = await detectFileConflicts([task('A', 2), task('B', 2)], project);
+
+    expect(result.safe.map((candidate) => candidate.id)).toEqual(['A', 'B']);
+    expect(result.conflictGroups).toHaveLength(0);
+  });
+
+  it('uses only sufficient canonical existing draft files for an unknown scope', async () => {
+    writeFileSync(join(project, 'src/drafted.ts'), 'drafted');
+    mockAnalyzeIssue.mockResolvedValue(null);
+    const candidate = task('drafted', 2);
+    const draftTask = vi.fn(async () => ({
+      taskType: 'bugfix', intentSummary: 'repair the drafted implementation',
+      relevantFiles: ['./src/drafted.ts', 'src/missing.ts'],
+      suggestedApproach: 'change the existing implementation carefully',
+      completionCriteria: ['focused test passes'], sufficient: true,
+      registrySnapshot: [], durationMs: 1,
+    }));
+
+    const scope = await resolveTaskFileScope(candidate, project, { draftTask });
+
+    expect(scope).toEqual(['src/drafted.ts']);
+    expect(candidate.fileScopeSource).toBe('drafted');
+    expect(candidate.preAdmissionDraft?.relevantFiles).toEqual(['src/drafted.ts']);
+    expect(draftTask).toHaveBeenCalledTimes(1);
   });
 
   it('serializes KG scopes that reduce to unknown after volatile paths are removed', async () => {
@@ -120,7 +166,7 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
 
     const result = await detectFileConflicts(
       [task('A', 2), task('B', 2)],
-      PROJECT,
+      project,
     );
 
     expect(result.conflictGroups).toHaveLength(1);
@@ -130,6 +176,7 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
   it('treats a failed KG lookup as unknown scope and logs a warning instead of throwing', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
+      writeFileSync(join(project, 'src/b.ts'), 'b');
       mockAnalyzeIssue.mockImplementation(async (_projectPath: string, title: string) => {
         if (title === 'task A') throw new Error('graph read failed');
         return impact(['src/b.ts']);
@@ -137,7 +184,7 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
 
       const result = await detectFileConflicts(
         [task('A', 2), task('B', 2)],
-        PROJECT,
+        project,
       );
 
       // Task A's failure makes its scope unknown, so admission fails closed

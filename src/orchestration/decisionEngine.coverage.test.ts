@@ -129,7 +129,7 @@ beforeEach(() => {
 // loadState (private, reached only via init())
 // ---------------------------------------------------------------------------
 describe('DecisionEngine.init — loadState', () => {
-  it('loads persisted engine state from disk', async () => {
+  it('loads durable outcome totals while ignoring retired throttle fields', async () => {
     fsMock.readFile.mockResolvedValueOnce(
       JSON.stringify({ lastRunAt: 123, consecutiveTasksRun: 2, totalTasksCompleted: 5, totalTasksFailed: 1 }),
     );
@@ -138,8 +138,6 @@ describe('DecisionEngine.init — loadState', () => {
     expect(engine.getStats()).toEqual({
       totalCompleted: 5,
       totalFailed: 1,
-      consecutiveRun: 2,
-      lastRunAt: 123,
     });
   });
 
@@ -150,8 +148,6 @@ describe('DecisionEngine.init — loadState', () => {
     expect(engine.getStats()).toEqual({
       totalCompleted: 0,
       totalFailed: 0,
-      consecutiveRun: 0,
-      lastRunAt: 0,
     });
   });
 });
@@ -165,27 +161,6 @@ describe('DecisionEngine.heartbeat', () => {
     const engine = new DecisionEngine();
     const result = await engine.heartbeat([task()]);
     expect(result).toEqual({ action: 'skip', reason: 'Time window blocked: outside market hours' });
-  });
-
-  it('defers during cooldown after a prior executeTask call', async () => {
-    const engine = new DecisionEngine(); // default cooldownSeconds: 300
-    await engine.executeTask(task(), workflow()).catch(() => undefined);
-    const result = await engine.heartbeat([]);
-    expect(result.action).toBe('defer');
-    expect(result.reason).toMatch(/^Cooldown: \d+s remaining$/);
-  });
-
-  it('resets and defers once maxConsecutiveTasks is reached', async () => {
-    const engine = new DecisionEngine({ maxConsecutiveTasks: 2, cooldownSeconds: 0 });
-    await engine.executeTask(task(), workflow()).catch(() => undefined);
-    await engine.executeTask(task(), workflow()).catch(() => undefined);
-    expect(engine.getStats().consecutiveRun).toBe(2);
-
-    const result = await engine.heartbeat([]);
-    expect(result).toEqual({ action: 'defer', reason: 'Max consecutive tasks reached, taking a break' });
-    // the reset is persisted via saveState (fs.writeFile) and reflected in getStats
-    expect(engine.getStats().consecutiveRun).toBe(0);
-    expect(fsMock.writeFile).toHaveBeenCalled();
   });
 
   it('skips when there are no executable tasks at all', async () => {
@@ -351,16 +326,14 @@ describe('DecisionEngine.taskToWorkflow (via heartbeat)', () => {
 // executeTask
 // ---------------------------------------------------------------------------
 describe('DecisionEngine.executeTask', () => {
-  it('updates state then throws because the legacy executor is removed', async () => {
+  it('throws without persisting retired pace-throttle state', async () => {
     const engine = new DecisionEngine();
     const t = task();
     await expect(engine.executeTask(t, workflow())).rejects.toThrow(
       'Legacy workflow executor has been removed. Use pair mode (pairMode: true) for task execution.',
     );
-    const stats = engine.getStats();
-    expect(stats.consecutiveRun).toBe(1);
-    expect(stats.lastRunAt).toBeGreaterThan(0);
-    expect(fsMock.writeFile).toHaveBeenCalled();
+    expect(engine.getStats()).toEqual({ totalCompleted: 0, totalFailed: 0 });
+    expect(fsMock.writeFile).not.toHaveBeenCalled();
   });
 });
 
@@ -461,29 +434,6 @@ describe('DecisionEngine.heartbeatMultiple', () => {
     const engine = new DecisionEngine();
     const result = await engine.heartbeatMultiple([task()], 3);
     expect(result).toEqual({ action: 'skip', tasks: [], reason: 'Time window blocked: blocked', skippedCount: 1 });
-  });
-
-  it('defers during cooldown', async () => {
-    const engine = new DecisionEngine();
-    await engine.executeTask(task(), workflow()).catch(() => undefined);
-    const result = await engine.heartbeatMultiple([task(), task({ id: 'issue-2' })], 3);
-    expect(result.action).toBe('defer');
-    expect(result.tasks).toEqual([]);
-    expect(result.skippedCount).toBe(2);
-    expect(result.reason).toMatch(/^Cooldown: \d+s remaining$/);
-  });
-
-  it('resets and defers once maxConsecutiveTasks is reached', async () => {
-    const engine = new DecisionEngine({ maxConsecutiveTasks: 1, cooldownSeconds: 0 });
-    await engine.executeTask(task(), workflow()).catch(() => undefined);
-    const result = await engine.heartbeatMultiple([task()], 3);
-    expect(result).toEqual({
-      action: 'defer',
-      tasks: [],
-      reason: 'Max consecutive tasks reached, taking a break',
-      skippedCount: 1,
-    });
-    expect(engine.getStats().consecutiveRun).toBe(0);
   });
 
   it('excludes already-running projects and skips when nothing remains', async () => {

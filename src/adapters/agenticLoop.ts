@@ -14,6 +14,10 @@ import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
 import type { CliRunResult } from './types.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
+import { getSandboxExecutorConfig } from '../sandboxExecutor/runtime.js';
+import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 
 // ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
 
@@ -135,6 +139,8 @@ export interface AgenticLoopOptions {
    * does not stop `cd /repo && ...`.
    */
   shellTools?: boolean;
+  /** Test/embedding seam; production resolves the attested configured client. */
+  sandboxExecutorSessionFactory?: (cwd: string) => Promise<SandboxExecutorSession>;
   /** Expose built-in filesystem tools independently from MCP/coordination. */
   filesystemTools?: boolean;
   /** Read-only mode: hide mutation/shell tools and refuse response-text edits. */
@@ -178,6 +184,10 @@ export interface AgenticLoopResult {
   cachedTokens: number;
   /** A blocking ask_human ended the run; the operator now owns the next step. */
   blockedOnOperator?: boolean;
+  /** Exact correlation IDs returned by the blocking ask_human tool call. */
+  operatorQuestionCorrelationIds?: string[];
+  /** A side-effecting sandbox RPC lost its authoritative result; quarantine. */
+  executionOutcomeUnknown?: boolean;
   /** 소요 시간 (ms) */
   durationMs: number;
   /** Shell commands the worker actually ran via the `bash` tool — ground truth
@@ -216,16 +226,42 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
-    shellTools = true,
+    shellTools: requestedShellTools = true,
+    sandboxExecutorSessionFactory,
     filesystemTools = true,
     readOnly = false,
     applyPatch = false,
-    diagnosticsTool = false,
+    diagnosticsTool: requestedDiagnosticsTool = false,
     mcpTools,
     coordinationContext,
     signal,
     editFormat = 'json',
   } = options;
+
+  // Strict mode exposes bash only after a separate companion has attested its
+  // boot generation, loopback-only network, per-workspace mount namespace and
+  // PID namespace. Missing socket or any mismatch leaves bash hidden.
+  const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
+  let sandboxExecutorSession: SandboxExecutorSession | undefined;
+  if (strictHumanSurfaceBoundary && requestedShellTools && enableTools && filesystemTools && !readOnly) {
+    try {
+      if (sandboxExecutorSessionFactory) {
+        sandboxExecutorSession = await sandboxExecutorSessionFactory(cwd);
+      } else {
+        const sandboxConfig = getSandboxExecutorConfig();
+        if (sandboxConfig) sandboxExecutorSession = await new SandboxExecutorClient(sandboxConfig).createSession(cwd);
+      }
+    } catch (error) {
+      onLog?.(`[Sandbox executor] shell unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const shellTools = requestedShellTools && (!strictHumanSurfaceBoundary || sandboxExecutorSession !== undefined);
+  const diagnosticsTool = requestedDiagnosticsTool && !strictHumanSurfaceBoundary;
+
+  const humanSurfaceFilteredMcp = filterHumanSurfaceMcpTools(mcpTools ?? []);
+  for (const entry of humanSurfaceFilteredMcp.denied) {
+    onLog?.(`[MCP policy] ${entry.name}: ${entry.reason}`);
+  }
 
   const startTime = Date.now();
   const deadline = timeoutMs > 0 ? startTime + timeoutMs : Number.POSITIVE_INFINITY;
@@ -277,7 +313,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         // own memory server exposes writes, so injected content could leave
         // something behind for a later run. (INT-3189)
         ...(webTools && !readOnly ? WEB_TOOL_DEFINITIONS : []),
-        ...(readOnly ? [] : mcpTools ?? []),
+        ...(readOnly ? [] : humanSurfaceFilteredMcp.tools),
         ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
       ]
     : [];
@@ -294,6 +330,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
   const seenToolCalls = new Set<string>();
   let blockedOnOperator = false;
+  let executionOutcomeUnknown = false;
+  const operatorQuestionCorrelationIds: string[] = [];
   let noProgressTurns = 0;
   const NO_PROGRESS_LIMIT = 3;
   // Two independent nudge budgets — they fire for different reasons and must NOT
@@ -534,6 +572,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       filesystemTools,
       allowedToolNames,
       coordinationContext,
+      sandboxExecutorSession,
       loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
     });
     toolCallCount += toolCalls.length;
@@ -595,18 +634,32 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       }
     }
 
+    if (results.some((result) => result.fatal === 'execution_outcome_unknown')) {
+      executionOutcomeUnknown = true;
+      finalText = 'OUTCOME_UNKNOWN_DO_NOT_RETRY: sandbox command outcome requires operator inspection before this worktree can continue.';
+      onLog?.('⛔ Sandbox command outcome unknown — quarantining this run without another model/tool turn');
+      break;
+    }
+
     // A blocking decision belongs to the operator, so end the run here rather
     // than trusting the model to honour the tool's instruction. Nothing after
     // this point can be decided without the answer, and continuing is how an
     // agent invents one.
-    const blockingQuestion = toolCalls.findIndex((tc, i) => {
-      if (tc.function.name !== 'ask_human' || results[i]?.is_error) return false;
+    let blockingQuestion = -1;
+    for (let i = 0; i < toolCalls.length; i += 1) {
+      const tc = toolCalls[i];
+      if (tc.function.name !== 'ask_human' || results[i]?.is_error) continue;
       try {
-        return (JSON.parse(results[i].content) as { blocked?: boolean }).blocked === true;
+        const payload = JSON.parse(results[i].content) as { blocked?: boolean; correlationId?: unknown };
+        if (payload.blocked !== true) continue;
+        if (blockingQuestion < 0) blockingQuestion = i;
+        if (typeof payload.correlationId === 'string' && payload.correlationId.trim()) {
+          operatorQuestionCorrelationIds.push(payload.correlationId.trim());
+        }
       } catch {
-        return false;
+        // A malformed tool result cannot establish a durable blocking question.
       }
-    });
+    }
     if (blockingQuestion >= 0) {
       blockedOnOperator = true;
       onLog?.('⏸ Blocking decision sent to the operator — stopping this run');
@@ -727,6 +780,10 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     durationMs: Date.now() - startTime,
     executedCommands,
     blockedOnOperator,
+    executionOutcomeUnknown,
+    operatorQuestionCorrelationIds: operatorQuestionCorrelationIds.length > 0
+      ? [...new Set(operatorQuestionCorrelationIds)]
+      : undefined,
   };
 }
 
@@ -746,6 +803,8 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     durationMs: result.durationMs,
     executedCommands: result.executedCommands,
     blockedOnOperator: result.blockedOnOperator,
+    executionOutcomeUnknown: result.executionOutcomeUnknown,
+    operatorQuestionCorrelationIds: result.operatorQuestionCorrelationIds,
     costInfo: {
       costUsd: 0,
       inputTokens: result.inputTokens,

@@ -2,19 +2,20 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CliAdapter } from '../adapters/types.js';
+import type { CliAdapter, CliRunOptions } from '../adapters/types.js';
 
 const getAdapter = vi.hoisted(() => vi.fn());
-const getMcpTools = vi.hoisted(() => vi.fn(async () => []));
+const resolveMcpTools = vi.hoisted(() => vi.fn(async () => []));
 
 vi.mock('../adapters/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../adapters/index.js')>();
   return { ...actual, getAdapter };
 });
 
-vi.mock('../mcp/mcpClient.js', () => ({ getMcpTools }));
+vi.mock('../mcp/mcpClient.js', () => ({ resolveMcpTools }));
 
 import { runChatCompletion } from './chatBackend.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['name'] = 'codex'): CliAdapter {
   return {
@@ -34,7 +35,10 @@ function cliAdapter(buildCommand: CliAdapter['buildCommand'], name: CliAdapter['
   };
 }
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  resetHumanSurfaceReadOnlyForTests();
+  vi.clearAllMocks();
+});
 
 describe('runChatCompletion CLI fallback', () => {
   it('stores prompts in an unpredictable owner-only temp path and removes it', async () => {
@@ -159,6 +163,61 @@ describe('runChatCompletion CLI fallback', () => {
     })).rejects.toThrow('Chat response timeout');
     expect(Date.now() - startedAt).toBeLessThan(150);
     await new Promise((resolve) => setTimeout(resolve, 325));
+  });
+
+  it('sources the globally filtered MCP set for native chat runs', async () => {
+    const safeTool = {
+      type: 'function' as const,
+      function: { name: 'slack__list_channels', description: '', parameters: { type: 'object' } },
+    };
+    resolveMcpTools.mockResolvedValueOnce([safeTool]);
+    let seenTools: unknown;
+    getAdapter.mockReturnValue({
+      ...cliAdapter(() => ({ command: 'unused', args: [] })),
+      run: async (options: { mcpTools?: unknown }) => {
+        seenTools = options.mcpTools;
+        return { exitCode: 0, stdout: 'done', stderr: '', durationMs: 1 };
+      },
+    });
+
+    await expect(runChatCompletion({ prompt: 'inspect', provider: 'codex', timeoutMs: 5000 }))
+      .resolves.toMatchObject({ response: 'done' });
+    expect(resolveMcpTools).toHaveBeenCalledOnce();
+    expect(seenTools).toEqual([safeTool]);
+  });
+
+  it('keeps strict native chat on the companion-attested shell path while forcing diagnostics off', async () => {
+    enableHumanSurfaceReadOnly();
+    let seenOptions: CliRunOptions | undefined;
+    const native = cliAdapter(() => ({ command: 'unused', args: [] }));
+    getAdapter.mockReturnValue({
+      ...native,
+      capabilities: { ...native.capabilities, enforcesHumanSurfaceReadOnly: true },
+      run: async (options) => {
+        seenOptions = options;
+        return { exitCode: 0, stdout: 'local chat still works', stderr: '', durationMs: 1 };
+      },
+    });
+
+    await expect(runChatCompletion({ prompt: 'inspect', provider: 'codex', timeoutMs: 5000 }))
+      .resolves.toMatchObject({ response: 'local chat still works' });
+    expect(seenOptions).toMatchObject({ shellTools: true, diagnosticsTool: false, webTools: true });
+  });
+
+  it('refuses delegated chat before buildCommand can reach a fake CLI or HOME credential', async () => {
+    enableHumanSurfaceReadOnly();
+    const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
+    getAdapter.mockReturnValue(cliAdapter(buildCommand));
+    const previousHome = process.env.HOME;
+    process.env.HOME = '/tmp/fake-home-with-human-credentials';
+    try {
+      await expect(runChatCompletion({ prompt: 'send', provider: 'codex', timeoutMs: 5000 }))
+        .rejects.toThrow(/HUMAN_SURFACE_READ_ONLY.*delegates to an external CLI/);
+      expect(buildCommand).not.toHaveBeenCalled();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
   });
 
   it.skipIf(process.platform === 'win32')('terminates descendant processes when the caller aborts', async () => {

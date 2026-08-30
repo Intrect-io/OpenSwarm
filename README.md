@@ -342,6 +342,13 @@ Each autonomous run snapshots the current Claude Code instruction hierarchy (`~/
 
 A configured `coordinationBoardIssueId` turns one project-scoped tracker issue into the durable agent board. Worker advice/delegation, Discord questions, adapter routes, periodic reviews, and MCP denials are visible through `GET /api/coordination`, SSE, and the **AGENT COORDINATION** dashboard panel. Tool arguments, prompts, credentials, and rule bodies are redacted or omitted.
 
+With `autonomous.enabled: false`, the runner still accepts explicit issue-board
+and `openswarm work` dispatches without selecting backlog work. Transient
+durable-admission deferrals remain queued across a hard restart: only rows
+recorded as explicit `claim_deferred` work are rebuilt, at their original
+`RETRY_AT` deadline. Operator waits, provider backoffs, failures, terminal
+tracker cards, and publication reconciliation are never promoted by this path.
+
 The transient inbox and the repository discussion board have separate jobs.
 `/threads` stores topics, messages, subscriptions, unread cursors, and CAS
 resolution in the automation SQLite database under the canonical Git repository
@@ -392,6 +399,91 @@ role. This lets the supervisor settle evidence-backed worker questions without
 copying OAuth state or granting every worker broad Linear access. No external
 tool is granted implicitly, and decisions requiring new business authority stay
 with the operator.
+
+External human-facing surfaces have a stricter global boundary than the role
+grant above. Slack, Discord, email, Notion, and other messaging/collaboration
+servers are identified from the configured server descriptor, endpoint/package
+identity, tool action, and MCP annotations; custom opaque aliases should set
+`mcp.servers.<name>.surface: human`. Only actions containing an explicit
+`read`, `list`, `get`, `search`, or `fetch` verb are exposed or dispatched.
+`send`, `post`, `create`, `update`, `delete`, unknown actions, and equivalent
+mutations fail closed even if a role includes their exact name in `writeTools`
+or `destructiveTools`. MCP annotations are untrusted hints: they may tighten the
+decision but cannot turn a mutating action into a read. GitHub, Linear,
+Cloudflare, database/server tools, and sandbox-local data tools keep their
+existing role-scoped write contract.
+
+Generic MCP HTTP/proxy tools are reclassified again at dispatch from their
+actual destination, method, and body arguments. An explicit `GET`, `HEAD`, or
+`OPTIONS` to Slack, Discord, Notion, Gmail, or a human-facing Microsoft Graph
+path remains readable; a write, dynamic destination, or ambiguous call fails
+before the MCP server is invoked. Concrete writes through a generic transport
+also require a write-declaring tool descriptor, the server to declare
+`surface: devops`, `data`, or `sandbox`, and (for autonomous roles) the same
+exact `writeTools` grant as any other mutation.
+Microsoft Graph device/directory paths remain DevOps; mail, message, calendar,
+chat, drive, and other human-facing paths do not. Specialized tools do not scan
+ordinary payload text, so a GitHub issue body that merely quotes a Slack URL is
+not mistaken for a network destination.
+
+For unattended deployments, enable the complete execution boundary explicitly:
+
+```yaml
+humanSurfaceReadOnly:
+  enabled: true
+  sandboxExecutor:
+    enabled: true
+    socketPath: /run/openswarm-sandbox/executor.sock
+    allowedRoots: [/work]
+    connectTimeoutMs: 1000
+    maxRequestBytes: 65536
+    maxOutputBytes: 524288
+    maxTimeoutMs: 900000
+    maxConcurrent: 8
+```
+
+With this switch on, OpenSwarm does not attempt to classify arbitrary programs.
+It keeps compiler-spawning diagnostics disabled, refuses delegated CLI adapters
+before availability/model discovery or command construction, and exposes native
+`bash` only through the separately deployed companion after exact attestation.
+The main daemon never spawns that command. The sidecar has `network_mode: none`,
+no daemon config/env file/provider state/warehouse/HOME or host service sockets,
+and a minimal child environment. Its trusted server can register a `/work`
+checkout, but each command receives a new bwrap mount/PID namespace with only
+that inode-stable workspace writable, git metadata and linked dependencies
+read-only, `/run` hidden, and known sensitive workspace files overlaid. The
+sidecar TCB still sees the broad `/work` mount to perform registration and mask
+preflight; do not describe the TCB itself as secret-free.
+Use a native-loop adapter; local web chat remains available with file tools,
+read-only web access, and policy-filtered MCP tools. Approved typed DevOps/data
+writes keep their existing role grants. OpenSwarm-owned Discord, Slack,
+Telegram, and generic webhook notification/send paths are all disabled—there is
+no operator-control-plane exception. The default is `false` for compatibility;
+the MCP human-surface descriptor and dispatch checks still apply regardless.
+Once enabled, the boundary is monotonic for that process so an incidental config
+lookup cannot downgrade it; restart with `enabled: false` to disable it.
+
+**Linux deployment readiness gate:** strict mode does not turn an unsandboxed
+shell back on just to recover build throughput. Repository-local build/test
+execution is available only after the sidecar proves loopback works while no
+veth/default route/external TCP/UDP/DNS path exists, and proves its bwrap
+mount/PID namespace with a real command. The Unix protocol is one newline-
+delimited JSON frame per connection with hard request/response caps, exact-key
+schemas, private same-uid directory/socket checks, an executor boot generation,
+and an opaque inode-bound workspace token. It is not a durable job ledger: if a
+side-effecting RPC loses its response, OpenSwarm reports
+`OUTCOME_UNKNOWN_DO_NOT_RETRY`, stops the loop, preserves the worktree and parks
+the durable run for explicit inspection/redispatch instead of replaying it.
+Server/database mutations are safe only through explicitly surfaced, role-
+granted DevOps/data MCP tools. If the host cannot create the verification
+namespace (for example, `bwrap` is blocked by the container runtime) **and** no
+typed MCP grant is provisioned, the deployment is coordination/file-only and is
+blocked for autonomous development. Do not compensate by enabling native or
+delegated shell access: that would also restore the unclassifiable human-API
+write path. On such a host, first make the existing sandbox probe pass or add
+the narrowly scoped MCP server/tool grants, then re-run the build/test and
+zero-write checks.
+
 One sweep runs at a time per daemon and repository, concurrent daemons contend
 on a file lock, and shutdown aborts then drains an active supervisor call. An
 unchanged set of open board items is not sent to the model again. The deprecated
@@ -535,9 +627,33 @@ docker pull ghcr.io/unohee/openswarm:latest   # or: docker compose build
 
 cp config.example.yaml config.yaml            # edit adapter/projects/keys
 export OPENSWARM_WEB_TOKEN=$(openssl rand -hex 24)  # required to expose the dashboard
-docker compose up -d
+docker compose up -d                          # normal daemon
 curl http://localhost:3847/api/health         # daemon health (token-less)
 ```
+
+Strict native-shell execution is an opt-in deployment. It adds the isolated
+companion and makes the daemon wait for its real health proof before startup:
+
+```bash
+# Ubuntu/AppArmor hosts: install the repository-scoped companion profile.
+# This keeps AppArmor enforced; do not use apparmor=unconfined.
+sudo install -m 0644 deploy/apparmor/openswarm-sandbox-executor \
+  /etc/apparmor.d/openswarm-sandbox-executor
+sudo apparmor_parser -r /etc/apparmor.d/openswarm-sandbox-executor
+
+sudo install -d -o 1001 -g 1001 -m 0700 sandbox-socket
+export OPENSWARM_IMAGE="openswarm:$(git rev-parse --short=12 HEAD)"
+export OPENSWARM_WORKSPACE="$(pwd)/workspace" # use the real absolute workspace root
+docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml build
+docker compose -f docker-compose.yml -f docker-compose.strict-sandbox.yml up -d
+```
+
+Set both `humanSurfaceReadOnly.enabled` and
+`humanSurfaceReadOnly.sandboxExecutor.enabled` to `true` in `config.yaml`.
+Before starting, confirm that `OPENSWARM_WORKSPACE` contains every configured
+`/work/<repo>` checkout. After the build, both services must resolve to the
+same `OPENSWARM_IMAGE` image ID; keep the prior immutable image tag for
+rollback. Do not rely on a pre-existing mutable `openswarm:latest` image.
 
 Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated `0.0.0.0` bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
 
@@ -548,6 +664,7 @@ The compose file wires the persistent and local-data mounts that matter:
 | `./config.yaml → /app/config.yaml` | daemon configuration (read-only) |
 | `openswarm-state → /home/openswarm/.openswarm` | task state, auth profiles, coordination board — **must persist**, and one container per state volume (two daemons sharing it would fight over locks and double-process issues) |
 | `./workspace → /work` | the repositories the daemon works on; point `autonomous.allowedProjects` at `/work/<repo>` |
+| `./sandbox-socket → /run/openswarm-sandbox` | private uid-1001/mode-0700 Unix-socket directory; daemon read-only, sidecar read-write |
 | `../openswarm-warehouse → /warehouse` | agent-readable, Git-external local assets (read-only) |
 | `../openswarm-warehouse → /warehouse-rw` | operator upload path used only by the authenticated `/warehouse` web UI |
 
@@ -556,6 +673,8 @@ Notes:
 - **Provider CLIs are not baked in.** The default `codex-responses` adapter runs OpenSwarm's own tool loop against OAuth state — log in on the host (`openswarm auth login`) and mount `~/.codex` / reuse the state volume. For the delegated CLI adapters (`claude`, `codex`, `cursor`), derive your own image: `FROM ghcr.io/unohee/openswarm` + `npm install -g <cli>`.
 - **Git identity**: mount `~/.gitconfig` or set `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` (and `GH_TOKEN` for `gh`) so worker commits and PRs attribute correctly.
 - **Verify sandbox**: `bubblewrap` is installed but fail-closed under Docker's default seccomp profile. Enabling it requires `security_opt: [seccomp=unconfined]` + `cap_add: [SYS_ADMIN]` (commented in `docker-compose.yml`) — weigh that against your threat model.
+- **Strict shell companion**: the optional compose override starts a root launcher only long enough for `setpriv` to enter uid/gid 1001. The non-root Node server retains ambient `SYS_ADMIN`, `SETUID`, read-only `DAC_READ_SEARCH`, and `NET_ADMIN` because bubblewrap 0.8 rejects capabilities at a non-root uid and resolves `--bind-fd` sources through `/proc/self/fd`: each execution uses `SETUID` to launch bwrap as uid 0, while `DAC_READ_SEARCH` lets that launcher traverse mode-0700 worktrees without granting writes. Every command receives its own network namespace; `NET_ADMIN` only raises that namespace's loopback interface so localhost test servers work, while two concurrent workspaces can bind the same port without seeing each other. It then immediately returns the requested command to uid 1001 with permitted/effective/inheritable/ambient capabilities cleared. `SETGID` is used only by the initial launcher and is not retained by Node. The production probe requires child uid 1001, zero active capabilities, isolated concurrent localhost listeners, and failed external TCP/UDP/DNS before the socket becomes ready. The Compose override requires the repository's `openswarm-sandbox-executor` AppArmor profile: Docker's default profile denies bubblewrap mounts and Ubuntu's global `/usr/bin/bwrap` profile strips the namespace setup capability. The scoped profile keeps AppArmor enforced and inherits `/usr/bin/bwrap` instead of transitioning to that global child profile. If it is missing or the real host still denies bwrap, the container stays unhealthy and strict bash remains unavailable. Do not add `apparmor=unconfined` as a workaround. `.env`, `.env.*`, `.dev.vars`, `.envrc`, `.npmrc`, `.pypirc`, `.netrc`, credential/key files, and secret directories are masked inside command namespaces even while empty; only `.env.example`, `.env.sample`, and `.env.template` are intentional examples.
+- **Strict deterministic verification**: disposable HEAD/base Git sandboxes are created beneath the configured `/work` root and their commands use the same attested companion. A missing socket, root mismatch, or contract failure becomes a blocking security result; the main daemon never falls back to its own `bwrap` or unsandboxed shell.
 - **Local asset warehouse**: create `../openswarm-warehouse/INDEX.md`, then open `/warehouse` in the dashboard to browse, download, or upload. Agents are prompted to inspect `/warehouse/INDEX.md` before asking for gitignored data. See [docs/WAREHOUSE.md](docs/WAREHOUSE.md).
 
 ---
@@ -612,7 +731,7 @@ Notes:
 - **Codebase Audit (`review --max`)** — fans reviewer subagents out over directory-shaped areas (auto-split to fill `--concurrency`), aggregates a deduped verdict into a markdown report, and synthesizes ≤10 cohesive Linear issues via a PM agent. Both `review` modes consult repository-local prior review logs; resolved/stale findings are not repeated, and byte-identical duplicate follow-ups are suppressed while unresolved issues remain visible. `--fix` groups findings by repository dependency closure, injects the package manager/manifests/verification contract and repo knowledge, runs only independent fix units concurrently in isolated sandboxes, and promotes disjoint in-scope diffs into an audit worktree. It publishes the PR only when every area re-approves and trusted deterministic verification passes; unavailable dependencies/checks fail closed. `--in-place` keeps edits in the current working tree but uses the same gates. Language-agnostic; codex usage-limit aware with automatic `claude` fallback
 - **CI / test gate auto-fix (`openswarm fix`)** — runs the project's objective checks (lint / typecheck / build / test), groups the failures by file into areas, fans a fix-worker out over each, then **re-runs the checks and repeats until green** (or the round budget). Deterministic convergence — unlike the review fix pass, it verifies its own work. Multi-language: auto-detects npm scripts, `Cargo.toml` (`cargo check`/`test`, clippy on request), and Python tooling (`ruff`/`mypy`/`pytest`, gated on the repo's config); any other toolchain via a `"checks"` map in `openswarm.json`
 - **PR autopilot (`openswarm pr`)** — on-demand surface over the daemon's PRProcessor + `commitAndCreatePR`. `status` reports conflicts / review feedback / CI; `fix` runs one autopilot pass (conflict → comments → CI); `review` re-applies reviewer feedback only, skipping conflict/CI work — recognizes Claude, Codex, and any formal `CHANGES_REQUESTED` review; `review --fresh` instead runs a brand-new code review of the PR's current diff (the same reviewer `openswarm review` uses) and posts the verdict as a PR comment, independent of any existing feedback; `review --all` reviews every open PR in the repo sequentially (combine with `--fresh`) instead of just the current branch's PR or `--number`; `watch` loops until merge-ready; `create` publishes the current feature branch (local fix → commit → push → `gh pr create`). Never merges or enables auto-merge.
-- **Decision Engine** — Scope validation, rate limiting, priority-based task selection, and workflow mapping
+- **Decision Engine** — Scope validation, priority-based task selection, and workflow mapping
 - **Cognitive Memory** — LanceDB vector store with Xenova/multilingual-e5-base embeddings for long-term recall across sessions
 - **Repo Knowledge Loop** — workers learn each repository over time: task outcomes (success patterns, review-rejection pitfalls) are stored per-repo and recalled into the next worker prompt
 - **SWE-bench Verified** — the agentic harness solves real SWE-bench Lite issues, graded by the official harness; hybrid mode (frontier diagnosis + lightweight implementer) resolved 3/3 attempted instances ([benchmarks/RUBRIC.md](benchmarks/RUBRIC.md))
@@ -623,7 +742,7 @@ Notes:
 - **PR Auto-Improvement** — Monitors open PRs, auto-fixes CI failures, auto-resolves merge conflicts, and retries until all checks pass
 - **Long-Running Monitors** — Track external processes (training jobs, batch tasks) and report completion
 - **Web Dashboard** — Real-time pipeline stages, cost tracking, worktree status, and live logs on port 3847
-- **Pace Control** — 5-hour rolling window task caps, per-project limits, turbo mode, exponential backoff on failures
+- **Failure Safety** — Provider quota holds, bounded retry backoff, durable leases, and repository conflict fencing without artificial throughput caps
 - **i18n** — English and Korean locale support
 
 ---

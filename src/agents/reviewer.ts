@@ -21,6 +21,7 @@ import { COORDINATION_GUIDANCE_PROMPT, type CoordinationToolContext } from '../c
 export interface ReviewerOptions {
   taskTitle: string;
   taskDescription: string;
+  authoritativeOperatorFeedback?: string;
   workerResult: WorkerResult;
   projectPath: string;
   timeoutMs?: number;
@@ -173,6 +174,7 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
     return getPrompts().buildReviewerPrompt({
       taskTitle: options.taskTitle,
       taskDescription: options.taskDescription,
+      authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
       workerReport: `- **Files under audit (${files.length}):** ${filesSummary}`,
       mode: 'audit',
       priorReviewContext: options.priorReviewContext,
@@ -199,6 +201,7 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
     return getPrompts().buildReviewerPrompt({
       taskTitle: options.taskTitle,
       taskDescription: options.taskDescription,
+      authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
       workerReport: report,
       mode: 'direct',
       priorReviewContext: options.priorReviewContext,
@@ -225,6 +228,7 @@ ${guardSection}`;
   return getPrompts().buildReviewerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
+    authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
     workerReport,
     completionCriteria: options.completionCriteria,
     verificationEvidence: renderVerifyEvidence(options.verificationEvidence ?? []),

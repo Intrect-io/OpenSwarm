@@ -20,6 +20,24 @@ discord:
   channelId: ${DISCORD_CHANNEL_ID}
   webhookUrl: ${DISCORD_WEBHOOK_URL:-}  # Optional
 
+# Optional fail-closed boundary for unattended agents. When enabled, all
+# external human collaboration surfaces are read-only. Delegated CLIs and
+# diagnostics stay disabled. Native-loop bash is exposed only after the
+# separate network-none companion attests its Unix socket, bwrap mount/PID
+# namespaces, exact /work roots and limits. Missing/mismatched proof leaves it
+# disabled; typed DevOps/data MCP writes keep their existing grants.
+humanSurfaceReadOnly:
+  enabled: false
+  sandboxExecutor:
+    enabled: false
+    socketPath: /run/openswarm-sandbox/executor.sock
+    allowedRoots: [/work]
+    connectTimeoutMs: 1000
+    maxRequestBytes: 65536
+    maxOutputBytes: 524288
+    maxTimeoutMs: 900000
+    maxConcurrent: 8
+
 linear:
   apiKey: ${LINEAR_API_KEY}
   teamId: ${LINEAR_TEAM_ID}
@@ -47,10 +65,13 @@ autonomous:
   pairMode: true
   schedule: "*/15 * * * *"  # Every 15 minutes
   maxAttempts: 3
-  maxConcurrentTasks: 4  # Number of concurrent tasks
+  maxConcurrentTasks: 64  # Operator-controlled global capacity (maximum 256)
+  # In Progress is a live ownership signal, not a parking lot. If neither the
+  # scheduler nor a durable lease owns an issue for this long, return it to Backlog.
+  stalledInProgressHours: 6
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
-  maxConcurrentPerProject: 2  # Optional cap for same-project worktree parallelism
+  # maxConcurrentPerProject: 64  # Optional hard cap; omit for weighted, work-conserving project fairness
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
   shutdownGraceMs: 30000         # Wait for real executor exit before service teardown
@@ -234,7 +255,6 @@ autonomous:
 prProcessor:
   enabled: true
   schedule: "*/15 * * * *"    # Check every 15 minutes
-  cooldownHours: 6            # Wait 6 hours after processing
   maxIterations: 3            # Max 3 Worker-Reviewer iterations
 
 # Anonymous usage telemetry (opt-out). Sends command name, version, and OS only —
@@ -248,10 +268,18 @@ telemetry:
 mcp:
   servers:
     github:
+      surface: devops
       command: npx
       args: ["-y", "@modelcontextprotocol/server-github"]
     linear:
+      surface: devops
       preset: linear
     cloudflare:
+      surface: devops
       command: npx
       args: ["-y", "@cloudflare/mcp-server-cloudflare"]
+    # Label opaque aliases explicitly. Human-surface tools remain globally
+    # read-only even when a role lists them in writeTools/destructiveTools.
+    # company-comms:
+    #   surface: human
+    #   url: https://mcp.example.com/comms

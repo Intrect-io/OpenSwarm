@@ -12,11 +12,29 @@ import os from 'node:os';
 import path from 'node:path';
 import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
+import { SandboxOutcomeUnknownError } from '../sandboxExecutor/protocol.js';
+
+afterEach(() => resetHumanSurfaceReadOnlyForTests());
 
 /** Scripted API response carrying a single tool call. */
 const toolCallResp = (id: string, name: string, args: object) => ({
   choices: [{
     message: { role: 'assistant', content: null, tool_calls: [{ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }] },
+    finish_reason: 'tool_calls',
+  }],
+});
+const multiToolCallResp = (calls: Array<{ id: string; name: string; args: object }>) => ({
+  choices: [{
+    message: {
+      role: 'assistant',
+      content: null,
+      tool_calls: calls.map(({ id, name, args }) => ({
+        id,
+        type: 'function' as const,
+        function: { name, arguments: JSON.stringify(args) },
+      })),
+    },
     finish_reason: 'tool_calls',
   }],
 });
@@ -372,10 +390,104 @@ describe('runAgenticLoop tool exposure options', () => {
     });
 
     expect(toolNames).not.toContain('bash');
-    // run_diagnostics spawns compilers, so it goes with the shell.
-    expect(toolNames).not.toContain('run_diagnostics');
+    // diagnostics spawns compilers, so it goes with the shell.
+    expect(toolNames).not.toContain('diagnostics');
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('write_file');
+  });
+
+  it('forces arbitrary program tools off in strict mode while keeping local files, web reads, and MCP', async () => {
+    enableHumanSurfaceReadOnly();
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      shellTools: true,
+      diagnosticsTool: true,
+      maxTurns: 1,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'github__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).not.toContain('bash');
+    expect(toolNames).not.toContain('diagnostics');
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('write_file');
+    expect(toolNames).toContain('web_fetch');
+    expect(toolNames).toContain('github__get_issue');
+  });
+
+  it('exposes strict bash only after companion attestation and executes through that session', async () => {
+    enableHumanSurfaceReadOnly();
+    const execute = vi.fn(async () => ({
+      output: 'tests passed\n', exitCode: 0, signal: null,
+      timedOut: false, truncated: false, outputLimitExceeded: false,
+    }));
+    const sessionFactory = vi.fn(async () => ({ execute }));
+    let turn = 0;
+    let firstToolNames: string[] = [];
+
+    const result = await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      shellTools: true,
+      diagnosticsTool: true,
+      maxTurns: 2,
+      sandboxExecutorSessionFactory: sessionFactory,
+      callApi: async (_messages, tools) => {
+        if (turn++ === 0) {
+          firstToolNames = tools.map((tool) => tool.function.name);
+          return toolCallResp('sandbox-bash', 'bash', { command: 'npm test' });
+        }
+        return finalResp('done');
+      },
+    });
+
+    expect(firstToolNames).toContain('bash');
+    expect(firstToolNames).not.toContain('diagnostics');
+    expect(sessionFactory).toHaveBeenCalledWith(process.cwd());
+    expect(execute).toHaveBeenCalledWith('npm test', 30_000);
+    expect(result.executedCommands).toEqual(['npm test']);
+    expect(result.executionOutcomeUnknown).toBe(false);
+  });
+
+  it('quarantines a lost sandbox response immediately and skips every later tool and model turn', async () => {
+    enableHumanSurfaceReadOnly();
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'sandbox-loop-'));
+    const laterFile = path.join(cwd, 'must-not-exist.txt');
+    const execute = vi.fn(async () => {
+      throw new SandboxOutcomeUnknownError('socket closed after command start');
+    });
+    const callApi = vi.fn(async () => multiToolCallResp([
+      { id: 'unknown-bash', name: 'bash', args: { command: 'npm test' } },
+      { id: 'later-write', name: 'write_file', args: { path: laterFile, content: 'unsafe continuation' } },
+    ]));
+    try {
+      const result = await runAgenticLoop({
+        prompt: 'x', cwd, model: 'test', maxTurns: 5,
+        sandboxExecutorSessionFactory: async () => ({ execute }),
+        callApi,
+      });
+
+      expect(result).toMatchObject({
+        executionOutcomeUnknown: true,
+        apiCallCount: 1,
+        text: expect.stringContaining('OUTCOME_UNKNOWN_DO_NOT_RETRY'),
+      });
+      expect(callApi).toHaveBeenCalledOnce();
+      await expect(fs.stat(laterFile)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it('withholds every filesystem tool while preserving MCP and coordination tools', async () => {
@@ -438,6 +550,35 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(deniedResult).toContain('TOOL_NOT_ALLOWED');
     expect(deniedResult).toContain('linear__delete_issue');
   });
+
+  it('removes human-surface writes from the provider schema while preserving reads and DevOps writes', async () => {
+    let toolNames: string[] = [];
+    const logs: string[] = [];
+    const mcp = (name: string) => ({
+      type: 'function' as const,
+      function: { name, description: '', parameters: { type: 'object' } },
+    });
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      filesystemTools: false,
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      mcpTools: [mcp('slack__list_channels'), mcp('slack__chat_postMessage'), mcp('github__create_issue')],
+      onLog: (line) => logs.push(line),
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((entry) => entry.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toEqual(['slack__list_channels', 'github__create_issue']);
+    expect(logs.join('\n')).toContain('slack__chat_postMessage');
+    expect(logs.join('\n')).toContain('human surface is read-only');
+  });
 });
 
 describe('runAgenticLoop blocking human decision', () => {
@@ -469,6 +610,41 @@ describe('runAgenticLoop blocking human decision', () => {
     // turn in which it could answer its own question.
     expect(calls).toEqual(['turn-1', 'turn-2']);
     expect(result.text).toContain('Blocked');
+    expect(result.blockedOnOperator).toBe(true);
+    expect(result.operatorQuestionCorrelationIds).toHaveLength(1);
+    expect(result.operatorQuestionCorrelationIds?.[0]).toMatch(/^hq-/);
+  });
+
+  it('collects every correlation when one model turn posts multiple blocking questions', async () => {
+    let turn = 0;
+    const result = await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      maxTurns: 5,
+      coordinationContext: {
+        repository: process.cwd(),
+        taskId: `t-multi-${Date.now()}`,
+        actor: 'magos-test',
+        actorName: 'Magos Test-Vector',
+        notifyOperator: async () => true,
+      },
+      callApi: async () => {
+        turn += 1;
+        if (turn === 1) {
+          return multiToolCallResp([
+            { id: 'c1', name: 'ask_human', args: { question: 'Which region?' } },
+            { id: 'c2', name: 'ask_human', args: { question: 'Which account?' } },
+          ]);
+        }
+        return finalResp('Blocked on both operator decisions.');
+      },
+    });
+
+    expect(result.blockedOnOperator).toBe(true);
+    expect(result.operatorQuestionCorrelationIds).toHaveLength(2);
+    expect(new Set(result.operatorQuestionCorrelationIds).size).toBe(2);
+    expect(result.operatorQuestionCorrelationIds?.every((id) => id.startsWith('hq-'))).toBe(true);
   });
 });
 

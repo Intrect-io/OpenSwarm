@@ -20,6 +20,19 @@ const integrationBoundaryCoverageExcludes = [
   'src/adapters/lmstudio.ts',
   'src/adapters/tools.ts',
 
+  // Linux namespace/mount + Unix-socket companion boundary. Its protocol,
+  // parsing, path, secret-mask, Git, lifecycle, and deployment contracts remain
+  // unit-tested, while the effectful backend is proven by the fail-closed
+  // startup probe inside the production companion (including concurrent
+  // loopback-only netns) and a real AppArmor canary. Counting unreachable
+  // macOS/ordinary-CI mount and socket branches as unit coverage would reward
+  // mocks instead of the kernel boundary that matters.
+  'src/cli/sandboxExecutorCommand.ts',
+  'src/sandboxExecutor/bubblewrap.ts',
+  'src/sandboxExecutor/client.ts',
+  'src/sandboxExecutor/entrypoint.ts',
+  'src/sandboxExecutor/server.ts',
+
   // Agent roles that shell out to providers or depend on full workflow integration.
   'src/agents/auditor.ts',
   'src/agents/cliStreamParser.ts',

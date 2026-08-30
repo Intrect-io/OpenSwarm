@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripHumanSurfaceEnv } from '../mcp/humanSurfacePolicy.js';
 
 /**
  * Resolve OpenSwarm's bundled `node_modules/.bin` directory.
@@ -38,15 +39,15 @@ export function getBundledBinDir(): string | null {
  */
 export function buildWorkerEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const binDir = getBundledBinDir();
-  if (binDir === null) return { ...base };
+  if (binDir === null) return stripHumanSurfaceEnv(base);
 
   const existingPath = base.PATH ?? base.Path ?? '';
   // Avoid duplicate entries if this env is reused across spawns.
   const parts = existingPath.split(delimiter).filter(Boolean);
   if (parts[0] === binDir) {
-    return { ...base };
+    return stripHumanSurfaceEnv(base);
   }
   const nextPath = [binDir, ...parts.filter((p) => p !== binDir)].join(delimiter);
 
-  return { ...base, PATH: nextPath };
+  return stripHumanSurfaceEnv({ ...base, PATH: nextPath });
 }

@@ -29,6 +29,11 @@ import { enrichTaskFromState, hydrateTaskStateFromComments, updateTaskLinearStat
 import { probeDaemonPort } from '../cli/daemon.js';
 import { rotateServiceLogs } from '../support/logRotation.js';
 import { acquireServiceInstanceLock, type ServiceInstanceLock } from '../support/serviceInstanceLock.js';
+import {
+  enableHumanSurfaceReadOnly,
+  isHumanSurfaceReadOnlyEnabled,
+} from '../mcp/humanSurfacePolicy.js';
+import { configureSandboxExecutor } from '../sandboxExecutor/runtime.js';
 
 let state: ServiceState = {
   running: false,
@@ -73,6 +78,11 @@ export async function startService(config: SwarmConfig): Promise<void> {
 }
 
 async function startServiceLocked(config: SwarmConfig): Promise<void> {
+  if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
+  if (config.humanSurfaceReadOnly?.enabled === true
+      && config.humanSurfaceReadOnly.sandboxExecutor?.enabled === true) {
+    configureSandboxExecutor(config.humanSurfaceReadOnly.sandboxExecutor);
+  }
   let postMergeIntegration: PRProcessorConfig['postMergeIntegration'];
   // The lifetime SQLite lock above is the atomic single-instance authority.
   // Keep the port probe as a diagnostic for older daemons or unrelated
@@ -136,7 +146,13 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   }
 
   // Discord initialization (optional)
-  if (config.discordToken && config.discordChannelId) {
+  if (isHumanSurfaceReadOnlyEnabled()) {
+    // A connected bot can reply, type, and post through many handler paths.
+    // Do not retain that capability in strict mode; local web chat is the
+    // supported human control surface.
+    await discord.stopDiscord();
+    console.log('⏭ Discord disabled by humanSurfaceReadOnly policy');
+  } else if (config.discordToken && config.discordChannelId) {
     console.log('🤖 Connecting Discord bot...');
     await discord.initDiscord(config.discordToken, config.discordChannelId);
     console.log('✅ Discord bot connected successfully');
@@ -235,11 +251,13 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
           id: issue.id,
           identifier: issue.identifier,
           title: issue.title,
+          url: issue.url,
           description: issue.description,
           priority: issue.priority,
           state: issue.state,
           labels: issue.labels,
           blockedBy: issue.blockedBy,
+          updatedAt: issue.updatedAt,
           project: issue.project ? {
             id: issue.project.id,
             name: issue.project.name,
@@ -265,8 +283,6 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       includeBacklog: config.autonomous.includeBacklog,
       heartbeatSchedule: config.autonomous.schedule,
       autoExecute: true,
-      maxConsecutiveTasks: 3,
-      cooldownSeconds: 300,
       dryRun: false,
       pairMode: config.autonomous.pairMode,
       pairMaxAttempts: config.autonomous.maxAttempts,
@@ -277,6 +293,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       autonomousHeartbeat: heartbeatEnabled,
       triggerNow: heartbeatEnabled,  // Execute immediately on start (heartbeat mode only)
       maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
+      stalledInProgressHours: config.autonomous.stalledInProgressHours,
       maxConcurrentPerProject: config.autonomous.maxConcurrentPerProject,
       automationLedgerMode: config.autonomous.automationLedgerMode,
       automationDbPath: config.autonomous.automationDbPath,
@@ -307,7 +324,6 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       securityAudit: config.autonomous.securityAudit,
       // Bad-edit / reflection self-repair budget
       maxReflections: config.autonomous.maxReflections,
-      interTaskCooldownMs: config.autonomous.interTaskCooldownMs ?? 1_800_000,
       jobProfiles: config.autonomous.jobProfiles,
       coordinationBoardIssueId: config.autonomous.coordinationBoardIssueId,
       mcpPolicies: config.autonomous.mcpPolicies,
@@ -360,7 +376,6 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     prProcessor = new PRProcessor({
       repos: githubRepos,
       schedule: config.prProcessor.schedule,
-      cooldownHours: config.prProcessor.cooldownHours,
       maxIterations: config.prProcessor.maxIterations,
       roles: config.autonomous?.defaultRoles,
       maxRetries: config.prProcessor.maxRetries,

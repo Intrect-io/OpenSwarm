@@ -30,6 +30,8 @@ describe('prepareApprovedModelRequest', () => {
 
   it('uses the same loopback boundary for local API-key model probes', () => {
     expect(approvedLocalModelEndpoint('http://localhost:1234', '/v1/models')).toBe('http://localhost:1234/v1/models');
+    expect(approvedLocalModelEndpoint('http://127.0.0.1:3456', '/cc-router/health'))
+      .toBe('http://127.0.0.1:3456/cc-router/health');
     expect(() => approvedLocalModelEndpoint('https://models.example.com', '/v1/models')).toThrow('unapproved local endpoint');
   });
 });

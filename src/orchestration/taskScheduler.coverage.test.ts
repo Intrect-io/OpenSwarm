@@ -69,6 +69,34 @@ describe('TaskScheduler queue management', () => {
     expect(sched.getQueuedTasks().map((t) => t.task.id)).toEqual(['urgent', 'low']);
   });
 
+  it('restores a deferred task with its exact durable deadline and wakes only when due', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      const slotFreed = vi.fn();
+      sched.on('slotFreed', slotFreed);
+
+      expect(sched.enqueue(task('recover'), '/repo', { availableAt: 5_000 })).toBe(true);
+      expect(sched.getQueuedTasks()).toEqual([
+        expect.objectContaining({ task: expect.objectContaining({ id: 'recover' }), availableAt: 5_000 }),
+      ]);
+      expect(sched.getNextExecutable()).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(3_999);
+      expect(slotFreed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(slotFreed).toHaveBeenCalledTimes(1);
+      expect(sched.getNextExecutable()?.task.id).toBe('recover');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a non-finite restored deadline', () => {
+    expect(() => sched.enqueue(task('bad'), '/repo', { availableAt: Number.NaN }))
+      .toThrow(/finite epoch timestamp/);
+  });
+
   it('dequeue removes a queued task and reports success', () => {
     sched.enqueue(task('a'), '/repo');
     expect(sched.dequeue('a')).toBe(true);
@@ -296,6 +324,39 @@ describe('TaskScheduler graceful shutdown races', () => {
     expect(sched.startTask(task('late'), '/other', pendingExecutor())).toBe(false);
   });
 
+  it('includes a shutdown-racing deferred task in the atomic discard snapshot', async () => {
+    const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+    const d = deferredExecutor();
+    const deferred = vi.fn();
+    sched.on('deferred', deferred);
+    sched.startTask(task('running'), '/repo', d.exec, 123);
+
+    const stopping = sched.shutdown(1_000);
+    d.resolve({ ...failResult(), finalStatus: 'deferred', retryAt: Date.now() + 30_000 });
+
+    const stopped = await stopping;
+    expect(stopped.discardedQueue).toEqual([
+      expect.objectContaining({ task: expect.objectContaining({ id: 'running' }), queuedAt: 123 }),
+    ]);
+    expect(deferred).not.toHaveBeenCalled();
+  });
+
+  it('emits a late discard when a deferred executor settles after shutdown returned', async () => {
+    const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+    const d = deferredExecutor();
+    const discarded = vi.fn();
+    sched.on('discarded', discarded);
+    sched.startTask(task('late-deferred'), '/repo', d.exec, 456);
+
+    await expect(sched.shutdown(0)).resolves.toMatchObject({ drained: false, discardedQueue: [] });
+    d.resolve({ ...failResult(), finalStatus: 'deferred', retryAt: Date.now() + 30_000 });
+    await flush();
+
+    expect(discarded).toHaveBeenCalledWith(
+      expect.objectContaining({ task: expect.objectContaining({ id: 'late-deferred' }), queuedAt: 456 }),
+    );
+  });
+
   it('returns a bounded non-drained result when an executor ignores abort', async () => {
     vi.useFakeTimers();
     try {
@@ -353,6 +414,41 @@ describe('TaskScheduler.runAvailable', () => {
     const started = await sched.runAvailable(executor);
     expect(started).toBe(1);
   });
+
+  it('keeps a transient admission deferral queued and wakes it without a heartbeat', async () => {
+    vi.useFakeTimers();
+    try {
+      const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+      const retryAt = Date.now() + 1_000;
+      const executor = vi.fn(async (): Promise<PipelineResult> => {
+        if (executor.mock.calls.length === 1) {
+          return { ...failResult(), finalStatus: 'deferred', retryAt };
+        }
+        return okResult();
+      });
+      sched.on('slotFreed', () => { void sched.runAvailable(executor); });
+      sched.enqueue(task('deferred'), '/repo');
+
+      await sched.runAvailable(executor);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(sched.getQueuedTasks()).toEqual([
+        expect.objectContaining({ task: expect.objectContaining({ id: 'deferred' }), availableAt: retryAt }),
+      ]);
+      expect(sched.getStats()).toMatchObject({ queued: 1, running: 0, completed: 0, failed: 0 });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(executor).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(executor).toHaveBeenCalledTimes(2);
+      expect(sched.getStats()).toMatchObject({ queued: 0, running: 0, completed: 1, failed: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('TaskScheduler.waitAll', () => {
@@ -401,6 +497,38 @@ describe('TaskScheduler.getStats byProject aggregation', () => {
     const stats = sched.getStats();
     expect(stats.byProject.get('/repo')).toBe(2);
     expect(stats.running).toBe(2);
+  });
+
+  it('exposes runnable and project-blocked queue pressure separately', () => {
+    const sched = new TaskScheduler({ maxConcurrent: 2, worktreeMode: true });
+    sched.startTask(task('running'), '/repo-a', pendingExecutor());
+    sched.enqueue(task('same-project'), '/repo-a');
+    sched.enqueue(task('other-project'), '/repo-b');
+
+    expect(sched.getStats().throughput.current).toMatchObject({
+      maxConcurrent: 2,
+      availableSlots: 1,
+      runnableQueued: 1,
+      blockedByGlobalCapacity: 0,
+      blockedByProjectCapacity: 1,
+      blockedByQuarantine: 0,
+    });
+  });
+
+  it('does not count future retry-at work as runnable or globally blocked', () => {
+    const sched = new TaskScheduler({ maxConcurrent: 1, worktreeMode: true });
+    sched.enqueue(task('deferred'), '/repo');
+    sched.getQueuedTasks()[0].availableAt = Date.now() + 60_000;
+
+    const stats = sched.getStats();
+    expect(stats.throughput.current).toMatchObject({
+      runnableQueued: 0,
+      blockedByGlobalCapacity: 0,
+      deferredByRetryAt: 1,
+    });
+    expect(stats.fairness.projects).toEqual([
+      expect.objectContaining({ projectPath: '/repo', blockedReason: 'retry-at' }),
+    ]);
   });
 });
 

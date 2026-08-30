@@ -11,6 +11,11 @@ import {
   conflictScopesOverlap,
   normalizeConflictScope,
 } from './conflictScope.js';
+import { selectGreedyMaximalIndependentSet } from './conflictAdmission.js';
+import {
+  canonicalExistingRepoFiles,
+  MAX_VALIDATED_DIRECT_FILES,
+} from './writeScope.js';
 
 // Types
 
@@ -74,12 +79,39 @@ function normalizeScope(entries: string[] | undefined): Set<string> {
 }
 
 const UNKNOWN_SCOPE = 'unknown-file-scope';
+
+export interface FileScopeResolutionOptions {
+  /** Expensive pre-admission analysis, invoked only for unknown/broad direct scope. */
+  draftTask?: () => Promise<TaskItem['preAdmissionDraft'] | undefined>;
+}
+
+export interface ConflictDetectionOptions {
+  /** Repay one deferred unknown task by admitting it alone on an idle repository. */
+  preferUnknownExclusive?: boolean;
+  preferredUnknownTaskId?: string;
+}
+
+function pairKey(left: number, right: number): string {
+  return left < right ? `${left}:${right}` : `${right}:${left}`;
+}
+
 /**
  * Resolve the best available preflight write scope for one task. The normalized
  * result is written back to the task so the scheduler and durable admission
  * layer can make the same decision without repeating Knowledge Graph work.
  */
-export async function resolveTaskFileScope(task: TaskItem, projectPath: string): Promise<string[]> {
+export async function resolveTaskFileScope(
+  task: TaskItem,
+  projectPath: string,
+  options: FileScopeResolutionOptions = {},
+): Promise<string[]> {
+  if (task.fileScopeSource === 'inferred') {
+    // Legacy builds persisted raw direct+dependent KG output. Re-resolve it
+    // through the validated-direct/draft path instead of blessing it as a
+    // declared reservation merely because it survived a restart.
+    task.fileScope = undefined;
+    task.fileScopeSource = undefined;
+  }
   const declared = normalizeScope(task.fileScope);
   if (declared.size > 0) {
     const scope = [...declared];
@@ -88,26 +120,48 @@ export async function resolveTaskFileScope(task: TaskItem, projectPath: string):
     return scope;
   }
   if (task.fileScope && task.fileScope.some((entry) => typeof entry === 'string' && entry.trim())) {
-    // An explicit but unsafe/generated-only scope is unknown, not permission to
-    // replace the planner's claim with a potentially narrower inference.
+    // Never reserve an unsafe/generated-only declaration. Recovery below must
+    // independently prove existing direct/draft files before it becomes known.
     task.fileScope = undefined;
     task.fileScopeSource = undefined;
-    return [];
   }
 
+  let needsDraft = true;
   try {
     const impact = await analyzeIssue(projectPath, task.title, task.description);
     if (impact) {
-      const inferred = normalizeScope([...impact.directModules, ...impact.dependentModules]);
-      if (inferred.size > 0) {
-        const scope = [...inferred];
+      // Dependents and tests are execution context only. Reserving them made two
+      // disjoint writers conflict merely because both feed a common importer.
+      task.impactAnalysis = impact;
+      const direct = await canonicalExistingRepoFiles(projectPath, impact.directModules);
+      const broad = impact.directModules.length > MAX_VALIDATED_DIRECT_FILES;
+      if (!broad && direct.length > 0) {
+        const scope = [...direct];
         task.fileScope = scope;
-        task.fileScopeSource = 'inferred';
+        task.fileScopeSource = 'validated-direct';
         return scope;
       }
+      needsDraft = broad || direct.length === 0;
     }
   } catch (err) {
     console.warn(`[ConflictDetector] Impact analysis failed for ${task.id}:`, err);
+  }
+
+  if (needsDraft) {
+    try {
+      const draft = task.preAdmissionDraft ?? await options.draftTask?.();
+      if (draft?.sufficient) {
+        const relevantFiles = await canonicalExistingRepoFiles(projectPath, draft.relevantFiles);
+        if (relevantFiles.length > 0) {
+          task.preAdmissionDraft = { ...draft, relevantFiles };
+          task.fileScope = relevantFiles;
+          task.fileScopeSource = 'drafted';
+          return relevantFiles;
+        }
+      }
+    } catch (err) {
+      console.warn(`[ConflictDetector] Pre-admission draft failed for ${task.id}:`, err);
+    }
   }
 
   task.fileScope = undefined;
@@ -125,14 +179,16 @@ export function fileScopesConflict(left: string[] | undefined, right: string[] |
 
 /**
  * Detect file-scope overlap between tasks. Each task's scope prefers the
- * planner-declared `fileScope` (authoritative), falling back to Knowledge Graph
- * inference (`analyzeIssue`) only when no explicit scope is available.
- * Overlapping tasks are grouped into a ConflictGroup; only the highest-priority
- * task in each group is returned as safe to run concurrently.
+ * planner-declared `fileScope` (authoritative), then existing KG direct files,
+ * then a sufficient canonical pre-admission draft. Dependents remain context.
+ * Overlapping tasks are grouped into a ConflictGroup for diagnostics. Within
+ * each group, a priority-stable greedy maximal independent set is returned as
+ * safe, so transitively connected but directly disjoint tasks can still run.
  */
 export async function detectFileConflicts(
   tasks: TaskItem[],
   projectPath: string,
+  options: ConflictDetectionOptions = {},
 ): Promise<ConflictDetectionResult> {
   // Step 1: 각 태스크의 영향 모듈 집합 수집
   const taskImpacts: Map<number, Set<string>> = new Map();
@@ -215,8 +271,27 @@ export async function detectFileConflicts(
       continue;
     }
 
-    // 충돌 그룹: 최고 우선순위(낮은 숫자) 태스크만 safe에 포함
-    const groupTasks = indices.map(i => tasks[i]);
+    // Priority first (1=Urgent > 4=Low), then original input position. The
+    // explicit position tie-break keeps admission deterministic even if the
+    // runtime's Array#sort stability changes.
+    const orderedIndices = [...indices].sort((left, right) => {
+      const leftUnknown = unknownScopeIndices.has(left);
+      const rightUnknown = unknownScopeIndices.has(right);
+      if (leftUnknown !== rightUnknown) {
+        // Known work fills the normal wave. Once the scheduler records an
+        // uncertainty debt, put one unknown first; its all-peer edges make the
+        // resulting wave exactly one task and therefore exclusive.
+        const unknownFirst = options.preferUnknownExclusive === true;
+        return leftUnknown === unknownFirst ? -1 : 1;
+      }
+      if (leftUnknown && options.preferredUnknownTaskId) {
+        const leftPreferred = tasks[left].id === options.preferredUnknownTaskId;
+        const rightPreferred = tasks[right].id === options.preferredUnknownTaskId;
+        if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
+      }
+      return tasks[left].priority - tasks[right].priority || left - right;
+    });
+    const groupTasks = orderedIndices.map(index => tasks[index]);
     const sharedModuleSet = new Set<string>();
     for (let a = 0; a < indices.length; a++) {
       for (let b = a + 1; b < indices.length; b++) {
@@ -229,12 +304,14 @@ export async function detectFileConflicts(
     }
     const sharedModules = Array.from(sharedModuleSet);
 
-    // 우선순위 기준 정렬 (1=Urgent > 4=Low)
-    groupTasks.sort((a, b) => a.priority - b.priority);
-
-    // 최고 우선순위 태스크만 safe
-    safe.push(groupTasks[0]);
-
+    // The first greedy wave is maximal. Unknown scopes have an edge to every
+    // peer, so uncertainty remains fail-closed; known work wins normal waves,
+    // while a debt-repayment wave admits exactly one unknown exclusively.
+    const admittedIndices = selectGreedyMaximalIndependentSet(
+      orderedIndices,
+      (left, right) => pairShared.has(pairKey(left, right)),
+    );
+    safe.push(...admittedIndices.map(index => tasks[index]));
     // 나머지는 충돌 그룹으로 기록
     conflictGroups.push({
       tasks: groupTasks,

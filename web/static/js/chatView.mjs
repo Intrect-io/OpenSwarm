@@ -8,7 +8,7 @@
 // (`/api/coordination/history`), live updates from the same SSE channel the
 // orchestration view uses, with the board snapshot as a polling backstop.
 
-import { buildChatLines, latestAddressable, openQuestionFor } from './conversationModel.mjs';
+import { buildChatThreads, latestAddressable, openQuestionFor } from './conversationModel.mjs';
 import { ROLE_COLORS } from './orchestrationView.mjs';
 
 const PENDING = new Set(['open', 'waiting', 'running']);
@@ -100,9 +100,9 @@ export function renderChatText(text, targets = []) {
 }
 
 /** `[14:02] name (worker · AGT-1009): message` as one room line. */
-export function renderLine(line, mentionTargets = []) {
+export function renderLine(line, mentionTargets = [], { hideTask = false } = {}) {
   const color = ROLE_COLORS[line.role] ?? ROLE_COLORS.agent;
-  const tagParts = [line.speakerRole, line.taskLabel].filter(Boolean);
+  const tagParts = [line.speakerRole, hideTask ? '' : line.taskLabel].filter(Boolean);
   const tag = tagParts.length ? `<span class="tag">(${escapeHtml(tagParts.join(' · '))})</span> ` : '';
   const statusClass = PENDING.has(line.status) ? ' pending'
     : line.status === 'failed' || line.status === 'expired' ? ' failed' : '';
@@ -117,10 +117,110 @@ export function renderLine(line, mentionTargets = []) {
   </div>`;
 }
 
+function textOrEmpty(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function issueCodeOf(value) {
+  const code = textOrEmpty(value);
+  return /^[A-Z][A-Z0-9]*-\d+$/.test(code) ? code : '';
+}
+
+/** Only canonical Linear card links are allowed to leave the dashboard. */
+export function safeLinearUrl(value) {
+  try {
+    const url = new URL(textOrEmpty(value));
+    return url.protocol === 'https:' && url.hostname === 'linear.app' ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Fold the daemon's already-fetched project/session projections into a lookup.
+ * No browser-side Linear request is made: the bulk runner cache remains the
+ * authority and recent sessions only fill titles missing from that cache.
+ */
+export function buildTaskReferenceIndex(projectsPayload, sessionsPayload) {
+  const index = new Map();
+  const add = (candidate) => {
+    if (!candidate || typeof candidate !== 'object') return;
+    const taskId = textOrEmpty(candidate.id ?? candidate.taskId);
+    const code = issueCodeOf(candidate.issueIdentifier);
+    const title = textOrEmpty(candidate.title);
+    const url = safeLinearUrl(candidate.issueUrl);
+    if (!taskId && !code) return;
+
+    const prior = index.get(taskId) ?? index.get(code) ?? {};
+    const reference = {
+      taskId: taskId || prior.taskId || '',
+      code: code || prior.code || '',
+      title: title || prior.title || '',
+      url: url || prior.url || '',
+    };
+    if (reference.taskId) index.set(reference.taskId, reference);
+    if (reference.code) index.set(reference.code, reference);
+  };
+
+  if (Array.isArray(projectsPayload)) {
+    for (const project of projectsPayload) {
+      for (const bucket of ['running', 'queued', 'pending']) {
+        if (Array.isArray(project?.[bucket])) project[bucket].forEach(add);
+      }
+    }
+  }
+  for (const bucket of ['sessions', 'recent']) {
+    if (Array.isArray(sessionsPayload?.[bucket])) sessionsPayload[bucket].forEach(add);
+  }
+  return index;
+}
+
+export function renderIssueReference(reference) {
+  if (!reference) return '';
+  const code = issueCodeOf(reference.code);
+  const title = textOrEmpty(reference.title);
+  if (!code && !title) return '';
+  const contents = [
+    code ? `<span class="issue-code">${escapeHtml(code)}</span>` : '',
+    title ? `<span class="issue-title">${escapeHtml(title)}</span>` : '',
+  ].filter(Boolean).join('<span class="issue-sep">—</span>');
+  const url = safeLinearUrl(reference.url);
+  return url
+    ? `<a class="issue-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${contents}</a>`
+    : `<span class="issue-link issue-link-plain">${contents}</span>`;
+}
+
+function taskReferenceFor(thread, index) {
+  const label = issueCodeOf(thread.taskLabel);
+  return index.get(thread.taskId) ?? index.get(label) ?? (label ? { code: label } : null);
+}
+
+/** One durable exchange, with its issue context shown once in the header. */
+export function renderThread(thread, mentionTargets = [], taskReferences = new Map()) {
+  const system = thread.channel === 'system';
+  const channel = system ? 'SYSTEM' : 'CHAT';
+  const count = thread.lines.length;
+  const kind = system
+    ? String(thread.events[0]?.kind ?? 'system').replaceAll('-', ' ')
+    : `${count} message${count === 1 ? '' : 's'}`;
+  const issue = renderIssueReference(taskReferenceFor(thread, taskReferences));
+  const lines = thread.lines
+    .map((line) => renderLine(line, mentionTargets, { hideTask: true }))
+    .join('');
+  return `<section class="chat-thread thread-${system ? 'system' : 'chat'}" data-correlation="${escapeHtml(thread.correlationId)}">
+    <div class="thread-head">
+      <span class="channel-badge">${channel}</span>
+      ${issue}<span class="thread-kind">${escapeHtml(kind)}</span>
+    </div>
+    <div class="thread-lines">${lines}</div>
+  </section>`;
+}
+
 /** Entry point: backfill from the trace, render, keep live via SSE + polling. */
 export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000 } = {}) {
   const fetcher = fetchImpl ?? ((url, init) => fetch(url, init));
   const byId = new Map();
+  let taskReferences = new Map();
   let stick = true;
 
   const room = doc.getElementById('room');
@@ -228,7 +328,8 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
 
   const redraw = () => {
     const events = [...byId.values()];
-    const lines = buildChatLines(events);
+    const threads = buildChatThreads(events);
+    const lines = threads.flatMap((thread) => thread.lines);
     const mentionTargets = [
       // The dashboard user is canonically named Operator even before they have
       // spoken in this retained window, so agents can mention them immediately.
@@ -238,8 +339,8 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
         ...(line.recipientName ? [{ name: line.recipientName, role: line.recipientRole }] : []),
       ]),
     ];
-    room.innerHTML = lines.length
-      ? lines.map((line) => renderLine(line, mentionTargets)).join('')
+    room.innerHTML = threads.length
+      ? threads.map((thread) => renderThread(thread, mentionTargets, taskReferences)).join('')
       : '<div class="empty">No one has said anything yet.</div>';
     // The composer can only address an agent that exists; without one the
     // POST would be unroutable (the API requires repository/taskId/recipient).
@@ -372,6 +473,29 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     } catch { /* transient; the next poll retries */ }
   }
 
+  /** Load issue titles/links once from the daemon's local projections. */
+  async function loadTaskReferences() {
+    const results = await Promise.allSettled([
+      fetcher('/api/projects'),
+      fetcher('/api/work/sessions?limit=100'),
+    ]);
+    const payloads = [];
+    for (const result of results) {
+      if (result.status !== 'fulfilled' || !result.value?.ok) {
+        payloads.push(null);
+        continue;
+      }
+      try {
+        payloads.push(await result.value.json());
+      } catch {
+        payloads.push(null);
+      }
+    }
+    taskReferences = buildTaskReferenceIndex(payloads[0], payloads[1]);
+    redraw();
+  }
+
+  loadTaskReferences();
   backfill().then(() => refresh()).then(() => redraw());
   const timer = setInterval(refresh, pollMs);
 

@@ -587,3 +587,37 @@ export function terminateCliProcessTree(
 ): void {
   signalCliProcessTree(proc, 'SIGKILL', platform, lookupOwnership, listGroupMembers);
 }
+
+/**
+ * Reap descendants that deliberately created a new session and escaped the
+ * detached process group. The opaque marker is inherited through ordinary
+ * forks. This supplements (never replaces) process-group/PID-namespace
+ * ownership: failure to enumerate leaks a process rather than signalling an
+ * unrelated PID.
+ */
+export async function terminateProcessesWithEnvMarker(marker: string): Promise<void> {
+  if (process.platform === 'win32' || marker.length < 24) return;
+  const childProcess = await import('node:child_process');
+  if (typeof childProcess.execFile !== 'function') return;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let stdout = '';
+    try {
+      stdout = await new Promise<string>((resolveOutput, rejectOutput) => {
+        childProcess.execFile('ps', ['eww', '-axo', 'pid=,command='], {
+          encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 5_000,
+        }, (error, output) => error ? rejectOutput(error) : resolveOutput(output));
+      });
+    } catch {
+      return;
+    }
+    const pids = stdout.split('\n')
+      .filter((line) => line.includes(marker))
+      .map((line) => Number.parseInt(line.trim().split(/\s+/, 1)[0] ?? '', 10))
+      .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid);
+    if (pids.length === 0) return;
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* raced with exit */ }
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+  }
+}

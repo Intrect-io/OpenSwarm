@@ -53,11 +53,13 @@ describe('linearIssueToTask — label propagation', () => {
       id: 'uuid-1',
       identifier: 'INT-1',
       title: 'x',
+      url: 'https://linear.app/intrect/issue/INT-1/x',
       priority: 2,
       state: 'Backlog',
       labels: ['swarm:stuck', 'core'],
     });
     expect(task.labels).toEqual(['swarm:stuck', 'core']);
+    expect(task.issueUrl).toBe('https://linear.app/intrect/issue/INT-1/x');
   });
 
   it('leaves labels undefined when none are provided', () => {

@@ -33,7 +33,12 @@ import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
 import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
 import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
-import { OPERATOR_PARK_REASON, shouldReadmitEarly } from '../coordination/operatorAnswers.js';
+import {
+  normalizeOperatorQuestionCorrelations,
+  OPERATOR_PARK_REASON,
+  OPERATOR_QUESTION_PARK_REASON,
+  shouldReadmitEarly,
+} from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
@@ -48,9 +53,10 @@ import type { DefaultRolesConfig } from '../core/types.js';
 import * as execution from './runnerExecution.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { t } from '../locale/index.js';
+import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
-import { getTaskState, upsertTaskState } from '../taskState/store.js';
+import { getTaskState, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { setAutomationDbPath } from './automationDbPath.js';
 import {
   findPullRequestForBranch,
@@ -95,6 +101,12 @@ import {
   deliverTrackerEffect,
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
+import { planStalledInProgress } from './stalledInProgress.js';
+import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
+import {
+  isExplicitAdmissionRetry,
+  planExplicitDeferredRecovery,
+} from './explicitDispatchRecovery.js';
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 
@@ -128,6 +140,14 @@ export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
 }
 
 export type RunnableCandidate = { task: TaskItem; projectPath: string };
+
+type CachedDraftScope = {
+  fingerprint: string;
+  fileScope: string[];
+  draft: NonNullable<TaskItem['preAdmissionDraft']>;
+  description?: string;
+  executionCommentsLoaded?: boolean;
+};
 
 // The completion/cancellation effect payload contract (and its delivery) lives
 // in trackerEffects.ts, shared with the `openswarm work` CLI so the marker
@@ -180,6 +200,16 @@ function setOperatorPark(issueId: string, parked: boolean): void {
   }
 }
 
+function setSandboxOutcomePark(issueId: string, parked: boolean): void {
+  try {
+    upsertTaskState(issueId, {
+      execution: { blockedReason: parked ? SANDBOX_OUTCOME_UNKNOWN_PARK_REASON : undefined },
+    } as Parameters<typeof upsertTaskState>[1]);
+  } catch (error) {
+    console.warn(`[AutonomousRunner] Could not record sandbox outcome quarantine for ${issueId}:`, error);
+  }
+}
+
 export class AutonomousRunner {
   private config: AutonomousConfig;
   private engine: DecisionEngine;
@@ -189,6 +219,10 @@ export class AutonomousRunner {
   private readonly schedulerHandlers = new Set<Promise<void>>();
   /** Adapter default-model cache for the dashboard PAIR bar (INT-2393). */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
+  /** Unknown write scopes deferred by a known-first wave, repaid one at a time. */
+  private unknownScopeDebt = new Set<string>();
+  /** Sufficient drafted scopes survive heartbeat refetches and feed the pipeline. */
+  private preAdmissionScopeCache = new Map<string, CachedDraftScope>();
   private cronJob: Cron | null = null;
   private periodicReviewJobs: Cron[] = [];
   private orchestratorSupervisor: OrchestratorSupervisor | null = null;
@@ -298,15 +332,6 @@ export class AutonomousRunner {
 
   // Cache: linearProjectName → resolvedLocalPath (populated during task execution)
   private projectPathCache = new Map<string, string>();
-
-  // Max pace: the daemon always runs at full throughput (concurrency +
-  // heartbeat come from config). This flag is now ON by default and never
-  // expires — it used to default false and auto-expire after 4h, so every
-  // restart silently dropped the dashboard back to "TURBO off" even though real
-  // throughput (maxConcurrentTasks + heartbeat) was unchanged. Kept as a manual
-  // escape hatch (Discord/dashboard can still toggle it off).
-  private turboMode = true;
-  private turboExpiresAt: number | null = null;
 
   // Track completed/failed task IDs to prevent re-selection (persisted to disk)
   private completedTaskIds = new Set<string>();
@@ -431,8 +456,6 @@ export class AutonomousRunner {
       allowedProjects: config.allowedProjects,
       linearTeamId: config.linearTeamId,
       autoExecute: config.autoExecute,
-      maxConsecutiveTasks: config.maxConsecutiveTasks,
-      cooldownSeconds: config.cooldownSeconds,
       dryRun: config.dryRun,
       includeBacklog: config.includeBacklog,
       // Same-project parallel selection only makes sense when the scheduler can
@@ -446,7 +469,12 @@ export class AutonomousRunner {
     this.scheduler = initScheduler({
       maxConcurrent: config.maxConcurrentTasks ?? 1,
       allowSameProjectConcurrent: config.allowSameProjectConcurrent ?? true,
-      maxConcurrentPerProject: effectiveProjectConcurrency(config),
+      // Preserve omission for TaskScheduler: undefined activates its weighted,
+      // work-conserving fairness without inventing a hidden hard project cap.
+      // Durable admission still receives the effective global safety ceiling.
+      maxConcurrentPerProject: config.maxConcurrentPerProject == null
+        ? undefined
+        : effectiveProjectConcurrency(config),
       worktreeMode: config.worktreeMode ?? false,
     });
 
@@ -565,6 +593,30 @@ export class AutonomousRunner {
       this.scheduleNextHeartbeat();
     });
 
+    this.scheduler.on('deferred', ({ task, result, projectPath, retryAt }: {
+      task: TaskItem; result: PipelineResult; projectPath: string; retryAt: number;
+    }) => {
+      const taskCtx = this.formatTaskContext(task);
+      const retryLabel = new Date(retryAt).toISOString();
+      console.log(`[Scheduler] Task deferred: ${taskCtx} ${task.title} — retry at ${retryLabel}`);
+      this.recordPipelineHistory(task, result);
+      broadcastEvent({
+        type: 'log',
+        data: {
+          taskId: taskEventKey(task),
+          stage: 'admission',
+          line: `Transient admission conflict; kept queued until ${retryLabel}`,
+        },
+      });
+      // A started attempt ended, but the task itself is still scheduler-owned.
+      // Return the dashboard session to queued instead of reporting terminal
+      // completion; the scheduler wake timer works even when heartbeat is off.
+      broadcastEvent({
+        type: 'task:queued',
+        data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier },
+      });
+    });
+
     this.scheduler.on('cancelled', ({ task, result }) => {
       this.trackSchedulerHandler('cancelled', (async () => {
         const taskCtx = this.formatTaskContext(task);
@@ -616,42 +668,47 @@ export class AutonomousRunner {
       // operator's answer cannot shorten it.
       const parkedId = task.issueId || task.id;
       if (parkedId) {
+        const outcomeUnknown = result.workerResult?.executionOutcomeUnknown === true;
         // Without an authoritative ledger there is no error code to carry the
         // park, so record the stand-in signal the heartbeat reads instead.
-        if (!this.durableRuns.isPrimary) setOperatorPark(parkedId, true);
+        if (!this.durableRuns.isPrimary) {
+          if (outcomeUnknown) setSandboxOutcomePark(parkedId, true);
+          else setOperatorPark(parkedId, true);
+        }
 
-        // A re-dispatch is a fresh worker session, and asking again is not
-        // free — a worker+reviewer cycle burned on a question the operator
-        // has already been paged for once and not answered. Past the first
-        // unanswered ask, stop the automatic retry loop entirely instead of
-        // paying for another one on a fixed clock: NEEDS_HUMAN drops the
-        // task out of heartbeat selection until the resume check finds it
-        // answered, or an operator otherwise reopens it (AGT-4042). Durable
-        // mode only — legacy mode has no ledger error code to gate the stop
-        // on, so it keeps the fixed-backoff ladder above.
-        //
-        // Counted as consecutive ATTEMPTS, not distinct board correlation
-        // IDs: a worker that asks with identical wording every time never
-        // mints a second correlation ID (the paging gate above collapses it
-        // to one), so a count keyed on wording would never see more than 1 no
-        // matter how many times it was actually re-dispatched and asked.
-        // Bounded by the task's last operator answer, so a resumed run's
-        // first ask on a brand-new question does not share a streak with the
-        // answered attempt before it.
-        const lastAnsweredAt = getCoordinationStore().lastAnsweredAt(parkedId);
-        const consecutiveAsks = this.durableRuns.consecutiveAttemptsWithErrorCode(
-          parkedId, OPERATOR_PARK_REASON, lastAnsweredAt,
+        const correlationIds = normalizeOperatorQuestionCorrelations(
+          result.workerResult?.operatorQuestionCorrelationIds ?? [],
         );
-        if (this.durableRuns.isPrimary && consecutiveAsks >= 2) {
-          this.durableRuns.markNeedsHuman(
-            parkedId,
-            `${OPERATOR_QUESTION_PARK_MARKER} asked ${consecutiveAsks} times with no answer — stopped retrying automatically`,
-          );
-          console.log(`[Scheduler] Parking ${taskCtx} — asked ${consecutiveAsks}x with no answer, stopped auto-retry until the operator answers or reopens it`);
+        // The primary coordinator normally persisted NEEDS_HUMAN atomically
+        // before this event. The RETRY_AT conversion remains as a recovery path
+        // for callers that emit the scheduler event around a legacy coordinator.
+        // If an old adapter omits the correlation, keep bounded backoff rather
+        // than inventing a broad task-level resume condition.
+        const existingRun = this.durableRuns.getRun(parkedId);
+        const durablyParked = this.durableRuns.isPrimary && (
+          outcomeUnknown
+            ? existingRun?.state === 'NEEDS_HUMAN'
+              && existingRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
+            : correlationIds.length > 0 && (
+              (existingRun?.state === 'NEEDS_HUMAN'
+                && existingRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON)
+              || this.durableRuns.markNeedsHumanForQuestions(
+                parkedId,
+                correlationIds,
+                `Waiting for operator answer (${correlationIds.join(', ')})`,
+              )
+            )
+        );
+        if (durablyParked) {
+          console.log(outcomeUnknown
+            ? `[Scheduler] Quarantining ${taskCtx} until explicit operator redispatch`
+            : `[Scheduler] Parking ${taskCtx} on exact operator question set: ${correlationIds.join(', ')}`);
+        } else if (outcomeUnknown) {
+          console.error(`[Scheduler] Sandbox outcome quarantine could not be persisted for ${taskCtx}; refusing automatic retry`);
         } else {
           const nextRetryTime = setRetryTime(parkedId, 4, this.failedTaskRetryTimes);
           this.saveTaskState();
-          console.log(`[Scheduler] Re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)}, or sooner if the operator answers`);
+          console.log(`[Scheduler] Exact question park unavailable; re-admitting ${taskCtx} ${formatRetryTime(nextRetryTime)}`);
         }
       }
       this.scheduleNextHeartbeat();
@@ -969,6 +1026,15 @@ export class AutonomousRunner {
       }
 
       if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
+        const isSandboxOutcomeQuarantine = durableRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
+        if (isSandboxOutcomeQuarantine) {
+          if (task.explicitDispatch === true) {
+            const resumed = this.durableRuns.resumeNeedsHuman(id);
+            if (resumed) durableRun = this.durableRuns.getRun(id);
+          }
+          if (durableRun?.state === 'NEEDS_HUMAN') return false;
+          if (!durableRun) return false;
+        }
         // The two resume conditions are mutually exclusive by why the run was
         // parked, not layered as "either one fires it." An ask_human park
         // (marker prefix) leaves the Linear card exactly where it already was
@@ -981,16 +1047,20 @@ export class AutonomousRunner {
         // elsewhere in this file, which share NEEDS_HUMAN but DO move the
         // card (a STUCK label / Backlog), keep resuming only on that Linear
         // change.
-        const isOperatorQuestionPark = durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false;
+        const isExactOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON;
+        const isLegacyOperatorQuestionPark = durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false;
+        const isOperatorQuestionPark = isExactOperatorQuestionPark || isLegacyOperatorQuestionPark;
         const linearReopened = !isOperatorQuestionPark
           && ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '');
         // Read from the durable trace, not the live board: a busy task's own
         // traffic can push its unanswered question out of a board window, and
         // `openQuestionCount` would then read that as "no questions open" —
         // resuming a run that is still genuinely waiting.
-        const questionAnswered = isOperatorQuestionPark && getCoordinationStore().allQuestionsAnswered(id);
-        if (linearReopened || questionAnswered) {
-          const resumed = this.durableRuns.resumeNeedsHuman(id);
+        const legacyQuestionAnswered = isLegacyOperatorQuestionPark && getCoordinationStore().allQuestionsAnswered(id);
+        if (linearReopened || legacyQuestionAnswered || isExactOperatorQuestionPark) {
+          const resumed = isExactOperatorQuestionPark
+            ? this.durableRuns.resumeNeedsHumanForQuestions(id)
+            : this.durableRuns.resumeNeedsHuman(id);
           if (resumed) {
             durableRun = this.durableRuns.getRun(id);
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
@@ -1033,6 +1103,12 @@ export class AutonomousRunner {
       }
 
       const legacyIsAuthority = !this.durableRuns.isPrimary || !durableRun;
+
+      if (legacyIsAuthority
+          && getTaskState(id)?.execution?.blockedReason === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON) {
+        if (task.explicitDispatch !== true) return false;
+        setSandboxOutcomePark(id, false);
+      }
 
       // Check rejection limit first. Once an issue has a durable row, the
       // imported ledger state replaces legacy JSON counters as authority.
@@ -1140,13 +1216,9 @@ export class AutonomousRunner {
   /**
    * Trigger the next heartbeat as soon as possible.
    *
-   * Historically this used a "pace-aware cooldown" that grew quadratically
-   * with daily completion count (ratio² × 3 multiplier) on top of a 30-minute
-   * baseline — the swarm would slow itself down dramatically after a few
-   * tasks. That was removed by user request: the cron schedule
-   * (`config.heartbeatSchedule`) is now the only knob, and between cron
-   * ticks we re-fire immediately when a task wraps up so the next backlog
-   * item starts without artificial dead time.
+   * The cron schedule is the periodic reconciliation fallback. Between cron
+   * ticks we re-fire immediately when a task wraps up so the next backlog item
+   * starts without artificial dead time.
    */
   private _nextHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private scheduleNextHeartbeat(): void {
@@ -1621,39 +1693,49 @@ export class AutonomousRunner {
    * artifact reconciliation a heartbeat would, without any task selection.
    * The Linear fetch only feeds the reconciler's issueId→task lookup. (INT-3388)
    */
-  private async rollbackDiscardedDispatchClaims(
-    discarded: Array<{ task: TaskItem }>,
-  ): Promise<void> {
-    const dispatched = discarded.filter(({ task }) => task.explicitDispatch === true && task.issueId);
-    if (dispatched.length === 0) return;
-    const linear = await import('../linear/linear.js');
-    if (!linear.isLinearInitialized()) return;
-    for (const { task } of dispatched) {
-      const prior = (task.linearState ?? '').toLowerCase() === 'backlog' ? 'Backlog' : 'Todo';
-      const ok = await linear.updateIssueState(task.issueId!, prior).catch(() => false);
-      console.log(ok
-        ? `[AutonomousRunner] Rolled back queued dispatch claim: ${task.issueIdentifier ?? task.issueId} → ${prior}`
-        : `[AutonomousRunner] WARNING: could not roll back claim for ${task.issueIdentifier ?? task.issueId} — left In Progress`);
-    }
-  }
-
   private async recoverParkedRunsOnly(): Promise<void> {
     if (!this.durableRuns.isPrimary) return;
+    const inScope = this.getDispatchScopePredicate();
     const needsArtifactRecovery = this.durableRuns.listRuns(['NEEDS_RECONCILE']).length > 0;
+    const explicitDeferredRuns = this.durableRuns.listRuns(['RETRY_AT'])
+      .filter((run) => isExplicitAdmissionRetry(run, inScope));
     let tasks: TaskItem[] = [];
-    if (needsArtifactRecovery) {
+    if (needsArtifactRecovery || explicitDeferredRuns.length > 0) {
       const fetchResult = await fetchLinearTasks();
       if (fetchResult.error) {
         console.warn(`[AutonomousRunner] Explicit-mode recovery fetch failed: ${fetchResult.error}`);
       } else {
         tasks = fetchResult.tasks;
-        await this.reconcileDurableArtifacts(tasks);
+        if (needsArtifactRecovery) await this.reconcileDurableArtifacts(tasks);
+
+        let restored = 0;
+        for (const recovery of planExplicitDeferredRecovery(explicitDeferredRuns, tasks, inScope)) {
+          // Re-read the row immediately before taking in-memory ownership. A
+          // second daemon may have claimed or reclassified the snapshot while
+          // the tracker fetch was in flight; durable claim fencing handles the
+          // remaining race when the deadline arrives.
+          const current = this.durableRuns.getRun(recovery.run.issueId);
+          if (
+            !current
+            || current.stateVersion !== recovery.run.stateVersion
+            || !isExplicitAdmissionRetry(current, inScope)
+            || current.retryAt !== recovery.retryAt
+          ) continue;
+          if (this.scheduler.isTaskQueued(recovery.task.id) || this.scheduler.isTaskRunning(recovery.task.id)) {
+            continue;
+          }
+          if (this.enqueueCandidate(recovery.task, recovery.projectPath, recovery.retryAt)) restored++;
+        }
+        if (restored > 0) {
+          console.log(`[AutonomousRunner] Restored ${restored} explicit deferred task(s) from durable RETRY_AT`);
+          await this.runAvailableTasks();
+        }
       }
     }
     await reconcileTrackerTerminalRuns({
       durableRuns: this.durableRuns,
       source: getTaskSource(),
-      inScope: this.getDispatchScopePredicate(),
+      inScope,
       knownTasks: tasks,
     });
   }
@@ -1705,15 +1787,6 @@ export class AutonomousRunner {
     const deadline = Date.now() + graceMs;
     const heartbeatAtStop = this.heartbeatCompletion;
     const shutdown = await this.scheduler.shutdown(graceMs);
-    // Queued-but-never-started explicit dispatches were discarded by
-    // shutdown() with no cancellation event — roll their Linear claims back
-    // to the state they were dispatched from, or they sit In Progress forever
-    // with no worker. The discard snapshot is taken atomically inside
-    // shutdown() (same synchronous block as stopping+clearQueue), so none of
-    // these can have started. Heartbeat-selected tasks are untouched: they
-    // were never moved to In Progress at queue time. (INT-3388)
-    await this.rollbackDiscardedDispatchClaims(shutdown.discardedQueue).catch((error) =>
-      console.warn('[AutonomousRunner] Queued-dispatch claim rollback failed:', error));
     const remainingGrace = Math.max(0, deadline - Date.now());
     const activityDrained = await this.waitForRunnerActivity(heartbeatAtStop, remainingGrace);
 
@@ -1912,6 +1985,76 @@ export class AutonomousRunner {
     return tasks.filter(task => !moved.has(task.issueId || task.id));
   }
 
+  /**
+   * Keep Linear's In Progress column honest: it represents a scheduler-owned
+   * task or a live durable lease, never an abandoned claim. The bulk heartbeat
+   * fetch already carries updatedAt, so the sweep adds no read-side API calls.
+   */
+  private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
+    const source = getTaskSource();
+    if (source?.kind !== 'linear') return tasks;
+
+    const staleAfterMs = (this.config.stalledInProgressHours ?? 6) * 60 * 60_000;
+    const candidates = planStalledInProgress(tasks, {
+      now,
+      staleAfterMs,
+      hasOpenSwarmClaim: (issueId) =>
+        this.durableRuns.getRun(issueId) != null
+        && getTaskState(issueId)?.execution.status === 'in_progress',
+      isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
+      hasLiveLease: (issueId) => {
+        const run = this.durableRuns.getRun(issueId);
+        return Boolean(
+          run
+          && ACTIVE_LEASE_STATES.includes(run.state)
+          && run.leaseExpiresAt != null
+          && run.leaseExpiresAt > now,
+        );
+      },
+      hasPublishedArtifact: (issueId) => Boolean(this.durableRuns.getRun(issueId)?.prUrl),
+    });
+
+    let moved = 0;
+    for (const { task, targetState } of candidates) {
+      const issueId = task.issueId || task.id;
+      // Re-read immediately before the write. The heartbeat snapshot may be
+      // minutes old; a person or another daemon could have reclaimed or edited
+      // the issue since then. Linear has no conditional issue-update mutation,
+      // so an exact state+updatedAt match is the strongest available optimistic
+      // guard and missing evidence must fail closed.
+      const refreshed = await source.lookupIssueState(task.issueIdentifier ?? issueId).catch((error) => ({
+        ok: false as const,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      if (
+        !refreshed.ok
+        || !refreshed.issue
+        || refreshed.issue.state.toLowerCase() !== 'in progress'
+        || !Number.isFinite(refreshed.issue.updatedAt)
+        || refreshed.issue.updatedAt !== task.trackerUpdatedAt
+      ) {
+        console.warn(
+          `[AutonomousRunner] Skipping stale-state repair for ${task.issueIdentifier ?? issueId}: tracker ownership changed or could not be revalidated`,
+        );
+        continue;
+      }
+      const accepted = await source.updateState(issueId, targetState).catch((error) => {
+        console.warn(`[AutonomousRunner] Failed to retire stalled ${task.issueIdentifier ?? issueId}:`, error);
+        return false;
+      });
+      if (!accepted) {
+        console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
+        continue;
+      }
+      task.linearState = targetState;
+      updateTaskLinearState(issueId, targetState);
+      moved++;
+      this.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
+    }
+    if (moved > 0) this.syslog(`✓ Retired ${moved} stalled In Progress issue(s)`);
+    return tasks;
+  }
+
   async heartbeat(): Promise<void> {
     if (this.stopping) return;
     if (this._heartbeatRunning) {
@@ -1995,13 +2138,6 @@ export class AutonomousRunner {
       // quota gate is irrelevant; it only spammed 401s and could wrongly skip codex
       // work. codex-responses self-protects via RateLimitError (scheduler pause).
 
-      // 1.6 Pace gate (removed)
-      // The 5h rolling window cap (globalCap = projects × dailyTaskCap) and
-      // turbo-mode multiplier used to gate heartbeat here. Both were removed
-      // by user request: speed is now governed only by the cron schedule and
-      // the Linear API rate limiter, not by an internal completion cap.
-      this.syslog(`✓ Pace: unrestricted (cron only)`);
-
       // 2. Fetch tasks from Linear
       this.syslog('⟳ Fetching tasks from Linear...');
       const fetchResult = await fetchLinearTasks();
@@ -2011,17 +2147,17 @@ export class AutonomousRunner {
         await reportToDiscord(`⚠️ Linear fetch failed: ${fetchResult.error}`);
         return;
       }
+      let tasks = await this.reconcileStalledInProgress(fetchResult.tasks);
       const trackerReconcile = await reconcileTrackerTerminalRuns({
         durableRuns: this.durableRuns,
         source: getTaskSource(),
         inScope: this.getDispatchScopePredicate(),
-        knownTasks: fetchResult.tasks,
+        knownTasks: tasks,
       });
       if (trackerReconcile.lookedUp > 0 || trackerReconcile.fromFetch > 0) {
         this.syslog(`✓ Tracker cache: ${trackerReconcile.fromFetch} bulk hit(s), ${trackerReconcile.lookedUp} explicit lookup(s), ${trackerReconcile.terminal} terminal ledger row(s) reconciled`);
       }
       if (this.stopping) return;
-      let tasks = fetchResult.tasks;
       if (tasks.length === 0) {
         this.syslog('— No tasks in backlog');
         return;
@@ -2276,9 +2412,6 @@ export class AutonomousRunner {
         continue;
       }
 
-      // Per-project 5h window cap (removed, INT-2317) — like the global pace
-      // gate above, throughput is governed by the cron schedule and the Linear
-      // rate limiter only. Completions are still recorded for cost telemetry.
       candidates.push({ task, projectPath });
     }
 
@@ -2301,7 +2434,35 @@ export class AutonomousRunner {
     const safeTasks = new Set<string>(); // task IDs safe to enqueue
     for (const [projPath, group] of byProject) {
       try {
-        await Promise.all(group.map(c => resolveTaskFileScope(c.task, projPath)));
+        await Promise.all(group.map(async c => {
+          const cacheKey = `${projPath}\0${c.task.id}`;
+          const fingerprint = JSON.stringify([
+            c.task.title, c.task.description ?? '', c.task.trackerUpdatedAt ?? 0,
+          ]);
+          const cached = this.preAdmissionScopeCache.get(cacheKey);
+          if ((c.task.fileScope?.length ?? 0) === 0 && cached?.fingerprint === fingerprint) {
+            c.task.fileScope = [...cached.fileScope];
+            c.task.fileScopeSource = 'drafted';
+            c.task.preAdmissionDraft = { ...cached.draft, relevantFiles: [...cached.fileScope] };
+            c.task.description = cached.description;
+            c.task.executionCommentsLoaded = cached.executionCommentsLoaded;
+            return;
+          }
+          await resolveTaskFileScope(c.task, projPath, {
+            draftTask: () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath),
+          });
+          if (c.task.fileScopeSource === 'drafted' && c.task.preAdmissionDraft) {
+            this.preAdmissionScopeCache.delete(cacheKey);
+            this.preAdmissionScopeCache.set(cacheKey, {
+              fingerprint, fileScope: [...(c.task.fileScope ?? [])], draft: c.task.preAdmissionDraft,
+              description: c.task.description,
+              executionCommentsLoaded: c.task.executionCommentsLoaded,
+            });
+            if (this.preAdmissionScopeCache.size > 256) {
+              this.preAdmissionScopeCache.delete(this.preAdmissionScopeCache.keys().next().value!);
+            }
+          }
+        }));
 
         // A later heartbeat must compare new candidates with workers that are
         // already editing another worktree. Candidate-vs-candidate detection
@@ -2320,10 +2481,31 @@ export class AutonomousRunner {
         });
         if (runnable.length === 0) continue;
 
-        const result = await detectFileConflicts(runnable.map(c => c.task), projPath);
+        const debtKey = (task: TaskItem) => `${projPath}\0${task.id}`;
+        for (const candidate of runnable) {
+          if ((candidate.task.fileScope?.length ?? 0) > 0) this.unknownScopeDebt.delete(debtKey(candidate.task));
+        }
+        const debtTask = active.length === 0
+          ? runnable.find(candidate =>
+            (candidate.task.fileScope?.length ?? 0) === 0
+            && this.unknownScopeDebt.has(debtKey(candidate.task)))
+          : undefined;
+        const runnableTasks = runnable.map(c => c.task);
+        const result = debtTask
+          ? await detectFileConflicts(runnableTasks, projPath, {
+            preferUnknownExclusive: true,
+            preferredUnknownTaskId: debtTask.task.id,
+          })
+          : await detectFileConflicts(runnableTasks, projPath);
 
         for (const t of result.safe) {
           safeTasks.add(t.id);
+          if ((t.fileScope?.length ?? 0) === 0) this.unknownScopeDebt.delete(debtKey(t));
+        }
+        for (const candidate of runnable) {
+          if ((candidate.task.fileScope?.length ?? 0) === 0 && !safeTasks.has(candidate.task.id)) {
+            this.unknownScopeDebt.add(debtKey(candidate.task));
+          }
         }
 
         for (const cg of result.conflictGroups) {
@@ -2362,9 +2544,9 @@ export class AutonomousRunner {
     if (prior) task.priorAttemptFeedback = prior.detail;
   }
 
-  private enqueueCandidate(task: TaskItem, projectPath: string): boolean {
+  private enqueueCandidate(task: TaskItem, projectPath: string, availableAt?: number): boolean {
     this.attachPriorFeedback(task);
-    if (!this.scheduler.enqueue(task, projectPath)) return false;
+    if (!this.scheduler.enqueue(task, projectPath, { availableAt })) return false;
     broadcastEvent({ type: 'task:queued', data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
     this.syslog(`✓ Queued: ${task.issueIdentifier || ''} ${task.title} → ${projectPath.split('/').slice(-2).join('/')}`);
     return true;
@@ -2381,8 +2563,8 @@ export class AutonomousRunner {
    * Throws (rather than queueing work that would never start) when the
    * runner's configuration cannot execute scheduler-queued tasks:
    * runAvailableTasks() is a no-op without pairMode + maxConcurrentTasks, so
-   * silently accepting the queue here would strand the issues In Progress
-   * with no worker ever picking them up.
+   * silently accepting the queue here would claim success for work that can
+   * never start.
    */
   async enqueueIssues(
     tasks: TaskItem[],
@@ -2402,10 +2584,8 @@ export class AutonomousRunner {
       );
     }
     const queued: string[] = [];
-    // The reason distinction matters to the caller's claim-rollback decision:
-    // 'duplicate' means the scheduler already owns this issue (another live
-    // dispatch/heartbeat is working it — its In Progress claim must stand),
-    // while 'stopping' means nobody will ever run it (rollback is safe).
+    // The distinction tells the caller whether another live scheduler entry
+    // owns the task or the runner cannot accept it at all.
     const rejected: Array<{ id: string; reason: 'duplicate' | 'stopping' }> = [];
     for (const task of tasks) {
       if (this.stopping) {
@@ -2668,8 +2848,6 @@ export class AutonomousRunner {
       engineStats: this.engine.getStats(), pendingApproval: !!this.state.pendingApproval,
       schedulerStats: this.scheduler.getStats(),
       automationLedger: this.durableRuns.getMetrics(Date.now(), this.getDispatchScopePredicate()),
-      turboMode: this.turboMode,
-      turboExpiresAt: this.turboExpiresAt,
       dailyPace: getDailyPaceInfo(),
     };
   }
@@ -2773,27 +2951,6 @@ export class AutonomousRunner {
     };
   }
 
-  // ============================================
-  // Max Pace (formerly "Turbo")
-  // ============================================
-
-  getTurboMode(): boolean {
-    // Max pace no longer auto-expires; it stays on until explicitly toggled off.
-    return this.turboMode;
-  }
-
-  setTurboMode(enabled: boolean): void {
-    this.turboMode = enabled;
-    // No auto-expiry: max pace is a persistent state, not a 4h burst. (always-max)
-    this.turboExpiresAt = null;
-    if (enabled) {
-      console.log('[AutonomousRunner] MAX PACE ON (persistent)');
-      broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'turbo', line: 'MAX PACE ON — persistent' } });
-    } else {
-      console.log('[AutonomousRunner] MAX PACE OFF');
-      broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'turbo', line: 'MAX PACE OFF — normal pace resumed' } });
-    }
-  }
 
   async getAdapterSummary() {
     const defaultAdapter = this.config.defaultAdapter ?? 'codex';

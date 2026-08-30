@@ -7,7 +7,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: openswarm:latest
+    # Pin OPENSWARM_IMAGE to an immutable commit tag in production so the
+    # daemon and strict companion cannot silently start different builds.
+    image: ${OPENSWARM_IMAGE:-openswarm:latest}
     container_name: openswarm
     restart: unless-stopped
 

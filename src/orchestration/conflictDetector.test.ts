@@ -79,6 +79,35 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.safe).toHaveLength(2);
   });
 
+  it('admits directly disjoint endpoints from a transitive conflict chain', async () => {
+    const result = await detectFileConflicts(
+      [
+        task('A', 1, ['src/a-b.ts']),
+        task('B', 2, ['src/a-b.ts', 'src/b-c.ts']),
+        task('C', 1, ['src/b-c.ts']),
+      ],
+      PROJECT,
+    );
+
+    expect(result.conflictGroups).toHaveLength(1);
+    expect(result.conflictGroups[0].tasks.map((t) => t.id)).toEqual(['A', 'C', 'B']);
+    expect(result.safe.map((t) => t.id)).toEqual(['A', 'C']);
+  });
+
+  it('breaks equal-priority conflicts by stable input order', async () => {
+    const result = await detectFileConflicts(
+      [
+        task('first', 2, ['src/shared.ts']),
+        task('second', 2, ['src/shared.ts']),
+        task('third', 2, ['src/shared.ts']),
+      ],
+      PROJECT,
+    );
+
+    expect(result.conflictGroups[0].tasks.map((t) => t.id)).toEqual(['first', 'second', 'third']);
+    expect(result.safe.map((t) => t.id)).toEqual(['first']);
+  });
+
   it('ignores stale generated/worktree scope entries instead of creating false conflicts', async () => {
     const result = await detectFileConflicts(
       [
@@ -92,14 +121,38 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.conflictGroups).toHaveLength(0);
   });
 
-  it('serializes unknown scope because merge safety cannot be proven', async () => {
+  it('runs the known maximal wave before an unknown scope', async () => {
     const result = await detectFileConflicts(
-      [task('A', 2, ['unknown-file-scope']), task('B', 2, ['src/shared.ts'])],
+      [
+        task('unknown', 1, ['unknown-file-scope']),
+        task('known-a', 2, ['src/a.ts']),
+        task('known-b', 2, ['src/b.ts']),
+      ],
       PROJECT,
     );
 
-    expect(result.safe).toHaveLength(1);
+    expect(result.safe.map((t) => t.id)).toEqual(['known-a', 'known-b']);
     expect(result.conflictGroups).toHaveLength(1);
     expect(result.conflictGroups[0].sharedModules).toEqual(['unknown-file-scope']);
+  });
+
+  it('admits exactly one task when every scope is unknown', async () => {
+    const result = await detectFileConflicts(
+      [task('first', 2), task('second', 1), task('third', 3)],
+      PROJECT,
+    );
+
+    expect(result.safe.map((t) => t.id)).toEqual(['second']);
+    expect(result.conflictGroups).toHaveLength(1);
+  });
+
+  it('can repay a deferred unknown as an exclusive wave', async () => {
+    const result = await detectFileConflicts(
+      [task('known', 1, ['src/known.ts']), task('unknown', 4)],
+      PROJECT,
+      { preferUnknownExclusive: true, preferredUnknownTaskId: 'unknown' },
+    );
+
+    expect(result.safe.map((t) => t.id)).toEqual(['unknown']);
   });
 });

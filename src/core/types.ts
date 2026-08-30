@@ -58,6 +58,8 @@ export type LinearIssueInfo = {
   id: string;
   identifier: string;
   title: string;
+  /** Canonical Linear card URL, fetched with the bulk issue projection. */
+  url?: string;
   description?: string;
   state: string;
   /** Linear workflow-state type, populated by explicit single-issue lookups. */
@@ -71,6 +73,8 @@ export type LinearIssueInfo = {
   blockedBy?: string[];
   /** ISO timestamp of issue creation — duplicate grooming orders peers by real age. (INT-3387) */
   createdAt?: string;
+  /** ISO timestamp of the last tracker activity — used to retire stale In Progress claims. */
+  updatedAt?: string;
 };
 
 /**
@@ -102,6 +106,8 @@ export type SwarmEvent = {
 export type McpServerConfig = {
   /** Reference a built-in preset (e.g. `linear`) instead of command/url. (INT-1952) */
   preset?: string;
+  /** Trust-domain label used by the external human-surface policy. */
+  surface?: 'human' | 'devops' | 'data' | 'sandbox' | 'unknown';
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -131,6 +137,23 @@ export type SwarmConfig = {
   discordWebhookUrl?: string;
   /** Outbound notification channel (Discord/Slack/Telegram/webhook) — INT-1576 */
   notifications?: NotificationsConfig;
+  /**
+   * Fail-closed human-surface boundary.  When enabled, external collaboration
+   * surfaces are read-only and arbitrary agent program execution is disabled.
+   */
+  humanSurfaceReadOnly?: {
+    enabled: boolean;
+    sandboxExecutor?: {
+      enabled: boolean;
+      socketPath: string;
+      allowedRoots: string[];
+      connectTimeoutMs: number;
+      maxRequestBytes: number;
+      maxOutputBytes: number;
+      maxTimeoutMs: number;
+      maxConcurrent: number;
+    };
+  };
   /** Linear API key */
   linearApiKey: string;
   /** Linear team ID */
@@ -171,8 +194,6 @@ export type PRProcessorConfig = {
   enabled: boolean;
   /** Check schedule (cron) */
   schedule: string;
-  /** Cooldown after processing (hours) */
-  cooldownHours: number;
   /** Worker-Reviewer max iteration count */
   maxIterations: number;
   /** Max retry attempts per PR (default: 3) */
@@ -558,7 +579,9 @@ export type AutonomousStartupConfig = {
   reviewerTimeoutMs?: number;
   /** Max concurrent tasks */
   maxConcurrentTasks?: number;
-  /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
+  /** Move unowned In Progress issues back to Backlog after this many idle hours. */
+  stalledInProgressHours?: number;
+  /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   /** Durable execution ledger rollout mode. */
   automationLedgerMode?: 'off' | 'shadow' | 'primary';
@@ -595,8 +618,6 @@ export type AutonomousStartupConfig = {
    * Default: 3.
    */
   maxReflections?: number;
-  /** Cooldown between task completions in ms (default: 1800000 = 30min) */
-  interTaskCooldownMs?: number;
   /** Job profiles used to select models based on task traits */
   jobProfiles?: JobProfile[];
   coordinationBoardIssueId?: string;

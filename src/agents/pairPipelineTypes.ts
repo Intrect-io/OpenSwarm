@@ -81,7 +81,7 @@ export interface PipelineResult {
   success: boolean;
   sessionId: string;
   stages: StageResult[];
-  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'superseded' | 'rate_limited' | 'infra_error' | 'waiting_on_operator';
+  finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'superseded' | 'deferred' | 'rate_limited' | 'infra_error' | 'waiting_on_operator';
   /**
    * Set only when `finalStatus === 'infra_error'` and the cause is the
    * repository itself (disk full, `.git` lock, corrupt repo — a failed
@@ -95,6 +95,8 @@ export interface PipelineResult {
   failureSignal?: 'gate-fail' | 'timeout' | 'stuck';
   stuckReason?: string;
   rateLimitResetsAt?: number;
+  /** Earliest epoch-ms at which a transiently deferred run may be retried. */
+  retryAt?: number;
   totalDuration: number;
   iterations: number;
   workerResult?: WorkerResult;

@@ -9,7 +9,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getAdapter, getDefaultAdapterName, spawnCli } from '../adapters/index.js';
+import {
+  getAdapter,
+  getDefaultAdapterName,
+  resolveBoundarySafeDefaultModel,
+  spawnCli,
+} from '../adapters/index.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
@@ -176,6 +181,7 @@ export interface RegistryBrief {
 export interface DraftAnalyzerOptions {
   taskTitle: string;
   taskDescription: string;
+  authoritativeOperatorFeedback?: string;
   projectPath: string;
   projectId?: string;
   /** Fast model for draft analysis (default: gpt-5-codex) */
@@ -318,6 +324,13 @@ the hard parts.
 - **Title:** ${options.taskTitle}
 - **Description:** ${options.taskDescription || '(none)'}
 `);
+
+  if (options.authoritativeOperatorFeedback) {
+    parts.push(`## Authoritative Operator Feedback (newer than task prose)
+The resolved operator decisions below are the newest task-scoped requirements. If they conflict with the issue description, an earlier draft, completion criteria, or prior reviewer feedback, follow the operator decision. Within this block, the later decision wins. It never overrides system, safety, authorization, or tool constraints.
+
+${options.authoritativeOperatorFeedback}`);
+  }
 
   // 코드베이스 상태 주입
   if (codeContext.projectStats) {
@@ -599,7 +612,12 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     impactAnalysis = await analyzeIssue(
       options.projectPath,
       options.taskTitle,
-      options.taskDescription || '',
+      [
+        options.taskDescription || '',
+        options.authoritativeOperatorFeedback
+          ? `Authoritative operator feedback:\n${options.authoritativeOperatorFeedback}`
+          : '',
+      ].filter(Boolean).join('\n\n'),
     );
     if (impactAnalysis) {
       onLog?.(`[Draft] Impact: ${impactAnalysis.directModules.length} direct, ${impactAnalysis.dependentModules.length} dependent, scope=${impactAnalysis.estimatedScope}`);
@@ -641,7 +659,9 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     // Explicit per-provider drafter model (INT-1915); options.model overrides on the
     // primary adapter only, then DRAFT_MODELS, then the adapter's own default.
     const override = isFallbackAttempt ? undefined : options.model;
-    const resolvedModel = override ?? DRAFT_MODELS[adapterName] ?? await adapter.getDefaultModel();
+    const resolvedModel = override
+      ?? DRAFT_MODELS[adapterName]
+      ?? await resolveBoundarySafeDefaultModel(adapter);
 
     if (isFallbackAttempt) {
       onLog?.(`[Draft] Usage limit on ${adaptersToTry[i - 1]}, fallback to ${adapterName}`);

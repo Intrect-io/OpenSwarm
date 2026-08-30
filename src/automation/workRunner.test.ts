@@ -154,15 +154,14 @@ describe('listWorkIssues', () => {
 });
 
 describe('dispatchWork', () => {
-  it('claims each issue as In Progress, queues it, and emits work:queued', async () => {
+  it('queues each issue without claiming In Progress before execution, and emits work:queued', async () => {
     linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`));
     const runner = mkRunner();
     const result = await dispatchWork(runner, { issueIds: ['1', '2'], projectPath: '/tmp/repo' });
 
     expect(result.queued).toBe(2);
     expect(result.skipped).toBe(0);
-    expect(linear.updateIssueState).toHaveBeenCalledTimes(2);
-    expect(linear.updateIssueState).toHaveBeenCalledWith('1', 'In Progress');
+    expect(linear.updateIssueState).not.toHaveBeenCalled();
     expect(runner.enqueueIssues).toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ issueId: '1' }), expect.objectContaining({ issueId: '2' })]),
       expect.stringContaining('/tmp/repo'),
@@ -207,7 +206,7 @@ describe('dispatchWork', () => {
     expect(reasons).toEqual(['not found', 'state is Done']);
   });
 
-  it('scheduler-duplicate rejection keeps the In Progress claim — another dispatch owns the issue (race fix)', async () => {
+  it('scheduler-duplicate rejection leaves tracker state untouched', async () => {
     linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`));
     const runner = mkRunner({
       enqueueIssues: vi.fn(async () => ({ queued: [], rejected: [{ id: '1', reason: 'duplicate' as const }] })),
@@ -215,48 +214,17 @@ describe('dispatchWork', () => {
     const result = await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
     expect(result.queued).toBe(0);
     expect(result.items[0]).toMatchObject({ status: 'skipped', reason: 'already queued or running' });
-    // CRITICAL: no rollback to Todo — the concurrently-running dispatch that
-    // owns this issue on the scheduler relies on the In Progress claim.
-    expect(linear.updateIssueState).not.toHaveBeenCalledWith('1', 'Todo');
+    expect(linear.updateIssueState).not.toHaveBeenCalled();
   });
 
-  it('stopping rejection rolls back the claim this dispatch made (review finding)', async () => {
+  it('stopping rejection needs no rollback because queueing never claimed the issue', async () => {
     linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`));
     const runner = mkRunner({
       enqueueIssues: vi.fn(async () => ({ queued: [], rejected: [{ id: '1', reason: 'stopping' as const }] })),
     });
     const result = await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
     expect(result.items[0]).toMatchObject({ status: 'skipped', reason: 'runner shutting down' });
-    expect(linear.updateIssueState).toHaveBeenCalledWith('1', 'Todo');
-  });
-
-  it('rolls a Backlog-claimed issue back to Backlog, not Todo (review finding)', async () => {
-    linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`, 'Backlog'));
-    const runner = mkRunner({
-      enqueueIssues: vi.fn(async () => ({ queued: [], rejected: [{ id: '1', reason: 'stopping' as const }] })),
-    });
-    await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
-    expect(linear.updateIssueState).toHaveBeenCalledWith('1', 'Backlog');
-    expect(linear.updateIssueState).not.toHaveBeenCalledWith('1', 'Todo');
-  });
-
-  it('does NOT roll back an issue that was already In Progress before dispatch (resume path)', async () => {
-    linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`, 'In Progress'));
-    const runner = mkRunner({
-      enqueueIssues: vi.fn(async () => ({ queued: [], rejected: [{ id: '1', reason: 'stopping' as const }] })),
-    });
-    await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
     expect(linear.updateIssueState).not.toHaveBeenCalled();
-  });
-
-  it('surfaces a failed rollback in the item reason instead of hiding it', async () => {
-    linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`));
-    linear.updateIssueState.mockImplementation(async (_id: string, state: string) => state === 'In Progress');
-    const runner = mkRunner({
-      enqueueIssues: vi.fn(async () => ({ queued: [], rejected: [{ id: '1', reason: 'stopping' as const }] })),
-    });
-    const result = await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
-    expect(result.items[0].reason).toMatch(/manual state reset needed/);
   });
 
   it('rejects an empty issue list and a missing project path upfront', async () => {
@@ -311,17 +279,16 @@ describe('dispatchWork', () => {
     expect(linear.updateIssueState).not.toHaveBeenCalled();
   });
 
-  it('skips an issue whose Linear claim fails instead of queueing unprotected work (review finding)', async () => {
+  it('does not depend on a tracker state write before queueing', async () => {
     linear.getIssue.mockImplementation(async (id: string) => todoIssue(id, `INT-${id}`));
     linear.updateIssueState.mockResolvedValue(false);
     const runner = mkRunner();
     const result = await dispatchWork(runner, { issueIds: ['1'], projectPath: '/tmp/repo' });
-    expect(result.queued).toBe(0);
-    expect(result.items[0]).toMatchObject({ status: 'skipped' });
-    expect(result.items[0].reason).toMatch(/failed to claim/);
-    // Nothing reached the scheduler beyond the empty config-probe batch.
+    expect(result.queued).toBe(1);
+    expect(result.items[0]).toMatchObject({ status: 'queued' });
     const realBatches = vi.mocked(runner.enqueueIssues).mock.calls.filter(([tasks]) => tasks.length > 0);
-    expect(realBatches).toHaveLength(0);
+    expect(realBatches).toHaveLength(1);
+    expect(linear.updateIssueState).not.toHaveBeenCalled();
   });
 
   it('reports duplicate issue ids in one request as skipped duplicates, not phantom queues (review finding)', async () => {

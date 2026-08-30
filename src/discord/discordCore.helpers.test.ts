@@ -4,8 +4,10 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { clampDiscordText, getChatHistory, questionCorrelationIdFrom, saveChatHistory, startTypingIndicator } from './discordCore.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 afterEach(() => {
+  resetHumanSurfaceReadOnlyForTests();
   vi.useRealTimers();
   vi.restoreAllMocks();
   delete process.env.OPENSWARM_CHAT_HISTORY_FILE;
@@ -49,6 +51,15 @@ describe('Discord outbound bounds', () => {
     clearInterval(timer);
     expect(sendTyping.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(warn).toHaveBeenCalled();
+  });
+
+  it('does not emit typing activity in strict mode', async () => {
+    const sendTyping = vi.fn(async () => {});
+    enableHumanSurfaceReadOnly();
+    const timer = startTypingIndicator({ sendTyping }, 10);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    clearTimeout(timer);
+    expect(sendTyping).not.toHaveBeenCalled();
   });
 });
 

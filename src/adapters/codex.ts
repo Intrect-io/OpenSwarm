@@ -21,6 +21,7 @@ import { getCodexModelIds } from './codexModels.js';
 import { codexMcpConfigArgs } from './memoryMcp.js';
 import { codexUserMcpDisableArgs } from './codexUserMcp.js';
 import { extractSummary, parseReviewerResult } from './resultParsing.js';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,6 +46,7 @@ export class CodexCliAdapter implements CliAdapter {
   };
 
   async isAvailable(): Promise<boolean> {
+    if (isHumanSurfaceReadOnlyEnabled()) return false;
     try {
       await execFileAsync('which', ['codex']);
       return true;
@@ -59,6 +61,7 @@ export class CodexCliAdapter implements CliAdapter {
    * falling back to the local ~/.codex sources and a curated default list.
    */
   async listModels(): Promise<string[]> {
+    if (isHumanSurfaceReadOnlyEnabled()) return [];
     let accessToken: string | undefined;
     try {
       const store = new AuthProfileStore();

@@ -9,7 +9,7 @@ import { t, getPrompts } from '../locale/index.js';
 import type { WorkerContext } from '../locale/types.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
 import type { ToolDefinition } from '../adapters/tools.js';
-import { getAdapter, getDefaultAdapterName, spawnCli } from '../adapters/index.js';
+import { getAdapter, getDefaultAdapterName, probeAdapterAvailability, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
@@ -27,12 +27,14 @@ import {
   type AdapterRoutePolicy,
 } from '../coordination/routingPolicy.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
+import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
 
 // Types
 
 export interface WorkerOptions {
   taskTitle: string;
   taskDescription: string;
+  authoritativeOperatorFeedback?: string;
   projectPath: string;
   previousFeedback?: string;   // Previous feedback from Reviewer (for revisions)
   timeoutMs?: number;
@@ -122,42 +124,12 @@ export function loadWorkerRepoRules(projectPath: string): string {
   return sections.length > 0 ? `\n\n${sections.join('\n\n')}` : '';
 }
 
-/** Keep Git as the sole changed-file authority and enforce planner scope. */
-/**
- * Does `file` test `scoped`?
- *
- * A task scoped to `src/support/web.ts` whose completion criteria demand tests
- * has nowhere to put them: the test file is outside the declared scope, the
- * worker is rejected for writing it, and the retry writes it again. That
- * contradiction burned every iteration of a real run without ever reaching the
- * reviewer.
- *
- * The allowance is deliberately narrow — same directory, same base name, a
- * `.test`/`.spec` suffix, same extension — so it admits the tests for a file
- * the worker may already rewrite, and nothing else.
- */
-function isTestForScopedFile(file: string, scoped: string): boolean {
-  const match = scoped.match(/^(.*?)([^/]+)\.([cm]?[jt]sx?)$/);
-  if (!match) return false;
-  const [, dir, base, ext] = match;
-  const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // [^/] keeps the infix inside the same directory: `.+` would let
-  // `src/a.x/evil/deep.test.ts` ride on a scope of `src/a.ts`.
-  return new RegExp(`^${escape(dir)}${escape(base)}(\\.[^/]+)?\\.(test|spec)\\.${escape(ext)}$`).test(file);
-}
-
 export function reconcileWorkerFiles(
   gitChangedFiles: string[],
   fileScope: string[] = [],
 ): { filesChanged: string[]; outsideScope: string[] } {
   const filesChanged = [...gitChangedFiles];
-  const scope = fileScope.map((file) => file.replace(/^\.\//, '').replace(/\/$/, ''));
-  const inScope = (file: string): boolean => scope.some((allowed) =>
-    file === allowed
-    || file.startsWith(`${allowed}/`)
-    || isTestForScopedFile(file, allowed));
-  const outsideScope = scope.length === 0 ? [] : filesChanged.filter((file) => !inScope(file));
-  return { filesChanged, outsideScope };
+  return { filesChanged, outsideScope: filesOutsideWriteScope(filesChanged, fileScope) };
 }
 
 /** jobProfile effort → bash timeout. Heavier tasks get longer verification budgets. */
@@ -209,6 +181,7 @@ function buildWorkerPrompt(options: WorkerOptions): string {
   return getPrompts().buildWorkerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
+    authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
     previousFeedback: options.previousFeedback,
     context: options.workerContext,
   });
@@ -237,7 +210,7 @@ async function planWorkerAdapters(primary: AdapterName, policy?: AdapterRoutePol
   const candidates = new Set<AdapterName>(policy.fallbacks ?? []);
   candidates.delete(primary);
   if (isRouteReasonAllowed(policy, 'capability')) candidates.add(primary);
-  for (const candidate of candidates) available[candidate] = await getAdapter(candidate).isAvailable();
+  for (const candidate of candidates) available[candidate] = await probeAdapterAvailability(getAdapter(candidate));
   return planAdapterAttempts({ policy, primary, available });
 }
 
@@ -412,8 +385,14 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     if (raw.blockedOnOperator) {
       parsedResult.success = false;
       parsedResult.blockedOnOperator = true;
+      parsedResult.operatorQuestionCorrelationIds = raw.operatorQuestionCorrelationIds;
       parsedResult.haltReason = parsedResult.haltReason
         ?? 'Blocked on an operator decision (ask_human posted to Discord)';
+    }
+    if (raw.executionOutcomeUnknown) {
+      parsedResult.success = false;
+      parsedResult.executionOutcomeUnknown = true;
+      parsedResult.haltReason = 'OUTCOME_UNKNOWN_DO_NOT_RETRY: inspect the quarantined worktree before resuming';
     }
 
     // Backfill usage measured by the adapter's own loop (codex-responses/gpt/

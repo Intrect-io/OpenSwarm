@@ -164,6 +164,73 @@ describe('RunLedger tracker observation cache (AGT-4127)', () => {
 });
 
 describe('RunLedger operator re-admission (AGT-4033)', () => {
+  it('parks the first unanswered attempt and resumes after restart only for its exact correlation set', async () => {
+    const dbPath = createDbPath();
+    const previousDb = process.env.OPENSWARM_AUTOMATION_DB;
+    process.env.OPENSWARM_AUTOMATION_DB = dbPath;
+    const trace = await import('../coordination/coordinationTrace.js');
+    trace.resetTraceDbForTests();
+    const { CoordinationStore } = await import('../coordination/coordinationStore.js');
+    const store = new CoordinationStore(resolve(dbPath, '../coordination.json'));
+    let ledger: RunLedger | undefined = new RunLedger(dbPath);
+    try {
+      register(ledger, 'AX-1075');
+      const parkedAttempt = claim(ledger, 'AX-1075', 'daemon');
+      expect(ledger.transition(parkedAttempt, 'RETRY_AT', {
+        retryAt: 99_000,
+        errorCode: 'waiting_on_operator',
+      }, 2_100)).toBe(true);
+      for (const correlationId of ['hq-attempt-5', 'hq-attempt-9']) {
+        await store.publish({
+          repository: '/repo', taskId: 'AX-1075', actor: 'worker', recipient: 'human',
+          kind: 'human-question', status: 'waiting', correlationId, summary: `question ${correlationId}`,
+        });
+      }
+
+      expect(ledger.markNeedsHumanForQuestions(
+        'AX-1075', ['hq-attempt-5', 'hq-attempt-9', 'hq-attempt-5'], 'waiting for operator', 2_200,
+      )).toBe(true);
+      expect(ledger.getRun('AX-1075')).toMatchObject({
+        state: 'NEEDS_HUMAN', attemptNo: 1, lastErrorCode: 'operator_question', retryAt: undefined,
+      });
+      // The generic Linear/operator path may not bypass exact answer fencing.
+      expect(ledger.resumeNeedsHuman('AX-1075', 2_300)).toBeNull();
+
+      await store.publish({
+        repository: '/repo', taskId: 'AX-1075', actor: 'operator', recipient: 'worker',
+        kind: 'human-answer', status: 'completed', correlationId: 'hq-attempt-5',
+        summary: 'answered first', detail: 'Use monthly_cutoff; do not create due_date.',
+      });
+      // An unrelated answered question cannot stand in for attempt-9.
+      await store.publish({
+        repository: '/repo', taskId: 'AX-1075', actor: 'worker', recipient: 'human',
+        kind: 'human-question', status: 'waiting', correlationId: 'hq-unrelated', summary: 'unrelated',
+      });
+      await store.publish({
+        repository: '/repo', taskId: 'AX-1075', actor: 'operator', recipient: 'worker',
+        kind: 'human-answer', status: 'completed', correlationId: 'hq-unrelated', summary: 'answered unrelated',
+      });
+
+      ledger.close();
+      ledger = new RunLedger(dbPath); // daemon restart
+      expect(ledger.resumeNeedsHumanForQuestions('AX-1075', 3_000)).toBeNull();
+      expect(ledger.getRun('AX-1075')?.state).toBe('NEEDS_HUMAN');
+
+      await store.publish({
+        repository: '/repo', taskId: 'AX-1075', actor: 'operator', recipient: 'worker',
+        kind: 'human-answer', status: 'completed', correlationId: 'hq-attempt-9',
+        summary: 'answered retry', detail: 'Use monthly_cutoff; do not create due_date.',
+      });
+      expect(ledger.resumeNeedsHumanForQuestions('AX-1075', 3_100)).toBe('READY');
+      expect(ledger.getRun('AX-1075')).toMatchObject({ state: 'READY', attemptNo: 1 });
+    } finally {
+      ledger?.close();
+      if (previousDb === undefined) delete process.env.OPENSWARM_AUTOMATION_DB;
+      else process.env.OPENSWARM_AUTOMATION_DB = previousDb;
+      trace.resetTraceDbForTests();
+    }
+  });
+
   it('will not claim a run whose retry time has not come', () => {
     // This is why letting an answered task past the heartbeat filter is not
     // enough on its own: it would be selected every cycle and then fail to claim.
@@ -756,6 +823,25 @@ describe('RunLedger claim and fencing races', () => {
 
     expect(ledger.getMetrics(2_100).openCircuits).toBe(0);
     expect(ledger.claimRun('ADAPTER-2', {
+      ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
+      maxActiveForProject: 2, maxFailuresPerHour: 1,
+    })).not.toBeNull();
+    ledger.close();
+  });
+
+  it('does not count a transient admission deferral as a repository failure', () => {
+    const ledger = new RunLedger(createDbPath());
+    for (const id of ['DEFERRED-1', 'DEFERRED-2']) register(ledger, id, '/busy-repo');
+    const held = claim(ledger, 'DEFERRED-1', 'daemon', 2_000, 2);
+    expect(ledger.recordAttemptResult(held, {
+      success: false,
+      finalStatus: 'deferred',
+      maxFailuresPerHour: 1,
+      circuitCooldownMs: 60_000,
+    }, 2_100)).toBe(true);
+
+    expect(ledger.getMetrics(2_100).openCircuits).toBe(0);
+    expect(ledger.claimRun('DEFERRED-2', {
       ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
       maxActiveForProject: 2, maxFailuresPerHour: 1,
     })).not.toBeNull();

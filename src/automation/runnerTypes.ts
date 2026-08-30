@@ -14,8 +14,6 @@ export interface AutonomousConfig {
   heartbeatSchedule: string;
   autoExecute: boolean;
   discordChannelId?: string;
-  maxConsecutiveTasks: number;
-  cooldownSeconds: number;
   dryRun: boolean;
   /** Treat Linear Backlog as a work queue (legacy). Default false = Backlog parked (R5). */
   includeBacklog?: boolean;
@@ -34,6 +32,9 @@ export interface AutonomousConfig {
    */
   autonomousHeartbeat?: boolean;
   maxConcurrentTasks?: number;
+  /** Move unowned In Progress issues back to Backlog after this many idle hours. */
+  stalledInProgressHours?: number;
+  /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   defaultRoles?: DefaultRolesConfig;
   projectAgents?: ProjectAgentConfig[];
@@ -51,8 +52,6 @@ export interface AutonomousConfig {
   securityAudit?: SecurityAuditConfig;
   /** Max objective self-repair attempts (lint/bs/test) before giving up (default: 3) */
   maxReflections?: number;
-  /** Cooldown between task completions in ms (default: 1800000 = 30min) */
-  interTaskCooldownMs?: number;
   jobProfiles?: JobProfile[];
   /** Durable execution ledger rollout mode. Production default: primary. */
   automationLedgerMode?: 'off' | 'shadow' | 'primary';

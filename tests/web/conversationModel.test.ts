@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error - plain ESM module served to the browser
-import { buildChatLines, buildThreads, chatLineOf, isUtterance, latestAddressable, metadataPairs, openQuestionFor, taskLabelOf, threadFor } from '../../web/static/js/conversationModel.mjs';
+import { buildChatLines, buildChatThreads, buildThreads, chatLineOf, isAgentMessage, isSystemEvent, isUtterance, latestAddressable, metadataPairs, openQuestionFor, taskLabelOf, threadFor } from '../../web/static/js/conversationModel.mjs';
 
 function event(overrides: Record<string, unknown> = {}) {
   return {
@@ -153,6 +153,27 @@ describe('buildChatLines', () => {
       event({ id: 'first', seq: 1 }),
     ]);
     expect(lines.map((line: { id: string }) => line.id)).toEqual(['first', 'later']);
+  });
+});
+
+describe('buildChatThreads', () => {
+  it('groups the same durable exchange and keeps its messages chronological', () => {
+    const threads = buildChatThreads([
+      event({ id: 'done', seq: 8, kind: 'review-run', status: 'failed', summary: '196.2초 만에 통과하지 못함' }),
+      event({ id: 'start', seq: 7, kind: 'review-run', status: 'running', summary: '검토 시작' }),
+      event({ id: 'chat', seq: 2, correlationId: 'chat-1', summary: '작업을 시작합니다' }),
+    ]);
+    expect(threads.map((thread: { correlationId: string }) => thread.correlationId)).toEqual(['chat-1', 'c1']);
+    expect(threads[1].channel).toBe('system');
+    expect(threads[1].lines.map((line: { id: string }) => line.id)).toEqual(['start', 'done']);
+  });
+
+  it('classifies explicit control-plane kinds without hiding them', () => {
+    const system = event({ kind: 'mcp-audit' });
+    expect(isSystemEvent(system)).toBe(true);
+    expect(isAgentMessage(system)).toBe(false);
+    expect(isUtterance(system)).toBe(true);
+    expect(buildChatThreads([system])[0].lines).toHaveLength(1);
   });
 });
 

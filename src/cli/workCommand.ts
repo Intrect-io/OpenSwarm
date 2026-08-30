@@ -18,6 +18,7 @@ import { buildBranchName } from '../support/branchNaming.js';
 import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
+import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { linearIssueToTask } from '../orchestration/decisionEngine.js';
@@ -42,6 +43,7 @@ import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js'
 import { hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { fileScopesConflict, resolveTaskFileScope } from '../orchestration/conflictDetector.js';
+import { buildConflictFreeWaves as partitionConflictFreeWaves } from '../orchestration/conflictAdmission.js';
 import { ensureTaskSource } from './reviewCommand.js';
 import { filterRepoIssues, selectIssuesInteractive, WORK_SKIP_STATES } from './workSelect.js';
 import {
@@ -154,14 +156,10 @@ interface PlanRow {
  * reported as superseded instead of running in the next safe wave.
  */
 export function buildConflictFreeWaves<T extends { task: TaskItem }>(rows: readonly T[]): T[][] {
-  const waves: T[][] = [];
-  for (const row of rows) {
-    const wave = waves.find((candidate) => candidate.every((peer) =>
-      !fileScopesConflict(row.task.fileScope, peer.task.fileScope)));
-    if (wave) wave.push(row);
-    else waves.push([row]);
-  }
-  return waves;
+  return partitionConflictFreeWaves(
+    rows,
+    (left, right) => fileScopesConflict(left.task.fileScope, right.task.fileScope),
+  );
 }
 
 export interface WorkIssueSummary {
@@ -206,7 +204,20 @@ export function summarizeSettled(
       status: 'superseded',
       success: false,
       worktreePreserved: false,
-      note: 'owned by another process (daemon or another session), or its circuit is open',
+      note: 'owned by another process (daemon or another session), or awaiting reconciliation',
+    };
+  }
+  if (result.finalStatus === 'deferred') {
+    return {
+      ...base,
+      status: 'deferred',
+      success: false,
+      // The pipeline never started, so no cleanup ran. Any resumable worktree
+      // remains untouched for the later durable retry.
+      worktreePreserved: true,
+      note: result.retryAt
+        ? `durable admission deferred until ${new Date(result.retryAt).toISOString()}`
+        : 'durable admission deferred',
     };
   }
   const delivered = result.success && result.finalStatus === 'approved';
@@ -306,6 +317,12 @@ async function runWorkCommandInner(
     log(`Could not load config: ${err instanceof Error ? err.message : String(err)}`);
     return WORK_EXIT_NOT_RUN;
   }
+  // The normal CLI preAction and loadConfig() both activate this boundary.
+  // Apply it from the resolved config here as well so an embedded caller that
+  // supplies WorkCommandDeps.loadConfig cannot bypass the same execution
+  // contract. Enabling remains monotonic; a false value never downgrades an
+  // already strict process.
+  if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
 
   const source = await (deps.ensureTaskSource ?? ensureTaskSource)();
   if (!source) {
@@ -432,6 +449,7 @@ async function runWorkCommandInner(
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      url: issue.url,
       description: issue.description,
       priority: issue.priority,
       state: issue.state,

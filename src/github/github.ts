@@ -32,39 +32,48 @@ export function isBlockingConclusion(conclusion: string): boolean {
   return BLOCKING_CONCLUSIONS.has(conclusion.toLowerCase());
 }
 
-function normalizePRCheck(c: any): { name: string; status: string; conclusion: string } {
-  const bucket = String(c.bucket ?? '').toLowerCase();
-  const state = String(c.state ?? '').toLowerCase();
+export type PRCheck = { name: string; status: string; conclusion: string };
 
-  switch (bucket || state) {
+function normalizePRCheck(c: any): PRCheck {
+  const name = String(c.name ?? c.context ?? 'unknown');
+  const bucket = String(c.bucket ?? '').toLowerCase();
+  const state = String(c.state ?? c.status ?? '').toLowerCase();
+  const conclusion = String(c.conclusion ?? '').toLowerCase();
+  // `gh pr checks` supplies bucket+state. `gh pr view`'s statusCheckRollup
+  // instead supplies status+conclusion for CheckRun entries and state for
+  // StatusContext entries. Prefer a completed check's conclusion so both
+  // surfaces normalize to the same durable shape.
+  const signal = bucket || (state === 'completed' ? conclusion : state) || conclusion;
+
+  switch (signal) {
     case 'pass':
     case 'success':
-      return { name: c.name, status: 'completed', conclusion: 'success' };
+      return { name, status: 'completed', conclusion: 'success' };
     case 'fail':
     case 'failure':
     case 'startup_failure':
-      return { name: c.name, status: 'completed', conclusion: 'failure' };
+      return { name, status: 'completed', conclusion: 'failure' };
     case 'timed_out':
-      return { name: c.name, status: 'completed', conclusion: 'timed_out' };
+      return { name, status: 'completed', conclusion: 'timed_out' };
     case 'pending':
     case 'queued':
     case 'in_progress':
     case 'requested':
     case 'waiting':
-      return { name: c.name, status: 'pending', conclusion: 'pending' };
+      return { name, status: 'pending', conclusion: 'pending' };
     case 'action_required':
-      return { name: c.name, status: 'completed', conclusion: 'action_required' };
+      return { name, status: 'completed', conclusion: 'action_required' };
     case 'stale':
-      return { name: c.name, status: 'completed', conclusion: 'stale' };
+      return { name, status: 'completed', conclusion: 'stale' };
     case 'skipping':
     case 'skipped':
     case 'neutral':
-      return { name: c.name, status: 'completed', conclusion: 'skipped' };
+      return { name, status: 'completed', conclusion: 'skipped' };
     case 'cancel':
     case 'cancelled':
-      return { name: c.name, status: 'completed', conclusion: 'cancelled' };
+      return { name, status: 'completed', conclusion: 'cancelled' };
     default:
-      return { name: c.name, status: state || 'unknown', conclusion: state || 'unknown' };
+      return { name, status: state || 'unknown', conclusion: conclusion || state || 'unknown' };
   }
 }
 
@@ -233,7 +242,7 @@ export async function getFailedJobLogs(
 export async function getPRChecks(
   repo: string,
   prNumber: number
-): Promise<{ name: string; status: string; conclusion: string }[]> {
+): Promise<PRCheck[]> {
   try {
     const stdout = await ghExec('pr', 'checks', String(prNumber), '-R', repo, '--json', 'name,state,bucket');
     const checks = JSON.parse(stdout);
@@ -241,6 +250,45 @@ export async function getPRChecks(
   } catch (err) {
     console.error(`Failed to get PR checks for ${repo}#${prNumber}:`, err);
     return [];
+  }
+}
+
+export type PRCISnapshot =
+  | { identity: 'known'; headSha: string; checks: PRCheck[] }
+  | { identity: 'unknown'; reason: 'head_unavailable' | 'checks_unavailable' };
+
+/**
+ * Read the PR head and its check rollup in one GitHub observation.
+ *
+ * Fetching `headRefOid` separately from `gh pr checks` leaves a race where the
+ * branch advances between the two commands and a green result for head A is
+ * attributed to head B. `statusCheckRollup` keeps identity and evidence in the
+ * same response, and malformed or unavailable identity stays explicitly
+ * unknown instead of degrading to an empty (eventually successful) check set.
+ */
+export async function getPRCISnapshot(repo: string, prNumber: number): Promise<PRCISnapshot> {
+  try {
+    const stdout = await ghExec(
+      'pr', 'view', String(prNumber), '-R', repo,
+      '--json', 'headRefOid,statusCheckRollup',
+    );
+    const view = JSON.parse(stdout) as {
+      headRefOid?: unknown;
+      statusCheckRollup?: unknown;
+    };
+    const headSha = typeof view.headRefOid === 'string' ? view.headRefOid.trim() : '';
+    if (!headSha) return { identity: 'unknown', reason: 'head_unavailable' };
+    if (!Array.isArray(view.statusCheckRollup)) {
+      return { identity: 'unknown', reason: 'checks_unavailable' };
+    }
+    return {
+      identity: 'known',
+      headSha,
+      checks: view.statusCheckRollup.map(normalizePRCheck),
+    };
+  } catch (err) {
+    console.error(`Failed to get PR CI snapshot for ${repo}#${prNumber}:`, err);
+    return { identity: 'unknown', reason: 'head_unavailable' };
   }
 }
 
@@ -529,6 +577,8 @@ export type PRInfo = {
   isFork?: boolean;
   /** Target branch when the listing surface requested it. */
   baseBranch?: string;
+  /** Immutable identity of the head observed by the listing surface. */
+  headSha?: string;
 };
 
 export type PRMergeability = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
@@ -582,7 +632,7 @@ export async function getOpenPRs(repo: string, limit = 30): Promise<PRInfo[]> {
 export async function getOpenPRsOrThrow(repo: string, limit = 30): Promise<PRInfo[]> {
   const stdout = await ghExec(
     'pr', 'list', '-R', repo, '--state', 'open', '--limit', String(limit),
-    '--json', 'number,title,headRefName,baseRefName,createdAt,url,author,isCrossRepository'
+    '--json', 'number,title,headRefName,baseRefName,headRefOid,createdAt,url,author,isCrossRepository'
   );
   const prs = JSON.parse(stdout);
   return prs.map((pr: any) => ({
@@ -595,6 +645,7 @@ export async function getOpenPRsOrThrow(repo: string, limit = 30): Promise<PRInf
     author: pr.author?.login,
     isFork: !!pr.isCrossRepository,
     baseBranch: pr.baseRefName,
+    headSha: pr.headRefOid || undefined,
   }));
 }
 
@@ -640,7 +691,7 @@ export async function getMergedPRsOrThrow(repo: string, limit = 100): Promise<PR
 export async function getPRContext(repo: string, prNumber: number): Promise<PRDetails | null> {
   try {
     const [viewStdout, diffStdout, checks] = await Promise.all([
-      ghExec('pr', 'view', String(prNumber), '-R', repo, '--json', 'title,headRefName,createdAt,url,body,author'),
+      ghExec('pr', 'view', String(prNumber), '-R', repo, '--json', 'title,headRefName,headRefOid,createdAt,url,body,author'),
       ghExecLarge('pr', 'diff', String(prNumber), '-R', repo),
       getPRChecks(repo, prNumber),
     ]);
@@ -658,6 +709,7 @@ export async function getPRContext(repo: string, prNumber: number): Promise<PRDe
       number: prNumber,
       title: view.title,
       branch: view.headRefName,
+      headSha: view.headRefOid || undefined,
       createdAt: view.createdAt,
       url: view.url,
       body: view.body || '',
@@ -877,39 +929,74 @@ export async function getPRMergeability(repo: string, prNumber: number): Promise
  * CI status result
  */
 export type CIStatus =
-  | { status: 'pending' }
-  | { status: 'success' }
-  | { status: 'failure'; failedChecks: { name: string; conclusion: string }[] };
+  | { status: 'pending'; headSha: string }
+  | { status: 'success'; headSha: string }
+  | { status: 'failure'; headSha: string; failedChecks: { name: string; conclusion: string }[] }
+  | {
+      status: 'unknown';
+      reason: 'head_unavailable' | 'expected_head_unavailable' | 'head_mismatch' | 'checks_unavailable';
+      expectedHeadSha?: string;
+      observedHeadSha?: string;
+    };
 
 /**
  * Check current CI status for a PR
  */
-export async function checkPRCIStatus(repo: string, prNumber: number): Promise<CIStatus> {
-  try {
-    const checks = await getPRChecks(repo, prNumber);
-
-    if (checks.length === 0) {
-      return { status: 'pending' };
-    }
-
-    const pending = checks.some(c => c.status === 'in_progress' || c.status === 'queued' || c.status === 'pending');
-    if (pending) {
-      return { status: 'pending' };
-    }
-
-    const failed = checks.filter(c => isBlockingConclusion(c.conclusion));
-    if (failed.length > 0) {
-      return {
-        status: 'failure',
-        failedChecks: failed.map(c => ({ name: c.name, conclusion: c.conclusion }))
-      };
-    }
-
-    return { status: 'success' };
-  } catch (err) {
-    console.error(`[GitHub] Failed to check PR CI status for ${repo}#${prNumber}:`, err);
-    return { status: 'pending' };
+export async function checkPRCIStatus(
+  repo: string,
+  prNumber: number,
+  expectedHeadSha?: string,
+): Promise<CIStatus> {
+  const expected = expectedHeadSha?.trim();
+  if (expectedHeadSha !== undefined && !expected) {
+    return { status: 'unknown', reason: 'expected_head_unavailable' };
   }
+
+  const snapshot = await getPRCISnapshot(repo, prNumber);
+  if (snapshot.identity === 'unknown') {
+    return { status: 'unknown', reason: snapshot.reason, expectedHeadSha: expected };
+  }
+  if (expected && snapshot.headSha !== expected) {
+    return {
+      status: 'unknown',
+      reason: 'head_mismatch',
+      expectedHeadSha: expected,
+      observedHeadSha: snapshot.headSha,
+    };
+  }
+
+  const { checks, headSha } = snapshot;
+  if (checks.length === 0) {
+    return { status: 'pending', headSha };
+  }
+
+  const pending = checks.some(c => c.status === 'in_progress' || c.status === 'queued' || c.status === 'pending');
+  if (pending) {
+    return { status: 'pending', headSha };
+  }
+
+  const failed = checks.filter(c => isBlockingConclusion(c.conclusion));
+  if (failed.length > 0) {
+    return {
+      status: 'failure',
+      headSha,
+      failedChecks: failed.map(c => ({ name: c.name, conclusion: c.conclusion }))
+    };
+  }
+
+  const indeterminate = checks.some(
+    c => c.conclusion !== 'success' && c.conclusion !== 'skipped',
+  );
+  if (indeterminate) {
+    return {
+      status: 'unknown',
+      reason: 'checks_unavailable',
+      expectedHeadSha: expected,
+      observedHeadSha: headSha,
+    };
+  }
+
+  return { status: 'success', headSha };
 }
 
 /**
@@ -925,30 +1012,46 @@ export async function waitForCICompletion(
   options: {
     timeoutMs?: number;
     pollIntervalMs?: number;
+    /** Exact published commit this wait is allowed to accept. */
+    expectedHeadSha?: string;
     onProgress?: (status: CIStatus, elapsed: number) => void;
   } = {}
 ): Promise<CIStatus> {
   const timeoutMs = options.timeoutMs ?? 600_000; // 10 minutes default
   const pollIntervalMs = options.pollIntervalMs ?? 30_000; // 30 seconds default
   const startTime = Date.now();
+  let expectedHeadSha = options.expectedHeadSha?.trim();
+  let lastPending: Extract<CIStatus, { status: 'pending' }> | undefined;
 
   while (true) {
     const elapsed = Date.now() - startTime;
 
     if (elapsed >= timeoutMs) {
       console.log(`[GitHub] CI timeout for ${repo}#${prNumber} (${elapsed}ms)`);
-      return { status: 'pending' };
+      return lastPending ?? {
+        status: 'unknown',
+        reason: expectedHeadSha ? 'head_unavailable' : 'expected_head_unavailable',
+        expectedHeadSha,
+      };
     }
 
-    const status = await checkPRCIStatus(repo, prNumber);
+    const status = await checkPRCIStatus(repo, prNumber, expectedHeadSha);
+
+    // Legacy callers that did not provide an expected SHA are pinned to the
+    // first head they actually observe. A later push can no longer replace a
+    // pending head A with a green head B inside the same wait.
+    if (!expectedHeadSha && status.status !== 'unknown') {
+      expectedHeadSha = status.headSha;
+    }
 
     if (options.onProgress) {
       options.onProgress(status, elapsed);
     }
 
-    if (status.status === 'success' || status.status === 'failure') {
+    if (status.status !== 'pending') {
       return status;
     }
+    lastPending = status;
 
     // Wait before next poll
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs));

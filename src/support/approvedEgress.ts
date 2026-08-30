@@ -38,7 +38,7 @@ export function prepareApprovedModelRequest(endpoint: string, payload: unknown):
  */
 export function approvedLocalModelEndpoint(
   baseUrl: string,
-  path: '/v1/models' | '/v1/chat/completions' | '/v1/responses',
+  path: '/v1/models' | '/v1/chat/completions' | '/v1/responses' | '/cc-router/health',
 ): string {
   let base: URL;
   try {

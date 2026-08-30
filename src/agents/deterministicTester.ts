@@ -7,10 +7,64 @@ import type { VerifyConfig } from '../core/types.js';
 import type { VerifyCommand } from '../verify/manifest.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
+import { getSandboxExecutorConfig } from '../sandboxExecutor/runtime.js';
+import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 
 const VERIFY_INPUTS = ['.openswarm/verify.yaml'];
+
+class VerifySecurityError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(`verify-security: ${message}`, options);
+    this.name = 'VerifySecurityError';
+  }
+}
+
+async function strictVerifySandbox(projectPath: string): Promise<{
+  sessionFactory?: (workspace: string) => Promise<SandboxExecutorSession>;
+  scratchRoot?: string;
+}> {
+  if (!isHumanSurfaceReadOnlyEnabled()) return {};
+  const config = getSandboxExecutorConfig();
+  if (!config) {
+    return {
+      sessionFactory: async () => {
+        throw new Error('strict sandbox executor is not configured');
+      },
+    };
+  }
+  let project: string;
+  let roots: string[];
+  try {
+    project = await realpath(projectPath);
+    roots = await Promise.all(config.allowedRoots.map((root) => realpath(root)));
+  } catch (error) {
+    throw new VerifySecurityError('strict sandbox root attestation failed', {
+      cause: error,
+    });
+  }
+  const scratchRoot = roots
+    .filter((root) => {
+      const rel = relative(root, project);
+      return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+    })
+    .sort((left, right) => right.length - left.length)[0];
+  if (!scratchRoot) {
+    return {
+      sessionFactory: async () => {
+        throw new Error('project is not beneath a strict sandbox executor root');
+      },
+    };
+  }
+  const client = new SandboxExecutorClient(config);
+  return {
+    scratchRoot,
+    sessionFactory: (workspace) => client.createSession(workspace),
+  };
+}
 
 export async function captureVerifyInputFingerprint(projectPath: string): Promise<string> {
   const hash = createHash('sha256');
@@ -75,9 +129,16 @@ export async function runDeterministicTester(
   const base = await resolveBaseRef(projectPath).catch((error) => {
     throw new Error(`verify-runner: failed to resolve base ref: ${error instanceof Error ? error.message : String(error)}`);
   });
+  const strictSandbox = await strictVerifySandbox(projectPath);
   const evidence = await runVerify({
     projectPath, commands, baseRef: base.ref, trustedPackageJsonByDirectory: plan.packageJsonByDirectory,
+    sandboxExecutorSessionFactory: strictSandbox.sessionFactory,
+    sandboxScratchRoot: strictSandbox.scratchRoot,
   });
+  const security = evidence.find((item) => item.securityFailure);
+  if (security) {
+    throw new VerifySecurityError(`${security.command.name} could not run inside the attested companion: ${security.rawOutputTail}`);
+  }
   const infra = evidence.find((item) => item.headStatus === 'infra'
     || (item.headStatus === 'fail' && item.baseStatus === 'infra'));
   if (infra) {
@@ -116,6 +177,7 @@ export async function runTesterWithVerification(options: {
       );
       if (deterministic) return deterministic;
     } catch (error) {
+      if (error instanceof VerifySecurityError) throw error;
       if (!isInfraError(error)) throw error;
       options.onInfra?.(error);
     }

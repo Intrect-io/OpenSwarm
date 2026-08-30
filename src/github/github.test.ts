@@ -17,7 +17,7 @@ vi.mock('node:child_process', () => ({
   spawn: vi.fn(),
 }));
 
-import { checkPRCIStatus, getActiveFailures, getAllFailedRuns, getOpenPRs, getOpenPRsOrThrow, getPRChecks } from './github.js';
+import { checkPRCIStatus, getActiveFailures, getAllFailedRuns, getOpenPRs, getOpenPRsOrThrow, getPRChecks, waitForCICompletion } from './github.js';
 
 function mockGhJson(value: unknown): void {
   execFileMock.mockImplementationOnce((...args: unknown[]) => {
@@ -54,27 +54,102 @@ describe('getPRChecks', () => {
   });
 
   it('reports failed PR CI when gh classifies a check in the fail bucket', async () => {
-    mockGhJson([
-      { name: 'unit', state: 'SUCCESS', bucket: 'pass' },
-      { name: 'lint', state: 'FAILURE', bucket: 'fail' },
-    ]);
+    mockGhJson({
+      headRefOid: 'head-a',
+      statusCheckRollup: [
+        { name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        { name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' },
+      ],
+    });
 
     await expect(checkPRCIStatus('owner/repo', 42)).resolves.toEqual({
       status: 'failure',
+      headSha: 'head-a',
       failedChecks: [{ name: 'lint', conclusion: 'failure' }],
     });
   });
 
   it('treats every blocking conclusion as a failed PR status', async () => {
-    mockGhJson([
-      { name: 'cancel', state: 'CANCELLED', bucket: 'cancel' },
-      { name: 'approval', state: 'ACTION_REQUIRED', bucket: 'action_required' },
-      { name: 'stale', state: 'STALE', bucket: 'stale' },
-    ]);
+    mockGhJson({
+      headRefOid: 'head-a',
+      statusCheckRollup: [
+        { name: 'cancel', status: 'COMPLETED', conclusion: 'CANCELLED' },
+        { name: 'approval', status: 'COMPLETED', conclusion: 'ACTION_REQUIRED' },
+        { name: 'stale', status: 'COMPLETED', conclusion: 'STALE' },
+      ],
+    });
     const result = await checkPRCIStatus('owner/repo', 42);
     expect(result.status).toBe('failure');
     if (result.status === 'failure') {
       expect(result.failedChecks.map((check) => check.conclusion)).toEqual(['cancelled', 'action_required', 'stale']);
+    }
+  });
+
+  it('binds a successful observation to the exact PR head', async () => {
+    mockGhJson({
+      headRefOid: 'head-a',
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    });
+
+    await expect(checkPRCIStatus('owner/repo', 42, 'head-a')).resolves.toEqual({
+      status: 'success',
+      headSha: 'head-a',
+    });
+    expect(execFileMock.mock.calls[0][1]).toContain('headRefOid,statusCheckRollup');
+  });
+
+  it('does not let successful checks from head A satisfy expected head B', async () => {
+    mockGhJson({
+      headRefOid: 'head-a',
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    });
+
+    await expect(checkPRCIStatus('owner/repo', 42, 'head-b')).resolves.toEqual({
+      status: 'unknown',
+      reason: 'head_mismatch',
+      expectedHeadSha: 'head-b',
+      observedHeadSha: 'head-a',
+    });
+  });
+
+  it('fails closed when GitHub does not identify the observed head', async () => {
+    mockGhJson({
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    });
+
+    await expect(checkPRCIStatus('owner/repo', 42, 'head-a')).resolves.toEqual({
+      status: 'unknown',
+      reason: 'head_unavailable',
+      expectedHeadSha: 'head-a',
+    });
+  });
+
+  it('pins an unbound wait to head A and refuses a later green head B', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGhJson({
+        headRefOid: 'head-a',
+        statusCheckRollup: [{ name: 'unit', status: 'IN_PROGRESS', conclusion: null }],
+      });
+      mockGhJson({
+        headRefOid: 'head-b',
+        statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      });
+
+      const resultPromise = waitForCICompletion('owner/repo', 42, {
+        timeoutMs: 1_000,
+        pollIntervalMs: 10,
+      });
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(resultPromise).resolves.toEqual({
+        status: 'unknown',
+        reason: 'head_mismatch',
+        expectedHeadSha: 'head-a',
+        observedHeadSha: 'head-b',
+      });
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
@@ -229,18 +304,18 @@ describe('getOpenPRs / getOpenPRsOrThrow (INT-3282)', () => {
 
   it('getOpenPRsOrThrow maps PR fields correctly, including isFork from isCrossRepository', async () => {
     mockGhJson([
-      { number: 9, title: 'Ship it', headRefName: 'feat/x', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9', author: { login: 'someone' }, isCrossRepository: false },
-      { number: 10, title: 'Fork contribution', headRefName: 'patch-1', createdAt: '2026-08-06T00:00:00.000Z', url: 'https://example/pr/10', author: { login: 'contributor' }, isCrossRepository: true },
+      { number: 9, title: 'Ship it', headRefName: 'feat/x', headRefOid: 'head-9', createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9', author: { login: 'someone' }, isCrossRepository: false },
+      { number: 10, title: 'Fork contribution', headRefName: 'patch-1', headRefOid: 'head-10', createdAt: '2026-08-06T00:00:00.000Z', url: 'https://example/pr/10', author: { login: 'contributor' }, isCrossRepository: true },
     ]);
     const prs = await getOpenPRsOrThrow('owner/repo');
     expect(prs).toEqual([
       {
         repo: 'owner/repo', number: 9, title: 'Ship it', branch: 'feat/x',
-        createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9', author: 'someone', isFork: false,
+        createdAt: '2026-08-05T00:00:00.000Z', url: 'https://example/pr/9', author: 'someone', isFork: false, headSha: 'head-9',
       },
       {
         repo: 'owner/repo', number: 10, title: 'Fork contribution', branch: 'patch-1',
-        createdAt: '2026-08-06T00:00:00.000Z', url: 'https://example/pr/10', author: 'contributor', isFork: true,
+        createdAt: '2026-08-06T00:00:00.000Z', url: 'https://example/pr/10', author: 'contributor', isFork: true, headSha: 'head-10',
       },
     ]);
   });

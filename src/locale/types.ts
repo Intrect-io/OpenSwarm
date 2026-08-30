@@ -519,6 +519,7 @@ export interface PromptTemplates {
   buildWorkerPrompt: (opts: {
     taskTitle: string;
     taskDescription: string;
+    authoritativeOperatorFeedback?: string;
     previousFeedback?: string;
     context?: WorkerContext;
   }) => string;
@@ -526,6 +527,7 @@ export interface PromptTemplates {
     taskTitle: string;
     taskDescription: string;
     workerReport: string;
+    authoritativeOperatorFeedback?: string;
     /** Execution-grounded definition of done the reviewer hard-gates on (INT-1914). */
     completionCriteria?: string[];
     /** Pre-rendered deterministic harness evidence; empty when verification is unavailable. */
@@ -550,6 +552,7 @@ export interface PromptTemplates {
     taskDescription: string;
     projectName: string;
     targetMinutes: number;
+    authoritativeOperatorFeedback?: string;
     impactAnalysis?: {
       directModules: string[];
       dependentModules: string[];

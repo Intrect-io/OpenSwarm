@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
@@ -7,6 +7,10 @@ import type { ExecutionContext } from '../automation/runnerExecution.js';
 import type { ExecutionDurabilityHooks } from '../automation/durableRunCoordinator.js';
 import type { EffectClaim, EffectInput } from '../automation/runLedger.js';
 import type { RepoMetadata } from '../support/repoMetadata.js';
+import {
+  resetHumanSurfaceReadOnlyForTests,
+  isHumanSurfaceReadOnlyEnabled,
+} from '../mcp/humanSurfacePolicy.js';
 import {
   buildConflictFreeWaves,
   buildWorkAdmission,
@@ -20,6 +24,8 @@ import {
   type WorkCommandDeps,
   type WorkCoordinator,
 } from './workCommand.js';
+
+afterEach(() => resetHumanSurfaceReadOnlyForTests());
 
 function issue(overrides: Partial<LinearIssueInfo> = {}): LinearIssueInfo {
   return {
@@ -305,6 +311,19 @@ describe('runWorkCommand — direct issue ids (INT-3387)', () => {
 });
 
 describe('runWorkCommand — bootstrap validation', () => {
+  it('activates the strict boundary from an injected config loader', async () => {
+    const deps = baseDeps({
+      loadConfig: () => ({
+        autonomous: { maxConcurrentTasks: 1 },
+        humanSurfaceReadOnly: { enabled: true },
+      }) as SwarmConfig,
+    });
+
+    expect(isHumanSurfaceReadOnlyEnabled()).toBe(false);
+    await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    expect(isHumanSurfaceReadOnlyEnabled()).toBe(true);
+  });
+
   it('exits 2 for a non-project path', async () => {
     const deps = baseDeps({ isValidProjectPath: async () => false });
     expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/nope', yes: true }, deps))
@@ -575,6 +594,18 @@ describe('runWorkCommand — exit code matrix', () => {
     expect(code).toBe(WORK_EXIT_OK);
     expect(deps.outs.join('\n')).toContain('owned by another process');
   });
+
+  it('deferred (no current owner) remains incomplete → 1', async () => {
+    const deps = baseDeps();
+    deps.exec.mockResolvedValue(pipelineResult({
+      success: false,
+      finalStatus: 'deferred',
+      retryAt: Date.now() + 30_000,
+    }));
+    const code = await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_FAILED);
+    expect(deps.outs.join('\n')).toContain('durable admission deferred until');
+  });
 });
 
 describe('runWorkCommand — options plumbing', () => {
@@ -772,6 +803,15 @@ describe('pure helpers', () => {
     });
     expect(summary.note).toContain('owned by another process');
     expect(summary.worktreePreserved).toBe(false);
+  });
+
+  it('summarizeSettled exposes a transient durable-admission deferral', () => {
+    const retryAt = Date.parse('2026-09-01T00:00:00.000Z');
+    const summary = summarizeSettled(row, {
+      value: pipelineResult({ success: false, finalStatus: 'deferred', retryAt }),
+    });
+    expect(summary).toMatchObject({ status: 'deferred', success: false, worktreePreserved: true });
+    expect(summary.note).toContain('2026-09-01T00:00:00.000Z');
   });
 
   it('formatWorkSummary renders one aligned row per issue', () => {

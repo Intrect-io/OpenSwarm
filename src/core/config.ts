@@ -10,6 +10,8 @@ import YAML from 'yaml';
 import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResolverConfig, McpConfig } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 import { c, status } from '../support/colors.js';
+import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { configureSandboxExecutor } from '../sandboxExecutor/runtime.js';
 
 // Constants
 
@@ -309,10 +311,12 @@ const AutonomousConfigSchema = z.object({
   workerTimeoutMs: z.number().min(0).default(0),
   /** Reviewer timeout (ms). 0/unset = pipeline per-stage ceiling (not unlimited). */
   reviewerTimeoutMs: z.number().min(0).default(0),
-  /** Max concurrent tasks. The daemon fills every available slot, up to 32. */
-  maxConcurrentTasks: z.number().int().min(1).max(32).default(32),
+  /** Operator-controlled global task capacity. Safety comes from scopes and leases, not a hidden low cap. */
+  maxConcurrentTasks: z.number().int().min(1).max(256).default(64),
+  /** Retire stale tracker claims so In Progress means a worker actually owns the task. */
+  stalledInProgressHours: z.number().min(1).max(168).default(6),
   /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
-  maxConcurrentPerProject: z.number().int().min(1).max(32).optional(),
+  maxConcurrentPerProject: z.number().int().min(1).max(256).optional(),
   /** SQLite execution-truth rollout. primary is fail-closed; shadow only observes. */
   automationLedgerMode: z.enum(['off', 'shadow', 'primary']).default('primary'),
   automationDbPath: z.string().min(1).optional(),
@@ -340,8 +344,6 @@ const AutonomousConfigSchema = z.object({
   securityAudit: SecurityAuditConfigSchema,
   /** Max objective self-repair attempts (lint/bs/test) before giving up */
   maxReflections: z.number().min(1).max(10).default(3),
-  /** Cooldown between task completions in ms (default: 1800000 = 30min) */
-  interTaskCooldownMs: z.number().min(0).default(1800000),
   coordinationBoardIssueId: z.string().min(1).optional(),
   mcpPolicies: z.record(z.string(), z.object({
     servers: z.array(z.string()).default([]),
@@ -400,7 +402,6 @@ const ConflictResolverConfigSchema = z.object({
 const PRProcessorConfigSchema = z.object({
   enabled: z.boolean().default(false),
   schedule: z.string().default('*/15 * * * *'),
-  cooldownHours: z.number().default(6),
   maxIterations: z.number().min(1).max(10).default(3),
   maxRetries: z.number().min(1).max(10).optional(),
   ciTimeoutMs: z.number().positive().optional(),
@@ -427,12 +428,40 @@ const NotificationsSchema = z.object({
   webhookUrl: z.string().optional(),
 }).optional();
 
+const SandboxExecutorConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  socketPath: z.string().refine(
+    (value) => resolve(value) === value && value.startsWith('/run/openswarm-sandbox/'),
+    'Must be a normalized absolute path under /run/openswarm-sandbox',
+  ).default('/run/openswarm-sandbox/executor.sock'),
+  allowedRoots: z.array(z.string().refine((value) => {
+    const canonical = resolve(value);
+    return canonical === value && (canonical === '/work' || canonical.startsWith('/work/'));
+  }, 'Must be /work or a normalized descendant of /work')).min(1).default(['/work']),
+  connectTimeoutMs: z.number().int().min(100).max(10_000).default(1_000),
+  maxRequestBytes: z.number().int().min(4 * 1024).max(1024 * 1024).default(64 * 1024),
+  maxOutputBytes: z.number().int().min(1024).max(4 * 1024 * 1024).default(512 * 1024),
+  maxTimeoutMs: z.number().int().min(1_000).max(60 * 60_000).default(15 * 60_000),
+  maxConcurrent: z.number().int().min(1).max(64).default(8),
+}).optional();
+
+const HumanSurfaceReadOnlySchema = z.object({
+  /**
+   * Strict mode blocks arbitrary agent programs and all OpenSwarm-owned
+   * Slack/Discord/Telegram/webhook sends.  Local web chat remains available.
+   */
+  enabled: z.boolean().default(false),
+  sandboxExecutor: SandboxExecutorConfigSchema,
+}).default({ enabled: false });
+
 // MCP server entry: stdio (`command`/`args`/`env`) or remote (`url`/`headers`).
 // Mirrors the ~/.openswarm/mcp.json shape so config.yaml is a single source. (INT-1949)
 const McpServerSchema = z
   .object({
     /** Reference a built-in preset (e.g. `linear`) instead of command/url. (INT-1952) */
     preset: z.string().optional(),
+    /** Explicit trust-domain label; `human` makes unknown actions fail closed. */
+    surface: z.enum(['human', 'devops', 'data', 'sandbox', 'unknown']).optional(),
     command: z.string().optional(),
     args: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
@@ -468,6 +497,7 @@ const RawConfigSchema = z.object({
   language: z.enum(['en', 'ko']).default('en'),
   discord: DiscordConfigSchema,
   notifications: NotificationsSchema,
+  humanSurfaceReadOnly: HumanSurfaceReadOnlySchema,
   linear: LinearConfigSchema,
   github: GitHubConfigSchema,
   timeWindow: TimeWindowConfigSchema,
@@ -628,6 +658,12 @@ function transformConfig(raw: RawConfig): SwarmConfig {
           webhookUrl: raw.notifications.webhookUrl,
         }
       : undefined,
+    humanSurfaceReadOnly: {
+      enabled: raw.humanSurfaceReadOnly.enabled,
+      ...(raw.humanSurfaceReadOnly.sandboxExecutor ? {
+        sandboxExecutor: { ...raw.humanSurfaceReadOnly.sandboxExecutor },
+      } : {}),
+    },
     linearApiKey: raw.linear?.apiKey ?? '',
     linearTeamId: raw.linear?.teamId ?? '',
     agents: raw.agents.map(agent => ({
@@ -668,6 +704,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       workerTimeoutMs: raw.autonomous.workerTimeoutMs,
       reviewerTimeoutMs: raw.autonomous.reviewerTimeoutMs,
       maxConcurrentTasks: raw.autonomous.maxConcurrentTasks,
+      stalledInProgressHours: raw.autonomous.stalledInProgressHours,
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
       automationLedgerMode: raw.autonomous.automationLedgerMode,
       automationDbPath: raw.autonomous.automationDbPath ? expandPath(raw.autonomous.automationDbPath) : undefined,
@@ -702,7 +739,6 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,
       maxReflections: raw.autonomous.maxReflections,
-      interTaskCooldownMs: raw.autonomous.interTaskCooldownMs,
       // jobProfiles was validated by the schema but dropped here, so per-task
       // model selection silently fell back to defaultRoles. Carry it through.
       jobProfiles: raw.autonomous.jobProfiles,
@@ -716,7 +752,6 @@ function transformConfig(raw: RawConfig): SwarmConfig {
     prProcessor: raw.prProcessor ? {
       enabled: raw.prProcessor.enabled,
       schedule: raw.prProcessor.schedule,
-      cooldownHours: raw.prProcessor.cooldownHours,
       maxIterations: raw.prProcessor.maxIterations,
       maxRetries: raw.prProcessor.maxRetries,
       ciTimeoutMs: raw.prProcessor.ciTimeoutMs,
@@ -790,6 +825,16 @@ export function loadConfig(customPath?: string): SwarmConfig {
 
   // 5. Transform to SwarmConfig
   const config = transformConfig(parseResult.data);
+
+  // Enabling is process-lifetime monotonic. Utility callers also load config
+  // (MCP discovery, telemetry, provider lookup); a later lookup resolving a
+  // different/default file must never silently downgrade an active boundary.
+  // Disabling therefore requires a process restart with enabled:false.
+  if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
+  if (config.humanSurfaceReadOnly?.enabled === true
+      && config.humanSurfaceReadOnly.sandboxExecutor?.enabled === true) {
+    configureSandboxExecutor(config.humanSurfaceReadOnly.sandboxExecutor);
+  }
 
   // 6. Apply time window config
   if (config.timeWindow) {
@@ -881,6 +926,22 @@ notifications:
   # telegramBotToken: \${TELEGRAM_BOT_TOKEN:-}
   # telegramChatId: \${TELEGRAM_CHAT_ID:-}
   # webhookUrl: \${NOTIFY_WEBHOOK_URL:-}
+
+# Fail closed on writes to human-facing collaboration surfaces. Delegated CLIs
+# and diagnostics remain disabled. Native bash requires the separately deployed
+# network-none companion and exact health/contract attestation; any failure
+# leaves bash hidden. Approved typed DevOps/data MCP writes remain available.
+humanSurfaceReadOnly:
+  enabled: false
+  sandboxExecutor:
+    enabled: false
+    socketPath: /run/openswarm-sandbox/executor.sock
+    allowedRoots: [/work]
+    connectTimeoutMs: 1000
+    maxRequestBytes: 65536
+    maxOutputBytes: 524288
+    maxTimeoutMs: 900000
+    maxConcurrent: 8
 
 # Task source: when the linear block below is unset, OpenSwarm falls back to a
 # local SQLite issue store (~/.openswarm/issues.db) — no external account needed.

@@ -18,6 +18,11 @@ import {
 } from './runLedger.js';
 import type { TrackerTerminalState } from './runLedgerTrackerCache.js';
 import { pickPipelineFailureDetail } from './runnerState.js';
+import {
+  normalizeOperatorQuestionCorrelations,
+  OPERATOR_QUESTION_PARK_REASON,
+} from '../coordination/operatorAnswers.js';
+import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -71,12 +76,18 @@ export interface OutboxDrainResult {
   dead: number;
 }
 
-function nonExecutingResult(task: TaskItem, projectPath: string, reason: string): PipelineResult {
+function nonExecutingResult(
+  task: TaskItem,
+  projectPath: string,
+  reason: string,
+  disposition: { status: 'deferred'; retryAt: number } | { status: 'superseded' },
+): PipelineResult {
   return {
     success: false,
     sessionId: `durable-admission-${Date.now()}`,
     stages: [],
-    finalStatus: 'superseded',
+    finalStatus: disposition.status,
+    retryAt: disposition.status === 'deferred' ? disposition.retryAt : undefined,
     totalDuration: 0,
     iterations: 0,
     taskContext: {
@@ -99,6 +110,7 @@ function fencedResult(result: PipelineResult): PipelineResult {
 
 export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): number {
   if (result.finalStatus === 'rate_limited') return result.rateLimitResetsAt ?? now + 60_000;
+  if (result.finalStatus === 'deferred') return Math.max(now + 1_000, result.retryAt ?? 0);
   if (result.finalStatus === 'superseded') {
     // A first overlap can disappear quickly, but a still-open PR or persistent
     // file-scope conflict should not burn a fresh Draft/worker admission every
@@ -163,7 +175,13 @@ function holdsLiveLease(run: Pick<RunRecord, 'leaseExpiresAt'>, now: number): bo
 }
 
 export function runRecordToTask(run: RunRecord): TaskItem {
-  const metadata = (run.metadata ?? {}) as { projectId?: string; projectName?: string; fileScope?: string[] };
+  const metadata = (run.metadata ?? {}) as {
+    projectId?: string;
+    projectName?: string;
+    fileScope?: string[];
+    fileScopeSource?: TaskItem['fileScopeSource'];
+    explicitDispatch?: boolean;
+  };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
   return {
     id: run.issueId,
@@ -180,6 +198,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
       ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
       : undefined,
     fileScope: metadata.fileScope,
+    fileScopeSource: metadata.fileScopeSource,
+    explicitDispatch: metadata.explicitDispatch === true,
     createdAt: run.discoveredAt,
   };
 }
@@ -380,8 +400,21 @@ export class DurableRunCoordinator {
     return this.ledger?.markNeedsHuman(issueId, reason, now) ?? false;
   }
 
+  markNeedsHumanForQuestions(
+    issueId: string,
+    correlationIds: readonly string[],
+    reason: string,
+    now = Date.now(),
+  ): boolean {
+    return this.ledger?.markNeedsHumanForQuestions(issueId, correlationIds, reason, now) ?? false;
+  }
+
   resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
     return this.ledger?.resumeNeedsHuman(issueId, now) ?? null;
+  }
+
+  resumeNeedsHumanForQuestions(issueId: string, now = Date.now()): RunState | null {
+    return this.ledger?.resumeNeedsHumanForQuestions(issueId, now) ?? null;
   }
 
   importLegacyRun(input: ImportRunInput, now = Date.now()): { record: RunRecord; imported: boolean } | null {
@@ -401,6 +434,8 @@ export class DurableRunCoordinator {
         projectId: task.linearProject?.id,
         projectName: task.linearProject?.name,
         fileScope: task.fileScope,
+        fileScopeSource: task.fileScopeSource,
+        explicitDispatch: task.explicitDispatch === true,
       },
     }, now);
 
@@ -450,20 +485,44 @@ export class DurableRunCoordinator {
     if (!claim) {
       if (this.isPrimary) {
         const now = Date.now();
+        const existing = this.ledger.getRun(issueId);
+        // A future RETRY_AT can carry a more specific contract (for example an
+        // operator wait). Preserve both its reason and its deadline instead of
+        // rewriting it as a generic 30-second admission conflict.
+        if (existing?.state === 'RETRY_AT' && existing.retryAt != null && existing.retryAt > now) {
+          return nonExecutingResult(task, projectPath, 'durable retry deadline has not arrived', {
+            status: 'deferred',
+            retryAt: existing.retryAt,
+          });
+        }
         const circuitOpenUntil = this.ledger.getCircuitOpenUntil(issueId, now);
-        this.ledger.deferUnclaimedRun(
+        const retryAt = Math.max(now + 30_000, circuitOpenUntil ?? 0);
+        const didDefer = this.ledger.deferUnclaimedRun(
           issueId,
-          Math.max(now + 30_000, circuitOpenUntil ?? 0),
+          retryAt,
           'Durable claim unavailable (repository admission, circuit, budget, or concurrent owner)',
           now,
         );
-        return nonExecutingResult(task, projectPath, 'durable claim unavailable');
+        const parked = this.ledger.getRun(issueId);
+        // A repository slot/budget/circuit refusal parks this task in RETRY_AT:
+        // it still owns queued work and must be retried. An already-running copy
+        // of this same issue or NEEDS_RECONCILE instead means this invocation is
+        // genuinely superseded and must not create a duplicate scheduler entry.
+        if (didDefer && parked?.state === 'RETRY_AT') {
+          return nonExecutingResult(task, projectPath, 'durable claim unavailable', {
+            status: 'deferred',
+            retryAt: parked.retryAt ?? retryAt,
+          });
+        }
+        return nonExecutingResult(task, projectPath, 'durable claim unavailable', { status: 'superseded' });
       }
       return executor(this.noopHooks(), new AbortController().signal);
     }
 
     if (!this.ledger.transition(claim, 'EXECUTING')) {
-      if (this.isPrimary) return nonExecutingResult(task, projectPath, 'claim fence rejected');
+      if (this.isPrimary) {
+        return nonExecutingResult(task, projectPath, 'claim fence rejected', { status: 'superseded' });
+      }
       return executor(this.noopHooks(), new AbortController().signal);
     }
 
@@ -635,6 +694,33 @@ export class DurableRunCoordinator {
       }
       if (!options.successEffect) this.ledger.finalizeSyncedRun(issueId, now);
       return result;
+    }
+
+    if (result.finalStatus === 'waiting_on_operator') {
+      if (result.workerResult?.executionOutcomeUnknown) {
+        const reason = 'Sandbox command outcome unknown; inspect the preserved worktree and explicitly redispatch to resume';
+        return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+          errorCode: SANDBOX_OUTCOME_UNKNOWN_PARK_REASON,
+          errorMessage: reason,
+          eventKind: 'sandbox_outcome_quarantined',
+          eventData: { reason, sessionId: result.sessionId },
+        }, now) ? result : fencedResult(result);
+      }
+      const correlationIds = normalizeOperatorQuestionCorrelations(
+        result.workerResult?.operatorQuestionCorrelationIds ?? [],
+      );
+      if (correlationIds.length > 0) {
+        const reason = `Waiting for operator answer (${correlationIds.join(', ')})`;
+        return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+          errorCode: OPERATOR_QUESTION_PARK_REASON,
+          errorMessage: reason,
+          eventKind: 'operator_question_parked',
+          eventData: { reason, correlationIds },
+        }, now) ? result : fencedResult(result);
+      }
+      // Old/non-native adapters may identify the wait without returning the
+      // durable tool correlation. Do not invent a broad resume condition: the
+      // default RETRY_AT below is the fail-closed compatibility path.
     }
 
     let target: RunState;

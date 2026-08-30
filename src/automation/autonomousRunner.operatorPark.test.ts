@@ -64,7 +64,7 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     ]);
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'off',
     });
     const internal = runner as unknown as InternalRunner;
@@ -92,7 +92,7 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     // automation database a process has is declared.
     getRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'off', automationDbPath: configured,
     });
 
@@ -183,7 +183,7 @@ describe('operator park on the run ledger (AGT-4033)', () => {
 
     const runner = new AutonomousRunner({
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
-      autoExecute: true, maxConsecutiveTasks: 1, cooldownSeconds: 0, dryRun: true,
+      autoExecute: true, dryRun: true,
       automationLedgerMode: 'primary', automationDbPath: dbPath,
     });
     const internal = runner as unknown as InternalRunner;

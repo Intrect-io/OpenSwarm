@@ -45,7 +45,7 @@ export type SubIssueResult = { id: string; identifier: string; title: string } |
 
 /** Explicit tracker lookup used only for stale durable-run reconciliation. */
 export type TrackerIssueLookup =
-  | { ok: true; issue: { state: string; stateType?: string } | null }
+  | { ok: true; issue: { state: string; stateType?: string; updatedAt?: number } | null }
   | { ok: false; error: string };
 
 /** Minimal issue identity used by cache-first supervisor tracker tools. */
@@ -106,7 +106,13 @@ export class LinearTaskSource implements ITaskSource {
     return {
       ok: true,
       issue: result.issue
-        ? { state: result.issue.state, stateType: result.issue.stateType }
+        ? {
+            state: result.issue.state,
+            stateType: result.issue.stateType,
+            updatedAt: result.issue.updatedAt == null
+              ? undefined
+              : new Date(result.issue.updatedAt).getTime(),
+          }
         : null,
     };
   }
@@ -182,6 +188,7 @@ export function issueToTask(issue: Issue): TaskItem {
     parentId: issue.parentId,
     estimatedMinutes: issue.estimateMinutes,
     createdAt: new Date(issue.createdAt).getTime(),
+    trackerUpdatedAt: new Date(issue.updatedAt).getTime(),
   };
 }
 

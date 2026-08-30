@@ -53,35 +53,35 @@ describe('classifyBlocker (INT-3282)', () => {
       hasConflicts: true,
       changesRequestedCount: 1,
       criticalCommentCount: 0,
-      ci: { status: 'failure', failedChecks: [{ name: 't', conclusion: 'failure' }] },
+      ci: { status: 'failure', headSha: 'head-a', failedChecks: [{ name: 't', conclusion: 'failure' }] },
     })).toBe('conflicts');
 
     expect(classifyBlocker({
       hasConflicts: false,
       changesRequestedCount: 1,
       criticalCommentCount: 0,
-      ci: { status: 'failure', failedChecks: [{ name: 't', conclusion: 'failure' }] },
+      ci: { status: 'failure', headSha: 'head-a', failedChecks: [{ name: 't', conclusion: 'failure' }] },
     })).toBe('comments');
 
     expect(classifyBlocker({
       hasConflicts: false,
       changesRequestedCount: 0,
       criticalCommentCount: 0,
-      ci: { status: 'failure', failedChecks: [{ name: 't', conclusion: 'failure' }] },
+      ci: { status: 'failure', headSha: 'head-a', failedChecks: [{ name: 't', conclusion: 'failure' }] },
     })).toBe('ci');
 
     expect(classifyBlocker({
       hasConflicts: false,
       changesRequestedCount: 0,
       criticalCommentCount: 0,
-      ci: { status: 'pending' },
+      ci: { status: 'pending', headSha: 'head-a' },
     })).toBe('pending_ci');
 
     expect(classifyBlocker({
       hasConflicts: false,
       changesRequestedCount: 0,
       criticalCommentCount: 0,
-      ci: { status: 'success' },
+      ci: { status: 'success', headSha: 'head-a' },
     })).toBe('none');
   });
 });
@@ -120,14 +120,15 @@ describe('formatPrStatus (INT-3282)', () => {
       url: 'https://example/pr/1',
       mergeable: true,
       hasConflicts: false,
-      ci: { status: 'success' },
+      ci: { status: 'success', headSha: 'head-a' },
       changesRequested: [],
       criticalComments: [],
       blocker: 'none',
       mergeReady: true,
     };
     expect(formatPrStatus(ready)).toMatch(/ready:\s+yes/);
-    expect(formatPrStatus({ ...ready, blocker: 'ci', mergeReady: false, ci: { status: 'failure', failedChecks: [{ name: 'lint', conclusion: 'failure' }] } }))
+    expect(formatPrStatus(ready)).toMatch(/head:\s+head-a/);
+    expect(formatPrStatus({ ...ready, blocker: 'ci', mergeReady: false, ci: { status: 'failure', headSha: 'head-a', failedChecks: [{ name: 'lint', conclusion: 'failure' }] } }))
       .toMatch(/FAIL \(lint\)/);
   });
 });
@@ -147,7 +148,7 @@ function mkDeps(over: Partial<PrCommandDeps> = {}): PrCommandDeps {
       ...resolved,
       mergeable: true,
       hasConflicts: false,
-      ci: { status: 'success' as const },
+      ci: { status: 'success' as const, headSha: 'head-a' },
       changesRequested: [],
       criticalComments: [],
       blocker: 'none' as const,
@@ -283,7 +284,7 @@ describe('runPrCommand (INT-3282)', () => {
         ...resolved,
         mergeable: false,
         hasConflicts: true,
-        ci: { status: 'pending' as const },
+        ci: { status: 'pending' as const, headSha: 'head-a' },
         changesRequested: [],
         criticalComments: [],
         blocker: 'conflicts' as const,
@@ -525,7 +526,7 @@ describe('runPrCommand (INT-3282)', () => {
             ...resolved,
             mergeable: true,
             hasConflicts: false,
-            ci: { status: 'failure' as const, failedChecks: [{ name: 'test', conclusion: 'failure' }] },
+            ci: { status: 'failure' as const, headSha: 'head-a', failedChecks: [{ name: 'test', conclusion: 'failure' }] },
             changesRequested: [],
             criticalComments: [],
             blocker: 'ci' as const,
@@ -536,7 +537,7 @@ describe('runPrCommand (INT-3282)', () => {
           ...resolved,
           mergeable: true,
           hasConflicts: false,
-          ci: { status: 'success' as const },
+          ci: { status: 'success' as const, headSha: 'head-a' },
           changesRequested: [],
           criticalComments: [],
           blocker: 'none' as const,
@@ -560,7 +561,7 @@ describe('runPrCommand (INT-3282)', () => {
           ...resolved,
           mergeable: false,
           hasConflicts: false,
-          ci: { status: 'pending' as const },
+          ci: { status: 'pending' as const, headSha: 'head-a' },
           changesRequested: [],
           criticalComments: [],
           blocker: calls === 1 ? ('pending_ci' as const) : ('none' as const),
@@ -574,6 +575,31 @@ describe('runPrCommand (INT-3282)', () => {
     expect(result.exitCode).toBe(0);
   });
 
+  it('watch fails closed without running a fix when CI head identity is unknown', async () => {
+    const deps = mkDeps({
+      gatherStatus: vi.fn(async () => ({
+        ...resolved,
+        mergeable: false,
+        hasConflicts: false,
+        ci: {
+          status: 'unknown' as const,
+          reason: 'head_mismatch' as const,
+          expectedHeadSha: 'head-b',
+          observedHeadSha: 'head-a',
+        },
+        changesRequested: [],
+        criticalComments: [],
+        blocker: 'unknown_ci' as const,
+        mergeReady: false,
+      })),
+    });
+
+    const result = await runPrCommand('watch', { rounds: 3 }, deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/CI head identity is unknown/);
+    expect(deps.fixOne).not.toHaveBeenCalled();
+  });
+
   it('watch reports a blocked message with exit 1 when the fix pass fails', async () => {
     const deps = mkDeps({
       fixOne: vi.fn(async () => ({ success: false, error: 'still red', iterations: 1 })),
@@ -581,7 +607,7 @@ describe('runPrCommand (INT-3282)', () => {
         ...resolved,
         mergeable: false,
         hasConflicts: false,
-        ci: { status: 'failure' as const, failedChecks: [{ name: 'test', conclusion: 'failure' }] },
+        ci: { status: 'failure' as const, headSha: 'head-a', failedChecks: [{ name: 'test', conclusion: 'failure' }] },
         changesRequested: [],
         criticalComments: [],
         blocker: 'ci' as const,
@@ -599,7 +625,7 @@ describe('runPrCommand (INT-3282)', () => {
         ...resolved,
         mergeable: false,
         hasConflicts: false,
-        ci: { status: 'failure' as const, failedChecks: [{ name: 'test', conclusion: 'failure' }] },
+        ci: { status: 'failure' as const, headSha: 'head-a', failedChecks: [{ name: 'test', conclusion: 'failure' }] },
         changesRequested: [],
         criticalComments: [],
         blocker: 'ci' as const,
@@ -623,7 +649,9 @@ describe('runPrCommand (INT-3282)', () => {
           ...resolved,
           mergeable: calls > 1,
           hasConflicts: false,
-          ci: { status: calls > 1 ? ('success' as const) : ('failure' as const), failedChecks: calls > 1 ? undefined : [{ name: 'test', conclusion: 'failure' }] },
+          ci: calls > 1
+            ? { status: 'success' as const, headSha: 'head-b' }
+            : { status: 'failure' as const, headSha: 'head-a', failedChecks: [{ name: 'test', conclusion: 'failure' }] },
           changesRequested: [],
           criticalComments: [],
           blocker: calls > 1 ? ('none' as const) : ('ci' as const),

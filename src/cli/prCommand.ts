@@ -128,7 +128,6 @@ export function buildProcessorConfig(
   return {
     repos: [],
     schedule: '0 0 1 1 *', // unused for one-shot
-    cooldownHours: 0,
     maxIterations: opts.maxIterations ?? 3,
     maxRetries: opts.maxRetries ?? 3,
     roles,
@@ -391,6 +390,14 @@ export async function runPrCommand(
             pollIntervalMs: 30_000,
           });
           continue;
+        }
+
+        if (status.blocker === 'unknown_ci') {
+          return {
+            message: `Blocked: CI head identity is unknown for ${resolved.repo}#${resolved.number}\n${resolved.url}`,
+            exitCode: 1,
+            status,
+          };
         }
 
         // conflicts / comments / ci → one fix pass

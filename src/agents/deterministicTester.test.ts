@@ -1,12 +1,23 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
+import {
+  captureVerifyInputFingerprint,
+  loadTrustedVerifyPlan,
+  runDeterministicTester,
+  runTesterWithVerification,
+} from './deterministicTester.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
+import { configureSandboxExecutor, resetSandboxExecutorForTests } from '../sandboxExecutor/runtime.js';
+import { DEFAULT_SANDBOX_EXECUTOR_LIMITS } from '../sandboxExecutor/protocol.js';
 
 let root: string | undefined;
 
 afterEach(async () => {
+  resetHumanSurfaceReadOnlyForTests();
+  resetSandboxExecutorForTests();
   if (root) await rm(root, { recursive: true, force: true });
   root = undefined;
 });
@@ -58,5 +69,30 @@ describe('deterministic verification trust inputs', () => {
 
     const plan = await loadTrustedVerifyPlan(root, { enabled: true, blockOnNewFailures: true, maxCommands: 4 });
     expect(plan.packageJsonByDirectory).toEqual({ 'packages/api': nestedPackage });
+  });
+
+  it('keeps strict companion failures blocking when ordinary test regressions are non-blocking', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-strict-'));
+    const repo = join(root, 'repo');
+    await mkdir(repo);
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+    await writeFile(join(repo, 'README.md'), 'base\n');
+    execFileSync('git', ['-C', repo, 'add', 'README.md']);
+    execFileSync('git', ['-C', repo, 'commit', '-m', 'base'], { stdio: 'pipe' });
+    enableHumanSurfaceReadOnly();
+    configureSandboxExecutor({
+      ...DEFAULT_SANDBOX_EXECUTOR_LIMITS,
+      socketPath: join(root, 'missing.sock'),
+      allowedRoots: [root],
+      connectTimeoutMs: 50,
+    });
+
+    await expect(runDeterministicTester(
+      repo,
+      { enabled: true, blockOnNewFailures: false, maxCommands: 1 },
+      [{ name: 'strict-check', run: 'printf host-fallback-would-pass', kind: 'test', timeoutMs: 1_000 }],
+    )).rejects.toThrow(/verify-security:.*strict-check.*sandbox unavailable/);
   });
 });

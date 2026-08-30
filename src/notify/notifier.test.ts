@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EmbedBuilder } from 'discord.js';
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]) }));
 import { createNotifier, messageToText } from './notifier.js';
+import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 // These suites cover parsing and backend selection, not the socket layer, so
 // route publicFetch onto the global fetch they stub. The real implementation —
@@ -13,6 +14,7 @@ vi.mock('../support/outboundUrl.js', async (importOriginal) => {
 
 
 afterEach(() => {
+  resetHumanSurfaceReadOnlyForTests();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -87,5 +89,25 @@ describe('createNotifier — channel selection', () => {
   it('defaults to Noop when no config and no discord sender', async () => {
     const n = createNotifier(undefined);
     await expect(n.notify('x')).resolves.toBeUndefined();
+  });
+
+  it('fail-closes Discord, Slack, Telegram, and generic webhook senders when strict policy is enabled', async () => {
+    const send = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const notifiers = [
+      createNotifier({ channel: 'discord' }, send),
+      createNotifier({ channel: 'slack', slackWebhookUrl: 'https://hooks.slack/x' }),
+      createNotifier({ channel: 'telegram', telegramBotToken: 'TKN', telegramChatId: '42' }),
+      createNotifier({ channel: 'webhook', webhookUrl: 'https://example.com/human-hook' }),
+    ];
+
+    // Toggle after construction as well: an already registered notifier must
+    // not retain a latent sender when a config reload tightens the boundary.
+    enableHumanSurfaceReadOnly();
+    await Promise.all(notifiers.map((notifier) => notifier.notify('must not leave the process')));
+
+    expect(send).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

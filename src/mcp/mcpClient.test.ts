@@ -62,6 +62,17 @@ describe('loadRegistry', () => {
     expect(reg.fs).toEqual({ transport: 'stdio', command: 'npx', args: ['-y', 'server-filesystem', '/tmp'], env: { A: '1' } });
   });
 
+  it('preserves an explicit trust-domain surface label', () => {
+    const p = writeMcpJson({
+      mcpServers: { communications: { command: 'company-mcp', surface: 'human' } },
+    });
+    expect(loadRegistry(p).communications).toMatchObject({
+      transport: 'stdio',
+      command: 'company-mcp',
+      surface: 'human',
+    });
+  });
+
   it('normalizes a remote entry (url → http; sse honored)', () => {
     const p = writeMcpJson({
       mcpServers: {
@@ -154,6 +165,13 @@ describe('resolveMcpTools (INT-1951)', () => {
       }),
     ).toEqual([]);
   });
+
+  it('filters human-surface mutations from provided and discovered adapter tools', async () => {
+    const safe = { ...tool, function: { ...tool.function, name: 'slack__list_channels' } };
+    const write = { ...tool, function: { ...tool.function, name: 'slack__chat_postMessage' } };
+    expect(await resolveMcpTools([safe, write])).toEqual([safe]);
+    expect(await resolveMcpTools(undefined, async () => [safe, write])).toEqual([safe]);
+  });
 });
 
 describe('initMcpTools / callMcpTool regressions', () => {
@@ -195,6 +213,185 @@ describe('initMcpTools / callMcpTool regressions', () => {
     await initMcpTools(registry);
     clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'done' }] });
     await expect(callMcpTool('svc__ok', {})).resolves.toEqual({ content: 'done', isError: false });
+  });
+
+  it('denies a human-surface mutation at dispatch even when a hidden call bypasses tool exposure', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [
+        { name: 'chat_postMessage', description: 'Post a message', inputSchema: { type: 'object' } },
+        { name: 'list_channels', description: 'List channels', inputSchema: { type: 'object' } },
+      ],
+    });
+    await initMcpTools({ slack: { transport: 'stdio', command: 'mock-mcp', surface: 'human' } });
+
+    const denied = await callMcpTool('slack__chat_postMessage', { text: 'hello' });
+    expect(denied).toMatchObject({ isError: true, content: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    expect(clientMock.callTool).not.toHaveBeenCalled();
+
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'general' }] });
+    await expect(callMcpTool('slack__list_channels', {})).resolves.toEqual({ content: 'general', isError: false });
+    expect(clientMock.callTool).toHaveBeenCalledOnce();
+  });
+
+  it('reclassifies generic proxy destinations and HTTP methods at dispatch', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [{
+        name: 'http_post_request',
+        description: 'Send an HTTP request to a caller-provided destination',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            method: { type: 'string' },
+            body: { type: 'object', additionalProperties: true },
+          },
+        },
+      }],
+    });
+    await initMcpTools({ proxy: { transport: 'stdio', command: 'mock-mcp', surface: 'devops' } });
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+
+    const humanWrites = [
+      'https://hooks.slack.com/services/T/B/X',
+      'https://discord.com/api/webhooks/1/x',
+      'https://api.notion.com/v1/pages',
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      'https://www.googleapis.com/gmail/v1/users/me/messages/send',
+      'https://docs.googleapis.com/v1/documents/doc-1:batchUpdate',
+      'https://api.dropboxapi.com/2/files/upload',
+      'https://graph.microsoft.com/v1.0/me/messages',
+      'https://graph.microsoft.com/v1.0/teams/team-1/channels/channel-1/messages',
+    ];
+    for (const url of humanWrites) {
+      const result = await callMcpTool('proxy__http_post_request', { url, method: 'POST', body: { text: 'hi' } });
+      expect(result).toMatchObject({ isError: true, content: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    }
+    const graphBatch = await callMcpTool('proxy__http_post_request', {
+      url: 'https://graph.microsoft.com/v1.0/$batch',
+      method: 'POST',
+      body: JSON.stringify({ requests: [{ id: '1', method: 'POST', url: '/me/messages', body: { subject: 'hi' } }] }),
+    });
+    expect(graphBatch).toMatchObject({ isError: true, content: expect.stringContaining('Microsoft Graph') });
+    await expect(callMcpTool('proxy__http_post_request', {
+      url: 'https://graph.microsoft.com/v1.0/$batch', method: 'POST', body: 'opaque-batch-payload',
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('no inspectable nested destinations') });
+    expect(clientMock.callTool).not.toHaveBeenCalled();
+
+    // The same human destinations remain available for an explicit read.
+    for (const url of humanWrites) {
+      await expect(callMcpTool('proxy__http_post_request', { url, method: 'GET' }))
+        .resolves.toEqual({ content: 'ok', isError: false });
+    }
+    expect(clientMock.callTool).toHaveBeenCalledTimes(humanWrites.length);
+
+    // Concrete DevOps and data-plane writes retain the server's explicit grant.
+    await expect(callMcpTool('proxy__http_post_request', {
+      url: 'https://api.github.com/repos/intrect/openswarm/issues', method: 'POST', body: { title: 'x' },
+    })).resolves.toEqual({ content: 'ok', isError: false });
+    await expect(callMcpTool('proxy__http_post_request', {
+      url: 'https://graph.microsoft.com/v1.0/devices/device-1', method: 'PATCH', body: { accountEnabled: true },
+    })).resolves.toEqual({ content: 'ok', isError: false });
+    await expect(callMcpTool('proxy__http_post_request', {
+      url: 'https://graph.microsoft.com/v1.0/$batch',
+      method: 'POST',
+      body: JSON.stringify({ requests: [{ id: '1', method: 'PATCH', url: '/devices/device-1', body: { accountEnabled: true } }] }),
+    })).resolves.toEqual({ content: 'ok', isError: false });
+  });
+
+  it('fails closed for nested or dynamic generic write destinations without scanning specialized payloads', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [
+        {
+          name: 'proxy',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              request: {
+                type: 'object',
+                properties: { destination: { type: 'string' }, verb: { type: 'string' }, payload: { type: 'object' } },
+              },
+            },
+          },
+        },
+        {
+          name: 'create_issue',
+          inputSchema: { type: 'object', properties: { body: { type: 'string' } } },
+        },
+      ],
+    });
+    await initMcpTools({ gateway: { transport: 'stdio', command: 'mock-mcp', surface: 'devops' } });
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+
+    await expect(callMcpTool('gateway__proxy', {
+      request: { destination: 'https://hooks.slack.com/services/T/B/X', verb: 'POST', payload: { text: 'hi' } },
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    await expect(callMcpTool('gateway__proxy', {
+      request: { destination: '${TARGET_URL}', verb: 'POST', payload: { text: 'hi' } },
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('dynamic destination') });
+    await expect(callMcpTool('gateway__proxy', {
+      request: { destination: '${TARGET_URL}', verb: 'GET' },
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('dynamic destination') });
+    await expect(callMcpTool('gateway__proxy', {
+      request: { verb: 'GET' },
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('no concrete destination') });
+    expect(clientMock.callTool).not.toHaveBeenCalled();
+
+    // A URL quoted inside an issue body is data, not the generic request target.
+    await expect(callMcpTool('gateway__create_issue', {
+      body: 'Investigate https://hooks.slack.com/services/redacted without calling it',
+    })).resolves.toEqual({ content: 'ok', isError: false });
+    expect(clientMock.callTool).toHaveBeenCalledOnce();
+  });
+
+  it('requires an explicit surface grant before a generic non-human write', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [{
+        name: 'post_request',
+        inputSchema: { type: 'object', properties: { url: { type: 'string' }, method: { type: 'string' } } },
+      }],
+    });
+    await initMcpTools({ opaque: { transport: 'stdio', command: 'mock-mcp' } });
+
+    const result = await callMcpTool('opaque__post_request', {
+      url: 'https://api.github.com/repos/intrect/openswarm/issues', method: 'POST',
+    });
+    expect(result).toMatchObject({ isError: true, content: expect.stringContaining('no explicit devops/data/sandbox') });
+    expect(clientMock.callTool).not.toHaveBeenCalled();
+  });
+
+  it('does not let a read-declared generic tool become a DevOps writer from call arguments alone', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [{
+        name: 'request',
+        inputSchema: { type: 'object', properties: { url: { type: 'string' }, method: { type: 'string' } } },
+      }],
+    });
+    await initMcpTools({ proxy: { transport: 'stdio', command: 'mock-mcp', surface: 'devops' } });
+
+    await expect(callMcpTool('proxy__request', {
+      url: 'https://api.github.com/repos/intrect/openswarm/issues', method: 'POST',
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('does not declare a write capability') });
+    expect(clientMock.callTool).not.toHaveBeenCalled();
+  });
+
+  it('exposes a generic human transport for explicit reads but still denies its writes', async () => {
+    clientMock.listTools.mockResolvedValue({
+      tools: [{
+        name: 'request',
+        inputSchema: { type: 'object', properties: { url: { type: 'string' }, method: { type: 'string' }, body: { type: 'string' } } },
+      }],
+    });
+    const definitions = await initMcpTools({ comms: { transport: 'stdio', command: 'mock-mcp', surface: 'human' } });
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'read result' }] });
+
+    expect(await resolveMcpTools(definitions)).toEqual(definitions);
+    await expect(callMcpTool('comms__request', {
+      url: 'https://api.notion.com/v1/pages/page-1', method: 'GET',
+    })).resolves.toEqual({ content: 'read result', isError: false });
+    await expect(callMcpTool('comms__request', {
+      url: 'https://api.notion.com/v1/pages', method: 'POST', body: '{}',
+    })).resolves.toMatchObject({ isError: true, content: expect.stringContaining('HUMAN_SURFACE_READ_ONLY') });
+    expect(clientMock.callTool).toHaveBeenCalledOnce();
   });
 
   it('keeps the truncation marker inside the configured result cap', async () => {

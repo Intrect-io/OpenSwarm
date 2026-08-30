@@ -36,6 +36,10 @@ export interface CliRunResult {
    * back into the same unanswered question.
    */
   blockedOnOperator?: boolean;
+  /** Side-effecting companion RPC lost its result; never retry automatically. */
+  executionOutcomeUnknown?: boolean;
+  /** Exact durable question set that caused blockedOnOperator. */
+  operatorQuestionCorrelationIds?: string[];
   /**
    * Token/duration usage measured by the adapter's own loop (codex-responses,
    * gpt, …). parseWorkerOutput/parseReviewerOutput attach it to the stage result
@@ -155,6 +159,12 @@ export interface AdapterCapabilities {
    * flag at all. (INT-3189)
    */
   enforcesReadOnly?: boolean;
+  /**
+   * The adapter executes OpenSwarm's native tool loop and honours the process
+   * humanSurfaceReadOnly boundary.  Strict mode requires both this declaration
+   * and run(); absence fails closed before buildCommand or a child process.
+   */
+  enforcesHumanSurfaceReadOnly?: boolean;
 }
 
 export interface CliCommandSpec {

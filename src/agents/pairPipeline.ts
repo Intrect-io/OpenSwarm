@@ -382,6 +382,7 @@ export class PairPipeline extends EventEmitter {
           const workerOptions: WorkerOptions = {
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
+            authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
             projectPath: context.projectPath,
             previousFeedback: combinedFeedback,
             timeoutMs: stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs),
@@ -401,9 +402,9 @@ export class PairPipeline extends EventEmitter {
             // codex spark AND gpt-5.5 both read 30-37× and shipped 0 edits. Push the
             // worker to actually edit before concluding.
             nudgeMaxOnNoEdit: 3,
-            // Knowledge-graph scope is useful for scheduling conflicts, but it is
-            // advisory and may be stale. Only an explicitly planner-declared
-            // scope may reject real Git changes at the worker boundary.
+            // Legacy raw KG inference is advisory. Declared, existing-direct,
+            // and sufficient-draft scopes are trusted reservations and enforce
+            // the same boundary the scheduler/ledger admitted.
             fileScope: context.task.fileScopeSource === 'inferred'
               ? undefined
               : context.task.fileScope,
@@ -484,6 +485,7 @@ export class PairPipeline extends EventEmitter {
           const reviewerOptions = {
             taskTitle: context.task.title,
             taskDescription: context.task.description || '',
+            authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
@@ -845,8 +847,8 @@ export class PairPipeline extends EventEmitter {
         // same unanswered question, burning the iteration budget to end up
         // where we already are. The question stays open on the board; the task
         // resumes when the Discord answer lands.
-        if (failedWorker.blockedOnOperator) {
-          safeConsole.log(`[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
+        if (failedWorker.blockedOnOperator || failedWorker.executionOutcomeUnknown) {
+          safeConsole.log(failedWorker.executionOutcomeUnknown ? `[${context.taskPrefix}] Worker sandbox outcome is unknown — quarantining without retry` : `[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
           // First-class status: buildResult derives finalStatus from the
           // session, and anything else here surfaces as a plain 'failed' the
           // scheduler failure-counts and backoff-retries into the same

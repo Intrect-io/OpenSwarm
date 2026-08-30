@@ -6,7 +6,7 @@
 // ============================================
 
 import fs from 'node:fs/promises';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
@@ -16,6 +16,13 @@ import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
 import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import {
+  humanSurfaceShellWriteReason,
+  isHumanSurfaceReadOnlyEnabled,
+  stripHumanSurfaceEnv,
+} from '../mcp/humanSurfacePolicy.js';
+import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
+import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,7 +47,7 @@ export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
   ];
   const current = (base.PATH ?? '').split(':').filter(Boolean);
   const merged = [...extra.filter((p) => !current.includes(p)), ...current];
-  return { ...base, PATH: merged.join(':') };
+  return stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') });
 }
 
 // ============ 도구 정의 (OpenAI function calling 포맷) ============
@@ -122,7 +129,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked.',
+      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked. In humanSurfaceReadOnly mode this is exposed only through an attested companion sandbox.',
       parameters: {
         type: 'object',
         properties: {
@@ -285,6 +292,8 @@ export interface ToolResult {
   tool_call_id: string;
   content: string;
   is_error: boolean;
+  /** Stop the enclosing agent loop; retrying could duplicate a partial mutation. */
+  fatal?: 'execution_outcome_unknown';
 }
 
 /**
@@ -363,6 +372,8 @@ export interface ToolExecOptions {
   allowedToolNames?: ReadonlySet<string>;
   /** Run-scoped identity for worker coordination tool dispatch. */
   coordinationContext?: CoordinationToolContext;
+  /** Attested strict-mode companion session. Never accepted by delegated CLIs. */
+  sandboxExecutorSession?: SandboxExecutorSession;
   /**
    * Epoch ms at which the enclosing agentic loop gives up, when it has one.
    * `coordination_wait` clamps itself below this: a fixed ceiling alone would
@@ -386,66 +397,6 @@ function canonicalizePath(candidate: string): string {
     ancestor = parent;
   }
   return path.join(realpathSync(ancestor), ...suffix);
-}
-
-/**
- * The main checkout a linked git worktree belongs to, or null when `root` is
- * not a linked worktree.
- *
- * Derived from git's own metadata rather than guessed: a linked worktree's
- * `.git` is a FILE holding `gitdir: <main>/.git/worktrees/<name>`, so stripping
- * the trailing `/.git/worktrees/<name>` yields the main checkout. Read directly
- * instead of shelling out to `git worktree list --porcelain` (which is what
- * cgf-portal's own `link-local-assets.sh` uses) because validatePath runs on
- * every file-tool call and must not spawn a process per read.
- *
- * Deliberately uncached. Measured at ~36µs per resolve — noise beside the file
- * read it guards — and a cache keyed by path would go stale the moment the
- * worktree metadata it reads changes, in a daemon that outlives many worktrees.
- */
-function mainCheckoutOf(root: string): string | null {
-  const dotGit = path.join(root, '.git');
-  let raw: string;
-  try {
-    if (!statSync(dotGit).isFile()) return null; // plain checkout: `.git` is a directory
-    raw = readFileSync(dotGit, 'utf-8');
-  } catch {
-    return null;
-  }
-  const match = /^gitdir:\s*(.+?)\s*$/m.exec(raw);
-  if (!match) return null;
-  // `gitdir` may be relative (git >= 2.48 with --relative-paths), so resolve it
-  // against the worktree before walking up.
-  const gitDir = path.resolve(root, match[1]);
-  if (path.basename(path.dirname(gitDir)) !== 'worktrees') return null;
-  const commonDir = path.dirname(path.dirname(gitDir));
-  if (path.basename(commonDir) !== '.git') return null;
-  // Require git's own back-link. The worktree's `.git` is INSIDE the sandbox,
-  // so an agent could rewrite it to `gitdir: /etc/.git/worktrees/x` and open
-  // all of /etc to reads. git also writes `<gitDir>/gitdir` pointing back at
-  // this worktree's `.git`, and that file lives in the main checkout where no
-  // write path can reach it — checking both directions turns a forgeable
-  // one-way pointer into a link only git could have created.
-  let backLink: string;
-  try {
-    backLink = readFileSync(path.join(gitDir, 'gitdir'), 'utf-8').trim();
-  } catch {
-    return null;
-  }
-  // Resolved against `gitDir`, not the process cwd: with
-  // `worktree.useRelativePaths=true` (git >= 2.48) the back-link is written
-  // relative to the metadata dir — e.g. `../../../../wt/.git` — and resolving
-  // that against the daemon's cwd yields a garbage path, silently rejecting
-  // every relative-path worktree. (Caught by the commit-gate review.)
-  if (!backLink || canonicalizePath(path.dirname(path.resolve(gitDir, backLink))) !== root) return null;
-  const mainRoot = path.dirname(commonDir);
-  // A main checkout at the filesystem root would make the exception meaningless.
-  if (path.dirname(mainRoot) === mainRoot) return null;
-  try {
-    return statSync(mainRoot).isDirectory() ? mainRoot : null;
-  } catch {
-    return null;
-  }
 }
 
 export function isProtectedPath(resolved: string, protectedFiles?: string[]): boolean {
@@ -499,7 +450,7 @@ export function validatePath(filePath: string, cwd: string, options: ValidatePat
     const rel = path.relative(canonicalRoot, canonical);
     return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
   };
-  const mainCheckout = options.allowMainCheckoutRead ? mainCheckoutOf(projectRoot) : null;
+  const mainCheckout = options.allowMainCheckoutRead ? linkedMainCheckoutOf(projectRoot) : null;
   const warehouseRoot = options.allowWarehouseRead
     ? (process.env.OPENSWARM_WAREHOUSE_ROOT?.trim() || '/warehouse')
     : null;
@@ -807,6 +758,67 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        if (isHumanSurfaceReadOnlyEnabled()) {
+          if (!execOptions?.sandboxExecutorSession) {
+            return {
+              tool_call_id: callId,
+              content: 'HUMAN_SURFACE_READ_ONLY: attested sandbox executor is unavailable',
+              is_error: true,
+            };
+          }
+          if (isCommandBlocked(command)) {
+            return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
+          }
+          const limit = execOptions.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
+          try {
+            const result = await execOptions.sandboxExecutorSession.execute(command, limit);
+            const output = result.output.length > 8000
+              ? `...[sandbox output tail]\n${result.output.slice(-8000)}`
+              : result.output;
+            if (result.outputLimitExceeded) {
+              return {
+                tool_call_id: callId,
+                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: command hit the output ceiling after it may have modified the workspace\n${output}`,
+                is_error: true,
+                fatal: 'execution_outcome_unknown',
+              };
+            }
+            if (result.timedOut) {
+              return {
+                tool_call_id: callId,
+                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: timeout after ${limit}ms; the process tree was terminated but workspace writes may be partial.\n${output}`,
+                is_error: true,
+                fatal: 'execution_outcome_unknown',
+              };
+            }
+            if (result.exitCode !== 0) {
+              return {
+                tool_call_id: callId,
+                content: `${output || '(no output)'}\n[exit code ${result.exitCode ?? '?'}${result.signal ? `, signal ${result.signal}` : ''}]`,
+                is_error: true,
+              };
+            }
+            return { tool_call_id: callId, content: output || '(no output, exit 0)', is_error: false };
+          } catch (error) {
+            if (error instanceof SandboxOutcomeUnknownError) {
+              return {
+                tool_call_id: callId,
+                content: error.message,
+                is_error: true,
+                fatal: 'execution_outcome_unknown',
+              };
+            }
+            return {
+              tool_call_id: callId,
+              content: `SANDBOX_EXECUTOR_FAILED: ${error instanceof Error ? error.message : String(error)}`,
+              is_error: true,
+            };
+          }
+        }
+        const humanSurfaceDenial = humanSurfaceShellWriteReason(command);
+        if (humanSurfaceDenial) {
+          return { tool_call_id: callId, content: `HUMAN_SURFACE_READ_ONLY: ${humanSurfaceDenial}`, is_error: true };
+        }
         if (isCommandBlocked(command)) {
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
@@ -871,6 +883,13 @@ export async function executeTool(
       }
 
       case 'diagnostics': {
+        if (isHumanSurfaceReadOnlyEnabled()) {
+          return {
+            tool_call_id: callId,
+            content: 'HUMAN_SURFACE_READ_ONLY: diagnostics subprocess execution is disabled while humanSurfaceReadOnly.enabled is true',
+            is_error: true,
+          };
+        }
         // Lazy: only loops that opted in (AgenticLoopOptions.diagnosticsTool)
         // expose the schema, so most consumers never load this module.
         const { runDiagnosticsTool } = await import('./diagnosticsTool.js');
@@ -932,8 +951,19 @@ export async function executeToolCalls(
   while (index < toolCalls.length) {
     const call = toolCalls[index];
     if (!readOnlyTools.has(call.function.name)) {
-      results.push(await executeTool(call, cwd, cache, execOptions));
+      const result = await executeTool(call, cwd, cache, execOptions);
+      results.push(result);
       index++;
+      if (result.fatal) {
+        while (index < toolCalls.length) {
+          results.push({
+            tool_call_id: toolCalls[index++].id,
+            content: 'SKIPPED: a prior command has unknown outcome; no later tool was executed',
+            is_error: true,
+            fatal: 'execution_outcome_unknown',
+          });
+        }
+      }
       continue;
     }
 
