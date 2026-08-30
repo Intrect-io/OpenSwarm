@@ -13,6 +13,7 @@ import {
   trackCliProcessTree,
   untrackCliProcessTree,
 } from '../adapters/processTree.js';
+import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import type { SandboxExecutionResult } from './protocol.js';
 
 export interface WorkspaceIdentity {
@@ -33,7 +34,7 @@ export interface SandboxIsolationBackend {
 }
 
 export const SANDBOX_BWRAP_ISOLATION_ARGS = Object.freeze([
-  '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
+  '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup', '--unshare-net',
   '--die-with-parent', '--new-session',
   // bwrap 0.8 refuses a non-setuid invocation with ambient SYS_ADMIN. The
   // uid-1001 server therefore uses CAP_SETUID to launch bwrap as uid 0. bwrap
@@ -42,6 +43,7 @@ export const SANDBOX_BWRAP_ISOLATION_ARGS = Object.freeze([
   '--cap-drop', 'ALL',
   '--cap-add', 'CAP_SETUID',
   '--cap-add', 'CAP_DAC_READ_SEARCH',
+  '--cap-add', 'CAP_NET_ADMIN',
   '--clearenv',
 ] as const);
 
@@ -61,6 +63,27 @@ export const SANDBOX_CHILD_PRIVILEGE_DROP_ARGS = Object.freeze([
   '/usr/bin/setpriv', '--reuid', '1001',
   '--inh-caps', '-all', '--ambient-caps', '-all',
 ] as const);
+
+export const SANDBOX_NETWORK_INIT_SCRIPT = [
+  "/usr/bin/python3 -c 'import fcntl,socket,struct;",
+  's=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);',
+  'r=struct.pack("16sH",b"lo",0);',
+  'flags=struct.unpack("16sH",fcntl.ioctl(s.fileno(),0x8913,r))[1];',
+  "fcntl.ioctl(s.fileno(),0x8914,struct.pack(\"16sH\",b\"lo\",flags|1))'",
+  '&& exec "$@"',
+].join(' ');
+
+const ISOLATED_LOOPBACK_PROBE = [
+  'import socket,time',
+  's=socket.socket()',
+  's.bind(("127.0.0.1",45123))',
+  's.listen()',
+  'time.sleep(1)',
+  'c=socket.create_connection(s.getsockname(),1)',
+  'a,_=s.accept()',
+  'c.send(b"isolated")',
+  'assert a.recv(8)==b"isolated"',
+].join(';');
 
 class TailCapture {
   private readonly retained: Buffer;
@@ -159,29 +182,24 @@ async function directoryIdentity(path: string): Promise<WorkspaceIdentity> {
   return { path: canonical, dev: metadata.dev, ino: metadata.ino };
 }
 
-async function gitCommonDirectory(workspace: string): Promise<string | undefined> {
+export async function validatedGitCommonDirectory(workspace: string): Promise<string | undefined> {
   const dotGit = join(workspace, '.git');
   try {
     const metadata = await lstat(dotGit);
     if (metadata.isDirectory()) return dotGit;
     if (!metadata.isFile()) return undefined;
-    const declaration = (await readFile(dotGit, 'utf8')).trim();
-    const match = declaration.match(/^gitdir:\s*(.+)$/i);
-    if (!match) return undefined;
-    const gitDir = await realpath(resolve(workspace, match[1]));
-    try {
-      const common = (await readFile(join(gitDir, 'commondir'), 'utf8')).trim();
-      return await realpath(join(gitDir, common));
-    } catch {
-      return gitDir;
-    }
+    const mainCheckout = linkedMainCheckoutOf(workspace);
+    if (!mainCheckout) return undefined;
+    const common = await realpath(join(mainCheckout, '.git'));
+    return (await stat(common)).isDirectory() ? common : undefined;
   } catch {
     return undefined;
   }
 }
 
-async function dependencyTargets(workspace: string, roots: string[]): Promise<string[]> {
+export async function validatedDependencyTargets(workspace: string, roots: string[]): Promise<string[]> {
   const targets: string[] = [];
+  const mainCheckout = linkedMainCheckoutOf(workspace);
   for (const name of ['node_modules', '.venv-verify', '.venv', 'venv']) {
     try {
       const entry = join(workspace, name);
@@ -189,7 +207,17 @@ async function dependencyTargets(workspace: string, roots: string[]): Promise<st
       if (!entryMetadata.isSymbolicLink() && !entryMetadata.isDirectory()) continue;
       const target = entryMetadata.isSymbolicLink() ? await realpath(entry) : entry;
       if (!roots.some((root) => pathInside(root, target))) continue;
-      if ((await stat(target)).isDirectory()) targets.push(target);
+      if (!(await stat(target)).isDirectory()) continue;
+      if (pathInside(workspace, target)) {
+        targets.push(target);
+        continue;
+      }
+      if (!entryMetadata.isSymbolicLink() || !mainCheckout) continue;
+      const expectedEntry = join(mainCheckout, name);
+      const expectedMetadata = await lstat(expectedEntry).catch(() => undefined);
+      if (!expectedMetadata?.isDirectory() || expectedMetadata.isSymbolicLink()) continue;
+      const expected = await realpath(expectedEntry);
+      if (pathInside(mainCheckout, expected) && expected === target) targets.push(target);
     } catch {
       // Optional dependency path is absent or broken.
     }
@@ -429,16 +457,19 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
     this.allowedRoots = [...allowedRoots];
     const root = allowedRoots[0];
     const probeDir = await mkdtemp(join(root, '.openswarm-sandbox-probe-'));
+    const peerProbeDir = await mkdtemp(join(root, '.openswarm-sandbox-peer-probe-'));
     const sibling = join(root, `.openswarm-sandbox-sibling-${randomUUID()}`);
     try {
       await Promise.all([
         mkdir(join(probeDir, '.git')),
+        mkdir(join(peerProbeDir, '.git')),
         writeFile(join(probeDir, 'inside'), 'inside\n'),
         writeFile(sibling, 'outside\n'),
       ]);
       const identity = await directoryIdentity(probeDir);
       const parentPidNs = await readlink('/proc/self/ns/pid');
       const parentMountNs = await readlink('/proc/self/ns/mnt');
+      const parentNetNs = await readlink('/proc/self/ns/net');
       const command = [
         ...SANDBOX_CHILD_IDENTITY_PROBE,
         `test "$(cat inside)" = inside`,
@@ -464,6 +495,21 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       if (result.exitCode !== 0 || result.timedOut) {
         throw new Error(`Bubblewrap isolation proof failed: ${result.output || `exit ${result.exitCode}`}`);
       }
+      const peerIdentity = await directoryIdentity(peerProbeDir);
+      const loopbackCommand = [
+        `/usr/bin/python3 -c ${shellQuote(ISOLATED_LOOPBACK_PROBE)}`,
+        'readlink /proc/self/ns/net',
+      ].join(' && ');
+      const loopbackResults = await Promise.all([
+        this.execute(identity, loopbackCommand, 5_000, 4 * 1024),
+        this.execute(peerIdentity, loopbackCommand, 5_000, 4 * 1024),
+      ]);
+      const childNetNamespaces = loopbackResults.map((probe) => probe.output.trim());
+      if (loopbackResults.some((probe) => probe.exitCode !== 0 || probe.timedOut)
+          || new Set(childNetNamespaces).size !== 2
+          || childNetNamespaces.includes(parentNetNs)) {
+        throw new Error('Bubblewrap per-execution network namespace proof failed: localhost listeners collided or failed');
+      }
       const escape = await this.execute(
         identity,
         "setsid /bin/sh -c 'sleep 30' >/dev/null 2>&1 & exit 0",
@@ -475,6 +521,7 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       }
     } finally {
       await rm(probeDir, { recursive: true, force: true });
+      await rm(peerProbeDir, { recursive: true, force: true });
       await rm(sibling, { force: true });
     }
   }
@@ -505,12 +552,12 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       const support: Array<{ path: string; writable: boolean; kind: 'directory' | 'file' }> = [];
       const dotGit = join(workspace.path, '.git');
       const dotGitMetadata = await lstat(dotGit).catch(() => undefined);
-      const commonGit = await gitCommonDirectory(workspace.path);
+      const commonGit = await validatedGitCommonDirectory(workspace.path);
       if (commonGit && !pathInside(workspace.path, commonGit)
           && this.allowedRoots.some((root) => pathInside(root, commonGit))) {
         support.push({ path: commonGit, writable: false, kind: 'directory' });
       }
-      for (const target of await dependencyTargets(workspace.path, this.allowedRoots)) {
+      for (const target of await validatedDependencyTargets(workspace.path, this.allowedRoots)) {
         support.push({ path: target, writable: false, kind: 'directory' });
       }
       if (dotGitMetadata?.isDirectory()) support.push({ path: dotGit, writable: false, kind: 'directory' });
@@ -578,7 +625,8 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
       }
       args.push(
         '--chdir', workspace.path,
-        '--', ...SANDBOX_CHILD_PRIVILEGE_DROP_ARGS,
+        '--', '/bin/sh', '-c', SANDBOX_NETWORK_INIT_SCRIPT, 'sandbox-network-init',
+        ...SANDBOX_CHILD_PRIVILEGE_DROP_ARGS,
         '/bin/bash', '--noprofile', '--norc', '-c', command,
       );
 

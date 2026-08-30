@@ -22,13 +22,14 @@ services:
   # host HOME, Docker socket, SSH agent, or database socket. Its TCB sees /work
   # to register an inode-stable checkout; every command gets a bwrap namespace
   # with one workspace RW, known sensitive files masked, git/dependencies RO,
-  # /run hidden and PID-tree ownership. network_mode:none remains the egress
-  # boundary; bwrap shares that loopback-only namespace so localhost tests work.
+  # /run hidden and PID-tree ownership. network_mode:none remains the outer
+  # egress boundary; every bwrap child gets a distinct loopback-only netns.
   # Docker starts only the tiny launcher as root. setpriv immediately changes to
-  # uid/gid 1001 while retaining ambient SYS_ADMIN, SETUID, and DAC_READ_SEARCH.
+  # uid/gid 1001 while retaining SYS_ADMIN, SETUID, DAC_READ_SEARCH, NET_ADMIN.
   # bwrap 0.8 rejects ambient caps at non-root uid, so SETUID exists only to
   # enter uid 0 for the bwrap launcher. DAC_READ_SEARCH is required because its
   # fd-bind implementation resolves /proc/self/fd through mode-0700 worktrees.
+  # NET_ADMIN raises only the new per-execution namespace's loopback interface.
   # The requested command returns to uid 1001 with active caps cleared.
   sandbox-executor:
     build:
@@ -54,9 +55,9 @@ services:
       - "1001"
       - --clear-groups
       - --inh-caps
-      - +sys_admin,+setuid,+dac_read_search
+      - +sys_admin,+setuid,+dac_read_search,+net_admin
       - --ambient-caps
-      - +sys_admin,+setuid,+dac_read_search
+      - +sys_admin,+setuid,+dac_read_search,+net_admin
       - node
       - dist/sandboxExecutor/entrypoint.js
       - serve
@@ -88,7 +89,7 @@ services:
       - /tmp:rw,nosuid,nodev,mode=1777,size=512m
 
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, SETUID, SETGID, DAC_READ_SEARCH]
+    cap_add: [SYS_ADMIN, SETUID, SETGID, DAC_READ_SEARCH, NET_ADMIN]
     security_opt:
       - no-new-privileges:true
       - seccomp=unconfined

@@ -6,7 +6,7 @@
 // ============================================
 
 import fs from 'node:fs/promises';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
@@ -22,6 +22,7 @@ import {
   stripHumanSurfaceEnv,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
+import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -398,66 +399,6 @@ function canonicalizePath(candidate: string): string {
   return path.join(realpathSync(ancestor), ...suffix);
 }
 
-/**
- * The main checkout a linked git worktree belongs to, or null when `root` is
- * not a linked worktree.
- *
- * Derived from git's own metadata rather than guessed: a linked worktree's
- * `.git` is a FILE holding `gitdir: <main>/.git/worktrees/<name>`, so stripping
- * the trailing `/.git/worktrees/<name>` yields the main checkout. Read directly
- * instead of shelling out to `git worktree list --porcelain` (which is what
- * cgf-portal's own `link-local-assets.sh` uses) because validatePath runs on
- * every file-tool call and must not spawn a process per read.
- *
- * Deliberately uncached. Measured at ~36µs per resolve — noise beside the file
- * read it guards — and a cache keyed by path would go stale the moment the
- * worktree metadata it reads changes, in a daemon that outlives many worktrees.
- */
-function mainCheckoutOf(root: string): string | null {
-  const dotGit = path.join(root, '.git');
-  let raw: string;
-  try {
-    if (!statSync(dotGit).isFile()) return null; // plain checkout: `.git` is a directory
-    raw = readFileSync(dotGit, 'utf-8');
-  } catch {
-    return null;
-  }
-  const match = /^gitdir:\s*(.+?)\s*$/m.exec(raw);
-  if (!match) return null;
-  // `gitdir` may be relative (git >= 2.48 with --relative-paths), so resolve it
-  // against the worktree before walking up.
-  const gitDir = path.resolve(root, match[1]);
-  if (path.basename(path.dirname(gitDir)) !== 'worktrees') return null;
-  const commonDir = path.dirname(path.dirname(gitDir));
-  if (path.basename(commonDir) !== '.git') return null;
-  // Require git's own back-link. The worktree's `.git` is INSIDE the sandbox,
-  // so an agent could rewrite it to `gitdir: /etc/.git/worktrees/x` and open
-  // all of /etc to reads. git also writes `<gitDir>/gitdir` pointing back at
-  // this worktree's `.git`, and that file lives in the main checkout where no
-  // write path can reach it — checking both directions turns a forgeable
-  // one-way pointer into a link only git could have created.
-  let backLink: string;
-  try {
-    backLink = readFileSync(path.join(gitDir, 'gitdir'), 'utf-8').trim();
-  } catch {
-    return null;
-  }
-  // Resolved against `gitDir`, not the process cwd: with
-  // `worktree.useRelativePaths=true` (git >= 2.48) the back-link is written
-  // relative to the metadata dir — e.g. `../../../../wt/.git` — and resolving
-  // that against the daemon's cwd yields a garbage path, silently rejecting
-  // every relative-path worktree. (Caught by the commit-gate review.)
-  if (!backLink || canonicalizePath(path.dirname(path.resolve(gitDir, backLink))) !== root) return null;
-  const mainRoot = path.dirname(commonDir);
-  // A main checkout at the filesystem root would make the exception meaningless.
-  if (path.dirname(mainRoot) === mainRoot) return null;
-  try {
-    return statSync(mainRoot).isDirectory() ? mainRoot : null;
-  } catch {
-    return null;
-  }
-}
-
 export function isProtectedPath(resolved: string, protectedFiles?: string[]): boolean {
   if (!protectedFiles?.length) return false;
   return protectedFiles.some((p) => {
@@ -509,7 +450,7 @@ export function validatePath(filePath: string, cwd: string, options: ValidatePat
     const rel = path.relative(canonicalRoot, canonical);
     return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
   };
-  const mainCheckout = options.allowMainCheckoutRead ? mainCheckoutOf(projectRoot) : null;
+  const mainCheckout = options.allowMainCheckoutRead ? linkedMainCheckoutOf(projectRoot) : null;
   const warehouseRoot = options.allowWarehouseRead
     ? (process.env.OPENSWARM_WAREHOUSE_ROOT?.trim() || '/warehouse')
     : null;

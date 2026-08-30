@@ -13,7 +13,10 @@ import {
   SANDBOX_BWRAP_LAUNCHER_ARGS,
   SANDBOX_CHILD_IDENTITY_PROBE,
   SANDBOX_CHILD_PRIVILEGE_DROP_ARGS,
+  SANDBOX_NETWORK_INIT_SCRIPT,
   sandboxFdBindArgs,
+  validatedDependencyTargets,
+  validatedGitCommonDirectory,
 } from './bubblewrap.js';
 import { parseSandboxExecutorArgs } from './entrypoint.js';
 
@@ -173,14 +176,17 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
   it('uses the measured non-userns bwrap path and proves the child has uid 1001 with no capabilities', () => {
     expect(SANDBOX_BWRAP_ISOLATION_ARGS).not.toContain('--unshare-user');
     expect(SANDBOX_BWRAP_ISOLATION_ARGS).toEqual(expect.arrayContaining([
-      '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
-      '--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID', '--cap-add', 'CAP_DAC_READ_SEARCH', '--clearenv',
+      '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup', '--unshare-net',
+      '--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID', '--cap-add', 'CAP_DAC_READ_SEARCH',
+      '--cap-add', 'CAP_NET_ADMIN', '--clearenv',
     ]));
     expect(SANDBOX_BWRAP_LAUNCHER_ARGS).toEqual(['--reuid', '0', '/usr/bin/bwrap']);
     expect(SANDBOX_CHILD_PRIVILEGE_DROP_ARGS).toEqual([
       '/usr/bin/setpriv', '--reuid', '1001',
       '--inh-caps', '-all', '--ambient-caps', '-all',
     ]);
+    expect(SANDBOX_NETWORK_INIT_SCRIPT).toContain('0x8914');
+    expect(SANDBOX_NETWORK_INIT_SCRIPT).toContain('&& exec "$@"');
     expect(SANDBOX_CHILD_IDENTITY_PROBE).toEqual([
       'test "$(id -u)" = 1001',
       'test "$(awk \'/^CapEff:/ {print $2}\' /proc/self/status)" = 0000000000000000',
@@ -231,7 +237,7 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
     expect(sidecar.stop_grace_period).toBe('60s');
     expect(sidecar).not.toHaveProperty('env_file');
     expect(sidecar.cap_drop).toEqual(['ALL']);
-    expect(sidecar.cap_add).toEqual(['SYS_ADMIN', 'SETUID', 'SETGID', 'DAC_READ_SEARCH']);
+    expect(sidecar.cap_add).toEqual(['SYS_ADMIN', 'SETUID', 'SETGID', 'DAC_READ_SEARCH', 'NET_ADMIN']);
     expect(sidecar.security_opt).toEqual(expect.arrayContaining(['no-new-privileges:true', 'seccomp=unconfined']));
     expect(sidecar.security_opt).not.toContain('apparmor=unconfined');
     expect(targets).toEqual(expect.arrayContaining(['/work', '/run/openswarm-sandbox']));
@@ -242,13 +248,70 @@ describe('sandbox executor standalone entrypoint and compose boundary', () => {
     expect(sidecar.environment).toEqual(['TZ=Asia/Seoul']);
     expect(sidecar.command.slice(0, 11)).toEqual([
       '/usr/bin/setpriv', '--reuid', '1001', '--regid', '1001', '--clear-groups',
-      '--inh-caps', '+sys_admin,+setuid,+dac_read_search',
-      '--ambient-caps', '+sys_admin,+setuid,+dac_read_search', 'node',
+      '--inh-caps', '+sys_admin,+setuid,+dac_read_search,+net_admin',
+      '--ambient-caps', '+sys_admin,+setuid,+dac_read_search,+net_admin', 'node',
     ]);
     expect(sidecar.command).toEqual(expect.arrayContaining(['dist/sandboxExecutor/entrypoint.js', 'serve']));
     expect(sidecar.healthcheck.test.slice(0, 8)).toEqual([
       'CMD', '/usr/bin/setpriv', '--reuid', '1001', '--regid', '1001', '--clear-groups', 'node',
     ]);
     expect(sidecar.healthcheck.test).toEqual(expect.arrayContaining(['dist/sandboxExecutor/entrypoint.js', 'health']));
+  });
+});
+
+describe('sandbox executor Git and dependency support boundary', () => {
+  let disposableRoot: string | undefined;
+
+  afterEach(async () => {
+    if (disposableRoot) await rm(disposableRoot, { recursive: true, force: true });
+    disposableRoot = undefined;
+  });
+
+  async function linkedFixture(): Promise<{ root: string; main: string; workspace: string }> {
+    disposableRoot = await mkdtemp(join(tmpdir(), 'openswarm-sandbox-linked-'));
+    const root = await realpath(disposableRoot);
+    const main = join(root, 'main');
+    const workspace = join(root, 'worker');
+    const gitDir = join(main, '.git', 'worktrees', 'worker');
+    await Promise.all([mkdir(gitDir, { recursive: true }), mkdir(workspace)]);
+    await writeFile(join(workspace, '.git'), `gitdir: ${gitDir}\n`);
+    await writeFile(join(gitDir, 'gitdir'), `${join(workspace, '.git')}\n`);
+    return { root, main, workspace };
+  }
+
+  it('accepts only a Git common directory with the reverse worktree backlink', async () => {
+    const { root, main, workspace } = await linkedFixture();
+    await expect(validatedGitCommonDirectory(workspace)).resolves.toBe(join(main, '.git'));
+
+    const siblingCheckout = join(root, 'sibling-worker');
+    const siblingGitDir = join(root, 'sibling', '.git', 'worktrees', 'sibling-worker');
+    await Promise.all([mkdir(siblingCheckout), mkdir(siblingGitDir, { recursive: true })]);
+    await writeFile(join(siblingCheckout, '.git'), `gitdir: ${siblingGitDir}\n`);
+    await writeFile(join(siblingGitDir, 'gitdir'), `${join(siblingCheckout, '.git')}\n`);
+    await writeFile(join(workspace, '.git'), `gitdir: ${siblingGitDir}\n`);
+
+    await expect(validatedGitCommonDirectory(workspace)).resolves.toBeUndefined();
+  });
+
+  it('mounts only local or same-relative-path dependencies from the validated main checkout', async () => {
+    const { root, main, workspace } = await linkedFixture();
+    const mainNodeModules = join(main, 'node_modules');
+    const siblingVenv = join(root, 'sibling', '.venv');
+    const localVenv = join(workspace, 'venv');
+    await Promise.all([
+      mkdir(mainNodeModules),
+      mkdir(siblingVenv, { recursive: true }),
+      mkdir(localVenv),
+    ]);
+    await Promise.all([
+      symlink(mainNodeModules, join(workspace, 'node_modules')),
+      symlink(siblingVenv, join(workspace, '.venv')),
+      symlink(mainNodeModules, join(workspace, '.venv-verify')),
+    ]);
+
+    await expect(validatedDependencyTargets(workspace, [root])).resolves.toEqual([
+      mainNodeModules,
+      localVenv,
+    ]);
   });
 });
