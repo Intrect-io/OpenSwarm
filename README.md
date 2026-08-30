@@ -342,6 +342,13 @@ Each autonomous run snapshots the current Claude Code instruction hierarchy (`~/
 
 A configured `coordinationBoardIssueId` turns one project-scoped tracker issue into the durable agent board. Worker advice/delegation, Discord questions, adapter routes, periodic reviews, and MCP denials are visible through `GET /api/coordination`, SSE, and the **AGENT COORDINATION** dashboard panel. Tool arguments, prompts, credentials, and rule bodies are redacted or omitted.
 
+With `autonomous.enabled: false`, the runner still accepts explicit issue-board
+and `openswarm work` dispatches without selecting backlog work. Transient
+durable-admission deferrals remain queued across a hard restart: only rows
+recorded as explicit `claim_deferred` work are rebuilt, at their original
+`RETRY_AT` deadline. Operator waits, provider backoffs, failures, terminal
+tracker cards, and publication reconciliation are never promoted by this path.
+
 The transient inbox and the repository discussion board have separate jobs.
 `/threads` stores topics, messages, subscriptions, unread cursors, and CAS
 resolution in the automation SQLite database under the canonical Git repository

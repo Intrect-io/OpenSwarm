@@ -95,6 +95,10 @@ import {
   deliverTrackerEffect,
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
+import {
+  isExplicitAdmissionRetry,
+  planExplicitDeferredRecovery,
+} from './explicitDispatchRecovery.js';
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 
@@ -1673,21 +1677,47 @@ export class AutonomousRunner {
 
   private async recoverParkedRunsOnly(): Promise<void> {
     if (!this.durableRuns.isPrimary) return;
+    const inScope = this.getDispatchScopePredicate();
     const needsArtifactRecovery = this.durableRuns.listRuns(['NEEDS_RECONCILE']).length > 0;
+    const explicitDeferredRuns = this.durableRuns.listRuns(['RETRY_AT'])
+      .filter((run) => isExplicitAdmissionRetry(run, inScope));
     let tasks: TaskItem[] = [];
-    if (needsArtifactRecovery) {
+    if (needsArtifactRecovery || explicitDeferredRuns.length > 0) {
       const fetchResult = await fetchLinearTasks();
       if (fetchResult.error) {
         console.warn(`[AutonomousRunner] Explicit-mode recovery fetch failed: ${fetchResult.error}`);
       } else {
         tasks = fetchResult.tasks;
-        await this.reconcileDurableArtifacts(tasks);
+        if (needsArtifactRecovery) await this.reconcileDurableArtifacts(tasks);
+
+        let restored = 0;
+        for (const recovery of planExplicitDeferredRecovery(explicitDeferredRuns, tasks, inScope)) {
+          // Re-read the row immediately before taking in-memory ownership. A
+          // second daemon may have claimed or reclassified the snapshot while
+          // the tracker fetch was in flight; durable claim fencing handles the
+          // remaining race when the deadline arrives.
+          const current = this.durableRuns.getRun(recovery.run.issueId);
+          if (
+            !current
+            || current.stateVersion !== recovery.run.stateVersion
+            || !isExplicitAdmissionRetry(current, inScope)
+            || current.retryAt !== recovery.retryAt
+          ) continue;
+          if (this.scheduler.isTaskQueued(recovery.task.id) || this.scheduler.isTaskRunning(recovery.task.id)) {
+            continue;
+          }
+          if (this.enqueueCandidate(recovery.task, recovery.projectPath, recovery.retryAt)) restored++;
+        }
+        if (restored > 0) {
+          console.log(`[AutonomousRunner] Restored ${restored} explicit deferred task(s) from durable RETRY_AT`);
+          await this.runAvailableTasks();
+        }
       }
     }
     await reconcileTrackerTerminalRuns({
       durableRuns: this.durableRuns,
       source: getTaskSource(),
-      inScope: this.getDispatchScopePredicate(),
+      inScope,
       knownTasks: tasks,
     });
   }
@@ -2396,9 +2426,9 @@ export class AutonomousRunner {
     if (prior) task.priorAttemptFeedback = prior.detail;
   }
 
-  private enqueueCandidate(task: TaskItem, projectPath: string): boolean {
+  private enqueueCandidate(task: TaskItem, projectPath: string, availableAt?: number): boolean {
     this.attachPriorFeedback(task);
-    if (!this.scheduler.enqueue(task, projectPath)) return false;
+    if (!this.scheduler.enqueue(task, projectPath, { availableAt })) return false;
     broadcastEvent({ type: 'task:queued', data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
     this.syslog(`✓ Queued: ${task.issueIdentifier || ''} ${task.title} → ${projectPath.split('/').slice(-2).join('/')}`);
     return true;

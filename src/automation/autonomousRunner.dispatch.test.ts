@@ -9,6 +9,9 @@ import { AutonomousRunner } from './autonomousRunner.js';
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
+import type { ITaskSource } from './taskSource.js';
+import { DurableRunCoordinator } from './durableRunCoordinator.js';
+import { setTaskSource } from './runnerExecution.js';
 
 const cfg = (over: Partial<AutonomousConfig> = {}): AutonomousConfig => ({
   linearTeamId: 'team',
@@ -240,6 +243,7 @@ describe('AutonomousRunner explicit-dispatch start (INT-3388)', () => {
   let dbDir: string | null = null;
 
   afterEach(() => {
+    vi.useRealTimers();
     if (dbDir) rmSync(dbDir, { recursive: true, force: true });
     dbDir = null;
   });
@@ -266,5 +270,117 @@ describe('AutonomousRunner explicit-dispatch start (INT-3388)', () => {
     await heartbeat.start();
     expect((heartbeat as unknown as Internal).cronJob).not.toBeNull();
     await heartbeat.stop();
+  });
+
+  it('rebuilds a hard-restart explicit RETRY_AT queue and runs it at the original deadline without heartbeat', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-01T00:00:00.000Z'));
+    dbDir = mkdtempSync(join(tmpdir(), 'osw-dispatch-restart-'));
+    const dbPath = join(dbDir, 'automation.db');
+    const projectPath = join(dbDir, 'repo');
+
+    // Process 1: produce the exact durable admission deferral that survives a
+    // SIGKILL. Closing only the SQLite handle models the OS releasing the old
+    // process; no scheduler shutdown/claim rollback is allowed to run.
+    const producer = new DurableRunCoordinator({
+      mode: 'primary', dbPath, instanceId: 'crashed-process', maxActiveForProject: 1,
+    });
+    let releaseBlocker!: () => void;
+    const blockerHeld = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    const blocker = producer.execute(
+      { ...task('blocker'), linearProject: { id: 'p', name: 'Repo' } },
+      projectPath,
+      async () => {
+        await blockerHeld;
+        return {
+          success: false, sessionId: 'blocker-failed', stages: [], finalStatus: 'failed',
+          totalDuration: 1, iterations: 1,
+        };
+      },
+    );
+    expect(producer.getRun('blocker')?.state).toBe('EXECUTING');
+
+    const deferredTask: TaskItem = {
+      ...task('recover'),
+      linearState: 'In Progress',
+      linearProject: { id: 'p', name: 'Repo' },
+      explicitDispatch: true,
+    };
+    const deferred = await producer.execute(deferredTask, projectPath, async () => {
+      throw new Error('deferred executor must not start');
+    });
+    expect(deferred.finalStatus).toBe('deferred');
+    const parked = producer.getRun('recover')!;
+    expect(parked).toMatchObject({
+      state: 'RETRY_AT', lastErrorCode: 'claim_deferred',
+      metadata: expect.objectContaining({ explicitDispatch: true }),
+    });
+    const originalRetryAt = parked.retryAt!;
+    const originalReason = parked.lastErrorMessage;
+
+    releaseBlocker();
+    await blocker;
+    producer.close();
+
+    // Process 2: tracker truth is still active, but no heartbeat is configured.
+    const source: ITaskSource = {
+      kind: 'linear',
+      fetchTasks: vi.fn(async () => [deferredTask]),
+      lookupIssueState: vi.fn(async (id) => ({
+        ok: true as const,
+        issue: { state: id === 'recover' ? 'In Progress' : 'Todo' },
+      })),
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
+      logPairComplete: vi.fn(), logBlocked: vi.fn(), logStuck: vi.fn(),
+      unstick: vi.fn(), logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource;
+    setTaskSource(source);
+
+    const runner = new AutonomousRunner(cfg({
+      allowedProjects: [projectPath],
+      autonomousHeartbeat: false,
+      triggerNow: false,
+      autoExecute: true,
+      automationLedgerMode: 'primary',
+      automationDbPath: dbPath,
+      worktreeMode: true,
+      allowSameProjectConcurrent: true,
+    }));
+    const executePipeline = vi.fn(async (): Promise<PipelineResult> => ({
+      success: true, sessionId: 'recovered-run', stages: [], finalStatus: 'approved',
+      totalDuration: 1, iterations: 1,
+    }));
+    type RestartInternal = Internal & {
+      executePipeline: typeof executePipeline;
+      durableRuns: DurableRunCoordinator;
+      scheduler: { getQueuedTasks(): Array<{ task: TaskItem; availableAt?: number }> };
+    };
+    const internal = runner as unknown as RestartInternal;
+    internal.executePipeline = executePipeline;
+
+    await runner.start();
+    expect(source.fetchTasks).toHaveBeenCalledTimes(1);
+    expect(internal.scheduler.getQueuedTasks()).toEqual([
+      expect.objectContaining({
+        task: expect.objectContaining({
+          id: 'recover', explicitDispatch: true, explicitDispatchPriorState: undefined,
+        }),
+        availableAt: originalRetryAt,
+      }),
+    ]);
+    expect(internal.durableRuns.getRun('recover')).toMatchObject({
+      state: 'RETRY_AT', retryAt: originalRetryAt,
+      lastErrorCode: 'claim_deferred', lastErrorMessage: originalReason,
+    });
+    expect(executePipeline).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(originalRetryAt - Date.now() - 1);
+    expect(executePipeline).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(executePipeline).toHaveBeenCalledTimes(1));
+
+    await runner.stop();
   });
 });

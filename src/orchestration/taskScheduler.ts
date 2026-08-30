@@ -59,6 +59,11 @@ export interface QueuedTask {
   availableAt?: number;
 }
 
+export interface EnqueueOptions {
+  /** Restore a durable deferred task without attempting admission early. */
+  availableAt?: number;
+}
+
 export interface RunningTask {
   /** Unique execution generation. Task ids may be reused after retries. */
   runId: string;
@@ -157,10 +162,13 @@ export class TaskScheduler extends EventEmitter {
   /**
    * Add task to queue
    */
-  enqueue(task: TaskItem, projectPath: string): boolean {
+  enqueue(task: TaskItem, projectPath: string, options: EnqueueOptions = {}): boolean {
     if (this.stopping) {
       console.warn(`[Scheduler] Refusing enqueue while stopping: ${task.title}`);
       return false;
+    }
+    if (options.availableAt != null && !Number.isFinite(options.availableAt)) {
+      throw new Error('availableAt must be a finite epoch timestamp');
     }
     // Duplicate check
     if (this.isTaskQueued(task.id) || this.isTaskRunning(task.id)) {
@@ -173,9 +181,11 @@ export class TaskScheduler extends EventEmitter {
       projectPath,
       queuedAt: Date.now(),
       priority: task.priority,
+      availableAt: options.availableAt,
     };
 
     this.insertQueuedTask(queuedTask);
+    this.scheduleDeferredWake();
 
     console.log(`[Scheduler] Enqueued task: ${task.title} (priority: ${task.priority})`);
     this.emit('enqueued', queuedTask);

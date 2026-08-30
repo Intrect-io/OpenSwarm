@@ -69,6 +69,34 @@ describe('TaskScheduler queue management', () => {
     expect(sched.getQueuedTasks().map((t) => t.task.id)).toEqual(['urgent', 'low']);
   });
 
+  it('restores a deferred task with its exact durable deadline and wakes only when due', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      const slotFreed = vi.fn();
+      sched.on('slotFreed', slotFreed);
+
+      expect(sched.enqueue(task('recover'), '/repo', { availableAt: 5_000 })).toBe(true);
+      expect(sched.getQueuedTasks()).toEqual([
+        expect.objectContaining({ task: expect.objectContaining({ id: 'recover' }), availableAt: 5_000 }),
+      ]);
+      expect(sched.getNextExecutable()).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(3_999);
+      expect(slotFreed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(slotFreed).toHaveBeenCalledTimes(1);
+      expect(sched.getNextExecutable()?.task.id).toBe('recover');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a non-finite restored deadline', () => {
+    expect(() => sched.enqueue(task('bad'), '/repo', { availableAt: Number.NaN }))
+      .toThrow(/finite epoch timestamp/);
+  });
+
   it('dequeue removes a queued task and reports success', () => {
     sched.enqueue(task('a'), '/repo');
     expect(sched.dequeue('a')).toBe(true);
