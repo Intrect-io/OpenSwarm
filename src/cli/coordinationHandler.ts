@@ -18,7 +18,7 @@
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import type { CoordinationThread } from '../coordination/coordinationThreads.js';
 import { DAEMON_PORT } from './daemon.js';
-import { daemonBaseUrl, isRemoteDaemon, daemonHost } from './daemonEndpoint.js';
+import { DAEMON_TOKEN_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, isRemoteDaemon } from './daemonEndpoint.js';
 
 /** Matches attachHandler.ts: a daemon that answers /api/stats can still stall. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -56,7 +56,7 @@ async function getJson<T>(path: string, port: number, doFetch: typeof fetch, fal
   const url = `${daemonBaseUrl(port)}${path}`;
   let res: Response;
   try {
-    res = await doFetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await doFetch(url, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch (cause) {
     // `fetch failed` on its own tells an operator nothing about which daemon
     // was tried or what to do next, and a wrong OPENSWARM_DAEMON_HOST looks
@@ -67,6 +67,10 @@ async function getJson<T>(path: string, port: number, doFetch: typeof fetch, fal
         ? `Check that it is running there and that ${port} is reachable.`
         : 'Start it with `openswarm start`, or point at another host with OPENSWARM_DAEMON_HOST.')
       + ` (${cause instanceof Error ? cause.message : String(cause)})`);
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(`The daemon at ${daemonHost()} rejected this request (HTTP ${res.status}). `
+      + `Set ${DAEMON_TOKEN_ENV} to its OPENSWARM_WEB_TOKEN.`);
   }
   if (!res.ok) throw new Error(await readError(res, fallback));
   return await res.json() as T;

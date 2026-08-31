@@ -59,6 +59,24 @@ export function daemonHost(raw: string | undefined = process.env[DAEMON_HOST_ENV
   return parsed.hostname;
 }
 
+/** Env var holding the daemon's OPENSWARM_WEB_TOKEN, for a secured daemon. */
+export const DAEMON_TOKEN_ENV = 'OPENSWARM_DAEMON_TOKEN';
+
+/**
+ * Auth headers for a daemon request.
+ *
+ * web.ts authorises a request that carries a valid token, OR comes from
+ * loopback, OR comes over trusted Tailscale. A remote CLI has only the first
+ * of those unless the operator turned on OPENSWARM_TRUST_TAILSCALE, so without
+ * this a daemon secured with OPENSWARM_WEB_TOKEN refuses every remote command
+ * — exactly the deployment that most wants one. The daemon accepts this header
+ * or `Authorization: Bearer`; the bare header avoids its parsing entirely.
+ */
+export function daemonAuthHeaders(): Record<string, string> {
+  const token = process.env[DAEMON_TOKEN_ENV]?.trim();
+  return token ? { 'x-openswarm-token': token } : {};
+}
+
 /** Base URL for a daemon request, e.g. `http://127.0.0.1:3847`. */
 export function daemonBaseUrl(port: number): string {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import type { CoordinationThread } from '../coordination/coordinationThreads.js';
-import { DAEMON_HOST_ENV } from './daemonEndpoint.js';
+import { DAEMON_HOST_ENV, DAEMON_TOKEN_ENV } from './daemonEndpoint.js';
 import { formatBoard, formatThreads, runBoardCommand, runThreadsCommand } from './coordinationHandler.js';
 
 function event(overrides: Partial<CoordinationEvent> = {}): CoordinationEvent {
@@ -45,6 +45,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   delete process.env[DAEMON_HOST_ENV];
+  delete process.env[DAEMON_TOKEN_ENV];
 });
 
 describe('formatBoard', () => {
@@ -144,6 +145,24 @@ describe('runBoardCommand', () => {
 
     expect(fetchImpl.mock.calls[0][0]).toBe('http://vela:3847/api/coordination');
     expect(logs[0]).toBe('(daemon: vela)');
+  });
+
+  it('presents the daemon token so a secured daemon answers at all', async () => {
+    process.env[DAEMON_TOKEN_ENV] = 's3cret';
+    const fetchImpl = vi.fn().mockResolvedValue(ok({ events: [], pending: [], lastSeq: 0 }));
+
+    await runBoardCommand({ fetchImpl: fetchImpl as never });
+
+    expect(fetchImpl.mock.calls[0][1].headers).toEqual({ 'x-openswarm-token': 's3cret' });
+  });
+
+  it.each([401, 403])('names a missing token on HTTP %s instead of blaming the board', async (status) => {
+    const fetchImpl = vi.fn().mockResolvedValue(err(status, ''));
+
+    const code = await runBoardCommand({ fetchImpl: fetchImpl as never });
+
+    expect(code).toBe(1);
+    expect(errors.join('\n')).toContain(DAEMON_TOKEN_ENV);
   });
 
   it('surfaces the daemon error text rather than a bare status', async () => {

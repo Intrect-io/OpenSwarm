@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DAEMON_HOST_ENV,
+  DAEMON_TOKEN_ENV,
+  daemonAuthHeaders,
   DEFAULT_DAEMON_HOST,
   InvalidDaemonHostError,
   daemonBaseUrl,
@@ -10,6 +12,7 @@ import {
 
 afterEach(() => {
   delete process.env[DAEMON_HOST_ENV];
+  delete process.env[DAEMON_TOKEN_ENV];
 });
 
 describe('daemonHost', () => {
@@ -72,5 +75,24 @@ describe('daemonBaseUrl', () => {
 
   it.each([0, 65_536, 1.5, Number.NaN])('rejects out-of-range port %s', (port) => {
     expect(() => daemonBaseUrl(port)).toThrow(/between 1 and 65535/);
+  });
+});
+
+describe('daemonAuthHeaders', () => {
+  // web.ts authorises on token OR loopback OR trusted Tailscale. A remote CLI
+  // has only the token, so a daemon secured with OPENSWARM_WEB_TOKEN refuses
+  // every remote command without this.
+  it('sends nothing when no token is configured', () => {
+    expect(daemonAuthHeaders()).toEqual({});
+  });
+
+  it('presents the token in the header the daemon reads without parsing', () => {
+    process.env[DAEMON_TOKEN_ENV] = 's3cret';
+    expect(daemonAuthHeaders()).toEqual({ 'x-openswarm-token': 's3cret' });
+  });
+
+  it('ignores a blank token rather than sending an empty header', () => {
+    process.env[DAEMON_TOKEN_ENV] = '   ';
+    expect(daemonAuthHeaders()).toEqual({});
   });
 });

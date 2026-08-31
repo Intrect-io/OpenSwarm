@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import { DAEMON_PORT } from './daemon.js';
-import { daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
+import { daemonAuthHeaders, daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
 
 
 export interface ResolvedIssue {
@@ -120,7 +120,7 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 async function fetchTaskHistory(taskId: string, port: number): Promise<CoordinationEvent[]> {
   const res = await fetch(
     `${baseUrl(port)}/api/coordination/history?taskId=${encodeURIComponent(taskId)}&limit=200`,
-    { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+    { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
   );
   if (!res.ok) throw new Error(`Could not read the coordination board (HTTP ${res.status})`);
   const body = await res.json() as { events?: CoordinationEvent[] };
@@ -142,6 +142,7 @@ async function uploadAttachment(taskId: string, filepath: string, port: number):
   const query = `?taskId=${encodeURIComponent(taskId)}&filename=${encodeURIComponent(filename)}`;
   const res = await fetch(`${baseUrl(port)}/api/coordination/attachment${query}`, {
     method: 'POST',
+    headers: daemonAuthHeaders(),
     body: bytes,
     signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
   });
@@ -168,7 +169,7 @@ async function postMessage(
 ): Promise<void> {
   const res = await fetch(`${baseUrl(port)}/api/coordination/message`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify({
       correlationId: exchange.correlationId,
@@ -193,7 +194,7 @@ async function postMessage(
 
 async function isDaemonReachable(port: number): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl(port)}/api/stats`, { signal: AbortSignal.timeout(1500) });
+    const res = await fetch(`${baseUrl(port)}/api/stats`, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(1500) });
     return res.ok;
   } catch {
     return false;

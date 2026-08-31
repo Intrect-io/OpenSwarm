@@ -8,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFile } from 'node:child_process';
 import { expandPath } from '../core/config.js';
-import { DAEMON_HOST_ENV, daemonBaseUrl, daemonHost, isRemoteDaemon } from './daemonEndpoint.js';
+import { DAEMON_HOST_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, isRemoteDaemon } from './daemonEndpoint.js';
 
 // Types
 
@@ -49,6 +49,8 @@ const SERVICE_PORT = 3847;
 const BASE_URL = () => daemonBaseUrl(SERVICE_PORT);
 const HEALTH_TIMEOUT_MS = 3000;
 const AUTO_START_TIMEOUT_MS = 30000;
+/** Submitting a task is a small JSON POST; it should never outlast this. */
+const SUBMIT_TIMEOUT_MS = 30000;
 const DEFAULT_TASK_TIMEOUT_S = 600;
 const POLL_INTERVAL_MS = 3000;
 const POLL_REQUEST_TIMEOUT_MS = 5000;
@@ -69,7 +71,7 @@ async function checkServiceHealth(): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   try {
-    const res = await fetch(`${BASE_URL()}/api/stats`, { signal: controller.signal });
+    const res = await fetch(`${BASE_URL()}/api/stats`, { headers: daemonAuthHeaders(), signal: controller.signal });
     return res.ok;
   } catch {
     return false;
@@ -130,10 +132,14 @@ async function submitTask(opts: ExecOptions, projectPath: string): Promise<ExecT
     verbose: opts.verbose,
   };
 
+  // The only daemon call here without a bound. Over loopback that rarely bit;
+  // over a network it hangs forever with no way out (caught by openswarm pr
+  // review, not self-caught).
   const res = await fetch(`${BASE_URL()}/api/exec`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -162,7 +168,7 @@ async function pollForResult(taskId: string, timeoutS: number): Promise<ExecTask
         Math.min(POLL_REQUEST_TIMEOUT_MS, remainingMs),
       );
       try {
-        const res = await fetch(`${BASE_URL()}/api/exec/${taskId}`, { signal: controller.signal });
+        const res = await fetch(`${BASE_URL()}/api/exec/${taskId}`, { headers: daemonAuthHeaders(), signal: controller.signal });
         if (!res.ok) continue;
 
         const status = (await res.json()) as ExecTaskStatus;
