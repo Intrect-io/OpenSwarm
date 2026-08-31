@@ -323,17 +323,39 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     internal.durableRuns.close();
   });
 
-  it('still resumes an unrelated NEEDS_HUMAN park once Linear reopens it', async () => {
-    // The other half of the mutual-exclusivity fix: making the ask_human path
-    // ignore linearState must not cost the OTHER park types their own
-    // resume condition.
+  it('leaves an unrelated NEEDS_HUMAN park alone while its card sits In Progress (AGT-4155)', async () => {
+    // 'In Progress' is where THIS run put the card when it claimed the task,
+    // and parking does not move it back. Treating that level as "the operator
+    // reopened it" re-admitted the park on the very next heartbeat: it
+    // re-claimed, re-executed, re-published and re-parked, once per cycle,
+    // holding a slot the whole time. Observed in production at attempt 20.
     const internal = await makeRunner();
     internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
-    const reopened: TaskItem = { ...TASK, linearState: 'In Progress' };
+    const stillParked: TaskItem = { ...TASK, linearState: 'In Progress' };
+    // The slot the park was holding has to go somewhere: an unrelated task in
+    // the same cycle must still be admitted.
+    const sibling: TaskItem = {
+      ...TASK, id: 'AGT-2', issueId: 'AGT-2', issueIdentifier: 'AGT-2', title: 'unrelated work',
+    };
 
-    const selected = internal.filterAlreadyProcessed([reopened]);
+    const selected = internal.filterAlreadyProcessed([stillParked, sibling]);
 
-    expect(selected).toEqual([reopened]);
+    expect(selected).toEqual([sibling]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('resumes an unrelated NEEDS_HUMAN park when the operator dispatches it again (AGT-4155)', async () => {
+    // The park stays terminal for the autonomous loop but must remain
+    // recoverable by an operator ACT — the issue board or `work` CLI saying
+    // "run this", which the pipeline's own writes cannot forge.
+    const internal = await makeRunner();
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+    const dispatched: TaskItem = { ...TASK, linearState: 'In Progress', explicitDispatch: true };
+
+    const selected = internal.filterAlreadyProcessed([dispatched]);
+
+    expect(selected).toEqual([dispatched]);
     expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
