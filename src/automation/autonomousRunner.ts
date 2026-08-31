@@ -1114,29 +1114,38 @@ export class AutonomousRunner {
           if (durableRun?.state === 'NEEDS_HUMAN') return false;
           if (!durableRun) return false;
         }
-        // The two resume conditions are mutually exclusive by why the run was
+        // The resume conditions are mutually exclusive by why the run was
         // parked, not layered as "either one fires it." An ask_human park
-        // (marker prefix) leaves the Linear card exactly where it already was
-        // — the pipeline never touches it — which for an active task is
-        // routinely 'Todo' or 'In Progress' already; the pre-existing
-        // linearState check would then resume it on the very next heartbeat
-        // regardless of an answer, undoing the park before it did anything.
-        // So it resumes ONLY on its own condition — the question got
-        // answered — and the rejection-limit / PR-closed-without-merge parks
-        // elsewhere in this file, which share NEEDS_HUMAN but DO move the
-        // card (a STUCK label / Backlog), keep resuming only on that Linear
-        // change.
+        // (marker prefix) resumes only when its own questions are answered;
+        // every other park resumes only when the operator dispatches it again.
+        // Neither reads the Linear card's state, because an active task's card
+        // is routinely 'Todo' or 'In Progress' for reasons the pipeline itself
+        // created — see the note on `operatorRedispatched` below.
         const isExactOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON;
         const isLegacyOperatorQuestionPark = durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false;
         const isOperatorQuestionPark = isExactOperatorQuestionPark || isLegacyOperatorQuestionPark;
-        const linearReopened = !isOperatorQuestionPark
-          && ['Todo', 'In Progress', 'In Review'].includes(task.linearState ?? '');
+        // A park is terminal for the autonomous loop, so re-admission needs an
+        // operator ACT. 'In Progress' and 'In Review' are not one: this run put
+        // the card there when it claimed the task and parking does not move it
+        // back, so the old `['Todo','In Progress','In Review']` test was true on
+        // the very next heartbeat for every park that leaves the card alone.
+        // Each cycle re-claimed, re-executed, re-published and re-parked while
+        // holding a slot — AX-1030 reached attempt 20, AX-1027 16, AX-873 15,
+        // and 6 parked runs sat in 'In Progress' feeding this loop with none in
+        // 'Todo' (AGT-4155).
+        //
+        // 'Todo' survives because the pipeline never parks a card there — it is
+        // the operator-reopen surface `observeTask` already documents, reached
+        // by moving a STUCK issue back. `explicitDispatch` is the same act via
+        // the issue board or the `work` CLI.
+        const operatorReopened = !isOperatorQuestionPark
+          && (task.explicitDispatch === true || task.linearState === 'Todo');
         // Read from the durable trace, not the live board: a busy task's own
         // traffic can push its unanswered question out of a board window, and
         // `openQuestionCount` would then read that as "no questions open" —
         // resuming a run that is still genuinely waiting.
         const legacyQuestionAnswered = isLegacyOperatorQuestionPark && getCoordinationStore().allQuestionsAnswered(id);
-        if (linearReopened || legacyQuestionAnswered || isExactOperatorQuestionPark) {
+        if (operatorReopened || legacyQuestionAnswered || isExactOperatorQuestionPark) {
           const resumed = isExactOperatorQuestionPark
             ? this.durableRuns.resumeNeedsHumanForQuestions(id)
             : this.durableRuns.resumeNeedsHuman(id);
@@ -1271,7 +1280,16 @@ export class AutonomousRunner {
         console.warn(`[AutonomousRunner] Failed to clear stuck label for ${id}:`, err));
     }
     if (stuckSkipped > 0) {
-      this.syslog(`🛑 Skipped ${stuckSkipped} stuck issue(s) (retries exhausted — remove the \`${STUCK_LABEL}\` label or move to Todo / In Progress to retry)`);
+      // Name Todo because it is the one action that works in every mode. Under
+      // the durable ledger (isPrimary) retry exhaustion also parks the run in
+      // NEEDS_HUMAN and this filter returns on that state above, before the
+      // label check below — so there, removing the label does nothing and
+      // 'In Progress' cannot help either, being a state the pipeline writes
+      // itself when it claims a task (AGT-4155). The legacy non-primary path
+      // skips that gate and still recovers a labelled issue from any of
+      // classifyStuck's RECOVERABLE_STATES. Todo recovers on both. The recovery
+      // branch strips the label itself, so the operator only moves the card.
+      this.syslog(`🛑 Skipped ${stuckSkipped} stuck issue(s) (retries exhausted — move to Todo to retry)`);
     }
     if (recovered > 0) {
       this.saveTaskState();

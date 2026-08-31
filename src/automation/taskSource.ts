@@ -349,7 +349,7 @@ export class SqliteTaskSource implements ITaskSource {
       sections: [
         { label: 'Reason', body: reason },
         { label: 'How to retry', body: [
-          'Move this issue back to Todo / In Progress.',
+          'Move this issue back to Todo.',
           'The agent will not retry on its own until then.',
         ] },
       ],
