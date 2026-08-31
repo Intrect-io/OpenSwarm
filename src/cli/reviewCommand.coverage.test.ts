@@ -419,7 +419,11 @@ describe('runReviewCommand default deps (no injected review/getBranch/log/fileFo
       },
     );
     expect(fileReviewerFollowupsMock).not.toHaveBeenCalled();
-    expect(logs.join('\n')).toMatch(/Could not file follow-ups/);
+    // Names the cause instead of the old ambiguous "Is Linear connected?", which
+    // read the same whether the credential was dead or simply absent. (AGT-4148)
+    const out = logs.join('\n');
+    expect(out).toContain('Linear is not configured, so it could not file follow-ups');
+    expect(out).toContain('openswarm auth login --provider linear');
   });
 
   it('logs the changed-file count when opts.debug is set', async () => {

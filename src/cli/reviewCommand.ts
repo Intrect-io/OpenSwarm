@@ -223,6 +223,42 @@ export type TaskSourceFailure =
 export type TaskSourceResult = { source: ITaskSource } | ({ source: null } & TaskSourceFailure);
 
 /**
+ * Turn a task-source failure into operator guidance. Each reason points at a
+ * different repair, which is why the cause is carried this far: telling someone
+ * with a revoked token to "set linearApiKey" wastes their time on a setting that
+ * is already present. `action` names what could not be done, so the same wording
+ * serves both `openswarm work` and `review --issues`. (AGT-4148)
+ */
+export function describeTaskSourceFailure(failure: TaskSourceFailure, action: string): string[] {
+  switch (failure.reason) {
+    case 'credential-rejected': {
+      const lines = [
+        `Linear rejected the stored credential, so it could not ${action} — it is configured, but no longer valid.`,
+        `  ${failure.detail}`,
+      ];
+      // ensureValidToken already appends the remediation to its own message.
+      // Repeating it just makes the operator read the same command twice.
+      if (!failure.detail.includes('auth login --provider linear')) {
+        lines.push('Run `openswarm auth login --provider linear` to re-authenticate, then re-run.');
+      }
+      return lines;
+    }
+    case 'transient':
+      return [
+        `Could not reach Linear to ${action}. This looks temporary rather than a credential problem.`,
+        `  ${failure.detail}`,
+        'Re-run once it is reachable; if it persists, check connectivity and Linear status.',
+      ];
+    case 'unconfigured':
+    default:
+      return [
+        `Linear is not configured, so it could not ${action}.`,
+        'Run `openswarm auth login --provider linear` (or set linearApiKey + linearTeamId in config.yaml), then re-run.',
+      ];
+  }
+}
+
+/**
  * Build a Linear-backed task source, reporting *why* when it cannot. Prefer this
  * over `ensureTaskSource` wherever the outcome is surfaced to a person: a bare
  * null cannot distinguish an unconfigured machine from a revoked token, and the
@@ -524,13 +560,21 @@ export async function runReviewCommand(
       } else {
         // Default path initializes a Linear task source itself (the daemon isn't
         // running here), and files regardless of decision. (INT-1969)
+        // Why the source could not be built, when that is what stopped filing.
+        // "0 filed" otherwise means the reviewer simply had nothing to file, and
+        // blaming Linear for that sends the operator to fix a working setup.
+        // (AGT-4148)
+        let sourceFailure: TaskSourceFailure | undefined;
         const fileFollowups =
           deps.fileFollowups ??
           (async (p: string | undefined, r: ReviewResult) => {
             const { fileReviewerFollowups } = await import('../automation/runnerExecution.js');
-            const source = await ensureTaskSource();
-            if (!source) return 0;
-            return fileReviewerFollowups(source, p, r, { autoFile: true, projectId: mapping.projectId, requireApprove: false });
+            const resolved = await resolveTaskSource();
+            if (!resolved.source) {
+              sourceFailure = resolved;
+              return 0;
+            }
+            return fileReviewerFollowups(resolved.source, p, r, { autoFile: true, projectId: mapping.projectId, requireApprove: false });
           });
         const filed = await fileFollowups(parent, result);
         if (filed > 0) {
@@ -539,10 +583,10 @@ export async function runReviewCommand(
               ? `Filed ${filed} follow-up sub-issue(s) under ${parent}.`
               : `Filed ${filed} standalone follow-up issue(s) (pass \`--issues <id>\` to nest them under an issue).`,
           );
+        } else if (sourceFailure) {
+          for (const line of describeTaskSourceFailure(sourceFailure, 'file follow-ups')) log(line);
         } else {
-          log(
-            `Could not file follow-ups (0 created). Is Linear connected? Run \`openswarm auth login --provider linear\` (or set linearApiKey in config).`,
-          );
+          log('Filed 0 follow-ups — Linear is connected, the reviewer just produced none to file.');
         }
       }
     } else if (followups) {

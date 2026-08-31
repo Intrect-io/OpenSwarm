@@ -179,7 +179,11 @@ describe('runReviewCommand --issues branch inference (INT-1967)', () => {
     expect(logs.join('\n')).toContain('inferred from branch');
   });
 
-  it('warns to connect Linear when nothing is filed (INT-1969)', async () => {
+  // A filer that returns 0 without reporting a task-source failure means Linear
+  // worked and there was simply nothing to file. Saying "is Linear connected?"
+  // here sent operators to fix a setup that was fine; the unavailable-source
+  // path is covered separately in reviewCommand.coverage.test.ts. (AGT-4148)
+  it('reports an empty filing run without blaming Linear (INT-1969)', async () => {
     const logs: string[] = [];
     await runReviewCommand(
       { fileIssue: true },
@@ -187,13 +191,16 @@ describe('runReviewCommand --issues branch inference (INT-1967)', () => {
         getChangedFiles: async () => ['x.ts'],
         review: approveWithFollowups,
         getBranch: async () => 'main',
-        fileFollowups: async () => 0, // e.g. Linear not configured
+        fileFollowups: async () => 0,
         ensureProjectMapping: async () => ({ projectId: undefined, abort: false }),
         startProgress: () => null,
         log: (l) => logs.push(l),
       },
     );
-    expect(logs.join('\n')).toMatch(/Linear connected|auth login/);
+    const out = logs.join('\n');
+    expect(out).toContain('Filed 0 follow-ups');
+    expect(out).toContain('the reviewer just produced none to file');
+    expect(out).not.toContain('auth login');
   });
 
   it('uses an explicit id over branch inference', async () => {
