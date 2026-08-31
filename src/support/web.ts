@@ -742,33 +742,40 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           writeJson(res, 503, { error: 'GH_TOKEN not configured' });
           return;
         }
+        let parsed: { fullName?: unknown };
         try {
-          const { fullName } = JSON.parse(await readBody(req)) as { fullName?: unknown };
-          const segments = typeof fullName === 'string' ? fullName.split('/') : [];
-          if (typeof fullName !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(fullName)
-            || segments.includes('.') || segments.includes('..')) {
-            writeJson(res, 400, { error: 'Invalid repository name' });
-            return;
-          }
-          const destination = getCloneDestination(fullName);
-          if (!destination) {
-            writeJson(res, 400, { error: 'Invalid repository destination' });
-            return;
-          }
-          if (existsSync(destination)) {
-            writeJson(res, 409, { error: 'Repository destination already exists' });
-            return;
-          }
-          try {
-            await runGitClone(fullName, destination);
-          } catch {
-            writeJson(res, 502, { error: 'Git clone failed' });
-            return;
-          }
+          parsed = JSON.parse(await readBody(req)) as { fullName?: unknown };
+        } catch {
+          writeJson(res, 400, { error: 'Invalid JSON' });
+          return;
+        }
+        const fullName = parsed.fullName;
+        const segments = typeof fullName === 'string' ? fullName.split('/') : [];
+        if (typeof fullName !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(fullName)
+          || segments.includes('.') || segments.includes('..')) {
+          writeJson(res, 400, { error: 'Invalid repository name' });
+          return;
+        }
+        const destination = getCloneDestination(fullName);
+        if (!destination) {
+          writeJson(res, 400, { error: 'Invalid repository destination' });
+          return;
+        }
+        if (existsSync(destination)) {
+          writeJson(res, 409, { error: 'Repository destination already exists' });
+          return;
+        }
+        try {
+          await runGitClone(fullName, destination);
+        } catch {
+          writeJson(res, 502, { error: 'Git clone failed' });
+          return;
+        }
+        try {
           registerPinnedProject(destination);
           writeJson(res, 201, { fullName, destination });
         } catch {
-          writeJson(res, 400, { error: 'Invalid JSON' });
+          writeJson(res, 500, { error: 'Repository registration failed' });
         }
 
       // ---- Local projects for picker ----
