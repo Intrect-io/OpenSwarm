@@ -276,12 +276,30 @@ export async function resolveTaskSource(): Promise<TaskSourceResult> {
       if (config.linearTeamId) {
         const { AuthProfileStore, ensureValidToken } = await import('../auth/index.js');
         const authStore = new AuthProfileStore();
+        // A stored OAuth profile is preferred, but it must not *shadow* a working
+        // API key: a revoked or expired grant used to take this branch, throw, and
+        // leave `linearApiKey` untried even though it was configured and valid.
+        // The two credentials are independent, so a dead one is a reason to try the
+        // other, not to give up. (AGT-4152)
+        let oauthFailure: unknown;
+        let initialised = false;
         if (authStore.getProfile('linear:default')) {
-          const token = await ensureValidToken(authStore, 'linear:default');
-          linear.initLinear(token, config.linearTeamId, true);
-        } else if (config.linearApiKey) {
-          linear.initLinear(config.linearApiKey, config.linearTeamId);
+          try {
+            const token = await ensureValidToken(authStore, 'linear:default');
+            linear.initLinear(token, config.linearTeamId, true);
+            initialised = true;
+          } catch (err) {
+            oauthFailure = err;
+          }
         }
+        if (!initialised && config.linearApiKey) {
+          linear.initLinear(config.linearApiKey, config.linearTeamId);
+          initialised = true;
+        }
+        // Nothing else worked, so the OAuth cause is the useful one to report —
+        // rethrowing keeps AGT-4148's credential-rejected/transient classification
+        // instead of flattening it to "unconfigured".
+        if (!initialised && oauthFailure !== undefined) throw oauthFailure;
       }
     }
     if (!linear.isLinearInitialized()) return { source: null, reason: 'unconfigured' };
