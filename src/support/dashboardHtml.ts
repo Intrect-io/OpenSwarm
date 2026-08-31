@@ -1585,7 +1585,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         return (
           "<div class=\\"stage-block\\" data-stage-idx=\\"" + i + "\\">" +
             "<div class=\\"" + rowClass + "\\"" + onclick + ">" +
-              "<div class=\\"sdot " + (r.status || "") + "\\"></div>" +
+              "<div class=\\"sdot " + escapeAttr(r.status || "") + "\\"></div>" +
               "<div class=\\"srepo\\">" + escapeHtml(repoName) + "</div>" +
               "<div class=\\"sname\\">" + escapeHtml(r.stage) + "</div>" +
               "<div class=\\"stask\\" title=\\"" + escapeAttr(r.taskId || "") + "\\">" + escapeHtml(taskLabel) + "</div>" +
@@ -1593,7 +1593,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
               "<div class=\\"smodel\\">" + escapeHtml(modelStr) + "</div>" +
               "<div class=\\"stokens\\">" + escapeHtml(tokenStr) + "</div>" +
               "<div class=\\"selapsed\\">" + elapsed + "</div>" +
-              "<div class=\\"sstatus\\">" + (r.status || "") + "</div>" +
+              "<div class=\\"sstatus\\">" + escapeHtml(r.status || "") + "</div>" +
             "</div>" +
             (hasDetails ? "<div class=\\"stage-details\\">" + detailsHtml + "</div>" : "") +
           "</div>"
