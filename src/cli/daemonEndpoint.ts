@@ -77,12 +77,49 @@ export function daemonAuthHeaders(): Record<string, string> {
   return token ? { 'x-openswarm-token': token } : {};
 }
 
-/** Base URL for a daemon request, e.g. `http://127.0.0.1:3847`. */
+/** True when a non-blank token is configured. */
+function hasDaemonToken(): boolean {
+  return Boolean(process.env[DAEMON_TOKEN_ENV]?.trim());
+}
+
+/** Env var selecting https for a daemon behind TLS or a reverse proxy. */
+export const DAEMON_SCHEME_ENV = 'OPENSWARM_DAEMON_SCHEME';
+
+/** Env var acknowledging that a token will cross the network in the clear. */
+export const ALLOW_PLAINTEXT_TOKEN_ENV = 'OPENSWARM_DAEMON_ALLOW_PLAINTEXT_TOKEN';
+
+/** `http` (default, matching the daemon's own listener) or `https`. */
+export function daemonScheme(raw: string | undefined = process.env[DAEMON_SCHEME_ENV]): 'http' | 'https' {
+  const value = raw?.trim().toLowerCase().replace(/:$/, '');
+  if (!value) return 'http';
+  if (value !== 'http' && value !== 'https') {
+    throw new Error(`${DAEMON_SCHEME_ENV}=${JSON.stringify(raw)} must be "http" or "https".`);
+  }
+  return value;
+}
+
+/**
+ * Base URL for a daemon request, e.g. `http://127.0.0.1:3847`.
+ *
+ * Sending the token to a remote host over http puts a bearer-equivalent
+ * credential — and the coordination content around it — on the wire in the
+ * clear. Loopback never leaves the machine, so it is exempt; anything else has
+ * to either use https or say plainly that the network is already trusted (a
+ * WireGuard/Tailscale link, typically). Caught by `openswarm pr review`.
+ */
 export function daemonBaseUrl(port: number): string {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error(`Daemon port must be an integer between 1 and 65535, got ${port}`);
   }
-  return `http://${daemonHost()}:${port}`;
+  const scheme = daemonScheme();
+  const host = daemonHost();
+  if (scheme === 'http' && isRemoteDaemon() && hasDaemonToken()
+      && process.env[ALLOW_PLAINTEXT_TOKEN_ENV]?.trim() !== 'true') {
+    throw new Error(`Refusing to send ${DAEMON_TOKEN_ENV} to ${host} over plaintext http. `
+      + `Set ${DAEMON_SCHEME_ENV}=https, or ${ALLOW_PLAINTEXT_TOKEN_ENV}=true if the link is `
+      + 'already encrypted (e.g. Tailscale/WireGuard).');
+  }
+  return `${scheme}://${host}:${port}`;
 }
 
 /**

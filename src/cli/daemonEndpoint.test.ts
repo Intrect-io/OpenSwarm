@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DAEMON_HOST_ENV,
+  ALLOW_PLAINTEXT_TOKEN_ENV,
+  DAEMON_SCHEME_ENV,
   DAEMON_TOKEN_ENV,
   daemonAuthHeaders,
+  daemonScheme,
   DEFAULT_DAEMON_HOST,
   InvalidDaemonHostError,
   daemonBaseUrl,
@@ -13,6 +16,8 @@ import {
 afterEach(() => {
   delete process.env[DAEMON_HOST_ENV];
   delete process.env[DAEMON_TOKEN_ENV];
+  delete process.env[DAEMON_SCHEME_ENV];
+  delete process.env[ALLOW_PLAINTEXT_TOKEN_ENV];
 });
 
 describe('daemonHost', () => {
@@ -94,5 +99,57 @@ describe('daemonAuthHeaders', () => {
   it('ignores a blank token rather than sending an empty header', () => {
     process.env[DAEMON_TOKEN_ENV] = '   ';
     expect(daemonAuthHeaders()).toEqual({});
+  });
+});
+
+describe('daemonScheme', () => {
+  it('defaults to http, matching the daemon\'s own listener', () => {
+    expect(daemonScheme(undefined)).toBe('http');
+    expect(daemonScheme('')).toBe('http');
+  });
+
+  it.each(['https', 'HTTPS', ' https ', 'https:'])('accepts %s', (value) => {
+    expect(daemonScheme(value)).toBe('https');
+  });
+
+  it('rejects anything else instead of building a nonsense URL', () => {
+    expect(() => daemonScheme('ftp')).toThrow(/must be "http" or "https"/);
+  });
+});
+
+describe('plaintext credential guard', () => {
+  // The token is bearer-equivalent. Over http to another machine it, and the
+  // coordination content around it, are on the wire in the clear.
+  it('refuses to send the token to a remote host over http', () => {
+    process.env[DAEMON_HOST_ENV] = 'vela';
+    process.env[DAEMON_TOKEN_ENV] = 's3cret';
+    expect(() => daemonBaseUrl(3847)).toThrow(/Refusing to send/);
+  });
+
+  it('allows it over https', () => {
+    process.env[DAEMON_HOST_ENV] = 'vela';
+    process.env[DAEMON_TOKEN_ENV] = 's3cret';
+    process.env[DAEMON_SCHEME_ENV] = 'https';
+    expect(daemonBaseUrl(3847)).toBe('https://vela:3847');
+  });
+
+  it('allows it when the operator states the link is already encrypted', () => {
+    process.env[DAEMON_HOST_ENV] = 'vela';
+    process.env[DAEMON_TOKEN_ENV] = 's3cret';
+    process.env[ALLOW_PLAINTEXT_TOKEN_ENV] = 'true';
+    expect(daemonBaseUrl(3847)).toBe('http://vela:3847');
+  });
+
+  it('never blocks loopback, which does not leave the machine', () => {
+    process.env[DAEMON_TOKEN_ENV] = 's3cret';
+    expect(daemonBaseUrl(3847)).toBe('http://127.0.0.1:3847');
+    process.env[DAEMON_HOST_ENV] = 'localhost';
+    expect(daemonBaseUrl(3847)).toBe('http://localhost:3847');
+  });
+
+  it('never blocks a remote host when no token is configured', () => {
+    // Tailscale already encrypts the link; a tokenless read exposes no credential.
+    process.env[DAEMON_HOST_ENV] = '100.95.200.28';
+    expect(daemonBaseUrl(3847)).toBe('http://100.95.200.28:3847');
   });
 });
