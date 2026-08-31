@@ -287,3 +287,47 @@ describe('ensureValidToken', () => {
     await expect(ensureValidToken(new AuthProfileStore(), 'gpt:default')).rejects.toThrow(/auth login/);
   });
 });
+
+// The CLI classifies a dead credential by the *shape* ensureValidToken throws:
+// name 'TokenRefreshError' plus a numeric HTTP status. Those classifier tests
+// build that shape by hand, so without this the two halves of the contract could
+// drift apart silently. (AGT-4148)
+describe('ensureValidToken refresh failures', () => {
+  const expiredProfile = () =>
+    validProfile({ provider: 'linear', expires: Date.now() - 60_000 });
+
+  async function refreshWith(status: number, body: string) {
+    writeStore({ 'linear:default': expiredProfile() });
+    const { AuthProfileStore, ensureValidToken, TokenRefreshError } = await loadModule();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status })),
+    );
+    return { store: new AuthProfileStore(), ensureValidToken, TokenRefreshError };
+  }
+
+  it('rejects a non-2xx refresh with TokenRefreshError carrying the status', async () => {
+    const { store, ensureValidToken, TokenRefreshError } = await refreshWith(
+      400,
+      '{"error":"invalid_request","error_description":"Refresh token revoked"}',
+    );
+    const err = await ensureValidToken(store, 'linear:default').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TokenRefreshError);
+    expect((err as InstanceType<typeof TokenRefreshError>).status).toBe(400);
+    // The shape the CLI classifier matches on, asserted independently of the class.
+    expect((err as Error).name).toBe('TokenRefreshError');
+    expect((err as Error).message).toContain('Refresh token revoked');
+  });
+
+  it('preserves a 429 status rather than flattening every failure to one kind', async () => {
+    const { store, ensureValidToken } = await refreshWith(429, 'Too Many Requests');
+    const err = await ensureValidToken(store, 'linear:default').catch((e: unknown) => e);
+    expect((err as Error & { status: number }).status).toBe(429);
+  });
+
+  it('leaves the stored profile untouched when the refresh is rejected', async () => {
+    const { store, ensureValidToken } = await refreshWith(400, 'nope');
+    await ensureValidToken(store, 'linear:default').catch(() => undefined);
+    expect(readStore().profiles['linear:default'].refresh).toBe('refresh-token');
+  });
+});
