@@ -114,6 +114,7 @@ import { isBranchForIssue, isSwarmBranch } from './branchNaming.js';
 export { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
+import { guardUnsafeBinaryStaging, unsafeBinaryDataOnBranch, UNRESOLVED_BASE } from './unsafeBinaryData.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -633,13 +634,34 @@ async function removePreservedWorktreeAtUnlocked(
     const branchName = await git(worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD')
       .then((out) => out.trim())
       .catch(() => '');
-    if (branchName && branchName !== 'HEAD') {
-      await publish({ worktreePath, repoRoot, branchName }).catch((err) => {
+    // The WIP commit above deliberately runs no binary guard: unstaging a file
+    // here would strip it from the only copy that survives this directory. That
+    // was safe while the branch stayed local. Pushing it is not, so the guard
+    // that commitAndCreatePRWithHead applies to a staged tree (INT-2430) is
+    // applied to the branch instead — a run that accidentally captured a
+    // .duckdb/.parquet/.pkl/.pt keeps it locally and simply is not published.
+    // Fail closed: an unresolvable base means the branch cannot be judged, and
+    // publication would fail on the same lookup anyway.
+    const unsafe = await resolveBaseRef(worktreePath)
+      .then((base) => unsafeBinaryDataOnBranch(worktreePath, base.ref))
+      .catch(() => [UNRESOLVED_BASE]);
+    if (unsafe.length > 0) {
+      console.warn(
+        `[Worktree] Not publishing ${branchName || worktreePath}: the branch carries binary data `
+        + `automated commits never intentionally touch (${unsafe.join(', ')}). `
+        + 'The work stays on the local branch.',
+      );
+    } else if (branchName && branchName !== 'HEAD') {
+      // try/catch, not `.catch()`: this must also survive a hook that throws
+      // synchronously or returns no promise at all. Removal has to proceed.
+      try {
+        await publish({ worktreePath, repoRoot, branchName });
+      } catch (err) {
         console.warn(
           `[Worktree] Pre-cleanup publish failed for ${branchName}; the branch keeps the commits locally:`,
           err instanceof Error ? err.message : err,
         );
-      });
+      }
     } else {
       console.warn(`[Worktree] Cannot publish ${worktreePath} before cleanup: no branch at HEAD`);
     }
@@ -993,39 +1015,6 @@ export async function findOpenPRFileOverlaps(
 /** Split git/gh newline output into a trimmed, non-empty list. */
 function toLines(out: string): string[] {
   return out.split('\n').map(s => s.trim()).filter(Boolean);
-}
-
-// Unsafe binary staging guard (INT-2430)
-//
-// When a worker hits a permission error running `git status` on an LFS-tracked
-// repo, it can work around it with `-c filter.lfs.clean= -c filter.lfs.smudge=`.
-// That makes every already-smudged LFS binary (real content on disk) look
-// "modified" against its pointer, and the worker mistakes them for its own
-// changes — the subsequent `git add -A` (worker's or ours, right before commit)
-// stages them for real. An automated code-change commit has no legitimate reason
-// to touch a data dump, so these extensions are excluded outright regardless of
-// *why* they ended up staged. Real incident: PR #213/STONKS committed
-// nas_data/fnguide/*.duckdb and models/validated_features/*.parquet this way —
-// reverted by hand.
-const UNSAFE_BINARY_DATA_RE = /\.(duckdb|parquet|pkl|pt)$/i;
-
-/** Unstage any staged file matching an unsafe binary-data extension so it can
- *  never reach the commit. Best-effort — a failed unstage is logged, not thrown,
- *  since letting the binary through would be strictly worse. */
-async function guardUnsafeBinaryStaging(worktreePath: string): Promise<void> {
-  const staged = toLines(await git(worktreePath, 'diff', '--cached', '--name-only').catch(() => ''));
-  const unsafe = staged.filter((f) => UNSAFE_BINARY_DATA_RE.test(f));
-  if (unsafe.length === 0) return;
-
-  console.warn(
-    `[Worktree] Unstaging ${unsafe.length} binary data file(s) matching .duckdb/.parquet/.pkl/.pt — ` +
-    `automated commits never intentionally touch these (INT-2430): ${unsafe.join(', ')}`,
-  );
-  for (const file of unsafe) {
-    await git(worktreePath, 'reset', 'HEAD', '--', file).catch((e) =>
-      console.warn(`[Worktree] Failed to unstage ${file}:`, e),
-    );
-  }
 }
 
 /**

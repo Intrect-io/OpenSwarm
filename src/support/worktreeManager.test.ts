@@ -643,7 +643,9 @@ describe('removePreservedWorktreeAt (INT-2506)', () => {
     writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
     await preserveWorktree(info, 'stuck test');
 
-    await removePreservedWorktreeAt(info.worktreePath, async () => {
+    // Throws synchronously: removal must survive a hook that never returns a
+    // promise at all, not just a rejected one.
+    await removePreservedWorktreeAt(info.worktreePath, () => {
       throw new Error('gh: could not reach github.com');
     });
 
@@ -651,6 +653,38 @@ describe('removePreservedWorktreeAt (INT-2506)', () => {
     // The work still survives on the branch, as it did before publication existed.
     expect(execFileSync('git', ['-C', repo, 'show', 'swarm/INT-9-test:app.py'], { encoding: 'utf8' }))
       .toBe('base\npartial\n');
+  });
+
+  // The pre-cleanup WIP commit runs no binary guard on purpose — unstaging
+  // there would strip the file from the only copy that outlives the directory.
+  // That was safe while the branch stayed local; publishing it is not.
+  it('does not publish a branch carrying binary data, but still keeps it locally', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    writeFileSync(join(info.worktreePath, 'dump.parquet'), 'binary-ish\n');
+    await preserveWorktree(info, 'stuck test');
+
+    const publish = vi.fn();
+    await removePreservedWorktreeAt(info.worktreePath, publish);
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(existsSync(info.worktreePath)).toBe(false);
+    // Local preservation is unchanged: both files survive on the branch.
+    const tree = execFileSync('git', ['-C', repo, 'ls-tree', '--name-only', 'swarm/INT-9-test'], { encoding: 'utf8' });
+    expect(tree).toContain('dump.parquet');
+    expect(execFileSync('git', ['-C', repo, 'show', 'swarm/INT-9-test:app.py'], { encoding: 'utf8' }))
+      .toBe('base\npartial\n');
+  });
+
+  it('publishes a branch whose files are all safe', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'stuck test');
+
+    const publish = vi.fn();
+    await removePreservedWorktreeAt(info.worktreePath, publish);
+
+    expect(publish).toHaveBeenCalledTimes(1);
   });
 
   it('skips publication on a detached HEAD rather than pushing the wrong branch', async () => {
