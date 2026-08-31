@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import {
   latestAddressable,
@@ -418,5 +418,47 @@ describe('runAttachCommand --correlation', () => {
 
     expect(code).toBe(0);
     expect(JSON.parse(fetchMock.mock.calls[2][1].body as string).correlationId).toBe('hq-1');
+  });
+});
+
+describe('runAttachCommand endpoint misconfiguration', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    deps.ensureTaskSource.mockClear();
+    deps.getIssue.mockClear();
+  });
+
+  afterEach(() => {
+    delete process.env.OPENSWARM_DAEMON_HOST;
+    delete process.env.OPENSWARM_DAEMON_TOKEN;
+  });
+
+  // "start it first" is unactionable when the daemon is already running and
+  // the host is simply malformed. Third instance of this swallow across the
+  // CLI; the URL is now resolved before the catch at every entry point.
+  it('reports a malformed host instead of telling the operator to start a daemon', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OPENSWARM_DAEMON_HOST = 'http://vela';
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', deps });
+
+    expect(code).toBe(1);
+    const text = consoleError.mock.calls.flat().join('\n');
+    expect(text).toContain('is not a bare host');
+    expect(text).not.toContain('openswarm start');
+    expect(fetchMock).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it('reports a refused plaintext token the same way', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OPENSWARM_DAEMON_HOST = 'vela';
+    process.env.OPENSWARM_DAEMON_TOKEN = 's3cret';
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', deps });
+
+    expect(code).toBe(1);
+    expect(consoleError.mock.calls.flat().join('\n')).toContain('Refusing to send');
+    consoleError.mockRestore();
   });
 });

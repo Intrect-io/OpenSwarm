@@ -68,10 +68,14 @@ function getProjectRoot(): string {
 // Service Health Check
 
 async function checkServiceHealth(): Promise<boolean> {
+  // Resolved before the try: a malformed host or a refused plaintext token is
+  // a configuration error, and answering `false` here would send the caller
+  // into auto-start instead of reporting it.
+  const url = `${BASE_URL()}/api/stats`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   try {
-    const res = await fetch(`${BASE_URL()}/api/stats`, { headers: daemonAuthHeaders(), signal: controller.signal });
+    const res = await fetch(url, { headers: daemonAuthHeaders(), signal: controller.signal });
     return res.ok;
   } catch {
     return false;
@@ -154,6 +158,10 @@ async function submitTask(opts: ExecOptions, projectPath: string): Promise<ExecT
 // Task Polling
 
 async function pollForResult(taskId: string, timeoutS: number): Promise<ExecTaskStatus> {
+  // Resolved once, before the loop: the endpoint cannot change mid-poll, and
+  // resolving inside the per-iteration try would swallow a configuration error
+  // as just another failed poll until the deadline expired.
+  const pollUrl = BASE_URL();
   const deadline = Date.now() + timeoutS * 1000;
 
   while (Date.now() < deadline) {
@@ -168,7 +176,7 @@ async function pollForResult(taskId: string, timeoutS: number): Promise<ExecTask
         Math.min(POLL_REQUEST_TIMEOUT_MS, remainingMs),
       );
       try {
-        const res = await fetch(`${BASE_URL()}/api/exec/${taskId}`, { headers: daemonAuthHeaders(), signal: controller.signal });
+        const res = await fetch(`${pollUrl}/api/exec/${taskId}`, { headers: daemonAuthHeaders(), signal: controller.signal });
         if (!res.ok) continue;
 
         const status = (await res.json()) as ExecTaskStatus;

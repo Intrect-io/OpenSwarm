@@ -193,8 +193,14 @@ async function postMessage(
 }
 
 async function isDaemonReachable(port: number): Promise<boolean> {
+  // Outside the try: daemonBaseUrl throws for a malformed host or a token it
+  // will not send in the clear, and returning false for those tells the
+  // operator to start a daemon that is already running. Third instance of this
+  // swallow (providerCommand had two); the URL is now resolved before the
+  // catch at every entry point.
+  const url = `${baseUrl(port)}/api/stats`;
   try {
-    const res = await fetch(`${baseUrl(port)}/api/stats`, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(1500) });
+    const res = await fetch(url, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(1500) });
     return res.ok;
   } catch {
     return false;
@@ -225,7 +231,15 @@ export async function runAttachCommand(
     return 1;
   }
 
-  if (!(await isDaemonReachable(port))) {
+  let reachable: boolean;
+  try {
+    reachable = await isDaemonReachable(port);
+  } catch (error) {
+    // A configuration or safety refusal, not an absent daemon.
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+  if (!reachable) {
     console.error('OpenSwarm daemon is not reachable — start it first (`openswarm start`).');
     return 1;
   }
