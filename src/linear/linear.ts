@@ -1161,8 +1161,17 @@ export async function removeIssueLabel(issueId: string, labelName: string): Prom
  * heartbeat must NOT re-attempt it. Adds the durable {@link STUCK_LABEL} (survives
  * daemon restarts, unlike the in-memory failure counters) and parks the issue in
  * Backlog — a non-recoverable state, so the heartbeat's recovery branch won't
- * silently un-block it. Removing the label or moving the issue back to an active
- * state (Todo / In Progress) is the explicit signal to retry.
+ * silently un-block it. Moving the issue back to Todo is the explicit signal to
+ * retry, and the heartbeat strips the label itself on that recovery.
+ *
+ * Todo is named because it is the one action that works in every mode. Under the
+ * durable ledger, exhausting retries also parks the run in NEEDS_HUMAN and
+ * `filterAlreadyProcessed` returns on that state before it ever reaches the label
+ * check — so there, removing the label alone does nothing, and 'In Progress' cannot
+ * help either, being a state the pipeline writes itself when it claims a task
+ * (AGT-4155). Only Todo or an explicit dispatch from the issue board / `work` CLI
+ * retry a parked run. The legacy non-primary path still recovers a labelled issue
+ * from any active state, and Todo satisfies that one too.
  */
 export async function logStuck(
   issueId: string,
@@ -1174,7 +1183,7 @@ export async function logStuck(
     sections: [
       { label: 'Reason', body: reason },
       { label: 'How to retry', body: [
-        `Remove the \`${STUCK_LABEL}\` label, or move this issue back to Todo / In Progress.`,
+        'Move this issue back to Todo — the `' + STUCK_LABEL + '` label is cleared automatically on retry.',
         'The agent will not retry on its own until then.',
       ] },
     ],

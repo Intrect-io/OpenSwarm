@@ -1280,14 +1280,16 @@ export class AutonomousRunner {
         console.warn(`[AutonomousRunner] Failed to clear stuck label for ${id}:`, err));
     }
     if (stuckSkipped > 0) {
-      // Todo only. 'In Progress' still recovers a purely label-stuck issue via
-      // classifyStuck, but an issue whose durable run is NEEDS_HUMAN is filtered
-      // out above before it ever reaches that check — and it is filtered there
-      // precisely because the pipeline writes 'In Progress' itself when it
-      // claims a task, so a parked card left in that state cannot distinguish an
-      // operator's intent from this run's own footprint (AGT-4155). Naming the
-      // one state that works on both paths beats naming two that disagree.
-      this.syslog(`🛑 Skipped ${stuckSkipped} stuck issue(s) (retries exhausted — remove the \`${STUCK_LABEL}\` label or move to Todo to retry)`);
+      // Name Todo because it is the one action that works in every mode. Under
+      // the durable ledger (isPrimary) retry exhaustion also parks the run in
+      // NEEDS_HUMAN and this filter returns on that state above, before the
+      // label check below — so there, removing the label does nothing and
+      // 'In Progress' cannot help either, being a state the pipeline writes
+      // itself when it claims a task (AGT-4155). The legacy non-primary path
+      // skips that gate and still recovers a labelled issue from any of
+      // classifyStuck's RECOVERABLE_STATES. Todo recovers on both. The recovery
+      // branch strips the label itself, so the operator only moves the card.
+      this.syslog(`🛑 Skipped ${stuckSkipped} stuck issue(s) (retries exhausted — move to Todo to retry)`);
     }
     if (recovered > 0) {
       this.saveTaskState();
