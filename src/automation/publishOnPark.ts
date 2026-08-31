@@ -138,20 +138,24 @@ export async function publishParkedWork(
  * WIP commit that hook fires after. Returns the PR URL when one was opened, so
  * the caller can put it in the tracker comment the operator actually reads.
  *
- * Takes no durability hooks, unlike the other two paths, because there is no
- * claim left to fence against: the caller has already transitioned the run to
- * NEEDS_HUMAN, and that state is not claimable. What the fence guards there —
- * an executor publishing work it no longer speaks for — is bounded here by two
- * other things instead. A second owner live on *this* tree is caught by the
- * lifecycle lock's marker re-check, which skips publication entirely; a second
- * owner on the same branch from a *different* tree collides at the
- * `--force-with-lease` push, which fails loudly rather than overwriting.
+ * Takes no `beforePublish` hook because the caller already holds the same
+ * proof in a stronger form. The reviewed path fences on a live claim; here the
+ * caller has just run the durable park, and `markNeedsHuman` refuses any row
+ * that still carries an owner or lease — so it only reaches this function when
+ * the run is durably parked and unowned. A stale executor is turned away before
+ * getting here. Note that the worktree lifecycle lock this runs under does NOT
+ * supply that: it proves no worker is still editing the tree, which is a
+ * different guarantee from owning the run.
  *
- * The PR is likewise not attached to the ledger. Writing `pr_url` onto a parked
- * row feeds the reconcile paths that classify a PR-carrying non-approved run,
- * and that is the phantom-row shape which idled the whole loop on 2026-08-29.
- * The operator finds this PR through the tracker comment and by branch name,
- * which is also how a later reviewed publication reuses it.
+ * The PR is not attached to the ledger, which is a known gap rather than a
+ * decision that costs nothing: nothing reading run state sees this artifact.
+ * There is no ledger method for it — `attachPublication` needs a live claim and
+ * `recoverPublishedRun` only accepts NEEDS_RECONCILE/WAITING_EXTERNAL — and
+ * writing `pr_url` onto a parked row feeds the reconcile paths that classify a
+ * PR-carrying non-approved run, which is the phantom-row shape that idled the
+ * whole loop on 2026-08-29. Until that has an owner, the operator finds this PR
+ * through the tracker comment, and a later reviewed publication reuses it by
+ * branch name.
  */
 export async function publishStuckWork(
   ctx: { worktreePath: string; repoRoot: string; branchName: string },
