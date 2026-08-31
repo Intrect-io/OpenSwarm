@@ -96,6 +96,7 @@ const {
   resolveProjectId,
   ensureProjectMapping,
   ensureTaskSource,
+  resolveTaskSource,
   runReviewCommand,
 } = await import('./reviewCommand.js');
 
@@ -255,6 +256,57 @@ describe('ensureTaskSource (INT-1969)', () => {
 
     expect(ensureValidTokenMock).not.toHaveBeenCalled();
     expect(initLinearMock).toHaveBeenCalledWith('key-xyz', 'team-2');
+  });
+
+  // A revoked or expired OAuth grant used to take the profile branch, throw, and
+  // leave a configured-and-valid apiKey untried. The two credentials are
+  // independent, so a dead one is a reason to try the other. (AGT-4152)
+  it('falls back to the apiKey when the OAuth profile refresh is rejected', async () => {
+    isLinearInitializedMock.mockReturnValueOnce(false).mockReturnValueOnce(true);
+    loadConfigMock.mockReturnValueOnce({ linearTeamId: 'team-3', linearApiKey: 'key-live' });
+    getProfileMock.mockReturnValueOnce({ id: 'linear:default' });
+    const revoked = Object.assign(new Error('Token refresh failed (400): Refresh token revoked'), {
+      name: 'TokenRefreshError',
+      status: 400,
+    });
+    ensureValidTokenMock.mockRejectedValueOnce(revoked);
+
+    const result = await resolveTaskSource();
+
+    expect(initLinearMock).toHaveBeenCalledWith('key-live', 'team-3');
+    expect(result).toEqual({ source: { kind: 'linear-task-source' } });
+  });
+
+  // Without an apiKey there is nothing to fall back to, and the OAuth cause is
+  // what the operator needs — it must not flatten to "unconfigured". (AGT-4148)
+  it('reports the rejected credential when no apiKey is configured', async () => {
+    // Exactly one queued value: the rethrow exits before the confirmation check,
+    // and a leftover mockReturnValueOnce would leak into the next test.
+    isLinearInitializedMock.mockReturnValueOnce(false);
+    loadConfigMock.mockReturnValueOnce({ linearTeamId: 'team-4', linearApiKey: '' });
+    getProfileMock.mockReturnValueOnce({ id: 'linear:default' });
+    ensureValidTokenMock.mockRejectedValueOnce(Object.assign(new Error('Token refresh failed (400): revoked'), {
+      name: 'TokenRefreshError',
+      status: 400,
+    }));
+
+    const result = await resolveTaskSource();
+
+    expect(initLinearMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ source: null, reason: 'credential-rejected' });
+  });
+
+  // A live OAuth profile must still win; the apiKey is a fallback, not a peer.
+  it('does not touch the apiKey when the OAuth profile works', async () => {
+    isLinearInitializedMock.mockReturnValueOnce(false).mockReturnValueOnce(true);
+    loadConfigMock.mockReturnValueOnce({ linearTeamId: 'team-5', linearApiKey: 'key-unused' });
+    getProfileMock.mockReturnValueOnce({ id: 'linear:default' });
+    ensureValidTokenMock.mockResolvedValueOnce('token-live');
+
+    await resolveTaskSource();
+
+    expect(initLinearMock).toHaveBeenCalledTimes(1);
+    expect(initLinearMock).toHaveBeenCalledWith('token-live', 'team-5', true);
   });
 
   it('returns null when there is no linearTeamId configured at all', async () => {
