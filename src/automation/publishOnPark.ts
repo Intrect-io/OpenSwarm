@@ -137,6 +137,21 @@ export async function publishParkedWork(
  * that function's lifecycle lock and live-owner re-check, and so it sees the
  * WIP commit that hook fires after. Returns the PR URL when one was opened, so
  * the caller can put it in the tracker comment the operator actually reads.
+ *
+ * Takes no durability hooks, unlike the other two paths, because there is no
+ * claim left to fence against: the caller has already transitioned the run to
+ * NEEDS_HUMAN, and that state is not claimable. What the fence guards there —
+ * an executor publishing work it no longer speaks for — is bounded here by two
+ * other things instead. A second owner live on *this* tree is caught by the
+ * lifecycle lock's marker re-check, which skips publication entirely; a second
+ * owner on the same branch from a *different* tree collides at the
+ * `--force-with-lease` push, which fails loudly rather than overwriting.
+ *
+ * The PR is likewise not attached to the ledger. Writing `pr_url` onto a parked
+ * row feeds the reconcile paths that classify a PR-carrying non-approved run,
+ * and that is the phantom-row shape which idled the whole loop on 2026-08-29.
+ * The operator finds this PR through the tracker comment and by branch name,
+ * which is also how a later reviewed publication reuses it.
  */
 export async function publishStuckWork(
   ctx: { worktreePath: string; repoRoot: string; branchName: string },
