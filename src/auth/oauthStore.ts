@@ -231,6 +231,23 @@ export class AuthProfileStore {
 // Token refresh
 
 /**
+ * A refresh the provider answered and rejected. `status` is carried structurally
+ * so callers can separate a dead credential (4xx — only re-auth recovers it)
+ * from a provider fault (5xx — worth retrying) without parsing the message.
+ * A transport failure never becomes one of these; it propagates as the
+ * underlying fetch error, which is itself the signal that nothing was answered.
+ */
+export class TokenRefreshError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'TokenRefreshError';
+    this.status = status;
+  }
+}
+
+/**
  * 유효한 access token 반환. 만료 임박 시 자동 refresh.
  */
 export async function ensureValidToken(store: AuthProfileStore, profileKey: string): Promise<string> {
@@ -272,8 +289,9 @@ export async function ensureValidToken(store: AuthProfileStore, profileKey: stri
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     const reauth = profile.provider === 'linear' ? 'linear' : 'gpt';
-    throw new Error(
+    throw new TokenRefreshError(
       `Token refresh failed (${res.status}): ${errText.slice(0, 200)}. Run: openswarm auth login --provider ${reauth}`,
+      res.status,
     );
   }
 

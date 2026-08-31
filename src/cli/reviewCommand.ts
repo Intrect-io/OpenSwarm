@@ -207,10 +207,67 @@ export async function ensureProjectMapping(
  * Linear from config (OAuth profile or apiKey) and build a LinearTaskSource.
  * Returns null when Linear isn't configured. (INT-1969)
  */
-export async function ensureTaskSource(): Promise<ITaskSource | null> {
+/**
+ * Why a task source could not be built. `unconfigured` is the only one that
+ * means "nothing to fix here"; the other two are configured-but-failing, and
+ * telling an operator they are "not configured" sends them at the wrong repair.
+ */
+export type TaskSourceFailure =
+  /** No Linear team id, or no OAuth profile and no apiKey. */
+  | { reason: 'unconfigured' }
+  /** The provider answered and rejected the credential — only re-auth recovers it. */
+  | { reason: 'credential-rejected'; detail: string }
+  /** Nothing answered, or the provider faulted. Worth retrying. */
+  | { reason: 'transient'; detail: string };
+
+export type TaskSourceResult = { source: ITaskSource } | ({ source: null } & TaskSourceFailure);
+
+/**
+ * Turn a task-source failure into operator guidance. Each reason points at a
+ * different repair, which is why the cause is carried this far: telling someone
+ * with a revoked token to "set linearApiKey" wastes their time on a setting that
+ * is already present. `action` names what could not be done, so the same wording
+ * serves both `openswarm work` and `review --issues`. (AGT-4148)
+ */
+export function describeTaskSourceFailure(failure: TaskSourceFailure, action: string): string[] {
+  switch (failure.reason) {
+    case 'credential-rejected': {
+      const lines = [
+        `Linear rejected the stored credential, so it could not ${action} — it is configured, but no longer valid.`,
+        `  ${failure.detail}`,
+      ];
+      // ensureValidToken already appends the remediation to its own message.
+      // Repeating it just makes the operator read the same command twice.
+      if (!failure.detail.includes('auth login --provider linear')) {
+        lines.push('Run `openswarm auth login --provider linear` to re-authenticate, then re-run.');
+      }
+      return lines;
+    }
+    case 'transient':
+      return [
+        `Could not reach Linear to ${action}. This looks temporary rather than a credential problem.`,
+        `  ${failure.detail}`,
+        'Re-run once it is reachable; if it persists, check connectivity and Linear status.',
+      ];
+    case 'unconfigured':
+    default:
+      return [
+        `Linear is not configured, so it could not ${action}.`,
+        'Run `openswarm auth login --provider linear` (or set linearApiKey + linearTeamId in config.yaml), then re-run.',
+      ];
+  }
+}
+
+/**
+ * Build a Linear-backed task source, reporting *why* when it cannot. Prefer this
+ * over `ensureTaskSource` wherever the outcome is surfaced to a person: a bare
+ * null cannot distinguish an unconfigured machine from a revoked token, and the
+ * guidance for the two is different. (AGT-4148)
+ */
+export async function resolveTaskSource(): Promise<TaskSourceResult> {
   const { getTaskSource } = await import('../automation/runnerExecution.js');
   const existing = getTaskSource();
-  if (existing) return existing;
+  if (existing) return { source: existing };
   try {
     const linear = await import('../linear/linear.js');
     if (!linear.isLinearInitialized()) {
@@ -227,12 +284,55 @@ export async function ensureTaskSource(): Promise<ITaskSource | null> {
         }
       }
     }
-    if (!linear.isLinearInitialized()) return null;
+    if (!linear.isLinearInitialized()) return { source: null, reason: 'unconfigured' };
     const { LinearTaskSource } = await import('../automation/taskSource.js');
-    return new LinearTaskSource(async () => []); // fetch unused for filing
-  } catch {
-    return null;
+    return { source: new LinearTaskSource(async () => []) }; // fetch unused for filing
+  } catch (err) {
+    return { source: null, ...classifyTaskSourceError(err) };
   }
+}
+
+/**
+ * Statuses on which an OAuth token endpoint is saying the grant itself is no
+ * longer usable: a malformed/revoked grant (400), an unauthenticated client
+ * (401), a forbidden one (403). Deliberately an allow-list rather than the whole
+ * 4xx range — 429 is ordinary rate limiting and 408 a timeout, and both would
+ * otherwise be read as a dead credential.
+ */
+const CREDENTIAL_REJECTED_STATUSES: ReadonlySet<number> = new Set([400, 401, 403]);
+
+/**
+ * Decide whether a failed task-source build means the credential is dead or that
+ * the attempt merely did not land. The asymmetry drives the allow-list above:
+ * calling a transient fault "transient" when it was really a dead credential
+ * costs one wasted retry, while calling rate limiting a dead credential sends
+ * the operator to re-authenticate and discard a grant that still works.
+ *
+ * Recognised by shape rather than `instanceof TokenRefreshError`: every Linear
+ * dependency in this module is imported lazily, and an `instanceof` against a
+ * dynamically imported class silently stops matching if that module is ever
+ * instantiated twice. The name plus a numeric status is the distinguishing shape.
+ *
+ * Exported for test: this is the whole judgement, and driving it through a live
+ * OAuth failure would make the test depend on a revoked token existing.
+ */
+export function classifyTaskSourceError(err: unknown): TaskSourceFailure {
+  const detail = err instanceof Error ? err.message : String(err);
+  const status = err instanceof Error && err.name === 'TokenRefreshError'
+    ? (err as { status?: unknown }).status
+    : undefined;
+  if (typeof status === 'number' && CREDENTIAL_REJECTED_STATUSES.has(status)) {
+    return { reason: 'credential-rejected', detail };
+  }
+  return { reason: 'transient', detail };
+}
+
+/**
+ * Back-compatible wrapper: callers that only branch on availability keep working
+ * unchanged. New code that reports the outcome should call `resolveTaskSource`.
+ */
+export async function ensureTaskSource(): Promise<ITaskSource | null> {
+  return (await resolveTaskSource()).source;
 }
 
 export interface ReviewCommandOptions {
@@ -460,13 +560,21 @@ export async function runReviewCommand(
       } else {
         // Default path initializes a Linear task source itself (the daemon isn't
         // running here), and files regardless of decision. (INT-1969)
+        // Why the source could not be built, when that is what stopped filing.
+        // "0 filed" otherwise means the reviewer simply had nothing to file, and
+        // blaming Linear for that sends the operator to fix a working setup.
+        // (AGT-4148)
+        let sourceFailure: TaskSourceFailure | undefined;
         const fileFollowups =
           deps.fileFollowups ??
           (async (p: string | undefined, r: ReviewResult) => {
             const { fileReviewerFollowups } = await import('../automation/runnerExecution.js');
-            const source = await ensureTaskSource();
-            if (!source) return 0;
-            return fileReviewerFollowups(source, p, r, { autoFile: true, projectId: mapping.projectId, requireApprove: false });
+            const resolved = await resolveTaskSource();
+            if (!resolved.source) {
+              sourceFailure = resolved;
+              return 0;
+            }
+            return fileReviewerFollowups(resolved.source, p, r, { autoFile: true, projectId: mapping.projectId, requireApprove: false });
           });
         const filed = await fileFollowups(parent, result);
         if (filed > 0) {
@@ -475,10 +583,10 @@ export async function runReviewCommand(
               ? `Filed ${filed} follow-up sub-issue(s) under ${parent}.`
               : `Filed ${filed} standalone follow-up issue(s) (pass \`--issues <id>\` to nest them under an issue).`,
           );
+        } else if (sourceFailure) {
+          for (const line of describeTaskSourceFailure(sourceFailure, 'file follow-ups')) log(line);
         } else {
-          log(
-            `Could not file follow-ups (0 created). Is Linear connected? Run \`openswarm auth login --provider linear\` (or set linearApiKey in config).`,
-          );
+          log('Filed 0 follow-ups — Linear is connected, the reviewer just produced none to file.');
         }
       }
     } else if (followups) {

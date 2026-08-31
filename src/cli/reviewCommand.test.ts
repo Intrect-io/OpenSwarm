@@ -7,6 +7,7 @@ import {
   ensureProjectMapping,
   scaledReviewMaxTurns,
   scaledReviewTimeoutMs,
+  classifyTaskSourceError,
 } from './reviewCommand.js';
 import type { ReviewResult } from '../agents/agentPair.js';
 
@@ -178,7 +179,11 @@ describe('runReviewCommand --issues branch inference (INT-1967)', () => {
     expect(logs.join('\n')).toContain('inferred from branch');
   });
 
-  it('warns to connect Linear when nothing is filed (INT-1969)', async () => {
+  // A filer that returns 0 without reporting a task-source failure means Linear
+  // worked and there was simply nothing to file. Saying "is Linear connected?"
+  // here sent operators to fix a setup that was fine; the unavailable-source
+  // path is covered separately in reviewCommand.coverage.test.ts. (AGT-4148)
+  it('reports an empty filing run without blaming Linear (INT-1969)', async () => {
     const logs: string[] = [];
     await runReviewCommand(
       { fileIssue: true },
@@ -186,13 +191,16 @@ describe('runReviewCommand --issues branch inference (INT-1967)', () => {
         getChangedFiles: async () => ['x.ts'],
         review: approveWithFollowups,
         getBranch: async () => 'main',
-        fileFollowups: async () => 0, // e.g. Linear not configured
+        fileFollowups: async () => 0,
         ensureProjectMapping: async () => ({ projectId: undefined, abort: false }),
         startProgress: () => null,
         log: (l) => logs.push(l),
       },
     );
-    expect(logs.join('\n')).toMatch(/Linear connected|auth login/);
+    const out = logs.join('\n');
+    expect(out).toContain('Filed 0 follow-ups');
+    expect(out).toContain('the reviewer just produced none to file');
+    expect(out).not.toContain('auth login');
   });
 
   it('uses an explicit id over branch inference', async () => {
@@ -485,5 +493,74 @@ describe('runReviewCommand machine-readable output (INT-3102)', () => {
     );
     expect(result?.decision).toBe('revise');
     expect(logs.join('\n')).toContain('Could not write SARIF report');
+  });
+});
+
+describe('classifyTaskSourceError (AGT-4148)', () => {
+  // Matches TokenRefreshError's shape without importing it: reviewCommand
+  // recognises it structurally, so the test asserts that contract directly.
+  function refreshError(status: number, message = 'Token refresh failed'): Error {
+    const err = new Error(message);
+    err.name = 'TokenRefreshError';
+    (err as Error & { status: number }).status = status;
+    return err;
+  }
+
+  it('treats a rejected credential (4xx) as needing re-auth', () => {
+    const result = classifyTaskSourceError(
+      refreshError(400, 'Token refresh failed (400): Refresh token revoked'),
+    );
+    expect(result.reason).toBe('credential-rejected');
+    expect(result.detail).toContain('Refresh token revoked');
+  });
+
+  it('treats 401 and 403 as rejected credentials too', () => {
+    expect(classifyTaskSourceError(refreshError(401)).reason).toBe('credential-rejected');
+    expect(classifyTaskSourceError(refreshError(403)).reason).toBe('credential-rejected');
+  });
+
+  // A provider fault is not the operator's credential problem; sending them to
+  // re-authenticate would be wrong advice that also destroys a working grant.
+  it('treats a provider fault (5xx) as transient', () => {
+    expect(classifyTaskSourceError(refreshError(500)).reason).toBe('transient');
+    expect(classifyTaskSourceError(refreshError(503)).reason).toBe('transient');
+  });
+
+  // 429 and 408 are 4xx but say nothing about the grant. Reading them as a dead
+  // credential would tell the operator to re-authenticate and throw away a token
+  // that still works — the asymmetry the allow-list exists to prevent.
+  it('treats rate limiting and request timeout as transient, not a dead credential', () => {
+    expect(classifyTaskSourceError(refreshError(429, 'Too Many Requests')).reason)
+      .toBe('transient');
+    expect(classifyTaskSourceError(refreshError(408, 'Request Timeout')).reason)
+      .toBe('transient');
+  });
+
+  // An unexpected 4xx is not evidence the grant died either; only the enumerated
+  // auth statuses are.
+  it('treats an unenumerated 4xx as transient', () => {
+    expect(classifyTaskSourceError(refreshError(404)).reason).toBe('transient');
+    expect(classifyTaskSourceError(refreshError(422)).reason).toBe('transient');
+  });
+
+  it('treats a transport failure with no status as transient', () => {
+    const result = classifyTaskSourceError(new TypeError('fetch failed'));
+    expect(result.reason).toBe('transient');
+    expect(result.detail).toContain('fetch failed');
+  });
+
+  // Guards the shape check: a same-named error without a numeric status must not
+  // be read as a credential rejection.
+  it('does not treat a same-named error lacking a numeric status as rejected', () => {
+    const err = new Error('nope');
+    err.name = 'TokenRefreshError';
+    expect(classifyTaskSourceError(err).reason).toBe('transient');
+  });
+
+  it('stringifies a non-Error throw rather than losing it', () => {
+    expect(classifyTaskSourceError('plain string failure')).toEqual({
+      reason: 'transient',
+      detail: 'plain string failure',
+    });
   });
 });
