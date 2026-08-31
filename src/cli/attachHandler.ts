@@ -203,6 +203,8 @@ async function isDaemonReachable(port: number): Promise<boolean> {
 
 export interface RunAttachOptions {
   message?: string;
+  /** Address one exchange by the id `openswarm board` prints for it. */
+  correlationId?: string;
   port?: number;
   deps?: ResolveIssueDeps;
 }
@@ -242,13 +244,29 @@ export async function runAttachCommand(
     return 1;
   }
 
-  const target = latestAddressable(events);
+  // `openswarm board` prints a correlationId per exchange, so the operator has
+  // to be able to hand one back — otherwise the board advertises an address
+  // the answer command cannot take, and the reply silently rides whichever
+  // exchange happened to be newest.
+  const wanted = opts.correlationId?.trim();
+  const chosen = wanted ? events.filter((e) => e.correlationId === wanted).at(-1) : undefined;
+  if (wanted && !chosen) {
+    console.error(`No exchange with correlationId ${wanted} on ${issue.identifier}. `
+      + 'Run `openswarm board` for the current list.');
+    return 1;
+  }
+
+  const target = chosen ?? latestAddressable(events);
   if (!target) {
     console.error(`No agent is addressable yet for ${issue.identifier} — it hasn't spoken on the coordination board.`);
     return 1;
   }
-  const question = openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId });
-  const exchange = question ?? target;
+  // An explicit correlationId is the operator naming the exchange; only fall
+  // back to "whichever question this actor is parked on" when they did not.
+  const question = chosen
+    ? undefined
+    : openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId });
+  const exchange = chosen ?? question ?? target;
 
   const uploaded: UploadedAttachment[] = [];
   let hadFailure = false;

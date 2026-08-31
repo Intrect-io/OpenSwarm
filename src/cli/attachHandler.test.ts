@@ -360,3 +360,63 @@ describe('runAttachCommand without files', () => {
     consoleError.mockRestore();
   });
 });
+
+// ---- Addressing one exchange -------------------------------------------------
+// `openswarm board` prints a correlationId per exchange. Without a way to hand
+// one back, the board advertised an address the answer command could not take
+// and the reply rode whichever exchange was newest.
+
+describe('runAttachCommand --correlation', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    readFileSyncMock.mockReset();
+    deps.ensureTaskSource.mockClear();
+    deps.getIssue.mockClear();
+  });
+
+  it('answers the named exchange, not the newest one', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([
+        event({ id: 'q', seq: 5, correlationId: 'hq-older', actor: 'sable', actorRole: 'worker' }),
+        event({ id: 'l', seq: 6, correlationId: 'c-newer', actor: 'rowan', actorRole: 'worker' }),
+      ]))
+      .mockResolvedValueOnce(messageOk());
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'the older one', correlationId: 'hq-older', deps });
+
+    expect(code).toBe(0);
+    const body = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    expect(body.correlationId).toBe('hq-older');
+    expect(body.recipient).toBe('sable');
+  });
+
+  it('refuses an unknown correlationId instead of silently answering another', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([event({ actor: 'sable', actorRole: 'worker' })]));
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', correlationId: 'hq-nope', deps });
+
+    expect(code).toBe(1);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('hq-nope'));
+    // No message POST — the third call never happens.
+    expect(fetchMock.mock.calls).toHaveLength(2);
+    consoleError.mockRestore();
+  });
+
+  it('still auto-selects the parked question when no id is given', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([event({ seq: 5, correlationId: 'hq-1', actor: 'sable', actorRole: 'worker' })]))
+      .mockResolvedValueOnce(messageOk());
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', deps });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body as string).correlationId).toBe('hq-1');
+  });
+});

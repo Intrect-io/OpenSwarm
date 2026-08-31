@@ -121,7 +121,7 @@ export function formatBoard(snapshot: BoardSnapshot, limit: number): string {
   if (pending.length) {
     lines.push('');
     lines.push('Answer one with:');
-    lines.push(`  openswarm attach <issue> -m "your reply"`);
+    lines.push('  openswarm attach <issue> -c <correlationId> -m "your reply"');
   }
   return lines.join('\n');
 }

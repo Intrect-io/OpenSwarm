@@ -730,9 +730,13 @@ program
   .argument('<issueId>', 'Linear issue id or identifier (e.g. AGT-123)')
   .argument('[files...]', 'Local file path(s) to upload (optional when -m is given)')
   .option('-m, --message <text>', 'Message to send with the file(s)')
-  .action(async (issueId: string, files: string[], opts: { message?: string }) => {
+  .option('-c, --correlation <id>', 'Answer one exchange by the correlationId `openswarm board` prints')
+  .action(async (issueId: string, files: string[], opts: { message?: string; correlation?: string }) => {
     const { runAttachCommand } = await import('./cli/attachHandler.js');
-    process.exitCode = await runAttachCommand(issueId, files, opts);
+    process.exitCode = await runAttachCommand(issueId, files, {
+      message: opts.message,
+      correlationId: opts.correlation,
+    });
   });
 
 // openswarm board / openswarm threads — the read half of the coordination plane
