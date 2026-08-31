@@ -726,13 +726,40 @@ program
 
 program
   .command('attach')
-  .description("Upload file(s) to a task's coordination inbox and notify its agent")
+  .description("Send a message and/or file(s) to a task's coordination inbox and notify its agent")
   .argument('<issueId>', 'Linear issue id or identifier (e.g. AGT-123)')
-  .argument('<files...>', 'Local file path(s) to upload')
+  .argument('[files...]', 'Local file path(s) to upload (optional when -m is given)')
   .option('-m, --message <text>', 'Message to send with the file(s)')
   .action(async (issueId: string, files: string[], opts: { message?: string }) => {
     const { runAttachCommand } = await import('./cli/attachHandler.js');
     process.exitCode = await runAttachCommand(issueId, files, opts);
+  });
+
+// openswarm board / openswarm threads — the read half of the coordination plane
+
+program
+  .command('board')
+  .description('Show the coordination board: questions waiting on you, then recent activity')
+  .option('-p, --port <port>', 'Daemon port', parseTcpPortOption, 3847)
+  .option('-r, --repository <path>', 'Limit to one repository')
+  .option('-n, --limit <count>', 'Recent events to show', (v: string) => Number.parseInt(v, 10), 20)
+  .option('--json', "Print the daemon's raw payload")
+  .action(async (opts: { port: number; repository?: string; limit: number; json?: boolean }) => {
+    const { runBoardCommand } = await import('./cli/coordinationHandler.js');
+    process.exitCode = await runBoardCommand(opts);
+  });
+
+program
+  .command('threads')
+  .description('List coordination threads for a repository (defaults to the working directory)')
+  .option('-p, --port <port>', 'Daemon port', parseTcpPortOption, 3847)
+  .option('-r, --repository <path>', 'Repository path (default: cwd)')
+  .option('-s, --status <status>', 'Filter by status: open | resolved')
+  .option('-n, --limit <count>', 'Maximum threads to list', (v: string) => Number.parseInt(v, 10))
+  .option('--json', "Print the daemon's raw payload")
+  .action(async (opts: { port: number; repository?: string; status?: string; limit?: number; json?: boolean }) => {
+    const { runThreadsCommand } = await import('./cli/coordinationHandler.js');
+    process.exitCode = await runThreadsCommand(opts);
   });
 
 // openswarm dash

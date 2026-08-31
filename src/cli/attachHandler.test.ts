@@ -303,3 +303,60 @@ describe('runAttachCommand', () => {
     consoleError.mockRestore();
   });
 });
+
+// ---- Message-only ------------------------------------------------------------
+// The dashboard's chat box can send a bare message, and an operator answering a
+// parked question usually has nothing to upload. `attach` required a file until
+// this change, so the CLI could not answer a question at all.
+
+describe('runAttachCommand without files', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    readFileSyncMock.mockReset();
+    deps.ensureTaskSource.mockClear();
+    deps.getIssue.mockClear();
+  });
+
+  it('delivers a message with no upload and no attachment note', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([event({ actor: 'sable', actorRole: 'worker', actorName: 'Sable' })]))
+      .mockResolvedValueOnce(messageOk());
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'use the staging bucket', deps });
+
+    expect(code).toBe(0);
+    // Health probe, history, message — no attachment POST in between.
+    expect(fetchMock.mock.calls).toHaveLength(3);
+    expect(readFileSyncMock).not.toHaveBeenCalled();
+    const [messageUrl, messageInit] = fetchMock.mock.calls[2];
+    expect(messageUrl).toContain('/api/coordination/message');
+    const sentBody = JSON.parse(messageInit.body as string);
+    expect(sentBody.recipient).toBe('sable');
+    expect(sentBody.text).toBe('use the staging bucket');
+    expect(sentBody.text).not.toContain('Attached files');
+    consoleLog.mockRestore();
+  });
+
+  it('refuses a call with neither a file nor a message before touching the daemon', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const code = await runAttachCommand('AGT-123', [], { deps });
+
+    expect(code).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('or a message with -m'));
+    consoleError.mockRestore();
+  });
+
+  it('treats a whitespace-only message as no message', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const code = await runAttachCommand('AGT-123', [], { message: '   ', deps });
+
+    expect(code).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+});

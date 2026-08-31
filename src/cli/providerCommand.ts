@@ -19,6 +19,7 @@ import { isKnownAdapter, listAdapterNames } from '../adapters/index.js';
 import type { AdapterName } from '../adapters/types.js';
 import { readProviderOverride, writeProviderOverride } from '../core/providerOverride.js';
 import { loadConfig } from '../core/config.js';
+import { daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
 import { DAEMON_PORT } from './daemon.js';
 
 /**
@@ -60,9 +61,6 @@ interface StatsAdapters {
   [role: string]: unknown;
 }
 
-function baseUrl(port: number): string {
-  return `http://127.0.0.1:${port}`;
-}
 
 /** Ask the running daemon which adapter it is actually using right now. */
 async function fetchDaemonAdapters(port: number, timeoutMs = 1500): Promise<StatsAdapters | null> {

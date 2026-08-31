@@ -2,8 +2,8 @@
 // OpenSwarm - `openswarm attach <issueId> <files...>`
 // ============================================
 //
-// Upload file(s) to a running task's coordination inbox and notify its
-// agent — the CLI's counterpart to the dashboard's /chat attach button
+// Send a message and/or file(s) to a running task's coordination inbox and
+// notify its agent — the CLI's counterpart to the dashboard's /chat attach button
 // (AGT-4031, web/static/js/chatView.mjs). Neither
 // POST /api/coordination/attachment nor POST /api/coordination/message had
 // a CLI consumer before this (AGT-4058).
@@ -12,10 +12,8 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import { DAEMON_PORT } from './daemon.js';
+import { daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
 
-function baseUrl(port: number): string {
-  return `http://127.0.0.1:${port}`;
-}
 
 export interface ResolvedIssue {
   id: string;
@@ -216,8 +214,11 @@ export async function runAttachCommand(
 ): Promise<number> {
   const port = opts.port ?? DAEMON_PORT;
 
-  if (filepaths.length === 0) {
-    console.error('Pass at least one file to attach.');
+  // Files are optional: the dashboard's chat box can send a bare message, and
+  // an operator answering a parked question usually has nothing to upload.
+  const message = opts.message?.trim() ?? '';
+  if (filepaths.length === 0 && !message) {
+    console.error('Pass at least one file to attach, or a message with -m.');
     return 1;
   }
 
@@ -260,14 +261,16 @@ export async function runAttachCommand(
       console.error(`Failed to upload ${filepath}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (uploaded.length === 0) {
+  // Every requested upload failing is still a failure; asking for none is not.
+  if (filepaths.length > 0 && uploaded.length === 0) {
     console.error('No files uploaded — nothing to notify the agent about.');
     return 1;
   }
 
-  const text = opts.message?.trim()
-    ? `${opts.message.trim()}\n\nAttached files (read them at these paths):\n${uploaded.map((u) => u.path).join('\n')}`
-    : `Attached files (read them at these paths):\n${uploaded.map((u) => u.path).join('\n')}`;
+  const attachmentNote = uploaded.length > 0
+    ? `Attached files (read them at these paths):\n${uploaded.map((u) => u.path).join('\n')}`
+    : '';
+  const text = [message, attachmentNote].filter(Boolean).join('\n\n');
 
   try {
     await postMessage(exchange, target.actor, text, port);
