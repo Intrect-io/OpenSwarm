@@ -372,7 +372,7 @@ export const ko: LocaleMessages = {
       operatorPaged: 'Discord로 운영자에게 질문을 보냄',
       humanAnswered: '사용자가 차단 질문에 답변함',
       supervisorAnswered: '프로젝트 감독자가 차단 질문에 답변함',
-      siblingAnswered: '같은 차단 사유를 다르게 표현한 질문의 답변으로 처리됨',
+      siblingAnswered: '이 작업의 다른 열린 질문에 대한 답변으로 함께 처리됨 — 이 질문에 해당하는 답인지 확인하고 쓰라',
     },
     periodicReview: {
       title: '정기 저장소 리뷰',

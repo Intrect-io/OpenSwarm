@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { enPrompts } from './en.js';
 import { koPrompts } from './ko.js';
+import { en as enLocale } from '../en.js';
+import { ko as koLocale } from '../ko.js';
 
 // ── 1. systemPrompt ────────────────────────────────────────────
 
@@ -684,4 +686,41 @@ describe('diagnose before escalating, and the cxt hook (AGT-4081)', () => {
       expect(result).toContain('cxt impact');
     });
   }
+});
+
+// ── sibling-answer wording ─────────────────────────────────────
+//
+// When one operator answer settles a task's other open questions, the code that
+// does it cannot tell a reworded repeat from a genuinely unrelated ask — the
+// paging gate's own comment says distinguishing them "needs more than a text
+// diff and is not attempted here". The label must therefore not assert they are
+// the same blocker; it states what is known (an answer to another ask on this
+// task settled it) and tells the reader to check.
+describe('siblingAnswered label', () => {
+  const en = enLocale.coordination.humanQuestion.siblingAnswered;
+  const ko = koLocale.coordination.humanQuestion.siblingAnswered;
+
+  it('does not claim the asks share a blocker', () => {
+    expect(en).not.toMatch(/same blocker/i);
+    expect(ko).not.toContain('같은 차단 사유');
+  });
+
+  it('says an answer to another ask on this task settled it', () => {
+    expect(en).toMatch(/another open ask on this task/i);
+    expect(ko).toContain('다른 열린 질문');
+  });
+
+  // The fan-out runs regardless of actorRole — orchestratorTrackerTools answers
+  // too — while the primary answer event splits humanAnswered/supervisorAnswered.
+  // A single sibling label therefore must not name who answered.
+  it('does not claim who gave the answer', () => {
+    expect(en).not.toMatch(/operator|supervisor|human/i);
+    expect(ko).not.toContain('운영자');
+    expect(ko).not.toContain('감독');
+  });
+
+  it('tells the reader to check that the answer applies', () => {
+    expect(en).toMatch(/check it applies/i);
+    expect(ko).toContain('해당하는 답인지 확인');
+  });
 });
