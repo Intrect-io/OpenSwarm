@@ -5,7 +5,7 @@ const commitAndCreatePRWithHead = vi.hoisted(() => vi.fn());
 vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
-import { publishApprovedWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -72,5 +72,64 @@ describe('publication identity (AGT-4145)', () => {
 
     expect(result.prUrl).toBe('https://github.com/o/r/pull/17');
     expect(onPublication).toHaveBeenCalledWith('https://github.com/o/r/pull/17', 'head-b');
+  });
+});
+
+describe('publishStuckWork — terminal parks publish instead of holding', () => {
+  const ctx = { worktreePath: '/tmp/w', repoRoot: '/tmp/r', branchName: 'swarm/AGT-1' };
+  const task = { id: 'task-1', issueId: 'issue-1', issueIdentifier: 'AGT-1', title: 'Do the thing' };
+
+  it('opens a draft PR for a run that exhausted its retries', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
+
+    const prUrl = await publishStuckWork(ctx, task, 'autonomous execution failed 4 times');
+
+    expect(prUrl).toBe('https://github.com/o/r/pull/9');
+    const [info, title, identifier, body, options] = commitAndCreatePRWithHead.mock.calls[0];
+    expect(info).toMatchObject({ worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-1' });
+    expect(title).toBe('Do the thing');
+    expect(identifier).toBe('AGT-1');
+    // The park reason belongs in the PR body: it is why a human is being asked to look.
+    expect(body).toContain('autonomous execution failed 4 times');
+    // Never ready: nothing reviewed this, and CI must not run on known-incomplete work.
+    expect(options).toMatchObject({ draft: true });
+  });
+
+  it('sweeps up uncommitted work, because this worktree is about to be deleted', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
+
+    await publishStuckWork(ctx, task, 'stuck');
+
+    // committedOnly would publish only what the pre-cleanup WIP commit managed
+    // to capture — and that commit swallows its own failures.
+    expect(commitAndCreatePRWithHead.mock.calls[0][4]).not.toMatchObject({ committedOnly: true });
+  });
+
+  it('reports no URL, and does not throw, when the run produced no commits', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from - branch has no changes'));
+
+    await expect(publishStuckWork(ctx, task, 'reviewer rejected 3 attempts')).resolves.toBeUndefined();
+  });
+
+  it('swallows a publication failure — cleanup and the park must proceed regardless', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('gh: could not reach github.com'));
+
+    await expect(publishStuckWork(ctx, task, 'stuck')).resolves.toBeUndefined();
+  });
+
+  it('drops an inferred file scope, which is advisory and would block publication', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
+
+    await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource: 'inferred' }, 'stuck');
+
+    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ fileScope: undefined });
+  });
+
+  it('enforces a declared file scope', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
+
+    await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource: 'declared' }, 'stuck');
+
+    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ fileScope: ['src/a.ts'] });
   });
 });

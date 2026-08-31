@@ -64,6 +64,7 @@ import {
   pruneWorktrees,
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
+import { publishStuckWork } from './publishOnPark.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
@@ -208,6 +209,72 @@ function setSandboxOutcomePark(issueId: string, parked: boolean): void {
   } catch (error) {
     console.warn(`[AutonomousRunner] Could not record sandbox outcome quarantine for ${issueId}:`, error);
   }
+}
+
+/**
+ * Terminal park: publish the work before freeing the disk.
+ *
+ * All three terminal parks (sandbox infeasibility, the rejection limit, retry
+ * exhaustion) used to commit the partial work to a local branch and delete the
+ * worktree, leaving the commits unpushed and invisible. Reaching one of them is
+ * the run having built as far as it can and hit the point where the operator
+ * has to look, which is exactly when the work should be reviewable.
+ *
+ * Publication is a hook of the cleanup rather than a call before it so it runs
+ * under the same worktree lifecycle lock, after the ownership re-check has
+ * proven no resumed worker is still editing the tree, and after the pre-cleanup
+ * WIP commit that captures the last of the work.
+ *
+ * That lock is NOT the durable publication fence, though: it proves no worker
+ * is still editing this tree, not that this executor still owns the run. Those
+ * are different guarantees, and pushing needs the second one. `ownsRun` carries
+ * it — see the call sites, where it is the result of the durable park. Cleanup
+ * still runs when it is false; only the push is withheld.
+ */
+async function publishAndCleanupStuckWorktree(
+  task: TaskItem,
+  projectPath: string,
+  parkReason: string,
+  ownsRun: boolean,
+): Promise<string | undefined> {
+  let prUrl: string | undefined;
+  await removePreservedWorktreeAt(
+    projectPath,
+    ownsRun
+      ? async (ctx) => { prUrl = await publishStuckWork(ctx, task, parkReason); }
+      : undefined,
+  ).catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+  return prUrl;
+}
+
+/**
+ * Park the run durably and report whether this executor was the one entitled to.
+ *
+ * `markNeedsHuman` refuses a row that is in a non-parkable state or still
+ * carries an owner or lease, so a `true` here is exactly the proof the
+ * publication fence gives the reviewed path: this run is ours, durably parked,
+ * and unowned. A stale executor whose claim already ended gets `false` and must
+ * not push. With no ledger authority (`mode` off or shadow) there is no durable
+ * claim to speak of, and behaviour is what it was before publication existed.
+ */
+export function parkRunForHuman(
+  durableRuns: { isPrimary: boolean; markNeedsHuman(issueId: string, reason: string): boolean },
+  issueId: string,
+  reason: string,
+): boolean {
+  if (!durableRuns.isPrimary) return true;
+  const parked = durableRuns.markNeedsHuman(issueId, reason);
+  if (!parked) {
+    console.warn(`[Runner] ${issueId}: durable park refused — not publishing work this executor no longer owns`);
+  }
+  return parked;
+}
+
+/** Tracker-comment section pointing the operator at the published draft. */
+function stuckPullRequestSection(prUrl: string | undefined): string {
+  return prUrl
+    ? `\n\n**Draft PR with the work so far:** ${prUrl}`
+    : '';
 }
 
 export class AutonomousRunner {
@@ -804,16 +871,18 @@ export class AutonomousRunner {
           clearRetryTime(task.issueId, this.failedTaskRetryTimes);
           clearRejection(task.issueId);
           recordLastFailureDetail(this.taskStateRef, task.issueId, infeasDetail);
-          if (this.durableRuns.isPrimary) {
-            this.durableRuns.markNeedsHuman(
-              task.issueId,
-              `DoD appears unsatisfiable in the sandbox after ${attempts} attempts: ${infeasible.marker}`,
-            );
-          }
+          const ownsRun = parkRunForHuman(
+            this.durableRuns, task.issueId,
+            `DoD appears unsatisfiable in the sandbox after ${attempts} attempts: ${infeasible.marker}`,
+          );
           this.saveTaskState();
+          let stuckPrUrl: string | undefined;
           if (result.taskContext?.projectPath) {
-            await removePreservedWorktreeAt(result.taskContext.projectPath)
-              .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+            stuckPrUrl = await publishAndCleanupStuckWorktree(
+              task, result.taskContext.projectPath,
+              `the DoD appears unsatisfiable in the sandbox after ${attempts} attempts (marker: "${infeasible.marker}")`,
+              ownsRun,
+            );
           }
           try {
             await execution.syncFailureState(task,
@@ -822,7 +891,8 @@ export class AutonomousRunner {
               `**Needs human — the DoD appears unsatisfiable in this sandbox.**\n\n` +
               `Detected blocker phrase: "${infeasible.marker}". Re-running can't fix an environmental ` +
               `impossibility (missing DB / network / credentials, or a manual/human step), so automatic ` +
-              `retries were stopped early after ${attempts} attempts.\n\n**Latest failure:**\n${infeasDetail}`);
+              `retries were stopped early after ${attempts} attempts.\n\n**Latest failure:**\n${infeasDetail}` +
+              stuckPullRequestSection(stuckPrUrl));
             console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (needs-human: infeasible in sandbox) — ${attempts} attempts`);
           } catch (err) {
             console.error(`[Scheduler] Failed to update issue state:`, err);
@@ -855,22 +925,28 @@ export class AutonomousRunner {
           // Max rejections reached - permanently block
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
           clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
-          if (this.durableRuns.isPrimary) {
-            this.durableRuns.markNeedsHuman(task.issueId, `Reviewer rejected ${rejectionCount} attempts: ${feedback}`);
-          }
+          const ownsRun = parkRunForHuman(
+            this.durableRuns, task.issueId,
+            `Reviewer rejected ${rejectionCount} attempts: ${feedback}`,
+          );
           this.saveTaskState();
-          // Terminally stuck → no retry will resume the preserved tree; commit
-          // the partial work to the branch and free the disk (INT-2506).
+          // Terminally stuck → no retry will resume the preserved tree; publish
+          // the partial work as a draft PR and free the disk (INT-2506).
+          let stuckPrUrl: string | undefined;
           if (result.taskContext?.projectPath) {
-            await removePreservedWorktreeAt(result.taskContext.projectPath)
-              .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+            stuckPrUrl = await publishAndCleanupStuckWorktree(
+              task, result.taskContext.projectPath,
+              `the reviewer rejected ${rejectionCount} attempts`,
+              ownsRun,
+            );
           }
 
           try {
             await execution.syncFailureState(task, `Max rejection limit reached (${rejectionCount} attempts): ${feedback}`);
             await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
               `Rejected ${rejectionCount} times by the reviewer — automatic retries exhausted.\n\n` +
-              `**Latest rejection reason:**\n${feedback}`
+              `**Latest rejection reason:**\n${feedback}` +
+              stuckPullRequestSection(stuckPrUrl)
             );
             console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (max rejections reached)`);
           } catch (err) {
@@ -916,24 +992,27 @@ export class AutonomousRunner {
           // Max retries exceeded - permanently block
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
           clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
-          if (this.durableRuns.isPrimary) {
-            this.durableRuns.markNeedsHuman(
-              task.issueId,
-              `Autonomous execution failed ${count} times: ${failureDetail}`,
-            );
-          }
+          const ownsRun = parkRunForHuman(
+            this.durableRuns, task.issueId,
+            `Autonomous execution failed ${count} times: ${failureDetail}`,
+          );
           this.saveTaskState();
           console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — STUCK`);
-          // Terminally stuck → commit partial work to the branch, free the disk (INT-2506).
+          // Terminally stuck → publish partial work as a draft PR, free the disk (INT-2506).
+          let stuckPrUrl: string | undefined;
           if (result.taskContext?.projectPath) {
-            await removePreservedWorktreeAt(result.taskContext.projectPath)
-              .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+            stuckPrUrl = await publishAndCleanupStuckWorktree(
+              task, result.taskContext.projectPath,
+              `autonomous execution failed ${count} times`,
+              ownsRun,
+            );
           }
           try {
             await execution.syncFailureState(task, `Autonomous execution failed ${count} times: ${failureDetail}`);
             await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
               `Autonomous execution failed ${count} times in a row — automatic retries exhausted.\n\n` +
-              `**Last failure:**\n${failureDetail}`
+              `**Last failure:**\n${failureDetail}` +
+              stuckPullRequestSection(stuckPrUrl)
             );
             console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (max retries exceeded)`);
           } catch (err) {

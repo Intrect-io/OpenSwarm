@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { isProofCapableSpace, processNamespaceId } from './processLiveness.js';
 import {createWorktree, preserveWorktree, removePreservedWorktreeAt, removeWorktree, resolveSharedPaths, computeFileOverlaps, formatOverlapReport, findOpenPRFileOverlaps, resolveBaseRef, commitAndCreatePR, commitAndCreatePRWithHead, type WorktreeInfo } from './worktreeManager.js';
@@ -593,6 +593,111 @@ describe('removePreservedWorktreeAt (INT-2506)', () => {
   it('no-ops on paths that are not managed worktrees', async () => {
     await removePreservedWorktreeAt(repo); // repo root — no /worktree/ segment
     expect(existsSync(repo)).toBe(true);
+  });
+
+  // The publish hook exists so a terminally stuck run's work reaches a PR
+  // instead of sitting on a branch that was never pushed.
+  it('runs the publish hook with the tree intact and every commit already made', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'stuck test');
+
+    const seen: { branchName: string; repoRoot: string; treeExists: boolean; clean: boolean }[] = [];
+    await removePreservedWorktreeAt(info.worktreePath, async (ctx) => {
+      seen.push({
+        branchName: ctx.branchName,
+        repoRoot: ctx.repoRoot,
+        // Publication pushes from this directory, so it must still be there.
+        treeExists: existsSync(ctx.worktreePath),
+        // The pre-cleanup WIP commit runs first, so there is nothing left
+        // uncommitted for `committedOnly: true` publication to miss.
+        clean: execFileSync('git', ['-C', ctx.worktreePath, 'status', '--porcelain'], { encoding: 'utf8' }).trim() === '',
+      });
+    });
+
+    expect(seen).toEqual([{
+      branchName: 'swarm/INT-9-test',
+      repoRoot: repo,
+      treeExists: true,
+      clean: true,
+    }]);
+    expect(existsSync(info.worktreePath)).toBe(false);
+  });
+
+  it('does not publish a tree a live owner resumed — the same check that blocks removal', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'retryable failure');
+    const resumed = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+
+    const publish = vi.fn();
+    await removePreservedWorktreeAt(info.worktreePath, publish);
+
+    // Pushing here would publish a tree another worker is still editing.
+    expect(publish).not.toHaveBeenCalled();
+    await removeWorktree(resumed);
+  });
+
+  it('still removes the tree when publication fails — cleanup cannot depend on GitHub', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'stuck test');
+
+    // Throws synchronously: removal must survive a hook that never returns a
+    // promise at all, not just a rejected one.
+    await removePreservedWorktreeAt(info.worktreePath, () => {
+      throw new Error('gh: could not reach github.com');
+    });
+
+    expect(existsSync(info.worktreePath)).toBe(false);
+    // The work still survives on the branch, as it did before publication existed.
+    expect(execFileSync('git', ['-C', repo, 'show', 'swarm/INT-9-test:app.py'], { encoding: 'utf8' }))
+      .toBe('base\npartial\n');
+  });
+
+  // The pre-cleanup WIP commit runs no binary guard on purpose — unstaging
+  // there would strip the file from the only copy that outlives the directory.
+  // That was safe while the branch stayed local; publishing it is not.
+  it('does not publish a branch carrying binary data, but still keeps it locally', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    writeFileSync(join(info.worktreePath, 'dump.parquet'), 'binary-ish\n');
+    await preserveWorktree(info, 'stuck test');
+
+    const publish = vi.fn();
+    await removePreservedWorktreeAt(info.worktreePath, publish);
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(existsSync(info.worktreePath)).toBe(false);
+    // Local preservation is unchanged: both files survive on the branch.
+    const tree = execFileSync('git', ['-C', repo, 'ls-tree', '--name-only', 'swarm/INT-9-test'], { encoding: 'utf8' });
+    expect(tree).toContain('dump.parquet');
+    expect(execFileSync('git', ['-C', repo, 'show', 'swarm/INT-9-test:app.py'], { encoding: 'utf8' }))
+      .toBe('base\npartial\n');
+  });
+
+  it('publishes a branch whose files are all safe', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'stuck test');
+
+    const publish = vi.fn();
+    await removePreservedWorktreeAt(info.worktreePath, publish);
+
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips publication on a detached HEAD rather than pushing the wrong branch', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial\n');
+    await preserveWorktree(info, 'stuck test');
+    git(info.worktreePath, 'checkout', '--detach');
+
+    const publish = vi.fn();
+    await removePreservedWorktreeAt(info.worktreePath, publish);
+
+    expect(publish).not.toHaveBeenCalled();
+    expect(existsSync(info.worktreePath)).toBe(false);
   });
 });
 
