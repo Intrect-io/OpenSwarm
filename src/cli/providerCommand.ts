@@ -64,8 +64,13 @@ interface StatsAdapters {
 
 /** Ask the running daemon which adapter it is actually using right now. */
 async function fetchDaemonAdapters(port: number, timeoutMs = 1500): Promise<StatsAdapters | null> {
+  // Resolved outside the catch on purpose: daemonBaseUrl throws for a bad
+  // OPENSWARM_DAEMON_HOST or a token it refuses to send in the clear, and
+  // reading that as "no daemon" would silently persist a local override while
+  // the live daemon kept running something else (caught by openswarm pr review).
+  const url = `${baseUrl(port)}/api/stats`;
   try {
-    const res = await fetch(`${baseUrl(port)}/api/stats`, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetch(url, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     const stats = await res.json() as { adapters?: StatsAdapters };
     return stats.adapters ?? null;
@@ -124,8 +129,11 @@ export interface ApplyResult {
  */
 export async function applyProvider(next: AdapterName, port = DAEMON_PORT): Promise<ApplyResult> {
   let reachable = false;
+  // Same reason as fetchDaemonAdapters: a configuration error must not read as
+  // an absent daemon, or the override file silently disagrees with the daemon.
+  const url = `${baseUrl(port)}/api/provider`;
   try {
-    const res = await fetch(`${baseUrl(port)}/api/provider`, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
       body: JSON.stringify({ provider: next }),

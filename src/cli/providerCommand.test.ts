@@ -308,3 +308,34 @@ describe('providerCommand daemon auth', () => {
     expect(fetchMock.mock.calls[0][1].headers).toEqual({});
   });
 });
+
+describe('providerCommand endpoint misconfiguration', () => {
+  afterEach(() => {
+    delete process.env.OPENSWARM_DAEMON_HOST;
+    delete process.env.OPENSWARM_DAEMON_TOKEN;
+  });
+
+  // daemonBaseUrl throws for a bad host or a token it will not send in the
+  // clear. Reading that as "no daemon" would persist an override describing a
+  // provider the live daemon is not running.
+  it('does not report a misconfigured endpoint as an absent daemon', async () => {
+    process.env.OPENSWARM_DAEMON_HOST = 'http://vela';
+    fetchMock.mockReset();
+
+    const { getProviderStatus } = await import('./providerCommand.js');
+
+    await expect(getProviderStatus()).rejects.toThrow(/is not a bare host/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not silently persist an override when the endpoint is misconfigured', async () => {
+    process.env.OPENSWARM_DAEMON_HOST = 'http://vela';
+    fetchMock.mockReset();
+    writeProviderOverrideMock.mockReset();
+
+    const { applyProvider } = await import('./providerCommand.js');
+
+    await expect(applyProvider('claude')).rejects.toThrow(/is not a bare host/);
+    expect(writeProviderOverrideMock).not.toHaveBeenCalled();
+  });
+});

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import type { CoordinationThread } from '../coordination/coordinationThreads.js';
-import { DAEMON_HOST_ENV, DAEMON_TOKEN_ENV } from './daemonEndpoint.js';
+import { DAEMON_HOST_ENV, DAEMON_SCHEME_ENV, DAEMON_TOKEN_ENV } from './daemonEndpoint.js';
 import { formatBoard, formatThreads, runBoardCommand, runThreadsCommand } from './coordinationHandler.js';
 
 function event(overrides: Partial<CoordinationEvent> = {}): CoordinationEvent {
@@ -46,6 +46,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   delete process.env[DAEMON_HOST_ENV];
   delete process.env[DAEMON_TOKEN_ENV];
+  delete process.env[DAEMON_SCHEME_ENV];
 });
 
 describe('formatBoard', () => {
@@ -144,7 +145,20 @@ describe('runBoardCommand', () => {
     await runBoardCommand({ fetchImpl: fetchImpl as never });
 
     expect(fetchImpl.mock.calls[0][0]).toBe('http://vela:3847/api/coordination');
-    expect(logs[0]).toBe('(daemon: vela)');
+    // The daemon serves plain http, so name the transport rather than let a
+    // remote read look the same as a local one.
+    expect(logs[0]).toBe('(daemon: vela, plaintext http)');
+  });
+
+  it('says https when a TLS proxy fronts the daemon', async () => {
+    process.env[DAEMON_HOST_ENV] = 'vela';
+    process.env[DAEMON_SCHEME_ENV] = 'https';
+    const fetchImpl = vi.fn().mockResolvedValue(ok({ events: [], pending: [], lastSeq: 0 }));
+
+    await runBoardCommand({ fetchImpl: fetchImpl as never });
+
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://vela:3847/api/coordination');
+    expect(logs[0]).toBe('(daemon: vela, https)');
   });
 
   it('presents the daemon token so a secured daemon answers at all', async () => {

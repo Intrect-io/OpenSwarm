@@ -18,7 +18,7 @@
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import type { CoordinationThread } from '../coordination/coordinationThreads.js';
 import { DAEMON_PORT } from './daemon.js';
-import { DAEMON_TOKEN_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, isRemoteDaemon } from './daemonEndpoint.js';
+import { DAEMON_TOKEN_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, daemonScheme, isRemoteDaemon } from './daemonEndpoint.js';
 
 /** Matches attachHandler.ts: a daemon that answers /api/stats can still stall. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -141,7 +141,12 @@ export function formatThreads(threads: CoordinationThread[], repository: string)
 
 /** Printed once before output so a remote read is never mistaken for a local one. */
 function hostNotice(): string | null {
-  return isRemoteDaemon() ? `(daemon: ${daemonHost()})` : null;
+  if (!isRemoteDaemon()) return null;
+  // The daemon serves plain http (web.ts uses node:http), so a remote read is
+  // in the clear unless a TLS proxy fronts it. Say which, rather than block a
+  // configuration that is normally fine because the link itself is encrypted.
+  const transport = daemonScheme() === 'https' ? 'https' : 'plaintext http';
+  return `(daemon: ${daemonHost()}, ${transport})`;
 }
 
 export async function runBoardCommand(opts: CoordinationCommandOptions = {}): Promise<number> {
