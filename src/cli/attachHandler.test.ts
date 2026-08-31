@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import {
   latestAddressable,
@@ -300,6 +300,165 @@ describe('runAttachCommand', () => {
     });
     expect(code).toBe(1);
     expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('Issue not found'));
+    consoleError.mockRestore();
+  });
+});
+
+// ---- Message-only ------------------------------------------------------------
+// The dashboard's chat box can send a bare message, and an operator answering a
+// parked question usually has nothing to upload. `attach` required a file until
+// this change, so the CLI could not answer a question at all.
+
+describe('runAttachCommand without files', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    readFileSyncMock.mockReset();
+    deps.ensureTaskSource.mockClear();
+    deps.getIssue.mockClear();
+  });
+
+  it('delivers a message with no upload and no attachment note', async () => {
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([event({ actor: 'sable', actorRole: 'worker', actorName: 'Sable' })]))
+      .mockResolvedValueOnce(messageOk());
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'use the staging bucket', deps });
+
+    expect(code).toBe(0);
+    // Health probe, history, message — no attachment POST in between.
+    expect(fetchMock.mock.calls).toHaveLength(3);
+    expect(readFileSyncMock).not.toHaveBeenCalled();
+    const [messageUrl, messageInit] = fetchMock.mock.calls[2];
+    expect(messageUrl).toContain('/api/coordination/message');
+    const sentBody = JSON.parse(messageInit.body as string);
+    expect(sentBody.recipient).toBe('sable');
+    expect(sentBody.text).toBe('use the staging bucket');
+    expect(sentBody.text).not.toContain('Attached files');
+    consoleLog.mockRestore();
+  });
+
+  it('refuses a call with neither a file nor a message before touching the daemon', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const code = await runAttachCommand('AGT-123', [], { deps });
+
+    expect(code).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('or a message with -m'));
+    consoleError.mockRestore();
+  });
+
+  it('treats a whitespace-only message as no message', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const code = await runAttachCommand('AGT-123', [], { message: '   ', deps });
+
+    expect(code).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+});
+
+// ---- Addressing one exchange -------------------------------------------------
+// `openswarm board` prints a correlationId per exchange. Without a way to hand
+// one back, the board advertised an address the answer command could not take
+// and the reply rode whichever exchange was newest.
+
+describe('runAttachCommand --correlation', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    readFileSyncMock.mockReset();
+    deps.ensureTaskSource.mockClear();
+    deps.getIssue.mockClear();
+  });
+
+  it('answers the named exchange, not the newest one', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([
+        event({ id: 'q', seq: 5, correlationId: 'hq-older', actor: 'sable', actorRole: 'worker' }),
+        event({ id: 'l', seq: 6, correlationId: 'c-newer', actor: 'rowan', actorRole: 'worker' }),
+      ]))
+      .mockResolvedValueOnce(messageOk());
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'the older one', correlationId: 'hq-older', deps });
+
+    expect(code).toBe(0);
+    const body = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    expect(body.correlationId).toBe('hq-older');
+    expect(body.recipient).toBe('sable');
+  });
+
+  it('refuses an unknown correlationId instead of silently answering another', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([event({ actor: 'sable', actorRole: 'worker' })]));
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', correlationId: 'hq-nope', deps });
+
+    expect(code).toBe(1);
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('hq-nope'));
+    // No message POST — the third call never happens.
+    expect(fetchMock.mock.calls).toHaveLength(2);
+    consoleError.mockRestore();
+  });
+
+  it('still auto-selects the parked question when no id is given', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(statsOk())
+      .mockResolvedValueOnce(historyOk([event({ seq: 5, correlationId: 'hq-1', actor: 'sable', actorRole: 'worker' })]))
+      .mockResolvedValueOnce(messageOk());
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', deps });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body as string).correlationId).toBe('hq-1');
+  });
+});
+
+describe('runAttachCommand endpoint misconfiguration', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    deps.ensureTaskSource.mockClear();
+    deps.getIssue.mockClear();
+  });
+
+  afterEach(() => {
+    delete process.env.OPENSWARM_DAEMON_HOST;
+    delete process.env.OPENSWARM_DAEMON_TOKEN;
+  });
+
+  // "start it first" is unactionable when the daemon is already running and
+  // the host is simply malformed. Third instance of this swallow across the
+  // CLI; the URL is now resolved before the catch at every entry point.
+  it('reports a malformed host instead of telling the operator to start a daemon', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OPENSWARM_DAEMON_HOST = 'http://vela';
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', deps });
+
+    expect(code).toBe(1);
+    const text = consoleError.mock.calls.flat().join('\n');
+    expect(text).toContain('is not a bare host');
+    expect(text).not.toContain('openswarm start');
+    expect(fetchMock).not.toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it('reports a refused plaintext token the same way', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OPENSWARM_DAEMON_HOST = 'vela';
+    process.env.OPENSWARM_DAEMON_TOKEN = 's3cret';
+
+    const code = await runAttachCommand('AGT-123', [], { message: 'hi', deps });
+
+    expect(code).toBe(1);
+    expect(consoleError.mock.calls.flat().join('\n')).toContain('Refusing to send');
     consoleError.mockRestore();
   });
 });

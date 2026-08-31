@@ -2,8 +2,8 @@
 // OpenSwarm - `openswarm attach <issueId> <files...>`
 // ============================================
 //
-// Upload file(s) to a running task's coordination inbox and notify its
-// agent — the CLI's counterpart to the dashboard's /chat attach button
+// Send a message and/or file(s) to a running task's coordination inbox and
+// notify its agent — the CLI's counterpart to the dashboard's /chat attach button
 // (AGT-4031, web/static/js/chatView.mjs). Neither
 // POST /api/coordination/attachment nor POST /api/coordination/message had
 // a CLI consumer before this (AGT-4058).
@@ -12,10 +12,8 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import { DAEMON_PORT } from './daemon.js';
+import { daemonAuthHeaders, daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
 
-function baseUrl(port: number): string {
-  return `http://127.0.0.1:${port}`;
-}
 
 export interface ResolvedIssue {
   id: string;
@@ -122,7 +120,7 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 async function fetchTaskHistory(taskId: string, port: number): Promise<CoordinationEvent[]> {
   const res = await fetch(
     `${baseUrl(port)}/api/coordination/history?taskId=${encodeURIComponent(taskId)}&limit=200`,
-    { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+    { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
   );
   if (!res.ok) throw new Error(`Could not read the coordination board (HTTP ${res.status})`);
   const body = await res.json() as { events?: CoordinationEvent[] };
@@ -144,6 +142,7 @@ async function uploadAttachment(taskId: string, filepath: string, port: number):
   const query = `?taskId=${encodeURIComponent(taskId)}&filename=${encodeURIComponent(filename)}`;
   const res = await fetch(`${baseUrl(port)}/api/coordination/attachment${query}`, {
     method: 'POST',
+    headers: daemonAuthHeaders(),
     body: bytes,
     signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
   });
@@ -170,7 +169,7 @@ async function postMessage(
 ): Promise<void> {
   const res = await fetch(`${baseUrl(port)}/api/coordination/message`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     body: JSON.stringify({
       correlationId: exchange.correlationId,
@@ -194,8 +193,14 @@ async function postMessage(
 }
 
 async function isDaemonReachable(port: number): Promise<boolean> {
+  // Outside the try: daemonBaseUrl throws for a malformed host or a token it
+  // will not send in the clear, and returning false for those tells the
+  // operator to start a daemon that is already running. Third instance of this
+  // swallow (providerCommand had two); the URL is now resolved before the
+  // catch at every entry point.
+  const url = `${baseUrl(port)}/api/stats`;
   try {
-    const res = await fetch(`${baseUrl(port)}/api/stats`, { signal: AbortSignal.timeout(1500) });
+    const res = await fetch(url, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(1500) });
     return res.ok;
   } catch {
     return false;
@@ -204,6 +209,8 @@ async function isDaemonReachable(port: number): Promise<boolean> {
 
 export interface RunAttachOptions {
   message?: string;
+  /** Address one exchange by the id `openswarm board` prints for it. */
+  correlationId?: string;
   port?: number;
   deps?: ResolveIssueDeps;
 }
@@ -216,12 +223,23 @@ export async function runAttachCommand(
 ): Promise<number> {
   const port = opts.port ?? DAEMON_PORT;
 
-  if (filepaths.length === 0) {
-    console.error('Pass at least one file to attach.');
+  // Files are optional: the dashboard's chat box can send a bare message, and
+  // an operator answering a parked question usually has nothing to upload.
+  const message = opts.message?.trim() ?? '';
+  if (filepaths.length === 0 && !message) {
+    console.error('Pass at least one file to attach, or a message with -m.');
     return 1;
   }
 
-  if (!(await isDaemonReachable(port))) {
+  let reachable: boolean;
+  try {
+    reachable = await isDaemonReachable(port);
+  } catch (error) {
+    // A configuration or safety refusal, not an absent daemon.
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+  if (!reachable) {
     console.error('OpenSwarm daemon is not reachable — start it first (`openswarm start`).');
     return 1;
   }
@@ -240,13 +258,29 @@ export async function runAttachCommand(
     return 1;
   }
 
-  const target = latestAddressable(events);
+  // `openswarm board` prints a correlationId per exchange, so the operator has
+  // to be able to hand one back — otherwise the board advertises an address
+  // the answer command cannot take, and the reply silently rides whichever
+  // exchange happened to be newest.
+  const wanted = opts.correlationId?.trim();
+  const chosen = wanted ? events.filter((e) => e.correlationId === wanted).at(-1) : undefined;
+  if (wanted && !chosen) {
+    console.error(`No exchange with correlationId ${wanted} on ${issue.identifier}. `
+      + 'Run `openswarm board` for the current list.');
+    return 1;
+  }
+
+  const target = chosen ?? latestAddressable(events);
   if (!target) {
     console.error(`No agent is addressable yet for ${issue.identifier} — it hasn't spoken on the coordination board.`);
     return 1;
   }
-  const question = openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId });
-  const exchange = question ?? target;
+  // An explicit correlationId is the operator naming the exchange; only fall
+  // back to "whichever question this actor is parked on" when they did not.
+  const question = chosen
+    ? undefined
+    : openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId });
+  const exchange = chosen ?? question ?? target;
 
   const uploaded: UploadedAttachment[] = [];
   let hadFailure = false;
@@ -260,14 +294,16 @@ export async function runAttachCommand(
       console.error(`Failed to upload ${filepath}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (uploaded.length === 0) {
+  // Every requested upload failing is still a failure; asking for none is not.
+  if (filepaths.length > 0 && uploaded.length === 0) {
     console.error('No files uploaded — nothing to notify the agent about.');
     return 1;
   }
 
-  const text = opts.message?.trim()
-    ? `${opts.message.trim()}\n\nAttached files (read them at these paths):\n${uploaded.map((u) => u.path).join('\n')}`
-    : `Attached files (read them at these paths):\n${uploaded.map((u) => u.path).join('\n')}`;
+  const attachmentNote = uploaded.length > 0
+    ? `Attached files (read them at these paths):\n${uploaded.map((u) => u.path).join('\n')}`
+    : '';
+  const text = [message, attachmentNote].filter(Boolean).join('\n\n');
 
   try {
     await postMessage(exchange, target.actor, text, port);

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const readProviderOverrideMock = vi.hoisted(() => vi.fn());
 const writeProviderOverrideMock = vi.hoisted(() => vi.fn());
@@ -259,5 +259,83 @@ describe('provider command helpers', () => {
       expect(writeProviderOverrideMock).not.toHaveBeenCalled();
       log.mockRestore();
     });
+  });
+});
+
+// A secured remote daemon rejects an unauthenticated read, which this command
+// swallows into "no daemon" — so it would misreport the live provider and
+// refuse a switch while OPENSWARM_DAEMON_TOKEN was correctly set. Every other
+// CLI daemon call got the token; this one was missed until the PR-level review
+// saw the whole diff.
+describe('providerCommand daemon auth', () => {
+  afterEach(() => {
+    delete process.env.OPENSWARM_DAEMON_TOKEN;
+  });
+
+  it('presents the daemon token when reading the live provider', async () => {
+    process.env.OPENSWARM_DAEMON_TOKEN = 's3cret';
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(statsResponse({ defaultAdapter: 'claude' }));
+
+    const { getProviderStatus } = await import('./providerCommand.js');
+    await getProviderStatus();
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'x-openswarm-token': 's3cret' });
+  });
+
+  it('presents the daemon token when switching the live provider', async () => {
+    process.env.OPENSWARM_DAEMON_TOKEN = 's3cret';
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(statsResponse({ defaultAdapter: 'claude' }));
+
+    const { applyProvider } = await import('./providerCommand.js');
+    await applyProvider('claude');
+
+    expect(fetchMock).toHaveBeenCalled();
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(init.headers).toMatchObject({ 'x-openswarm-token': 's3cret' });
+    }
+  });
+
+  it('sends no token header when none is configured', async () => {
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(statsResponse({ defaultAdapter: 'claude' }));
+
+    const { getProviderStatus } = await import('./providerCommand.js');
+    await getProviderStatus();
+
+    expect(fetchMock.mock.calls[0][1].headers).toEqual({});
+  });
+});
+
+describe('providerCommand endpoint misconfiguration', () => {
+  afterEach(() => {
+    delete process.env.OPENSWARM_DAEMON_HOST;
+    delete process.env.OPENSWARM_DAEMON_TOKEN;
+  });
+
+  // daemonBaseUrl throws for a bad host or a token it will not send in the
+  // clear. Reading that as "no daemon" would persist an override describing a
+  // provider the live daemon is not running.
+  it('does not report a misconfigured endpoint as an absent daemon', async () => {
+    process.env.OPENSWARM_DAEMON_HOST = 'http://vela';
+    fetchMock.mockReset();
+
+    const { getProviderStatus } = await import('./providerCommand.js');
+
+    await expect(getProviderStatus()).rejects.toThrow(/is not a bare host/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not silently persist an override when the endpoint is misconfigured', async () => {
+    process.env.OPENSWARM_DAEMON_HOST = 'http://vela';
+    fetchMock.mockReset();
+    writeProviderOverrideMock.mockReset();
+
+    const { applyProvider } = await import('./providerCommand.js');
+
+    await expect(applyProvider('claude')).rejects.toThrow(/is not a bare host/);
+    expect(writeProviderOverrideMock).not.toHaveBeenCalled();
   });
 });

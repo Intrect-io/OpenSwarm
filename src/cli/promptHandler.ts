@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFile } from 'node:child_process';
 import { expandPath } from '../core/config.js';
+import { DAEMON_HOST_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, isRemoteDaemon } from './daemonEndpoint.js';
 
 // Types
 
@@ -43,9 +44,13 @@ interface ExecTaskStatus {
 // Constants
 
 const SERVICE_PORT = 3847;
-const BASE_URL = `http://127.0.0.1:${SERVICE_PORT}`;
+/** Resolved per call: the host comes from the environment, which a test
+ * (or an operator between commands) can change after this module loads. */
+const BASE_URL = () => daemonBaseUrl(SERVICE_PORT);
 const HEALTH_TIMEOUT_MS = 3000;
 const AUTO_START_TIMEOUT_MS = 30000;
+/** Submitting a task is a small JSON POST; it should never outlast this. */
+const SUBMIT_TIMEOUT_MS = 30000;
 const DEFAULT_TASK_TIMEOUT_S = 600;
 const POLL_INTERVAL_MS = 3000;
 const POLL_REQUEST_TIMEOUT_MS = 5000;
@@ -63,10 +68,14 @@ function getProjectRoot(): string {
 // Service Health Check
 
 async function checkServiceHealth(): Promise<boolean> {
+  // Resolved before the try: a malformed host or a refused plaintext token is
+  // a configuration error, and answering `false` here would send the caller
+  // into auto-start instead of reporting it.
+  const url = `${BASE_URL()}/api/stats`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   try {
-    const res = await fetch(`${BASE_URL}/api/stats`, { signal: controller.signal });
+    const res = await fetch(url, { headers: daemonAuthHeaders(), signal: controller.signal });
     return res.ok;
   } catch {
     return false;
@@ -127,10 +136,14 @@ async function submitTask(opts: ExecOptions, projectPath: string): Promise<ExecT
     verbose: opts.verbose,
   };
 
-  const res = await fetch(`${BASE_URL}/api/exec`, {
+  // The only daemon call here without a bound. Over loopback that rarely bit;
+  // over a network it hangs forever with no way out (caught by openswarm pr
+  // review, not self-caught).
+  const res = await fetch(`${BASE_URL()}/api/exec`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
   });
 
   if (!res.ok) {
@@ -145,6 +158,10 @@ async function submitTask(opts: ExecOptions, projectPath: string): Promise<ExecT
 // Task Polling
 
 async function pollForResult(taskId: string, timeoutS: number): Promise<ExecTaskStatus> {
+  // Resolved once, before the loop: the endpoint cannot change mid-poll, and
+  // resolving inside the per-iteration try would swallow a configuration error
+  // as just another failed poll until the deadline expired.
+  const pollUrl = BASE_URL();
   const deadline = Date.now() + timeoutS * 1000;
 
   while (Date.now() < deadline) {
@@ -159,7 +176,7 @@ async function pollForResult(taskId: string, timeoutS: number): Promise<ExecTask
         Math.min(POLL_REQUEST_TIMEOUT_MS, remainingMs),
       );
       try {
-        const res = await fetch(`${BASE_URL}/api/exec/${taskId}`, { signal: controller.signal });
+        const res = await fetch(`${pollUrl}/api/exec/${taskId}`, { headers: daemonAuthHeaders(), signal: controller.signal });
         if (!res.ok) continue;
 
         const status = (await res.json()) as ExecTaskStatus;
@@ -221,6 +238,17 @@ export async function executePrompt(opts: ExecOptions): Promise<void> {
   const healthy = await checkServiceHealth();
 
   if (!healthy) {
+    // startServiceAuto() only ever starts a daemon on THIS machine. When
+    // OPENSWARM_DAEMON_HOST points somewhere else, doing that would spawn a
+    // daemon nobody asked for and then poll the remote host for 30s anyway,
+    // so the unreachable remote is reported instead (caught by openswarm
+    // review, not self-caught).
+    if (isRemoteDaemon()) {
+      console.error(`Error: no OpenSwarm daemon answered at ${daemonHost()}:${SERVICE_PORT}.`);
+      console.error('Auto-start only applies to a local daemon — start it on that host, '
+        + `or unset ${DAEMON_HOST_ENV} to use this machine.`);
+      process.exit(1);
+    }
     if (!autoStart) {
       console.error('Error: Service is not running. Use --auto-start or start it manually.');
       process.exit(1);
