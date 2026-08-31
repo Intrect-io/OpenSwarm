@@ -710,6 +710,15 @@ describe('siblingAnswered label', () => {
     expect(ko).toContain('다른 열린 질문');
   });
 
+  // The fan-out runs regardless of actorRole — orchestratorTrackerTools answers
+  // too — while the primary answer event splits humanAnswered/supervisorAnswered.
+  // A single sibling label therefore must not name who answered.
+  it('does not claim who gave the answer', () => {
+    expect(en).not.toMatch(/operator|supervisor|human/i);
+    expect(ko).not.toContain('운영자');
+    expect(ko).not.toContain('감독');
+  });
+
   it('tells the reader to check that the answer applies', () => {
     expect(en).toMatch(/check it applies/i);
     expect(ko).toContain('해당하는 답인지 확인');

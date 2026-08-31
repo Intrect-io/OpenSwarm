@@ -372,7 +372,7 @@ export const en: LocaleMessages = {
       operatorPaged: 'Operator paged on Discord',
       humanAnswered: 'Human answered the blocking question',
       supervisorAnswered: 'Project supervisor answered the blocking question',
-      siblingAnswered: 'Settled by the operator answer to another open ask on this task — check it applies before acting on it',
+      siblingAnswered: 'Settled by the answer to another open ask on this task — check it applies before acting on it',
     },
     periodicReview: {
       title: 'Periodic repository review',
