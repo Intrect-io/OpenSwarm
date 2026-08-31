@@ -32,19 +32,6 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 /**
- * Safe gh command execution (no shell). `cwd` must be inside the target repo —
- * gh infers the repository from the working directory, and the daemon's own
- * cwd is typically NOT a git repo (e.g. started from $HOME), which made every
- * `gh pr create` here die with "fatal: not a git repository" while the push
- * (which does pass a cwd) succeeded — completed work stranded on remote
- * branches with no PR. (INT-2321)
- */
-async function gh(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('gh', args, { cwd, timeout: GIT_TIMEOUT_MS });
-  return stdout;
-}
-
-/**
  * Resolve the base remote + default branch to branch worktrees and PRs from.
  * OpenSwarm hardcoded `origin/main` everywhere, which silently broke every repo that
  * doesn't match BOTH assumptions: a repo whose default branch is `master`
@@ -126,6 +113,7 @@ import { isBranchForIssue, isSwarmBranch } from './branchNaming.js';
 // file is at the pre-commit LOC cap. Re-exported so callers keep one import.
 export { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
+import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -609,7 +597,23 @@ export async function inspectWorktreeRecovery(
  * and by the age sweep. Accepts the worktree path itself — the repo root is the
  * segment before `/worktree/<id>`. No-op for paths that don't match. (INT-2506)
  */
-async function removePreservedWorktreeAtUnlocked(worktreePath: string): Promise<void> {
+/**
+ * Called between the pre-cleanup WIP commit and the directory removal, with the
+ * tree's own branch name. Every commit the run will ever have exists by then and
+ * the directory still does, which is the only window where the branch can still
+ * be pushed from its worktree. Best-effort by contract: a throw is logged and
+ * removal proceeds, because cleanup must not depend on GitHub being reachable.
+ */
+export type PreCleanupPublish = (ctx: {
+  worktreePath: string;
+  repoRoot: string;
+  branchName: string;
+}) => Promise<void>;
+
+async function removePreservedWorktreeAtUnlocked(
+  worktreePath: string,
+  publish?: PreCleanupPublish,
+): Promise<void> {
   const m = worktreePath.replace(/\/+$/, '').match(/^(.*)\/worktree\/[^/]+$/);
   if (!m || !existsSync(worktreePath)) return;
   const repoRoot = m[1];
@@ -623,13 +627,38 @@ async function removePreservedWorktreeAtUnlocked(worktreePath: string): Promise<
     );
     console.log(`[Worktree] WIP committed to branch before cleanup: ${worktreePath}`);
   } catch { /* clean tree or commit failure — proceed with removal */ }
+  if (publish) {
+    // Detached HEAD has no branch to push, and pushing the wrong one is worse
+    // than pushing none, so an unresolvable name skips publication entirely.
+    const branchName = await git(worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD')
+      .then((out) => out.trim())
+      .catch(() => '');
+    if (branchName && branchName !== 'HEAD') {
+      await publish({ worktreePath, repoRoot, branchName }).catch((err) => {
+        console.warn(
+          `[Worktree] Pre-cleanup publish failed for ${branchName}; the branch keeps the commits locally:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    } else {
+      console.warn(`[Worktree] Cannot publish ${worktreePath} before cleanup: no branch at HEAD`);
+    }
+  }
   await git(repoRoot, 'worktree', 'remove', '--force', worktreePath).catch(() => {
     rmSync(worktreePath, { recursive: true, force: true });
   });
   console.log(`[Worktree] Removed preserved worktree: ${worktreePath}`);
 }
 
-export async function removePreservedWorktreeAt(worktreePath: string): Promise<void> {
+/**
+ * `publish` runs under this same lifecycle lock, after the ownership re-check
+ * below has proven no live owner holds the tree. Publishing outside the lock
+ * would let a push race a resumed worker still editing the same files.
+ */
+export async function removePreservedWorktreeAt(
+  worktreePath: string,
+  publish?: PreCleanupPublish,
+): Promise<void> {
   const normalized = worktreePath.replace(/\/+$/, '');
   const match = normalized.match(/^(.*)\/worktree\/([^/]+)$/);
   if (!match || !existsSync(normalized)) return;
@@ -646,7 +675,7 @@ export async function removePreservedWorktreeAt(worktreePath: string): Promise<v
         !markerPidIsJudgeable(marker)
         || (!markerWriterProvablyGone(marker) && processAppearsAlive(marker.ownerPid))
       ))) return;
-    await removePreservedWorktreeAtUnlocked(normalized);
+    await removePreservedWorktreeAtUnlocked(normalized, publish);
   });
 }
 
@@ -1062,53 +1091,6 @@ async function collectActiveScopes(worktreePath: string, selfBranch: string): Pr
   } catch { /* gh unavailable — skip merged-PR staleness check */ }
 
   return scopes;
-}
-
-// Duplicate-issue-PR guard (INT-2544)
-//
-// Two parallel workers can each independently implement the same Linear issue on
-// their own branch and both open PRs — nothing checked whether one already exists.
-// Real incident: STONKS STO-1400 (PR #224 merged + PR #226 left open, CONFLICTING)
-// and STO-1454 (PR #221 merged + PR #228 left open, CONFLICTING) sat undetected
-// until a human noticed the "File overlap with in-flight work" comment and ran
-// `git merge-tree` by hand. Every OpenSwarm PR body literally contains
-// `Closes <issueIdentifier>`, so a GitHub body search finds siblings regardless of
-// branch name or merge state.
-
-/** Other PRs (any state) whose body already closes this Linear issue, excluding
- *  this branch's own PR. Best-effort — any gh failure returns [] rather than
- *  blocking PR creation. */
-async function findDuplicateIssuePRs(
-  worktreePath: string,
-  issueIdentifier: string,
-  selfBranch: string,
-): Promise<{ number: number; url: string; headRefName: string }[]> {
-  try {
-    const raw = await gh(
-      worktreePath, 'pr', 'list',
-      '--search', `"Closes ${issueIdentifier}" in:body`,
-      '--state', 'all',
-      '--json', 'number,url,headRefName',
-      '--limit', '10',
-    );
-    const prs: { number: number; url: string; headRefName: string }[] = JSON.parse(raw || '[]');
-    return prs.filter((pr) => pr.headRefName !== selfBranch);
-  } catch (err) {
-    console.warn('[Worktree] Duplicate-issue-PR check skipped:', err);
-    return [];
-  }
-}
-
-/** Render the duplicate-PR warning as a PR-body markdown section ('' if none). */
-function formatDuplicateIssueSection(issueIdentifier: string, duplicates: { number: number; url: string; headRefName: string }[]): string {
-  if (duplicates.length === 0) return '';
-  return [
-    '## ⚠️ Possible duplicate work',
-    '',
-    `${duplicates.length} other PR(s) already reference \`Closes ${issueIdentifier}\` — opened as a draft. Verify this isn't redundant with already-merged work before marking ready and merging:`,
-    '',
-    ...duplicates.map((d) => `- ${d.url} (${d.headRefName})`),
-  ].join('\n');
 }
 
 /**

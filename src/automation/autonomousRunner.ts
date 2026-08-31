@@ -64,6 +64,7 @@ import {
   pruneWorktrees,
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
+import { publishStuckWork } from './publishOnPark.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
@@ -208,6 +209,39 @@ function setSandboxOutcomePark(issueId: string, parked: boolean): void {
   } catch (error) {
     console.warn(`[AutonomousRunner] Could not record sandbox outcome quarantine for ${issueId}:`, error);
   }
+}
+
+/**
+ * Terminal park: publish the work before freeing the disk.
+ *
+ * All three terminal parks (sandbox infeasibility, the rejection limit, retry
+ * exhaustion) used to commit the partial work to a local branch and delete the
+ * worktree, leaving the commits unpushed and invisible. Reaching one of them is
+ * the run having built as far as it can and hit the point where the operator
+ * has to look, which is exactly when the work should be reviewable.
+ *
+ * Publication is a hook of the cleanup rather than a call before it so it runs
+ * under the same worktree lifecycle lock, after the ownership re-check has
+ * proven no resumed worker is still editing the tree, and after the pre-cleanup
+ * WIP commit that captures the last of the work.
+ */
+async function publishAndCleanupStuckWorktree(
+  task: TaskItem,
+  projectPath: string,
+  parkReason: string,
+): Promise<string | undefined> {
+  let prUrl: string | undefined;
+  await removePreservedWorktreeAt(projectPath, async (ctx) => {
+    prUrl = await publishStuckWork(ctx, task, parkReason);
+  }).catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+  return prUrl;
+}
+
+/** Tracker-comment section pointing the operator at the published draft. */
+function stuckPullRequestSection(prUrl: string | undefined): string {
+  return prUrl
+    ? `\n\n**Draft PR with the work so far:** ${prUrl}`
+    : '';
 }
 
 export class AutonomousRunner {
@@ -811,9 +845,12 @@ export class AutonomousRunner {
             );
           }
           this.saveTaskState();
+          let stuckPrUrl: string | undefined;
           if (result.taskContext?.projectPath) {
-            await removePreservedWorktreeAt(result.taskContext.projectPath)
-              .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+            stuckPrUrl = await publishAndCleanupStuckWorktree(
+              task, result.taskContext.projectPath,
+              `the DoD appears unsatisfiable in the sandbox after ${attempts} attempts (marker: "${infeasible.marker}")`,
+            );
           }
           try {
             await execution.syncFailureState(task,
@@ -822,7 +859,8 @@ export class AutonomousRunner {
               `**Needs human — the DoD appears unsatisfiable in this sandbox.**\n\n` +
               `Detected blocker phrase: "${infeasible.marker}". Re-running can't fix an environmental ` +
               `impossibility (missing DB / network / credentials, or a manual/human step), so automatic ` +
-              `retries were stopped early after ${attempts} attempts.\n\n**Latest failure:**\n${infeasDetail}`);
+              `retries were stopped early after ${attempts} attempts.\n\n**Latest failure:**\n${infeasDetail}` +
+              stuckPullRequestSection(stuckPrUrl));
             console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (needs-human: infeasible in sandbox) — ${attempts} attempts`);
           } catch (err) {
             console.error(`[Scheduler] Failed to update issue state:`, err);
@@ -859,18 +897,22 @@ export class AutonomousRunner {
             this.durableRuns.markNeedsHuman(task.issueId, `Reviewer rejected ${rejectionCount} attempts: ${feedback}`);
           }
           this.saveTaskState();
-          // Terminally stuck → no retry will resume the preserved tree; commit
-          // the partial work to the branch and free the disk (INT-2506).
+          // Terminally stuck → no retry will resume the preserved tree; publish
+          // the partial work as a draft PR and free the disk (INT-2506).
+          let stuckPrUrl: string | undefined;
           if (result.taskContext?.projectPath) {
-            await removePreservedWorktreeAt(result.taskContext.projectPath)
-              .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+            stuckPrUrl = await publishAndCleanupStuckWorktree(
+              task, result.taskContext.projectPath,
+              `the reviewer rejected ${rejectionCount} attempts`,
+            );
           }
 
           try {
             await execution.syncFailureState(task, `Max rejection limit reached (${rejectionCount} attempts): ${feedback}`);
             await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
               `Rejected ${rejectionCount} times by the reviewer — automatic retries exhausted.\n\n` +
-              `**Latest rejection reason:**\n${feedback}`
+              `**Latest rejection reason:**\n${feedback}` +
+              stuckPullRequestSection(stuckPrUrl)
             );
             console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (max rejections reached)`);
           } catch (err) {
@@ -924,16 +966,20 @@ export class AutonomousRunner {
           }
           this.saveTaskState();
           console.log(`[Scheduler] Task failure count: ${count}/${AutonomousRunner.MAX_RETRY_COUNT} for ${taskCtx} — STUCK`);
-          // Terminally stuck → commit partial work to the branch, free the disk (INT-2506).
+          // Terminally stuck → publish partial work as a draft PR, free the disk (INT-2506).
+          let stuckPrUrl: string | undefined;
           if (result.taskContext?.projectPath) {
-            await removePreservedWorktreeAt(result.taskContext.projectPath)
-              .catch((err) => console.warn('[Worktree] STUCK cleanup failed:', err));
+            stuckPrUrl = await publishAndCleanupStuckWorktree(
+              task, result.taskContext.projectPath,
+              `autonomous execution failed ${count} times`,
+            );
           }
           try {
             await execution.syncFailureState(task, `Autonomous execution failed ${count} times: ${failureDetail}`);
             await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
               `Autonomous execution failed ${count} times in a row — automatic retries exhausted.\n\n` +
-              `**Last failure:**\n${failureDetail}`
+              `**Last failure:**\n${failureDetail}` +
+              stuckPullRequestSection(stuckPrUrl)
             );
             console.log(`[Scheduler] Issue ${task.issueId} marked STUCK (max retries exceeded)`);
           } catch (err) {

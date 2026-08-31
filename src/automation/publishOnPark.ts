@@ -121,6 +121,69 @@ export async function publishParkedWork(
 }
 
 /**
+ * Publish the branch of a run that parked terminally for a human.
+ *
+ * Retry exhaustion, the rejection limit and sandbox infeasibility are not
+ * failures to hide: reaching one is the run having built as far as it can and
+ * arrived at the point where the operator has to look. Until now all three
+ * committed the partial work to a local branch and deleted the worktree without
+ * ever pushing — measured on the deployed daemon, 14 parked runs holding a
+ * branch each and not one PR between them.
+ *
+ * Draft, like {@link publishParkedWork}: nothing reviewed this work, and a
+ * ready PR would put known-incomplete work through CI.
+ *
+ * Runs as {@link removePreservedWorktreeAt}'s pre-cleanup hook so it inherits
+ * that function's lifecycle lock and live-owner re-check, and so it sees the
+ * WIP commit that hook fires after. Returns the PR URL when one was opened, so
+ * the caller can put it in the tracker comment the operator actually reads.
+ */
+export async function publishStuckWork(
+  ctx: { worktreePath: string; repoRoot: string; branchName: string },
+  task: PublishableTask,
+  parkReason: string,
+): Promise<string | undefined> {
+  try {
+    const { prUrl } = await commitAndCreatePRWithHead(
+      {
+        worktreePath: ctx.worktreePath,
+        branchName: ctx.branchName,
+        originalPath: ctx.repoRoot,
+        issueId: task.issueId ?? task.id,
+      },
+      task.title,
+      task.issueIdentifier || '',
+      `Published because this run stopped and needs a human: ${parkReason}\n\n`
+        + 'It has not been reviewed and is very likely incomplete — this PR is a'
+        + ' draft on purpose. It exists so the work is reviewable instead of'
+        + ' sitting on a branch that was never pushed.',
+      // NOT committedOnly, unlike the operator-park path. That path leaves the
+      // tree untouched because the run resumes from it; this tree is about to
+      // be deleted, so anything still uncommitted is about to be lost. The
+      // pre-cleanup WIP commit normally captures it first and makes this a
+      // no-op (a clean tree skips the whole commit phase) — but that commit
+      // swallows its own failures, and this is the second chance.
+      { draft: true,
+        fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+    );
+    broadcastEvent({
+      type: 'log',
+      data: { taskId: task.issueId || task.id, stage: 'pr', line: `Draft PR created for stuck run: ${prUrl}` },
+    });
+    console.log(`[Runner] Stuck run published as draft for ${task.issueIdentifier}: ${prUrl}`);
+    return prUrl;
+  } catch (err) {
+    // "No commits to create PR from" is the common, correct outcome — the run
+    // went stuck without producing anything. Nothing here may change the park.
+    const detail = err instanceof Error ? err.message : String(err);
+    if (!/No commits to create PR from/.test(detail)) {
+      console.warn(`[Runner] Could not publish stuck work for ${task.issueIdentifier}: ${detail}`);
+    }
+    return undefined;
+  }
+}
+
+/**
  * Publish the branch of a run that passed review.
  *
  * A publication failure is fatal here, unlike the parked path: a worktree-mode
