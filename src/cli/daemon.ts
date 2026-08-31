@@ -76,6 +76,11 @@ function readPidFile(): number | null {
  */
 export async function probeDaemonPort(port = DAEMON_PORT, timeoutMs = 800): Promise<boolean> {
   try {
+    // Deliberately loopback, not daemonBaseUrl(): this asks whether THIS
+    // machine's port is already taken, so that start/stop does not spawn a
+    // second daemon on the same queue. Routing it through
+    // OPENSWARM_DAEMON_HOST would answer about a different machine and let
+    // exactly that happen.
     const res = await fetch(`http://127.0.0.1:${port}/api/stats`, {
       signal: AbortSignal.timeout(timeoutMs),
     });

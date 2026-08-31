@@ -19,7 +19,7 @@ import { isKnownAdapter, listAdapterNames } from '../adapters/index.js';
 import type { AdapterName } from '../adapters/types.js';
 import { readProviderOverride, writeProviderOverride } from '../core/providerOverride.js';
 import { loadConfig } from '../core/config.js';
-import { daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
+import { daemonAuthHeaders, daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
 import { DAEMON_PORT } from './daemon.js';
 
 /**
@@ -65,7 +65,7 @@ interface StatsAdapters {
 /** Ask the running daemon which adapter it is actually using right now. */
 async function fetchDaemonAdapters(port: number, timeoutMs = 1500): Promise<StatsAdapters | null> {
   try {
-    const res = await fetch(`${baseUrl(port)}/api/stats`, { signal: AbortSignal.timeout(timeoutMs) });
+    const res = await fetch(`${baseUrl(port)}/api/stats`, { headers: daemonAuthHeaders(), signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     const stats = await res.json() as { adapters?: StatsAdapters };
     return stats.adapters ?? null;
@@ -127,7 +127,7 @@ export async function applyProvider(next: AdapterName, port = DAEMON_PORT): Prom
   try {
     const res = await fetch(`${baseUrl(port)}/api/provider`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
       body: JSON.stringify({ provider: next }),
       signal: AbortSignal.timeout(5000),
     });
