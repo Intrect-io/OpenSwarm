@@ -20,6 +20,9 @@ const execFileAsync = promisify(execFile);
 
 export class CursorCliAdapter implements CliAdapter {
   readonly name = 'cursor';
+  // Model table from `cursor-agent --list-models`, cached for the adapter
+  // lifetime so buildCommand can reject unsupported ids without a subprocess.
+  private cachedModels: string[] | null = null;
   readonly capabilities: AdapterCapabilities = {
     supportsStreaming: true,
     supportsJsonOutput: true,
@@ -46,9 +49,18 @@ export class CursorCliAdapter implements CliAdapter {
 
   async listModels(): Promise<string[]> {
     if (isHumanSurfaceReadOnlyEnabled()) return [];
+    if (this.cachedModels) return this.cachedModels;
     try {
       const { stdout } = await execFileAsync('cursor-agent', ['--list-models'], { timeout: 10_000 });
-      return stdout.split('\n').map((line) => line.trim()).filter((line) => line && !/^available models/i.test(line));
+      // Each line is "<id> - <display name>"; only the id is a valid --model
+      // value. Feeding the whole line back made the CLI reject it
+      // ("Cannot use this model: auto - Auto (current, default)").
+      const models = stdout.split('\n').map((line) => line.trim())
+        .filter((line) => line && !/^available models/i.test(line))
+        .map((line) => line.split(/\s+-\s+/)[0]?.trim())
+        .filter((id): id is string => !!id && /^[\w.\-:/@]+$/.test(id));
+      this.cachedModels = models;
+      return models;
     } catch {
       return [];
     }
@@ -59,16 +71,35 @@ export class CursorCliAdapter implements CliAdapter {
     return first ?? 'auto';
   }
 
+  /**
+   * The config may carry provider-specific ids (e.g. plannerModel
+   * z-ai/glm-5.2 for the OpenRouter/Atlas Cloud adapters). cursor-agent only
+   * accepts ids it lists; passing anything else aborts with
+   * "Cannot use this model: …". Route unsupported ids to the auto default.
+   */
+  private resolveModel(wanted: string): string {
+    // Vendor-slug ids ("z-ai/…", "zai-org/…") never exist on cursor-agent.
+    if (wanted.includes('/')) return 'auto';
+    if (this.cachedModels) return this.cachedModels.includes(wanted) ? wanted : 'auto';
+    return wanted;
+  }
+
   buildCommand(options: CliRunOptions): CliCommandSpec {
-    const args = ['--print', '--output-format', 'stream-json', '--stream-partial-output', '--workspace', options.cwd];
+    // stream-json without --stream-partial-output yields message-level events
+    // (whole sentences per assistant turn) instead of per-token deltas, so the
+    // live log does not fill with tiny fragments (observed on vela 2026-09-01).
+    // --trust skips Cursor's interactive workspace-trust prompt; OpenSwarm's
+    // own bwrap executor is the filesystem boundary.
+    const args = ['--print', '--output-format', 'stream-json', '--trust', '--workspace', options.cwd];
     if (options.readOnly) {
-      args.push('--mode', 'ask', '--sandbox', 'enabled');
+      args.push('--mode', 'ask', '--sandbox', 'disabled');
     } else {
       // The containing OpenSwarm worktree is already the filesystem boundary;
-      // Cursor's sandbox is additive. Never pass --force/--yolo.
-      args.push('--sandbox', 'enabled');
+      // Cursor's sandbox is additive and fails to start inside bwrap/AppArmor.
+      // Never pass --force/--yolo.
+      args.push('--sandbox', 'disabled');
     }
-    if (options.model) args.push('--model', options.model);
+    if (options.model) args.push('--model', this.resolveModel(options.model));
     return { command: 'cursor-agent', args, stdinFile: options.prompt };
   }
 
@@ -107,10 +138,30 @@ function cursorEventText(line: string): string {
   if (!trimmed) return '';
   try {
     const event = JSON.parse(trimmed) as Record<string, unknown>;
+    // Streaming "thinking" deltas arrive per token and would flood the live
+    // log with fragments. Only whole assistant messages / results are events.
+    if (event.type === 'thinking') return '';
+    // The CLI echoes the full prompt (including any injected content from task
+    // descriptions) back as a `user` message, and `system` events carry config
+    // noise. Neither belongs in the live log; they also re-surface prompt
+    // injections verbatim to the dashboard. Only model output should log.
+    if (event.type === 'user' || event.type === 'system' || event.type === 'session') return '';
     for (const key of ['text', 'content', 'result', 'message'] as const) {
       const value = event[key];
+      if (key === 'message' && value && typeof value === 'object') {
+        const content = (value as { content?: unknown }).content;
+        if (Array.isArray(content)) {
+          const parts = content
+            .filter((c): c is { type: string; text?: string } => !!c && typeof c === 'object')
+            .map((c) => (typeof c.text === 'string' ? c.text : ''))
+            .filter(Boolean);
+          if (parts.length) return parts.join('').trim();
+        } else if (typeof content === 'string' && content.trim()) {
+          return content.trim();
+        }
+      }
       if (typeof value === 'string' && value.trim()) return value.trim();
-      if (value && typeof value === 'object' && typeof (value as { content?: unknown }).content === 'string') {
+      if (value && typeof value === 'object' && typeof (value as { content?: string }).content === 'string') {
         return (value as { content: string }).content.trim();
       }
     }

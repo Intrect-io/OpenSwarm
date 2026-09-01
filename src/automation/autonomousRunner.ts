@@ -69,6 +69,9 @@ import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
+import { scanRepository } from '../registry/entityScanner.js';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import {
   detectFileConflicts,
@@ -1969,6 +1972,50 @@ export class AutonomousRunner {
     }
   }
 
+  /**
+   * Keep the code-entity registry fresh for Draft File Map / registryCheck.
+   * Throttled to once per 6h per project so heartbeats stay cheap; a missing
+   * or empty scan still runs immediately (measured: Draft logged "0 entities"
+   * for months while ~/.openswarm/registry.db sat stale since 2026-07-05).
+   */
+  private readonly registryScanAt = new Map<string, number>();
+  private static readonly REGISTRY_SCAN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+  private refreshCodeRegistries(): void {
+    for (const projectPath of this.config.allowedProjects) {
+      const resolvedPath = normalizeProjectPath(projectPath);
+      const last = this.registryScanAt.get(resolvedPath) ?? 0;
+      if (Date.now() - last < AutonomousRunner.REGISTRY_SCAN_INTERVAL_MS) continue;
+      if (!existsSync(join(resolvedPath, '.git'))) continue;
+
+      const projectId = this.resolveRegistryProjectId(resolvedPath);
+      this.registryScanAt.set(resolvedPath, Date.now());
+      void scanRepository(resolvedPath, projectId, { timeoutMs: 180_000 })
+        .then((result) => {
+          this.syslog(
+            `Registry scan ${projectId}: ${result.extracted} entities `
+            + `(+${result.registered}/~${result.updated}) in ${result.durationMs}ms`,
+          );
+        })
+        .catch((e) => {
+          console.error(`[AutonomousRunner] Registry scan failed for ${resolvedPath}:`, e);
+          this.registryScanAt.delete(resolvedPath);
+        });
+    }
+  }
+
+  private resolveRegistryProjectId(projectPath: string): string {
+    const normalized = projectPath.replace(/\/+$/, '');
+    const wt = normalized.match(/^(.*)\/worktree\/[^/]+$/);
+    const repoRoot = wt ? wt[1] : normalized;
+    try {
+      const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8')) as { name?: unknown };
+      if (typeof pkg.name === 'string' && pkg.name) return pkg.name.replace(/^@[^/]+\//, '');
+    } catch { /* basename fallback */ }
+    return repoRoot.split('/').pop() ?? repoRoot;
+  }
+
+
   /** Send system message to dashboard LIVE LOG */
   private syslog(line: string): void {
     const safeLine = line.replace(/[\r\n]/g, '');
@@ -2179,6 +2226,9 @@ export class AutonomousRunner {
 
       // 0. Knowledge graph refresh (async, service continues even on failure)
       this.refreshKnowledgeGraphs();
+      // 0.05 Code-entity registry (Draft File Map / registryCheck) — throttled
+      this.refreshCodeRegistries();
+
 
       // 0.1 Reconcile before pruning. Unknown/crash-recovery worktrees are never
       // deleted from a heartbeat without a terminal durable record.

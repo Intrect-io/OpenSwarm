@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.2 — 2026-09-01
+
+### Fixed
+
+- **Code registry stays fresh for Draft File Map / `registryCheck`.** Heartbeat now rescans each allowed project at most once per 6h (`refreshCodeRegistries`), skips `worktree/` trees that previously inflated registries (e.g. vega-agent past 130k rows), marks leftovers under skipped dirs as broken, and Draft stats count **active** entities only. Measured production had logged `[Draft] Registry: 0 entities` for months while `~/.openswarm/registry.db` sat stale since 2026-07-05.
+- **Cursor CLI worker is usable under OpenSwarm isolation.** Drop interactive workspace-trust prompts (`--trust`), disable Cursor's nested sandbox when bwrap/AppArmor already isolates the run, skip stream `thinking`/`user`/`system` noise (and prompt-echo of injected task text) in the live log, parse `--list-models` ids cleanly, and map vendor-slug models (`z-ai/…`) to `auto` instead of failing with `Cannot use this model`.
+
 ## 0.21.1 — 2026-08-23
 
 ### Fixed
