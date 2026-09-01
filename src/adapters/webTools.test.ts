@@ -152,6 +152,37 @@ describe('webSearch — backend selection', () => {
     expect(out).toContain('vega-search');
   });
 
+  it('accepts VEGA_SEARXNG_URL and forwards X-VEGA-Key', async () => {
+    vi.stubEnv('VEGA_SEARXNG_URL', 'http://127.0.0.1:18888');
+    vi.stubEnv('OPENSWARM_SEARXNG_KEY', 'secret-key');
+    expect(searchBackend()).toBe('searxng');
+    const f = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>)['X-VEGA-Key']).toBe('secret-key');
+      return new Response(JSON.stringify({ results: [] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', f);
+    expect(await webSearch('empty')).toContain('No results');
+  });
+
+  it('ignores a non-http SearXNG URL and falls through to DuckDuckGo', () => {
+    vi.stubEnv('OPENSWARM_SEARXNG_URL', 'ftp://searxng.local');
+    expect(searchBackend()).toBe('duckduckgo');
+  });
+
+  it('ignores an unparseable SearXNG URL', () => {
+    vi.stubEnv('OPENSWARM_SEARXNG_URL', 'not a url');
+    expect(searchBackend()).toBe('duckduckgo');
+  });
+
+  it('returns a Search failed string when SearXNG responds non-OK', async () => {
+    vi.stubEnv('OPENSWARM_SEARXNG_URL', 'http://searxng:8080/');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('nope', { status: 503 })));
+    const out = await webSearch('q');
+    expect(out).toContain('Search failed');
+    expect(out).toContain('SearXNG HTTP 503');
+    expect(out).not.toContain('TAVILY_KEY');
+  });
+
   it('prefers Tavily when TAVILY_KEY is set', async () => {
     vi.stubEnv('TAVILY_KEY', 'tk');
     expect(searchBackend()).toBe('tavily');

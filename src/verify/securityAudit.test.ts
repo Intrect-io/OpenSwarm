@@ -111,6 +111,12 @@ describe('security audit primitives', () => {
       ),
     }];
     expect(newSecurityFindings(baseline, current)).toEqual([]);
+    expect(repositoryRelativeSarifPath(snapshot, 'openswarm-security-audit-1oXMjf/web/local_provider.py')).toBe('web/local_provider.py');
+    expect(repositoryRelativeSarifPath(snapshot, '.codeql-python\\src\\tmp\\openswarm-security-audit-1oXMjf\\web\\local_provider.py')).toBe('web/local_provider.py');
+    expect(repositoryRelativeSarifPath(snapshot, '.codeql-python/src/tmp/openswarm-security-audit-1oXMjf')).toBeUndefined();
+    expect(repositoryRelativeSarifPath(snapshot, 'web/../etc/passwd')).toBeUndefined();
+    expect(repositoryRelativeSarifPath(snapshot, '/etc/passwd')).toBeUndefined();
+    expect(repositoryRelativeSarifPath(snapshot, '.codeql-javascript/ql/foo.ts')).toBeUndefined();
   });
 });
 
