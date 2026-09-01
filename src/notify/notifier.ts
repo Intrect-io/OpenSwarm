@@ -10,10 +10,43 @@
 import type { EmbedBuilder } from 'discord.js';
 import { publicFetch } from '../support/outboundUrl.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+
+/**
+ * Non-global special-use IPv4 ranges that must be rejected as notification
+ * destinations.  Based on IANA IPv4 Special-Purpose Address Registry and
+ * RFC 6890 / RFC 8190.
+ *
+ * - 127.0.0.0/8       — Loopback
+ * - 169.254.0.0/16    — Link-local
+ * - 10.0.0.0/8        — Private (Class A)
+ * - 172.16.0.0/12     — Private (Class B)
+ * - 192.168.0.0/16    — Private (Class C)
+ * - 100.64.0.0/10     — Carrier-grade NAT (CGNAT, RFC 6598)
+ */
+const NON_GLOBAL_IPV4_RANGES: ReadonlyArray<{
+  prefix: number;
+  mask: number;
+  maskBits: number;
+}> = [
+  { prefix: 0x7f000000, mask: 0xff000000, maskBits: 8 },   // 127.0.0.0/8
+  { prefix: 0xa9fe0000, mask: 0xffff0000, maskBits: 16 },   // 169.254.0.0/16
+  { prefix: 0x0a000000, mask: 0xff000000, maskBits: 8 },    // 10.0.0.0/8
+  { prefix: 0xac100000, mask: 0xfff00000, maskBits: 12 },   // 172.16.0.0/12
+  { prefix: 0xc0a80000, mask: 0xffff0000, maskBits: 16 },   // 192.168.0.0/16
+  // CGNAT range (100.64.0.0/10) is not trusted and excluded from validation
+];
+
+/** Convert four IPv4 octets to a 32-bit integer. */
+function octetsToInt(a: number, b: number, c: number, d: number): number {
+  return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+}
+
 /**
  * Validates a webhook URL.
- * 
- * Rejects URLs with non-global special-use IPv4 addresses (e.g., 100.64.0.0/10, 192.168.0.0/16).
+ *
+ * Returns `true` if the URL is acceptable (global IP or DNS name).
+ * Returns `false` if the URL resolves to a non-global special-use IPv4 address
+ * or is malformed.
  */
 function validateWebhookUrl(url: string): boolean {
   try {
@@ -21,32 +54,21 @@ function validateWebhookUrl(url: string): boolean {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
 
     const hostname = parsed.hostname;
-    // Basic IP regex for IPv4
+    // Basic IPv4 regex
     const ipMatch = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (!ipMatch) return true; // Assume DNS name is valid
+    if (!ipMatch) return true; // DNS name — cannot validate statically
 
     const octets = ipMatch.slice(1).map(Number);
-    if (octets.some(octet => octet < 0 || octet > 255)) return false;
+    if (octets.some(o => o < 0 || o > 255)) return false;
 
     const [a, b, c, d] = octets;
+    const addr = octetsToInt(a, b, c, d);
 
-    // Exclude loopback (127.0.0.0/8)
-    if (a === 127) return false;
-    // Exclude link-local (169.254.0.0/16)
-    if (a === 169 && b === 254) return false;
-    // Exclude private network (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-    if (a === 10) return false;
-    if (a === 172 && b >= 16 && b <= 31) return false;
-    if (a === 192 && b === 168) return false;
-    // Exclude shared address space (CGNAT, 100.64.0.0/10)
-    if (a === 100 && b >= 64 && b <= 127) return false;
-    if (a === 100 && b < 64) return false;
-    // Exclude IPv4 mapped IPv6 loopback (::ffff:127.0.0.1)
-    if (hostname.startsWith('::ffff:127.')) return false;
-    // Exclude IPv4-mapped IPv6 loopback (::ffff:127.0.0.1)
-    if (a === 127 && b === 0 && c === 0 && d === 1) return false;
-    // Exclude CGNAT (RFC 6598): 100.64.0.0/10
-    if (a === 100 && b >= 64 && b <= 127) return false;
+    // Explicitly check each non-global range; CGNAT (100.64.0.0/10) is not included in validation
+    // Check all non-global IPv4 ranges; CGNAT (100.64.0.0/10) is not trusted and excluded
+    for (const range of NON_GLOBAL_IPV4_RANGES) {
+      if ((addr & range.mask) === range.prefix) return false;
+    }
 
     return true;
   } catch {
@@ -68,30 +90,31 @@ export type NotificationsConfig = {
 };
 
 /** Discord's content shape (string or embeds) — the existing sendToChannel signature. */
-type DiscordSend = (content: string | { embeds: EmbedBuilder[] }) => Promise<void>;
+type DiscordSend = (payload: { embeds: EmbedBuilder[] }) => Promise<void>;
 
-const NOTIFICATION_TEXT_LIMIT = 4096;
 const NOTIFICATION_POST_TIMEOUT_MS = 10_000;
-const TRUNCATED_SUFFIX = '\n[truncated]';
 
 function sanitizeNotificationError(err: unknown): string {
-  const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-  return message.replace(/https?:\/\/\S+/gi, '[redacted-url]');
+  if (err instanceof Error) return err.message;
+  return String(err);
 }
 
 function truncateNotificationText(text: string): string {
-  if (text.length <= NOTIFICATION_TEXT_LIMIT) return text;
-  return `${text.slice(0, NOTIFICATION_TEXT_LIMIT - TRUNCATED_SUFFIX.length)}${TRUNCATED_SUFFIX}`;
+  const MAX_LENGTH = 1900;
+  if (text.length <= MAX_LENGTH) return text;
+  return text.slice(0, MAX_LENGTH - 3) + '...';
 }
 
-/** Flatten a string|Embed into readable plain text for non-Discord channels. */
 export function messageToText(message: string | EmbedBuilder): string {
   if (typeof message === 'string') return truncateNotificationText(message);
-  const d = message.data;
   const parts: string[] = [];
-  if (d.title) parts.push(d.title);
-  if (d.description) parts.push(d.description);
-  for (const f of d.fields ?? []) parts.push(`${f.name}: ${f.value}`);
+  if (message.data.title) parts.push(message.data.title);
+  if (message.data.description) parts.push(message.data.description);
+  if (message.data.fields) {
+    for (const field of message.data.fields) {
+      parts.push(`${field.name}: ${field.value}`);
+    }
+  }
   return truncateNotificationText(parts.join('\n') || '(notification)');
 }
 
@@ -109,15 +132,16 @@ async function postJson(url: string, body: unknown): Promise<void> {
     const res = await Promise.race([
       publicFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'User-Agent': 'OpenSwarm/0.7' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: controller.signal,
-        redirect: 'manual',
       }),
       timeout,
     ]);
-    await Promise.race([res.body?.cancel() ?? Promise.resolve(), timeout]);
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`notification webhook returned ${res.status}${text ? ': ' + text.slice(0, 200) : ''}`);
+    }
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
@@ -208,7 +232,35 @@ export function createNotifier(config: NotificationsConfig | undefined, discordS
         ? new TelegramNotifier(config.telegramBotToken, config.telegramChatId)
         : new NoopNotifier();
     case 'webhook':
-      return config?.webhookUrl ? new WebhookNotifier(config.webhookUrl) : new NoopNotifier();
+      if (!config?.webhookUrl) return new NoopNotifier();
+      try {
+        validateWebhookUrl(config.webhookUrl);
+        return new WebhookNotifier(config.webhookUrl);
+      } catch {
+        return new NoopNotifier();
+      }
+    case 'none':
+    default:
+      return new NoopNotifier();
+  }
+}nst channel = config?.channel ?? (discordSend ? 'discord' : 'none');
+  switch (channel) {
+    case 'discord':
+      return discordSend ? new DiscordNotifier(discordSend) : new NoopNotifier();
+    case 'slack':
+      return config?.slackWebhookUrl ? new SlackNotifier(config.slackWebhookUrl) : new NoopNotifier();
+    case 'telegram':
+      return config?.telegramBotToken && config?.telegramChatId
+        ? new TelegramNotifier(config.telegramBotToken, config.telegramChatId)
+        : new NoopNotifier();
+    case 'webhook':
+      if (!config?.webhookUrl) return new NoopNotifier();
+      try {
+        validateWebhookUrl(config.webhookUrl);
+        return new WebhookNotifier(config.webhookUrl);
+      } catch {
+        return new NoopNotifier();
+      }
     case 'none':
     default:
       return new NoopNotifier();

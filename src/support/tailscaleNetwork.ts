@@ -11,14 +11,14 @@ export function isLoopbackAddress(address: string | undefined): boolean {
  * as a sole trust decision mechanism. All sensitive operations must verify peer
  * identity through Tailscale control plane (e.g., node key, capability check).
  * 
- * The 100.64.0.0/10 CGNAT range is explicitly NOT trusted here as it can be spoofed.
- */
-export function isTailscaleAddress(address: string | undefined): boolean {
-  if (!address) return false;
-  const normalized = address.startsWith('::ffff:') ? address.slice(7) : address;
-  // Only ULA is accepted - CGNAT (100.64.0.0/10) is not trusted
-  // Additional peer verification (e.g., node key, capability check) is required
-  return normalized.toLowerCase().startsWith('fd7a:115c:a1e0:');
+ 	 * Only ULA addresses are accepted. CGNAT (100.64.0.0/10) is not trusted.
+	 * Peer identity must be verified through the Tailscale control plane.
+	 */
+	export function isTailscaleAddress(address: string | undefined): boolean {
+	  if (!address) return false;
+	  const normalized = address.startsWith('::ffff:') ? address.slice(7) : address;
+	  // Trust only on ULA prefix; CGNAT range requires explicit peer identity verification
+	  return normalized.toLowerCase().startsWith('fd7a:115c:a1e0:');
 }
 
 /** This machine's Tailscale IPv4 address, detected dynamically. */
