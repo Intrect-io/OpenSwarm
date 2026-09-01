@@ -154,4 +154,24 @@ describe('orchestrator tracker tools', () => {
       .resolves.toMatchObject({ isError: true, content: expect.stringContaining('Unknown supervisor tracker tool') });
     expect(context.tracker.addComment).not.toHaveBeenCalled();
   });
+
+  it('reads development-host files inside the repository and refuses path escape', async () => {
+    const { tools } = await setup();
+    const { writeFileSync, mkdirSync } = await import('node:fs');
+    const src = join(dir, 'src');
+    mkdirSync(src);
+    writeFileSync(join(src, 'app.ts'), 'export const n = 1;\nexport const m = 2;\n');
+    const orchestrator = {
+      repository: dir, taskId: 'orchestrator:sweep', actor: 'orchestrator-a', actorRole: 'orchestrator' as const,
+    };
+    const read = await tools.executeOrchestratorTrackerTool('host_read_file', { path: 'src/app.ts' }, orchestrator);
+    expect(read.isError).toBe(false);
+    expect(read.content).toContain('export const n = 1;');
+    const escaped = await tools.executeOrchestratorTrackerTool('host_read_file', { path: '../secret' }, orchestrator);
+    expect(escaped).toMatchObject({ isError: true, content: expect.stringContaining('outside') });
+    const workerDenied = await tools.executeOrchestratorTrackerTool('host_read_file', { path: 'src/app.ts' }, {
+      repository: dir, taskId: 'worker', actor: 'worker-a', actorRole: 'worker',
+    });
+    expect(workerDenied.isError).toBe(true);
+  });
 });

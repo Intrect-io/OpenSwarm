@@ -6,8 +6,9 @@
 // (openrouter/gpt/local) — the `claude -p` harness used to provide this for
 // free (INT-1573). The model calls these deliberately, like `bash`.
 //
-// web_fetch is keyless. web_search has a pluggable backend: Tavily or Brave
-// when a key is set, else a keyless (and fragile) DuckDuckGo fallback.
+// web_fetch is keyless. web_search has a pluggable backend: operator-configured
+// SearXNG (vega-search), then Tavily or Brave when a key is set, else a keyless
+// (and fragile) DuckDuckGo fallback.
 
 import type { ToolDefinition } from './tools.js';
 import { publicFetch } from '../support/outboundUrl.js';
@@ -236,8 +237,24 @@ export async function webFetch(url: string): Promise<string> {
 
 interface SearchResult { title: string; url: string; snippet: string }
 
+export type SearchBackend = 'searxng' | 'tavily' | 'brave' | 'duckduckgo';
+
+/** Operator-configured SearXNG (vega-search). Private hosts are intentional. */
+function searxngEndpoint(): URL | undefined {
+  const raw = process.env.OPENSWARM_SEARXNG_URL?.trim() || process.env.VEGA_SEARXNG_URL?.trim();
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Which search backend is active (for diagnostics). */
-export function searchBackend(): 'tavily' | 'brave' | 'duckduckgo' {
+export function searchBackend(): SearchBackend {
+  if (searxngEndpoint()) return 'searxng';
   if (process.env.TAVILY_KEY) return 'tavily';
   if (process.env.BRAVE_SEARCH_KEY) return 'brave';
   return 'duckduckgo';
@@ -250,15 +267,52 @@ export async function webSearch(query: string, maxResults = 5): Promise<string> 
   try {
     const backend = searchBackend();
     const results =
-      backend === 'tavily' ? await tavilySearch(query, n)
+      backend === 'searxng' ? await searxngSearch(query, n)
+      : backend === 'tavily' ? await tavilySearch(query, n)
       : backend === 'brave' ? await braveSearch(query, n)
       : await ddgSearch(query, n);
     if (results.length === 0) return `No results for "${query}".`;
     return results.map((r, i) => `${i + 1}. ${r.title.slice(0, 500)}\n   ${r.url.slice(0, 2_000)}${r.snippet ? `\n   ${r.snippet.slice(0, 500)}` : ''}`).join('\n\n');
   } catch (err) {
-    const keyed = process.env.TAVILY_KEY || process.env.BRAVE_SEARCH_KEY;
-    const hint = keyed ? '' : ' (the keyless DuckDuckGo backend is fragile — set TAVILY_KEY or BRAVE_SEARCH_KEY for reliable search)';
+    const keyed = process.env.TAVILY_KEY || process.env.BRAVE_SEARCH_KEY || searxngEndpoint();
+    const hint = keyed ? '' : ' (the keyless DuckDuckGo backend is fragile — set OPENSWARM_SEARXNG_URL, TAVILY_KEY, or BRAVE_SEARCH_KEY for reliable search)';
     return `Search failed for "${query}": ${err instanceof Error ? err.message : String(err)}${hint}`;
+  }
+}
+
+/**
+ * Query the configured SearXNG instance. This is the one outbound fetch that
+ * is allowed to target a private address: vega-search is an operator-run
+ * sidecar (`localhost:18888` or compose DNS), not an arbitrary URL.
+ */
+async function searxngSearch(query: string, n: number): Promise<SearchResult[]> {
+  const base = searxngEndpoint();
+  if (!base) throw new Error('SearXNG URL is not configured');
+  const url = new URL('search', base.href.endsWith('/') ? base.href : `${base.href}/`);
+  url.searchParams.set('q', query);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('language', 'ko-KR');
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'User-Agent': USER_AGENT,
+  };
+  const key = process.env.OPENSWARM_SEARXNG_KEY?.trim() || process.env.VEGA_SEARXNG_KEY?.trim();
+  if (key) headers['X-VEGA-Key'] = key;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { method: 'GET', headers, redirect: 'error', signal: ac.signal });
+    if (!res.ok) throw new Error(`SearXNG HTTP ${res.status}`);
+    const data = JSON.parse(await res.text()) as {
+      results?: Array<{ title?: string; url?: string; content?: string }>;
+    };
+    return (data.results ?? []).slice(0, n).map((r) => ({
+      title: r.title ?? '',
+      url: r.url ?? '',
+      snippet: (r.content ?? '').slice(0, 300),
+    }));
+  } finally {
+    clearTimeout(timer);
   }
 }
 

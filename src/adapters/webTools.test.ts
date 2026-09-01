@@ -133,6 +133,25 @@ describe('webSearch — backend selection', () => {
     expect(searchBackend()).toBe('duckduckgo');
   });
 
+  it('prefers SearXNG when OPENSWARM_SEARXNG_URL is set', async () => {
+    vi.stubEnv('OPENSWARM_SEARXNG_URL', 'http://searxng:8080/');
+    vi.stubEnv('TAVILY_KEY', 'tk');
+    expect(searchBackend()).toBe('searxng');
+    const f = vi.fn(async (input: RequestInfo | URL) => {
+      const href = String(input);
+      expect(href).toContain('http://searxng:8080/search');
+      expect(href).toContain('format=json');
+      return new Response(JSON.stringify({
+        results: [{ title: 'S', url: 'https://s.example', content: 'vega-search' }],
+      }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', f);
+    const out = await webSearch('q', 3);
+    expect(out).toContain('S');
+    expect(out).toContain('https://s.example');
+    expect(out).toContain('vega-search');
+  });
+
   it('prefers Tavily when TAVILY_KEY is set', async () => {
     vi.stubEnv('TAVILY_KEY', 'tk');
     expect(searchBackend()).toBe('tavily');

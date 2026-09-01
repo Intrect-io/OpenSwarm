@@ -536,6 +536,7 @@ describe('coordination_wait', () => {
       expect(COORDINATION_TOOL_NAMES.has(definition.function.name)).toBe(true);
     }
     expect(COORDINATION_TOOL_NAMES.has('tracker_save_comment')).toBe(true);
+    expect(COORDINATION_TOOL_NAMES.has('host_read_file')).toBe(true);
   });
 });
 

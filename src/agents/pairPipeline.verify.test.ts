@@ -122,8 +122,19 @@ afterEach(() => {
 });
 
 describe('PairPipeline deterministic tester (INT-2662)', () => {
-  it('fails closed when a detected CodeQL language has only partial coverage', async () => {
-    runSecurityAudit.mockResolvedValueOnce({
+  it('treats CodeQL partial coverage as a known extractor gap, not infrastructure failure', async () => {
+    // Go/Swift extractors reject --build-mode=none permanently. Baseline and
+    // current skip the same languages, so the introduced-findings comparison
+    // stays sound; failing closed here parked every Go pipeline (AGT-3841).
+    runWorker.mockResolvedValue({
+      success: true,
+      summary: 'implemented',
+      filesChanged: ['src/example.ts'],
+      commands: ['npm test'],
+      output: '',
+      confidencePercent: 100,
+    });
+    runSecurityAudit.mockResolvedValue({
       status: 'partial',
       codeqlLanguages: ['javascript', 'swift'],
       skippedCodeqlLanguages: ['swift'],
@@ -136,10 +147,10 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
       securityAudit: { enabled: true, maxThreads: 2 },
     });
 
-    expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
-    expect(runSecurityAudit).toHaveBeenCalledOnce();
-    expect(runWorker).not.toHaveBeenCalled();
-    expect(runReviewer).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved' });
+    expect(runSecurityAudit).toHaveBeenCalledTimes(2);
+    expect(runWorker).toHaveBeenCalled();
+    expect(runReviewer).toHaveBeenCalled();
   });
 
   it('blocks new CodeQL findings even when the tester stage is not configured', async () => {
