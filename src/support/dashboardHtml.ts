@@ -2354,6 +2354,15 @@ const PROVIDER_BUTTON_LABELS: Record<string, string> = {
  * Inject registry-backed provider buttons so the dashboard toggle cannot
  * drift from `isKnownAdapter` / POST /api/provider validation. (INT-3284)
  */
+function escapeHtml(unsafe: string): string {
+  return unsafe
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 export function buildDashboardHtml(providers: readonly string[]): string {
   const buttons = providers.map((name) => {
     const label = PROVIDER_BUTTON_LABELS[name] ?? name;

@@ -75,9 +75,13 @@ export function ChatLog({ history, streaming, activity = [], busy, maxMessages =
         <Box flexDirection="column">
           <Text color={theme.assistant} bold>{`${ICON.assistant} ${ROLE_LABEL.assistant}`}</Text>
           <Box flexDirection="column" paddingLeft={2}>
-            {activity.slice(-5).map((line, i) => (
-              <Text key={i} color={theme.dim}>{`${ICON.tool} ${sanitizeTerminalText(line)}`}</Text>
-            ))}
+            {activity.slice(-5).map((line, i) => {
+              const safeLine = sanitizeTerminalText(line);
+              const truncatedLine = safeLine.length > 200 ? safeLine.substring(0, 197) + '...' : safeLine;
+              return (
+                <Text key={i} color={theme.dim}>{`${ICON.tool} ${truncatedLine}`}</Text>
+              );
+            })}
             {streaming ? <Text>{tailLines(sanitizeTerminalText(streaming), STREAM_TAIL_LINES)}</Text> : null}
             {busy ? <WorkingIndicator /> : null}
           </Box>
