@@ -39,3 +39,26 @@ describe('SecurityAuditInfrastructureError', () => {
     expect(new SecurityAuditInfrastructureError(undefined).message).toBe('security-audit-infra: no result');
   });
 });
+
+describe('runConfiguredSecurityAudit partial status', () => {
+  it('passes a partial audit through — skipped languages are a known limitation, not a fault', async () => {
+    const runModule = await import('./securityAuditGate.js');
+    const { vi } = await import('vitest');
+    const verify = await import('../verify/securityAudit.js');
+    const partial = result({
+      status: 'partial',
+      codeqlLanguages: ['go'],
+      skippedCodeqlLanguages: ['go'],
+      detail: 'Skipped languages whose installed CodeQL extractor does not support build-mode=none: go.',
+    });
+    const spyList = vi.spyOn(verify, 'listTrackedSecurityFiles').mockResolvedValue(['main.go']);
+    const spyRun = vi.spyOn(verify, 'runSecurityAudit').mockResolvedValue(partial);
+    try {
+      await expect(runModule.captureSecurityAuditBaseline('/repo', { enabled: true, maxThreads: 2 }))
+        .resolves.toBe(partial);
+    } finally {
+      spyList.mockRestore();
+      spyRun.mockRestore();
+    }
+  });
+});

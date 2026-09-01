@@ -31,9 +31,16 @@ async function runConfiguredSecurityAudit(projectPath: string, config: SecurityA
   } catch (error) {
     throw new SecurityAuditInfrastructureError(undefined, error instanceof Error ? error.message : String(error));
   }
-  if (result.status === 'failed' || result.status === 'unavailable' || result.status === 'partial') {
+  if (result.status === 'failed' || result.status === 'unavailable') {
     throw new SecurityAuditInfrastructureError(result);
   }
+  // 'partial' (some languages skipped because their extractor rejects
+  // build-mode=none — e.g. Go) is a permanent environmental limitation, not a
+  // transient fault: baseline and current skip the same languages, so the
+  // introduced-findings comparison stays sound for everything scanned. Failing
+  // closed here burned every pipeline on Go repositories against a wall no
+  // retry can move. The coverage gap is visible on the result's
+  // `skippedCodeqlLanguages`/`detail`.
   return result;
 }
 

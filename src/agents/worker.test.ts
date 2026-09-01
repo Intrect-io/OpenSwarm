@@ -78,6 +78,8 @@ describe('worker', () => {
     expect(isEphemeralWorkerArtifact('apps/pipelines/pytest-of-openswarm/garbage/test_case/current')).toBe(true);
     expect(isEphemeralWorkerArtifact('tests/test_case.py')).toBe(false);
     expect(isEphemeralWorkerArtifact('src/pytest-of-openswarm-helper.ts')).toBe(false);
+    expect(isEphemeralWorkerArtifact('.venv.bak')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.venv.bak/bin/python')).toBe(true);
     expect(isEphemeralWorkerArtifact('.venv/bin/python')).toBe(true);
     expect(isEphemeralWorkerArtifact('.openswarm-trash/AGT-3533-user-backup/notes.txt')).toBe(false);
   });

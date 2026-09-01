@@ -13,6 +13,9 @@
 # For lmstudio: start LM Studio Local Server (default http://localhost:1234)
 #   Optional env: LMSTUDIO_BASE_URL, LMSTUDIO_MODEL, LMSTUDIO_API_KEY
 #   If LMSTUDIO_MODEL is unset, the adapter auto-selects the first loaded model.
+# web_search: set OPENSWARM_SEARXNG_URL (vega-search, e.g. http://searxng:8080)
+#   or VEGA_SEARXNG_URL. Optional OPENSWARM_SEARXNG_KEY / VEGA_SEARXNG_KEY for
+#   the public X-VEGA-Key header. TAVILY_KEY / BRAVE_SEARCH_KEY still work.
 adapter: codex-responses
 
 discord:

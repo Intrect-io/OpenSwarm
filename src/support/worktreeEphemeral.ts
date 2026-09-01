@@ -4,6 +4,8 @@
 export function isEphemeralWorktreeArtifact(file: string): boolean {
   return file === '.venv'
     || file === '.venv-verify'
+    || file === '.venv.bak'
+    || file.startsWith('.venv.bak/')
     || file === 'pytest-local'
     // pytest's basetemp (`pytest-of-<user>/…`) anywhere in the tree, and the
     // whole worktree-local `.trash/` quarantine (cgf-portal ships secrets under

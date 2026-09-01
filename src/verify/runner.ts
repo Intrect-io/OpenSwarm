@@ -93,6 +93,7 @@ function isEphemeralVerificationArtifact(path: string): boolean {
   // publication never ran.
   return root === '.venv'
     || root === '.venv-verify'
+    || root === '.venv.bak'
     || root === 'pytest-local'
     || root === '.pytest-lathe'
     || root === '.trash'
@@ -598,8 +599,9 @@ async function createHeadSandbox(
           !path.split(sep).some((segment) =>
             segment === '.git'
             || segment === 'node_modules'
-            || segment === '.venv'
-            || segment === '.venv-verify')
+            ||             segment === '.venv'
+            || segment === '.venv-verify'
+            || segment === '.venv.bak')
           && !isEphemeralVerificationArtifact(path)
           && !pathCoveredBy(path, sharedPaths)
         );

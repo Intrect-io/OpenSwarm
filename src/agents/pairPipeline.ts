@@ -941,7 +941,11 @@ export class PairPipeline extends EventEmitter {
       const introducedSecurityFindings = await collectIntroducedSecurityFindings(context);
       if (introducedSecurityFindings.length > 0) {
         const failures = introducedSecurityFindings.map(formatSecurityFinding);
-        safeConsole.log(`[${context.taskPrefix}] New CodeQL findings, retrying...`);
+        safeConsole.log(
+          `[${context.taskPrefix}] New CodeQL findings (${failures.length}): ${
+            failures.slice(0, 3).join('; ')
+          }${failures.length > 3 ? ` (+${failures.length - 3} more)` : ''}`,
+        );
         const { progressed } = recordReflection(context.reflection, {
           iteration: context.currentIteration,
           source: 'test',

@@ -28,6 +28,8 @@ services:
       # Provider/API keys come from .env (see env_file) or the shell:
       #   LINEAR_API_KEY, LINEAR_TEAM_ID, DISCORD_TOKEN, DISCORD_CHANNEL_ID,
       #   ATLASCLOUD_API_KEY, OPENROUTER_API_KEY, ...
+      # SearXNG / vega-search backend for web_search (preferred over DuckDuckGo):
+      - OPENSWARM_SEARXNG_URL=${OPENSWARM_SEARXNG_URL:-}
 
     # Optional: create .env next to this file. Missing file is not an error.
     env_file:

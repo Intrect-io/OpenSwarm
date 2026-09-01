@@ -96,7 +96,7 @@ describe('runOrchestrator', () => {
       policy: { servers: ['github', 'cloudflare'] },
     });
 
-    expect(result.toolsGranted).toEqual(['github__get_issue']);
+    expect(result.toolsGranted).toEqual(['github__get_issue', 'host_read_file', 'host_search_files']);
     expect(result.toolsDenied.map((entry) => entry.name)).toEqual(['cloudflare__delete_worker', 'evil__read']);
     const passed = spawnCli.mock.calls[0][1] as {
       cwd: string;
@@ -108,7 +108,9 @@ describe('runOrchestrator', () => {
     expect(passed.cwd).not.toBe('/repo');
     expect(passed.cwd.startsWith(tmpdir())).toBe(true);
     expect(passed.filesystemTools).toBe(false);
-    expect(passed.mcpTools.map((entry) => entry.function.name)).toEqual(['github__get_issue']);
+    expect(passed.mcpTools.map((entry) => entry.function.name)).toEqual([
+      'github__get_issue', 'host_read_file', 'host_search_files',
+    ]);
     expect(passed.coordinationContext).toMatchObject({
       repository: '/repo', taskId: 'coordination', actorRole: 'orchestrator',
     });
@@ -126,9 +128,10 @@ describe('runOrchestrator', () => {
 
     await runOrchestrator({ repository: '/repo', taskId: 'coordination', objective: 'x', policy: { servers: ['github'] } });
 
-    const passed = spawnCli.mock.calls[0][1] as { shellTools?: boolean; filesystemTools?: boolean };
+    const passed = spawnCli.mock.calls[0][1] as { shellTools?: boolean; filesystemTools?: boolean; webTools?: boolean };
     expect(passed.shellTools).toBe(false);
     expect(passed.filesystemTools).toBe(false);
+    expect(passed.webTools).toBe(true);
   });
 
   it('passes the explicit supervisor model and reasoning route to the native loop', async () => {
@@ -200,7 +203,14 @@ describe('runOrchestrator', () => {
     });
 
     expect(result.skippedReason).toBeUndefined();
-    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      mcpTools: expect.arrayContaining([
+        expect.objectContaining({ function: expect.objectContaining({ name: 'host_read_file' }) }),
+      ]),
+      webTools: true,
+      filesystemTools: false,
+      shellTools: false,
+    }));
     const events = (await import('./coordinationStore.js')).getCoordinationStore().list({ repository: '/repo', limit: 10 });
     expect(events).toContainEqual(expect.objectContaining({ kind: 'mcp-audit', status: 'failed', summary: expect.stringContaining('catalog offline') }));
   });
@@ -217,7 +227,14 @@ describe('runOrchestrator', () => {
     });
 
     expect(result.skippedReason).toBeUndefined();
-    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      mcpTools: expect.arrayContaining([
+        expect.objectContaining({ function: expect.objectContaining({ name: 'host_read_file' }) }),
+      ]),
+      webTools: true,
+      filesystemTools: false,
+      shellTools: false,
+    }));
   });
 
   it('does not discover or grant external MCP without an explicit role policy', async () => {
@@ -230,9 +247,16 @@ describe('runOrchestrator', () => {
       repository: '/repo', taskId: 'coordination', objective: 'x',
     });
 
-    expect(result.toolsGranted).toEqual([]);
+    expect(result.toolsGranted).toEqual(['host_read_file', 'host_search_files']);
     expect(getMcpTools).not.toHaveBeenCalled();
-    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ mcpTools: [] }));
+    expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      mcpTools: expect.arrayContaining([
+        expect.objectContaining({ function: expect.objectContaining({ name: 'host_read_file' }) }),
+      ]),
+      webTools: true,
+      filesystemTools: false,
+      shellTools: false,
+    }));
   });
 
   it('grants native cache-first tracker tools without external MCP discovery', async () => {
@@ -252,6 +276,7 @@ describe('runOrchestrator', () => {
 
     expect(getMcpTools).not.toHaveBeenCalled();
     expect(result.toolsGranted).toEqual([
+      'host_read_file', 'host_search_files',
       'tracker_cached_issue', 'tracker_save_comment', 'coordination_answer_question',
     ]);
     expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

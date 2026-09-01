@@ -29,6 +29,7 @@ import {
   detectCodeqlLanguages,
   listTrackedSecurityFiles,
   newSecurityFindings,
+  repositoryRelativeSarifPath,
   runSecurityAudit,
   securityFindingFingerprint,
   selectSecuritySourceFiles,
@@ -85,6 +86,38 @@ describe('security audit primitives', () => {
     expect(newSecurityFindings(baseline, [existingMoved, newlyIntroducedDuplicate]))
       .toEqual([newlyIntroducedDuplicate]);
   });
+
+  it('strips CodeQL database overlay prefixes so baseline and current fingerprints match', () => {
+    const snapshot = '/tmp/openswarm-security-audit-1oXMjf';
+    expect(repositoryRelativeSarifPath(
+      snapshot,
+      '.codeql-python/src/tmp/openswarm-security-audit-1oXMjf/web/local_provider.py',
+    )).toBe('web/local_provider.py');
+    expect(repositoryRelativeSarifPath(snapshot, 'web/local_provider.py')).toBe('web/local_provider.py');
+    expect(repositoryRelativeSarifPath(
+      '/tmp/openswarm-security-audit-AAAA',
+      '.codeql-python/src/tmp/openswarm-security-audit-BBBB/web/local_provider.py',
+    )).toBe('web/local_provider.py');
+    const baseline = [{
+      ruleId: 'codeql/py/partial-ssrf', level: 'error' as const,
+      message: 'Part of the URL depends on a user-provided value',
+      filePath: 'web/local_provider.py',
+    }];
+    const current = [{
+      ...baseline[0],
+      filePath: repositoryRelativeSarifPath(
+        '/tmp/openswarm-security-audit-9zzz',
+        '.codeql-python/src/tmp/openswarm-security-audit-9zzz/web/local_provider.py',
+      ),
+    }];
+    expect(newSecurityFindings(baseline, current)).toEqual([]);
+    expect(repositoryRelativeSarifPath(snapshot, 'openswarm-security-audit-1oXMjf/web/local_provider.py')).toBe('web/local_provider.py');
+    expect(repositoryRelativeSarifPath(snapshot, '.codeql-python\\src\\tmp\\openswarm-security-audit-1oXMjf\\web\\local_provider.py')).toBe('web/local_provider.py');
+    expect(repositoryRelativeSarifPath(snapshot, '.codeql-python/src/tmp/openswarm-security-audit-1oXMjf')).toBeUndefined();
+    expect(repositoryRelativeSarifPath(snapshot, 'web/../etc/passwd')).toBeUndefined();
+    expect(repositoryRelativeSarifPath(snapshot, '/etc/passwd')).toBeUndefined();
+    expect(repositoryRelativeSarifPath(snapshot, '.codeql-javascript/ql/foo.ts')).toBeUndefined();
+  });
 });
 
 describe('runSecurityAudit', () => {
@@ -103,6 +136,27 @@ describe('runSecurityAudit', () => {
 
     expect(audit).toMatchObject({ status: 'unavailable', codeqlLanguages: ['javascript'] });
     expect(audit.findings[0]?.ruleId).toBe('openswarm/security-codeql-unavailable');
+  });
+
+  it('finds CodeQL at OPENSWARM_CODEQL_PATH or /opt/codeql even when PATH is empty', async () => {
+    vi.stubEnv('PATH', '');
+    vi.stubEnv('OPENSWARM_CODEQL_PATH', '/custom/codeql');
+    fsMock.access.mockImplementation(async (target: string) => {
+      if (target === '/custom/codeql') return;
+      throw new Error('ENOENT');
+    });
+    execFileMock.mockResolvedValue({ stdout: '', stderr: '' });
+    fsMock.mkdtemp.mockResolvedValue('/snapshot');
+    fsMock.lstat.mockResolvedValue({ isFile: () => true, isSymbolicLink: () => false });
+    fsMock.cp.mockResolvedValue(undefined);
+    fsMock.mkdir.mockResolvedValue(undefined);
+    fsMock.rm.mockResolvedValue(undefined);
+    fsMock.readFile.mockResolvedValue(JSON.stringify({ version: '2.1.0', runs: [{ results: [] }] }));
+
+    const audit = await runSecurityAudit('/repo', ['src/a.ts']);
+
+    expect(audit.status).not.toBe('unavailable');
+    expect(execFileMock.mock.calls[0]?.[0]).toBe('/custom/codeql');
   });
 
   it('reports a query-pack preparation failure and cleans its isolated snapshot', async () => {
@@ -169,6 +223,33 @@ describe('runSecurityAudit', () => {
     expect(audit.findings).toEqual([
       expect.objectContaining({ filePath: 'web/main.js', line: 85 }),
       expect.objectContaining({ filePath: undefined, line: 1 }),
+    ]);
+  });
+
+  it('maps CodeQL python database overlay URIs onto the repository path', async () => {
+    fsMock.mkdtemp.mockResolvedValue('/tmp/openswarm-security-audit-1oXMjf');
+    fsMock.readFile.mockResolvedValue(JSON.stringify({
+      version: '2.1.0',
+      runs: [{ results: [{
+        ruleId: 'py/partial-ssrf',
+        message: { text: 'Part of the URL of this request depends on a user-provided value' },
+        locations: [{ physicalLocation: {
+          artifactLocation: {
+            uri: '.codeql-python/src/tmp/openswarm-security-audit-1oXMjf/web/local_provider.py',
+          },
+          region: { startLine: 83 },
+        } }],
+      }] }],
+    }));
+
+    const audit = await runSecurityAudit('/repo', ['web/local_provider.py']);
+
+    expect(audit.findings).toEqual([
+      expect.objectContaining({
+        ruleId: 'codeql/py/partial-ssrf',
+        filePath: 'web/local_provider.py',
+        line: 83,
+      }),
     ]);
   });
 

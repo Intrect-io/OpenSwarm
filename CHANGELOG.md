@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.21.4 — 2026-09-01
+
+### Fixed
+
+- **CodeQL path + partial audits no longer park Go pipelines.** `findSystemExecutable` honors `OPENSWARM_CODEQL_PATH` and `/opt/codeql` when a login-shell entrypoint drops compose PATH. A `partial` audit (extractor rejects `build-mode=none`, e.g. Go) is no longer `security-audit-infra`; baseline and current skip the same languages so the introduced-findings comparison stays sound.
+- **Workers revise DoD through the orchestrator, not `ask_human`.** Draft completion criteria must be sandbox-achievable.
+- **`.venv.bak` is ephemeral.** A leftover runtime symlink was failing the worker-scope fence (AGT-3834).
+- **New CodeQL findings are logged with the actual rules**, not a bare "retrying" line.
+- **CodeQL "new findings" were the snapshot temp path.** Python SARIF URIs included `.codeql-python/src/tmp/openswarm-security-audit-<id>/…`, so every post-edit audit looked newly introduced and workers never reached PR publication.
+
+### Added
+
+- **SearXNG (vega-search) web_search backend** via `OPENSWARM_SEARXNG_URL` / `VEGA_SEARXNG_URL`.
+- **Orchestrator `host_read_file` / `host_search_files`** — read the development-host checkout (and `/warehouse`) without giving the supervisor bash or generic write tools. `web_search` is enabled on the supervisor.
+
 ## 0.21.3 — 2026-09-01
 
 ### Fixed

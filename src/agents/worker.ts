@@ -267,9 +267,11 @@ export function formatWorkerGitChangeStatus(files: string[]): string {
 export function isEphemeralWorkerArtifact(file: string): boolean {
   return file === '.venv'
     || file === '.venv-verify'
+    || file === '.venv.bak'
     || file === 'pytest-local'
     || file.startsWith('.venv/')
     || file.startsWith('.venv-verify/')
+    || file.startsWith('.venv.bak/')
     || file.startsWith('pytest-local/')
     || /(?:^|\/)pytest-of-[^/]+\//.test(file)
     || /^pytest-of-[^/]+$/.test(file)

@@ -161,7 +161,7 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'ask_human',
-      description: 'Page the operator on Discord with one blocking decision. Returns a correlation ID; the operator answers later, so stop this run and report the open decision rather than inventing an answer or continuing past it. Before calling, establish WHY you are blocked and include the evidence in the question: whether the path exists (ls -la, readlink -f for a symlink), whether the tool exists (command -v), and whether the credential exists (KEY NAMES ONLY, never a value). One failed attempt is not proof that something is impossible, and an unevidenced guess at the cause reaches the operator as fact.',
+      description: 'Page the operator on Discord ONLY for a true operator decision: secret/credential value, production access, irreversible external action, or product/policy choice a human must own. Do NOT use this for Definition-of-Done scope, acceptance criteria, missing files you have not searched, flaky tests, or implementation approach — those are agent-owned: revise the work, publish a coordination note to the draft/orchestrator peer, or report a concrete blocker with evidence. Returns a correlation ID; the operator answers later, so stop this run after calling. Before calling, prove WHY with ls -la / readlink -f, command -v, and KEY NAMES ONLY from .env (never values).',
       parameters: {
         type: 'object',
         properties: { question: { type: 'string' } },

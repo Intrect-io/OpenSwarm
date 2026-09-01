@@ -414,6 +414,13 @@ Each criterion must be a runtime/observable fact, NOT mere existence of code:
   (these are wiring, not done). Never list a criterion that can be satisfied by
   scaffolding alone. Do NOT defer core work to "follow-up" — fold it into a
   criterion. Produce 2–5 criteria.
+- SANDBOX-ACHIEVABLE ONLY: every criterion must be verifiable in this isolated
+  worktree without production credentials, live customer data, manual operator
+  steps, or external approvals. If the issue text demands an operator-only
+  action, encode the largest automatable subset as criteria and note the
+  remainder in suggestedApproach — never put "needs human" into DoD itself.
+  Prefer narrowing over inventing impossible gates; worker+orchestrator will
+  revise DoD via coordination rather than paging a human.
 `);
 
   return parts.join('\n');

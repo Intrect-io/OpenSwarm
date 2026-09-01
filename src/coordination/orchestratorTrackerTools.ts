@@ -1,7 +1,17 @@
+import { existsSync } from 'node:fs';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
+
 import type { ToolDefinition } from '../adapters/tools.js';
 import { answerHumanQuestion } from './humanQuestions.js';
 import { getCoordinationStore } from './coordinationStore.js';
 import { repositoryKey } from './repositoryCell.js';
+
+const execFileAsync = promisify(execFile);
+const HOST_READ_MAX_BYTES = 200_000;
+const HOST_SEARCH_MAX_HITS = 50;
 
 export interface CachedTrackerIssue {
   issueId: string;
@@ -33,6 +43,39 @@ export interface OrchestratorTrackerToolContext {
 }
 
 export const ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'host_read_file',
+      description:
+        'Read a file on the development host outside the worker sandbox. Path is repository-relative, or under /warehouse. This is how the supervisor inspects the live checkout the workers cannot reach from bwrap.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Repository-relative path, or an absolute path under the warehouse root.' },
+          offset: { type: 'number', description: '1-based start line (default 1).' },
+          limit: { type: 'number', description: 'Max lines to return (default 200, max 400).' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'host_search_files',
+      description:
+        'Search file contents on the development-host repository (git grep). Use this instead of asking the operator to paste source.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'POSIX extended regular expression.' },
+          path: { type: 'string', description: 'Optional repository-relative subdirectory or file to search.' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
   {
     type: 'function',
     function: {
@@ -82,6 +125,33 @@ export const ORCHESTRATOR_TRACKER_TOOL_NAMES: ReadonlySet<string> = new Set(
   ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS.map((definition) => definition.function.name),
 );
 
+export const ORCHESTRATOR_HOST_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'host_read_file',
+  'host_search_files',
+]);
+
+export const ORCHESTRATOR_HOST_TOOL_DEFINITIONS: ToolDefinition[] =
+  ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS.filter((definition) =>
+    ORCHESTRATOR_HOST_TOOL_NAMES.has(definition.function.name));
+
+function warehouseRoot(): string {
+  return process.env.OPENSWARM_WAREHOUSE_ROOT?.trim() || '/warehouse';
+}
+
+async function resolveHostPath(repository: string, requested: string): Promise<string | undefined> {
+  const roots = [resolve(repository), resolve(warehouseRoot())];
+  for (const root of roots) {
+    const canonicalRoot = existsSync(root) ? await realpath(root) : root;
+    const target = isAbsolute(requested) ? resolve(requested) : resolve(canonicalRoot, requested);
+    const canonical = existsSync(target) ? await realpath(target) : target;
+    const rel = relative(canonicalRoot, canonical);
+    if (rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))) {
+      return canonical;
+    }
+  }
+  return undefined;
+}
+
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -93,6 +163,72 @@ function issueIsInRepositoryCell(issue: string, context: OrchestratorTrackerTool
     .some((event) => event.taskId.toLowerCase() === expected || event.taskLabel?.toLowerCase() === expected);
 }
 
+async function executeHostReadTool(
+  name: string,
+  args: Record<string, unknown>,
+  context: OrchestratorTrackerToolContext,
+): Promise<{ content: string; isError: boolean }> {
+  if (name === 'host_search_files') {
+    const pattern = nonEmptyString(args.pattern);
+    if (!pattern) return { content: 'pattern is required', isError: true };
+    const searchPath = nonEmptyString(args.path) ?? '.';
+    const resolved = await resolveHostPath(context.repository, searchPath);
+    if (!resolved) return { content: 'path is outside the repository or warehouse', isError: true };
+    const repoRoot = existsSync(context.repository) ? await realpath(context.repository) : resolve(context.repository);
+    const rel = relative(repoRoot, resolved);
+    if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
+      return { content: 'host_search_files is limited to the repository checkout', isError: true };
+    }
+    const gitArgs = ['grep', '--no-color', '-n', '-I', '-E', '-e', pattern, '--', rel === '' ? '.' : rel];
+    try {
+      const { stdout } = await execFileAsync('git', gitArgs, {
+        cwd: context.repository,
+        timeout: 10_000,
+        maxBuffer: 256 * 1024,
+      });
+      const lines = stdout.split('\n').filter(Boolean).slice(0, HOST_SEARCH_MAX_HITS);
+      return { content: lines.length ? lines.join('\n') : '(no matches)', isError: false };
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && (error as { code: number }).code === 1) {
+        return { content: '(no matches)', isError: false };
+      }
+      return {
+        content: 'host_search_files is unavailable: git grep failed. Do not treat this as "no matches".',
+        isError: true,
+      };
+    }
+  }
+
+  const requested = nonEmptyString(args.path);
+  if (!requested) return { content: 'path is required', isError: true };
+  const resolved = await resolveHostPath(context.repository, requested);
+  if (!resolved) return { content: 'path is outside the repository or warehouse', isError: true };
+  try {
+    const info = await stat(resolved);
+    if (!info.isFile()) return { content: 'path is not a regular file', isError: true };
+    if (info.size > HOST_READ_MAX_BYTES) {
+      return { content: `file exceeds ${HOST_READ_MAX_BYTES} bytes`, isError: true };
+    }
+    const content = await readFile(resolved, 'utf8');
+    const lines = content.split('\n');
+    const offsetRaw = typeof args.offset === 'number' && Number.isFinite(args.offset) ? Math.trunc(args.offset) : 1;
+    const offset = Math.max(1, offsetRaw) - 1;
+    const limitRaw = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.trunc(args.limit) : 200;
+    const limit = Math.min(400, Math.max(1, limitRaw));
+    const slice = lines.slice(offset, offset + limit);
+    const numbered = slice.map((line, i) => `${offset + i + 1}\t${line}`).join('\n');
+    const truncated = lines.length > offset + limit
+      ? `\n... (${lines.length - offset - limit} more lines)`
+      : '';
+    return { content: numbered + truncated, isError: false };
+  } catch (error) {
+    return {
+      content: `host_read_file failed: ${error instanceof Error ? error.message : String(error)}`,
+      isError: true,
+    };
+  }
+}
+
 export async function executeOrchestratorTrackerTool(
   name: string,
   args: Record<string, unknown>,
@@ -100,6 +236,10 @@ export async function executeOrchestratorTrackerTool(
 ): Promise<{ content: string; isError: boolean }> {
   if (context.actorRole !== 'orchestrator') {
     return { content: 'Supervisor tracker tools are restricted to the orchestrator role', isError: true };
+  }
+
+  if (name === 'host_read_file' || name === 'host_search_files') {
+    return executeHostReadTool(name, args, context);
   }
 
   if (name === 'coordination_answer_question') {

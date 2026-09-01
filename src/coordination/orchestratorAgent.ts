@@ -26,6 +26,7 @@ import { assignCallSign } from './agentNames.js';
 import { repositoryCell } from './repositoryCell.js';
 import { getPrompts, t } from '../locale/index.js';
 import {
+  ORCHESTRATOR_HOST_TOOL_DEFINITIONS,
   ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS,
   type OrchestratorTrackerBridge,
 } from './orchestratorTrackerTools.js';
@@ -152,7 +153,9 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
   }
   options.signal?.throwIfAborted();
   const { tools, denied } = filterMcpToolsForRole(discovered, options.policy);
-  const nativeTrackerTools = options.tracker ? ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS : [];
+  const nativeTrackerTools = options.tracker
+    ? ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS
+    : ORCHESTRATOR_HOST_TOOL_DEFINITIONS;
   const grantedTools = [...tools, ...nativeTrackerTools];
   for (const entry of denied) {
     await store.publish({
@@ -202,8 +205,8 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         '',
         `You are **${callSign.name}**, the orchestrator for this repository. Address workers by their call signs.`,
         '',
-        'Coordinate the autonomous workers using the internal coordination tools, cache-first tracker tools, and approved MCP tools only.',
-        'You have no access to the repository working tree: your file tools are confined to a scratch directory.',
+        'Coordinate the autonomous workers using the internal coordination tools, cache-first tracker tools, approved MCP tools, host_read_file/host_search_files, and web_search.',
+        'Generic file tools and bash stay confined to an empty scratch directory — they cannot see the repository. Read the development-host checkout with host_read_file / host_search_files (warehouse under /warehouse when present). Search the web with web_search; SearXNG is used when OPENSWARM_SEARXNG_URL is set.',
         'Use tracker_cached_issue before tracker_save_comment. Tracker comments must cite verified evidence and use a stable idempotency key.',
         'Use coordination_answer_question only after the blocker is actually resolved; leave decisions requiring new business authority pending.',
         'Never attempt a write or destructive MCP operation that was not granted; report it as a blocker instead.',
@@ -234,10 +237,11 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
         actorRole: 'orchestrator',
         tracker: options.tracker,
       },
-      webTools: false,
+      webTools: true,
       memoryTools: false,
       // Coordination and approved MCP remain available, but no local file or
       // shell tool is exposed. Hidden-name execution is denied in tools.ts too.
+      // Development-host reads go through host_read_file / host_search_files.
       shellTools: false,
       filesystemTools: false,
       signal: options.signal,
