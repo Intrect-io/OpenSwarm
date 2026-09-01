@@ -48,36 +48,38 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
   // Tool calls accumulate by their streaming index (id/name arrive once, arguments stream).
   const calls = new Map<number, { id: string; name: string; args: string }>();
 
-  for (const chunk of chunks) {
-    if (chunk.usage) {
-      const pt = chunk.usage.prompt_tokens ?? 0;
-      const ct = chunk.usage.completion_tokens ?? 0;
-      usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: chunk.usage.total_tokens ?? pt + ct };
+  for (const c of chunks) {
+    const delta = c.choices?.[0]?.delta;
+    if (!delta) {
+      if (c.usage) usage = c.usage as ChatCompletionLike['usage'];
+      if (c.choices?.[0]?.finish_reason) finishReason = c.choices[0].finish_reason;
+      continue;
     }
-    const choice = chunk.choices?.[0];
-    if (!choice) continue;
-    const delta = choice.delta ?? {};
-    if (typeof delta.content === 'string' && delta.content) {
+    if (delta.content) {
       content += delta.content;
       sawContent = true;
-      onToken?.(delta.content);
+      if (onToken) onToken(delta.content);
     }
-    for (const tc of delta.tool_calls ?? []) {
-      const idx = tc.index ?? 0;
-      const cur = calls.get(idx) ?? { id: '', name: '', args: '' };
-      if (tc.id) cur.id = tc.id;
-      if (tc.function?.name) cur.name = tc.function.name;
-      if (tc.function?.arguments) cur.args += tc.function.arguments;
-      calls.set(idx, cur);
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const idx = tc.index ?? 0;
+        let entry = calls.get(idx);
+        if (!entry) {
+          entry = { id: tc.id ?? '', name: tc.function?.name ?? '', args: '' };
+          calls.set(idx, entry);
+        }
+        if (tc.id) entry.id = tc.id;
+        if (tc.function?.name) entry.name = tc.function.name;
+        if (tc.function?.arguments) entry.args += tc.function.arguments;
+      }
     }
-    if (choice.finish_reason) finishReason = choice.finish_reason;
+    if (c.choices?.[0]?.finish_reason) finishReason = c.choices[0].finish_reason;
   }
 
-  const toolCalls: StreamToolCall[] = [...calls.values()].map((c) => ({
-    id: c.id,
-    type: 'function',
-    function: { name: c.name, arguments: c.args },
-  }));
+  const toolCalls: StreamToolCall[] = [];
+  for (const [, v] of calls) {
+    toolCalls.push({ id: v.id, type: 'function', function: { name: v.name, arguments: v.args } });
+  }
 
   return {
     choices: [
@@ -107,6 +109,9 @@ function parseChunkLine(line: string): StreamChunk | null {
   }
 }
 
+/** Hard cap on the SSE partial-frame buffer to prevent memory exhaustion. */
+const MAX_FRAME_SIZE = 512 * 1024; // 512 KiB
+
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
   res: Response,
@@ -127,7 +132,21 @@ export async function consumeChatCompletionsStream(
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const decoded = decoder.decode(value, { stream: true });
+    // Guard: if the accumulated buffer already exceeds the limit, discard the
+    // incoming chunk to avoid unbounded growth from a single oversized frame.
+    if (buffer.length + decoded.length > MAX_FRAME_SIZE) {
+      // Truncate decoded to fit within MAX_FRAME_SIZE
+      const remainingSpace = MAX_FRAME_SIZE - buffer.length;
+      const truncated = decoded.slice(0, remainingSpace);
+      buffer += truncated;
+      // Process and flush the buffer immediately
+      const lines = buffer.split('\n');
+      buffer = '';
+      for (const line of lines) handle(parseChunkLine(line));
+      continue;
+    }
+    buffer += decoded;
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) handle(parseChunkLine(line));

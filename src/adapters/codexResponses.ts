@@ -125,6 +125,9 @@ export function toolsToResponsesTools(tools: ToolDefinition[]): ResponsesTool[] 
   }));
 }
 
+const MAX_EVENTS = 500; // Maximum number of events to retain
+const MAX_EVENT_SIZE = 64 * 1024; // Maximum size of a single event in bytes (64KB)
+
 interface SseEvent {
   type?: string;
   delta?: string;
@@ -142,6 +145,20 @@ interface SseEvent {
  * Exported so the SSE→chat mapping is unit-testable without a live stream.
  */
 export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
+  // Enforce maximum event count to prevent memory exhaustion
+  if (events.length > MAX_EVENTS) {
+    events = events.slice(-MAX_EVENTS);
+  }
+  
+  // Truncate oversized event payloads
+  for (const event of events) {
+    if (event.delta && event.delta.length > MAX_EVENT_SIZE) {
+      event.delta = event.delta.slice(0, MAX_EVENT_SIZE);
+    }
+    if (event.arguments && event.arguments.length > MAX_EVENT_SIZE) {
+      event.arguments = event.arguments.slice(0, MAX_EVENT_SIZE);
+    }
+  }
   let text = '';
   // Keyed by the streaming item id; the emitted tool-call id is the call_id so it
   // round-trips back as `function_call_output.call_id` on the next turn.
@@ -230,6 +247,11 @@ function parseSseLine(line: string): SseEvent | null {
  * `onToken` is provided, each `response.output_text.delta` is emitted live so
  * the chat TUI can stream tokens as they arrive.
  */
+// Maximum number of SSE events to retain in memory
+const MAX_EVENTS_BUFFER = 500;
+// Maximum size of an individual event payload before truncation
+const MAX_EVENT_SIZE = 64 * 1024; // 64 KiB
+
 async function consumeResponsesStream(
   res: Response,
   onToken?: (delta: string) => void,
@@ -256,6 +278,10 @@ async function consumeResponsesStream(
   };
   const handle = (ev: SseEvent | null) => {
     if (!ev) return;
+    // Enforce maximum buffer size with sliding window
+    if (events.length >= MAX_EVENTS_BUFFER) {
+      events.shift(); // Remove oldest event
+    }
     events.push(ev);
     if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
     if (onReasoning && ev.type === 'response.reasoning_summary_text.delta' && ev.delta) {
@@ -601,4 +627,6 @@ async function refreshAndRetry(store: AuthProfileStore): Promise<string> {
   // process rotated it in between. Only `expires` is ours to change.
   if (!store.expireProfile(PROFILE_KEY)) throw new Error('No auth profile found');
   return ensureValidToken(store, PROFILE_KEY);
+}
+eturn ensureValidToken(store, PROFILE_KEY);
 }

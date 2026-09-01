@@ -24,6 +24,9 @@ import {
 import { t, getDateLocale } from '../locale/index.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
+// Maximum size of a worker report in characters before truncation
+const MAX_REPORT_SIZE = 4000;
+
 /**
  * !pair command handler
  */
@@ -381,10 +384,13 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
         agentPair.updateSessionStatus(sessionId, 'failed');
         await thread.send(t('discord.pair.maxAttemptsExceeded'));
 
+        // Truncate and sanitize message before sending to Linear
+        const message = `Worker failed after max attempts (${session.worker.maxAttempts}) exceeded`;
+        const truncated = message.length > 4000 ? message.slice(0, 4000) : message;
+        
         // Log failure in Linear
         try {
-          await linear.logPairFailed(session.taskId, sessionId, 'max_attempts',
-            `Worker failed after max attempts (${session.worker.maxAttempts}) exceeded`);
+          await linear.logPairFailed(session.taskId, sessionId, 'max_attempts', truncated);
         } catch (err) {
           console.error('[Pair] Linear logPairFailed failed:', err);
         }

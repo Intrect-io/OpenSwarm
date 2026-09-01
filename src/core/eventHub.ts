@@ -227,12 +227,21 @@ export function broadcastEvent(event: HubEvent): void {
   const data = `data: ${JSON.stringify(event)}\n\n`;
   for (const res of sseClients) {
     try {
+      // Enforce backpressure limit: disconnect clients with too much pending data
+      if (res.connection && (res.connection as any).writableLength > MAX_PENDING_BYTES) {
+        sseClients.delete(res);
+        res.destroy();
+        continue;
+      }
       res.write(data);
     } catch {
       sseClients.delete(res);
     }
   }
 }
+
+// Maximum pending data in bytes before disconnecting SSE client (1MB)
+const MAX_PENDING_BYTES = 1024 * 1024;
 
 export function addSSEClient(res: ServerResponse, skipReplay = false): () => void {
   // Replay buffered events to new client so they see current state
@@ -247,6 +256,13 @@ export function addSSEClient(res: ServerResponse, skipReplay = false): () => voi
       return () => {};
     }
   }
+  
+  // Check if client's pending write queue is too large
+  if (res.connection && (res.connection.bufferSize > MAX_PENDING_BYTES)) {
+    res.destroy();
+    return () => {};
+  }
+  
   sseClients.add(res);
 
   // Cleanup function that removes client from set
