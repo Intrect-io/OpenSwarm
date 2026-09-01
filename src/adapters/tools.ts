@@ -634,7 +634,14 @@ export async function executeTool(
           };
         }
 
-        const content = await fs.readFile(filePath, 'utf-8');
+        // Bound read by bytes before loading the full file into memory
+        const stat = await fs.stat(filePath);
+        const readSize = Math.min(stat.size, MAX_READ_FILE_BYTES);
+        const fd = await fs.open(filePath, 'r');
+        const buf = Buffer.alloc(readSize);
+        await fd.read(buf, 0, readSize, 0);
+        await fd.close();
+        const content = buf.toString('utf-8');
         const lines = content.split('\n');
         const slice = lines.slice(offset, offset + limit);
         const numbered = slice.map((line, i) => `${offset + i + 1}\t${line}`).join('\n');
