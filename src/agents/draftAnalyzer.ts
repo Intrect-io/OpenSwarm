@@ -235,8 +235,11 @@ function collectCodebaseState(
 
     // 1. 프로젝트 전체 통계 — always scoped; global stats are cross-repo noise.
     const stats = store.getStats(registryKey);
-    totalEntities = stats.total;
-    const statParts: string[] = [`${stats.total} entities`];
+    // Prefer active rows — broken/worktree leftovers used to inflate "0 → 130k"
+    // noise after skipped dirs still left stale actives in the DB.
+    const activeCount = stats.byStatus.find((s) => s.status === 'active')?.count ?? stats.total;
+    totalEntities = activeCount;
+    const statParts: string[] = [`${activeCount} entities`];
     if (stats.deprecated > 0) statParts.push(`${stats.deprecated} deprecated`);
     if (stats.untested > 0) statParts.push(`${stats.untested} untested`);
     if (stats.withWarnings > 0) statParts.push(`${stats.withWarnings} with warnings`);

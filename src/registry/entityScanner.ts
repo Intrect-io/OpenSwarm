@@ -22,6 +22,9 @@ const SKIP_DIRS = new Set([
   'coverage', '.turbo', '.cache', '.parcel-cache',
   '.venv-mcp', 'site-packages', '.openswarm',
   'trash', 'testing', 'vendor', 'third_party',
+  // Isolated agent worktrees duplicate the main tree; scanning them inflated
+  // vega-agent to 130k+ rows and mixed ephemeral paths into File Map briefs.
+  'worktree',
   'target',    // Rust/Java
   'bin', 'obj', // C#
   'cmake-build-debug', 'cmake-build-release', // C/C++
@@ -42,7 +45,7 @@ async function readBoundedRegularFile(filePath: string): Promise<string> {
   }
 }
 const MAX_DEPTH = 15;
-const SCAN_TIMEOUT_MS = 60_000;
+const SCAN_TIMEOUT_MS = 180_000;
 
 // ============ 언어 정의 ============
 
@@ -832,7 +835,14 @@ export async function scanRepository(
       }
     }
 
-    if (sourceFileScanned || sourceFileMissing) {
+    // Paths under SKIP_DIRS (e.g. worktree/) are intentionally not walked. If
+    // they still exist on disk, the old "file exists ⇒ keep" rule left 100k+
+    // stale active rows after we started skipping worktrees.
+    const underSkippedDir = entity.filePath.split('/').some(
+      (part) => SKIP_DIRS.has(part) || SKIP_DIR_PREFIXES.some((p) => part.startsWith(p)),
+    );
+
+    if (sourceFileScanned || sourceFileMissing || underSkippedDir) {
       store.changeEntityStatus(entity.id, 'broken', 'scanner');
       removed++;
     }
