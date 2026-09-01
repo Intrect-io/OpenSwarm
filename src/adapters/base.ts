@@ -33,13 +33,15 @@ export { terminateCliProcessTree } from './processTree.js';
  */
 export async function spawnCli(
   adapter: CliAdapter,
-  requestedOptions: CliRunOptions,
+  requestedOptions: CliRunOptions & { timeoutMs?: number; maxBuffer?: number },
 ): Promise<CliRunResult> {
   const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
   assertAdapterCanRunUnderHumanSurfaceBoundary(adapter);
   const options: CliRunOptions = strictHumanSurfaceBoundary
     ? { ...requestedOptions, diagnosticsTool: false }
     : requestedOptions;
+  const maxBuffer = options.maxBuffer ?? 10 * 1024 * 1024;
+  const timeout = options.timeoutMs ?? 300000;
   // Fail closed before anything runs. `readOnly` is asked for when the input is
   // untrusted, so an adapter that ignores it would hand a full toolset to an
   // agent reading attacker-authored files. Refusing is loud; ignoring is not.
@@ -204,13 +206,23 @@ export async function spawnCli(
         }, proc);
       }
 
+      const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB retention limit
       let stdout = '';
       let stderr = '';
       let streamBuffer = '';
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
 
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
-        stdout += text;
+        if (!stdoutTruncated) {
+          if (stdout.length + text.length > MAX_OUTPUT_BYTES) {
+            stdout += text.slice(0, MAX_OUTPUT_BYTES - stdout.length);
+            stdoutTruncated = true;
+          } else {
+            stdout += text;
+          }
+        }
         if (options.onLog && adapter.capabilities.supportsStreaming) {
           streamBuffer = adapter.parseStreamingChunk
             ? adapter.parseStreamingChunk(text, options.onLog, streamBuffer)
@@ -219,7 +231,15 @@ export async function spawnCli(
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
+        const text = data.toString();
+        if (!stderrTruncated) {
+          if (stderr.length + text.length > MAX_OUTPUT_BYTES) {
+            stderr += text.slice(0, MAX_OUTPUT_BYTES - stderr.length);
+            stderrTruncated = true;
+          } else {
+            stderr += text;
+          }
+        }
       });
 
       let exitDrainTimer: NodeJS.Timeout | null = null;

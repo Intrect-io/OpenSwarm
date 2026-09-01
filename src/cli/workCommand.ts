@@ -477,7 +477,17 @@ async function runWorkCommandInner(
 
   // ---- Plan ----------------------------------------------------------------
   const recoverable = deps.hasRecoverableWorktree ?? hasRecoverableWorktree;
-  const plan: PlanRow[] = await Promise.all(tasks.map(async (task) => {
+  // Handle SIGTERM via cancellation path
+  let cancelled = false;
+  const handleSigterm = async () => {
+    if (cancelled) return;
+    cancelled = true;
+    await coordinator.cancel();
+    process.exit(130);
+  };
+  process.on('SIGTERM', handleSigterm);
+
+  const plan = await Promise.all(tasks.map(async (task) => {
     const branchName = buildBranchName(task.issueIdentifier ?? task.issueId ?? task.id, task.title);
     const resumes = await recoverable(repoPath, task.issueId ?? task.id, branchName)
       .catch(() => false);

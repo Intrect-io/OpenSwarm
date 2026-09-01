@@ -116,6 +116,11 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
     const proc = processHandles.get(pid);
     if (proc) {
       if (force) {
+        // Clear any pending graceful-kill escalation before force-killing
+        if ((proc as any).__gracefulKillTimer) {
+          clearTimeout((proc as any).__gracefulKillTimer);
+          (proc as any).__gracefulKillTimer = undefined;
+        }
         terminateCliProcessTree(proc);
       } else {
         signalCliProcessTree(proc, 'SIGTERM');
@@ -123,6 +128,15 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
         // native CLI/MCP descendants, so checking only proc.exitCode is unsafe.
         const escalation = setTimeout(() => terminateCliProcessTree(proc), 5000);
         escalation.unref();
+        // Store timer reference so force-kill can clear it
+        (proc as any).__gracefulKillTimer = escalation;
+        // Clear the timer on force kill to prevent duplicate termination
+        proc.once('exit', () => {
+          if ((proc as any).__gracefulKillTimer) {
+            clearTimeout((proc as any).__gracefulKillTimer);
+            (proc as any).__gracefulKillTimer = undefined;
+          }
+        });
       }
       return true;
     }
