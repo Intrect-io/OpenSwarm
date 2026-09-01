@@ -412,10 +412,12 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
     mkdirSync(dir, { recursive: true });
   }
 
+  const tempSchemaPath = join(dir, 'repo.graphql.tmp');
   const schemaPath = join(dir, 'repo.graphql');
   const snapshotPath = join(dir, 'repo-snapshot.json');
 
-  atomicWriteFileSync(schemaPath, REPO_SCHEMA);
+  atomicWriteFileSync(tempSchemaPath, REPO_SCHEMA);
+  fs.renameSync(tempSchemaPath, schemaPath);
 
   const snapshot = buildSnapshot(graph, projectPath);
   atomicWriteFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));

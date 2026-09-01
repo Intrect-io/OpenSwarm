@@ -199,6 +199,7 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
   if (processGroupId && process.platform !== 'win32') {
     try { process.kill(-processGroupId, 'SIGKILL'); } catch { /* already exited */ }
   }
+  await validateSandboxSymlinks(projectPath, sharedPaths);
   await terminateProcessesWithEnvMarker(marker);
 }
 

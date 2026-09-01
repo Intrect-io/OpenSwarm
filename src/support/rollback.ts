@@ -76,22 +76,18 @@ function checkpointStashMessage(executionId: string): string {
  * We split on ": " and compare the last segment exactly.
  */
 async function resolveStashRef(projectPath: string, message: string): Promise<string | undefined> {
-  const { stdout } = await gitExec(projectPath, 'stash', 'list');
+  const { stdout } = await gitExec(projectPath, 'stash', 'list', '--pretty=format:%gd: %gs');
   const lines = stdout.split('\n').filter(Boolean);
   // Match stashes by exact message identity, processing from newest to oldest
   for (const line of lines) {
-    // Format: stash@{N}: On branch: <message>
+    // Format: stash@{N}: <message>
     const colonIdx = line.indexOf(': ');
     if (colonIdx === -1) continue;
-    const fullMsg = line.slice(colonIdx + 2);
-    // Extract message after "On <context>: " prefix
-    const msgMatch = fullMsg.match(/^On [^:]+: (.*)/);
-    if (!msgMatch) continue;
-    const msg = msgMatch[1];
+    const ref = line.slice(0, colonIdx);
+    const msg = line.slice(colonIdx + 2);
     // Exact string match on message content
     if (msg === message) {
-      const refMatch = line.match(/stash@\{\d+\}/);
-      if (refMatch) return refMatch[0];
+      return ref;
     }
   }
   return undefined;

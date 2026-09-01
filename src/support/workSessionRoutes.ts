@@ -266,6 +266,16 @@ export async function tryHandleWorkSessionRoutes(
     return true;
   }
 
+  if (url.pathname === '/diff') {
+    if (!validateWorktreeContainment(worktreePath, projectPath)) {
+      writeJson(res, 403, { error: 'Invalid worktree' });
+      return true;
+    }
+    const diff = await getDiff(projectPath);
+    writeJson(res, 200, { diff });
+    return true;
+  }
+
   return false;
 }
 
