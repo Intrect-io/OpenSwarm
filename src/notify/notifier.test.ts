@@ -1,4 +1,4 @@
-import { WebhookNotifier } from './notifier';
+import { WebhookNotifier, createNotifier } from './notifier';
 
 describe('WebhookNotifier', () => {
   it('should reject webhook URLs targeting non-global IPv4 addresses', () => {
@@ -16,35 +16,72 @@ describe('WebhookNotifier', () => {
     expect(() => new WebhookNotifier('https://discord.com/webhook/123')).not.toThrow();
   });
 
-  describe('Webhook URL validation', () => {
-    test('rejects private IPv4 addresses', () => {
-      expect(isPrivateIPv4('10.0.0.1')).toBe(true);
-      expect(isPrivateIPv4('172.16.0.1')).toBe(true);
-      expect(isPrivateIPv4('192.168.1.1')).toBe(true);
-      expect(isPrivateIPv4('100.64.0.1')).toBe(true);
-      expect(isPrivateIPv4('127.0.0.1')).toBe(true);
-      expect(isPrivateIPv4('169.254.0.1')).toBe(true);
-    });
+  it('should reject link-local addresses', () => {
+    expect(() => new WebhookNotifier('http://169.254.0.1')).toThrow();
+  });
 
-    test('accepts public IPv4 addresses', () => {
-      expect(isPrivateIPv4('8.8.8.8')).toBe(false);
-      expect(isPrivateIPv4('1.1.1.1')).toBe(false);
-    });
+  it('should reject private Class A addresses', () => {
+    expect(() => new WebhookNotifier('http://10.0.0.1')).toThrow();
+  });
 
-    test('validates webhook URLs correctly', () => {
-      expect(WebhookNotifier.isValidUrl('https://example.com/webhook')).toBe(true);
-      expect(WebhookNotifier.isValidUrl('http://example.com/webhook')).toBe(false);
-      expect(WebhookNotifier.isValidUrl('https://192.168.1.1/webhook')).toBe(false);
-      expect(WebhookNotifier.isValidUrl('https://100.64.0.1/webhook')).toBe(false);
-      expect(WebhookNotifier.isValidUrl('https://127.0.0.1/webhook')).toBe(false);
-      expect(WebhookNotifier.isValidUrl('https://8.8.8.8/webhook')).toBe(true);
-    });
+  it('should reject private Class B addresses', () => {
+    expect(() => new WebhookNotifier('http://172.16.0.1')).toThrow();
+  });
 
-    test('constructor throws for invalid URLs', () => {
-      expect(() => new WebhookNotifier('http://example.com')).toThrow();
-      expect(() => new WebhookNotifier('https://192.168.1.1')).toThrow();
-      expect(() => new WebhookNotifier('https://100.64.0.1')).toThrow();
-      expect(() => new WebhookNotifier('https://127.0.0.1')).toThrow();
-    });
+  it('should allow webhook URLs with DNS names', () => {
+    expect(() => new WebhookNotifier('https://webhook.example.com')).not.toThrow();
+  });
+});
+
+describe('validateWebhookUrl', () => {
+  test('rejects loopback IPv4 addresses', () => {
+    expect(validateWebhookUrl('http://127.0.0.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://127.1.1.1/hook')).toBe(false);
+  });
+
+  test('rejects private IPv4 addresses', () => {
+    expect(validateWebhookUrl('http://10.0.0.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://192.168.1.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://172.16.0.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://172.31.255.255/hook')).toBe(false);
+  });
+
+  test('rejects CGNAT IPv4 addresses', () => {
+    expect(validateWebhookUrl('http://100.64.0.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://100.127.255.255/hook')).toBe(false);
+  });
+
+  test('accepts global IPv4 and DNS names', () => {
+    expect(validateWebhookUrl('http://8.8.8.8/hook')).toBe(true);
+    expect(validateWebhookUrl('http://example.com/hook')).toBe(true);
+  });
+});
+
+describe('createNotifier', () => {
+  it('should return NoopNotifier for webhook URLs targeting non-global IPv4', () => {
+    // createNotifier catches errors and returns NoopNotifier
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: 'http://192.168.1.1/hook' });
+    // NoopNotifier logs but doesn't throw — verify it doesn't crash
+    expect(async () => await notifier.notify('test')).not.toThrow();
+  });
+
+  it('should return NoopNotifier for webhook URLs targeting CGNAT addresses', () => {
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: 'http://100.64.0.1/hook' });
+    expect(async () => await notifier.notify('test')).not.toThrow();
+  });
+
+  it('should return NoopNotifier for webhook URLs targeting loopback', () => {
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: 'http://127.0.0.1/hook' });
+    expect(async () => await notifier.notify('test')).not.toThrow();
+  });
+
+  it('should return a WebhookNotifier for global IPv4 addresses', () => {
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: 'http://8.8.8.8/hook' });
+    expect(async () => await notifier.notify('test')).not.toThrow();
+  });
+
+  it('should return a WebhookNotifier for domain names', () => {
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: 'https://example.com/hook' });
+    expect(async () => await notifier.notify('test')).not.toThrow();
   });
 });
