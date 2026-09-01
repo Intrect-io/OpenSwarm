@@ -399,6 +399,8 @@ const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 /**
  * Consolidate duplicate/similar memories
  */
+const consolidateMutex = new AsyncMutex();
+
 export async function consolidateMemories(): Promise<{
   merged: number;
   groups: Array<{ kept: string; merged: string[] }>;

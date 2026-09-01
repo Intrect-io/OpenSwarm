@@ -295,8 +295,25 @@ async function migrateLeanSchemaIfNeeded(database: Connection, current: Table): 
 
   const tableName = current.name;
   console.log(`${status.info('[Memory]')} ${c.dim('migrating')} ${c.cyan(tableName)} ${c.dim('to v3 lean schema')}`);
-  const rows = await current.query().limit(100_000).toArray();
-  let normalized = normalizeRecords(rows);
+  let lastRowId = 0;
+  let batch;
+  let allRows: any[] = [];
+
+  do {
+    batch = await database.selectFrom(tableName)
+      .selectAll()
+      .where('rowid', '>', lastRowId)
+      .orderBy('rowid')
+      .limit(100_000)
+      .execute();
+
+    if (batch.length === 0) break;
+
+    allRows.push(...batch);
+    lastRowId = batch[batch.length - 1].rowid;
+  } while (batch.length === 100_000);
+
+  let normalized = normalizeRecords(allRows);
   if (normalized.length === 0) {
     const now = Date.now();
     normalized = [{

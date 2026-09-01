@@ -284,6 +284,26 @@ export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
 /**
  * Load workflow
  */
+const WorkflowExecutionSchema = z.object({
+  workflowId: z.string(),
+  status: z.enum(['running', 'completed', 'failed']),
+  steps: z.record(z.object({
+    status: z.enum(['pending', 'running', 'success', 'failed']),
+    startedAt: z.number().optional(),
+    completedAt: z.number().optional(),
+  })),
+});
+
+const WorkflowExecutionSchema = z.object({
+  workflowId: z.string(),
+  status: z.enum(['running', 'completed', 'failed']),
+  steps: z.record(z.object({
+    status: z.enum(['pending', 'running', 'success', 'failed']),
+    startedAt: z.number().optional(),
+    completedAt: z.number().optional(),
+  })),
+});
+
 export async function loadWorkflow(workflowId: string): Promise<WorkflowConfig | null> {
   try {
     const filePath = storageFilePath(WORKFLOW_DIR, workflowId, '.yaml');
@@ -473,6 +493,32 @@ export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; er
       topologicalSort(workflow.steps);
     } catch (e) {
       errors.push((e as Error).message);
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// Exports
+
+export {
+  WORKFLOW_DIR,
+  EXECUTION_DIR,
+};
+age);
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// Exports
+
+export {
+  WORKFLOW_DIR,
+  EXECUTION_DIR,
+};
+age);
     }
   }
 
