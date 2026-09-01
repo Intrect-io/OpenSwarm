@@ -219,7 +219,7 @@ agents:
         maxCommands: 4,
       });
       expect(config.autonomous?.securityAudit).toEqual({
-        enabled: true,
+        enabled: false,
         maxThreads: 2,
         maxRamMb: 4096,
       });

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.5 — 2026-09-01
+
+### Changed
+
+- **CodeQL is no longer part of the default autonomous loop.** The baseline-diff security gate (`autonomous.securityAudit`) defaults to off. A full CodeQL run is minutes to tens of minutes per language and was parking worker PRs (AGT-4160). Opt in with `securityAudit.enabled: true` when CodeQL is installed and that latency is acceptable.
+
+
 ## 0.21.4 — 2026-09-01
 
 ### Fixed

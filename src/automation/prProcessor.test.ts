@@ -227,11 +227,11 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     expect(args?.[9]).toBe(securityAudit);
   });
 
-  it('enables the default CodeQL policy when no autonomous configuration exists', async () => {
+  it('leaves CodeQL off when no autonomous configuration exists', async () => {
     await newProcessor().fixOne(pr, '/tmp/proj');
 
     const args = createPipelineFromConfigImpl.mock.calls.at(-1);
-    expect(args?.[9]).toEqual({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
+    expect(args?.[9]).toEqual({ enabled: false, maxThreads: 2, maxRamMb: 4096 });
   });
 
   it('succeeds when there are no conflicts, the pipeline succeeds, and CI passes', async () => {
