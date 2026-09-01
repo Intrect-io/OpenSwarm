@@ -79,7 +79,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "^4.1.11",
     "bun-types": "^1.1.0",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",

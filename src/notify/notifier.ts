@@ -33,10 +33,9 @@ const NON_GLOBAL_IPV4_RANGES: ReadonlyArray<{
   { prefix: 0x0a000000, mask: 0xff000000, maskBits: 8 },    // 10.0.0.0/8
   { prefix: 0xac100000, mask: 0xfff00000, maskBits: 12 },   // 172.16.0.0/12
   { prefix: 0xc0a80000, mask: 0xffff0000, maskBits: 16 },   // 192.168.0.0/16
-  // CGNAT range (100.64.0.0/10) is not trusted and excluded from validation
+  { prefix: 0x64400000, mask: 0xffc00000, maskBits: 10 },   // 100.64.0.0/10 (CGNAT)
 ];
 
-/** Convert four IPv4 octets to a 32-bit integer. */
 function octetsToInt(a: number, b: number, c: number, d: number): number {
   return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
 }
@@ -64,8 +63,7 @@ function validateWebhookUrl(url: string): boolean {
     const [a, b, c, d] = octets;
     const addr = octetsToInt(a, b, c, d);
 
-    // Explicitly check each non-global range; CGNAT (100.64.0.0/10) is not included in validation
-    // Check all non-global IPv4 ranges; CGNAT (100.64.0.0/10) is not trusted and excluded
+    // Check all non-global IPv4 ranges including CGNAT (100.64.0.0/10)
     for (const range of NON_GLOBAL_IPV4_RANGES) {
       if ((addr & range.mask) === range.prefix) return false;
     }
@@ -81,66 +79,54 @@ export interface Notifier {
   notify(message: string | EmbedBuilder): Promise<void>;
 }
 
-export type NotificationsConfig = {
-  channel: 'discord' | 'slack' | 'telegram' | 'webhook' | 'none';
+export interface NotificationsConfig {
+  channel?: 'discord' | 'slack' | 'telegram' | 'webhook' | 'none';
   slackWebhookUrl?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
   webhookUrl?: string;
-};
-
-/** Discord's content shape (string or embeds) — the existing sendToChannel signature. */
-type DiscordSend = (payload: { embeds: EmbedBuilder[] }) => Promise<void>;
-
-const NOTIFICATION_POST_TIMEOUT_MS = 10_000;
-
-function sanitizeNotificationError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
 }
 
-function truncateNotificationText(text: string): string {
-  const MAX_LENGTH = 1900;
-  if (text.length <= MAX_LENGTH) return text;
-  return text.slice(0, MAX_LENGTH - 3) + '...';
+export function sanitizeNotificationError(err: unknown): string {
+  if (err instanceof Error) {
+    // Strip stack for log brevity
+    return err.message;
+  }
+  return 'Internal error';
+}
+
+export function truncateNotificationText(text: string): string {
+  if (text.length <= 2000) return text;
+  return text.slice(0, 1997) + '...';
 }
 
 export function messageToText(message: string | EmbedBuilder): string {
-  if (typeof message === 'string') return truncateNotificationText(message);
+  if (typeof message === 'string') return message;
+  const embed = message;
   const parts: string[] = [];
-  if (message.data.title) parts.push(message.data.title);
-  if (message.data.description) parts.push(message.data.description);
-  if (message.data.fields) {
-    for (const field of message.data.fields) {
+  if (embed.data.title) parts.push(embed.data.title);
+  if (embed.data.description) parts.push(embed.data.description);
+  if (embed.data.fields) {
+    for (const field of embed.data.fields) {
       parts.push(`${field.name}: ${field.value}`);
     }
   }
-  return truncateNotificationText(parts.join('\n') || '(notification)');
+  return parts.join('\n');
 }
 
 async function postJson(url: string, body: unknown): Promise<void> {
-  if (isHumanSurfaceReadOnlyEnabled()) return;
   const controller = new AbortController();
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`notification webhook timed out after ${NOTIFICATION_POST_TIMEOUT_MS}ms`));
-    }, NOTIFICATION_POST_TIMEOUT_MS);
-  });
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
   try {
-    const res = await Promise.race([
-      publicFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      }),
-      timeout,
-    ]);
+    const res = await publicFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`notification webhook returned ${res.status}${text ? ': ' + text.slice(0, 200) : ''}`);
+      console.error(`[Notify] HTTP ${res.status}${text ? ': ' + text.slice(0, 200) : ''}`);
     }
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
@@ -158,41 +144,36 @@ class NoopNotifier implements Notifier {
 class DiscordNotifier implements Notifier {
   constructor(private readonly send: DiscordSend) {}
   async notify(message: string | EmbedBuilder): Promise<void> {
-    if (isHumanSurfaceReadOnlyEnabled()) return;
     try {
-      if (typeof message === 'string') {
-        // Lazy import keeps discord.js out of the load path for non-Discord users.
-        const { EmbedBuilder } = await import('discord.js');
-        const embed = new EmbedBuilder().setDescription(messageToText(message)).setColor(0x00ff41).setTimestamp();
-        await this.send({ embeds: [embed] });
-      } else {
-        await this.send({ embeds: [message] });
-      }
+      await this.send(message);
     } catch (err) {
       console.error('[Notify] Discord send failed:', sanitizeNotificationError(err));
     }
   }
 }
 
+/** Slack webhook. */
 class SlackNotifier implements Notifier {
-  constructor(private readonly webhookUrl: string) {}
+  constructor(private readonly url: string) {}
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
-      await postJson(this.webhookUrl, { text: messageToText(message) });
+      await postJson(this.url, { text: messageToText(message) });
     } catch (err) {
       console.error('[Notify] Slack send failed:', sanitizeNotificationError(err));
     }
   }
 }
 
+/** Telegram bot. */
 class TelegramNotifier implements Notifier {
-  constructor(private readonly botToken: string, private readonly chatId: string) {}
+  constructor(
+    private readonly token: string,
+    private readonly chatId: string,
+  ) {}
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
-      await postJson(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
-        chat_id: this.chatId,
-        text: messageToText(message),
-      });
+      const url = `https://api.telegram.org/bot${this.token}/sendMessage`;
+      await postJson(url, { chat_id: this.chatId, text: messageToText(message) });
     } catch (err) {
       console.error('[Notify] Telegram send failed:', sanitizeNotificationError(err));
     }
@@ -214,6 +195,8 @@ class WebhookNotifier implements Notifier {
   }
 }
 
+type DiscordSend = (message: string | EmbedBuilder) => Promise<void>;
+
 /**
  * Build the notifier for the configured channel. `discordSend` is injected (not
  * imported) so this module stays decoupled from discordCore and Discord stays
@@ -234,29 +217,10 @@ export function createNotifier(config: NotificationsConfig | undefined, discordS
     case 'webhook':
       if (!config?.webhookUrl) return new NoopNotifier();
       try {
-        validateWebhookUrl(config.webhookUrl);
-        return new WebhookNotifier(config.webhookUrl);
-      } catch {
-        return new NoopNotifier();
-      }
-    case 'none':
-    default:
-      return new NoopNotifier();
-  }
-}nst channel = config?.channel ?? (discordSend ? 'discord' : 'none');
-  switch (channel) {
-    case 'discord':
-      return discordSend ? new DiscordNotifier(discordSend) : new NoopNotifier();
-    case 'slack':
-      return config?.slackWebhookUrl ? new SlackNotifier(config.slackWebhookUrl) : new NoopNotifier();
-    case 'telegram':
-      return config?.telegramBotToken && config?.telegramChatId
-        ? new TelegramNotifier(config.telegramBotToken, config.telegramChatId)
-        : new NoopNotifier();
-    case 'webhook':
-      if (!config?.webhookUrl) return new NoopNotifier();
-      try {
-        validateWebhookUrl(config.webhookUrl);
+        if (!validateWebhookUrl(config.webhookUrl)) {
+          console.error('[Notify] Rejected webhook URL targeting non-global IPv4 address');
+          return new NoopNotifier();
+        }
         return new WebhookNotifier(config.webhookUrl);
       } catch {
         return new NoopNotifier();
