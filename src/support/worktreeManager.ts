@@ -7,6 +7,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { isEphemeralWorktreeArtifact } from './worktreeEphemeral.js';
+import { stagePreservableWorktreeChanges, purgeTrackedEphemeralArtifacts } from './worktreeEphemeralOps.js';
 import { getInstanceId } from './healthEndpoint.js';
 import { readyReusedPullRequest } from './pullRequestReady.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
@@ -85,8 +87,14 @@ async function getPreservedTaskFiles(worktreePath: string): Promise<string[]> {
     const tab = line.indexOf('\t');
     return { hash: line.slice(0, tab), subject: line.slice(tab + 1) };
   });
+  // Artifact-purge commits are an internal continuation of the same WIP
+  // checkpoint. Treating them as a new base would make the actual source diff
+  // disappear on the next resume.
+  const isPreservedWip = (subject: string): boolean =>
+    subject.startsWith('wip: preserved partial work')
+    || subject === 'wip: remove ephemeral runtime artifacts (auto)';
   let preservedCount = 0;
-  while (commits[preservedCount]?.subject.startsWith('wip: preserved partial work')) preservedCount += 1;
+  while (commits[preservedCount] && isPreservedWip(commits[preservedCount].subject)) preservedCount += 1;
   if (preservedCount === 0) return [];
 
   const base = commits[preservedCount]?.hash;
@@ -94,7 +102,9 @@ async function getPreservedTaskFiles(worktreePath: string): Promise<string[]> {
     ? ['diff', '--name-only', base, 'HEAD']
     : ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'];
   const files = await git(worktreePath, ...diffArgs);
-  return [...new Set(files.split('\n').filter((file) => file && file !== PRESERVE_MARKER))];
+  return [...new Set(files.split('\n').filter((file) =>
+    file && file !== PRESERVE_MARKER && !isEphemeralWorktreeArtifact(file)
+  ))];
 }
 
 /** Runtime ownership metadata must never be published in a task branch/PR. */
@@ -103,6 +113,7 @@ async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
   try { rmSync(markerPath, { force: true }); } catch { /* git cleanup below still runs */ }
   await git(worktreePath, 'rm', '--cached', '--ignore-unmatch', '--', PRESERVE_MARKER).catch(() => '');
 }
+
 
 // Branch & Path Utilities
 
@@ -619,8 +630,7 @@ async function removePreservedWorktreeAtUnlocked(
   if (!m || !existsSync(worktreePath)) return;
   const repoRoot = m[1];
   try {
-    await stripRuntimeMarkerFromGit(worktreePath);
-    await git(worktreePath, 'add', '-A');
+    await stagePreservableWorktreeChanges(worktreePath);
     await git(
       worktreePath,
       '-c', 'user.email=swarm@openswarm.local', '-c', 'user.name=OpenSwarm',
@@ -739,7 +749,7 @@ export async function preserveWorktree(info: WorktreeInfo, reason: string): Prom
   // Only meaningful when git status actually reported dirty files.
   if (dirty !== null && fileCount > 0) {
     try {
-      await git(worktreePath, 'add', '-A');
+      await stagePreservableWorktreeChanges(worktreePath);
       await git(
         worktreePath,
         '-c', 'user.email=swarm@openswarm.local', '-c', 'user.name=OpenSwarm',
@@ -796,6 +806,7 @@ export async function createWorktree(
     const valid = await git(worktreePath, 'status', '--porcelain').then(() => true).catch(() => false);
     const branch = await git(worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD').then((b) => b.trim()).catch(() => '');
     if (valid && branch === branchName) {
+      await purgeTrackedEphemeralArtifacts(worktreePath);
       const resumed: WorktreeInfo = {
         worktreePath, branchName, originalPath: repoPath, issueId,
         resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
@@ -830,6 +841,7 @@ export async function createWorktree(
     if (!valid || branch !== branchName) {
       throw new WorktreeCoordinationError(`Existing worktree requires reconciliation (valid=${valid}, branch=${branch}): ${worktreePath}`);
     }
+    await purgeTrackedEphemeralArtifacts(worktreePath);
     const resumed: WorktreeInfo = {
       worktreePath, branchName, originalPath: repoPath, issueId,
       resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
@@ -868,6 +880,7 @@ export async function createWorktree(
     worktreePath, branchName, originalPath: repoPath, issueId,
     resumedTaskFiles: branchExists ? await getPreservedTaskFiles(worktreePath) : undefined,
   };
+  if (branchExists) await purgeTrackedEphemeralArtifacts(worktreePath);
   // Written before dependency setup or worker invocation. A crash anywhere after
   // `git worktree add` is therefore recoverable.
   info.activeMarkerToken = await writeActiveWorktreeMarker(info);
@@ -1116,6 +1129,13 @@ export async function commitAndCreatePRWithHead(
   options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[] } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
+
+  // A parked/stuck branch can be published without a subsequent resume, so the
+  // resume-time cleanup above is not sufficient. Repair legacy generated
+  // artifacts at the publication boundary as well; otherwise a harmless
+  // pytest quarantine or heartbeat lock makes the write-scope fence reject a
+  // branch that otherwise contains valid task work.
+  await purgeTrackedEphemeralArtifacts(worktreePath);
 
   // Check for uncommitted changes and commit them.
   //

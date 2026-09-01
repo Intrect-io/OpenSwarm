@@ -99,6 +99,21 @@ describe('runVerify', () => {
     }
   });
 
+  it('permits VEGA test fixtures only within the disposable verification checkout', async () => {
+    await mkdir(join(repo, 'pipeline'), { recursive: true });
+    await writeFile(join(repo, 'pipeline', 'path_guard.py'), '# VEGA path policy marker\n');
+    git('add', 'pipeline/path_guard.py');
+    git('commit', '-m', 'VEGA path policy marker');
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('test "$VEGA_EXTRA_PATHS" = "$VEGA_CWD"; test "$VEGA_HEADLESS" = 1; test -d "$VEGA_EXTRA_PATHS"')],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
+  });
+
   it('runs each verification command from a fresh HEAD sandbox', async () => {
     const evidence = await runVerify({
       projectPath: repo,
@@ -150,6 +165,55 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'skipped', newFailure: true });
     expect(evidence.rawOutputTail).toContain('rejects escaping symlink');
     expect(await readFile(outside, 'utf8')).toBe('original\n');
+  });
+
+  it('ignores pytest temporary links left by a preserved worker worktree', async () => {
+    const outside = join(root, 'pytest-output');
+    await mkdir(join(repo, 'pytest-of-openswarm', 'pytest-10'), { recursive: true });
+    await writeFile(outside, 'not a verification input\n');
+    await symlink(outside, join(repo, 'pytest-of-openswarm', 'pytest-current'));
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf verified')],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
+    expect(evidence.rawOutputTail).toContain('verified');
+  });
+
+  it('ignores root-level pytest fixture symlinks while retaining normal link containment', async () => {
+    const outside = join(root, 'fixture-output');
+    await mkdir(join(repo, 'int3304_sortsym__p1mb7w0'), { recursive: true });
+    await writeFile(outside, 'not a verification input\n');
+    await symlink(outside, join(repo, 'int3304_sortsym__p1mb7w0', 'mlink_to_dir'));
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf verified')],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
+    expect(evidence.rawOutputTail).toContain('verified');
+  });
+
+  it('ignores task-scoped OpenSwarm pytest quarantine links', async () => {
+    const outside = join(root, 'pytest-output');
+    const quarantine = join(repo, '.openswarm-trash', 'AGT-3533-pytest-123');
+    await mkdir(quarantine, { recursive: true });
+    await writeFile(outside, 'not a verification input\n');
+    await symlink(outside, join(quarantine, 'test-current'));
+
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf verified')],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
+    expect(evidence.rawOutputTail).toContain('verified');
   });
 
   it('allows a relative symlink whose target remains inside the repository sandbox', async () => {

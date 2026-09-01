@@ -263,6 +263,29 @@ export function formatWorkerGitChangeStatus(files: string[]): string {
   return `[Worker] Git detected ${files.length} changed file(s): ${shown}${more}`;
 }
 
+/** Test-run quarantine is not a worker-owned source edit. */
+export function isEphemeralWorkerArtifact(file: string): boolean {
+  return file === '.venv'
+    || file === '.venv-verify'
+    || file === 'pytest-local'
+    || file.startsWith('.venv/')
+    || file.startsWith('.venv-verify/')
+    || file.startsWith('pytest-local/')
+    || /(?:^|\/)pytest-of-[^/]+\//.test(file)
+    || /^pytest-of-[^/]+$/.test(file)
+    || /^\.openswarm-trash\/[^/]*-(?:pytest|verify)(?:-|\/|$)/.test(file)
+    || file === '.vega/google_heartbeat_sync.lock'
+    || /^\.openswarm\/(?:repo-snapshot\.json|repo\.graphql)$/.test(file)
+    || /^\.test-tmp(?:-[^/]+)?(?:\/|$)/.test(file)
+    || /^\.trash(?:\/|$)/.test(file)
+    || /^\.pytest-lathe(?:\/|$)/.test(file)
+    // pytest fixtures in VEGA-style repositories use tempfile prefixes such
+    // as int3301_<random> and tmp<random>; they are harness scratch, never a
+    // task-owned source directory.
+    || /^int\d+_[a-z0-9_]{8,}(?:\/|$)/i.test(file)
+    || /^tmp[a-z0-9]{8,}(?:\/|$)/i.test(file);
+}
+
 // Worker Execution
 
 /**
@@ -409,8 +432,16 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     // signal over self-report).
     if (isGitRepo && snapshotHash) {
       const freshChangedFiles = (await gitTracker.getChangedFilesSinceSnapshot(cwd, snapshotHash))
-        .filter((file) => file !== '.openswarm-preserved');
-      const gitChangedFiles = [...new Set([...(options.resumedTaskFiles ?? []), ...freshChangedFiles])];
+        .filter((file) => file !== '.openswarm-preserved' && !isEphemeralWorkerArtifact(file));
+      // Preserved worktree state predates this invocation and may include
+      // test-run byproducts from an older worker. Apply the same quarantine to
+      // both sources before presenting the authoritative change set to guards,
+      // tester, or publication. Otherwise a resumed task can repeatedly claim
+      // `.venv`/pytest scratch files as source edits even though fresh diffs
+      // correctly filter them.
+      const resumedTaskFiles = (options.resumedTaskFiles ?? [])
+        .filter((file) => file !== '.openswarm-preserved' && !isEphemeralWorkerArtifact(file));
+      const gitChangedFiles = [...new Set([...resumedTaskFiles, ...freshChangedFiles])];
 
       // Scope is an execution-time write boundary. Enforce it against edits made
       // by THIS invocation. Task-owned WIP was already preserved after a prior

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.3 — 2026-09-01
+
+### Fixed
+
+- **Throughput: stop treating pytest/.venv scratch as task source.** Worker change detection, worktree WIP preserve, and verify head sandboxes now ignore ephemeral paths (`pytest-of-*`, `.venv`, `.trash`, `.openswarm` snapshots, etc.). Measured on vela: workers completed but PRs never opened because tester failed in 1–4s on polluted worktrees and scope fences blocked retries.
+- **Verify head checkout no longer copies harness garbage** into the disposable sandbox (same ephemeral filter on `cp` + symlink validation).
+
 ## 0.21.2 — 2026-09-01
 
 ### Fixed
