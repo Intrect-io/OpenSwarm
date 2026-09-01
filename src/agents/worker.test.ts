@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { WorkerResult } from './agentPair.js';
-import { formatWorkReport, formatWorkerGitChangeStatus, reconcileWorkerFiles, resolveWorkerBashTimeoutMs, loadWorkerRepoRules, WORKER_BASH_TIMEOUT_DEFAULT_MS, type WorkerOptions } from './worker.js';
+import { formatWorkReport, formatWorkerGitChangeStatus, isEphemeralWorkerArtifact, reconcileWorkerFiles, resolveWorkerBashTimeoutMs, loadWorkerRepoRules, WORKER_BASH_TIMEOUT_DEFAULT_MS, type WorkerOptions } from './worker.js';
 
 describe('worker', () => {
   beforeEach(() => {
@@ -61,6 +61,25 @@ describe('worker', () => {
     it('formats the no-change status', () => {
       expect(formatWorkerGitChangeStatus([])).toBe('[Worker] No file changes detected by Git');
     });
+  });
+
+  it('excludes pytest per-run output but not source tests', () => {
+    expect(isEphemeralWorkerArtifact('.venv')).toBe(true);
+    expect(isEphemeralWorkerArtifact('pytest-of-openswarm/pytest-1/test_case0/result.json')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.openswarm-trash/AGT-3533-pytest-1788171300/pytest-1/test_case0/result.json')).toBe(true);
+    expect(isEphemeralWorkerArtifact('int3301_5736n7bf/fixture.json')).toBe(true);
+    expect(isEphemeralWorkerArtifact('tmp3gnhgw1i/output.txt')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.venv-verify')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.openswarm/repo-snapshot.json')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.test-tmp-2/test_case/current')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.test-tmp-verify/test_case/current')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.trash/AX-855/.test-tmp-verify/test_case/current')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.pytest-lathe/test_case/current')).toBe(true);
+    expect(isEphemeralWorkerArtifact('apps/pipelines/pytest-of-openswarm/garbage/test_case/current')).toBe(true);
+    expect(isEphemeralWorkerArtifact('tests/test_case.py')).toBe(false);
+    expect(isEphemeralWorkerArtifact('src/pytest-of-openswarm-helper.ts')).toBe(false);
+    expect(isEphemeralWorkerArtifact('.venv/bin/python')).toBe(true);
+    expect(isEphemeralWorkerArtifact('.openswarm-trash/AGT-3533-user-backup/notes.txt')).toBe(false);
   });
 
   describe('reconcileWorkerFiles (INT-2609)', () => {

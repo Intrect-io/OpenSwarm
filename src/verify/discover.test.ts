@@ -73,6 +73,15 @@ describe('discoverVerifyCommands', () => {
     ]);
   });
 
+  it('serializes an explicitly configured xdist pytest run for stable base comparison', async () => {
+    const root = await fixture({
+      'pytest.ini': '[pytest]\naddopts = --tb=short -n auto --dist loadgroup\n',
+    });
+    expect(await discoverVerifyCommands(root)).toEqual([
+      { name: 'pytest', run: 'python -m pytest -n 0 -x -q', kind: 'test', timeoutMs: 300_000 },
+    ]);
+  });
+
   it('discovers Rust tests', async () => {
     const root = await fixture({ 'Cargo.toml': '[package]\nname = "demo"\nversion = "0.1.0"\n' });
     expect(await discoverVerifyCommands(root)).toEqual([

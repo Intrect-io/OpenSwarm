@@ -113,6 +113,35 @@ describe('normalizeFailureOutput', () => {
     expect(out).not.toContain('2.5s');
   });
 
+  it('normalizes pytest-xdist worker assignment and failure completion order', () => {
+    const a = [
+      '============================= FAILURES =============================',
+      '____________________ test_a ____________________',
+      '[gw1] linux',
+      'E   AssertionError: old failure',
+      '____________________ test_b ____________________',
+      '[gw2] linux',
+      'E   AssertionError: other old failure',
+      '=========================== short test summary info ============================',
+      'FAILED tests/test_b.py::test_b',
+      'FAILED tests/test_a.py::test_a',
+    ].join('\n');
+    const b = [
+      '============================= FAILURES =============================',
+      '____________________ test_b ____________________',
+      '[gw7] linux',
+      'E   AssertionError: other old failure',
+      '____________________ test_a ____________________',
+      '[gw3] linux',
+      'E   AssertionError: old failure',
+      '=========================== short test summary info ============================',
+      'FAILED tests/test_a.py::test_a',
+      'FAILED tests/test_b.py::test_b',
+    ].join('\n');
+
+    expect(normalizeFailureOutput(a, [])).toBe(normalizeFailureOutput(b, []));
+  });
+
   it('is stable for output that mixes stdout and stderr content', () => {
     // The fingerprint is now built stdout-then-stderr rather than in arrival
     // order, so the two streams' relative timing cannot change the hash input.

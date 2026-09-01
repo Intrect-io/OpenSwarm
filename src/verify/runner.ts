@@ -78,6 +78,33 @@ function pathCoveredBy(path: string, roots: string[]): boolean {
   return roots.some((root) => path === root || path.startsWith(`${root}${sep}`));
 }
 
+/**
+ * Worker retries can leave pytest's numbered temporary directory in a preserved
+ * worktree. Its `*-current` convenience link intentionally points outside that
+ * worktree, but it is neither source nor an input to verification. Do not turn
+ * that known test byproduct into a blanket exception for escaping symlinks.
+ */
+function isEphemeralVerificationArtifact(path: string): boolean {
+  const segments = path.split(sep);
+  const root = segments[0] ?? '';
+  // Root-scoped scratch that must never enter the verification checkout or
+  // count as a worker source edit. Measured on vela: preserved worktrees carried
+  // hundreds of pytest-of-* / .venv paths, so head verify failed in 1–4s and PR
+  // publication never ran.
+  return root === '.venv'
+    || root === '.venv-verify'
+    || root === 'pytest-local'
+    || root === '.pytest-lathe'
+    || root === '.trash'
+    || /^pytest-of-[^/]+$/.test(root)
+    || /^int\d+_[a-z0-9_]{8,}$/i.test(root)
+    || /^tmp[a-z0-9]{8,}$/i.test(root)
+    || /^\.openswarm-trash\/[^/]*-(?:pytest|verify)(?:-|\/|$)/.test(path)
+    || /^\.openswarm\/(?:repo-snapshot\.json|repo\.graphql)$/.test(path)
+    || /^\.trash\/(?:atomic-verify-[^/]+|pytest-of-[^/]+)(?:\/|$)/.test(path)
+    || /(?:^|\/)pytest-of-[^/]+\//.test(path);
+}
+
 function hasSameFailure(base: CommandResult, head: CommandResult): boolean {
   // A shared non-zero exit code is not enough to prove that the failure is
   // pre-existing: HEAD may contain the old failure plus a new regression.
@@ -114,11 +141,37 @@ export function normalizeFailureOutput(output: string, paths: Array<[string, str
   for (const [path, label] of ordered) {
     normalized = normalized.replace(new RegExp(escapeForRegExp(path), 'g'), label);
   }
-  return normalized
+  normalized = normalized
     .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
     .replace(/(=+ .*? in )\d+(?:\.\d+)?s( =+)/g, '$1<DURATION>$2')
     .replace(/(Ran \d+ tests? in )\d+(?:\.\d+)?s/g, '$1<DURATION>')
-    .replace(/(finished in )\d+(?:\.\d+)?s/gi, '$1<DURATION>');
+    .replace(/(finished in )\d+(?:\.\d+)?s/gi, '$1<DURATION>')
+    // pytest-xdist assigns the same failure to different workers on base and
+    // head.  A worker number is scheduler noise, not failure evidence.
+    .replace(/\[gw\d+\]/g, '[gw<WORKER>]');
+
+  // xdist also completes failing workers in nondeterministic order.  Preserve
+  // every traceback (so a changed assertion still differs), but compare their
+  // order-insensitive set.  The short summary is normalized for the same reason.
+  const failureMatch = /^(={3,} FAILURES ={3,})\n/m.exec(normalized);
+  if (failureMatch?.index !== undefined) {
+    const bodyStart = failureMatch.index + failureMatch[0].length;
+    const nextHeading = /^(={3,} (?:warnings summary|short test summary info) ={3,})$/m
+      .exec(normalized.slice(bodyStart));
+    const bodyEnd = nextHeading?.index === undefined ? normalized.length : bodyStart + nextHeading.index;
+    const body = normalized.slice(bodyStart, bodyEnd);
+    const blocks = body.split(/(?=^_{8,}.*$)/m).filter(Boolean);
+    normalized = normalized.slice(0, bodyStart) + blocks.sort().join('') + normalized.slice(bodyEnd);
+  }
+  const summaryMatch = /^(={3,} short test summary info ={3,})\n/m.exec(normalized);
+  if (summaryMatch?.index !== undefined) {
+    const bodyStart = summaryMatch.index + summaryMatch[0].length;
+    const nextHeading = /^(={3,} .* ={3,})$/m.exec(normalized.slice(bodyStart));
+    const bodyEnd = nextHeading?.index === undefined ? normalized.length : bodyStart + nextHeading.index;
+    const lines = normalized.slice(bodyStart, bodyEnd).split('\n').filter(Boolean).sort();
+    normalized = normalized.slice(0, bodyStart) + lines.join('\n') + (lines.length ? '\n' : '') + normalized.slice(bodyEnd);
+  }
+  return normalized;
 }
 
 function isEnvironmentFailure(output: string): boolean {
@@ -159,6 +212,18 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+/**
+ * VEGA's file-tool policy deliberately permits only its home, OS temp paths,
+ * and explicit user roots.  Verification, however, runs a disposable checkout
+ * beneath the companion's /work root; pytest's cwd-relative tmp paths therefore
+ * are neither home nor /tmp.  Permit precisely that disposable checkout for
+ * VEGA's own tests.  This is not inherited from the supervisor environment and
+ * is never a parent sandbox directory.
+ */
+function vegaVerifyWorkspaceRoot(root: string): string | undefined {
+  return existsSync(join(root, 'pipeline', 'path_guard.py')) ? root : undefined;
+}
+
 async function runWithSandboxExecutor(
   command: VerifyCommand,
   root: string,
@@ -173,9 +238,15 @@ async function runWithSandboxExecutor(
     const cwdBin = join(cwd, 'node_modules', '.bin');
     const rootBin = join(root, 'node_modules', '.bin');
     const relativeCwd = relative(root, cwd) || '.';
+    const vegaWorkspace = vegaVerifyWorkspaceRoot(root);
     const result = await session.execute([
       `cd -- ${shellQuote(relativeCwd)}`,
       `export PATH=${shellQuote(`${cwdBin}${delimiter}${rootBin}`)}:"$PATH"`,
+      ...(vegaWorkspace ? [`export VEGA_EXTRA_PATHS=${shellQuote(vegaWorkspace)}`] : []),
+      // Bundled VEGA toolsets intentionally use the narrower headless-workspace
+      // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
+      // disposable checkout; neither admits its parent /work directory.
+      ...(vegaWorkspace ? ['export VEGA_HEADLESS=1', `export VEGA_CWD=${shellQuote(vegaWorkspace)}`] : []),
       command.run,
     ].join(' && '), timeoutMs);
     let status: CommandResult['status'];
@@ -254,6 +325,12 @@ async function runCommand(
   };
   for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (env[key] !== undefined) safeEnv[key] = env[key];
+  }
+  const vegaWorkspace = vegaVerifyWorkspaceRoot(root);
+  if (vegaWorkspace) {
+    safeEnv.VEGA_EXTRA_PATHS = vegaWorkspace;
+    safeEnv.VEGA_HEADLESS = '1';
+    safeEnv.VEGA_CWD = vegaWorkspace;
   }
   if (sandboxExecutorSessionFactory) {
     return await runWithSandboxExecutor(
@@ -451,7 +528,11 @@ async function validateSandboxSymlinks(projectPath: string, sharedPaths: string[
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const source = join(directory, entry.name);
       const path = relative(projectRoot, source);
-      if (path.split(sep).some((segment) => segment === '.git' || segment === 'node_modules') || pathCoveredBy(path, sharedPaths)) continue;
+      if (
+        path.split(sep).some((segment) => segment === '.git' || segment === 'node_modules')
+        || isEphemeralVerificationArtifact(path)
+        || pathCoveredBy(path, sharedPaths)
+      ) continue;
       if (entry.isSymbolicLink()) {
         const target = await readlink(source);
         const resolvedTarget = resolve(dirname(source), target);
@@ -514,7 +595,12 @@ async function createHeadSandbox(
       filter: (source) => {
         const path = relative(projectPath, source);
         return path === '' || (
-          !path.split(sep).some((segment) => segment === '.git' || segment === 'node_modules')
+          !path.split(sep).some((segment) =>
+            segment === '.git'
+            || segment === 'node_modules'
+            || segment === '.venv'
+            || segment === '.venv-verify')
+          && !isEphemeralVerificationArtifact(path)
           && !pathCoveredBy(path, sharedPaths)
         );
       },

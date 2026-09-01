@@ -361,6 +361,40 @@ describe('preserveWorktree → createWorktree resume roundtrip (INT-2503)', () =
     expect(() => git(repo, 'show', 'swarm/INT-9-test:.openswarm-preserved')).toThrow();
   });
 
+  it('keeps linked environments and pytest scratch files out of preserved WIP', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\npartial-impl\n');
+    writeFileSync(join(info.worktreePath, '.venv'), 'runtime-link-placeholder\n');
+    mkdirSync(join(info.worktreePath, 'pytest-of-openswarm', 'pytest-1'), { recursive: true });
+    writeFileSync(join(info.worktreePath, 'pytest-of-openswarm', 'pytest-1', 'current'), 'scratch\n');
+
+    expect(await preserveWorktree(info, 'test failure')).toBe(true);
+    const resumed = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+
+    expect(resumed.resumedTaskFiles).toEqual(['app.py']);
+    expect(() => git(repo, 'show', 'swarm/INT-9-test:.venv')).toThrow();
+    expect(() => git(repo, 'show', 'swarm/INT-9-test:pytest-of-openswarm/pytest-1/current')).toThrow();
+  });
+
+  it('purges runtime artifacts that a legacy WIP commit already tracked on resume', async () => {
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\nlegacy-partial\n');
+    writeFileSync(join(info.worktreePath, '.venv'), 'legacy-runtime-link\n');
+    mkdirSync(join(info.worktreePath, 'pytest-of-openswarm', 'pytest-1'), { recursive: true });
+    writeFileSync(join(info.worktreePath, 'pytest-of-openswarm', 'pytest-1', 'current'), 'legacy-scratch\n');
+    git(info.worktreePath, 'add', '-A');
+    git(info.worktreePath, 'commit', '--no-verify', '-m', 'wip: preserved partial work (auto, legacy)');
+    writeFileSync(join(info.worktreePath, '.openswarm-preserved'), '{}\n');
+
+    const resumed = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
+
+    expect(resumed.resumedTaskFiles).toEqual(['app.py']);
+    expect(() => git(repo, 'show', 'swarm/INT-9-test:.venv')).toThrow();
+    expect(() => git(repo, 'show', 'swarm/INT-9-test:pytest-of-openswarm/pytest-1/current')).toThrow();
+    expect(git(repo, 'log', '--format=%s', '-1', 'swarm/INT-9-test').toString())
+      .toContain('wip: remove ephemeral runtime artifacts (auto)');
+  });
+
   it('removes a clean worktree instead of preserving it', async () => {
     const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
     expect(await preserveWorktree(info, 'test failure')).toBe(false);

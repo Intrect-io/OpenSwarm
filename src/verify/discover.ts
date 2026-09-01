@@ -75,7 +75,18 @@ export async function discoverVerifyCommands(projectPath: string): Promise<Verif
   const pyproject = await readText(join(projectPath, 'pyproject.toml'));
   const setupCfg = await readText(join(projectPath, 'setup.cfg'));
   if (pytestIni || pyproject?.includes('[tool.pytest.ini_options]') || setupCfg?.includes('[tool:pytest]')) {
-    commands.push(command('pytest', `${await pythonCommand(projectPath)} -m pytest -x -q`, 'test'));
+    // Baseline comparison uses -x. If a repository's config enables xdist,
+    // parallel scheduling can make base and HEAD stop at different *existing*
+    // failures and turn deterministic verification into a false regression.
+    // Override only an explicitly configured xdist worker count; generic pytest
+    // environments that do not install xdist must not receive an unknown -n flag.
+    const pytestConfig = [
+      pytestIni ? await readText(join(projectPath, 'pytest.ini')) : null,
+      pyproject,
+      setupCfg,
+    ].filter((value): value is string => value !== null).join('\n');
+    const serialXdist = /(?:^|\s)-n(?:\s|=)/m.test(pytestConfig) ? ' -n 0' : '';
+    commands.push(command('pytest', `${await pythonCommand(projectPath)} -m pytest${serialXdist} -x -q`, 'test'));
   }
 
   // Rust repositories use Cargo's native test runner.
