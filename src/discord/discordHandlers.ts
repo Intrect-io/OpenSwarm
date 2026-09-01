@@ -8,7 +8,7 @@ import {
   Message,
   EmbedBuilder,
 } from 'discord.js';
-import { enforceEmbedLimits } from './embedUtils.js';
+import { enforceEmbedLimits, truncateFieldValue, truncateFieldName } from './embedUtils.js';
 import * as linear from '../linear/index.js';
 import * as github from '../github/index.js';
 import * as dev from '../support/dev.js';
@@ -28,27 +28,47 @@ import {
 } from './discordCore.js';
 import { t, getDateLocale } from '../locale/index.js';
 
-// Discord embed limits: 6000 total chars, 1024 per field value, 256 per field name
-const EMBED_TOTAL_LIMIT = 6000;
-const EMBED_FIELD_VALUE_LIMIT = 1024;
-const EMBED_FIELD_NAME_LIMIT = 256;
+	// Discord embed limits: 6000 total chars, 1024 per field value, 256 per field name
+	const EMBED_TOTAL_LIMIT = 6000;
+	const EMBED_FIELD_VALUE_LIMIT = 1024;
+	const EMBED_FIELD_NAME_LIMIT = 256;
 
-/** Truncate a string to fit within Discord embed field limits, appending a marker. */
-function truncateFieldValue(value: string, max = EMBED_FIELD_VALUE_LIMIT): string {
-  if (value.length <= max) return value;
-  return `${value.slice(0, max - 12)}\n…[truncated]`;
-}
+	/** Enforce total embed description limit with truncation. */
+	function truncateDescription(desc: string): string {
+	  if (desc.length <= EMBED_TOTAL_LIMIT) return desc;
+	  return `${desc.slice(0, EMBED_TOTAL_LIMIT - 12)}\n…[truncated]`;
+	}
 
-function truncateFieldName(name: string): string {
-  if (name.length <= EMBED_FIELD_NAME_LIMIT) return name;
-  return `${name.slice(0, EMBED_FIELD_NAME_LIMIT - 12)}…[truncated]`;
-}
+	/** Truncate a string to fit within Discord embed field limits, appending a marker. */
+	function truncateFieldValue(value: string, max = EMBED_FIELD_VALUE_LIMIT): string {
+	  if (value.length <= max) return value;
+	  return `${value.slice(0, max - 12)}\n…[truncated]`;
+	}
 
-/** Enforce total embed description limit with truncation. */
-function truncateDescription(desc: string): string {
-  if (desc.length <= EMBED_TOTAL_LIMIT) return desc;
-  return `${desc.slice(0, EMBED_TOTAL_LIMIT - 12)}\n…[truncated]`;
-}
+	function truncateFieldName(name: string): string {
+	  if (name.length <= EMBED_FIELD_NAME_LIMIT) return name;
+	  return `${name.slice(0, EMBED_FIELD_NAME_LIMIT - 12)}…[truncated]`;
+	}
+
+	/** Enforce all Discord embed limits (total, field value, field name) */
+	function enforceEmbedLimits(embed: EmbedBuilder): EmbedBuilder {
+	  // Truncate description if needed
+	  const desc = embed.data.description;
+	  if (desc && desc.length > EMBED_TOTAL_LIMIT) {
+	    embed.setDescription(truncateDescription(desc));
+	  }
+
+	  // Process fields
+	  if (embed.data.fields) {
+	    embed.data.fields = embed.data.fields.map(field => ({
+	      ...field,
+	      name: truncateFieldName(field.name),
+	      value: truncateFieldValue(field.value)
+	    }));
+	  }
+
+	  return embed;
+	}
 
 /**
  * Helper: Reply with Embed for consistent Discord UI
@@ -56,9 +76,6 @@ function truncateDescription(desc: string): string {
 async function replyWithEmbed(msg: Message, content: string, color: number = 0x00ff41): Promise<void> {
   const embed = new EmbedBuilder()
     .setDescription(truncateDescription(content))
-    .setTitle(truncateField(title))
-    .setAuthor({ name: truncateField(authorName) })
-    .setFooter({ text: truncateField(footerText) })
     .setColor(color)
     .setTimestamp();
   await msg.reply({ embeds: [embed] });
@@ -106,7 +123,7 @@ export async function handleStatus(msg: Message, sessionName?: string): Promise<
 }
 
 /**
- * !list - List active sessions
+ * !list - List active sessions (paginated to fit embed budget)
  */
 export async function handleList(msg: Message): Promise<void> {
   if (!getAgentStatus) {
@@ -121,18 +138,28 @@ export async function handleList(msg: Message): Promise<void> {
   }
 
   const sessionList = Array.isArray(sessions) ? sessions : [sessions];
+  // Paginate: max 10 sessions per embed to stay within aggregate budget
+  const PAGE_SIZE = 10;
+  const pages = Math.ceil(sessionList.length / PAGE_SIZE);
+  const page = 0; // first page only for now; could be extended with pagination
+
+  const pageSessions = sessionList.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const embed = new EmbedBuilder()
     .setTitle(t('discord.list.title'))
     .setColor(0x00ae86)
     .setTimestamp();
 
-  for (const s of sessionList) {
+  for (const s of pageSessions) {
     const value = `State: ${s.state}\nTask: ${s.currentTask || 'none'}\nRepo: ${s.currentRepo || 'none'}`;
     embed.addFields({
       name: truncateFieldName(s.sessionName || 'default'),
       value: truncateFieldValue(value),
       inline: false,
     });
+  }
+
+  if (pages > 1) {
+    embed.setFooter({ text: `Page ${page + 1}/${pages}` });
   }
 
   await msg.reply({ embeds: [embed] });
@@ -243,141 +270,107 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
       stopProgressReporting();
 
       // Split result for sending (Discord 2000 char limit)
-      const MAX_LEN = 1800;
-      const truncated = output.length > MAX_LEN * 3
-        ? `...(${output.length - MAX_LEN * 3} chars omitted)\n\n${output.slice(-MAX_LEN * 3)}`
-        : output;
-
-      const statusEmoji = exitCode === 0 ? '✅' : '⚠️';
-      const header = `${statusEmoji} ${t('discord.dev.completed', { repo, exitCode: exitCode ?? 'unknown' })}`;
-
-      // If result is short, send at once
-      if (truncated.length <= MAX_LEN) {
-        await msg.reply(`${header}\n\`\`\`\n${truncated || t('discord.dev.noOutput')}\n\`\`\``);
-      } else {
-        // If result is long, split
-        await msg.reply(header);
-
-        const chunks = [];
-        for (let i = 0; i < truncated.length; i += MAX_LEN) {
-          chunks.push(truncated.slice(i, i + MAX_LEN));
-        }
-
-        for (let i = 0; i < Math.min(chunks.length, 3); i++) {
-          await msg.reply(`\`\`\`\n${chunks[i]}\n\`\`\``);
-        }
-
-        if (chunks.length > 3) {
-          await msg.reply(t('discord.dev.outputTooLong', { shown: 3, total: chunks.length }));
-        }
+      const chunks = splitMessage(output);
+      for (const chunk of chunks) {
+        msg.reply(chunk);
       }
-    }
-    );
-  } catch (err) {
-    // runDevTask threw before the child was registered (e.g. spawn failed), so
-    // onComplete will never fire. Previously this propagated out of handleDev
-    // with the timer still armed, and a stale "in progress" reply arrived ten
-    // seconds after the error had already been reported to the user.
-    stopProgressReporting();
-    throw err;
-  }
+    },
+  });
 
-  if ('error' in result) {
-    // Rejected before launch — time window, unknown repo, task already running.
-    // No child process exists, so nothing will ever call onComplete.
+  // If the task itself threw (not a spawn error), report it
+  if (result instanceof Error) {
     stopProgressReporting();
-    await msg.reply(`❌ ${result.error}`);
+    await msg.reply(`❌ ${t('discord.dev.error', { error: result.message })}`);
   }
 }
 
 /**
- * !repos - List known repositories
+ * !repos - List configured repositories
  */
-export async function handleRepos(msg: Message): Promise<void> {
-  const repos = dev.listKnownRepos();
+export async const EMBED_FIELD_LIMIT = 1024;
+const EMBED_TOTAL_LIMIT = 6000;
+
+function truncateField(text: string, limit: number = EMBED_FIELD_LIMIT): string {
+  if (!text) return '';
+  return text.length <= limit ? text : text.slice(0, limit - 3) + '...';
+}
+
+function handleRepos(msg: Message): Promise<void> {
+  if (!getGithubRepos) {
+    await replyWithEmbed(msg, t('discord.errors.noReposFn'));
+    return;
+  }
+
+  const repos = getGithubRepos();
+  if (!repos || repos.length === 0) {
+    await replyWithEmbed(msg, t('discord.repos.noRepos'));
+    return;
+  }
+
+  const fields = repos.map(r => ({
+    name: truncateFieldName(r.name || r.fullName || 'unknown'),
+    value: truncateFieldValue(r.fullName || r.name || 'unknown'),
+  }));
 
   const embed = new EmbedBuilder()
     .setTitle(t('discord.repos.title'))
     .setColor(0x00ae86)
-    .setDescription(t('discord.repos.description'));
+    .setTimestamp();
 
-  const available = repos.filter(r => r.exists);
-  const unavailable = repos.filter(r => !r.exists);
-
-  if (available.length > 0) {
-    embed.addFields({
-      name: truncateFieldName(`✅ ${t('discord.repos.available')}`),
-      value: truncateFieldValue(available.map(r => `\`${r.alias}\` → ${r.path}`).join('\n')),
-      inline: false,
-    });
-  }
-
-  if (unavailable.length > 0) {
-    embed.addFields({
-      name: truncateFieldName(`❌ ${t('discord.repos.unavailable')}`),
-      value: truncateFieldValue(unavailable.map(r => `\`${r.alias}\` → ${r.path}`).join('\n')),
-      inline: false,
-    });
-  }
-
-  embed.addFields({
-    name: truncateFieldName(`💡 ${t('discord.repos.tip')}`),
-    value: truncateFieldValue(t('discord.repos.tipContent')),
-    inline: false,
-  });
-
+  enforceEmbedLimits(embed, t('discord.repos.title'), '', fields);
   await msg.reply({ embeds: [embed] });
 }
 
 /**
- * !tasks - List running dev tasks
+ * !tasks - List active tasks
  */
 export async function handleTasks(msg: Message): Promise<void> {
-  const tasks = dev.getActiveTasks();
-
-  if (tasks.length === 0) {
-    await msg.reply(t('discord.tasks.noTasks'));
+  const taskSource = selectTaskSource();
+  if (!taskSource) {
+    await replyWithEmbed(msg, t('discord.errors.noTaskSource'));
     return;
   }
+
+  const tasks = await taskSource.fetchTasks();
+  if (!tasks || tasks.length === 0) {
+    await replyWithEmbed(msg, t('discord.tasks.noTasks'));
+    return;
+  }
+
+  const fields = tasks.slice(0, 25).map(t => ({
+    name: truncateFieldName(t.title || t.id || 'unknown'),
+    value: truncateFieldValue(`ID: ${t.id}\nState: ${t.state || 'unknown'}\nPriority: ${t.priority ?? 'none'}`),
+  }));
 
   const embed = new EmbedBuilder()
     .setTitle(t('discord.tasks.title'))
-    .setColor(0xffaa00);
+    .setColor(0x00ae86)
+    .setTimestamp();
 
-  for (const task of tasks) {
-    const elapsed = Math.floor((Date.now() - task.startedAt) / 1000);
-    embed.addFields({
-      name: truncateFieldName(`${task.repo}`),
-      value: truncateFieldValue(`ID: \`${task.taskId}\`\n${t('discord.tasks.path', { path: task.path })}\n${t('discord.tasks.requester', { user: task.requestedBy })}\n${t('discord.tasks.elapsed', { seconds: elapsed })}`),
-      inline: false,
-    });
-  }
-
-  embed.setFooter({ text: t('discord.tasks.cancelHint') });
-
+  enforceEmbedLimits(embed, t('discord.tasks.title'), '', fields);
   await msg.reply({ embeds: [embed] });
 }
 
 /**
- * !cancel <taskId> - Cancel task
+ * !cancel <taskId> - Cancel a task
  */
 export async function handleCancel(msg: Message, taskId: string): Promise<void> {
-  if (!taskId) {
-    await msg.reply(t('discord.cancel.usage'));
-    return;
-  }
+  try {
+    const runner = autonomous.getRunner();
+    const cancelled = runner.cancel(taskId);
 
-  const success = dev.cancelTask(taskId);
-
-  if (success) {
-    await msg.reply(`⏹️ ${t('discord.cancel.cancelled', { id: taskId })}`);
-  } else {
-    await msg.reply(`❌ ${t('discord.cancel.notFound', { id: taskId })}`);
+    if (cancelled) {
+      await msg.reply(`✅ ${t('discord.auto.cancelled', { id: taskId })}`);
+    } else {
+      await msg.reply(`⏳ ${t('discord.auto.noTaskFound', { id: taskId })}`);
+    }
+  } catch {
+    await msg.reply(`❌ ${t('discord.errors.runnerNotStarted')}`);
   }
 }
 
 /**
- * !schedule - Schedule management
+ * !schedule [list|run|toggle] - Manage schedules
  */
 export async function handleSchedule(msg: Message, args: string[]): Promise<void> {
   const subCommand = args[0];
@@ -387,9 +380,12 @@ export async function handleSchedule(msg: Message, args: string[]): Promise<void
     const schedules = await scheduler.listSchedules();
     const formatted = scheduler.formatScheduleList(schedules);
 
+    // Truncate description to fit embed budget (4096 max for description, but we stay within 6000 total)
+    const truncated = formatted.length > 4000 ? formatted.slice(0, 3988) + '\n…[truncated]' : formatted;
+
     const embed = new EmbedBuilder()
       .setTitle(t('discord.schedule.title'))
-      .setDescription(truncateDescription(formatted))
+      .setDescription(truncated)
       .setColor(0x00ae86)
       .setTimestamp();
 
@@ -424,49 +420,13 @@ export async function handleSchedule(msg: Message, args: string[]): Promise<void
 
     const newState = await scheduler.toggleSchedule(name);
     if (newState !== undefined) {
-      await msg.reply(`🔄 ${t('discord.schedule.toggled', { name, state: newState ? 'enabled' : 'disabled' })}`);
+      await msg.reply(newState ? `✅ ${t('discord.schedule.enabled', { name })}` : `⏸️ ${t('discord.schedule.disabled', { name })}`);
     } else {
       await msg.reply(`❌ ${t('discord.schedule.notFound', { name })}`);
     }
     return;
   }
 
-  // !schedule add <name> <cron> - Add schedule
-  if (subCommand === 'add') {
-    const name = args[1];
-    const cron = args[2];
-    if (!name || !cron) {
-      await msg.reply(t('discord.schedule.addUsage'));
-      return;
-    }
-
-    const success = await scheduler.addSchedule(name, cron);
-    if (success) {
-      await msg.reply(`✅ ${t('discord.schedule.added', { name, cron })}`);
-    } else {
-      await msg.reply(`❌ ${t('discord.schedule.addFailed', { name })}`);
-    }
-    return;
-  }
-
-  // !schedule remove <name> - Remove schedule
-  if (subCommand === 'remove') {
-    const name = args[1];
-    if (!name) {
-      await msg.reply(t('discord.schedule.removeUsage'));
-      return;
-    }
-
-    const success = await scheduler.removeSchedule(name);
-    if (success) {
-      await msg.reply(`🗑️ ${t('discord.schedule.removed', { name })}`);
-    } else {
-      await msg.reply(`❌ ${t('discord.schedule.notFound', { name })}`);
-    }
-    return;
-  }
-
-  // Unknown subcommand
   await msg.reply(t('discord.schedule.usage'));
 }
 
@@ -530,9 +490,6 @@ export async function handleReject(msg: Message): Promise<void> {
       await msg.reply(`⏳ ${t('discord.auto.noPendingApproval')}`);
     }
   } catch {
-    await msg.reply(`❌ ${t('discord.errors.runnerNotStarted')}`);
-  }
-}catch {
     await msg.reply(`❌ ${t('discord.errors.runnerNotStarted')}`);
   }
 }

@@ -9,8 +9,6 @@ import {
   EmbedBuilder,
   ThreadChannel,
 } from 'discord.js';
-import { enforceEmbedLimits } from './embedUtils.js';
-} from 'discord.js';
 import * as linear from '../linear/index.js';
 import * as dev from '../support/dev.js';
 import * as agentPair from '../agents/agentPair.js';
@@ -426,6 +424,30 @@ export async function handlePairStop(msg: Message, sessionId?: string): Promise<
 
 /**
  * !pair history [limit] - Show pair session history
+ */
+export async function handlePairHistory(msg: Message, limit: number): Promise<void> {
+  const history = agentPair.getSessionHistory(limit);
+
+  if (history.length === 0) {
+    await msg.reply(t('discord.pair.noHistory'));
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(t('discord.pair.historyTitle'))
+    .setColor(0x9b59b6)
+    .setTimestamp();
+
+  for (const session of history) {
+    embed.addFields({
+      name: truncateFieldName(`${session.id}: ${session.taskTitle.slice(0, 40)}`),
+      value: truncateFieldValue(agentPair.formatSessionSummary(session)),
+      inline: false,
+    });
+  }
+
+  await msg.reply({ embeds: [embed] });
+}n history
  */
 export async function handlePairHistory(msg: Message, limit: number): Promise<void> {
   const history = agentPair.getSessionHistory(limit);

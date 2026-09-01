@@ -63,7 +63,14 @@ export interface ChatLogProps {
   maxMessages?: number;
 }
 
-export function ChatLog({ history, streaming, activity = [], busy, maxMessages = 40 }: ChatLogProps) {
+export const MAX_LINE_WIDTH = 120;
+
+function truncateLine(text: string): string {
+  if (!text) return '';
+  return text.length <= MAX_LINE_WIDTH ? text : text.slice(0, MAX_LINE_WIDTH) + '...';
+}
+
+function ChatLog({ history, streaming, activity = [], busy, maxMessages = 40 }: ChatLogProps) {
   const live = streaming !== null || busy;
   const shown = maxMessages > 0 ? history.slice(-maxMessages) : [];
   return (

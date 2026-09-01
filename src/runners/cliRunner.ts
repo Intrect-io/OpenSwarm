@@ -257,6 +257,8 @@ export async function runCli(options: CliRunOptions): Promise<void> {
 
 // Result Formatting
 
+import { sanitizeTerminalText } from '../tui/sanitize';
+
 function printResult(result: PipelineResult): void {
   console.log('');
   console.log('  ======================================');

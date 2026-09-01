@@ -2363,7 +2363,17 @@ function escapeHtml(unsafe: string): string {
     .replace(/'/g, '&#039;');
 }
 
-export function buildDashboardHtml(providers: readonly string[]): string {
+export function escapeHtml(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function buildDashboardHtml(providers: readonly string[]): string {
   const buttons = providers.map((name) => {
     const label = PROVIDER_BUTTON_LABELS[name] ?? name;
     return `<button class="provider-btn" id="provider-${name}" onclick="switchProvider('${name}')">${label}</button>`;

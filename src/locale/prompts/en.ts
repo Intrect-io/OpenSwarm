@@ -14,7 +14,15 @@ function bounded<T>(values: readonly T[]): readonly T[] {
   return values.slice(0, MAX_PROMPT_COLLECTION_ITEMS);
 }
 
-function escapePromptData(value: string): string {
+export const MAX_FEEDBACK_ITEMS = 10;
+export const MAX_EVIDENCE_LENGTH = 2000;
+
+export function bounded<T>(items: T[], limit: number = MAX_FEEDBACK_ITEMS): T[] {
+  if (!items) return [];
+  return items.slice(0, limit);
+}
+
+export function escapePromptData(value: string): string {
   const limited = value.length > MAX_PROMPT_DATA_CHARS ? `${value.slice(0, MAX_PROMPT_DATA_CHARS)}\n[truncated]` : value;
   return limited
     .replaceAll(DATA_BLOCK_OPEN, '&lt;openswarm-untrusted-data&gt;')
