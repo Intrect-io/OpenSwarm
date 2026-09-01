@@ -15,7 +15,6 @@ import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
 import { withStoreLock } from '../taskState/store.js';
-import { withStoreLock } from '../taskState/store.js';
 
 const execFileAsync = promisify(execFile);
 /** Safe git command execution (no shell) */
@@ -490,8 +489,6 @@ export class PRProcessor {
 
       // Acquire cross-process lease before any state mutation
       await withStoreLock('prProcessor-fix', async () => {
-              // Acquire cross-process lease before any state mutation
-      await withStoreLock('prProcessor-fix', async () => {
         const review = await runReviewCommand({
           path: scratchWorktree,
           base: mergeBase,
@@ -510,7 +507,6 @@ export class PRProcessor {
           historyDirOverride: join(projectPath, '.openswarm', 'history'),
           stateDirOverride: join(projectPath, '.openswarm', 'state'),
         });
-      });
       });
             captureReviewFileHashes(scratchWorktree, files),
           ]);
