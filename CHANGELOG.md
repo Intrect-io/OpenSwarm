@@ -8,6 +8,7 @@
 - **Workers revise DoD through the orchestrator, not `ask_human`.** Draft completion criteria must be sandbox-achievable.
 - **`.venv.bak` is ephemeral.** A leftover runtime symlink was failing the worker-scope fence (AGT-3834).
 - **New CodeQL findings are logged with the actual rules**, not a bare "retrying" line.
+- **CodeQL "new findings" were the snapshot temp path.** Python SARIF URIs included `.codeql-python/src/tmp/openswarm-security-audit-<id>/…`, so every post-edit audit looked newly introduced and workers never reached PR publication.
 
 ### Added
 

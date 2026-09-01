@@ -190,10 +190,38 @@ function sarifArtifactPath(snapshotRoot: string, uri: string | undefined): strin
   if (!uri) return undefined;
   try {
     const candidate = uri.startsWith('file:') ? fileURLToPath(uri) : resolve(snapshotRoot, uri);
-    return inside(snapshotRoot, candidate) ? relative(snapshotRoot, candidate).split(sep).join('/') : undefined;
+    if (!inside(snapshotRoot, candidate)) return undefined;
+    return repositoryRelativeSarifPath(snapshotRoot, relative(snapshotRoot, candidate).split(sep).join('/'));
   } catch {
     return undefined;
   }
+}
+
+/**
+ * CodeQL's Python (and some other) extractors emit database-relative URIs
+ * such as `.codeql-python/src/tmp/openswarm-security-audit-<id>/web/foo.py`
+ * instead of the snapshot-relative `web/foo.py`. Fingerprinting that random
+ * temp segment made every post-edit audit look like a brand-new finding, so
+ * workers looped on "New CodeQL findings" and never published a PR.
+ */
+export function repositoryRelativeSarifPath(snapshotRoot: string, relativePosix: string): string | undefined {
+  let path = relativePosix.replaceAll('\\', '/');
+  if (path.startsWith('.codeql-')) {
+    path = path.replace(/^\.codeql-[^/]+\/src\//, '');
+  }
+  // Python extractor nests the host temp path under the DB: tmp/openswarm-security-audit-<id>/…
+  path = path.replace(/^(?:tmp\/)?openswarm-security-audit-[^/]+\//, '');
+  const snapshotPosix = snapshotRoot.split(sep).join('/');
+  const absPrefix = snapshotPosix.replace(/^\//, '');
+  if (absPrefix && (path === absPrefix || path.startsWith(`${absPrefix}/`))) {
+    path = path === absPrefix ? '' : path.slice(absPrefix.length + 1);
+  }
+  const name = snapshotPosix.split('/').pop() ?? '';
+  if (name && name !== absPrefix && (path === name || path.startsWith(`${name}/`))) {
+    path = path === name ? '' : path.slice(name.length + 1);
+  }
+  if (!path || /(^|\/)\.\.(\/|$)/.test(path) || path.startsWith('.codeql-') || isAbsolute(path)) return undefined;
+  return path;
 }
 
 async function findSystemExecutable(name: string): Promise<string | undefined> {
