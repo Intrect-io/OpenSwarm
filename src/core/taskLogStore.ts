@@ -73,7 +73,9 @@ function evictIfNeeded(): void {
 }
 
 /** Returns the sequence assigned to the line (0 when nothing was stored). */
-export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): number {
+export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): void {
+  const safeTaskId = tailWithinBytes(taskId, 512);
+  const safeStage = tailWithinBytes(stage, 512);
   if (!taskId || typeof line !== 'string') return 0;
   let buffer = buffers.get(taskId);
   if (!buffer) {

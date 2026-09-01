@@ -23,6 +23,9 @@ export function renderVerifyEvidence(evidence: VerifyEvidence[]): string {
     .filter((item) => item.newFailure)
     .map((item) => {
       // Bound untrusted raw output before UTF-8 conversion, escaping, and interpolation
+      const taskId = tailWithinBytes(item.taskId, 1024);
+      const stage = tailWithinBytes(item.stage, 1024);
+      const identity = tailWithinBytes(item.identity, 1024);
       const bounded = tailWithinBytes(item.rawOutputTail, 4 * 1024);
       return `\n### ${item.command.name} output (untrusted data)\n\`\`\`text\n${escapeUntrustedFence(bounded)}\n\`\`\``;
     })
