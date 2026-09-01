@@ -14,6 +14,8 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import { withStoreLock } from '../taskState/store.js';
+import { withStoreLock } from '../taskState/store.js';
 
 const execFileAsync = promisify(execFile);
 /** Safe git command execution (no shell) */
@@ -486,24 +488,30 @@ export class PRProcessor {
       worktreePath = scratchWorktree;
       await gitExec(projectPath, 'worktree', 'add', '--detach', scratchWorktree, reviewedSha);
 
-      const review = await runReviewCommand({
-        path: scratchWorktree,
-        base: mergeBase,
-        // The checked-out content is another PR's diff — untrusted the same
-        // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
-        // including bash, keeps a malicious PR from using the reviewer's
-        // shell access and provider credential as an attack surface.
-        readOnly: true,
-      }, {
-        // Both overrides exist for the same reason: the review's cwd is the
-        // scratch worktree that `finally` deletes, so the default paths write
-        // history into a directory about to vanish and read it from one that was
-        // just created empty. Every PR review was therefore unrecorded AND blind
-        // to earlier ones. Point both at the real repository, while hashes keep
-        // coming from the checkout actually under review. (INT-3914)
-        loadHistory: async (_cwd, files) => {
-          const [loaded, currentHashes] = await Promise.all([
-            loadReviewHistory(projectPath),
+      // Acquire cross-process lease before any state mutation
+      await withStoreLock('prProcessor-fix', async () => {
+              // Acquire cross-process lease before any state mutation
+      await withStoreLock('prProcessor-fix', async () => {
+        const review = await runReviewCommand({
+          path: scratchWorktree,
+          base: mergeBase,
+          // The checked-out content is another PR's diff — untrusted the same
+          // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
+          // including bash, keeps a malicious PR from using the reviewer's
+          // shell access and provider credential as an attack surface.
+          readOnly: true,
+        }, {
+          // Both overrides exist for the same reason: the review's cwd is the
+          // scratch worktree that `finally` deletes, so the default paths write
+          // history into a directory about to vanish and read it from one that was
+          // just created empty. Every PR review was therefore unrecorded AND blind
+          // to earlier ones. Point both at the real repository, while hashes keep
+          // content isolation.
+          historyDirOverride: join(projectPath, '.openswarm', 'history'),
+          stateDirOverride: join(projectPath, '.openswarm', 'state'),
+        });
+      });
+      });
             captureReviewFileHashes(scratchWorktree, files),
           ]);
           const rendered = renderReviewHistoryContext(loaded, files, currentHashes);

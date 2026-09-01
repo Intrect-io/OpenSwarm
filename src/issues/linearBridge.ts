@@ -39,7 +39,16 @@ export async function syncFromLinear(
   projectId: string,
   options?: { states?: string[]; limit?: number },
 ): Promise<{ created: number; updated: number }> {
-  await waitForLinearBridgeInit();
+  try {
+    // Ensure client is ready, retrying initialization if needed
+    await ensureLinearAuthFresh();
+  } catch (err) {
+    console.warn('[LinearBridge] syncFromLinear failed, reinitializing...', err);
+    if (linearTeamId && process.env.LINEAR_API_KEY) {
+      await initLinearBridge(process.env.LINEAR_API_KEY, linearTeamId);
+    }
+    await waitForLinearBridgeInit();
+  }
   if (!linearClient) {
     console.warn('[LinearBridge] 클라이언트 미초기화');
     return { created: 0, updated: 0 };

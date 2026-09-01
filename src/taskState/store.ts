@@ -149,6 +149,22 @@ function lockPidIsJudgeable(owner: StoreLockOwner): boolean {
   return sameProcessNamespace(owner.ns);
 }
 
+/**
+ * Detect if two files are the same physical file (same inode or creation time)
+ * to identify same-size replacements within one mtime tick.
+ */
+function filesAreSamePhysicalFile(path1: string, path2: string): boolean {
+  try {
+    const stat1 = statSync(path1);
+    const stat2 = statSync(path2);
+    // Compare inodes if available (Unix), otherwise fall back to birth time
+    return stat1.dev === stat2.dev && stat1.ino === stat2.ino ||
+           Math.abs(stat1.birthtimeMs - stat2.birthtimeMs) < 1;
+  } catch {
+    return false;
+  }
+}
+
 function readStoreLockOwner(lockPath: string): StoreLockOwner | null {
   try {
     const value = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<StoreLockOwner>;

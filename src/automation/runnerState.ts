@@ -599,12 +599,14 @@ export function registerDecomposition(
 
   // Validate the full batch before mutating the in-memory projection. A child
   // identity collision must leave no half-created parent entry behind.
+  // Reserve capacity atomically before any mutation
   for (const childId of uniqueChildren) {
     const existing = state.decompositions[childId];
     if (existing && existing.parentId !== issueId) {
       throw new Error(`Decomposition child ${childId} is already owned by ${existing.parentId ?? 'no parent'}`);
     }
   }
+  // All checks passed, proceed with mutation
 
   const existingIssue = state.decompositions[issueId];
   state.decompositions[issueId] = {

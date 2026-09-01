@@ -222,12 +222,14 @@ export async function runDevTask(
       }
     } catch { /* use original */ }
 
-    // Generate report file
-    const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
-    generateReport(devTask, code, duration);
-
-    onComplete?.(resultText, code);
-    activeTasks.delete(taskId);
+    let duration = 0;
+    try {
+      duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
+      generateReport(devTask, code, duration);
+    } finally {
+      onComplete?.(resultText, code);
+      activeTasks.delete(taskId);
+    }
   });
 
   // Handle errors
