@@ -384,7 +384,12 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
         agentPair.updateSessionStatus(sessionId, 'failed');
         await thread.send(t('discord.pair.maxAttemptsExceeded'));
 
-        // Truncate and sanitize message before sending to Linear
+        // Truncate and sanitize feedback before posting to Discord
+        const feedback = session.reviewResult?.feedback;
+        if (feedback) {
+          const safeFeedback = sanitizeTerminalText(feedback).slice(0, MAX_FEEDBACK_LENGTH);
+          postToThread(safeFeedback);
+        }
         const message = `Worker failed after max attempts (${session.worker.maxAttempts}) exceeded`;
         const truncated = message.length > 4000 ? message.slice(0, 4000) : message;
         
@@ -484,10 +489,14 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       return;
     }
 
+    // Truncate and sanitize feedback before logging
+    const feedback = sanitizeTerminalText(reviewResult.feedback || '');
+    const truncatedFeedback = feedback.slice(0, MAX_REPORT_SIZE);
+    
     // Log revision request in Linear
     try {
       await linear.logPairRevision(session.taskId, sessionId,
-        reviewResult.feedback, reviewResult.issues || []);
+        truncatedFeedback, reviewResult.issues || []);
     } catch (err) {
       console.error('[Pair] Linear logPairRevision failed:', err);
     }

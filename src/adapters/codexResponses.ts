@@ -262,6 +262,7 @@ async function consumeResponsesStream(
   if (!reader) throw new Error('Codex responses: empty stream body');
 
   const decoder = new TextDecoder();
+  const MAX_EVENT_SIZE = 1024 * 1024; // 1 MiB
   let buffer = '';
   // Reasoning summary streams token-by-token; buffer and emit whole lines so the
   // live log shows readable thoughts instead of one-word-per-line spam.

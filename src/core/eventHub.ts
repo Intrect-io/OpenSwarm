@@ -167,6 +167,9 @@ export function getEventHub(): EventEmitter {
   return hub;
 }
 
+const MAX_PENDING_EVENTS = 100;
+const MAX_EVENT_PAYLOAD = 1024 * 1024; // 1 MiB
+
 export function broadcastEvent(event: HubEvent): void {
   // Skip replaying heartbeat/stats to avoid noise on reconnect
   if (event.type !== 'heartbeat') {
@@ -218,13 +221,30 @@ export function broadcastEvent(event: HubEvent): void {
       stageBuffer.push(event);
       if (stageBuffer.length > STAGE_BUFFER_MAX) stageBuffer.shift();
       break;
-    case 'chat:user':
-    case 'chat:agent':
+    case 'chat':
       chatBuffer.push(event);
       if (chatBuffer.length > CHAT_BUFFER_MAX) chatBuffer.shift();
       break;
   }
-  const data = `data: ${JSON.stringify(event)}\n\n`;
+  // Cap event payload size before sending
+  const serialized = JSON.stringify(event, (key, value) => {
+    if (typeof value === 'string' && value.length > MAX_EVENT_PAYLOAD) {
+      return value.slice(0, MAX_EVENT_PAYLOAD);
+    }
+    return value;
+  });
+  sendToAllClients(serialized);
+}
+
+function sendToAllClients(event: string) {
+  clients.forEach(client => {
+    if (client.pendingEvents && client.pendingEvents > MAX_PENDING_EVENTS) {
+      client.disconnect();
+    } else {
+      client.send(event);
+    }
+  });
+}
   for (const res of sseClients) {
     try {
       // Enforce backpressure limit: disconnect clients with too much pending data

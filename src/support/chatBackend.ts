@@ -353,7 +353,10 @@ async function runChatViaAdapter(
   const text = raw.stdout.trim();
   // Non-streaming adapters emit nothing via onToken — flush the full reply once.
   if (!streamed) options.onText?.(text, false);
-  return { response: text || '[No response]', provider, model };
+  // Apply bounds to stdout/stderr before returning
+  const stdout = sanitizeTerminalText(raw.stdout).slice(0, MAX_OUTPUT_BYTES);
+  const stderr = sanitizeTerminalText(raw.stderr).slice(0, MAX_OUTPUT_BYTES);
+  return { response: text || '[No response]', provider, model, stdout, stderr };
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     options.signal?.removeEventListener('abort', relayCallerAbort);

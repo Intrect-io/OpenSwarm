@@ -15,9 +15,12 @@ import { expandPath } from '../core/config.js';
 import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgress.js';
 import { status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
+const MAX_OUTPUT_BYTES = 1024 * 1024; // 1 MiB
 import { safeConsole as console } from '../support/safeLog.js';
 
 // Types
+
+const MAX_OUTPUT_BYTES = 1024 * 1024; // 1 MiB
 
 export interface CliRunOptions {
   task: string;
@@ -27,7 +30,7 @@ export interface CliRunOptions {
   workerOnly?: boolean;
   maxIterations?: number;
   verbose?: boolean;
-  /** Record the outcome into repo knowledge (default true; --no-learn opts out). (INT-2268) */
+}
   learn?: boolean;
 }
 

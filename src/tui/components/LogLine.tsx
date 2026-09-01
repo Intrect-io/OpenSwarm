@@ -4,12 +4,12 @@ import { parseLogLine } from '../logFormat.js';
 import { sanitizeTerminalText } from '../sanitize.js';
 
 // Maximum size of a log line in bytes before truncation
-const MAX_LOG_LINE_BYTES = 16 * 1024; // 16 KiB
+const MAX_LOG_LINE_BYTES = 4 * 1024; // 4 KiB
 
 export function LogLine({ line }: { line: string }) {
   // Truncate long lines to prevent memory issues
-  const truncated = line.length > MAX_LOG_LINE_BYTES 
-    ? line.slice(0, MAX_LOG_LINE_BYTES) 
+  const truncated = line.length > MAX_LOG_LINE_BYTES ? line.slice(0, MAX_LOG_LINE_BYTES) + '…' : line;
+  const parsed = parseLogLine(truncated);
     : line;
     
   return (

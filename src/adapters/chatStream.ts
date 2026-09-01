@@ -146,10 +146,21 @@ export async function consumeChatCompletionsStream(
       for (const line of lines) handle(parseChunkLine(line));
       continue;
     }
-    buffer += decoded;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    for (const line of lines) handle(parseChunkLine(line));
+          // Enforce frame size limit
+      if (buffer.length + decoded.length > MAX_FRAME_SIZE) {
+        const remainingSpace = MAX_FRAME_SIZE - buffer.length;
+        const truncated = decoded.slice(0, remainingSpace);
+        buffer += truncated;
+        // Process and flush the buffer immediately
+        const lines = buffer.split('\n');
+        buffer = '';
+        for (const line of lines) handle(parseChunkLine(line));
+        continue;
+      }
+      buffer += decoded;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) handle(parseChunkLine(line));
   }
   handle(parseChunkLine(buffer));
 
