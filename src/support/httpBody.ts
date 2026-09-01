@@ -18,8 +18,13 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Read the full request body as a UTF-8 string, using a streaming TextDecoder
+ * so that multi-byte characters split across TCP chunks are decoded correctly.
+ */
 export function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
+    const decoder = new TextDecoder('utf-8', { stream: true });
     let data = '';
     let totalBytes = 0;
     let settled = false;
@@ -37,11 +42,13 @@ export function readBody(req: IncomingMessage): Promise<string> {
         fail(413, 'Request body too large');
         return;
       }
-      data += chunk.toString('utf-8');
+      data += decoder.decode(chunk, { stream: true });
     });
     req.on('end', () => {
       if (settled) return;
       settled = true;
+      // Flush any remaining buffered bytes from the decoder
+      data += decoder.decode();
       resolve(data);
     });
     req.on('aborted', () => fail(400, 'Request body aborted'));

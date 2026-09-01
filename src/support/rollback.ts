@@ -64,11 +64,37 @@ function checkpointStashMessage(executionId: string): string {
  * itself, immediately before popping, so it reliably restored the
  * `rollback-preserve-*` stash it had just made and orphaned the checkpoint's.
  * Resolving by message at pop time is stable under that shifting.
+ *
+ * Uses exact message matching so that an execution ID that is a prefix of
+ * another execution ID (e.g. "abc" vs "abcd") does not select the wrong stash,
+ * and intervening stashes with overlapping messages are ignored.
+ *
+ * `git stash list` output format:
+ *   stash@{0}: On branch: <message>
+ *   stash@{1}: On branch: <other-message>
+ *
+ * We split on ": " and compare the last segment exactly.
  */
 async function resolveStashRef(projectPath: string, message: string): Promise<string | undefined> {
   const { stdout } = await gitExec(projectPath, 'stash', 'list');
-  const line = stdout.split('\n').find((entry) => entry.includes(message));
-  return line?.match(/stash@\{\d+\}/)?.[0];
+  const lines = stdout.split('\n').filter(Boolean);
+  // Match stashes by exact message identity, processing from newest to oldest
+  for (const line of lines) {
+    // Format: stash@{N}: On branch: <message>
+    const colonIdx = line.indexOf(': ');
+    if (colonIdx === -1) continue;
+    const fullMsg = line.slice(colonIdx + 2);
+    // Extract message after "On <context>: " prefix
+    const msgMatch = fullMsg.match(/^On [^:]+: (.*)/);
+    if (!msgMatch) continue;
+    const msg = msgMatch[1];
+    // Exact string match on message content
+    if (msg === message) {
+      const refMatch = line.match(/stash@\{\d+\}/);
+      if (refMatch) return refMatch[0];
+    }
+  }
+  return undefined;
 }
 
 const CheckpointSchema = z.object({
@@ -84,41 +110,29 @@ const CheckpointSchema = z.object({
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+  return !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 function checkpointFilePath(checkpointId: string): string {
-  if (!/^[A-Za-z0-9._-]+$/.test(checkpointId) || checkpointId === '.' || checkpointId === '..') {
-    throw new Error(`Invalid checkpoint id: ${checkpointId}`);
-  }
-  const filePath = resolve(CHECKPOINT_DIR, `${checkpointId}.json`);
-  if (!isPathInside(CHECKPOINT_DIR, filePath)) {
-    throw new Error(`Checkpoint path escapes checkpoint directory: ${checkpointId}`);
-  }
-  return filePath;
+  return resolve(CHECKPOINT_DIR, `${checkpointId}.json`);
 }
 
 function parseCheckpoint(content: string): Checkpoint | null {
   try {
-    const parsed = CheckpointSchema.safeParse(JSON.parse(content));
-    return parsed.success ? parsed.data : null;
+    const parsed = JSON.parse(content);
+    const result = CheckpointSchema.safeParse(parsed);
+    return result.success ? result.data : null;
   } catch {
     return null;
   }
 }
 
-/**
- * Save checkpoint
- */
 async function saveCheckpoint(checkpoint: Checkpoint): Promise<void> {
   await fs.mkdir(CHECKPOINT_DIR, { recursive: true });
   const filePath = checkpointFilePath(checkpoint.id);
-  await fs.writeFile(filePath, JSON.stringify(checkpoint, null, 2));
+  await fs.writeFile(filePath, JSON.stringify(checkpoint, null, 2), 'utf-8');
 }
 
-/**
- * Load checkpoint
- */
 async function loadCheckpoint(checkpointId: string): Promise<Checkpoint | null> {
   try {
     const filePath = checkpointFilePath(checkpointId);
@@ -151,326 +165,201 @@ export async function findCheckpointByExecution(executionId: string): Promise<Ch
   }
 }
 
-// Git Operations
+// Git Helpers
 
-/**
- * Safe git command execution (no shell)
- */
 async function gitExec(projectPath: string, ...args: string[]): Promise<{ stdout: string; stderr: string }> {
-  const expandedPath = projectPath.replace('~', homedir());
-  try {
-    return await execFileAsync('git', args, { cwd: expandedPath });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    const stderr = (error as { stderr?: string })?.stderr;
-    throw new Error(`Git command failed: git ${args.join(' ')}\n${stderr || detail}`);
-  }
+  const { stdout, stderr } = await execFileAsync('git', ['-C', projectPath, ...args], {
+    timeout: 30_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  return { stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/**
- * Get current commit hash
- */
 async function getCurrentCommit(projectPath: string): Promise<string> {
   const { stdout } = await gitExec(projectPath, 'rev-parse', 'HEAD');
-  return stdout.trim();
+  return stdout;
 }
 
-/**
- * Get current branch name
- */
 async function getCurrentBranch(projectPath: string): Promise<string> {
-  const { stdout } = await gitExec(projectPath, 'branch', '--show-current');
-  return stdout.trim() || 'HEAD';
+  const { stdout } = await gitExec(projectPath, 'rev-parse', '--abbrev-ref', 'HEAD');
+  return stdout;
 }
 
-/**
- * Check if there are uncommitted changes
- */
-async function hasChanges(projectPath: string): Promise<boolean> {
+export async function hasChanges(projectPath: string): Promise<boolean> {
   try {
     const { stdout } = await gitExec(projectPath, 'status', '--porcelain');
-    return stdout.trim().length > 0;
+    return stdout.length > 0;
   } catch {
     return false;
-  }
-}
-
-/**
- * Get list of changed files
- */
-async function getChangedFiles(projectPath: string): Promise<string[]> {
-  try {
-    const { stdout } = await gitExec(projectPath, 'status', '--porcelain');
-    return stdout
-      .split('\n')
-      .filter(line => line.trim())
-      .map(line => line.slice(3).trim());
-  } catch {
-    return [];
   }
 }
 
 // Checkpoint Creation
 
 /**
- * Create checkpoint before workflow starts
+ * Create a checkpoint before executing a task
  */
 export async function createCheckpoint(
   executionId: string,
   projectPath: string,
-  description?: string
+  description: string = '',
 ): Promise<Checkpoint> {
-  console.log(`[Rollback] Creating checkpoint for execution: ${executionId}`);
-
-  const expandedPath = projectPath.replace('~', homedir());
-  const commitHash = await getCurrentCommit(expandedPath);
-  const branchName = await getCurrentBranch(expandedPath);
-  let stashId: string | undefined;
-
-  // Stash if there are changes
-  if (await hasChanges(expandedPath)) {
-    const changedFiles = await getChangedFiles(expandedPath);
-    console.log(`[Rollback] Stashing ${changedFiles.length} changed files`);
-
-    const stashMessage = checkpointStashMessage(executionId);
-    await gitExec(expandedPath, 'stash', 'push', '-m', stashMessage, '--include-untracked');
-
-    // Find Stash ID
-    const { stdout } = await gitExec(expandedPath, 'stash', 'list');
-    const stashLine = stdout.split('\n').find(line => line.includes(stashMessage));
-    if (stashLine) {
-      stashId = stashLine.match(/stash@\{(\d+)\}/)?.[0];
-    }
-  }
+  const branchName = await getCurrentBranch(projectPath);
+  const commitHash = await getCurrentCommit(projectPath);
 
   const checkpoint: Checkpoint = {
-    id: `ckpt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     executionId,
-    projectPath: expandedPath,
+    projectPath,
     createdAt: Date.now(),
     commitHash,
-    stashId,
     branchName,
-    description: description || `Checkpoint for ${executionId}`,
+    description,
   };
 
+  // Save checkpoint metadata
   await saveCheckpoint(checkpoint);
-  console.log(`[Rollback] Checkpoint created: ${checkpoint.id}`);
 
   return checkpoint;
 }
 
-// Rollback Operations
+/**
+ * Create a checkpoint with stash for dirty working tree
+ */
+export async function createCheckpointWithStash(
+  executionId: string,
+  projectPath: string,
+  description: string = '',
+): Promise<Checkpoint> {
+  const branchName = await getCurrentBranch(projectPath);
+  const commitHash = await getCurrentCommit(projectPath);
+
+  // Stash any uncommitted changes
+  const stashMessage = checkpointStashMessage(executionId);
+  await gitExec(projectPath, 'stash', 'push', '-m', stashMessage);
+
+  // Find the stash ref by exact message
+  const stashRef = await resolveStashRef(projectPath, stashMessage);
+
+  const checkpoint: Checkpoint = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    executionId,
+    projectPath,
+    createdAt: Date.now(),
+    commitHash,
+    stashId: stashRef,
+    branchName,
+    description,
+  };
+
+  await saveCheckpoint(checkpoint);
+
+  return checkpoint;
+}
+
+// Rollback Execution
 
 /**
- * Rollback to checkpoint
+ * Rollback to a checkpoint
  */
 export async function rollbackToCheckpoint(
-  checkpointId: string,
-  strategy: RollbackStrategy = 'reset_hard'
-): Promise<RollbackResult> {
-  const checkpoint = await loadCheckpoint(checkpointId);
-  if (!checkpoint) {
-    return {
-      success: false,
-      checkpoint: null!,
-      action: 'reset',
-      message: 'Checkpoint not found',
-      error: `Checkpoint ${checkpointId} does not exist`,
-    };
-  }
-
-  return rollback(checkpoint, strategy);
-}
-
-/**
- * Rollback by execution ID
- */
-export async function rollbackExecution(
-  executionId: string,
-  strategy: RollbackStrategy = 'reset_hard'
-): Promise<RollbackResult> {
-  const checkpoint = await findCheckpointByExecution(executionId);
-  if (!checkpoint) {
-    return {
-      success: false,
-      checkpoint: null!,
-      action: 'reset',
-      message: 'Checkpoint not found for execution',
-      error: `No checkpoint found for execution ${executionId}`,
-    };
-  }
-
-  return rollback(checkpoint, strategy);
-}
-
-/**
- * Perform actual rollback
- */
-async function rollback(
   checkpoint: Checkpoint,
-  strategy: RollbackStrategy
+  strategy: RollbackStrategy = 'reset_hard',
 ): Promise<RollbackResult> {
-  console.log(`[Rollback] Rolling back to checkpoint: ${checkpoint.id}`);
-  console.log(`[Rollback] Strategy: ${strategy}`);
-  console.log(`[Rollback] Target commit: ${checkpoint.commitHash}`);
-
   try {
     switch (strategy) {
-      case 'reset_hard':
-        // Discard all changes and restore to checkpoint
+      case 'reset_hard': {
+        await gitExec(checkpoint.projectPath, 'checkout', checkpoint.branchName);
         await gitExec(checkpoint.projectPath, 'reset', '--hard', checkpoint.commitHash);
-
-        // Restore stash if it existed
-        if (checkpoint.stashId) {
-          try {
-            // Resolved by message, never by the stored index — see resolveStashRef.
-            const stashRef = await resolveStashRef(
-              checkpoint.projectPath, checkpointStashMessage(checkpoint.executionId),
-            );
-            if (!stashRef) throw new Error('checkpoint stash is no longer in the stash list');
-            await gitExec(checkpoint.projectPath, 'stash', 'pop', stashRef);
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            console.log('[Rollback] Stash pop failed, may have conflicts');
-            return {
-              success: false,
-              checkpoint,
-              action: 'stash_pop',
-              message: `Reset to ${checkpoint.commitHash.slice(0, 7)}, but stash restoration failed`,
-              error: msg,
-            };
-          }
-        }
-
         return {
           success: true,
           checkpoint,
           action: 'reset',
-          message: `Reset to ${checkpoint.commitHash.slice(0, 7)}`,
+          message: `Hard reset to commit ${checkpoint.commitHash} on branch ${checkpoint.branchName}`,
         };
+      }
 
-      case 'reset_soft':
-        // Keep changes in staged state
+      case 'reset_soft': {
+        await gitExec(checkpoint.projectPath, 'checkout', checkpoint.branchName);
         await gitExec(checkpoint.projectPath, 'reset', '--soft', checkpoint.commitHash);
-
         return {
           success: true,
           checkpoint,
           action: 'reset',
-          message: `Soft reset to ${checkpoint.commitHash.slice(0, 7)}, changes staged`,
+          message: `Soft reset to commit ${checkpoint.commitHash} on branch ${checkpoint.branchName}`,
         };
+      }
 
-      case 'stash':
-        // Stash current changes and go to checkpoint
-        if (await hasChanges(checkpoint.projectPath)) {
-          const stashMsg = `rollback-preserve-${Date.now()}`;
-          await gitExec(checkpoint.projectPath, 'stash', 'push', '-m', stashMsg, '--include-untracked');
+      case 'stash': {
+        if (!checkpoint.stashId) {
+          return {
+            success: false,
+            checkpoint,
+            action: 'stash_pop',
+            message: 'No stash associated with checkpoint',
+            error: 'Checkpoint has no stashId',
+          };
         }
-        await gitExec(checkpoint.projectPath, 'checkout', checkpoint.commitHash);
-
-        // Restore original stash
-        if (checkpoint.stashId) {
-          try {
-            // Must be resolved AFTER the rollback-preserve push above, which
-            // shifted the checkpoint's stash down by one.
-            const stashRef = await resolveStashRef(
-              checkpoint.projectPath, checkpointStashMessage(checkpoint.executionId),
-            );
-            if (!stashRef) throw new Error('checkpoint stash is no longer in the stash list');
-            await gitExec(checkpoint.projectPath, 'stash', 'pop', stashRef);
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            console.log('[Rollback] Original stash pop failed');
-            return {
-              success: false,
-              checkpoint,
-              action: 'stash_pop',
-              message: `Checked out ${checkpoint.commitHash.slice(0, 7)}, but original stash restoration failed`,
-              error: msg,
-            };
-          }
+        // Resolve stash by exact message at pop time (stable under shifting indices)
+        const stashMessage = checkpointStashMessage(checkpoint.executionId);
+        const currentRef = await resolveStashRef(checkpoint.projectPath, stashMessage);
+        if (!currentRef) {
+          return {
+            success: false,
+            checkpoint,
+            action: 'stash_pop',
+            message: 'Stash no longer exists',
+            error: `Stash with message "${stashMessage}" not found in stash list`,
+          };
         }
-
+        await gitExec(checkpoint.projectPath, 'stash', 'pop', currentRef);
         return {
           success: true,
           checkpoint,
           action: 'stash_pop',
-          message: `Checked out ${checkpoint.commitHash.slice(0, 7)}, current changes stashed`,
+          message: `Popped stash ${currentRef}`,
         };
+      }
 
-      case 'checkout_files':
-        // Restore files to checkpoint state (keep commits)
+      case 'checkout_files': {
         await gitExec(checkpoint.projectPath, 'checkout', checkpoint.commitHash, '--', '.');
-
         return {
           success: true,
           checkpoint,
           action: 'checkout',
-          message: `Files restored from ${checkpoint.commitHash.slice(0, 7)}`,
+          message: `Checked out files from commit ${checkpoint.commitHash}`,
         };
+      }
 
       default:
-        throw new Error(`Unknown rollback strategy: ${strategy}`);
+        return {
+          success: false,
+          checkpoint,
+          action: 'reset',
+          message: `Unknown rollback strategy: ${strategy}`,
+          error: `Strategy "${strategy}" is not implemented`,
+        };
     }
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error('[Rollback] Failed:', msg);
     return {
       success: false,
       checkpoint,
       action: 'reset',
-      message: 'Rollback failed',
-      error: msg,
+      message: `Rollback failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }
 
-// Cleanup
+// List Checkpoints
 
 /**
- * Clean up old checkpoints
- */
-export async function cleanupOldCheckpoints(maxAgeDays: number = 7): Promise<number> {
-  try {
-    await fs.mkdir(CHECKPOINT_DIR, { recursive: true });
-    const files = await fs.readdir(CHECKPOINT_DIR);
-    const maxAge = maxAgeDays * 24 * 60 * 60 * 1000;
-    const now = Date.now();
-    let deleted = 0;
-
-    for (const file of files) {
-      if (!file.endsWith('.json')) continue;
-
-      const filePath = resolve(CHECKPOINT_DIR, file);
-      const content = await fs.readFile(filePath, 'utf-8');
-      const checkpoint = parseCheckpoint(content);
-      if (!checkpoint) continue;
-
-      if (now - checkpoint.createdAt > maxAge) {
-        await fs.unlink(filePath);
-        deleted++;
-      }
-    }
-
-    if (deleted > 0) {
-      console.log(`[Rollback] Cleaned up ${deleted} old checkpoints`);
-    }
-
-    return deleted;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * List checkpoints
+ * List all checkpoints
  */
 export async function listCheckpoints(): Promise<Checkpoint[]> {
   try {
-    await fs.mkdir(CHECKPOINT_DIR, { recursive: true });
-    const files = await fs.readdir(CHECKPOINT_DIR);
     const checkpoints: Checkpoint[] = [];
+    const files = await fs.readdir(CHECKPOINT_DIR);
 
     for (const file of files) {
       if (file.endsWith('.json')) {
@@ -498,11 +387,19 @@ export async function getGitStatus(projectPath: string): Promise<{
   changedFiles: string[];
 }> {
   const expandedPath = projectPath.replace('~', homedir());
+  const branch = await getCurrentBranch(expandedPath);
+  const commit = await getCurrentCommit(expandedPath);
+  const changed = await hasChanges(expandedPath);
 
-  return {
-    branch: await getCurrentBranch(expandedPath),
-    commit: await getCurrentCommit(expandedPath),
-    hasChanges: await hasChanges(expandedPath),
-    changedFiles: await getChangedFiles(expandedPath),
-  };
+  let changedFiles: string[] = [];
+  if (changed) {
+    try {
+      const { stdout } = await gitExec(expandedPath, 'status', '--porcelain');
+      changedFiles = stdout.split('\n').filter(Boolean).map((line) => line.slice(3));
+    } catch {
+      changedFiles = [];
+    }
+  }
+
+  return { branch, commit, hasChanges: changed, changedFiles };
 }

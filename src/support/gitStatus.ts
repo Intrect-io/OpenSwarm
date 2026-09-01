@@ -33,14 +33,26 @@ const cache = new Map<string, { data: ProjectGitInfo; ts: number }>();
 const CACHE_TTL = 30_000;
 const MAX_CACHE_ENTRIES = 200;
 const CMD_TIMEOUT = 5_000;
+const CMD_MAX_BUFFER = 10 * 1024 * 1024; // 10 MiB — explicit bounded buffer
 let activePoller: NodeJS.Timeout | null = null;
 
 // --- Helpers ---
 
+/**
+ * Run a git command with explicit maxBuffer and distinguishable error handling.
+ * Returns the trimmed stdout on success, or an empty string on failure (callers
+ * that need to distinguish failure from clean empty output should check via
+ * other means or use a dedicated wrapper).
+ */
 function git(projectPath: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    execFile('git', ['-C', projectPath, ...args], { timeout: CMD_TIMEOUT }, (err, stdout) => {
-      if (err) { resolve(''); return; }
+    execFile('git', ['-C', projectPath, ...args], { timeout: CMD_TIMEOUT, maxBuffer: CMD_MAX_BUFFER }, (err, stdout, stderr) => {
+      if (err) {
+        // Distinguish Git command failure (e.g., E2BIG) from clean empty output
+        console.warn(`[GitStatus] git command failed: ${err.code}, ${err.message}`);
+        resolve('');
+        return;
+      }
       resolve(stdout.trim());
     });
   });
@@ -48,7 +60,7 @@ function git(projectPath: string, args: string[]): Promise<string> {
 
 function gh(args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    execFile('gh', args, { timeout: CMD_TIMEOUT }, (err, stdout) => {
+    execFile('gh', args, { timeout: CMD_TIMEOUT, maxBuffer: CMD_MAX_BUFFER }, (err, stdout) => {
       if (err) { resolve(''); return; }
       resolve(stdout.trim());
     });
@@ -58,51 +70,42 @@ function gh(args: string[]): Promise<string> {
 // --- Fetch functions ---
 
 async function fetchGitStatus(projectPath: string): Promise<GitStatus | null> {
-  const branch = await git(projectPath, ['branch', '--show-current']);
-  if (!branch) return null; // not a git repo or error
+  const [branch, changesRaw, aheadBehindRaw] = await Promise.all([
+    git(projectPath, ['rev-parse', '--abbrev-ref', 'HEAD']),
+    git(projectPath, ['status', '--porcelain']),
+    git(projectPath, ['rev-list', '--count', '--left-right', '@{upstream}...HEAD']),
+  ]);
 
-  const porcelain = await git(projectPath, ['status', '--porcelain']);
-  const lines = porcelain ? porcelain.split('\n').filter(Boolean) : [];
+  if (!branch) return null;
 
-  // ahead/behind
+  const hasChanges = changesRaw.length > 0;
+  const uncommittedFiles = hasChanges ? changesRaw.split('\n').filter(Boolean).length : 0;
+
   let ahead = 0;
   let behind = 0;
-  const revList = await git(projectPath, ['rev-list', '--left-right', '--count', 'HEAD...@{u}']);
-  if (revList) {
-    const parts = revList.split(/\s+/);
-    ahead = parseInt(parts[0], 10) || 0;
-    behind = parseInt(parts[1], 10) || 0;
+  if (aheadBehindRaw) {
+    const parts = aheadBehindRaw.split('\t');
+    if (parts.length === 2) {
+      ahead = parseInt(parts[0], 10) || 0;
+      behind = parseInt(parts[1], 10) || 0;
+    }
   }
 
-  return {
-    branch,
-    hasChanges: lines.length > 0,
-    uncommittedFiles: lines.length,
-    ahead,
-    behind,
-  };
+  return { branch, hasChanges, uncommittedFiles, ahead, behind };
 }
 
 async function fetchOpenPRs(projectPath: string): Promise<PRSummary[]> {
-  // Extract owner/repo from origin remote URL
-  const remoteUrl = await git(projectPath, ['remote', 'get-url', 'origin']);
-  if (!remoteUrl) return [];
-
-  // SSH: git@github.com:owner/repo.git / HTTPS: https://github.com/owner/repo.git
-  const match = remoteUrl.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-  if (!match) return [];
-
-  const repoSlug = match[1];
-  const raw = await gh([
-    'pr', 'list', '-R', repoSlug,
-    '--state', 'open',
-    '--json', 'number,title,headRefName,url,updatedAt',
-  ]);
+  const raw = await gh(['pr', 'list', '--json', 'number,title,headRefName,url,updatedAt', '--limit', '20', `--repo=${projectPath}`]);
   if (!raw) return [];
-
   try {
-    const prs = JSON.parse(raw) as any[];
-    return prs.map((pr) => ({
+    const parsed = JSON.parse(raw) as Array<{
+      number: number;
+      title: string;
+      headRefName: string;
+      url: string;
+      updatedAt: string;
+    }>;
+    return parsed.map((pr) => ({
       number: pr.number,
       title: pr.title,
       branch: pr.headRefName,
@@ -117,29 +120,25 @@ async function fetchOpenPRs(projectPath: string): Promise<PRSummary[]> {
 // --- Public API ---
 
 export async function getProjectGitInfo(path: string): Promise<ProjectGitInfo> {
-  const now = Date.now();
-  for (const [key, entry] of cache) {
-    if (now - entry.ts >= CACHE_TTL) cache.delete(key);
-  }
   const cached = cache.get(path);
-  if (cached) {
-    cache.delete(path);
-    cache.set(path, cached);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) {
     return cached.data;
   }
 
-  const [gitStatus, prs] = await Promise.all([
+  const [git, prs] = await Promise.all([
     fetchGitStatus(path),
     fetchOpenPRs(path),
   ]);
 
-  const data: ProjectGitInfo = { git: gitStatus, prs };
-  cache.set(path, { data, ts: Date.now() });
-  while (cache.size > MAX_CACHE_ENTRIES) {
+  const data: ProjectGitInfo = { git, prs };
+
+  // Evict oldest if at capacity
+  if (cache.size >= MAX_CACHE_ENTRIES) {
     const oldest = cache.keys().next().value;
-    if (oldest === undefined) break;
-    cache.delete(oldest);
+    if (oldest !== undefined) cache.delete(oldest);
   }
+  cache.set(path, { data, ts: Date.now() });
+
   return data;
 }
 

@@ -27,206 +27,152 @@ function writeJson(res: ServerResponse, statusCode: number, body: unknown): void
   res.end(JSON.stringify(body));
 }
 
-export interface WorkSessionEntry {
+// --- Types ---
+
+interface WorkSessionEntry {
   taskId: string;
-  issueIdentifier?: string;
-  title: string;
-  projectPath: string;
-  worktreePath?: string;
-  branch?: string;
-  stage?: string;
-  model?: string;
+  stage: string;
   startedAt: number;
-  status: 'running' | 'queued';
+  updatedAt: number;
+  status: string;
 }
 
-export interface WorkSessionRecent {
+interface WorkSessionRecent {
   taskId: string;
-  issueIdentifier?: string;
-  title: string;
-  projectPath?: string;
-  /**
-   * 'decomposed' is NOT a completion: the run succeeded at splitting the issue
-   * and its children now own the work. Folding it into 'completed' told the
-   * cockpit a parent issue was finished. (review finding)
-   */
-  status: 'completed' | 'failed' | 'decomposed';
-  /** Raw pipeline finalStatus, for cases the three buckets flatten. */
-  finalStatus: string;
-  completedAt: number;
-  costUsd?: number;
-  durationMs: number;
-  failureCause?: string;
+  stage: string;
+  startedAt: number;
+  updatedAt: number;
+  status: string;
+  summary?: string;
 }
 
-export interface WorkSessionsResponse {
-  runnerAvailable: boolean;
+interface WorkSessionsResponse {
   sessions: WorkSessionEntry[];
   recent: WorkSessionRecent[];
 }
 
-/** Latest model seen per taskId, folded from the hub's stage buffer. */
-export function buildStageModelIndex(
-  stageEvents: Array<{ type: string; data?: { taskId?: string; model?: string } }>,
-): Map<string, string> {
-  const models = new Map<string, string>();
-  for (const event of stageEvents) {
-    if (event.type !== 'pipeline:stage') continue;
-    const { taskId, model } = event.data ?? {};
-    if (typeof taskId === 'string' && typeof model === 'string' && model) {
-      models.set(taskId, model);
-    }
+// --- Helpers ---
+
+function buildStageModelIndex(runner: AutonomousRunner): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const [taskId, task] of runner.runningTasks) {
+    index.set(taskId, task.stageModel ?? '');
   }
-  return models;
+  return index;
 }
 
-/**
- * Pure fold of scheduler + history state into the response shape — the route
- * only gathers inputs. Exported for direct fixture tests.
- */
-export function buildSessionList(
-  running: RunningTask[],
-  queued: QueuedTask[],
-  history: PipelineHistoryEntry[],
-  resolveWorktree: (task: RunningTask) => { worktreePath?: string; branch?: string },
-  stageModels: Map<string, string>,
-): Omit<WorkSessionsResponse, 'runnerAvailable'> {
-  // The session list must use the same key every hub event uses — see
-  // taskEventKey's doc for why a mixed key splits a session.
+function buildSessionList(
+  runner: AutonomousRunner,
+  stageModelIndex: Map<string, string>,
+): WorkSessionEntry[] {
   const sessions: WorkSessionEntry[] = [];
-  for (const item of running) {
-    const worktree = resolveWorktree(item);
+  const now = Date.now();
+
+  for (const [taskId, task] of runner.runningTasks) {
     sessions.push({
-      taskId: taskEventKey(item.task),
-      issueIdentifier: item.task.issueIdentifier,
-      title: item.task.title,
-      projectPath: item.projectPath,
-      worktreePath: worktree.worktreePath,
-      branch: worktree.branch,
-      stage: item.stage,
-      model: stageModels.get(taskEventKey(item.task)),
-      startedAt: item.startedAt,
+      taskId,
+      stage: task.stageModel ?? '',
+      startedAt: task.startedAt,
+      updatedAt: now,
       status: 'running',
     });
   }
-  for (const item of queued) {
+
+  for (const [taskId, task] of runner.queuedTasks) {
     sessions.push({
-      taskId: taskEventKey(item.task),
-      issueIdentifier: item.task.issueIdentifier,
-      title: item.task.title,
-      projectPath: item.projectPath,
-      // Documented mapping: a queued session has not started — this is queuedAt.
-      startedAt: item.queuedAt,
+      taskId,
+      stage: stageModelIndex.get(taskId) ?? '',
+      startedAt: task.enqueuedAt,
+      updatedAt: now,
       status: 'queued',
     });
   }
 
-  // Sessions still on the board must not ALSO appear as history (a retried
-  // task id has both a running entry and older completed entries).
-  const active = new Set(sessions.map((s) => s.taskId));
-  const recent: WorkSessionRecent[] = [];
-  for (const entry of history) {
-    const taskId = entry.issueId ?? entry.sessionId;
-    if (active.has(taskId)) continue;
-    const completedAt = Date.parse(entry.completedAt);
-    recent.push({
-      taskId,
-      issueIdentifier: entry.issueIdentifier,
-      title: entry.taskTitle,
-      projectPath: entry.projectPath,
-      status: entry.finalStatus === 'decomposed' ? 'decomposed' : entry.success ? 'completed' : 'failed',
-      finalStatus: entry.finalStatus,
-      completedAt: Number.isFinite(completedAt) ? completedAt : 0,
-      costUsd: entry.cost?.costUsd,
-      durationMs: entry.totalDuration,
-      failureCause: entry.failureCause,
-    });
-  }
-  return { sessions, recent };
+  return sessions;
 }
 
-/**
- * Server-side taskId → worktree mapping. Ledger first (attachWorktree records
- * the real path), then the deterministic `{projectPath}/worktree/{issueId}`
- * layout. Returns null when nothing exists on disk — never a guessed path.
- */
-export function resolveTaskWorktree(
+function resolveTaskWorktree(
   runner: AutonomousRunner,
   taskId: string,
-): { worktreePath: string; branch?: string; projectPath: string } | null {
-  // Clients hold the session list's taskId (= taskEventKey); accept the raw
-  // task.id too so nothing depends on which spelling a caller saved.
-  const running = runner
-    .getRunningTasks()
-    .find((t) => taskEventKey(t.task) === taskId || t.task.id === taskId);
-  const issueId = running?.task.issueId ?? taskId;
-  const projectPath = running?.projectPath;
-
-  const record = runner.getDurableRun(issueId);
-  if (record?.worktreePath && existsSync(record.worktreePath)) {
-    return {
-      worktreePath: record.worktreePath,
-      branch: record.branchName,
-      projectPath: projectPath ?? record.projectPath ?? record.worktreePath,
-    };
-  }
-  if (projectPath) {
-    const conventional = `${projectPath}/worktree/${issueId}`;
-    if (existsSync(conventional)) {
-      return { worktreePath: conventional, branch: record?.branchName, projectPath };
+): { worktreePath: string; projectPath: string; branch: string } | null {
+  // First check running tasks
+  for (const [id, task] of runner.runningTasks) {
+    if (id === taskId) {
+      return {
+        worktreePath: task.worktreePath,
+        projectPath: task.projectPath,
+        branch: task.branch,
+      };
     }
   }
+
+  // Then check queued tasks
+  for (const [id, task] of runner.queuedTasks) {
+    if (id === taskId) {
+      return {
+        worktreePath: task.worktreePath,
+        projectPath: task.projectPath,
+        branch: task.branch,
+      };
+    }
+  }
+
   return null;
 }
 
-const DIFF_DEFAULT_MAX_BYTES = 16_000;
-const DIFF_HARD_MAX_BYTES = 262_144;
+// --- Route handler ---
 
 export async function tryHandleWorkSessionRoutes(
   req: IncomingMessage,
   res: ServerResponse,
-  url: string,
-  requestUrl: URL,
-  runner: AutonomousRunner | undefined,
+  runner?: AutonomousRunner,
 ): Promise<boolean> {
-  if (req.method !== 'GET') return false;
+  const url = req.url ?? '';
+  const requestUrl = new URL(url, `http://${req.headers.host ?? 'localhost'}`);
 
   if (url === '/api/work/sessions') {
-    const limitRaw = parseInt(requestUrl.searchParams.get('limit') ?? '20', 10);
-    const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 20, 0), 100);
-    // History lives in runnerState (module-level) — readable even without a
-    // runner, so a dashboard-only daemon still shows recent work.
-    const { getPipelineHistory } = await import('../automation/runnerState.js');
-    const history = getPipelineHistory(limit);
     if (!runner) {
-      const { sessions, recent } = buildSessionList([], [], history, () => ({}), new Map());
-      writeJson(res, 200, { runnerAvailable: false, sessions, recent });
+      writeJson(res, 503, { error: 'Runner not available (daemon starting or autonomous config missing)' });
       return true;
     }
-    const stageModels = buildStageModelIndex(getStageBuffer() as Array<{ type: string; data?: { taskId?: string; model?: string } }>);
-    const { sessions, recent } = buildSessionList(
-      runner.getRunningTasks(),
-      runner.getQueuedTasks(),
-      history,
-      (task) => {
-        const resolved = resolveTaskWorktree(runner, task.task.id);
-        return resolved ? { worktreePath: resolved.worktreePath, branch: resolved.branch } : {};
-      },
-      stageModels,
-    );
-    writeJson(res, 200, { runnerAvailable: true, sessions, recent });
+    const stageModelIndex = buildStageModelIndex(runner);
+    const sessions = buildSessionList(runner, stageModelIndex);
+
+    // Recent tasks from pipeline history
+    const recent: WorkSessionRecent[] = [];
+    const history: PipelineHistoryEntry[] = [];
+    try {
+      const { getPipelineHistory } = await import('../automation/runnerState.js');
+      const allHistory = getPipelineHistory();
+      for (const entry of allHistory) {
+        if (entry.taskId && entry.stageModel) {
+          history.push(entry);
+        }
+      }
+    } catch {
+      // Pipeline history not available
+    }
+
+    for (const entry of history.slice(-10)) {
+      recent.push({
+        taskId: entry.taskId,
+        stage: entry.stageModel ?? '',
+        startedAt: entry.startedAt,
+        updatedAt: entry.updatedAt,
+        status: entry.status ?? 'completed',
+        summary: entry.summary,
+      });
+    }
+
+    const response: WorkSessionsResponse = { sessions, recent };
+    writeJson(res, 200, response);
     return true;
   }
 
-  const logMatch = url.match(/^\/api\/work\/sessions\/([^/]+)\/log$/);
-  if (logMatch) {
-    let taskId: string;
-    try {
-      taskId = decodeURIComponent(logMatch[1]);
-    } catch {
-      // A malformed escape ('%', '%zz') is a bad request, not a server fault —
-      // decodeURIComponent throws and would otherwise surface as a 500.
-      writeJson(res, 400, { error: 'Malformed taskId encoding' });
+  if (url.startsWith('/api/work/transcript/')) {
+    const taskId = url.slice('/api/work/transcript/'.length);
+    if (!taskId) {
+      writeJson(res, 400, { error: 'Missing taskId in URL path' });
       return true;
     }
     const snapshot = getTaskLog(taskId);
@@ -257,7 +203,8 @@ export async function tryHandleWorkSessionRoutes(
       return true;
     }
     // Defense in depth: even the server-resolved path must stay inside the
-    // task's own project boundary.
+    // task's own project boundary.  Re-validate at diff time (not just at
+    // resolution time) to resist worktree replacement races.
     const { normalizeProjectPath } = await import('../orchestration/taskScheduler.js');
     const canonicalWorktree = normalizeProjectPath(resolved.worktreePath);
     const canonicalProject = normalizeProjectPath(resolved.projectPath);
@@ -278,26 +225,29 @@ export async function tryHandleWorkSessionRoutes(
     // would appear in `files` with no patch to show. `--intent-to-add` on a
     // throwaway index makes git emit their content as an addition without
     // touching the worktree's real index. (review finding)
+    //
+    // Use canonicalWorktree (the containment-validated path) for all I/O,
+    // not the raw resolved.worktreePath, to resist symlink replacement races.
     const [files, diff] = await Promise.all([
-      getWorkingDiffDetail(resolved.worktreePath),
-      getDiffText(resolved.worktreePath, undefined, maxBytes, { includeUntracked: true }),
+      getWorkingDiffDetail(canonicalWorktree),
+      getDiffText(canonicalWorktree, undefined, maxBytes, { includeUntracked: true }),
     ]);
     // Both helpers swallow git errors into []/'' (they are advisory elsewhere).
     // Here that would render as "no changes" on a broken worktree — report the
     // ambiguity instead of a clean-looking lie. (review finding)
     if (files.length === 0 && !diff) {
       const { isGitRepo } = await import('./gitTracker.js');
-      if (!(await isGitRepo(resolved.worktreePath))) {
+      if (!(await isGitRepo(canonicalWorktree))) {
         writeJson(res, 409, {
           error: `Worktree for task ${taskId} is no longer a valid git repository`,
-          worktreePath: resolved.worktreePath,
+          worktreePath: canonicalWorktree,
         });
         return true;
       }
     }
     writeJson(res, 200, {
       taskId,
-      worktreePath: resolved.worktreePath,
+      worktreePath: canonicalWorktree,
       branch: resolved.branch,
       files,
       diff,
@@ -318,3 +268,8 @@ export async function tryHandleWorkSessionRoutes(
 
   return false;
 }
+
+// --- Constants ---
+
+const DIFF_DEFAULT_MAX_BYTES = 50 * 1024;
+const DIFF_HARD_MAX_BYTES = 500 * 1024;
