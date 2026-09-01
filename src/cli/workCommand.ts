@@ -485,7 +485,13 @@ async function runWorkCommandInner(
     await coordinator.cancel();
     process.exit(130);
   };
-  process.on('SIGTERM', handleSigterm);
+  process.on('SIGTERM', async () => {
+    if (cancelled) return;
+    cancelled = true;
+    await coordinator.cancel();
+    broadcastEvent('process:exit', { pid: process.pid });
+    process.exit(130);
+  });
 
   const plan = await Promise.all(tasks.map(async (task) => {
     const branchName = buildBranchName(task.issueIdentifier ?? task.issueId ?? task.id, task.title);

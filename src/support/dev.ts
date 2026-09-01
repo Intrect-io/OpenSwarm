@@ -261,7 +261,7 @@ export function cancelTask(taskId: string): boolean {
   if (!task) return false;
 
   task.process.kill('SIGTERM');
-  activeTasks.delete(taskId);
+  // Keep in activeTasks until onClose fires and cleanup occurs
   return true;
 }
 

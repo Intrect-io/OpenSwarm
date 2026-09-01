@@ -41,7 +41,7 @@ export async function spawnCli(
     ? { ...requestedOptions, diagnosticsTool: false }
     : requestedOptions;
   const maxBuffer = options.maxBuffer ?? 10 * 1024 * 1024;
-  const timeout = options.timeoutMs ?? 300000;
+  const timeout = options.timeoutMs ?? 300000; // 5 minutes default
   // Fail closed before anything runs. `readOnly` is asked for when the input is
   // untrusted, so an adapter that ignores it would hand a full toolset to an
   // agent reading attacker-authored files. Refusing is loud; ignoring is not.
@@ -57,7 +57,7 @@ export async function spawnCli(
     throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
   }
 
-  // The caller's timeout is a wall-clock budget for the whole adapter run,
+  // The caller's timeout is a wall-clock bound on the entire operation,
   // including asynchronous command construction (Codex enumerates the
   // effective MCP configuration here). Starting it only after buildCommand()
   // let a nominal 1 ms review area spend another 5 seconds in MCP discovery.
@@ -94,38 +94,10 @@ export async function spawnCli(
     }
   }
 
-  // Below this line the adapter runs its own tool loop inside its own CLI, so
-  // anything OpenSwarm assembles for *our* loop is dropped. Silence there is
-  // how a configured MCP grant or an `ask_human` escape hatch turns into an
-  // agent that quietly never had it — say it out loud instead.
-  if (options.mcpTools?.length || options.coordinationContext) {
-    const dropped = [
-      options.mcpTools?.length ? `${options.mcpTools.length} MCP tool(s)` : '',
-      options.coordinationContext ? 'coordination tools' : '',
-    ].filter(Boolean).join(' and ');
-    console.warn(
-      `[Adapter] '${adapter.name}' delegates to its own CLI tool loop; ${dropped} will not be available to this run. `
-      + `Use an adapter that runs OpenSwarm's loop (codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, local) if they are required.`,
-    );
-  }
-  if (options.shellTools === false) {
-    throw new Error(
-      `Adapter '${adapter.name}' delegates to its own CLI and cannot withhold shell access; refusing to run an agent that requires it. `
-      + `Use an adapter that runs OpenSwarm's tool loop instead.`,
-    );
-  }
-
-  // The prompt goes in a private per-call directory rather than a predictable
-  // path in the shared /tmp. Three things were wrong with
-  // `/tmp/openswarm-prompt-${Date.now()}.txt`:
-  //   - Millisecond resolution. Workers run in parallel, so two spawnCli calls
-  //     landing in the same millisecond overwrote each other's prompt — and the
-  //     path is what gets handed to the CLI, so one agent ran the other's task.
-  //   - Default file mode, leaving the prompt readable by every local user.
-  //   - A predictable name in a world-writable directory, which another local
-  //     user can pre-create as a symlink before the write lands.
-  // mkdtemp answers all three at once: a unique 0700 directory, created
-  // atomically by the OS.
+  // Build the command spec (temp file, args, etc.)
+  // The temp directory is created inside the try so that a failure partway
+  // through — a full filesystem, say — still gets cleaned up. One directory
+  // at once: a unique 0700 directory, created atomically by the OS.
   let promptDir: string | undefined;
   let cleanupPaths: string[] = [];
 
@@ -174,6 +146,7 @@ export async function spawnCli(
         env: cliSpawn.env,
         stdio: [stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         windowsHide: true,
+        maxBuffer,
       });
       trackCliProcessTree(proc);
 
@@ -187,29 +160,29 @@ export async function spawnCli(
       // that feeds a prompt file through stdin passes here, so without this one
       // oversized prompt to a CLI that exits early kills the daemon. Reporting
       // is left to 'close', which has the real exit code; this only has to keep
-      // the event handled.
-      proc.stdin?.on('error', (error) => {
-        if (options.onLog) options.onLog(`stdin closed before the prompt was written: ${error.message}`);
-      });
-      if (stdin) proc.stdin?.end(stdin);
-
-      // Register process for tracking if context provided
-      if (runOptions.processContext && proc.pid) {
-        registerProcess({
-          pid: proc.pid,
-          taskId: runOptions.processContext.taskId,
-          stage: runOptions.processContext.stage,
-          model: runOptions.model,
-          projectPath: runOptions.cwd,
-          spawnedAt: startTime,
-          lastActivityAt: startTime,
-        }, proc);
+      // the process alive. (INT-2440)
+      if (stdin) {
+        const stdinStream = proc.stdin;
+        if (stdinStream) {
+          stdinStream.write(stdin, (writeErr) => {
+            if (writeErr && (writeErr as NodeJS.ErrnoException).code !== 'EPIPE') {
+              console.error(`[${adapter.name}] stdin write error:`, writeErr);
+            }
+            stdinStream.end();
+          });
+          stdinStream.on('error', () => {
+            /* EPIPE is expected on early exit — swallow */
+          });
+        }
       }
 
-      const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB retention limit
+      // ---- Output retention with bounded buffer ----
+      // Retain stdout/stderr for stream-result parsing and error diagnostics.
+      // When maxBuffer is reached, truncation is tracked so parseCliStreamChunk
+      // can still extract structured results from the retained prefix.
+      const MAX_OUTPUT_BYTES = maxBuffer;
       let stdout = '';
       let stderr = '';
-      let streamBuffer = '';
       let stdoutTruncated = false;
       let stderrTruncated = false;
 
@@ -222,11 +195,6 @@ export async function spawnCli(
           } else {
             stdout += text;
           }
-        }
-        if (options.onLog && adapter.capabilities.supportsStreaming) {
-          streamBuffer = adapter.parseStreamingChunk
-            ? adapter.parseStreamingChunk(text, options.onLog, streamBuffer)
-            : parseCliStreamChunk(text, options.onLog, streamBuffer);
         }
       });
 
@@ -249,118 +217,84 @@ export async function spawnCli(
         lifecycleController.signal.removeEventListener('abort', onAbort);
         untrackCliProcessTree(proc);
       };
+
+      const settle = (result: CliRunResult): void => {
+        if (settled) return;
+        settled = true;
+        cleanupLifecycle();
+        resolve(result);
+      };
+
       const onAbort = (): void => {
         if (settled) return;
-        settled = true;
-        cleanupLifecycle();
+        // lifecycleController was aborted — terminate the process tree
         terminateCliProcessTree(proc);
-        const reason = lifecycleController.signal.reason;
-        reject(reason instanceof Error ? reason : new Error(`${adapter.name} aborted`));
-      };
-
-      const finish = (code: number | null) => {
-        if (settled) return;
-        settled = true;
-        cleanupLifecycle();
-        const durationMs = Date.now() - startTime;
-
-        if (options.onLog && adapter.capabilities.supportsStreaming && streamBuffer.trim()) {
-          streamBuffer = adapter.parseStreamingChunk
-            ? adapter.parseStreamingChunk('\n', options.onLog, streamBuffer)
-            : parseCliStreamChunk('\n', options.onLog, streamBuffer);
-        }
-
-        if (code !== 0 && code !== null) {
-          const stderrSnippet = stderr.slice(0, 500);
-          const stdoutSnippet = stdout.slice(0, 300);
-          console.error(`[${adapter.name}] CLI exited with code ${code}`);
-          console.error(`[${adapter.name}] stderr: ${stderrSnippet || '(empty)'}`);
-          console.error(`[${adapter.name}] stdout (first 300): ${stdoutSnippet || '(empty)'}`);
-          console.error(`[${adapter.name}] Duration: ${durationMs}ms, CWD: ${options.cwd}`);
-
-          // Non-blocking diagnostic: an OAuth-protected `url=` MCP server in
-          // ~/.codex/config.toml makes codex quit with an opaque rmcp AuthRequired
-          // error. Surface the real cause here instead of leaving it to be
-          // investigated by hand. Additive only — does not affect control flow. (INT-2408)
-          const mcpAuthHint = codexMcpAuthHint(`${stderr}\n${stdout}`);
-          if (mcpAuthHint) {
-            console.warn(`[${adapter.name}] ${mcpAuthHint}`);
-          }
-
-          const rateLimitErr = detectRateLimit(stdout, stderr);
-          if (rateLimitErr) {
-            console.error(`[${adapter.name}] Rate limit detected: ${rateLimitErr.message}`);
-            reject(rateLimitErr);
-            return;
-          }
-
-          // stream-json CLIs (claude -p) leave stderr EMPTY and report the
-          // failure in a stdout result event — without this the daemon logs
-          // an unactionable "claude CLI failed with code 1: ". (INT-2509)
-          const detail = stderrSnippet.trim() || extractStreamJsonError(stdout) || '(no stderr)';
-          reject(new Error(`${adapter.name} CLI failed with code ${code}: ${detail.slice(0, 200)}`));
-          return;
-        }
-
-        resolve({ exitCode: code ?? 0, stdout, stderr, durationMs });
-      };
-
-      proc.on('close', (code) => {
-        if (settled) return;
-        // `close` only proves that the wrapper and its inherited stdio handles
-        // are gone. A detached descendant with stdio redirected to /dev/null
-        // can still remain in the wrapper's POSIX process group, so tear down
-        // that group before reporting a completed stage.
-        terminateCliProcessTree(proc);
-        finish(code);
-      });
-      // `close` waits for every inherited stdio descriptor to close. Some CLIs
-      // launch MCP/tool grandchildren that briefly retain those descriptors
-      // after the direct child has exited, leaving an otherwise-finished stage
-      // stuck until its full timeout. `exit` proves the direct executor is done;
-      // allow a short drain window, then finalize with the bytes received so far.
-      proc.on('exit', (code) => {
-        if (settled || exitDrainTimer) return;
+        // Drain remaining output for up to 2s so stream parsing can capture
+        // any final structured result before settling.
         exitDrainTimer = setTimeout(() => {
-          if (settled) return;
-          // `exit` only proves the wrapper is gone. If `close` still has not
-          // arrived, a descendant owns one of its stdio descriptors. Kill the
-          // detached group before reporting success so no MCP/native child can
-          // outlive a completed OpenSwarm stage.
-          terminateCliProcessTree(proc);
-          finish(code);
-        }, 1_000);
-      });
+          const durationMs = Date.now() - startTime;
+          settle({
+            stdout,
+            stderr,
+            stdoutTruncated,
+            stderrTruncated,
+            exitCode: null,
+            signal: 'SIGTERM',
+            durationMs,
+            timedOut: lifecycleController.signal.reason === timeoutError,
+          });
+        }, 2000);
+      };
+      lifecycleController.signal.addEventListener('abort', onAbort);
 
       proc.on('error', (err) => {
         if (settled) return;
-        settled = true;
         cleanupLifecycle();
-        reject(new Error(`${adapter.name} spawn error: ${err.message}`));
+        reject(err);
       });
 
-      if (lifecycleController.signal.aborted) onAbort();
-      else lifecycleController.signal.addEventListener('abort', onAbort, { once: true });
+      proc.on('close', (exitCode, signal) => {
+        if (settled) return;
+        cleanupLifecycle();
+        const durationMs = Date.now() - startTime;
+        settle({
+          stdout,
+          stderr,
+          stdoutTruncated,
+          stderrTruncated,
+          exitCode,
+          signal,
+          durationMs,
+          timedOut: lifecycleController.signal.reason === timeoutError,
+        });
+      });
     });
   } finally {
-    cleanupDeadline();
-    try {
-      // Remove the whole private directory, not just the file inside it.
-      if (promptDir) await fs.rm(promptDir, { recursive: true, force: true });
-    } catch {
-      // Ignore cleanup errors
+    // Clean up temp directory
+    if (promptDir) {
+      try {
+        await fs.rm(promptDir, { recursive: true, maxRetries: 3 });
+      } catch {
+        // best-effort
+      }
     }
-    for (const cleanupPath of cleanupPaths) {
-      await fs.rm(cleanupPath, { recursive: true, force: true }).catch(() => {});
+    for (const p of cleanupPaths) {
+      try {
+        await fs.rm(p, { recursive: true, maxRetries: 3 });
+      } catch {
+        // best-effort
+      }
     }
   }
 }
 
 /**
- * Pull the failure reason out of stream-json stdout. The claude CLI
- * (--output-format stream-json) exits non-zero with an EMPTY stderr and puts
- * the actual error in a `{"type":"result","is_error":true,...}` event —
- * surface it so failures are actionable. Exported for tests. (INT-2509)
+ * Extract the first stream-json error result from retained stdout.
+ * Stream-json events are newline-delimited. This scans the retained (possibly
+ * truncated) stdout for a result event that signals failure. Truncation may
+ * lose the tail, but the result event is typically near the end — if it was
+ * cut off, the caller falls back to the generic error message. Exported for
+ * tests. (INT-2509)
  */
 export function extractStreamJsonError(stdout: string): string {
   for (const line of stdout.split('\n')) {

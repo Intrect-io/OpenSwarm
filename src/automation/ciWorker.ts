@@ -251,7 +251,7 @@ export class CIWorker {
   private async retryRun(repo: string, runId: number): Promise<void> {
     try {
       console.log(`[CIWorker] Retrying run: ${repo}#${runId}`);
-      await execFileAsync('gh', ['run', 'rerun', String(runId), '-R', repo, '--failed'], { timeout: 300000, maxBuffer: 10 * 1024 * 1024 });
+      await execFileAsync('gh', ['run', 'rerun', String(runId), '-R', repo, '--failed'], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
 
       broadcastEvent({
         type: 'log',

@@ -132,6 +132,7 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
         (proc as any).__gracefulKillTimer = escalation;
         // Clear the timer on force kill to prevent duplicate termination
         proc.once('exit', () => {
+          // Clear any pending graceful-kill escalation before force-killing
           if ((proc as any).__gracefulKillTimer) {
             clearTimeout((proc as any).__gracefulKillTimer);
             (proc as any).__gracefulKillTimer = undefined;

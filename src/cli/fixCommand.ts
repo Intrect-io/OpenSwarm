@@ -340,15 +340,10 @@ export interface FixReport {
   reason?: 'green' | 'out-of-rounds' | 'no-progress' | 'no-checks';
 }
 
-/** Default check runner: spawn the command, capture combined output, pass = exit 0. */
 async function defaultRunCheck(check: Check, cwd: string): Promise<{ passed: boolean; output: string }> {
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      resolve({ passed: false, output: 'Objective check timed out' });
-    }, 300000);
-    execFile(check.program, check.args, { cwd, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-      clearTimeout(timeout);
-      resolve({ passed: !err, output: `${stdout ?? ''}${stderr ?? ''}` });
+    execFile(check.program, check.args, { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 30000 }, (err, stdout, stderr) => {
+      resolve({ passed: !err, output: `${stdout ?? ""}${stderr ?? ""}` });
     });
   });
 }
