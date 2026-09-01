@@ -197,9 +197,23 @@ function sarifArtifactPath(snapshotRoot: string, uri: string | undefined): strin
 }
 
 async function findSystemExecutable(name: string): Promise<string | undefined> {
+  const binary = process.platform === 'win32' ? `${name}.exe` : name;
+  const candidates: string[] = [];
+  // Login-shell entrypoints (bash -lc) can drop compose PATH; still honor an
+  // explicit override and the conventional deploy mount before giving up.
+  if (name === 'codeql') {
+    const override = process.env.OPENSWARM_CODEQL_PATH?.trim();
+    if (override && isAbsolute(override)) candidates.push(override);
+    candidates.push('/opt/codeql/codeql');
+  }
   for (const directory of (process.env.PATH ?? '').split(delimiter)) {
     if (!isAbsolute(directory)) continue;
-    const candidate = join(directory, process.platform === 'win32' ? `${name}.exe` : name);
+    candidates.push(join(directory, binary));
+  }
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     try {
       await access(candidate, constants.X_OK);
       return candidate;

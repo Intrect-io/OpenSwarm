@@ -105,6 +105,27 @@ describe('runSecurityAudit', () => {
     expect(audit.findings[0]?.ruleId).toBe('openswarm/security-codeql-unavailable');
   });
 
+  it('finds CodeQL at OPENSWARM_CODEQL_PATH or /opt/codeql even when PATH is empty', async () => {
+    vi.stubEnv('PATH', '');
+    vi.stubEnv('OPENSWARM_CODEQL_PATH', '/custom/codeql');
+    fsMock.access.mockImplementation(async (target: string) => {
+      if (target === '/custom/codeql') return;
+      throw new Error('ENOENT');
+    });
+    execFileMock.mockResolvedValue({ stdout: '', stderr: '' });
+    fsMock.mkdtemp.mockResolvedValue('/snapshot');
+    fsMock.lstat.mockResolvedValue({ isFile: () => true, isSymbolicLink: () => false });
+    fsMock.cp.mockResolvedValue(undefined);
+    fsMock.mkdir.mockResolvedValue(undefined);
+    fsMock.rm.mockResolvedValue(undefined);
+    fsMock.readFile.mockResolvedValue(JSON.stringify({ version: '2.1.0', runs: [{ results: [] }] }));
+
+    const audit = await runSecurityAudit('/repo', ['src/a.ts']);
+
+    expect(audit.status).not.toBe('unavailable');
+    expect(execFileMock.mock.calls[0]?.[0]).toBe('/custom/codeql');
+  });
+
   it('reports a query-pack preparation failure and cleans its isolated snapshot', async () => {
     execFileMock.mockRejectedValueOnce(Object.assign(new Error('pack failed'), { code: 1, stderr: 'network unavailable' }));
 
