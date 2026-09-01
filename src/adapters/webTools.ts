@@ -339,8 +339,8 @@ async function braveSearch(query: string, n: number): Promise<SearchResult[]> {
   if (!res.ok) throw new Error(`Brave HTTP ${res.status}`);
   const data = JSON.parse(res.body) as { web?: { results?: Array<{ title?: string; url?: string; description?: string }> } };
   return (data.web?.results ?? []).slice(0, n).map((r) => ({
-    title: r.title ?? '',
-    url: r.url ?? '',
+    title: (r.title ?? '').slice(0, 512),
+    url: (r.url ?? '').slice(0, 1024),
     snippet: stripTags(r.description ?? '').slice(0, 300),
   }));
 }

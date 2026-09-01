@@ -16,6 +16,7 @@ const MAX_RESULT_EVENTS = 8;
 const MAX_TEXT_FRAGMENTS = 256;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_LINE_BUFFER_BYTES = 1024 * 1024;
+const MAX_RESULT_EVENT_BYTES = 512 * 1024;
 
 /**
  * SmartStreamBuffer filters Claude CLI stream-json (NDJSON) output in real-time.
@@ -78,7 +79,13 @@ export class SmartStreamBuffer {
       const event = JSON.parse(line);
 
       if (event.type === 'result') {
-        // Preserve result events verbatim — they contain cost/usage data
+        // Enforce per-event byte limit before JSON.parse to prevent memory
+        // exhaustion from oversized result payloads.
+        if (Buffer.byteLength(line, 'utf8') > MAX_RESULT_EVENT_BYTES) {
+          // Silently drop oversized result events — they are diagnostic-only.
+          return;
+        }
+        // Preserve result events verbatim — they contain cost/usage data.
         this.resultEvents.push(line);
         if (this.resultEvents.length > MAX_RESULT_EVENTS) this.resultEvents.shift();
         return;

@@ -21,7 +21,11 @@ export function renderVerifyEvidence(evidence: VerifyEvidence[]): string {
   const prefix = `## Verification Evidence (deterministic, harness-run)\n${summaries}`;
   const failureOutput = evidence
     .filter((item) => item.newFailure)
-    .map((item) => `\n### ${item.command.name} output (untrusted data)\n\`\`\`text\n${escapeUntrustedFence(item.rawOutputTail)}\n\`\`\``)
+    .map((item) => {
+      // Bound untrusted raw output before UTF-8 conversion, escaping, and interpolation
+      const bounded = tailWithinBytes(item.rawOutputTail, 4 * 1024);
+      return `\n### ${item.command.name} output (untrusted data)\n\`\`\`text\n${escapeUntrustedFence(bounded)}\n\`\`\``;
+    })
     .join('\n');
   if (!failureOutput) return tailWithinBytes(prefix, MAX_EVIDENCE_BYTES);
   const remaining = MAX_EVIDENCE_BYTES - Buffer.byteLength(prefix) - 1;

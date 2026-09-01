@@ -207,6 +207,29 @@ const BLOCKED_COMMANDS = [
 ];
 
 /**
+ * Secondary-interpreter commands that can conceal destructive operations.
+ * A blocklist covers known patterns that call interpreters where the real
+ * command string is a shell word or argument, not a direct match.
+ */
+const SECONDARY_INTERPRETER_PATTERNS = [
+  /\bsh\s+-c\s+/,
+  /\bbash\s+-c\s+/,
+  /\bzsh\s+-c\s+/,
+  /\bksh\s+-c\s+/,
+  /\bdash\s+-c\s+/,
+  /\bfish\s+-c\s+/,
+];
+
+/**
+ * Process substitution and command substitution patterns that can execute
+ * code before the outer command sees it.
+ */
+const PROCESS_SUBSTITUTION_PATTERNS = [
+  /\$\(/,
+  /`[^`]+`/,
+];
+
+/**
  * Tools a read-only run refuses to execute.
  *
  * Kept beside the loop's tool-list filter rather than inline, because the two
@@ -275,7 +298,18 @@ async function searchWithGitGrep(
 }
 
 function isCommandBlocked(command: string): boolean {
-  return BLOCKED_COMMANDS.some(pattern => pattern.test(command));
+  // Direct destructive command patterns
+  if (BLOCKED_COMMANDS.some(pattern => pattern.test(command))) return true;
+
+  // Secondary interpreters (sh -c, bash -c, etc.) — the real command
+  // is a shell word, not directly matched by BLOCKED_COMMANDS.
+  if (SECONDARY_INTERPRETER_PATTERNS.some(pattern => pattern.test(command))) return true;
+
+  // Process substitution / command substitution — $(...) and backticks
+  // can execute arbitrary code before the outer command runs.
+  if (PROCESS_SUBSTITUTION_PATTERNS.some(pattern => pattern.test(command))) return true;
+
+  return false;
 }
 
 // ============ 도구 실행기 ============
