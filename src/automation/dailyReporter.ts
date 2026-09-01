@@ -12,6 +12,9 @@ let linearClient: LinearClient | null = null;
 let discordReporter: ((content: any) => Promise<void>) | null = null;
 let teamId: string | null = null;
 let reportInFlight: Promise<void> | null = null;
+=======
+```
+
 // Project path mapping (projectId → projectPath) for knowledge graph metrics
 let projectPathMapping = new Map<string, string>();
 

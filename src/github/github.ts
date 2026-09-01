@@ -1054,6 +1054,7 @@ export async function waitForCICompletion(
     lastPending = status;
 
     // Wait before next poll
-    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+    const waitPromise = new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+    await waitPromise;
   }
 }

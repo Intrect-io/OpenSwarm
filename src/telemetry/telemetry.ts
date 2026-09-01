@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { nanoid } from 'nanoid';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import lockfile from 'proper-lockfile';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
