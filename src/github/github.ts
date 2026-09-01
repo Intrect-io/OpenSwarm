@@ -1022,14 +1022,22 @@ export async function waitForCICompletion(
   const startTime = Date.now();
   let expectedHeadSha = options.expectedHeadSha?.trim();
   let lastPending: Extract<CIStatus, { status: 'pending' }> | undefined;
+  let timeoutHandle: NodeJS.Timeout | null = null;
+  let intervalHandle: NodeJS.Timeout | null = null;
+
+  const cleanup = () => {
+    if (intervalHandle) clearInterval(intervalHandle);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  };
 
   while (true) {
     const elapsed = Date.now() - startTime;
 
     if (elapsed >= timeoutMs) {
       console.log(`[GitHub] CI timeout for ${repo}#${prNumber} (${elapsed}ms)`);
-      return lastPending ?? {
-        status: 'unknown',
+      cleanup();
+      return { status: 'timed_out', headSha: '' };
+    }
         reason: expectedHeadSha ? 'head_unavailable' : 'expected_head_unavailable',
         expectedHeadSha,
       };
@@ -1049,12 +1057,16 @@ export async function waitForCICompletion(
     }
 
     if (status.status !== 'pending') {
+      cleanup();
       return status;
     }
     lastPending = status;
 
     // Wait before next poll
-    const waitPromise = new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+    intervalHandle = setTimeout(() => {}, pollIntervalMs);
+    const waitPromise = new Promise(resolve => {
+      timeoutHandle = setTimeout(resolve, pollIntervalMs);
+    });
     await waitPromise;
   }
 }

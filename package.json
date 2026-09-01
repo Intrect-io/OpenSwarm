@@ -1,7 +1,7 @@
 {
   "name": "@intrect/openswarm",
   "version": "0.21.4",
-  "description": "Autonomous AI agent orchestrator \u2014 Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
+  "description": "Autonomous AI agent orchestrator — Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -55,6 +55,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/blessed": "^0.1.27",
     "apache-arrow": "^18.1.0",
+    "async-mutex": "^0.5.0",
     "better-sqlite3": "^12.8.0",
     "cli-highlight": "^2.1.11",
     "commander": "^12.1.0",

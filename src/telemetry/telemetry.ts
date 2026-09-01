@@ -23,6 +23,8 @@ import lockfile from 'proper-lockfile';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
+const TELEMETRY_LOCK_FILE = join(STATE_DIR, 'telemetry.lock');
+const TELEMETRY_LOCK_STALE_MS = 5 * 60 * 1000; // 5 minutes
 
 // Collection endpoint (Cloudflare Worker → D1 intrect-telemetry.openswarm_events).
 // Kept fixed in the client so a local environment variable cannot redirect even
@@ -111,6 +113,40 @@ function envDisabled(): boolean {
   if (dnt === '1' || dnt === 'true') return true;
   // CI/automation are not real users — exclude so the signal stays clean.
   if (process.env.CI || process.env.GITHUB_ACTIONS) return true;
+  return false;
+}
+
+/**
+ * Reclaim the telemetry lock if it's stale (older than 10 minutes).
+ * Uses atomic file rename to prevent race conditions.
+ * @returns true if lock was reclaimed or didn't exist, false if actively held
+ */
+export function reclaimStaleTelemetryLock(): boolean {
+  const lockPath = path.join(stateDir, 'telemetry.lock');
+  const tempPath = path.join(stateDir, 'telemetry.lock.tmp');
+  const staleThresholdMs = 10 * 60 * 1000; // 10 minutes
+
+  if (!fs.existsSync(lockPath)) {
+    return true;
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(lockPath);
+  } catch (err) {
+    return true; // If we can't stat, assume it's stale
+  }
+
+  if (Date.now() - stat.mtimeMs > staleThresholdMs) {
+    // Use atomic rename to avoid race
+    try {
+      fs.writeFileSync(tempPath, 'reclaim\n', 'utf8');
+      fs.renameSync(tempPath, lockPath); // Overwrites lock atomically
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
   return false;
 }
 

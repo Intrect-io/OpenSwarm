@@ -252,7 +252,7 @@ async function runClaudeCli(
       ],
       { 
         cwd: expandedPath,
-        maxBuffer: 1024 * 1024 // 1MB limit for stdout/stderr
+        maxBuffer: 10 * 1024 * 1024 // 10MB buffer limit
       }
     );
 =======

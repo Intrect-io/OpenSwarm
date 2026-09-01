@@ -85,15 +85,17 @@ export function stopDailyReporter(): void {
  * Manually trigger daily reports (for testing)
  */
 export async function generateDailyReports(): Promise<void> {
-  if (!linearClient) {
-    console.warn('[DailyReporter] LinearClient not set, skipping reports');
-    return;
-  }
+  const release = await reportMutex.acquire();
+  try {
+    if (reportInFlight) {
+      console.log('[DailyReporter] Daily report generation already in progress, skipping');
+      return;
+    }
 
-  if (!teamId) {
-    console.warn('[DailyReporter] Team ID not set, skipping reports');
-    return;
-  }
+    if (!linearClient || !teamId) {
+      console.warn('[DailyReporter] Linear client or team ID not set, skipping daily report');
+      return;
+    }
 
   console.log('[DailyReporter] Generating daily reports...');
 
@@ -173,5 +175,28 @@ async function sendDiscordSummary(
     console.log('[DailyReporter] Discord summary sent');
   } catch (err) {
     console.error('[DailyReporter] Failed to send Discord summary:', err);
+  }
+  } finally {
+    release();
+  }
+} finally {
+  release();
+}
+} finally {
+  release();
+}
+}
+mary sent');
+  } catch (err) {
+    console.error('[DailyReporter] Failed to send Discord summary:', err);
+  }
+}
+r);
+  }
+}
+porter] Failed to send Discord summary:', err);
+  }
+}
+r);
   }
 }
