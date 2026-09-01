@@ -287,7 +287,7 @@ export async function runInitWizard(opts: InitWizardOptions = {}): Promise<void>
     if (!envVars[k]) delete envVars[k];
   }
 
-  // Write .env (secrets) + config.yaml.
+  // Write .env (secrets) + config.yaml with exclusive create and strict permissions.
   if (Object.keys(envVars).length > 0) {
     writeEnvVars(envPath, envVars);
     console.log(`\nWrote ${envPath} (${Object.keys(envVars).join(', ')}) — chmod 600.`);

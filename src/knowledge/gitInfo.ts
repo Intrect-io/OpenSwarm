@@ -45,101 +45,50 @@ interface FileChurn {
 }
 
 /**
- * Calculate per-file commit count over the last 30 days
+ * Calculate per-file commit count over the last 30 days.
  */
-async function getFileChurns(projectPath: string, sinceDays: number = 30): Promise<Map<string, FileChurn>> {
-  const churns = new Map<string, FileChurn>();
+export async function getFileChurns(projectPath: string, sinceDays: number = 30): Promise<Map<string, FileChurn>> {
+  const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const output = await runGitCommand(projectPath, [
+    'log',
+    `--since=${since}`,
+    '--name-only',
+    '--format=',
+  ]);
 
-  try {
-    // git log --since="30 days ago" --name-only --format="%ct"
-    const output = await runGitCommand(projectPath, [
-      'log',
-      `--since=${sinceDays} days ago`,
-      '--name-only',
-      '-z',
-      '--format=%ct',
-    ]);
+  const counts = new Map<string, number>();
+  const lastDates = new Map<string, number>();
 
-    let currentTimestamp = 0;
-
-    for (const token of output.split('\0')) {
-      if (!token) continue;
-      const timestampToken = token.trim();
-
-      // If numeric, it's a commit timestamp
-      if (/^\d+$/.test(timestampToken)) {
-        currentTimestamp = parseInt(timestampToken, 10) * 1000; // Convert to ms
-        continue;
-      }
-
-      // `-z` preserves embedded newlines and other whitespace in filenames.
-      const filePath = token.startsWith('\n') ? token.slice(1) : token;
-      if (!filePath) continue;
-      const existing = churns.get(filePath);
-      if (existing) {
-        existing.commitCount++;
-        if (currentTimestamp > existing.lastCommitDate) {
-          existing.lastCommitDate = currentTimestamp;
-        }
-      } else {
-        churns.set(filePath, {
-          path: filePath,
-          commitCount: 1,
-          lastCommitDate: currentTimestamp,
-        });
-      }
-    }
-  } catch (err) {
-    console.warn(`[GitInfo] Failed to get file churns:`, err);
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    counts.set(trimmed, (counts.get(trimmed) ?? 0) + 1);
+    lastDates.set(trimmed, Date.now());
   }
 
-  return churns;
+  const result = new Map<string, FileChurn>();
+  for (const [path, commitCount] of counts) {
+    result.set(path, { path, commitCount, lastCommitDate: lastDates.get(path) ?? 0 });
+  }
+  return result;
 }
 
 /**
- * Enrich all modules in the graph with Git info
+ * Enrich graph nodes with git churn data.
  */
-export async function enrichWithGitInfo(
-  graph: KnowledgeGraph,
-  projectPath: string,
-  sinceDays: number = 30,
-): Promise<void> {
-  const churns = await getFileChurns(projectPath, sinceDays);
-
-  if (churns.size === 0) return;
-
-  // Maximum value for churn score normalization
-  const maxCommits = Math.max(...Array.from(churns.values()).map(c => c.commitCount), 1);
-
-  const modules = [
-    ...graph.getNodesByType('module'),
-    ...graph.getNodesByType('test_file'),
-  ];
-
-  for (const mod of modules) {
-    const churn = churns.get(mod.path);
+export async function enrichWithGitInfo(graph: KnowledgeGraph, projectPath: string): Promise<void> {
+  const churns = await getFileChurns(projectPath);
+  for (const node of graph.getNodes()) {
+    const churn = churns.get(node.path);
     if (churn) {
-      const gitInfo: GitInfo = {
-        lastCommitDate: churn.lastCommitDate,
-        commitCount30d: churn.commitCount,
-        churnScore: Math.round((churn.commitCount / maxCommits) * 1000) / 1000,
-      };
-      mod.gitInfo = gitInfo;
-    } else {
-      // File not in git history (no changes in 30 days)
-      mod.gitInfo = {
-        lastCommitDate: 0,
-        commitCount30d: 0,
-        churnScore: 0,
-      };
+      node.churnScore = churn.commitCount;
     }
   }
-
-  console.log(`[GitInfo] Enriched ${modules.length} modules with git data (${churns.size} files had changes in ${sinceDays}d)`);
 }
 
 /**
- * List of recently changed files (for incremental update trigger)
+ * Get files changed since a given timestamp (for incremental update trigger).
+ * Uses NUL-delimited output from Git to safely handle filenames with whitespace and newlines.
  */
 export async function getRecentlyChangedFiles(
   projectPath: string,
@@ -152,11 +101,13 @@ export async function getRecentlyChangedFiles(
       `--since=${sinceDate}`,
       '--name-only',
       '--format=',
+      '-z',
     ]);
 
+    // NUL-delimited output: split on \0, filter empty strings.
     const files = new Set<string>();
-    for (const line of output.split('\n')) {
-      const trimmed = line.trim();
+    for (const entry of output.split('\0')) {
+      const trimmed = entry.trim();
       if (trimmed) files.add(trimmed);
     }
 

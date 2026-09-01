@@ -2,7 +2,7 @@
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
@@ -50,34 +50,8 @@ type Module {
   dependedBy: [Module!]!
   tests: [Module!]!
   churnScore: Float
-  commitCount30d: Int
-  lastCommitDate: String
-  state: ModuleState
-  techDebt: Float
-  isEntrypoint: Boolean!
   isHotspot: Boolean!
-  risk: RiskLevel!
-}
-
-type Impact {
-  direct: [Module!]!
-  transitive: [Module!]!
-  affectedTests: [Module!]!
-  scope: Scope!
-}
-
-type Cycle {
-  modules: [ID!]!
-  length: Int!
-}
-
-type ProjectSummary {
-  avgChurnScore: Float!
-  hotModules: [ID!]!
-  untestedModules: [ID!]!
-  stableCount: Int!
-  experimentalCount: Int!
-  deprecatedCount: Int!
+  risk: String!
 }
 
 type LanguageBreakdown {
@@ -89,173 +63,160 @@ type LanguageBreakdown {
 type LayerBreakdown {
   layer: ArchLayer!
   count: Int!
-  modules: [ID!]!
+  loc: Int!
 }
 
-enum NodeType { PROJECT DIRECTORY MODULE TEST_FILE }
-enum Language { TYPESCRIPT PYTHON OTHER }
-enum ArchLayer { CORE AGENT ADAPTER AUTOMATION SUPPORT KNOWLEDGE ORCHESTRATION LINEAR DISCORD CLI LOCALE MEMORY TEST OTHER }
-enum ModuleState { STABLE EXPERIMENTAL DEPRECATED LEGACY PLANNED }
-enum RiskLevel { LOW MEDIUM HIGH }
-enum Scope { SMALL MEDIUM LARGE }
+type ProjectSummary {
+  totalModules: Int!
+  totalTests: Int!
+  totalLoc: Int!
+  testCoverage: Float!
+  hotspots: Int!
+  circularDepGroups: Int!
+  avgChurn: Float!
+  entrypoints: Int!
+}
+
+type Impact {
+  module: Module!
+  transitiveCount: Int!
+  testCount: Int!
+  risk: String!
+}
+
+type Cycle {
+  modules: [String!]!
+  length: Int!
+}
+
+enum ArchLayer {
+  INFRASTRUCTURE
+  ADAPTER
+  APPLICATION
+  DOMAIN
+  SUPPORT
+  UNKNOWN
+}
+
+enum Language {
+  TYPESCRIPT
+  JAVASCRIPT
+  PYTHON
+  RUST
+  GO
+  UNKNOWN
+}
+
+enum NodeType {
+  MODULE
+  TEST
+  CONFIG
+  DATA
+}
 `;
 
-// 아키텍처 레이어 추론
-function inferLayer(modulePath: string): string {
-  const segments = modulePath.split('/');
-  const layerMap: Record<string, string> = {
-    core: 'CORE',
-    agents: 'AGENT',
-    adapters: 'ADAPTER',
-    automation: 'AUTOMATION',
-    support: 'SUPPORT',
-    knowledge: 'KNOWLEDGE',
-    orchestration: 'ORCHESTRATION',
-    linear: 'LINEAR',
-    discord: 'DISCORD',
-    cli: 'CLI',
-    locale: 'LOCALE',
-    memory: 'MEMORY',
-    runners: 'CLI',
-    taskState: 'CORE',
-    __tests__: 'TEST',
-  };
-  for (const seg of segments) {
-    if (layerMap[seg]) return layerMap[seg];
-  }
-  return 'OTHER';
+// --- Helpers (pure, unit-tested) ---
+
+/** Infer architectural layer from module path. */
+export function inferLayer(modulePath: string): string {
+  if (modulePath.startsWith('src/domain')) return 'DOMAIN';
+  if (modulePath.startsWith('src/application') || modulePath.startsWith('src/app')) return 'APPLICATION';
+  if (modulePath.startsWith('src/adapter') || modulePath.startsWith('src/adapters')) return 'ADAPTER';
+  if (modulePath.startsWith('src/infra') || modulePath.startsWith('src/infrastructure')) return 'INFRASTRUCTURE';
+  if (modulePath.startsWith('src/support') || modulePath.startsWith('src/tui') || modulePath.startsWith('src/cli')) return 'SUPPORT';
+  return 'UNKNOWN';
 }
 
-// 리스크 계산
-function computeRisk(node: GraphNode, hasTests: boolean, dependentCount: number): string {
-  const churn = node.gitInfo?.churnScore ?? 0;
-  const loc = node.metrics?.loc ?? 0;
-  if ((churn > 0.5 && !hasTests) || (dependentCount >= 5 && !hasTests)) return 'HIGH';
-  if (churn > 0.3 || dependentCount >= 3 || (loc > 200 && !hasTests)) return 'MEDIUM';
-  return 'LOW';
+/** Compute risk label from test coverage and dependency count. */
+export function computeRisk(node: GraphNode, hasTests: boolean, dependentCount: number): string {
+  if (!hasTests && dependentCount > 5) return 'HIGH';
+  if (!hasTests && dependentCount > 0) return 'MEDIUM';
+  if (!hasTests) return 'LOW';
+  return 'NONE';
 }
 
-// 순환 의존성 탐지
-function detectCycles(nodes: GraphNode[], edges: GraphEdge[]): string[][] {
-  const importEdges = edges.filter(e => e.type === 'imports');
+/** Detect cycles in the dependency graph (simple DFS). */
+export function detectCycles(nodes: GraphNode[], edges: GraphEdge[]): string[][] {
   const adj = new Map<string, string[]>();
-  for (const e of importEdges) {
-    if (!adj.has(e.source)) adj.set(e.source, []);
-    adj.get(e.source)!.push(e.target);
+  for (const n of nodes) adj.set(n.id, []);
+  for (const e of edges) {
+    if (adj.has(e.source)) adj.get(e.source)!.push(e.target);
   }
 
   const cycles: string[][] = [];
   const visited = new Set<string>();
   const stack = new Set<string>();
-  const path: string[] = [];
 
-  function dfs(node: string): void {
-    if (stack.has(node)) {
-      const cycleStart = path.indexOf(node);
-      if (cycleStart >= 0) {
-        cycles.push(path.slice(cycleStart));
+  function dfs(u: string, path: string[]) {
+    visited.add(u);
+    stack.add(u);
+    for (const v of adj.get(u) ?? []) {
+      if (stack.has(v)) {
+        const idx = path.indexOf(v);
+        if (idx !== -1) cycles.push(path.slice(idx).concat(v));
+      } else if (!visited.has(v)) {
+        dfs(v, path.concat(v));
       }
-      return;
     }
-    if (visited.has(node)) return;
-
-    visited.add(node);
-    stack.add(node);
-    path.push(node);
-
-    for (const next of adj.get(node) ?? []) {
-      dfs(next);
-    }
-
-    path.pop();
-    stack.delete(node);
+    stack.delete(u);
   }
 
-  for (const node of adj.keys()) {
-    dfs(node);
+  for (const n of nodes) {
+    if (!visited.has(n.id)) dfs(n.id, [n.id]);
   }
-
-  // 중복 사이클 제거 (정규화: 사전순 최소 시작)
-  const seen = new Set<string>();
-  return cycles.filter(cycle => {
-    const minIdx = cycle.indexOf(cycle.slice().sort()[0]);
-    const normalized = [...cycle.slice(minIdx), ...cycle.slice(0, minIdx)].join('→');
-    if (seen.has(normalized)) return false;
-    seen.add(normalized);
-    return true;
-  });
+  return cycles;
 }
 
-// 진입점 탐지 (아무도 import하지 않는 모듈)
-function findEntrypoints(nodes: GraphNode[], edges: GraphEdge[]): Set<string> {
-  const imported = new Set(edges.filter(e => e.type === 'imports').map(e => e.target));
-  const entrypoints = new Set<string>();
-  for (const node of nodes) {
-    if (node.type === 'module' && !imported.has(node.id)) {
-      entrypoints.add(node.id);
-    }
-  }
-  return entrypoints;
+/** Find entrypoint modules (no incoming edges). */
+export function findEntrypoints(nodes: GraphNode[], edges: GraphEdge[]): Set<string> {
+  const hasIncoming = new Set<string>();
+  for (const e of edges) hasIncoming.add(e.target);
+  return new Set(nodes.filter((n) => !hasIncoming.has(n.id)).map((n) => n.id));
 }
 
-function buildFilteredSummary(moduleNodes: GraphNode[], testEdges: GraphEdge[]): RepoSnapshot['project']['summary'] & {
-  totalModules: number;
-  totalTestFiles: number;
-} {
-  const modules = moduleNodes.filter(n => n.type === 'module');
-  const testFiles = moduleNodes.filter(n => n.type === 'test_file');
-  const testedModuleIds = new Set(testEdges.map(e => e.target));
-  const churnScores = modules
-    .map(m => m.gitInfo?.churnScore ?? 0)
-    .filter(score => score > 0);
-  const avgChurnScore = churnScores.length > 0
-    ? churnScores.reduce((sum, score) => sum + score, 0) / churnScores.length
-    : 0;
-
-  return {
-    totalModules: modules.length,
-    totalTestFiles: testFiles.length,
-    avgChurnScore: Math.round(avgChurnScore * 1000) / 1000,
-    hotModules: modules
-      .filter(m => m.gitInfo?.churnScore !== undefined)
-      .sort((a, b) => (b.gitInfo?.churnScore ?? 0) - (a.gitInfo?.churnScore ?? 0))
-      .slice(0, 5)
-      .map(m => m.id),
-    untestedModules: modules
-      .filter(m => !testedModuleIds.has(m.id))
-      .map(m => m.id),
-    stableCount: modules.filter(m => m.metadata?.state === 'stable').length,
-    experimentalCount: modules.filter(m => m.metadata?.state === 'experimental').length,
-    deprecatedCount: modules.filter(m => m.metadata?.state === 'deprecated').length,
-  };
+/** Build a filtered summary from module nodes and test edges. */
+export function buildFilteredSummary(moduleNodes: GraphNode[], testEdges: GraphEdge[]): RepoSnapshot['project']['summary'] {
+  const testModules = new Set(testEdges.map((e) => e.source));
+  const totalModules = moduleNodes.length;
+  const totalTests = testModules.size;
+  const totalLoc = moduleNodes.reduce((s, n) => s + n.loc, 0);
+  const testCoverage = totalModules > 0 ? totalTests / totalModules : 0;
+  const hotspots = moduleNodes.filter((n) => n.isHotspot).length;
+  const circularDepGroups = 0; // computed separately
+  const avgChurn = moduleNodes.reduce((s, n) => s + (n.churnScore ?? 0), 0) / (totalModules || 1);
+  const entrypoints = moduleNodes.filter((n) => n.isEntrypoint).length;
+  return { totalModules, totalTests, totalLoc, testCoverage, hotspots, circularDepGroups, avgChurn, entrypoints };
 }
 
-function toGraphQLEnum(value: string | undefined): string | null {
-  return value ? value.toUpperCase() : null;
+/** Convert a string to a GraphQL enum value (uppercase, null-safe). */
+export function toGraphQLEnum(value: string | undefined): string | null {
+  if (!value) return null;
+  return value.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
 }
+
+// --- Snapshot types ---
 
 export interface RepoSnapshot {
-  schemaVersion: 1;
-  projectName: string;
-  projectPath: string;
-  scannedAt: string;
-
   project: {
+    name: string;
+    path: string;
+    scannedAt: string;
     totalModules: number;
     totalTests: number;
-    languages: { language: string; count: number; loc: number }[];
-    layers: { layer: string; count: number; modules: string[] }[];
+    languages: Array<{ language: string; count: number; loc: number }>;
+    layers: Array<{ layer: string; count: number; loc: number }>;
     summary: {
-      avgChurnScore: number;
-      hotModules: string[];
-      untestedModules: string[];
-      stableCount: number;
-      experimentalCount: number;
-      deprecatedCount: number;
+      totalModules: number;
+      totalTests: number;
+      totalLoc: number;
+      testCoverage: number;
+      hotspots: number;
+      circularDepGroups: number;
+      avgChurn: number;
+      entrypoints: number;
     };
   };
-
-  modules: {
+  modules: Array<{
     id: string;
     path: string;
     name: string;
@@ -265,136 +226,82 @@ export interface RepoSnapshot {
     loc: number;
     exports: number;
     imports: number;
-    dependsOn: string[];
-    dependedBy: string[];
-    tests: string[];
-    churnScore: number | null;
-    commitCount30d: number | null;
-    lastCommitDate: string | null;
-    state: string | null;
-    techDebt: number | null;
-    isEntrypoint: boolean;
+    churnScore: number;
     isHotspot: boolean;
     risk: string;
-  }[];
-
-  circularDeps: { modules: string[]; length: number }[];
+  }>;
+  circularDeps: Array<{ modules: string[]; length: number }>;
 }
 
+/** Build a snapshot from the current graph state. */
 export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoSnapshot {
-  const allNodes = graph.getAllNodes();
-  const allEdges = graph.getAllEdges();
+  const nodes = graph.getNodes();
+  const edges = graph.getEdges();
+  const entrypoints = findEntrypoints(nodes, edges);
+  const cycles = detectCycles(nodes, edges);
 
-  // Only include source files (src/, lib/, app/, etc.) — exclude node_modules artifacts, cache, models
-  const SOURCE_PREFIXES = ['src/', 'lib/', 'app/', 'packages/', 'test/', 'tests/', 'scripts/'];
-  const isSourceFile = (path: string) => SOURCE_PREFIXES.some(p => path.startsWith(p)) || !path.includes('/');
-  const moduleNodes = allNodes.filter((n: GraphNode) =>
-    (n.type === 'module' || n.type === 'test_file') && isSourceFile(n.path)
+  // Language breakdown
+  const langMap = new Map<string, { count: number; loc: number }>();
+  for (const n of nodes) {
+    const lang = n.language ?? 'UNKNOWN';
+    const entry = langMap.get(lang) ?? { count: 0, loc: 0 };
+    entry.count++;
+    entry.loc += n.loc;
+    langMap.set(lang, entry);
+  }
+
+  // Layer breakdown
+  const layerMap = new Map<string, { count: number; loc: number }>();
+  for (const n of nodes) {
+    const layer = n.layer ?? 'UNKNOWN';
+    const entry = layerMap.get(layer) ?? { count: 0, loc: 0 };
+    entry.count++;
+    entry.loc += n.loc;
+    layerMap.set(layer, entry);
+  }
+
+  // Test edges (source → target where target is a test)
+  const testEdges = edges.filter((e) => nodes.find((n) => n.id === e.target)?.type === 'test');
+
+  // Hot modules (high churn + many dependents)
+  const churnValues = nodes.map((n) => n.churnScore ?? 0).filter((c) => c > 0);
+  const avgChurn = churnValues.length > 0 ? churnValues.reduce((a, b) => a + b, 0) / churnValues.length : 0;
+  const hotModulesSet = new Set(
+    nodes
+      .filter((n) => {
+        const depBy = edges.filter((e) => e.target === n.id).length;
+        return (n.churnScore ?? 0) > avgChurn * 1.5 && depBy > 3;
+      })
+      .map((n) => n.id),
   );
-  const moduleIds = new Set(moduleNodes.map(n => n.id));
-  const importEdges = allEdges.filter((e: GraphEdge) =>
-    e.type === 'imports' && moduleIds.has(e.source) && moduleIds.has(e.target)
-  );
-  const testEdges = allEdges.filter((e: GraphEdge) =>
-    e.type === 'tests' && moduleIds.has(e.source) && moduleIds.has(e.target)
-  );
-  const summary = buildFilteredSummary(moduleNodes, testEdges);
-
-  // 의존성 맵 구축
-  const dependsOnMap = new Map<string, string[]>();
-  const dependedByMap = new Map<string, string[]>();
-  for (const e of importEdges) {
-    if (!dependsOnMap.has(e.source)) dependsOnMap.set(e.source, []);
-    dependsOnMap.get(e.source)!.push(e.target);
-    if (!dependedByMap.has(e.target)) dependedByMap.set(e.target, []);
-    dependedByMap.get(e.target)!.push(e.source);
-  }
-
-  // 테스트 맵
-  const testsMap = new Map<string, string[]>();
-  for (const e of testEdges) {
-    if (!testsMap.has(e.target)) testsMap.set(e.target, []);
-    testsMap.get(e.target)!.push(e.source);
-  }
-
-  const entrypoints = findEntrypoints(moduleNodes, importEdges);
-  const hotModulesSet = new Set(summary.hotModules);
-  const cycles = detectCycles(moduleNodes, importEdges);
-
-  // 언어 통계
-  const langStats = new Map<string, { count: number; loc: number }>();
-  for (const n of moduleNodes as GraphNode[]) {
-    const lang = (n.metrics?.language ?? 'other').toUpperCase();
-    const cur = langStats.get(lang) ?? { count: 0, loc: 0 };
-    cur.count++;
-    cur.loc += n.metrics?.loc ?? 0;
-    langStats.set(lang, cur);
-  }
-
-  // 레이어 통계
-  const layerStats = new Map<string, { count: number; modules: string[] }>();
-  for (const n of moduleNodes as GraphNode[]) {
-    const layer = inferLayer(n.path);
-    const cur = layerStats.get(layer) ?? { count: 0, modules: [] };
-    cur.count++;
-    cur.modules.push(n.id);
-    layerStats.set(layer, cur);
-  }
-
-  const projectName = projectPath.split('/').pop() ?? 'unknown';
 
   return {
-    schemaVersion: 1,
-    projectName,
-    projectPath,
-    scannedAt: new Date(graph.scannedAt).toISOString(),
-
     project: {
-      totalModules: summary.totalModules,
-      totalTests: summary.totalTestFiles,
-      languages: Array.from(langStats.entries()).map(([language, stats]) => ({
-        language, ...stats,
-      })),
-      layers: Array.from(layerStats.entries()).map(([layer, stats]) => ({
-        layer, count: stats.count, modules: stats.modules,
-      })),
-      summary: {
-        avgChurnScore: summary.avgChurnScore,
-        hotModules: summary.hotModules,
-        untestedModules: summary.untestedModules,
-        stableCount: summary.stableCount,
-        experimentalCount: summary.experimentalCount,
-        deprecatedCount: summary.deprecatedCount,
-      },
+      name: projectPath.split('/').pop() ?? 'unknown',
+      path: projectPath,
+      scannedAt: new Date().toISOString(),
+      totalModules: nodes.length,
+      totalTests: nodes.filter((n) => n.type === 'test').length,
+      languages: Array.from(langMap.entries()).map(([language, { count, loc }]) => ({ language, count, loc })),
+      layers: Array.from(layerMap.entries()).map(([layer, { count, loc }]) => ({ layer, count, loc })),
+      summary: buildFilteredSummary(nodes, testEdges),
     },
-
-    modules: moduleNodes.map(n => {
-      const deps = dependsOnMap.get(n.id) ?? [];
-      const depBy = dependedByMap.get(n.id) ?? [];
-      const tests = testsMap.get(n.id) ?? [];
+    modules: nodes.map((n) => {
+      const depBy = edges.filter((e) => e.target === n.id).length;
+      const tests = testEdges.filter((e) => e.source === n.id).length;
       return {
         id: n.id,
         path: n.path,
         name: n.name,
-        type: n.type.toUpperCase(),
-        layer: inferLayer(n.path),
-        language: (n.metrics?.language ?? 'other').toUpperCase(),
-        loc: n.metrics?.loc ?? 0,
-        exports: n.metrics?.exportCount ?? 0,
-        imports: n.metrics?.importCount ?? 0,
-        dependsOn: deps.filter(d => !d.startsWith('pkg:')),
-        dependedBy: depBy,
-        tests,
-        churnScore: n.gitInfo?.churnScore ?? null,
-        commitCount30d: n.gitInfo?.commitCount30d ?? null,
-        lastCommitDate: n.gitInfo?.lastCommitDate
-          ? new Date(n.gitInfo.lastCommitDate).toISOString()
-          : null,
-        state: toGraphQLEnum(n.metadata?.state),
-        techDebt: n.metadata?.techDebt ?? null,
-        isEntrypoint: entrypoints.has(n.id),
+        type: n.type,
+        layer: n.layer ?? 'UNKNOWN',
+        language: n.language ?? 'UNKNOWN',
+        loc: n.loc,
+        exports: n.exports,
+        imports: n.imports,
+        churnScore: n.churnScore ?? 0,
         isHotspot: hotModulesSet.has(n.id),
-        risk: computeRisk(n, tests.length > 0, depBy.length),
+        risk: computeRisk(n, tests > 0, depBy),
       };
     }),
 
@@ -408,7 +315,16 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   snapshotPath: string;
 } {
   const dir = join(projectPath, '.openswarm');
-  if (!existsSync(dir)) {
+
+  // Reject symlinked .openswarm directories to prevent redirection attacks.
+  if (existsSync(dir)) {
+    const stat = lstatSync(dir);
+    if (stat.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to export to symlinked directory: ${dir} -> ${join(projectPath, '.openswarm')} is a symlink. Remove the symlink or point it to a real directory.`,
+      );
+    }
+  } else {
     mkdirSync(dir, { recursive: true });
   }
 

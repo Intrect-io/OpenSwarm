@@ -10,7 +10,7 @@
 // keypress logs one code point but the screen shows two glyphs, it's terminal
 // echo (fix in the client); if it logs the code point twice, it's ink-level.
 
-import { closeSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { closeSync, chmodSync, mkdirSync, openSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -31,25 +31,59 @@ export interface DebugKeyFlags {
  * points (so doubling is visible), and any active key flags. Pure. (INT-1964)
  */
 export function formatInputDebug(input: string, key: DebugKeyFlags = {}): string {
-  const codepoints = Array.from(input).map((ch) => (ch.codePointAt(0) ?? 0));
+  const codepoints = [...input].map((c) => `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`).join(' ');
   const flags = Object.entries(key)
     .filter(([, v]) => v)
-    .map(([k]) => k);
-  return `input=${JSON.stringify(input)} len=${codepoints.length} cp=[${codepoints.join(',')}]${
-    flags.length ? ` keys=${flags.join('+')}` : ''
-  }`;
+    .map(([k]) => k)
+    .join('|');
+  const flagsPart = flags ? ` [${flags}]` : '';
+  return `${JSON.stringify(input)} ${codepoints}${flagsPart}`;
 }
 
-/** Whether input diagnostics are enabled (OPENSWARM_DEBUG_INPUT truthy). */
+/** Check if input debugging is enabled via env var. (INT-1964) */
 export function inputDebugEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const v = env.OPENSWARM_DEBUG_INPUT;
   return v === '1' || v === 'true';
+}
+
+/**
+ * Enforce private permissions (0o600) on a pre-existing file.
+ * Throws if the file exists and has permissions more permissive than 0o600.
+ */
+function enforcePrivatePermissions(path: string): void {
+  try {
+    const stat = statSync(path);
+    // Check if any bits outside owner-read/write are set.
+    if (stat.mode & 0o077) {
+      throw new Error(
+        `Refusing to append to ${path}: permissions are ${(stat.mode & 0o777).toString(8)} (expected 600). ` +
+        `Fix with: chmod 600 ${path}`,
+      );
+    }
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return; // file doesn't exist yet — fine
+    throw err;
+  }
+}
+
+/** Enforce private file permissions (0o600) on pre-existing files. */
+function enforcePrivatePermissions(path: string): void {
+  try {
+    const stat = statSync(path);
+    if ((stat.mode & 0o777) !== 0o600) {
+      throw new Error(`File ${path} has unsafe permissions: ${stat.mode.toString(8)}`);
+    }
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') throw err;
+  }
 }
 
 /** Append a diagnostic line to the debug log (best-effort, never throws). (INT-1964) */
 export function appendInputDebug(input: string, key: DebugKeyFlags = {}, path = INPUT_DEBUG_LOG): void {
   try {
     mkdirSync(dirname(path), { recursive: true });
+    // Check pre-existing file permissions before opening.
+    enforcePrivatePermissions(path);
     const fd = openSync(path, 'a', 0o600);
     try {
       writeFileSync(fd, `${formatInputDebug(input, key)}\n`, 'utf8');

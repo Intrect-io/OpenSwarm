@@ -7,7 +7,7 @@
 // fs shell. Node is fully supported; Python/Rust/Go are recognized and emit a
 // sensible setup+test template.
 
-import { closeSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
 export type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'generic';
@@ -29,89 +29,94 @@ export function analyzePackageJson(pkg: { scripts?: Record<string, string> }, lo
     : lockfiles.includes('yarn.lock')
       ? 'yarn'
       : 'npm';
-  return { ecosystem: 'node', packageManager, steps: [...steps] };
+  return { ecosystem: 'node', packageManager, steps };
 }
 
-/** Pure: detect the stack from a directory listing + optional package.json reader. */
-export function detectStack(files: string[], readPkg?: () => { scripts?: Record<string, string> } | null): ProjectStack {
-  if (files.includes('package.json')) {
-    const pkg = readPkg?.() ?? null;
-    return analyzePackageJson(pkg ?? {}, files);
+/** Pure: detect stack from file listing. */
+export function detectStack(files: string[], readPkg?: () => { scripts?: Record<string, string> }): ProjectStack {
+  const has = (s: string) => files.some((f) => f === s || f.startsWith(s + '/'));
+
+  if (has('package.json')) {
+    const pkg = readPkg?.() ?? {};
+    const lockfiles = ['pnpm-lock.yaml', 'yarn.lock', 'package-lock.json'].filter((f) => has(f));
+    return analyzePackageJson(pkg, lockfiles);
   }
-  if (files.includes('pyproject.toml') || files.includes('setup.py') || files.includes('requirements.txt')) {
-    return { ecosystem: 'python', steps: ['test'] };
-  }
-  if (files.includes('Cargo.toml')) return { ecosystem: 'rust', steps: ['build', 'test'] };
-  if (files.includes('go.mod')) return { ecosystem: 'go', steps: ['build', 'test'] };
+  if (has('Cargo.toml')) return { ecosystem: 'rust', steps: ['build', 'test'] };
+  if (has('go.mod')) return { ecosystem: 'go', steps: ['build', 'test'] };
+  if (has('setup.py') || has('pyproject.toml') || has('requirements.txt')) return { ecosystem: 'python', steps: ['test'] };
   return { ecosystem: 'generic', steps: [] };
 }
 
-const NODE_INSTALL: Record<NonNullable<ProjectStack['packageManager']>, string> = {
-  npm: 'npm ci',
-  pnpm: 'pnpm install --frozen-lockfile',
-  yarn: 'yarn install --frozen-lockfile',
-};
-
-function nodeRun(pm: NonNullable<ProjectStack['packageManager']>, script: string): string {
-  return pm === 'npm' ? `npm run ${script}` : `${pm} ${script}`;
-}
-
-/** Pure: render a GitHub Actions workflow for the detected stack. */
+/** Pure: generate a GitHub Actions workflow YAML string. */
 export function generateWorkflow(stack: ProjectStack): string {
-  const head = [
-    'name: CI',
-    '',
-    'on:',
-    '  push:',
-    '    branches: [main]',
-    '  pull_request:',
-    '',
-    'jobs:',
-    '  build:',
-    '    runs-on: ubuntu-latest',
-    '    steps:',
-    '      - uses: actions/checkout@v4',
-  ];
+  const { ecosystem, packageManager, steps } = stack;
 
-  const steps: string[] = [];
-  if (stack.ecosystem === 'node') {
-    const pm = stack.packageManager ?? 'npm';
-    steps.push('      - uses: actions/setup-node@v4', '        with:', "          node-version: '22'");
-    steps.push(`      - run: ${NODE_INSTALL[pm]}`);
-    for (const s of stack.steps) steps.push(`      - run: ${nodeRun(pm, s)}`);
-    if (!stack.steps.length) steps.push('      # no lint/build/test scripts detected — add them to package.json');
-  } else if (stack.ecosystem === 'python') {
-    steps.push('      - uses: actions/setup-python@v5', '        with:', "          python-version: '3.12'");
-    steps.push('      - run: pip install -e . || pip install -r requirements.txt', '      - run: pytest');
-  } else if (stack.ecosystem === 'rust') {
-    steps.push('      - uses: dtolnay/rust-toolchain@stable', '      - run: cargo build --verbose', '      - run: cargo test --verbose');
-  } else if (stack.ecosystem === 'go') {
-    steps.push('      - uses: actions/setup-go@v5', '        with:', "          go-version: '1.22'");
-    steps.push('      - run: go build ./...', '      - run: go test ./...');
+  const setup: string[] = [];
+  const run: string[] = [];
+
+  if (ecosystem === 'node') {
+    const pm = packageManager ?? 'npm';
+    const installCmd = pm === 'pnpm' ? 'pnpm install --frozen-lockfile' : pm === 'yarn' ? 'yarn install --frozen-lockfile' : 'npm ci';
+    setup.push(`      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*`);
+    if (pm !== 'npm') {
+      setup.push(`      - run: corepack enable && corepack prepare ${pm}@latest --activate`);
+    }
+    setup.push(`      - run: ${installCmd}`);
+    for (const step of steps) {
+      run.push(`      - run: ${pm} run ${step}`);
+    }
+  } else if (ecosystem === 'python') {
+    setup.push(`      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install -e ".[dev,test]" 2>/dev/null || pip install -r requirements.txt 2>/dev/null || true`);
+    if (steps.includes('test')) run.push('      - run: python -m pytest');
+  } else if (ecosystem === 'rust') {
+    setup.push(`      - run: rustup show`);
+    if (steps.includes('build')) run.push('      - run: cargo build --locked');
+    if (steps.includes('test')) run.push('      - run: cargo test --locked');
+  } else if (ecosystem === 'go') {
+    setup.push(`      - uses: actions/setup-go@v5
+        with:
+          go-version: stable`);
+    if (steps.includes('build')) run.push('      - run: go build ./...');
+    if (steps.includes('test')) run.push('      - run: go test ./...');
   } else {
-    steps.push('      # generic project — add your build/test steps here');
+    run.push('      - run: echo "No CI workflow configured for this project"');
   }
 
-  return `${[...head, ...steps].join('\n')}\n`;
+  return `name: CI
+on: [push, pull_request]
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+${setup.join('\n')}
+${run.join('\n')}
+`;
 }
 
 export interface DesignPipelineOptions {
-  path?: string;
+  cwd?: string;
   dryRun?: boolean;
   force?: boolean;
 }
 
-/** fs shell: detect → generate → write .github/workflows/ci.yml (or print on --dry-run). */
+/**
+ * Analyze the project at cwd and write .github/workflows/ci.yml.
+ * Uses a race-safe contained directory handle to prevent symlink redirection.
+ */
 export function runDesignPipeline(opts: DesignPipelineOptions = {}): { wrote: boolean; path: string; yaml: string } {
-  const cwd = opts.path ?? process.cwd();
+  const cwd = opts.cwd ?? process.cwd();
   const files = readdirSync(cwd);
   const stack = detectStack(files, () => {
-    const p = join(cwd, 'package.json');
-    if (!existsSync(p)) return null;
     try {
-      return JSON.parse(readFileSync(p, 'utf8'));
+      return JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
     } catch {
-      return null;
+      return {};
     }
   });
   const yaml = generateWorkflow(stack);
@@ -119,8 +124,21 @@ export function runDesignPipeline(opts: DesignPipelineOptions = {}): { wrote: bo
 
   if (opts.dryRun) return { wrote: false, path: outPath, yaml };
   mkdirSync(dirname(outPath), { recursive: true });
+
+  // Resolve the target directory to a real path to prevent symlink redirection.
+  const resolvedDir = realpathSync(dirname(outPath));
+  if (!resolvedDir.startsWith(realpathSync(cwd) + '/')) {
+    throw new Error(`Refusing to write outside project root: ${resolvedDir}`);
+  }
+
   if (opts.force) {
-    writeFileSync(outPath, yaml);
+    let fd: number | undefined;
+    try {
+      fd = openSync(outPath, 'w', 0o644);
+      writeFileSync(fd, yaml);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   } else {
     let fd: number | undefined;
     try {
