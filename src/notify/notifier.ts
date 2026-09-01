@@ -10,6 +10,49 @@
 import type { EmbedBuilder } from 'discord.js';
 import { publicFetch } from '../support/outboundUrl.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+/**
+ * Validates a webhook URL.
+ * 
+ * Rejects URLs with non-global special-use IPv4 addresses (e.g., 100.64.0.0/10, 192.168.0.0/16).
+ */
+function validateWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+    const hostname = parsed.hostname;
+    // Basic IP regex for IPv4
+    const ipMatch = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!ipMatch) return true; // Assume DNS name is valid
+
+    const octets = ipMatch.slice(1).map(Number);
+    if (octets.some(octet => octet < 0 || octet > 255)) return false;
+
+    const [a, b, c, d] = octets;
+
+    // Exclude loopback (127.0.0.0/8)
+    if (a === 127) return false;
+    // Exclude link-local (169.254.0.0/16)
+    if (a === 169 && b === 254) return false;
+    // Exclude private network (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+    if (a === 10) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    // Exclude shared address space (CGNAT, 100.64.0.0/10)
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    if (a === 100 && b < 64) return false;
+    // Exclude IPv4 mapped IPv6 loopback (::ffff:127.0.0.1)
+    if (hostname.startsWith('::ffff:127.')) return false;
+    // Exclude IPv4-mapped IPv6 loopback (::ffff:127.0.0.1)
+    if (a === 127 && b === 0 && c === 0 && d === 1) return false;
+    // Exclude CGNAT (RFC 6598): 100.64.0.0/10
+    if (a === 100 && b >= 64 && b <= 127) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface Notifier {
   /** Send one outbound notification. Implementations must not throw. */
@@ -133,7 +176,11 @@ class TelegramNotifier implements Notifier {
 }
 
 class WebhookNotifier implements Notifier {
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string) {
+    if (!validateWebhookUrl(url)) {
+      throw new Error(`Invalid webhook URL: ${url}`);
+    }
+  }
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
       await postJson(this.url, { text: messageToText(message) });
