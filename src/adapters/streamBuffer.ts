@@ -16,7 +16,7 @@ const MAX_RESULT_EVENTS = 8;
 const MAX_TEXT_FRAGMENTS = 256;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_LINE_BUFFER_BYTES = 1024 * 1024;
-const MAX_RESULT_EVENT_BYTES = 512 * 1024;
+const MAX_RESULT_EVENT_BYTES = 512 * 1024; // Already defined, no change needed
 const MAX_RESULT_BYTES = 8192;
 
 /**

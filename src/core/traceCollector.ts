@@ -91,18 +91,30 @@ export class TraceCollector {
       const completed = [...this.traces].find(([, trace]) => trace.status !== 'running');
       if (!completed) throw new Error(`Trace capacity exceeded (${this.maxTraces} active traces)`);
       this.traces.delete(completed[0]);
-    }
+  collectTrace(name: string, metadata?: Record<string, unknown>, error?: Error) {
+    // Bound inputs before retention
+    const safeName = this.tailWithinBytes(name, 4096);
+    const safeMetadata = metadata ? JSON.parse(this.tailWithinBytes(JSON.stringify(metadata), 4096)) : undefined;
+    const safeError = error ? new Error(this.tailWithinBytes(error.message, 4096)) : undefined;
+
     const traceId = randomUUID();
     const trace: Trace = {
       traceId,
-      name,
+      name: safeName,
       startTime: Date.now(),
       status: 'running',
       spans: [],
-      metadata,
+      metadata: safeMetadata || {}
     };
     this.traces.set(traceId, trace);
     return traceId;
+  }
+
+  private tailWithinBytes(value: string, maxBytes: number): string {
+    if (maxBytes <= 0) return '';
+    const bytes = Buffer.from(value, 'utf8');
+    if (bytes.length <= maxBytes) return value;
+    return `…truncated…\n${bytes.subarray(bytes.length - Math.max(0, maxBytes - 16)).toString('utf8')}`;
   }
 
   /**
