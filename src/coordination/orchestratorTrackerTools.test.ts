@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -5,7 +6,9 @@ import { join } from 'node:path';
 
 const originalCoordinationFile = process.env.OPENSWARM_COORDINATION_FILE;
 const originalAutomationDb = process.env.OPENSWARM_AUTOMATION_DB;
+const originalWarehouseRoot = process.env.OPENSWARM_WAREHOUSE_ROOT;
 let dir = '';
+let warehouseDir = '';
 
 async function setup() {
   dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-tracker-'));
@@ -26,8 +29,11 @@ afterEach(async () => {
   (await import('./coordinationTrace.js')).resetTraceDbForTests();
   process.env.OPENSWARM_COORDINATION_FILE = originalCoordinationFile;
   process.env.OPENSWARM_AUTOMATION_DB = originalAutomationDb;
+  process.env.OPENSWARM_WAREHOUSE_ROOT = originalWarehouseRoot;
   if (dir) rmSync(dir, { recursive: true, force: true });
+  if (warehouseDir) rmSync(warehouseDir, { recursive: true, force: true });
   dir = '';
+  warehouseDir = '';
 });
 
 describe('orchestrator tracker tools', () => {
@@ -173,5 +179,42 @@ describe('orchestrator tracker tools', () => {
       repository: dir, taskId: 'worker', actor: 'worker-a', actorRole: 'worker',
     });
     expect(workerDenied.isError).toBe(true);
+    expect(await tools.executeOrchestratorTrackerTool('host_read_file', {}, orchestrator))
+      .toMatchObject({ isError: true, content: expect.stringContaining('path is required') });
+    expect(await tools.executeOrchestratorTrackerTool('host_read_file', { path: 'src' }, orchestrator))
+      .toMatchObject({ isError: true, content: expect.stringContaining('not a regular file') });
+    const paged = await tools.executeOrchestratorTrackerTool(
+      'host_read_file',
+      { path: 'src/app.ts', offset: 2, limit: 1 },
+      orchestrator,
+    );
+    expect(paged.isError).toBe(false);
+    expect(paged.content).toContain('export const m = 2;');
+    expect(paged.content).not.toContain('export const n = 1;');
+
+    warehouseDir = mkdtempSync(join(tmpdir(), 'osw-warehouse-'));
+    writeFileSync(join(warehouseDir, 'note.md'), 'from warehouse\n');
+    process.env.OPENSWARM_WAREHOUSE_ROOT = warehouseDir;
+    const warehouseRead = await tools.executeOrchestratorTrackerTool(
+      'host_read_file',
+      { path: join(warehouseDir, 'note.md') },
+      orchestrator,
+    );
+    expect(warehouseRead).toMatchObject({ isError: false, content: expect.stringContaining('from warehouse') });
+    expect(await tools.executeOrchestratorTrackerTool('host_search_files', { pattern: 'warehouse', path: warehouseDir }, orchestrator))
+      .toMatchObject({ isError: true, content: expect.stringContaining('limited to the repository checkout') });
+    expect(await tools.executeOrchestratorTrackerTool('host_search_files', {}, orchestrator))
+      .toMatchObject({ isError: true, content: expect.stringContaining('pattern is required') });
+    expect(await tools.executeOrchestratorTrackerTool('host_search_files', { pattern: 'export const' }, orchestrator))
+      .toMatchObject({ isError: true, content: expect.stringContaining('git grep failed') });
+
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['add', 'src/app.ts'], { cwd: dir });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 't'], { cwd: dir });
+    const found = await tools.executeOrchestratorTrackerTool('host_search_files', { pattern: 'export const n' }, orchestrator);
+    expect(found.isError).toBe(false);
+    expect(found.content).toContain('src/app.ts');
+    const none = await tools.executeOrchestratorTrackerTool('host_search_files', { pattern: 'this-string-is-absent-zzzz' }, orchestrator);
+    expect(none).toMatchObject({ isError: false, content: '(no matches)' });
   });
 });
