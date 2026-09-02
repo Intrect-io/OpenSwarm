@@ -238,6 +238,8 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     : undefined;
 
   return pickFailureDetail([
+    // Publication failed after every stage passed: nothing below describes it.
+    result.failureDetail,
     testerFailure,
     result.lastReviewFeedback,
     result.reviewResult?.feedback,

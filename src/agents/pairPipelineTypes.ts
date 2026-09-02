@@ -117,6 +117,22 @@ export interface PipelineResult {
   };
   prUrl?: string;
   totalCost?: CostInfo;
+  /**
+   * Cause of a failure that happened outside the staged pipeline — today the
+   * publication step, which runs after every stage succeeded. `stages[]`
+   * cannot carry it (there is no 'pr' stage), and without it the ledger
+   * recorded these attempts with no message at all (vela AGT-3844: 48
+   * attempts, half of them blank).
+   */
+  failureDetail?: string;
+  /**
+   * A deterministic failure that an operator has to resolve. The coordinator
+   * parks the run as NEEDS_HUMAN under `code` instead of scheduling a retry:
+   * the publication-scope fence rejecting files already committed on the
+   * branch cannot be retried into success, and vela spent 23/48/15 attempts
+   * on three such runs on 2026-09-02 before anyone looked.
+   */
+  operatorPark?: { code: string; reason: string };
 }
 
 export interface PipelineContext {
