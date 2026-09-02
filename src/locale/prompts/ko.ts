@@ -104,8 +104,14 @@ ${promptDataBlock(previousFeedback)}
 
     // Code context section (repository + draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
     let contextSection = '';
-    if (context?.fileScope?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
+    if (context?.fileScope?.length || context?.priorDeliveries?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
       const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
+
+      if (context.priorDeliveries?.length) {
+        parts.push('', '### 이전 납품 (구속력 있음)');
+        parts.push('이 이슈에 대한 아래 PR은 이번 시도 전에 이미 머지되거나 닫혔다. 이번 시도는 이슈가 다시 열렸기 때문에 존재한다. 이슈의 최신 설명과 코멘트가 아직 요구하는 것만 하고, 이미 납품된 작업을 다시 구현하거나 고쳐 쓰거나 "개선"하지 마라. 남은 것이 없으면 아무것도 편집하지 말고 status done과 그 납품을 지목하는 noChangesReason으로 끝내라.');
+        parts.push(promptDataBlock(context.priorDeliveries.join('\n')));
+      }
 
       if (context.fileScope?.length) {
         parts.push('', '### 허용 편집 경계 (구속력 있음)');

@@ -20,6 +20,9 @@ export async function collectWorkerContext(
     // would have passed.
     const enforcedScope = enforcedFileScope(context.task);
     if (enforcedScope) wc.fileScope = enforcedScope;
+    // cgf-portal#211 (2026-09-02): an issue whose PR had merged came back, the
+    // worker found nothing left to do and "improved" an unrelated dev script.
+    if (context.task.priorDeliveries?.length) wc.priorDeliveries = [...context.task.priorDeliveries];
     if (draft) {
       wc.draftAnalysis = { taskType: draft.taskType, intentSummary: draft.intentSummary, relevantFiles: draft.relevantFiles,
         suggestedApproach: draft.suggestedApproach, projectStats: draft.projectStats, completionCriteria: draft.completionCriteria, sufficient: draft.sufficient };
@@ -54,6 +57,6 @@ export async function collectWorkerContext(
     // it changes what the worker knows, not what it is allowed to do. (AGT-4088)
     const siblingWork = await collectSiblingWork(context.projectPath);
     if (siblingWork.length) { wc.siblingWork = siblingWork; safeConsole.log(`[Pipeline] ${siblingWork.length} sibling worktree(s) have uncommitted changes`); }
-    return wc.fileScope || wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
+    return wc.fileScope || wc.priorDeliveries || wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
   } catch (error) { safeConsole.warn('[Pipeline] Worker context collection failed (non-blocking):', error); return undefined; }
 }

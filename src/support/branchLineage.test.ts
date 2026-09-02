@@ -52,12 +52,12 @@ describe('prepareAttemptBranch', () => {
 
     await expect(prepareAttemptBranch(root, 'issue-1', 'swarm/X-1-t', {
       lookup: async () => null, retire,
-    })).resolves.toBe('swarm/X-1-t');
+    })).resolves.toEqual({ branchName: 'swarm/X-1-t', consumedPullRequests: [] });
     expect(retire).not.toHaveBeenCalled();
 
     await expect(prepareAttemptBranch(root, 'issue-1', 'swarm/X-1-t', {
       lookup: async (_r, name) => (name === 'swarm/X-1-t' ? { url: 'u/9', state: 'MERGED' } : null), retire,
-    })).resolves.toBe('swarm/X-1-t-r2');
+    })).resolves.toEqual({ branchName: 'swarm/X-1-t-r2', consumedPullRequests: ['u/9'] });
     expect(retire).toHaveBeenCalledWith(root, 'issue-1', stale);
     expect(log).toHaveBeenCalledWith(expect.stringContaining('consumed by u/9'));
     log.mockRestore();

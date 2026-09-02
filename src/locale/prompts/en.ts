@@ -104,8 +104,14 @@ Apply the above feedback and make corrections.
 
     // Code context section (repository + draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
     let contextSection = '';
-    if (context?.fileScope?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
+    if (context?.fileScope?.length || context?.priorDeliveries?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
       const parts: string[] = ['## Code Context (auto-generated)'];
+
+      if (context.priorDeliveries?.length) {
+        parts.push('', '### Prior Deliveries (binding)');
+        parts.push('The following pull request(s) for this issue were already merged or closed before this attempt. This attempt exists only because the issue was reopened. Do only what the issue\'s latest description and comments still ask for; do not re-implement, restyle, or "improve" delivered work. If nothing remains, make no edits and finish with status done and a noChangesReason naming the delivery.');
+        parts.push(promptDataBlock(context.priorDeliveries.join('\n')));
+      }
 
       if (context.fileScope?.length) {
         parts.push('', '### Allowed Edit Boundary (binding)');

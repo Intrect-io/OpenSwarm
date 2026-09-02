@@ -112,7 +112,7 @@ export async function prepareAttemptBranch(
   issueId: string,
   baseName: string,
   deps: { lookup?: PullRequestLookup; retire?: (repoPath: string, issueId: string, worktreePath: string) => Promise<void> } = {},
-): Promise<string> {
+): Promise<AttemptBranch> {
   const lineage = await resolveAttemptBranchName(repoPath, baseName, deps.lookup);
   if (lineage.consumedPullRequests.length > 0) {
     console.log(
@@ -130,5 +130,5 @@ export async function prepareAttemptBranch(
       }
     }
   }
-  return lineage.branchName;
+  return lineage;
 }
