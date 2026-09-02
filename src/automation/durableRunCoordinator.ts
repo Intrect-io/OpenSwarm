@@ -691,8 +691,10 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'superseded') {
+      // Back off on how many times in a row a sibling has claimed the files,
+      // not on how many attempts of any kind the run has behind it.
       return this.ledger.transition(claim, 'RETRY_AT', {
-        retryAt: retryAtFor(result, now, claim.attemptNo),
+        retryAt: retryAtFor(result, now, this.ledger.consecutiveSupersessions(issueId) + 1),
         errorCode: result.finalStatus,
         eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
       }, now) ? result : fencedResult(result);

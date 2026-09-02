@@ -53,3 +53,26 @@ export function consecutiveIdenticalInfraFailuresInDb(
   }
   return streak;
 }
+
+/**
+ * Finished attempts, newest first, that ended `superseded` before anything
+ * else. The supersession backoff is keyed on this streak, not on the run's
+ * total attempt number: a run with eight earlier attempts of any kind used to
+ * wait six hours after ONE sibling PR claimed its files, and an explicit
+ * redispatch that hit the same PR only pushed it further out (vela
+ * AGT-3597/4165/3502 → 19:27–20:07 on 2026-09-02).
+ */
+export function consecutiveSupersessionsInDb(db: Database.Database, issueId: string, limit = 32): number {
+  const rows = db.prepare(`
+    SELECT result_status FROM automation_attempts
+    WHERE issue_id = ? AND finished_at IS NOT NULL
+    ORDER BY attempt_no DESC, lease_epoch DESC
+    LIMIT ?
+  `).all(issueId, limit) as Array<{ result_status: string | null }>;
+  let streak = 0;
+  for (const row of rows) {
+    if (row.result_status !== 'superseded') break;
+    streak += 1;
+  }
+  return streak;
+}
