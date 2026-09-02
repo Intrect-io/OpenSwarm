@@ -769,7 +769,8 @@ function decodeThreadCursor(cursor: string): [number, string] {
 }
 
 export function listCoordinationThreads(input: {
-  repository: string;
+  /** Omit to read the operator-wide board across repository cells. */
+  repository?: string;
   status?: CoordinationThreadStatus;
   relatedTaskId?: string;
   participant?: { actor: string; taskId: string };
@@ -777,10 +778,14 @@ export function listCoordinationThreads(input: {
   cursor?: string;
 }): ThreadPage<CoordinationThread> {
   const db = database();
-  const repo = repository(input.repository);
   const limit = Math.min(Math.max(Math.trunc(input.limit ?? DEFAULT_LIMIT), 1), MAX_LIMIT);
-  const where = ['t.repository = ?'];
-  const params: Array<string | number> = [repo];
+  const repo = input.repository ? repository(input.repository) : undefined;
+  const where: string[] = [];
+  const params: Array<string | number> = [];
+  if (repo) {
+    where.push('t.repository = ?');
+    params.push(repo);
+  }
   if (input.status) {
     where.push('t.status = ?');
     params.push(input.status);
@@ -822,7 +827,7 @@ export function listCoordinationThreads(input: {
       (SELECT COUNT(*) FROM coordination_thread_subscriptions s WHERE s.thread_id = t.thread_id) AS participant_count
       ${unreadSelect}
     FROM coordination_threads t
-    WHERE ${where.join(' AND ')}
+    ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY t.updated_at DESC, t.thread_id DESC
     LIMIT ?
   `).all(...unreadParams, ...params, limit + 1) as ThreadRow[];

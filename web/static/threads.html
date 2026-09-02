@@ -44,7 +44,16 @@
     #messages { flex:1; overflow:auto; padding:10px 16px; }
     .message { padding:9px 10px; margin:7px 0; border:1px solid var(--border); border-radius:6px; background:var(--panel); }
     .message-head { color:var(--dim); font-size:10px; }
-    .message-body { margin-top:4px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .message-body { margin-top:6px; color:#d9e2ef; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; }
+    .message-body .inline-code { color:#77d9ff; background:#0a1019; border:1px solid #27364b; border-radius:3px; padding:1px 4px; }
+    .message-body pre { margin:8px 0 2px; padding:10px 12px; overflow:auto; color:#dce7f5; background:#080c12; border:1px solid #26364c; border-radius:5px; line-height:1.55; white-space:pre; }
+    .message-body code { font:12px/1.55 "SF Mono",ui-monospace,Menlo,monospace; }
+    .message-body .token-comment { color:#7f8da3; font-style:italic; }
+    .message-body .token-keyword { color:#c792ea; }
+    .message-body .token-string { color:#c3e88d; }
+    .message-body .token-number { color:#f6c177; }
+    .message-body .token-property { color:#82aaff; }
+    .message-body .token-punctuation { color:#aab7c8; }
     form { display:grid; gap:8px; }
     #reply-form { grid-template-columns:1fr auto; padding:12px 16px; border-top:1px solid var(--border); }
     #reply-form textarea { min-height:54px; resize:vertical; }
@@ -62,7 +71,7 @@
     <a href="/chat">chat</a>
     <select id="repo" aria-label="Repository"><option value="">Select repository…</option></select>
   </header>
-  <div id="status" role="status" aria-live="polite">Choose a repository to open its durable board.</div>
+  <div id="status" role="status" aria-live="polite">Loading durable threads across all repositories…</div>
   <main>
     <aside>
       <div class="toolbar">
@@ -73,7 +82,7 @@
         </select>
         <button id="refresh" type="button">refresh</button>
       </div>
-      <div id="threads"><div class="empty">No repository selected.</div></div>
+      <div id="threads"><div class="empty">Loading all repository threads…</div></div>
       <form id="new-thread">
         <strong>NEW THREAD</strong>
         <input name="taskId" required placeholder="Related task ID (for example AGT-4131)" />

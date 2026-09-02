@@ -34,6 +34,50 @@ function time(value) {
   return new Date(value).toLocaleString();
 }
 
+function appendCode(doc, holder, source) {
+  const code = doc.createElement('code');
+  // A small DOM-only lexer keeps agent-controlled text inert while making the
+  // common code and log fragments materially easier to scan.
+  const token = /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)|((?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'))|(\b(?:async|await|break|case|class|const|def|else|export|false|for|from|function|if|import|in|let|new|null|return|true|try|catch|throw|while)\b)|(\b\d+(?:\.\d+)?\b)|([{}[\]().,;:=])/g;
+  let cursor = 0;
+  for (const match of source.matchAll(token)) {
+    if (match.index > cursor) code.append(doc.createTextNode(source.slice(cursor, match.index)));
+    const className = match[1] ? 'token-comment'
+      : match[2] ? 'token-string'
+        : match[3] ? 'token-keyword'
+          : match[4] ? 'token-number' : 'token-punctuation';
+    code.appendChild(text(doc, 'span', match[0], className));
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < source.length) code.append(doc.createTextNode(source.slice(cursor)));
+  holder.appendChild(code);
+}
+
+/** Render prose, inline code, and fenced code without ever interpreting HTML. */
+export function renderThreadMessageBody(doc, holder, body) {
+  holder.replaceChildren();
+  const appendProse = (value) => {
+    let cursor = 0;
+    for (const match of value.matchAll(/`([^`\n]+)`/g)) {
+      if (match.index > cursor) holder.append(doc.createTextNode(value.slice(cursor, match.index)));
+      holder.appendChild(text(doc, 'code', match[1], 'inline-code'));
+      cursor = match.index + match[0].length;
+    }
+    if (cursor < value.length) holder.append(doc.createTextNode(value.slice(cursor)));
+  };
+  const source = String(body ?? '');
+  const fence = /```[^\n]*\n([\s\S]*?)```/g;
+  let cursor = 0;
+  for (const match of source.matchAll(fence)) {
+    appendProse(source.slice(cursor, match.index));
+    const pre = doc.createElement('pre');
+    appendCode(doc, pre, match[1]);
+    holder.appendChild(pre);
+    cursor = match.index + match[0].length;
+  }
+  appendProse(source.slice(cursor));
+}
+
 export function renderThreadList(doc, holder, threads, selectedId, onSelect) {
   holder.replaceChildren();
   if (threads.length === 0) {
@@ -54,7 +98,7 @@ export function renderThreadList(doc, holder, threads, selectedId, onSelect) {
     card.appendChild(text(
       doc,
       'div',
-      `${tasks} · ${thread.messageCount} messages · ${thread.participantCount} participants · ${time(thread.updatedAt)}`,
+      `${thread.repository} · ${tasks} · ${thread.messageCount} messages · ${thread.participantCount} participants · ${time(thread.updatedAt)}`,
       'meta',
     ));
     card.addEventListener('click', () => onSelect(thread.id));
@@ -67,6 +111,7 @@ export function renderThreadDetail(doc, detail) {
   doc.getElementById('detail').classList.add('visible');
   doc.getElementById('detail-subject').textContent = detail.thread.subject;
   doc.getElementById('detail-meta').textContent = [
+    detail.thread.repository,
     `v${detail.thread.version}`,
     detail.thread.status,
     `tasks ${(detail.thread.relatedTaskIds ?? []).join(', ')}`,
@@ -86,7 +131,9 @@ export function renderThreadDetail(doc, detail) {
       `${message.actorName ?? message.actor} · ${message.actorRole ?? 'agent'} · ${message.taskLabel ?? message.taskId} · ${time(message.createdAt)}`,
       'message-head',
     ));
-    block.appendChild(text(doc, 'div', message.body, 'message-body'));
+    const body = text(doc, 'div', '', 'message-body');
+    renderThreadMessageBody(doc, body, message.body);
+    block.appendChild(body);
     messages.appendChild(block);
   }
 }
@@ -112,12 +159,14 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     status.className = error ? 'error' : '';
   };
 
-  const repositoryQuery = () => `repository=${encodeURIComponent(state.repository)}`;
+  const repositoryForThread = (threadId = state.selectedId) => state.threads
+    .find((thread) => thread.id === threadId)?.repository ?? state.repository;
+  const repositoryQuery = (threadId) => `repository=${encodeURIComponent(repositoryForThread(threadId))}`;
 
   async function loadDetail(threadId = state.selectedId) {
-    if (!state.repository || !threadId || state.stopped) return;
+    if (!threadId || state.stopped) return;
     try {
-      const detail = await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(threadId)}?${repositoryQuery()}&messageLimit=200`);
+      const detail = await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(threadId)}?${repositoryQuery(threadId)}&messageLimit=200`);
       if (state.stopped || threadId !== state.selectedId) return;
       state.detail = detail;
       renderThreadDetail(doc, detail);
@@ -130,7 +179,7 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
       reply.querySelector('textarea').disabled = detail.thread.status !== 'open';
       if (subscribed) {
         await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(threadId)}/read`, {
-          method: 'POST', body: JSON.stringify({ repository: state.repository }),
+          method: 'POST', body: JSON.stringify({ repository: repositoryForThread(threadId) }),
         });
       }
       say(`${detail.thread.messageCount} durable messages · version ${detail.thread.version}`);
@@ -146,11 +195,12 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
   }
 
   async function loadThreads({ refreshDetail = true } = {}) {
-    if (!state.repository || state.stopped) return;
+    if (state.stopped) return;
     const generation = ++state.generation;
     try {
       const statusValue = statusFilter.value;
-      const query = new URLSearchParams({ repository: state.repository, limit: '200' });
+      const query = new URLSearchParams({ limit: '200' });
+      if (state.repository) query.set('repository', state.repository);
       if (statusValue) query.set('status', statusValue);
       const page = await request(fetchImpl, `/api/coordination/threads?${query}`);
       if (state.stopped || generation !== state.generation) return;
@@ -173,15 +223,11 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     state.repository = path;
     state.selectedId = null;
     state.detail = null;
-    if (!path) {
-      holder.replaceChildren(text(doc, 'div', 'No repository selected.', 'empty'));
-      say('Choose a repository to open its durable board.');
-      return;
-    }
+    if (!path) say('Loading durable threads across all repositories…');
     try {
-      doc.defaultView?.history?.replaceState({}, '', `/threads?repository=${encodeURIComponent(path)}`);
+      doc.defaultView?.history?.replaceState({}, '', path ? `/threads?repository=${encodeURIComponent(path)}` : '/threads');
     } catch { /* embedded hosts may not expose history */ }
-    say('Loading durable threads…');
+    if (path) say('Loading durable threads…');
     await loadThreads({ refreshDetail: false });
   }
 
@@ -205,10 +251,8 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
         option.textContent = requested;
         repo.appendChild(option);
       }
-      if (requested) {
-        repo.value = requested;
-        await chooseRepository(requested);
-      }
+      repo.value = requested;
+      await chooseRepository(requested);
     } catch (error) {
       say(error instanceof Error ? error.message : String(error), true);
     }
@@ -250,7 +294,7 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     try {
       await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(state.selectedId)}/messages`, {
         method: 'POST', body: JSON.stringify({
-          repository: state.repository, body, idempotencyKey: mutationKey('operator-reply'),
+          repository: repositoryForThread(), body, idempotencyKey: mutationKey('operator-reply'),
         }),
       });
       reply.reset();
@@ -265,7 +309,7 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     const following = follow.dataset.following === 'true';
     try {
       await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(state.selectedId)}/follow`, {
-        method: following ? 'DELETE' : 'POST', body: JSON.stringify({ repository: state.repository }),
+        method: following ? 'DELETE' : 'POST', body: JSON.stringify({ repository: repositoryForThread() }),
       });
       await loadDetail();
     } catch (error) {
@@ -278,7 +322,7 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     try {
       await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(state.selectedId)}/resolve`, {
         method: 'POST', body: JSON.stringify({
-          repository: state.repository, expectedVersion: state.detail.thread.version,
+          repository: repositoryForThread(), expectedVersion: state.detail.thread.version,
         }),
       });
       await loadThreads();
