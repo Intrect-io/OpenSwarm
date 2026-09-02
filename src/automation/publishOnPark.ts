@@ -14,8 +14,13 @@
 
 import { broadcastEvent } from '../core/eventHub.js';
 import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
+import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
+import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
+
+/** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
+export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
 
 /** The fields these paths read; narrower than the full pipeline result. */
 interface PublishableResult {
@@ -208,12 +213,14 @@ export async function publishStuckWork(
  *
  * A publication failure is fatal here, unlike the parked path: a worktree-mode
  * run is not deliverable until its branch is remotely reviewable, so the result
- * is turned back into a retryable `infra_error` with the worktree preserved.
+ * is turned back into a retryable `infra_error` with the worktree preserved —
+ * except a publication-scope rejection, which no retry can change and which
+ * therefore parks for the operator (`operatorPark`).
  */
 export async function publishApprovedWork(
   worktreeInfo: WorktreeInfo | null | undefined,
   task: PublishableTask,
-  result: PublishableResult & { success?: boolean; finalStatus?: string; prUrl?: string },
+  result: PublishableResult & Pick<PipelineResult, 'failureDetail' | 'operatorPark'> & { success?: boolean; finalStatus?: string; prUrl?: string },
   durability: ExecutionDurabilityHooks | undefined,
 ): Promise<void> {
   // Create PR (worktree mode + pipeline success = finalStatus 'approved')
@@ -249,17 +256,28 @@ export async function publishApprovedWork(
         console.log(`[Runner] PR created for ${task.issueIdentifier}: ${prUrl}`);
       } catch (err) {
         console.error('[Worktree] PR creation failed:', err);
+        const message = err instanceof Error ? err.message : String(err);
         // A worktree-mode run is not deliverable until the branch is published.
-        // Keep it retryable and preserved instead of marking the issue Done with
-        // no remotely reviewable artifact.
+        // Keep it preserved instead of marking the issue Done with no remotely
+        // reviewable artifact — and record WHY, or the ledger row is blank.
         result.success = false;
-        result.finalStatus = 'infra_error';
+        result.failureDetail = `publication: ${message}`;
+        if (err instanceof PublicationScopeMismatchError) {
+          // The branch already holds commits outside the reserved write scope.
+          // No retry changes that history; the worker just re-runs, finds the
+          // work done, and the fence rejects the same files again — 15-min
+          // backoff forever. Park it for the operator with the file list.
+          result.finalStatus = 'failed';
+          result.operatorPark = { code: PUBLICATION_SCOPE_PARK_REASON, reason: message };
+        } else {
+          result.finalStatus = 'infra_error';
+        }
         broadcastEvent({
           type: 'log',
           data: {
             taskId: task.issueId || task.id,
             stage: 'pr',
-            line: `PR creation failed: ${err instanceof Error ? err.message : String(err)}`,
+            line: `PR creation failed: ${message}`,
           },
         });
       }

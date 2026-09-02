@@ -739,6 +739,18 @@ export class DurableRunCoordinator {
 
     const detail = pickPipelineFailureDetail(result);
 
+    // A deterministic failure the pipeline has already attributed to the
+    // operator (publication-scope fence, …): retrying reproduces it exactly.
+    if (result.operatorPark) {
+      const { code, reason } = result.operatorPark;
+      return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+        errorCode: code,
+        errorMessage: reason,
+        eventKind: 'operator_parked',
+        eventData: { sessionId: result.sessionId, code, reason },
+      }, now) ? result : fencedResult(result);
+    }
+
     // An infrastructure failure is not counted toward STUCK, and rightly so:
     // a provider blip is not the task's fault. But the same infrastructure
     // failure on every attempt is not a blip, and retrying it forever is how

@@ -5,7 +5,8 @@ const commitAndCreatePRWithHead = vi.hoisted(() => vi.fn());
 vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
-import { publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
+import { PUBLICATION_SCOPE_PARK_REASON, publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -72,6 +73,39 @@ describe('publication identity (AGT-4145)', () => {
 
     expect(result.prUrl).toBe('https://github.com/o/r/pull/17');
     expect(onPublication).toHaveBeenCalledWith('https://github.com/o/r/pull/17', 'head-b');
+  });
+});
+
+// vela 2026-09-02: AGT-3844 (48 attempts), AX-868 (23), AGT-4158 (15) — every
+// one a publication-scope rejection of files an EARLIER attempt had already
+// committed, turned into a 15-minute infra retry with a blank ledger message.
+describe('publication failure classification', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-4158', issueId: 'AGT-4158' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-4158', title: 'Artifact cohort producer', fileScope: ['src/vega_plugins/eval/'], fileScopeSource: 'drafted' as const };
+
+  it('parks a publication-scope rejection for the operator instead of retrying it', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new PublicationScopeMismatchError(['benchmarks/artifact_cohort.py', 'uv.lock']));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: { code: string; reason: string } } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('failed');
+    expect(result.operatorPark).toEqual({
+      code: PUBLICATION_SCOPE_PARK_REASON,
+      reason: expect.stringContaining('benchmarks/artifact_cohort.py, uv.lock'),
+    });
+    expect(result.failureDetail).toMatch(/^publication: publication-scope: /);
+  });
+
+  it('keeps every other publication failure a retryable infra error, with the cause recorded', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('gh: HTTP 502 Bad Gateway'));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: unknown } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'infra_error', failureDetail: 'publication: gh: HTTP 502 Bad Gateway' });
+    expect(result.operatorPark).toBeUndefined();
   });
 });
 
