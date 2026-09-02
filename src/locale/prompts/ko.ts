@@ -104,8 +104,14 @@ ${promptDataBlock(previousFeedback)}
 
     // Code context section (repository + draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
     let contextSection = '';
-    if (context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
+    if (context?.fileScope?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
       const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
+
+      if (context.fileScope?.length) {
+        parts.push('', '### 허용 편집 경계 (구속력 있음)');
+        parts.push('아래 저장소 상대 경로만 생성·수정하라. 목록에 있는 소스 파일 옆의 동반 테스트(`foo.ts` -> `foo.test.ts`)는 목록에 없어도 허용되며, 그 밖의 테스트 파일은 목록에 있어야 한다. 작업에 다른 파일이 필요하면 편집하지 말고 구체적인 불일치를 보고하라.');
+        parts.push(promptDataBlock(context.fileScope.join('\n')));
+      }
 
       if (context.repository) {
         const repo = context.repository;

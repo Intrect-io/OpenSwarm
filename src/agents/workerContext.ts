@@ -12,6 +12,13 @@ export async function collectWorkerContext(
 ): Promise<WorkerContext | undefined> {
   try {
     const wc: WorkerContext = {};
+    // The runner enforces this boundary after the worker finishes. Exposing it
+    // before planning prevents otherwise-valid edits being discovered only by
+    // the post-run scope guard. Legacy raw KG inference is advisory and is NOT
+    // enforced by pairPipeline/publishOnPark, so announcing it as binding here
+    // would make the worker refuse edits that would actually have passed.
+    const enforcedScope = context.task.fileScopeSource === 'inferred' ? undefined : context.task.fileScope;
+    if (enforcedScope?.length) wc.fileScope = [...enforcedScope];
     if (draft) {
       wc.draftAnalysis = { taskType: draft.taskType, intentSummary: draft.intentSummary, relevantFiles: draft.relevantFiles,
         suggestedApproach: draft.suggestedApproach, projectStats: draft.projectStats, completionCriteria: draft.completionCriteria, sufficient: draft.sufficient };
@@ -46,6 +53,6 @@ export async function collectWorkerContext(
     // it changes what the worker knows, not what it is allowed to do. (AGT-4088)
     const siblingWork = await collectSiblingWork(context.projectPath);
     if (siblingWork.length) { wc.siblingWork = siblingWork; safeConsole.log(`[Pipeline] ${siblingWork.length} sibling worktree(s) have uncommitted changes`); }
-    return wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
+    return wc.fileScope || wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
   } catch (error) { safeConsole.warn('[Pipeline] Worker context collection failed (non-blocking):', error); return undefined; }
 }
