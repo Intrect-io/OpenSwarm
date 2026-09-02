@@ -270,6 +270,13 @@ describe('pipelineGuards — additional coverage', () => {
       expect(issues.length).toBe(0);
       expect(res.allPassed).toBe(true);
     });
+
+    it('does not scan a worktree-local virtual-environment pointer', async () => {
+      writeFileSync(join(repo, '.venv'), 'debugger; // generated environment link\n');
+      const res = await runGuards(mockWorker(['.venv']), repo, { bsDetector: true });
+      expect(guardIssues(res, 'bsDetector')).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
   });
 
   // --------------------------------------------------------------
