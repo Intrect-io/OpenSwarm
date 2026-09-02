@@ -37,6 +37,29 @@ describe('isEphemeralWorktreeArtifact', () => {
     expect(isEphemeralWorktreeArtifact('pytest-of-openswarm/pytest-3/x')).toBe(true);
     expect(isEphemeralWorktreeArtifact('.trash/AX-1/pytest-a3/out')).toBe(true);
   });
+
+  // cgf-portal AX-868 (2026-09-02): a worker ran `uv venv .venv_test` and the
+  // publication commit tracked 11,026 files under it. The purge commit that
+  // followed removed nothing because only the bare `.venv` link was known, so
+  // every later attempt died on the publication fence.
+  it('drops any virtualenv directory by name, at any depth', () => {
+    for (const file of [
+      '.venv_test/bin/activate',
+      '.venv_test/pyvenv.cfg',
+      '.venv/lib/python3.12/site-packages/x.py',
+      '.venv-verify/bin/ruff',
+      '.venv.bak/bin/python',
+      'venv/bin/python',
+      'apps/pipelines/.venv/pyvenv.cfg',
+      '.venv',
+      'venv',
+    ]) {
+      expect(isEphemeralWorktreeArtifact(file), file).toBe(true);
+    }
+    for (const file of ['src/venv_tools.py', 'docs/venv.md', 'convenv/x.py', 'src/env/config.py']) {
+      expect(isEphemeralWorktreeArtifact(file), file).toBe(false);
+    }
+  });
 });
 
 describe('ephemeralPathspecRoots', () => {
@@ -44,5 +67,11 @@ describe('ephemeralPathspecRoots', () => {
     expect(ephemeralPathspecRoots([
       'pytest-of-openswarm/pytest-3/a', 'pytest-of-openswarm/pytest-3/b', 'apps/pipelines/.coverage',
     ])).toEqual(['apps/pipelines/.coverage', 'pytest-of-openswarm']);
+  });
+
+  it('collapses a virtualenv to its directory so the purge is one rm -r', () => {
+    expect(ephemeralPathspecRoots([
+      '.venv_test/bin/activate', '.venv_test/lib/python3.12/site-packages/a.py', 'apps/x/.venv/pyvenv.cfg', '.venv',
+    ])).toEqual(['.venv', '.venv_test', 'apps/x/.venv']);
   });
 });
