@@ -275,6 +275,13 @@ export async function publishApprovedWork(
     if (!publishAllowed) {
       result.success = false;
       result.finalStatus = 'infra_error';
+      // Without this the ledger fell back to `lastReviewFeedback` — an
+      // approved run's fence rejection then recorded the REVIEWER'S APPROVAL
+      // TEXT as if it were the failure. cgf-portal AX-1020 hit this twice
+      // (2026-08-31): both attempts read as SentryAudits sign-off, and the
+      // actual cause — the fence, and why it fired — was unrecoverable once
+      // the container's log was gone.
+      result.failureDetail = 'publication: lease fence rejected the approved publish (a newer generation now owns this run, or the lease expired)';
       console.warn(`[Worktree] Publication fenced for ${task.issueIdentifier}; preserving worktree`);
     } else {
       try {

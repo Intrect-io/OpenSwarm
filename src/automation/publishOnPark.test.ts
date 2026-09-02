@@ -109,6 +109,33 @@ describe('afterPublication hook (per-repository fresh review)', () => {
   });
 });
 
+describe('approved publish, lease fence rejection (cgf-portal AX-1020, 2026-08-31)', () => {
+  // Losing beforePublish did not set failureDetail. pickPipelineFailureDetail
+  // then fell back to lastReviewFeedback — a reviewer's APPROVAL text recorded
+  // as if it were the failure, twice, on a run that was actually blocked by
+  // the lease fence for reasons the ledger never captured.
+  it('records the fence, not the reviewer\'s last word, as the failure cause', async () => {
+    const durability = { beforePublish: vi.fn(async () => false), onPublication: vi.fn() } as unknown as ExecutionDurabilityHooks;
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; lastReviewFeedback?: string } = {
+      success: true,
+      finalStatus: 'approved',
+      lastReviewFeedback: '검증 근거를 확인했습니다... 리뷰 결론은 승인입니다.',
+    };
+
+    await publishApprovedWork(
+      { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AX-1020', issueId: 'AX-1020' },
+      { id: 'task-1', issueIdentifier: 'AX-1020', title: 'Verify' },
+      result,
+      durability,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('infra_error');
+    expect(result.failureDetail).toMatch(/^publication: lease fence rejected/);
+    expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+  });
+});
+
 describe('parked-work draft publication', () => {
   const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-3844-ci-1', issueId: 'AGT-3844' };
   const publishable = { id: 'task-1', issueIdentifier: 'AGT-3844', title: 'CI suite reserve', fileScope: ['tests/'], fileScopeSource: 'drafted' as const };
