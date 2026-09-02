@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
-import { renderThreadDetail, renderThreadList, startThreadBoard } from '../../web/static/js/threadBoard.mjs';
+import { renderThreadDetail, renderThreadList, renderThreadMessageBody, startThreadBoard } from '../../web/static/js/threadBoard.mjs';
 
 function shell(): Document {
   document.body.innerHTML = `
@@ -51,6 +51,41 @@ describe('repository thread board', () => {
     expect(doc.querySelector('img')).toBeNull();
     expect(doc.querySelector('svg')).toBeNull();
     expect(doc.querySelector('script')).toBeNull();
+  });
+
+  it('renders fenced code with safe syntax tokens', () => {
+    const doc = shell();
+    const holder = doc.createElement('div');
+    renderThreadMessageBody(doc, holder, 'Use `src/a.ts`.\n```ts\nconst answer = 42; // safe\n```\n<img src=x>');
+    expect(holder.querySelector('pre code')).not.toBeNull();
+    expect(holder.querySelector('.token-keyword')?.textContent).toBe('const');
+    expect(holder.querySelector('.token-number')?.textContent).toBe('42');
+    expect(holder.querySelector('.inline-code')?.textContent).toBe('src/a.ts');
+    expect(holder.querySelector('img')).toBeNull();
+    expect(holder.textContent).toContain('<img src=x>');
+  });
+
+  it('loads every repository thread before a repository is selected', async () => {
+    const doc = shell();
+    const thread = {
+      id: 'thread-all', repository: 'git:0123456789abcdef0123456789abcdef', subject: 'Shared decision',
+      status: 'open', relatedTaskIds: [], relatedFiles: [], messageCount: 1, participantCount: 1, updatedAt: 1,
+    };
+    const fetchImpl = vi.fn(async (path: string) => {
+      if (path === '/api/work/projects') return response([]);
+      if (path.startsWith('/api/coordination/threads?')) return response({ items: [thread] });
+      if (path.startsWith('/api/coordination/threads/thread-all?')) {
+        return response({ thread, participants: [], messages: { items: [] } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const view = startThreadBoard(doc, { fetchImpl, pollMs: 0 });
+    await vi.waitFor(() => expect(doc.querySelector('[data-thread-id="thread-all"]')).not.toBeNull());
+    expect(fetchImpl).toHaveBeenCalledWith('/api/coordination/threads?limit=200&status=open', expect.any(Object));
+    (doc.querySelector('[data-thread-id="thread-all"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(doc.getElementById('detail-subject')?.textContent).toBe('Shared decision'));
+    expect(fetchImpl).toHaveBeenCalledWith(expect.stringContaining('repository=git%3A0123456789abcdef0123456789abcdef'), expect.any(Object));
+    view.stop();
   });
 
   it('drives create, follow, reply, read, and CAS resolve through the HTTP contract', async () => {
