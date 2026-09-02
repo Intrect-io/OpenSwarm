@@ -271,7 +271,15 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
       // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
       // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
-      body.provider = { data_collection: 'deny' };
+      //
+      // sort: 'throughput' picks the fastest ZDR-eligible endpoint instead of
+      // OpenRouter's default (load-balanced / cheapest-first) order. The
+      // 2026-06-09 worker benchmark found the same model 5x slower on one
+      // provider than another (qwen3-coder: 2759 tok/s on DeepInfra vs 160 on
+      // Novita) — provider, not model choice, was the dominant speed factor.
+      // A slow provider burns a stage's turn/timeout budget for no quality
+      // gain, so throughput is worth more here than shaving cents off price.
+      body.provider = { data_collection: 'deny', sort: 'throughput' };
     }
     // 추론 불필요 역할은 reasoning 토큰을 끈다. glm-4.7-flash처럼 non-thinking
     // 모델엔 무영향, 추론형 모델(glm-5 등)을 worker로 바꿔도 토큰 낭비를 막는다.
