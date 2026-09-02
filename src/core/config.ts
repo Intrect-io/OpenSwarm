@@ -11,7 +11,7 @@ import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResol
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 import { c, status } from '../support/colors.js';
 import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
-import { configureSandboxExecutor } from '../sandboxExecutor/runtime.js';
+import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
 
 // Constants
 
@@ -831,10 +831,7 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // different/default file must never silently downgrade an active boundary.
   // Disabling therefore requires a process restart with enabled:false.
   if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
-  if (config.humanSurfaceReadOnly?.enabled === true
-      && config.humanSurfaceReadOnly.sandboxExecutor?.enabled === true) {
-    configureSandboxExecutor(config.humanSurfaceReadOnly.sandboxExecutor);
-  }
+  wireSandboxExecutorIfEnabled(config.humanSurfaceReadOnly?.sandboxExecutor);
 
   // 6. Apply time window config
   if (config.timeWindow) {
@@ -930,7 +927,8 @@ notifications:
 # Fail closed on writes to human-facing collaboration surfaces. Delegated CLIs
 # and diagnostics remain disabled. Native bash requires the separately deployed
 # network-none companion and exact health/contract attestation; any failure
-# leaves bash hidden. Approved typed DevOps/data MCP writes remain available.
+# leaves bash hidden. Verify-security uses the same companion whenever
+# sandboxExecutor.enabled is true, even if this flag is off. (AGT-4172)
 humanSurfaceReadOnly:
   enabled: false
   sandboxExecutor:

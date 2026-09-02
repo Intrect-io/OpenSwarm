@@ -31,6 +31,18 @@ export function configureSandboxExecutor(config: SandboxExecutorClientConfig): v
   }
 }
 
+/**
+ * Wire the network-none companion whenever its block is enabled.
+ * Verify-security needs that socket even if humanSurfaceReadOnly is off
+ * (Cursor CLI workers still run typecheck in the daemon process). (AGT-4172)
+ */
+export function wireSandboxExecutorIfEnabled(
+  executor: (SandboxExecutorClientConfig & { enabled?: boolean }) | undefined,
+): void {
+  if (executor?.enabled !== true) return;
+  configureSandboxExecutor(executor);
+}
+
 export function getSandboxExecutorConfig(): Readonly<SandboxExecutorClientConfig> | undefined {
   return configuredClient;
 }
