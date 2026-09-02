@@ -128,6 +128,16 @@ describe('publication failure classification', () => {
     expect(result.failureDetail).toMatch(/^publication: publication-scope: /);
   });
 
+  it('counts a branch with nothing to publish as the attempt failing, not the infrastructure', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from - branch has no changes compared to main'));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: unknown } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'failed', failureDetail: expect.stringContaining('No commits to create PR from') });
+    expect(result.operatorPark).toBeUndefined();
+  });
+
   it('keeps every other publication failure a retryable infra error, with the cause recorded', async () => {
     commitAndCreatePRWithHead.mockRejectedValue(new Error('gh: HTTP 502 Bad Gateway'));
     const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: unknown } = { success: true, finalStatus: 'approved' };

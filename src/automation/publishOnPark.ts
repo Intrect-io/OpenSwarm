@@ -26,6 +26,9 @@ export type ApprovedPublicationHook = (publication: {
   worktreeInfo: WorktreeInfo;
 }) => Promise<void>;
 
+/** worktreeManager's refusal to open a PR from a branch with nothing on it. */
+const NO_COMMITS_TO_PUBLISH = /No commits to create PR from/;
+
 /** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
 export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
 
@@ -292,6 +295,15 @@ export async function publishApprovedWork(
           // backoff forever. Park it for the operator with the file list.
           result.finalStatus = 'failed';
           result.operatorPark = { code: PUBLICATION_SCOPE_PARK_REASON, reason: message };
+        } else if (NO_COMMITS_TO_PUBLISH.test(message)) {
+          // The worker claimed success but left the branch identical to its
+          // base (its only edits were runtime artifacts the stager drops).
+          // That is the attempt failing at its job, not the infrastructure
+          // failing the attempt: count it against the task's retry budget so
+          // a fresh attempt gets its chance and STUCK ends it — instead of the
+          // 15-minute infra backoff that cgf-portal AX-874 rode twice in an
+          // hour on 2026-09-02 with nothing to show.
+          result.finalStatus = 'failed';
         } else {
           result.finalStatus = 'infra_error';
         }
