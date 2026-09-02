@@ -1249,6 +1249,62 @@ describe('DurableRunCoordinator dead marker owners', () => {
   });
 });
 
+describe('DurableRunCoordinator infra failure circuit', () => {
+  function infraResult(detail: string): PipelineResult {
+    return {
+      success: false, sessionId: 's', stages: [
+        { stage: 'tester', success: false, result: { success: false, error: detail }, duration: 1, startedAt: 0, completedAt: 1 },
+      ], finalStatus: 'infra_error', totalDuration: 1, iterations: 1,
+    } as PipelineResult;
+  }
+
+  // vela 2026-09-01: 140 infra_error attempts, none counted toward STUCK,
+  // the same CodeQL / socket failure on every one of them.
+  it('parks a run once the identical infrastructure failure has repeated across the circuit', async () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 3 });
+    const t = task('infra');
+    const detail = (n: number) => `verify-security: pytest could not run: ENOENT lstat '/run/openswarm-sandbox' (took ${n}.${n}s)`;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await coordinator.execute(t, '/repo', async () => infraResult(detail(attempt)));
+      expect(ledger.getRun('infra')).toMatchObject({ state: 'RETRY_AT', lastErrorCode: 'infra_error' });
+      // Bring the backoff forward so the next execute can claim it.
+      expect(ledger.markReady('infra')).toBe(true);
+    }
+    await coordinator.execute(t, '/repo', async () => infraResult(detail(3)));
+    expect(ledger.getRun('infra')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      lastErrorCode: 'infra_circuit_open',
+      lastErrorMessage: expect.stringContaining('3 consecutive attempts'),
+    });
+    // The park is an operator park: an explicit redispatch may end it.
+    expect(ledger.resumeNeedsHuman('infra')).toBe('READY');
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('resets on a different failure, and never parks when disabled', async () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 2 });
+    const t = task('mixed');
+    await coordinator.execute(t, '/repo', async () => infraResult('tester: openrouter timeout after 360000ms'));
+    ledger.markReady('mixed');
+    await coordinator.execute(t, '/repo', async () => infraResult('security-audit: CodeQL extractor missing'));
+    expect(ledger.getRun('mixed')?.state).toBe('RETRY_AT');
+    coordinator.close();
+
+    const off = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 0 });
+    for (let i = 0; i < 4; i += 1) {
+      ledger.markReady('mixed');
+      await off.execute(t, '/repo', async () => infraResult('tester: openrouter timeout after 360000ms'));
+    }
+    expect(ledger.getRun('mixed')?.state).toBe('RETRY_AT');
+    off.close();
+    ledger.close();
+  });
+});
+
 describe('runRecordToTask', () => {
   // AGT-4094: reconciliation has to finish a published run whose tracker card
   // already went Done, and a Done card is never in the fetch — so the run

@@ -54,6 +54,8 @@ export interface AutonomousConfig {
    * integration requeue to surface any branch conflict at PR time instead.
    */
   unknownScopeAdmission?: 'serialize' | 'admit';
+  /** Identical-fingerprint infra_error attempts that park a run for the operator (0 disables, default 6). */
+  infraFailureCircuit?: number;
   guards?: Partial<import('../core/types.js').PipelineGuardsConfig>;
   verify?: VerifyConfig;
   securityAudit?: SecurityAuditConfig;

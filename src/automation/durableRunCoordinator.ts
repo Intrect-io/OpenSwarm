@@ -1,4 +1,5 @@
 import { getInstanceId } from '../support/healthEndpoint.js';
+import { DEFAULT_INFRA_FAILURE_CIRCUIT, INFRA_CIRCUIT_PARK_REASON, infraFailureFingerprint } from './infraFailureCircuit.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
@@ -41,6 +42,12 @@ export interface DurableRunCoordinatorConfig {
    * already fully expired once, so this is a second, independent wait.
    */
   reconcileAbandonMs?: number;
+  /**
+   * Consecutive infra_error attempts with one failure fingerprint after which
+   * the run parks for the operator instead of backing off again. 0 disables.
+   * Default 6.
+   */
+  infraFailureCircuit?: number;
 }
 
 export interface ExecutionDurabilityHooks {
@@ -217,6 +224,7 @@ export class DurableRunCoordinator {
   private readonly ownsLedger: boolean;
   private readonly leaseMs: number;
   private readonly maxActiveForProject: number;
+  private readonly infraFailureCircuit: number;
   private readonly processIsAlive: (pid: number) => boolean;
   private readonly reconcileAbandonMs: number;
   private readonly exitedClaims = new Map<string, RunClaim>();
@@ -229,6 +237,7 @@ export class DurableRunCoordinator {
     this.instanceId = config.instanceId ?? `${process.pid}-${getInstanceId()}`;
     this.leaseMs = config.leaseMs ?? 10 * 60_000;
     this.maxActiveForProject = Math.max(1, Math.floor(config.maxActiveForProject ?? 1));
+    this.infraFailureCircuit = Math.max(0, Math.floor(config.infraFailureCircuit ?? DEFAULT_INFRA_FAILURE_CIRCUIT));
     this.processIsAlive = config.processIsAlive ?? processIsAlive;
     this.reconcileAbandonMs = config.reconcileAbandonMs ?? this.leaseMs;
     if (this.leaseMs < 3_000) throw new Error('Durable run lease must be at least 3000ms');
@@ -728,6 +737,30 @@ export class DurableRunCoordinator {
       // default RETRY_AT below is the fail-closed compatibility path.
     }
 
+    const detail = pickPipelineFailureDetail(result);
+
+    // An infrastructure failure is not counted toward STUCK, and rightly so:
+    // a provider blip is not the task's fault. But the same infrastructure
+    // failure on every attempt is not a blip, and retrying it forever is how
+    // vela spent 140 attempts on 2026-09-01 — CodeQL extractor missing, a
+    // sandbox socket not mounted — and produced nothing. Once the identical
+    // fingerprint has repeated across the configured number of attempts, the
+    // cause is durable and an operator has to change something; park with
+    // the cause named, where `openswarm work` can redispatch it afterwards.
+    if (result.finalStatus === 'infra_error' && this.infraFailureCircuit > 0) {
+      const fingerprint = infraFailureFingerprint(detail);
+      const prior = fingerprint ? this.ledger.consecutiveIdenticalInfraFailures(issueId, fingerprint) : 0;
+      if (prior + 1 >= this.infraFailureCircuit) {
+        const reason = `Identical infrastructure failure on ${prior + 1} consecutive attempts: ${detail ?? 'no detail'}`;
+        return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+          errorCode: INFRA_CIRCUIT_PARK_REASON,
+          errorMessage: reason,
+          eventKind: 'infra_circuit_parked',
+          eventData: { sessionId: result.sessionId, fingerprint, attempts: prior + 1 },
+        }, now) ? result : fencedResult(result);
+      }
+    }
+
     let target: RunState;
     switch (result.finalStatus) {
       case 'rate_limited':
@@ -739,7 +772,7 @@ export class DurableRunCoordinator {
     const transitioned = this.ledger.transition(claim, target, {
       retryAt: target === 'RETRY_AT' ? retryAtFor(result, now) : null,
       errorCode: result.finalStatus,
-      errorMessage: pickPipelineFailureDetail(result),
+      errorMessage: detail,
       eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
     }, now);
     return transitioned ? result : fencedResult(result);

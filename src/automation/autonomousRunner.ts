@@ -556,6 +556,7 @@ export class AutonomousRunner {
       dbPath: config.automationDbPath,
       leaseMs: config.automationLeaseMs,
       maxActiveForProject: effectiveProjectConcurrency(config),
+      infraFailureCircuit: config.infraFailureCircuit,
     });
 
     // Set up scheduler event handling

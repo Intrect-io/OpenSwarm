@@ -79,6 +79,11 @@ autonomous:
   # (default) fails closed; admit relies on isolated worktrees and post-merge
   # integration requeue to surface a branch conflict at PR time instead.
   # unknownScopeAdmission: serialize
+  # An infrastructure failure is not the task's fault and is never counted
+  # toward STUCK — but the same infrastructure failure on this many consecutive
+  # attempts is not a blip. Park the run for the operator with the cause named
+  # instead of backing off forever (`openswarm work` redispatches it). 0 disables.
+  # infraFailureCircuit: 6
   # maxConcurrentPerProject: 64  # Optional hard cap; omit for weighted, work-conserving project fairness
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced

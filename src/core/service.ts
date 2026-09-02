@@ -298,6 +298,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       shutdownGraceMs: config.autonomous.shutdownGraceMs,
       allowSameProjectConcurrent: config.autonomous.allowSameProjectConcurrent,
       unknownScopeAdmission: config.autonomous.unknownScopeAdmission,
+      infraFailureCircuit: config.autonomous.infraFailureCircuit,
       defaultRoles: config.autonomous.defaultRoles,
       projectAgents: config.autonomous.projectAgents,
       // Task decomposition (Planner) configuration. The whole object is passed,
