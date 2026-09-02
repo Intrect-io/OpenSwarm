@@ -1216,6 +1216,39 @@ describe('DurableRunCoordinator', () => {
   });
 });
 
+describe('DurableRunCoordinator dead marker owners', () => {
+  it('derives its instance id from the per-process id the worktree markers carry', async () => {
+    const { getInstanceId } = await import('../support/healthEndpoint.js');
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger: new RunLedger(dbPath()) });
+    expect(coordinator.instanceId).toBe(`${process.pid}-${getInstanceId()}`);
+    coordinator.close();
+  });
+
+  it('names released prior-generation owners by marker id and never itself or the live owner', async () => {
+    const { getInstanceId } = await import('../support/healthEndpoint.js');
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    ledger.registerRun({ issueId: 'GEN-1', source: 'linear', projectPath: '/repo' }, 1_000);
+
+    // A prior generation claimed, went silent, and the ledger released it.
+    const prior = ledger.claimRun('GEN-1', { ownerInstanceId: '7-prior-generation-uuid', leaseMs: 1_000, now: 2_000 })!;
+    expect(ledger.transition(prior, 'RETRY_AT', { retryAt: 2_500 }, 2_100)).toBe(true);
+    // Our own generation claimed it afterwards.
+    const ours = ledger.claimRun('GEN-1', { ownerInstanceId: coordinator.instanceId, leaseMs: 1_000, now: 3_000 })!;
+
+    // Our own id is filtered by both the live-owner rule and the self rule.
+    expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
+    expect(coordinator.deadMarkerOwners('GEN-1')).not.toContain(getInstanceId());
+
+    // Once ours is released too, it is still never reported as dead to itself.
+    expect(ledger.transition(ours, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
+    expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
+    expect(coordinator.deadMarkerOwners('unknown')).toEqual([]);
+    coordinator.close();
+    ledger.close();
+  });
+});
+
 describe('runRecordToTask', () => {
   // AGT-4094: reconciliation has to finish a published run whose tracker card
   // already went Done, and a Done card is never in the fetch — so the run

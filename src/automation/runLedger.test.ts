@@ -107,6 +107,22 @@ describe('RunLedger state machine', () => {
   });
 });
 
+describe('RunLedger claim-owner history', () => {
+  it('lists every executor that ever claimed the run, newest first, without duplicates', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'OWNERS-1');
+    const first = claim(ledger, 'OWNERS-1', '7-first-generation', 2_000);
+    expect(ledger.transition(first, 'RETRY_AT', { retryAt: 2_500 }, 2_100)).toBe(true);
+    const second = claim(ledger, 'OWNERS-1', '7-second-generation', 3_000);
+    expect(ledger.transition(second, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
+    claim(ledger, 'OWNERS-1', '7-second-generation', 4_000);
+
+    expect(ledger.listClaimOwners('OWNERS-1')).toEqual(['7-second-generation', '7-first-generation']);
+    expect(ledger.listClaimOwners('never-registered')).toEqual([]);
+    ledger.close();
+  });
+});
+
 describe('RunLedger tracker observation cache (AGT-4127)', () => {
   it('preserves the row and recovery fields while closing a stale run from tracker truth', () => {
     const ledger = new RunLedger(createDbPath());

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { getInstanceId } from '../support/healthEndpoint.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
@@ -222,7 +222,9 @@ export class DurableRunCoordinator {
 
   constructor(config: DurableRunCoordinatorConfig) {
     this.mode = config.mode;
-    this.instanceId = config.instanceId ?? `${process.pid}-${randomUUID()}`;
+    // Share the per-process id the worktree markers are stamped with, so a
+    // ledger owner id names the same generation as the marker it wrote.
+    this.instanceId = config.instanceId ?? `${process.pid}-${getInstanceId()}`;
     this.leaseMs = config.leaseMs ?? 10 * 60_000;
     this.maxActiveForProject = Math.max(1, Math.floor(config.maxActiveForProject ?? 1));
     this.processIsAlive = config.processIsAlive ?? processIsAlive;
@@ -820,6 +822,28 @@ export class DurableRunCoordinator {
       }, now);
     }
     return reconciled;
+  }
+
+  /**
+   * Marker owner ids (`getInstanceId()` values) of every executor that once
+   * claimed this run and no longer holds its lease.
+   *
+   * A worktree marker from another pid namespace cannot be judged by pid, so
+   * the marker code trusts it for a full day. But an owner our own ledger has
+   * already released is not "another container": it is a previous generation
+   * of this daemon, and the ledger has proven its claim dead by a full lease
+   * of silence. Naming those ids lets recovery release their markers now
+   * rather than after the 24h window — which otherwise parks every in-flight
+   * run for a day on each container recreate.
+   */
+  deadMarkerOwners(issueId: string): string[] {
+    if (!this.ledger) return [];
+    const run = this.ledger.getRun(issueId);
+    const live = run?.ownerInstanceId;
+    return this.ledger.listClaimOwners(issueId)
+      .filter((owner) => owner !== live && owner !== this.instanceId)
+      .map((owner) => owner.replace(/^\d+-/, ''))
+      .filter((owner) => owner !== getInstanceId());
   }
 
   getProtectedWorktreePaths(projectPath?: string): Set<string> {

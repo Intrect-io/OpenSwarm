@@ -14,6 +14,7 @@ import {
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
+import { listClaimOwnersInDb } from './runLedgerOwners.js';
 import {
   markNeedsHumanForQuestionsInDb,
   resumeNeedsHumanForQuestionsInDb,
@@ -256,6 +257,11 @@ export class RunLedger {
       'NEEDS_HUMAN', 'NEEDS_RECONCILE', 'DONE', 'DECOMPOSED', 'CANCELLED',
     ];
     return this.unfencedTransition(issueId, eligible, 'READY', {}, now);
+  }
+
+  /** Every executor that ever claimed this run, newest first. */
+  listClaimOwners(issueId: string): string[] {
+    return listClaimOwnersInDb(this.db, issueId);
   }
 
   queueIntegrationRequeue(issueId: string, expectedStateVersion: number, effect: EffectInput, now = Date.now()): boolean {
