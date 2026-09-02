@@ -486,6 +486,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
           emitWorkerStatus(options, `[Worker] Finished without edits: ${noChangesReason.slice(0, 500)}`);
         } else {
           parsedResult.success = false;
+          parsedResult.zeroDiffWithoutReason = true;
           parsedResult.error = 'Worker reported success with no changed files and no explicit noChangesReason.';
         }
       }

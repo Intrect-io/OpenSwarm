@@ -44,6 +44,9 @@ export interface WorkerResult {
   executionOutcomeUnknown?: boolean; // sandbox command may have partially mutated; quarantine, do not retry
   operatorQuestionCorrelationIds?: string[]; // exact durable questions that stopped this attempt
   noChangesReason?: string;     // Explicit justification for a successful no-edit outcome
+  /** Claimed success, changed nothing, and gave no noChangesReason — a contract
+   *  violation the caller cannot tell apart from "nothing to do" (AX-868). */
+  zeroDiffWithoutReason?: boolean;
   uncertaintySignals?: string[]; // Detected uncertainty phrases
   costInfo?: CostInfo;
 }

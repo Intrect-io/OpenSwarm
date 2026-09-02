@@ -37,6 +37,9 @@ describe('runWorker Git authority (INT-2609)', () => {
     expect(result.success).toBe(false);
     expect(result.filesChanged).toEqual([]);
     expect(result.error).toContain('no changed files');
+    // The pipeline parks a session that repeats this outcome; it needs to tell
+    // it apart from every other worker failure.
+    expect(result.zeroDiffWithoutReason).toBe(true);
   });
 
   it('keeps a zero-diff success that carries a noChangesReason, and says so in the log', async () => {
