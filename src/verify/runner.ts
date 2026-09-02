@@ -145,6 +145,12 @@ export function normalizeFailureOutput(output: string, paths: Array<[string, str
   normalized = normalized
     .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
     .replace(/(=+ .*? in )\d+(?:\.\d+)?s( =+)/g, '$1<DURATION>$2')
+    // The discovered pytest command runs with `-q`, whose final summary line
+    // carries no `=` decoration: `3 skipped, 1 error in 1.54s`. Left alone,
+    // base and head fingerprints differed by timing alone, and every
+    // pre-existing failure read as a new regression (vega-agent AGT-4118:
+    // the same ModuleNotFoundError on both sides, 1.93s vs 1.54s).
+    .replace(/^(\d+ [a-z]+(?:, \d+ [a-z]+)* in )\d+(?:\.\d+)?s$/gm, '$1<DURATION>')
     .replace(/(Ran \d+ tests? in )\d+(?:\.\d+)?s/g, '$1<DURATION>')
     .replace(/(finished in )\d+(?:\.\d+)?s/gi, '$1<DURATION>')
     // pytest-xdist assigns the same failure to different workers on base and
