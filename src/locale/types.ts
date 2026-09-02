@@ -458,6 +458,11 @@ export interface LocaleMessages {
 /** Worker에 주입할 코드 컨텍스트 (반복 횟수 감소 목적) */
 export interface WorkerContext {
   /**
+   * Durable task write boundary. This is rendered to the worker so it can plan
+   * inside the same scope the runner will enforce after execution.
+   */
+  fileScope?: string[];
+  /**
    * What the repository's other worktrees are editing right now, so a worker
    * can see an overlap before its branch collides with theirs at integration.
    */

@@ -104,8 +104,14 @@ Apply the above feedback and make corrections.
 
     // Code context section (repository + draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
     let contextSection = '';
-    if (context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
+    if (context?.fileScope?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
       const parts: string[] = ['## Code Context (auto-generated)'];
+
+      if (context.fileScope?.length) {
+        parts.push('', '### Allowed Edit Boundary (binding)');
+        parts.push('Only create or modify the following repository-relative paths. A companion test beside a listed source file (`foo.ts` -> `foo.test.ts`) is also allowed; any other test file must be listed. If the task needs another file, report the concrete mismatch instead of editing it.');
+        parts.push(promptDataBlock(context.fileScope.join('\n')));
+      }
 
       if (context.repository) {
         const repo = context.repository;

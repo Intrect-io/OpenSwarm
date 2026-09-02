@@ -39,6 +39,16 @@ describe('systemPrompt', () => {
 describe('buildWorkerPrompt', () => {
   const base = { taskTitle: 'Fix login bug', taskDescription: 'Session expires too fast' };
 
+  it('shows the binding file scope before the worker edits', () => {
+    const result = enPrompts.buildWorkerPrompt({
+      ...base,
+      context: { fileScope: ['src/router.ts', 'tests/router.test.ts'] },
+    });
+    expect(result).toContain('Allowed Edit Boundary (binding)');
+    expect(result).toContain('src/router.ts');
+    expect(result).toContain('tests/router.test.ts');
+  });
+
   it('returns string containing task title and description', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     expect(result).toContain('Fix login bug');
