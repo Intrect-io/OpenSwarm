@@ -121,6 +121,24 @@ An optional `automation` block in `openswarm.json` controls admission:
 Unreadable or invalid policy is an infrastructure failure, not permission to
 run with guessed defaults.
 
+A separate `publication` block decides what happens to the pull requests the
+swarm publishes from this repository. Worker attempts run only deterministic
+guards and verification; the agentic fresh review (`openswarm pr review
+--fresh`) runs once, right after the PR is published, and only where the
+repository opts in:
+
+```json
+{
+  "publication": {
+    "freshReview": true
+  }
+}
+```
+
+It lives outside `automation` so opting in does not pull that block's admission
+defaults in with it. A review failure is logged on the run but never undoes the
+publication or re-publishes the PR.
+
 ## Operations
 
 Relevant service settings are:

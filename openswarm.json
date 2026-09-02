@@ -6,5 +6,8 @@
     "teamKey": "INT",
     "projectId": "74a9d092-7b3c-4d4d-a998-a2c9a8f08e83",
     "projectName": "OpenSwarm"
+  },
+  "publication": {
+    "freshReview": true
   }
 }

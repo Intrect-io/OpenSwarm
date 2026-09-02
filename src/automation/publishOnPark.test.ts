@@ -79,6 +79,36 @@ describe('publication identity (AGT-4145)', () => {
 // vela 2026-09-02: AGT-3844 (48 attempts), AX-868 (23), AGT-4158 (15) — every
 // one a publication-scope rejection of files an EARLIER attempt had already
 // committed, turned into a 15-minute infra retry with a blank ledger message.
+describe('afterPublication hook (per-repository fresh review)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-1', issueId: 'AGT-1' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-1', title: 'Hooked' };
+
+  it('runs once, after the publication is durably recorded, with the PR identity', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'head-9' });
+    const calls: string[] = [];
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => { calls.push('recorded'); return true; }),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async (p: { prUrl: string; headSha: string }) => { calls.push(`hook:${p.prUrl}:${p.headSha}`); });
+    const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, durability, hook);
+
+    expect(calls).toEqual(['recorded', 'hook:https://github.com/o/r/pull/9:head-9']);
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved', prUrl: 'https://github.com/o/r/pull/9' });
+  });
+
+  it('keeps the publication a success when the review itself fails', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/10', headSha: 'head-10' });
+    const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined, async () => { throw new Error('reviewer adapter down'); });
+
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved', prUrl: 'https://github.com/o/r/pull/10' });
+  });
+});
+
 describe('publication failure classification', () => {
   const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-4158', issueId: 'AGT-4158' };
   const publishable = { id: 'task-1', issueIdentifier: 'AGT-4158', title: 'Artifact cohort producer', fileScope: ['src/vega_plugins/eval/'], fileScopeSource: 'drafted' as const };

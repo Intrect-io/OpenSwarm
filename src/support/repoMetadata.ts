@@ -76,6 +76,21 @@ const RepoMetadataSchema = z.object({
     /** How long an admission circuit remains open before reevaluation. */
     circuitCooldownMinutes: z.number().int().min(1).max(24 * 60).default(60),
   }).optional(),
+  /**
+   * What happens to a pull request the swarm publishes from this repository.
+   * Kept outside `automation` so opting in does not pull that block's
+   * admission defaults (maxConcurrent 1, …) in with it.
+   */
+  publication: z.object({
+    /**
+     * Run the agentic fresh review (`openswarm pr review --fresh`) once, right
+     * after the PR is published. Worker attempts stay on deterministic guards
+     * and verification; this is the only LLM review in the autonomous loop,
+     * and it is per repository — OpenSwarm itself opts in, its target
+     * repositories do not (operator decision, 2026-09-02).
+     */
+    freshReview: z.boolean().default(false),
+  }).optional(),
   /** Free-form notes the swarm should keep in mind. */
   notes: z.string().optional(),
 });
@@ -155,6 +170,17 @@ export async function saveRepoMetadata(repoPath: string, meta: RepoMetadata): Pr
  * a missing/malformed file yields `undefined` (the caller then falls back to an
  * effort-derived or default timeout). Never throws. (INT-2415)
  */
+/** Whether this repository asked for a fresh review after each published PR. */
+export async function loadPublicationFreshReview(repoPath: string): Promise<boolean> {
+  try {
+    return (await loadRepoMetadata(repoPath))?.publication?.freshReview === true;
+  } catch {
+    // An unreadable openswarm.json already warns elsewhere; a review is an
+    // opt-in extra, so an unparseable file means "not opted in".
+    return false;
+  }
+}
+
 export async function loadSandboxBashTimeoutMs(repoPath: string): Promise<number | undefined> {
   try {
     const meta = await loadRepoMetadata(repoPath);
