@@ -285,10 +285,10 @@ const VerifyConfigSchema = z.object({
 }).default({ enabled: true, blockOnNewFailures: true, maxCommands: 4 });
 
 const SecurityAuditConfigSchema = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
   maxThreads: z.number().int().min(1).max(16).default(2),
   maxRamMb: z.number().int().min(512).max(65536).default(4096),
-}).default({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
+}).default({ enabled: false, maxThreads: 2, maxRamMb: 4096 });
 
 const AutonomousConfigSchema = z.object({
   /** Auto-enable on service start */
@@ -340,7 +340,7 @@ const AutonomousConfigSchema = z.object({
   guards: PipelineGuardsConfigSchema,
   /** Deterministic baseline-diff verification (default ON). */
   verify: VerifyConfigSchema,
-  /** CodeQL baseline-diff gate for autonomous code edits (default ON). */
+  /** CodeQL baseline-diff gate for autonomous code edits (default OFF — too slow to gate PRs). */
   securityAudit: SecurityAuditConfigSchema,
   /** Max objective self-repair attempts (lint/bs/test) before giving up */
   maxReflections: z.number().min(1).max(10).default(3),

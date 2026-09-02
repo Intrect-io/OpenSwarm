@@ -184,10 +184,12 @@ autonomous:
     blockOnNewFailures: true
     maxCommands: 4
 
-  # CodeQL security baseline-diff gate. This also applies to PR auto-remediation.
-  # CodeQL must be preinstalled on an absolute PATH; tool absence blocks an edit.
+  # CodeQL security baseline-diff gate. Off by default: a full audit is minutes
+  # to tens of minutes per language and parked autonomous PRs (AGT-4160).
+  # Set enabled: true only when CodeQL is installed and latency is acceptable.
+  # Tool absence still blocks an edit when this is on.
   securityAudit:
-    enabled: true
+    enabled: false
     maxThreads: 2
     # Memory target passed to each CodeQL run, in MB. Best-effort by CodeQL's
     # own account — a large database can still exceed it.

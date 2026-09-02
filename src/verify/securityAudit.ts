@@ -111,7 +111,7 @@ export const codeqlGate = new ConcurrencyGate(
 );
 
 export const DEFAULT_SECURITY_AUDIT_CONFIG: SecurityAuditConfig = {
-  enabled: true,
+  enabled: false,
   maxThreads: 2,
   maxRamMb: 4096,
 };

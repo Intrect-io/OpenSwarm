@@ -609,7 +609,7 @@ export type AutonomousStartupConfig = {
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */
   verify?: VerifyConfig;
-  /** CodeQL baseline-diff gate for autonomous worker edits, enabled by default. */
+  /** CodeQL baseline-diff gate for autonomous worker edits, disabled by default (AGT-4160). */
   securityAudit?: SecurityAuditConfig;
   /**
    * Max objective self-repair attempts (lint/bs/test failures) tolerated before
