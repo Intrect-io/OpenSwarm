@@ -6,7 +6,7 @@ vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
-import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -106,6 +106,44 @@ describe('afterPublication hook (per-repository fresh review)', () => {
     await publishApprovedWork(info, publishable, result, undefined, async () => { throw new Error('reviewer adapter down'); });
 
     expect(result).toMatchObject({ success: true, finalStatus: 'approved', prUrl: 'https://github.com/o/r/pull/10' });
+  });
+});
+
+describe('parked-work draft publication', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-3844-ci-1', issueId: 'AGT-3844' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-3844', title: 'CI suite reserve', fileScope: ['tests/'], fileScopeSource: 'drafted' as const };
+
+  // The draft exists so the operator can see the branch. Enforcing the write
+  // scope here only hides it: AGT-3844 parked on that fence (2026-09-02)
+  // holding 42 commits whose net diff is four files, and published nothing.
+  it('publishes the branch without the write-scope fence', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/21', headSha: 'abc' });
+
+    await publishParkedWork(info, publishable, undefined);
+
+    expect(commitAndCreatePRWithHead).toHaveBeenCalledWith(
+      info, publishable.title, 'AGT-3844', expect.any(String),
+      { draft: true, committedOnly: true },
+    );
+  });
+
+  it('publishes a park once, whichever side of the approved publish it happened on', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/22', headSha: 'abc' });
+    const parked = { finalStatus: 'failed', operatorPark: { code: 'publication_scope_mismatch', reason: 'r' } };
+
+    expect(await publishParkedIfNeeded(info, publishable, parked, undefined)).toBe(true);
+    expect(await publishParkedIfNeeded(info, publishable, { finalStatus: 'failed' }, undefined)).toBe(false);
+    expect(await publishParkedIfNeeded(null, publishable, parked, undefined)).toBe(false);
+    expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an operator park as a run that stopped for a person', () => {
+    expect(shouldPublishParkedWork(true, { finalStatus: 'failed', operatorPark: { code: 'worker_no_changes', reason: 'r' } })).toBe(true);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator' })).toBe(true);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'failed' })).toBe(false);
+    // A published run and a quarantined sandbox outcome still never publish.
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', prUrl: 'https://x/1' })).toBe(false);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', workerResult: { executionOutcomeUnknown: true } })).toBe(false);
   });
 });
 
@@ -213,19 +251,17 @@ describe('publishStuckWork — terminal parks publish instead of holding', () =>
     await expect(publishStuckWork(ctx, task, 'stuck')).resolves.toBeUndefined();
   });
 
-  it('drops an inferred file scope, which is advisory and would block publication', async () => {
-    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
+  // This used to enforce a declared scope and drop an inferred one. Both now
+  // publish: the worktree is deleted moments after this call, so a fenced
+  // refusal does not protect the operator's instruction — it destroys the work
+  // that would have shown them it was broken. A draft PR merges nothing.
+  it('publishes the branch as a draft without a write-scope fence, whatever the scope source', async () => {
+    for (const fileScopeSource of ['declared', 'drafted', 'inferred'] as const) {
+      commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
 
-    await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource: 'inferred' }, 'stuck');
+      await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource }, 'stuck');
 
-    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ fileScope: undefined });
-  });
-
-  it('enforces a declared file scope', async () => {
-    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
-
-    await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource: 'declared' }, 'stuck');
-
-    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ fileScope: ['src/a.ts'] });
+      expect(commitAndCreatePRWithHead.mock.calls.at(-1)?.[4]).toEqual({ draft: true });
+    }
   });
 });
