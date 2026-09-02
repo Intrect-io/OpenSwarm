@@ -41,6 +41,14 @@ vi.mock('../orchestration/conflictDetector.js', () => ({
   fileScopesConflict: fileScopesConflictMock,
 }));
 
+const { runLedgerRetrospectiveMock } = vi.hoisted(() => ({
+  runLedgerRetrospectiveMock: vi.fn(async () => ({ filed: false, reason: 'no failures in window' })),
+}));
+
+vi.mock('./ledgerRetrospective.js', () => ({
+  runLedgerRetrospective: runLedgerRetrospectiveMock,
+}));
+
 // writeProviderOverride writes unconditionally to ~/.config/openswarm/ (no dryRun
 // guard, no env override) — mock it so switchProvider() tests never touch the real
 // filesystem outside the sandbox.
@@ -137,7 +145,9 @@ type Internal = {
     listRuns(states?: readonly string[]): Array<{ issueId: string; lastErrorCode?: string }>;
     getRun(issueId: string): { state: string; leaseExpiresAt?: number; prUrl?: string } | null;
     markReady(issueId: string): boolean;
+    isPrimary: boolean;
   };
+  maybeRunLedgerRetrospective(): Promise<void>;
   rateLimitUntil: number;
   scheduleNextHeartbeat(): void;
   executeTaskPairMode: ReturnType<typeof vi.fn>;
@@ -877,6 +887,64 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const [, , note] = source.logStuck.mock.calls[0];
       expect(String(note)).toContain('Needs human');
       expect(source.updateState).not.toHaveBeenCalled(); // early-stuck bypasses the normal rejection tally
+    });
+  });
+
+
+  // vela deploys with maxConcurrentTasks 12 + pairMode true and never took any
+  // other branch — the lane sat behind a `return` that only serial-mode
+  // heartbeats reached, so it never ran a single time in production (AGT-4181
+  // follow-up, 2026-09-03). These exercise the extracted gate directly.
+  describe('maybeRunLedgerRetrospective (AGT-4181 follow-up)', () => {
+    beforeEach(() => {
+      runLedgerRetrospectiveMock.mockClear();
+      runLedgerRetrospectiveMock.mockResolvedValue({ filed: false, reason: 'no failures in window' });
+    });
+
+    function primaryRunner(over: Partial<AutonomousConfig> = {}) {
+      const r = new AutonomousRunner(cfg({ retrospectiveProjectId: 'proj-1', ...over }));
+      const internal = r as unknown as Internal;
+      Object.defineProperty(internal.durableRuns, 'isPrimary', { value: true, configurable: true });
+      return internal;
+    }
+
+    it('calls the lane when configured, primary, and a task source is registered', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const internal = primaryRunner();
+
+      await internal.maybeRunLedgerRetrospective();
+
+      expect(runLedgerRetrospectiveMock).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1' }));
+    });
+
+    it('does nothing without retrospectiveProjectId configured', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const r = new AutonomousRunner(cfg());
+      const internal = r as unknown as Internal;
+      Object.defineProperty(internal.durableRuns, 'isPrimary', { value: true, configurable: true });
+
+      await internal.maybeRunLedgerRetrospective();
+
+      expect(runLedgerRetrospectiveMock).not.toHaveBeenCalled();
+    });
+
+    it('does nothing on a non-primary (shadow/replica) coordinator', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const r = new AutonomousRunner(cfg({ retrospectiveProjectId: 'proj-1' }));
+      const internal = r as unknown as Internal;
+      Object.defineProperty(internal.durableRuns, 'isPrimary', { value: false, configurable: true });
+
+      await internal.maybeRunLedgerRetrospective();
+
+      expect(runLedgerRetrospectiveMock).not.toHaveBeenCalled();
+    });
+
+    it('swallows a lane failure without throwing', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const internal = primaryRunner();
+      runLedgerRetrospectiveMock.mockRejectedValueOnce(new Error('ledger unreachable'));
+
+      await expect(internal.maybeRunLedgerRetrospective()).resolves.toBeUndefined();
     });
   });
 });
