@@ -253,3 +253,14 @@ export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
   'operator_remediated',
   'waiting_on_operator',
 ];
+
+/**
+ * What re-admitted a NEEDS_HUMAN run. `tracker_todo` is an operator moving the
+ * card back; `explicit_dispatch` is the board or the `work` CLI; `unspecified`
+ * means a caller that has not been taught to say. Stored on the
+ * `operator_resumed` event: a park is supposed to hold until a person acts, so
+ * every re-admission is either that person or a leak — and when cgf-portal
+ * AX-874 left NEEDS_HUMAN unattended at 18:25 on 2026-09-02, the trace could
+ * only say that it had happened.
+ */
+export type ParkResumeTrigger = 'explicit_dispatch' | 'tracker_todo' | 'sandbox_quarantine_dispatch' | 'unspecified';

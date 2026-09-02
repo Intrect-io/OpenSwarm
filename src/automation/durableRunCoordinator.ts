@@ -14,6 +14,7 @@ import {
   type RunClaim,
   type RunLedgerMode,
   type RunRecord,
+  type ParkResumeTrigger,
   type RunState,
   type TrackerStateObservation,
 } from './runLedger.js';
@@ -422,8 +423,8 @@ export class DurableRunCoordinator {
     return this.ledger?.markNeedsHumanForQuestions(issueId, correlationIds, reason, now) ?? false;
   }
 
-  resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
-    return this.ledger?.resumeNeedsHuman(issueId, now) ?? null;
+  resumeNeedsHuman(issueId: string, now = Date.now(), trigger: ParkResumeTrigger = 'unspecified'): RunState | null {
+    return this.ledger?.resumeNeedsHuman(issueId, now, trigger) ?? null;
   }
 
   resumeNeedsHumanForQuestions(issueId: string, now = Date.now()): RunState | null {

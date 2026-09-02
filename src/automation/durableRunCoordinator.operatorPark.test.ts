@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,7 +39,8 @@ function task(id: string): TaskItem {
 // operator's; the coordinator must park it rather than schedule it again.
 describe('DurableRunCoordinator operatorPark', () => {
   it('parks immediately under the pipeline\'s own operator code, before any circuit', async () => {
-    const ledger = new RunLedger(dbPath());
+    const ledgerPath = dbPath();
+    const ledger = new RunLedger(ledgerPath);
     const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 6 });
     const reason = 'publication-scope: branch contains files outside reserved write scope: uv.lock';
     const parked: PipelineResult = {
@@ -60,7 +62,13 @@ describe('DurableRunCoordinator operatorPark', () => {
       lastErrorMessage: reason,
     });
     // An explicit redispatch after the operator widens the scope resumes it.
-    expect(ledger.resumeNeedsHuman('scope')).toBe('READY');
+    expect(ledger.resumeNeedsHuman('scope', Date.now(), 'tracker_todo')).toBe('READY');
+    // The trace has to name what re-admitted a park, or an unattended resume
+    // looks exactly like an operator (cgf-portal AX-874, 2026-09-02 18:25).
+    const resumed = new Database(ledgerPath)
+      .prepare("SELECT data_json FROM automation_events WHERE issue_id = 'scope' AND kind = 'operator_resumed' ORDER BY sequence DESC LIMIT 1")
+      .get() as { data_json: string } | undefined;
+    expect(JSON.parse(resumed?.data_json ?? '{}')).toMatchObject({ trigger: 'tracker_todo', parkedUnder: 'publication_scope_mismatch' });
     coordinator.close();
     ledger.close();
   });

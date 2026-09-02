@@ -43,6 +43,7 @@ import type {
   IntegrationReservationClaim,
   IntegrationReservationOptions,
   LedgerMetrics,
+  ParkResumeTrigger,
   RegisterRunInput,
   RunClaim,
   RunLedgerOptions,
@@ -65,6 +66,7 @@ export type {
   IntegrationReservationClaim,
   IntegrationReservationOptions,
   LedgerMetrics,
+  ParkResumeTrigger,
   RegisterRunInput,
   RunClaim,
   RunLedgerMode,
@@ -377,7 +379,8 @@ export class RunLedger {
 
   /** Explicit operator recovery from NEEDS_HUMAN. A dead external effect resumes
    * synchronization; only implementation failures return to READY. */
-  resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
+  /** @param trigger What re-admitted the run; see ParkResumeTrigger. */
+  resumeNeedsHuman(issueId: string, now = Date.now(), trigger: ParkResumeTrigger = 'unspecified'): RunState | null {
     const resume = this.db.transaction((): RunState | null => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
@@ -409,6 +412,8 @@ export class RunLedger {
       if (updated.changes !== 1) return null;
       this.insertEvent(issueId, row.attempt_no, 'operator_resumed', 'NEEDS_HUMAN', to, {
         deadEffectsReset: deadEffects,
+        trigger,
+        parkedUnder: row.last_error_code ?? undefined,
       }, now);
       return to;
     });
