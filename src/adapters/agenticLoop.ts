@@ -54,6 +54,19 @@ function truncateToolResult(content: string, maxLen = 2500): string {
   return `${head}\n...[${content.length - 2200} chars truncated]...\n${tail}`;
 }
 
+/**
+ * One LIVE LOG line for a failed tool call. The previous `slice(0, 100)` cut an
+ * ENOENT path off inside `/work/.../worktree/<uuid-prefix>`, which read as a
+ * missing worktree rather than a missing file. Keep the error kind (head) and
+ * the path/filename that identifies it (tail).
+ */
+export function formatToolErrorLog(content: string, maxLen = 240): string {
+  if (content.length <= maxLen) return content;
+  const head = 90;
+  const tail = Math.max(40, maxLen - head - 1);
+  return `${content.slice(0, head)}…${content.slice(-tail)}`;
+}
+
 // ============ 타입 ============
 
 /** OpenAI Chat Completions API 메시지 포맷 */
@@ -630,7 +643,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         content,
       });
       if (result.is_error) {
-        onLog?.(`  ✖ ${content.slice(0, 100)}`);
+        onLog?.(`  ✖ ${formatToolErrorLog(content)}`);
       }
     }
 

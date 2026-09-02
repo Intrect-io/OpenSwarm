@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, formatToolErrorLog, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError } from '../sandboxExecutor/protocol.js';
@@ -41,6 +41,21 @@ const multiToolCallResp = (calls: Array<{ id: string; name: string; args: object
 /** Scripted API response with no tool calls (model tries to finish). */
 const finalResp = (content: string) => ({
   choices: [{ message: { role: 'assistant', content }, finish_reason: 'stop' }],
+});
+
+describe('formatToolErrorLog', () => {
+  it('keeps short errors whole', () => {
+    expect(formatToolErrorLog('Tool error: missing')).toBe('Tool error: missing');
+  });
+
+  it('keeps the ENOENT path tail instead of cutting the worktree UUID', () => {
+    const content = "Tool error: ENOENT: no such file or directory, open '/work/cgf-portal/worktree/6627815b-7e6b-455e-af72-9a6b6bdfc7be/docs/CGF_data/0821.xls'";
+    const logged = formatToolErrorLog(content);
+    expect(logged.length).toBeLessThanOrEqual(240);
+    expect(logged).toContain('ENOENT');
+    expect(logged).toContain('0821.xls');
+    expect(logged).not.toMatch(/455e-af$/);
+  });
 });
 
 describe('progress-based stop helpers', () => {
