@@ -88,6 +88,7 @@ vi.mock('../support/worktreeManager.js', () => ({
   preserveWorktree,
   removeWorktree,
   WorktreeCoordinationError,
+  findPullRequestForBranch: async () => null, removePreservedWorktreeAt: async () => {}, // branch lineage: nothing consumed
 }));
 
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent }));

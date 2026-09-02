@@ -34,6 +34,7 @@ import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from './publishOnPark.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
+import { prepareAttemptBranch } from '../support/branchLineage.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
 import { plannedNewChildren, refuseForChildCap } from './decompositionLimits.js';
@@ -893,7 +894,7 @@ export async function executePipeline(
   let keepWorktree = true;
 
   if (ctx.worktreeMode && task.issueId && task.issueIdentifier) {
-    const branchName = buildBranchName(task.issueIdentifier, task.title);
+    const branchName = await prepareAttemptBranch(projectPath, task.issueId, buildBranchName(task.issueIdentifier, task.title));
     try {
       worktreeInfo = await createWorktree(projectPath, task.issueId, branchName);
       actualPath = worktreeInfo.worktreePath;
