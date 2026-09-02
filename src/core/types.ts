@@ -586,6 +586,8 @@ export type AutonomousStartupConfig = {
   /** Durable execution ledger rollout mode. */
   automationLedgerMode?: 'off' | 'shadow' | 'primary';
   automationDbPath?: string;
+  /** Linear project for the daemon's self-filed retrospective issues; unset disables the lane. */
+  retrospectiveProjectId?: string;
   automationLeaseMs?: number;
   shutdownGraceMs?: number;
   /** Default role configuration */

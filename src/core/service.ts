@@ -294,6 +294,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       maxConcurrentPerProject: config.autonomous.maxConcurrentPerProject,
       automationLedgerMode: config.autonomous.automationLedgerMode,
       automationDbPath: config.autonomous.automationDbPath,
+      retrospectiveProjectId: config.autonomous.retrospectiveProjectId,
       automationLeaseMs: config.autonomous.automationLeaseMs,
       shutdownGraceMs: config.autonomous.shutdownGraceMs,
       allowSameProjectConcurrent: config.autonomous.allowSameProjectConcurrent,
