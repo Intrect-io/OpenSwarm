@@ -135,6 +135,15 @@ export interface PipelineResult {
   operatorPark?: { code: string; reason: string };
 }
 
+/**
+ * NEEDS_HUMAN code for a worker that delivered no edits — either with an
+ * explicit `noChangesReason` (publication then has nothing to open a PR from)
+ * or by repeating the empty-result contract violation until the session gave
+ * up. Both mean the same thing to an operator: the agent will not produce a
+ * diff for this issue as written.
+ */
+export const WORKER_NO_CHANGES_PARK_REASON = 'worker_no_changes';
+
 export interface PipelineContext {
   task: TaskItem;
   projectPath: string;

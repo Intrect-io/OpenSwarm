@@ -40,6 +40,7 @@ import type {
   PipelineRunMetadata,
   StageResult,
 } from './pairPipelineTypes.js';
+import { WORKER_NO_CHANGES_PARK_REASON } from './pairPipelineTypes.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
 import * as documenterAgent from './documenter.js';
@@ -1287,6 +1288,18 @@ export class PairPipeline extends EventEmitter {
       failureSignal: context.stuckReason ? 'stuck'
         : context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
       stuckReason: context.stuckReason,
+      // The session stopped because the worker claimed success, changed
+      // nothing and gave no reason — three times, across a model escalation
+      // and a fresh context. A new attempt runs the same prompt into the same
+      // silence: cgf-portal AX-868 reached attempt 27 and AGT-3844 attempt 53
+      // that way on 2026-09-02, each attempt ~900k tokens, and the operator
+      // was never told the agent had produced nothing at all.
+      operatorPark: context.stuckReason && context.workerResult?.zeroDiffWithoutReason
+        ? {
+          code: WORKER_NO_CHANGES_PARK_REASON,
+          reason: `Worker claimed success without changing a file and without a noChangesReason (${context.stuckReason.toLowerCase()}). The issue needs a human: either it asks for something the agent cannot express as a diff, or its description does not say what to change.`,
+        }
+        : undefined,
       totalDuration: Date.now() - startTime,
       iterations: context.currentIteration,
       workerResult: context.workerResult,

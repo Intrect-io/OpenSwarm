@@ -17,6 +17,8 @@ import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeS
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
+import { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
+
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
 /** Runs once after a reviewed publication succeeded and was durably recorded. */
@@ -32,11 +34,7 @@ const NO_COMMITS_TO_PUBLISH = /No commits to create PR from/;
 /** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
 export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
 
-/**
- * NEEDS_HUMAN code for a worker that finished with an explicit
- * `noChangesReason` on a branch that then had nothing to publish.
- */
-export const WORKER_NO_CHANGES_PARK_REASON = 'worker_no_changes';
+export { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
 
 /** The fields these paths read; narrower than the full pipeline result. */
 interface PublishableResult {

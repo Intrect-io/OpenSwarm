@@ -389,6 +389,49 @@ describe('PairPipeline coverage extension', () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Same error repeated'));
   });
 
+  // cgf-portal AX-868 reached attempt 27 and AGT-3844 attempt 53 on 2026-09-02
+  // this way: the worker claimed success, changed nothing, gave no reason, and
+  // the run was re-asked the same question at ~900k tokens a time.
+  it('parks a stuck loop of empty worker results for the operator instead of leaving it retryable', async () => {
+    runWorker.mockResolvedValue({
+      success: false,
+      summary: 'nothing',
+      filesChanged: [],
+      commands: [],
+      output: '',
+      zeroDiffWithoutReason: true,
+      error: 'Worker reported success with no changed files and no explicit noChangesReason.',
+    });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 4,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.failureSignal).toBe('stuck');
+    expect(result.operatorPark).toEqual({
+      code: 'worker_no_changes',
+      reason: expect.stringContaining('without changing a file'),
+    });
+  });
+
+  it('leaves an ordinary stuck loop retryable — only the empty-worker contract parks', async () => {
+    runWorker.mockRejectedValue(new Error('the config loader keeps failing the same schema validation check'));
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 4,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    expect((await pipeline.run(task(), process.cwd())).operatorPark).toBeUndefined();
+  });
+
   // ============================================
   // Pipeline guards (blocking vs non-blocking)
   // ============================================
