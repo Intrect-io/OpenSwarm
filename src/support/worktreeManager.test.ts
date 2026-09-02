@@ -376,6 +376,32 @@ describe('preserveWorktree → createWorktree resume roundtrip (INT-2503)', () =
     expect(() => git(repo, 'show', 'swarm/INT-9-test:pytest-of-openswarm/pytest-1/current')).toThrow();
   });
 
+  // vega-agent AGT-3844 sat on five task commits at attempt 53, cgf-portal
+  // AX-868 on six at attempt 27, and neither ever opened a PR: the resumed
+  // worker made no new edit (the work was done), saw an empty file list, and
+  // failed the zero-diff contract before publication looked at the branch.
+  it('credits committed task work from earlier attempts when nothing is preserved as WIP', async () => {
+    const originBare = join(root, 'origin-resume.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', originBare], { stdio: 'pipe' });
+    git(repo, 'remote', 'remove', 'origin');
+    git(repo, 'remote', 'add', 'origin', originBare);
+    git(repo, 'push', '-u', 'origin', 'main');
+
+    const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-committed');
+    writeFileSync(join(info.worktreePath, 'app.py'), 'base\ndelivered\n');
+    writeFileSync(join(info.worktreePath, 'helper.py'), 'delivered\n');
+    git(info.worktreePath, 'add', '-A');
+    git(info.worktreePath, 'commit', '--no-verify', '-m', 'feat(INT-9): deliver the fix');
+    // Only runtime leftovers are dirty — exactly what a resumed vela worktree
+    // looks like once its delivery has been committed.
+    writeFileSync(join(info.worktreePath, '.venv'), 'runtime-link-placeholder\n');
+    await preserveWorktree(info, 'session did not succeed');
+
+    const resumed = await createWorktree(repo, 'INT-9', 'swarm/INT-9-committed');
+
+    expect(resumed.resumedTaskFiles?.sort()).toEqual(['app.py', 'helper.py']);
+  });
+
   it('purges runtime artifacts that a legacy WIP commit already tracked on resume', async () => {
     const info = await createWorktree(repo, 'INT-9', 'swarm/INT-9-test');
     writeFileSync(join(info.worktreePath, 'app.py'), 'base\nlegacy-partial\n');

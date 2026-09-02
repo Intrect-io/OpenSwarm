@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { isEphemeralWorktreeArtifact } from './worktreeEphemeral.js';
+import { getResumedTaskFiles } from './worktreeResumeFiles.js';
 import { stagePreservableWorktreeChanges, purgeTrackedEphemeralArtifacts } from './worktreeEphemeralOps.js';
 import { getInstanceId } from './healthEndpoint.js';
 import { readyReusedPullRequest } from './pullRequestReady.js';
@@ -81,31 +81,6 @@ export interface WorktreeInfo {
   resumedTaskFiles?: string[];
 }
 
-async function getPreservedTaskFiles(worktreePath: string): Promise<string[]> {
-  const log = await git(worktreePath, 'log', '--format=%H%x09%s', '-n', '100').catch(() => '');
-  const commits = log.split('\n').filter(Boolean).map((line) => {
-    const tab = line.indexOf('\t');
-    return { hash: line.slice(0, tab), subject: line.slice(tab + 1) };
-  });
-  // Artifact-purge commits are an internal continuation of the same WIP
-  // checkpoint. Treating them as a new base would make the actual source diff
-  // disappear on the next resume.
-  const isPreservedWip = (subject: string): boolean =>
-    subject.startsWith('wip: preserved partial work')
-    || subject === 'wip: remove ephemeral runtime artifacts (auto)';
-  let preservedCount = 0;
-  while (commits[preservedCount] && isPreservedWip(commits[preservedCount].subject)) preservedCount += 1;
-  if (preservedCount === 0) return [];
-
-  const base = commits[preservedCount]?.hash;
-  const diffArgs = base
-    ? ['diff', '--name-only', base, 'HEAD']
-    : ['diff-tree', '--root', '--no-commit-id', '--name-only', '-r', 'HEAD'];
-  const files = await git(worktreePath, ...diffArgs);
-  return [...new Set(files.split('\n').filter((file) =>
-    file && file !== PRESERVE_MARKER && !isEphemeralWorktreeArtifact(file)
-  ))];
-}
 
 /** Runtime ownership metadata must never be published in a task branch/PR. */
 async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
@@ -812,7 +787,7 @@ export async function createWorktree(
       await purgeTrackedEphemeralArtifacts(worktreePath);
       const resumed: WorktreeInfo = {
         worktreePath, branchName, originalPath: repoPath, issueId,
-        resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
+        resumedTaskFiles: await getResumedTaskFiles(worktreePath),
       };
       resumed.activeMarkerToken = await writeActiveWorktreeMarker(resumed);
       try {
@@ -847,7 +822,7 @@ export async function createWorktree(
     await purgeTrackedEphemeralArtifacts(worktreePath);
     const resumed: WorktreeInfo = {
       worktreePath, branchName, originalPath: repoPath, issueId,
-      resumedTaskFiles: await getPreservedTaskFiles(worktreePath),
+      resumedTaskFiles: await getResumedTaskFiles(worktreePath),
     };
     resumed.activeMarkerToken = await writeActiveWorktreeMarker(resumed);
     await linkSharedPaths(repoPath, worktreePath);
@@ -881,7 +856,7 @@ export async function createWorktree(
 
   const info: WorktreeInfo = {
     worktreePath, branchName, originalPath: repoPath, issueId,
-    resumedTaskFiles: branchExists ? await getPreservedTaskFiles(worktreePath) : undefined,
+    resumedTaskFiles: branchExists ? await getResumedTaskFiles(worktreePath) : undefined,
   };
   if (branchExists) await purgeTrackedEphemeralArtifacts(worktreePath);
   // Written before dependency setup or worker invocation. A crash anywhere after
