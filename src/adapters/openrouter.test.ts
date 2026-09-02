@@ -123,7 +123,7 @@ describe('OpenRouterCliAdapter', () => {
     const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
     await callApi([{ role: 'user', content: 'hi' }], []);
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.provider).toEqual({ data_collection: 'deny' });
+    expect(body.provider).toEqual({ data_collection: 'deny', sort: 'throughput' });
     expect(body.reasoning).toBeUndefined(); // not disabled unless requested
   });
 
