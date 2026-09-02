@@ -100,6 +100,7 @@ describe('discoverVerifyCommands', () => {
       'apps/web/package.json': '{}',
       'packages/shared/pyproject.toml': '[project]\nname = "shared"\n',
       '.venv/bin/python': '#!/bin/sh\n',
+      '.venv/bin/pytest': '#!/bin/sh\n',
       '.venv/bin/ruff': '#!/bin/sh\n',
     });
     expect(await discoverVerifyCommands(root)).toEqual([
@@ -112,6 +113,7 @@ describe('discoverVerifyCommands', () => {
     const nested = await fixture({
       'apps/api/pytest.ini': '[pytest]\n',
       'apps/api/.venv/bin/python': '#!/bin/sh\n',
+      'apps/api/.venv/bin/pytest': '#!/bin/sh\n',
     });
     expect(await discoverVerifyCommands(nested)).toEqual([
       { name: 'pytest:apps/api', run: './.venv/bin/python -m pytest -x -q', kind: 'test', timeoutMs: 300_000, cwd: 'apps/api' },
@@ -122,6 +124,18 @@ describe('discoverVerifyCommands', () => {
       'apps/api/pytest.ini': '[pytest]\n',
     });
     expect((await discoverVerifyCommands(rootProject)).map((c) => c.name)).toEqual(['pytest']);
+  });
+
+  // cgf-portal's root .venv holds only an interpreter; running `python -m pytest`
+  // with it fails identically on base and head, which the runner treats as a
+  // pre-existing environment failure — a green tester with zero tests run.
+  it('emits no subproject pytest when the chosen virtualenv cannot run pytest', async () => {
+    const root = await fixture({
+      'apps/pipelines/pyproject.toml': '[tool.pytest.ini_options]\n',
+      '.venv/bin/python': '#!/bin/sh\n',
+      '.venv/bin/ruff': '#!/bin/sh\n',
+    });
+    expect(await discoverVerifyCommands(root)).toEqual([]);
   });
 
   it('serializes an explicitly configured xdist pytest run for stable base comparison', async () => {

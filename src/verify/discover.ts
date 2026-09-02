@@ -1,5 +1,5 @@
 import { access, readdir, readFile } from 'node:fs/promises';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import type { VerifyCommand } from './manifest.js';
 
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -33,6 +33,23 @@ async function pythonCommand(projectPath: string, subdir = ''): Promise<string> 
     ? ['.venv-verify/Scripts/python.exe', '.venv/Scripts/python.exe', 'venv/Scripts/python.exe']
     : ['.venv-verify/bin/python', '.venv/bin/python', 'venv/bin/python'];
   return (await toolFromVenv(projectPath, subdir, candidates)) ?? 'python';
+}
+
+/**
+ * Whether the interpreter `pythonCommand` chose can actually run pytest. A
+ * virtualenv without pytest makes BOTH the base and the head run fail with
+ * the same ModuleNotFoundError, which the runner rightly reads as a
+ * pre-existing environment failure — and the tester then passes without a
+ * single test having run. cgf-portal's root `.venv` holds only an
+ * interpreter (its packages live in apps/pipelines/.venv), so the monorepo
+ * command from #534 would have gone green that way. Unknown for a PATH
+ * interpreter, which keeps the root behaviour unchanged.
+ */
+async function interpreterHasPytest(projectPath: string, subdir: string, python: string): Promise<boolean> {
+  if (!python.startsWith('.')) return true;
+  const bin = dirname(join(projectPath, subdir, python));
+  return exists(join(bin, process.platform === 'win32' ? 'pytest.exe' : 'pytest'))
+    || exists(join(bin, process.platform === 'win32' ? 'py.test.exe' : 'py.test'));
 }
 
 async function toolFromVenv(projectPath: string, subdir: string, candidates: string[]): Promise<string | undefined> {
@@ -77,7 +94,10 @@ async function discoverPythonCommands(projectPath: string, subdir: string): Prom
       setupCfg,
     ].filter((value): value is string => value !== null).join('\n');
     const serialXdist = /(?:^|\s)-n(?:\s|=)/m.test(pytestConfig) ? ' -n 0' : '';
-    commands.push({ ...command(`pytest${label}`, `${await pythonCommand(projectPath, subdir)} -m pytest${serialXdist} -x -q`, 'test'), ...cwd });
+    const python = await pythonCommand(projectPath, subdir);
+    if (!subdir || await interpreterHasPytest(projectPath, subdir, python)) {
+      commands.push({ ...command(`pytest${label}`, `${python} -m pytest${serialXdist} -x -q`, 'test'), ...cwd });
+    }
   }
 
   // Python lint: only a repository-installed ruff, so an unknown tool is never
