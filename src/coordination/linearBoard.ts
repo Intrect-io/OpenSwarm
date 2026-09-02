@@ -67,10 +67,26 @@ export function parseCoordinationComment(body: string): CoordinationEvent | null
 }
 
 export class TrackerCoordinationBoard {
+  private commentQuotaExhausted = false;
+
   constructor(private readonly source: ITaskSource, private readonly boardIssueId: string) {}
 
   async publish(event: CoordinationEvent): Promise<void> {
-    await this.source.addComment(this.boardIssueId, formatCoordinationComment(event), `coordination:${event.fingerprint}`);
+    if (this.commentQuotaExhausted) return;
+    try {
+      await this.source.addComment(this.boardIssueId, formatCoordinationComment(event), `coordination:${event.fingerprint}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // Linear rejects every subsequent comment once an issue reaches its hard
+      // 2,000-comment limit. The local coordination store remains durable, so
+      // retrying each event only creates an unbounded error storm.
+      if (/quota exceeded|maximum of \d+ comments/i.test(message)) {
+        this.commentQuotaExhausted = true;
+        console.error(`[CoordinationBoard] disabled remote mirror for ${this.boardIssueId}: ${message}`);
+        return;
+      }
+      throw error;
+    }
   }
 
   async read(): Promise<CoordinationEvent[]> {

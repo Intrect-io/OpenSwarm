@@ -50,4 +50,15 @@ describe('TrackerCoordinationBoard', () => {
     expect(addComment).toHaveBeenCalledWith('BOARD-1', expect.stringContaining('Agent board'), `coordination:${event.fingerprint}`);
     expect(await board.read()).toEqual([event]);
   });
+
+  it('stops retrying after Linear reports its immutable comment quota', async () => {
+    const addComment = vi.fn(async () => { throw new Error('Quota exceeded - An issue can have a maximum of 2000 comments.'); });
+    const board = new TrackerCoordinationBoard({ addComment } as unknown as ITaskSource, 'BOARD-1');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await board.publish(event);
+    await board.publish({ ...event, id: 'e2', fingerprint: 'a'.repeat(64) });
+    expect(addComment).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledTimes(1);
+    error.mockRestore();
+  });
 });
