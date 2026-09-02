@@ -91,6 +91,39 @@ describe('discoverVerifyCommands', () => {
     expect((await discoverVerifyCommands(withoutRuff)).map((c) => c.name)).toEqual(['pytest']);
   });
 
+  // cgf-portal (2026-09-02): pyproject with pytest config at apps/pipelines,
+  // nothing at the root. Discovery found nothing, the deterministic tester never
+  // ran, and all 113 attempts that day fell through to the LLM tester.
+  it('looks one level into workspace directories when the root has no Python project', async () => {
+    const root = await fixture({
+      'apps/pipelines/pyproject.toml': '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+      'apps/web/package.json': '{}',
+      'packages/shared/pyproject.toml': '[project]\nname = "shared"\n',
+      '.venv/bin/python': '#!/bin/sh\n',
+      '.venv/bin/ruff': '#!/bin/sh\n',
+    });
+    expect(await discoverVerifyCommands(root)).toEqual([
+      { name: 'pytest:apps/pipelines', run: '../../.venv/bin/python -m pytest -x -q', kind: 'test', timeoutMs: 300_000, cwd: 'apps/pipelines' },
+      { name: 'ruff:apps/pipelines', run: '../../.venv/bin/ruff check .', kind: 'lint', timeoutMs: 300_000, cwd: 'apps/pipelines' },
+    ]);
+  });
+
+  it('prefers a subproject virtualenv and stays at the root when the root is a Python project', async () => {
+    const nested = await fixture({
+      'apps/api/pytest.ini': '[pytest]\n',
+      'apps/api/.venv/bin/python': '#!/bin/sh\n',
+    });
+    expect(await discoverVerifyCommands(nested)).toEqual([
+      { name: 'pytest:apps/api', run: './.venv/bin/python -m pytest -x -q', kind: 'test', timeoutMs: 300_000, cwd: 'apps/api' },
+    ]);
+
+    const rootProject = await fixture({
+      'pytest.ini': '[pytest]\n',
+      'apps/api/pytest.ini': '[pytest]\n',
+    });
+    expect((await discoverVerifyCommands(rootProject)).map((c) => c.name)).toEqual(['pytest']);
+  });
+
   it('serializes an explicitly configured xdist pytest run for stable base comparison', async () => {
     const root = await fixture({
       'pytest.ini': '[pytest]\naddopts = --tb=short -n auto --dist loadgroup\n',
