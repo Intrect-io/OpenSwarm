@@ -820,6 +820,8 @@ describe('loopResultToCliResult costInfo (INT-2508)', () => {
       inputTokens: 10000,
       outputTokens: 2000,
       cachedTokens: 8000,
+      costUsd: 0,
+      meteredCalls: 0,
       durationMs: 45200,
       executedCommands: ['npm test'],
     };
@@ -960,5 +962,72 @@ describe('checking an inbox is not a stall', () => {
     const { allToolCallsSeen } = await import('./agenticLoop.js');
     const mixed = [call('read_file', '{"path":"a.ts"}'), call('coordination_read')];
     expect(allToolCallsSeen(mixed, new Set(['read_file:{"path":"a.ts"}', 'coordination_read:{}']))).toBe(false);
+  });
+});
+
+describe('runAgenticLoop usage ledger (AGT-4178)', () => {
+  it('records every priced response before the loop throws, and sums cost into the result', async () => {
+    const { readUsage } = await import('../support/usageLedger.js');
+    const startedAt = Date.now();
+    const usage = (cost: number | undefined) => ({
+      prompt_tokens: 500, completion_tokens: 20, total_tokens: 520, cached_tokens: 100, ...(cost === undefined ? {} : { cost }),
+    });
+    let calls = 0;
+    const ok = await runAgenticLoop({
+      prompt: 'x', cwd: '/work/demo', model: 'z-ai/glm-5.3', webTools: false, maxTurns: 1,
+      usageAttribution: { adapter: 'openrouter', taskId: 'AGT-77', stage: 'worker' },
+      callApi: async () => {
+        calls++;
+        return { ...finalResp('done'), usage: usage(0.01) };
+      },
+    });
+    expect(calls).toBe(1);
+    expect(ok.costUsd).toBeCloseTo(0.01);
+    expect(ok.meteredCalls).toBe(1);
+    expect(loopResultToCliResult(ok).costInfo?.costUsd).toBeCloseTo(0.01);
+
+    await expect(runAgenticLoop({
+      prompt: 'x', cwd: '/work/demo', model: 'z-ai/glm-5.3', webTools: false, maxTurns: 3,
+      usageAttribution: { adapter: 'openrouter', taskId: 'AGT-78', stage: 'worker' },
+      callApi: async (messages) => {
+        // First response: a tool call so the loop comes back for a second call,
+        // which then fails as an infra error. The first call's spend must survive.
+        if (!messages.some((m) => m.role === 'tool')) {
+          return {
+            choices: [{
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [{ id: 't1', type: 'function', function: { name: 'read_file', arguments: '{"path":"nope.txt"}' } }],
+              },
+              finish_reason: 'tool_calls',
+            }],
+            usage: usage(0.02),
+          };
+        }
+        throw new Error('connect ECONNREFUSED 127.0.0.1:443');
+      },
+    })).rejects.toThrow(/ECONNREFUSED/);
+
+    const rows = readUsage({ since: startedAt - 1000 }).filter((r) => r.taskId === 'AGT-77' || r.taskId === 'AGT-78');
+    expect(rows.map((r) => [r.taskId, r.costUsd, r.cachedTokens, r.model, r.stage, r.cwd])).toEqual([
+      ['AGT-77', 0.01, 100, 'z-ai/glm-5.3', 'worker', '/work/demo'],
+      ['AGT-78', 0.02, 100, 'z-ai/glm-5.3', 'worker', '/work/demo'],
+    ]);
+  });
+
+  it('records an unpriced response as unmetered (null cost) and keeps costUsd at 0', async () => {
+    const { readUsage } = await import('../support/usageLedger.js');
+    const startedAt = Date.now();
+    const res = await runAgenticLoop({
+      prompt: 'x', cwd: '/work/demo', model: 'local-model', webTools: false, maxTurns: 1,
+      usageAttribution: { adapter: 'local', taskId: 'AGT-79' },
+      callApi: async () => ({ ...finalResp('done'), usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } }),
+    });
+    expect(res.costUsd).toBe(0);
+    expect(res.meteredCalls).toBe(0);
+    const row = readUsage({ since: startedAt - 1000 }).find((r) => r.taskId === 'AGT-79');
+    expect(row).toMatchObject({ adapter: 'local', costUsd: null, promptTokens: 5 });
+    expect(row?.stage).toBeUndefined();
   });
 });

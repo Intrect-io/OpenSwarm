@@ -48,3 +48,40 @@ describe('reduceChatChunks', () => {
     expect(res.choices[0].message.tool_calls!.map((t) => t.function.name)).toEqual(['f0', 'f1']);
   });
 });
+
+describe('reduceChatChunks usage accounting (AGT-4178)', () => {
+  it('keeps the metered cost, cached and reasoning tokens from the final chunk', () => {
+    const out = reduceChatChunks([
+      { choices: [{ delta: { content: 'hi' } }] },
+      {
+        choices: [],
+        usage: {
+          prompt_tokens: 1200,
+          completion_tokens: 40,
+          total_tokens: 1240,
+          cost: 0.00312,
+          cost_details: { upstream_inference_cost: 0.003 },
+          prompt_tokens_details: { cached_tokens: 900 },
+          completion_tokens_details: { reasoning_tokens: 12 },
+        },
+      },
+    ]);
+    expect(out.usage).toEqual({
+      prompt_tokens: 1200,
+      completion_tokens: 40,
+      total_tokens: 1240,
+      cost: 0.00312,
+      upstream_cost: 0.003,
+      cached_tokens: 900,
+      reasoning_tokens: 12,
+    });
+  });
+
+  it('leaves cost absent — not zero — when the server does not price the call', () => {
+    const out = reduceChatChunks([
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 2, cost: null, prompt_tokens_details: null } },
+    ]);
+    expect(out.usage).toEqual({ prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 });
+    expect(out.usage && 'cost' in out.usage).toBe(false);
+  });
+});

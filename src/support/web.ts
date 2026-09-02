@@ -506,6 +506,16 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.write(':connected\n\n');
         addSSEClient(res, skipReplay);
 
+      // ---- Usage ledger (AGT-4178) ----
+      } else if (url === '/api/usage' && req.method === 'GET') {
+        const { queryUsage } = await import('./usageLedger.js');
+        const result = queryUsage({
+          since: requestUrl.searchParams.get('since') ?? '24h',
+          by: requestUrl.searchParams.get('by') ?? 'model',
+        });
+        if (!result.ok) { writeJson(res, 400, { error: result.error }); return; }
+        writeJson(res, 200, { since: new Date(result.since).toISOString(), until: new Date(result.until).toISOString(), ...result.aggregate });
+
       // ---- Stats ----
       } else if (url === '/api/stats') {
         const stats = runnerRef?.getStats();

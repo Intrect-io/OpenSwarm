@@ -1,6 +1,6 @@
 // OpenSwarm - whole-backlog grooming planner (INT-1609)
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { getAdapter, spawnCli } from '../adapters/index.js';
 import type { AdapterName } from '../adapters/types.js';
 import { expandPath } from '../core/config.js';
@@ -172,6 +172,7 @@ export async function runBacklogGroomingPlanner(options: RunBacklogGroomingOptio
       onLog: options.onLog,
       readOnly: true,
       reasoningEffort: 'high',
+      processContext: { taskId: `groom:${options.projectName ?? basename(cwd)}`, stage: 'groom' },
     });
     if (raw.exitCode !== 0 && !raw.stdout.trim()) {
       return { success: false, decisions: [], error: raw.stderr.slice(0, 500) || `Planner adapter exited with code ${raw.exitCode}` };

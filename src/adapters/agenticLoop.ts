@@ -13,6 +13,8 @@ import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
 import type { CliRunResult } from './types.js';
+import type { ChatUsage } from './chatStream.js';
+import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
@@ -94,13 +96,7 @@ interface ChatCompletionResponse {
     };
     finish_reason: string;
   }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-    /** Cached input tokens (prompt-cache hits). Subset of prompt_tokens. */
-    cached_tokens?: number;
-  };
+  usage?: ChatUsage;
 }
 
 /** 에이전틱 루프 설정 */
@@ -177,6 +173,12 @@ export interface AgenticLoopOptions {
    * - 'whole-file': hide edit_file / apply_patch; the model rewrites via write_file.
    */
   editFormat?: EditFormat;
+  /**
+   * Who is spending: stamped on the usage-ledger record written for EVERY
+   * API response, before any of the loop's throw paths. Adapter name is the
+   * minimum; task/stage come from CliRunOptions.processContext. (AGT-4178)
+   */
+  usageAttribution?: UsageAttribution;
 }
 
 /** 루프 실행 결과 */
@@ -195,6 +197,10 @@ export interface AgenticLoopResult {
   outputTokens: number;
   /** 캐시 적중 입력 토큰 누적 (totalTokens의 부분집합) — prompt-cache 효율 측정용 */
   cachedTokens: number;
+  /** Sum of the provider's metered charges (USD) across calls that reported one. */
+  costUsd: number;
+  /** Calls that carried a metered price; 0 means the provider is unmetered. */
+  meteredCalls: number;
   /** A blocking ask_human ended the run; the operator now owns the next step. */
   blockedOnOperator?: boolean;
   /** Exact correlation IDs returned by the blocking ask_human tool call. */
@@ -249,6 +255,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     coordinationContext,
     signal,
     editFormat = 'json',
+    usageAttribution,
   } = options;
 
   // Strict mode exposes bash only after a separate companion has attested its
@@ -372,7 +379,42 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens = 0;
+  let costUsd = 0;
+  let meteredCalls = 0;
   let finalText = '';
+
+  // Account for one response: accumulate the run totals AND write the ledger
+  // line immediately. The ledger write comes first because everything after a
+  // response — rate-limit re-throw, infra re-throw, the empty-final-answer
+  // throw, or the process being killed — would otherwise erase the spend of
+  // every call that already completed. (AGT-4178)
+  const accountUsage = (usage: ChatUsage | undefined, callStartedAt: number): void => {
+    if (!usage) return;
+    const metered = typeof usage.cost === 'number';
+    recordUsage({
+      ts: new Date().toISOString(),
+      adapter: usageAttribution?.adapter ?? 'unknown',
+      model: options.model,
+      taskId: usageAttribution?.taskId,
+      stage: usageAttribution?.stage,
+      cwd,
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+      cachedTokens: usage.cached_tokens ?? 0,
+      reasoningTokens: usage.reasoning_tokens ?? 0,
+      costUsd: metered ? usage.cost! : null,
+      ...(typeof usage.upstream_cost === 'number' ? { upstreamCostUsd: usage.upstream_cost } : {}),
+      durationMs: Date.now() - callStartedAt,
+    });
+    totalTokens += usage.prompt_tokens + usage.completion_tokens;
+    inputTokens += usage.prompt_tokens;
+    outputTokens += usage.completion_tokens;
+    cachedTokens += usage.cached_tokens ?? 0;
+    if (metered) {
+      costUsd += usage.cost!;
+      meteredCalls += 1;
+    }
+  };
 
   for (let turn = 0; turn < maxTurns + 1; turn++) {
     // 사용자 중단 (Esc/Ctrl+C) — 현재 텍스트가 있으면 유지, 없으면 표시만.
@@ -412,6 +454,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     onLog?.(`▸ API call #${apiCallCount}${turn > 0 ? ` (tool turn ${turn})` : ''}`);
 
     let response: ChatCompletionResponse;
+    const callStartedAt = Date.now();
     try {
       response = await callApi(messages, tools);
     } catch (err) {
@@ -458,12 +501,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       break;
     }
 
-    if (response.usage) {
-      totalTokens += response.usage.prompt_tokens + response.usage.completion_tokens;
-      inputTokens += response.usage.prompt_tokens;
-      outputTokens += response.usage.completion_tokens;
-      cachedTokens += response.usage.cached_tokens ?? 0;
-    }
+    accountUsage(response.usage, callStartedAt);
 
     const choice = response.choices?.[0];
     if (!choice) {
@@ -752,13 +790,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       }
 
       try {
+        const salvageStartedAt = Date.now();
         const response = await callApi(messages, []);
-        if (response.usage) {
-          totalTokens += response.usage.prompt_tokens + response.usage.completion_tokens;
-          inputTokens += response.usage.prompt_tokens;
-          outputTokens += response.usage.completion_tokens;
-          cachedTokens += response.usage.cached_tokens ?? 0;
-        }
+        accountUsage(response.usage, salvageStartedAt);
         apiCallCount++;
         const content = response.choices?.[0]?.message?.content;
         finalText = typeof content === 'string' && content.trim() ? content : '';
@@ -790,6 +824,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     inputTokens,
     outputTokens,
     cachedTokens,
+    costUsd,
+    meteredCalls,
     durationMs: Date.now() - startTime,
     executedCommands,
     blockedOnOperator,
@@ -803,10 +839,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 /**
  * AgenticLoopResult → CliRunResult 변환
  *
- * costUsd is 0 by design: the loop cannot price tokens itself — codex-responses
- * bills through a ChatGPT subscription (no per-token marginal cost) and a
- * hardcoded price table would go stale. Adapters with real metering (openrouter)
- * can overwrite costUsd downstream. Tokens and duration are real measurements. (INT-2508)
+ * costUsd is the provider's own metered charge summed over the run (OpenRouter
+ * prices every response); it stays 0 for unmetered providers — codex-responses
+ * bills through a ChatGPT subscription and local models have no marginal cost —
+ * because the loop keeps no price table (it would go stale). Tokens and
+ * duration are real measurements either way. (INT-2508, AGT-4178)
  */
 export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
   return {
@@ -819,7 +856,7 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     executionOutcomeUnknown: result.executionOutcomeUnknown,
     operatorQuestionCorrelationIds: result.operatorQuestionCorrelationIds,
     costInfo: {
-      costUsd: 0,
+      costUsd: result.costUsd,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       cacheReadTokens: result.cachedTokens,

@@ -408,6 +408,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       applyPatch: true,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'codex-responses', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {

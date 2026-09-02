@@ -613,7 +613,13 @@ openswarm start --foreground  # run attached (logs stream to the terminal)
 openswarm status              # pid, uptime, log path
 openswarm stop                # stop the daemon
 openswarm dash                # open the web dashboard (:3847)
+openswarm cost --since 24h    # LLM spend by model (--by stage|task|project|adapter|day, --json)
 ```
+
+Every model API call is appended to `~/.openswarm/usage/<UTC date>.jsonl` with the
+provider's own metered price when it reports one (OpenRouter prices every response;
+subscription and local providers are recorded as unmetered). The same aggregate is
+served at `GET /api/usage?since=24h&by=model`.
 
 > **From source / development** (contributors): clone the repo and use the `npm run …` scripts (`npm run dev`, `npm start`, `npm run service:install` for a macOS launchd service, `docker compose up -d`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -161,6 +161,7 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       coordinationContext: options.coordinationContext,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'atlascloud', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -168,7 +169,9 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       options.onLog?.(
         `[Atlas Cloud] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens`,
       );
-      return loopResultToCliResult(result);
+      const cli = loopResultToCliResult(result);
+      if (cli.costInfo) cli.costInfo.model = model;
+      return cli;
     } catch (err) {
       if (err instanceof RateLimitError) throw err;
       if (isInfraError(err)) throw err;

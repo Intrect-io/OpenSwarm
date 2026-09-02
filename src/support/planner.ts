@@ -22,6 +22,8 @@ export interface PlannerOptions {
   authoritativeOperatorFeedback?: string;
   projectPath: string;
   projectName?: string;
+  /** Task identity stamped on the usage ledger (issue identifier or scheduler id). */
+  taskId?: string;
   timeoutMs?: number;
   model?: string;
   adapterName?: AdapterName;  // CLI adapter (default: configured default)
@@ -165,6 +167,7 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
       systemPrompt: getPrompts().systemPrompt,
       readOnly: true,
       // Planner is a judgment role — keep reasoning ON (unlike the worker).
+      processContext: { taskId: options.taskId ?? options.taskTitle, stage: 'decompose' },
     });
 
     if (raw.exitCode !== 0 && !raw.stdout.trim()) {

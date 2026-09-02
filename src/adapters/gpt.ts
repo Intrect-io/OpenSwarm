@@ -164,6 +164,7 @@ export class GptCliAdapter implements CliAdapter {
       coordinationContext: options.coordinationContext,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'gpt', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -171,7 +172,9 @@ export class GptCliAdapter implements CliAdapter {
       if (options.onLog) {
         options.onLog(`[GPT] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens`);
       }
-      return loopResultToCliResult(result);
+      const cli = loopResultToCliResult(result);
+      if (cli.costInfo) cli.costInfo.model = model;
+      return cli;
     } catch (err) {
       // Rate-limit AND infra/capacity errors must propagate so the pipeline
       // classifies them (pause / infra_error backoff) instead of burying them in a
