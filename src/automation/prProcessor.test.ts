@@ -581,7 +581,7 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
   });
 
   it('reviews inside a scratch worktree at the merge-base, posts the reviewed SHA as a comment, and reports approve as success', async () => {
-    const processor = newProcessor();
+    const processor = newProcessor({ roles: { reviewer: { adapter: 'openrouter' } } } as never);
     const result = await processor.freshReview(pr, '/tmp/proj');
     // gateRan distinguishes a real verdict from a review that produced none, so
     // the caller can exit 2 rather than reporting a rejection. (INT-3914)
@@ -632,6 +632,9 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
         path: expect.stringMatching(scratchDirPattern),
         base: 'mergebasesha123',
         readOnly: true,
+        // The scratch worktree is the reviewed repository, whose config
+        // discovery would otherwise pick that repository's (or no) adapter.
+        adapter: 'openrouter',
       }),
       expect.objectContaining({ saveHistory: expect.any(Function) }),
     );
