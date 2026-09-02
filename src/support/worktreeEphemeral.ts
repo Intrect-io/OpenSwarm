@@ -21,7 +21,14 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     || /^\.test-tmp(?:-[^/]+)?(?:\/|$)/.test(file)
     || /^\.pytest-lathe(?:\/|$)/.test(file)
     || /^int\d+_[a-z0-9_]{8,}(?:\/|$)/i.test(file)
-    || /^tmp[a-z0-9]{8,}(?:\/|$)/i.test(file);
+    || /^tmp[a-z0-9]{8,}(?:\/|$)/i.test(file)
+    // Python test-run output at any depth. A repository that ignores only
+    // `coverage/` still leaves `.coverage` (and pytest-xdist's
+    // `.coverage.<host>.<pid>.<n>`) trackable, so a worker's `pytest --cov`
+    // reached the PR: cgf-portal#207 shipped `apps/pipelines/.coverage`.
+    || /(?:^|\/)\.coverage(?:\.[^/]+)?$/.test(file)
+    || /(?:^|\/)\.full-pytest\.status$/.test(file)
+    || /(?:^|\/)(?:\.pytest_cache|\.hypothesis|\.mypy_cache|\.ruff_cache|__pycache__|htmlcov)(?:\/|$)/.test(file);
 }
 
 /** Collapse file paths to the shallowest directory (or file) git can rm -r. */
