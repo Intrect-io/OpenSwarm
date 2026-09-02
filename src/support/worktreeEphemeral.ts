@@ -21,7 +21,9 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     || /^\.test-tmp(?:-[^/]+)?(?:\/|$)/.test(file)
     || /^\.pytest-lathe(?:\/|$)/.test(file)
     || /^int\d+_[a-z0-9_]{8,}(?:\/|$)/i.test(file)
-    || /^tmp[a-z0-9]{8,}(?:\/|$)/i.test(file)
+    // Python's tempfile.mkdtemp() draws its 8-character suffix from
+    // [a-z0-9_], so `tmppcd_d3bf/` must match too (vega-plugins#36).
+    || /^tmp[a-z0-9_]{8,}(?:\/|$)/i.test(file)
     // Python test-run output at any depth. A repository that ignores only
     // `coverage/` still leaves `.coverage` (and pytest-xdist's
     // `.coverage.<host>.<pid>.<n>`) trackable, so a worker's `pytest --cov`

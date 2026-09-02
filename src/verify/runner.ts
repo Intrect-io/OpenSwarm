@@ -99,7 +99,7 @@ function isEphemeralVerificationArtifact(path: string): boolean {
     || root === '.trash'
     || /^pytest-of-[^/]+$/.test(root)
     || /^int\d+_[a-z0-9_]{8,}$/i.test(root)
-    || /^tmp[a-z0-9]{8,}$/i.test(root)
+    || /^tmp[a-z0-9_]{8,}$/i.test(root)
     || /^\.openswarm-trash\/[^/]*-(?:pytest|verify)(?:-|\/|$)/.test(path)
     || /^\.openswarm\/(?:repo-snapshot\.json|repo\.graphql)$/.test(path)
     || /^\.trash\/(?:atomic-verify-[^/]+|pytest-of-[^/]+)(?:\/|$)/.test(path)

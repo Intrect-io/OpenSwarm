@@ -1152,7 +1152,11 @@ export async function commitAndCreatePRWithHead(
     const status = await git(worktreePath, 'status', '--porcelain');
 
     if (status.trim()) {
-      await git(worktreePath, 'add', '-A');
+      // Same filtered staging as the WIP checkpoint. The purge above only
+      // cleans HEAD; a raw `add -A` here re-adds every runtime artifact still
+      // on disk, which is how vega-plugins#36 shipped `.venv`, `.openswarm/*`
+      // and two `tmp*/whatsapp.db` after three purge commits.
+      await stagePreservableWorktreeChanges(worktreePath);
       await guardUnsafeBinaryStaging(worktreePath); // INT-2430
 
       const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
@@ -1330,7 +1334,7 @@ export async function commitAndCreateAuditPR(info: WorktreeInfo, req: AuditPRReq
 
   const dirty = await git(worktreePath, 'status', '--porcelain');
   if (dirty.trim()) {
-    await git(worktreePath, 'add', '-A');
+    await stagePreservableWorktreeChanges(worktreePath);
     await guardUnsafeBinaryStaging(worktreePath); // INT-2430
     const staged = await git(worktreePath, 'diff', '--cached', '--name-only');
     if (staged.trim()) {

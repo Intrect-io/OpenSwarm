@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -70,6 +70,42 @@ describe('pre-publication write-scope fence', () => {
     )).rejects.toThrow(/publication-scope.*src\/outside\.ts/);
 
     expect(remoteBranch(origin, branchName)).toBe('');
+  });
+
+  // vega-plugins#36 (2026-09-02): after three "remove ephemeral runtime
+  // artifacts" commits the publication commit did a raw `git add -A` and
+  // shipped `.venv`, `.openswarm/*` and two `tmp*/whatsapp.db` alongside two
+  // source files. Publication must stage through the same filter the WIP
+  // checkpoint uses.
+  it('publishes without the runtime artifacts still on disk', async () => {
+    const branchName = 'swarm/AGT-SCOPE-publish-clean';
+    const { repo, origin, info } = repository(branchName);
+    writeFileSync(join(repo, 'src/allowed.ts'), 'real work\n');
+    writeFileSync(join(repo, '.venv'), '/tmp/venv-link\n');
+    mkdirSync(join(repo, '.openswarm'));
+    writeFileSync(join(repo, '.openswarm', 'repo-snapshot.json'), '{}\n');
+    mkdirSync(join(repo, 'tmppcd_d3bf'));
+    writeFileSync(join(repo, 'tmppcd_d3bf', 'whatsapp.db'), 'sqlite\n');
+    mkdirSync(join(repo, 'apps'));
+    writeFileSync(join(repo, 'apps', '.coverage'), 'cov\n');
+
+    const bin = join(root, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\ncase "$*" in *"pr create"*) echo "https://example.test/clean";; esac\n');
+    chmodSync(join(bin, 'gh'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      await expect(commitAndCreatePRWithHead(
+        info, 'Clean publish', 'AGT-SCOPE', '', { fileScope: ['src/allowed.ts'] },
+      )).resolves.toMatchObject({ prUrl: 'https://example.test/clean' });
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    const published = git(repo, 'ls-tree', '-r', '--name-only', `origin/${branchName}`).split('\n').filter(Boolean).sort();
+    expect(published).toEqual(['src/allowed.ts', 'src/outside.ts']);
+    expect(remoteBranch(origin, branchName)).not.toBe('');
   });
 
   it('ignores generated OpenSwarm repository snapshots in a preserved branch', async () => {
