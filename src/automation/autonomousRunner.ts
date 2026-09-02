@@ -52,6 +52,7 @@ import {
 import type { DefaultRolesConfig } from '../core/types.js';
 import * as execution from './runnerExecution.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
+import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { decideExplicitReadmission } from './explicitDispatchReadmission.js';
@@ -2390,6 +2391,22 @@ export class AutonomousRunner {
         await this.requestApproval(decision);
       }
       this.state.consecutiveErrors = 0;
+
+      // The retrospective lane: the runner reads its own ledger and files one
+      // evidence-rich issue on the largest failure bucket, so the systemic
+      // fixes an operator would derive from the same queries happen without
+      // one. Isolated — a lane failure must not fail the heartbeat.
+      if (this.config.retrospectiveProjectId && this.durableRuns.isPrimary && !this.stopping) {
+        try {
+          const source = getTaskSource();
+          if (source) {
+            const outcome = await runLedgerRetrospective({ taskSource: source, projectId: this.config.retrospectiveProjectId });
+            if (outcome.filed) this.syslog(`🔁 Retrospective filed ${outcome.identifier}: ${outcome.reason}`);
+          }
+        } catch (error) {
+          console.warn('[AutonomousRunner] Ledger retrospective failed:', error instanceof Error ? error.message : error);
+        }
+      }
 
     } catch (error) {
       this.state.consecutiveErrors++;

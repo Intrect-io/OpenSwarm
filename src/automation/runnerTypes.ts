@@ -66,6 +66,8 @@ export interface AutonomousConfig {
   automationLedgerMode?: 'off' | 'shadow' | 'primary';
   /** Override ~/.openswarm/automation.db (primarily tests/operations). */
   automationDbPath?: string;
+  /** Linear project for the daemon's self-filed retrospective issues; unset disables the lane. */
+  retrospectiveProjectId?: string;
   /** Fenced execution lease duration; renewed at one third of this interval. */
   automationLeaseMs?: number;
   /** Grace period for real executor exit during service shutdown. */
