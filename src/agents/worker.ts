@@ -478,9 +478,16 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
         emitWorkerStatus(options, formatWorkerGitChangeStatus([]));
       }
 
-      if (parsedResult.success && parsedResult.filesChanged.length === 0 && !parsedResult.noChangesReason?.trim()) {
-        parsedResult.success = false;
-        parsedResult.error = 'Worker reported success with no changed files and no explicit noChangesReason.';
+      if (parsedResult.success && parsedResult.filesChanged.length === 0) {
+        const noChangesReason = parsedResult.noChangesReason?.trim();
+        if (noChangesReason) {
+          // Say it in the log: publication will refuse the empty branch and
+          // the run parks on this sentence, so it must be findable there.
+          emitWorkerStatus(options, `[Worker] Finished without edits: ${noChangesReason.slice(0, 500)}`);
+        } else {
+          parsedResult.success = false;
+          parsedResult.error = 'Worker reported success with no changed files and no explicit noChangesReason.';
+        }
       }
     }
 

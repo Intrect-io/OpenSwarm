@@ -6,7 +6,7 @@ vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
-import { PUBLICATION_SCOPE_PARK_REASON, publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -136,6 +136,28 @@ describe('publication failure classification', () => {
 
     expect(result).toMatchObject({ success: false, finalStatus: 'failed', failureDetail: expect.stringContaining('No commits to create PR from') });
     expect(result.operatorPark).toBeUndefined();
+  });
+
+  // cgf-portal AX-874, 2026-09-02: four consecutive attempts ended "No commits"
+  // and were counted as failures; the worker's own noChangesReason never
+  // reached the ledger, the Linear comment, or the operator.
+  it('parks a worker that finished with an explicit noChangesReason and nothing to publish', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from - branch has no changes compared to main'));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: { code: string; reason: string }; workerResult?: { noChangesReason?: string } } = {
+      success: true,
+      finalStatus: 'approved',
+      workerResult: { noChangesReason: 'settlement tags are already split in ledger.py' },
+    };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('failed');
+    expect(result.operatorPark).toEqual({
+      code: WORKER_NO_CHANGES_PARK_REASON,
+      reason: 'Worker finished without edits: settlement tags are already split in ledger.py',
+    });
+    expect(result.failureDetail).toBe('publication: No commits to create PR from - branch has no changes compared to main — worker: settlement tags are already split in ledger.py');
   });
 
   it('keeps every other publication failure a retryable infra error, with the cause recorded', async () => {
