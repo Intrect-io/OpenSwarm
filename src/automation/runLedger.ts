@@ -530,7 +530,7 @@ export class RunLedger {
         const activeScopes = activeRows
           .filter(active => ACTIVE_LEASE_STATES.includes(active.state as RunState))
           .map(active => parseJson(active.metadata_json));
-        if (!admitsConflictScope(options.conflictScope, activeScopes)) return null;
+        if (!admitsConflictScope(options.conflictScope, activeScopes, options.unknownScopeAdmission)) return null;
       }
 
       const epoch = row.lease_epoch + 1;

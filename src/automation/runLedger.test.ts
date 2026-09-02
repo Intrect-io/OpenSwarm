@@ -463,6 +463,28 @@ describe('RunLedger claim and fencing races', () => {
     ledger.close();
   });
 
+  // vela 2026-09-02: 9 of 12 slots idle because every repository serialized
+  // to one unscoped run. The operator can now choose to rely on isolated
+  // worktrees and post-merge integration requeue instead.
+  it('admits unknown scopes on either side under unknownScopeAdmission=admit, still refusing a known overlap', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'UNKNOWN-1', '/same-repo');
+    register(ledger, 'UNKNOWN-2', '/same-repo');
+    register(ledger, 'KNOWN-A', '/same-repo', ['src/a.ts']);
+    register(ledger, 'KNOWN-A2', '/same-repo', ['src/a.ts']);
+    const admit = { leaseMs: 1_000, maxActiveForProject: 4, unknownScopeAdmission: 'admit' as const };
+
+    expect(ledger.claimRun('UNKNOWN-1', { ...admit, ownerInstanceId: 'u1', now: 2_000, conflictScope: [] })).not.toBeNull();
+    // Unknown next to unknown.
+    expect(ledger.claimRun('UNKNOWN-2', { ...admit, ownerInstanceId: 'u2', now: 2_001, conflictScope: [] })).not.toBeNull();
+    // Known next to unknown actives.
+    expect(ledger.claimRun('KNOWN-A', { ...admit, ownerInstanceId: 'a', now: 2_002, conflictScope: ['src/a.ts'] })).not.toBeNull();
+    // Known overlap is still a conflict.
+    expect(ledger.claimRun('KNOWN-A2', { ...admit, ownerInstanceId: 'a2', now: 2_003, conflictScope: ['src/a.ts'] })).toBeNull();
+    expect(ledger.listRuns(['CLAIMED'])).toHaveLength(3);
+    ledger.close();
+  });
+
   it('rejects a late callback after lease expiry and replacement', () => {
     const dbPath = createDbPath();
     const oldDaemon = new RunLedger(dbPath);
