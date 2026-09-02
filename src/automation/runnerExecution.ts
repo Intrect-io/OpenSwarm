@@ -34,7 +34,6 @@ import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from './publishOnPark.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
-import { reviewPublishedPullRequest } from './prPublicationReview.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
 import { plannedNewChildren, refuseForChildCap } from './decompositionLimits.js';
@@ -1222,6 +1221,9 @@ export async function executePipeline(
     const freshReview = worktreeInfo ? await loadPublicationFreshReview(worktreeInfo.originalPath) : false;
     await publishApprovedWork(worktreeInfo, task, result, ctx.durability,
       freshReview ? async ({ prUrl, worktreeInfo: publishedWorktree }) => {
+        // Loaded on demand: the review pulls in the whole PR processor, which
+        // only an opted-in repository ever needs.
+        const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
         const review = await reviewPublishedPullRequest({
           prUrl,
           projectPath: publishedWorktree.originalPath,
