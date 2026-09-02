@@ -845,6 +845,31 @@ export class AutonomousRunner {
       broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
       await reportToDiscord(formatPipelineResultEmbed(result));
 
+      // A deterministic, operator-owned failure (the publication-scope fence).
+      // The coordinator has already parked the durable row under
+      // `operatorPark.code`; the failure budget below must NOT run: its retry
+      // branch returns the card to Todo, and the heartbeat reads Todo as an
+      // operator reopen — so the park resumed on the next tick and re-parked
+      // four minutes later, every cycle waking the orchestrator sweep (vela
+      // 13:09–13:31, 2026-09-02). Park the card the way STUCK does: comment
+      // the cause, move it to Backlog, and wait for a human to move it back.
+      if (result.operatorPark && task.issueId) {
+        const { code, reason } = result.operatorPark;
+        this.completedTaskIds.add(task.issueId); // no retry changes what the fence saw
+        clearRetryTime(task.issueId, this.failedTaskRetryTimes);
+        recordLastFailureDetail(this.taskStateRef, task.issueId, reason);
+        this.saveTaskState();
+        console.warn(`[Scheduler] ${taskCtx} parked for the operator (${code}): ${reason}`);
+        try {
+          await getTaskSource()?.logStuck(task.issueId, 'autonomous-runner',
+            `Parked for the operator — \`${code}\`. The daemon will not retry this on its own.\n\n**Reason:**\n${reason}`);
+        } catch (err) {
+          console.error('[Scheduler] Failed to record the operator park on the tracker:', err);
+        }
+        this.scheduleNextHeartbeat();
+        return;
+      }
+
       // Structural infeasibility (⑦, INT-2521): the failure text says the DoD can't
       // be met in this sandbox — it needs a human, a manual step, or an absent
       // environment resource (real DB / live network / production access). The
