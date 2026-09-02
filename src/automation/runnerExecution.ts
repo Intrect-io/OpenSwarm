@@ -32,7 +32,7 @@ import type { ITaskSource } from './taskSource.js';
 import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree, WorktreeCoordinationError,  } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
-import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { publishApprovedWork, publishParkedIfNeeded } from './publishOnPark.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
 import { prepareAttemptBranch } from '../support/branchLineage.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
@@ -1215,9 +1215,7 @@ export async function executePipeline(
       result.finalStatus = 'infra_error';
     }
 
-    if (shouldPublishParkedWork(Boolean(worktreeInfo), result) && worktreeInfo) {
-      await publishParkedWork(worktreeInfo, task, ctx.durability);
-    }
+    const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);
 
     // The repository, not the daemon, decides whether its published PRs get
     // the agentic fresh review (openswarm.json `publication.freshReview`).
@@ -1240,6 +1238,7 @@ export async function executePipeline(
         });
       } : undefined,
     );
+    if (!parkedPublished) await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');
     return result;

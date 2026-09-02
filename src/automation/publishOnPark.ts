@@ -42,6 +42,7 @@ interface PublishableResult {
   finalStatus?: string;
   prUrl?: string;
   workerResult?: { executionOutcomeUnknown?: boolean; noChangesReason?: string };
+  operatorPark?: { code: string; reason: string };
 }
 
 /** The fields these paths read off the task. */
@@ -67,9 +68,13 @@ export function shouldPublishParkedWork(
   hasWorktree: boolean,
   result: PublishableResult,
 ): boolean {
-  return hasWorktree && result.finalStatus === 'waiting_on_operator'
-    && result.workerResult?.executionOutcomeUnknown !== true
-    && !result.prUrl;
+  if (!hasWorktree || result.workerResult?.executionOutcomeUnknown === true || result.prUrl) return false;
+  // `waiting_on_operator` is one way a run stops for a person; an
+  // `operatorPark` — the publication-scope fence, a worker that delivered
+  // nothing — is another, and it was added without this. vega-agent AGT-3844
+  // parked that way on 2026-09-02 holding 42 commits whose net diff is four
+  // files, and published nothing at all.
+  return result.finalStatus === 'waiting_on_operator' || Boolean(result.operatorPark);
 }
 
 /**
@@ -111,8 +116,13 @@ export async function publishParkedWork(
         + ' reviewed — this PR is a draft on purpose.',
       // Draft, and committed work only: nothing reviewed this, and the tree
       // must stay exactly as the worker left it so the resume continues.
-      { draft: true, committedOnly: true,
-        fileScope: enforcedFileScope(task) },
+      //
+      // No write-scope fence. The fence stops an unreviewed run from
+      // *delivering* files it never reserved; this PR delivers nothing — it is
+      // how the person the run is waiting on sees what it built. Enforcing it
+      // here only hides the branch, which is the exact failure this function
+      // exists to fix (AGT-3844 parked on that fence holding 42 commits).
+      { draft: true, committedOnly: true },
     );
     // The ledger records the PR; the pipeline result deliberately does NOT.
     //
@@ -138,6 +148,25 @@ export async function publishParkedWork(
       console.warn(`[Runner] Could not publish parked work for ${task.issueIdentifier}: ${detail}`);
     }
   }
+}
+
+/**
+ * Publish a parked run's branch as a draft, once, if this outcome is a park.
+ *
+ * Called on both sides of the approved publish because a run parks either
+ * before it (the pipeline sets `operatorPark`) or during it (the scope fence
+ * refuses the push). vega-agent AGT-3844 parked the second way on 2026-09-02
+ * holding 42 commits — a four-file CI fix — and published nothing at all.
+ */
+export async function publishParkedIfNeeded(
+  worktreeInfo: WorktreeInfo | null | undefined,
+  task: PublishableTask,
+  result: PublishableResult,
+  durability: ExecutionDurabilityHooks | undefined,
+): Promise<boolean> {
+  if (!worktreeInfo || !shouldPublishParkedWork(true, result)) return false;
+  await publishParkedWork(worktreeInfo, task, durability);
+  return true;
 }
 
 /**
@@ -202,8 +231,10 @@ export async function publishStuckWork(
       // pre-cleanup WIP commit normally captures it first and makes this a
       // no-op (a clean tree skips the whole commit phase) — but that commit
       // swallows its own failures, and this is the second chance.
-      { draft: true,
-        fileScope: enforcedFileScope(task) },
+      // No write-scope fence, for the reason publishParkedWork documents: a
+      // draft PR nobody merged is how the operator sees the work, and this
+      // tree is about to be deleted.
+      { draft: true },
     );
     broadcastEvent({
       type: 'log',
