@@ -13,6 +13,7 @@
 // Split out of runnerExecution.ts, which sits on the 1500-line pre-commit cap.
 
 import { broadcastEvent } from '../core/eventHub.js';
+import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
@@ -33,7 +34,7 @@ interface PublishableTask {
   description?: string;
   issueIdentifier?: string;
   fileScope?: string[];
-  fileScopeSource?: 'declared' | 'validated-direct' | 'drafted' | 'inferred';
+  fileScopeSource?: FileScopeSource;
 }
 
 /**
@@ -92,7 +93,7 @@ export async function publishParkedWork(
       // Draft, and committed work only: nothing reviewed this, and the tree
       // must stay exactly as the worker left it so the resume continues.
       { draft: true, committedOnly: true,
-        fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+        fileScope: enforcedFileScope(task) },
     );
     // The ledger records the PR; the pipeline result deliberately does NOT.
     //
@@ -183,7 +184,7 @@ export async function publishStuckWork(
       // no-op (a clean tree skips the whole commit phase) — but that commit
       // swallows its own failures, and this is the second chance.
       { draft: true,
-        fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+        fileScope: enforcedFileScope(task) },
     );
     broadcastEvent({
       type: 'log',
@@ -229,7 +230,7 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
-          { fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+          { fileScope: enforcedFileScope(task) },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;

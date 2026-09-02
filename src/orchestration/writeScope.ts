@@ -63,6 +63,35 @@ function isTestForScopedFile(file: string, scoped: string): boolean {
   ).test(file);
 }
 
+/** Provenance of a task's reserved write scope; mirrors TaskItem.fileScopeSource. */
+export type FileScopeSource = 'declared' | 'validated-direct' | 'drafted' | 'inferred';
+
+/**
+ * The write scope a worker is held to, or undefined when none is enforced.
+ *
+ * Only a scope somebody meant as the edit target is binding: `declared`
+ * (planner or operator) and `drafted` (an analysis that judged itself
+ * sufficient). `inferred` and `validated-direct` both come from the knowledge
+ * graph matching the issue text — files the issue *mentions*, which is not
+ * the same as files the fix must touch. Measured on vela, 2026-09-02:
+ * validated-direct runs finished 1 of 43 with an average of 15 attempts,
+ * against 20 of 117 at 5 attempts for runs with no reservation at all; 3 of
+ * 3 scope violations that morning were mention-scopes that were simply wrong
+ * ("session list pin" reserved to `auth/superthread.py`). Those scopes still
+ * feed admission conflict checks, where over-caution costs only ordering.
+ *
+ * One function so the worker prompt, the post-run guard and the publication
+ * fence cannot disagree about what is enforced.
+ */
+export function enforcedFileScope(task: {
+  fileScope?: readonly string[];
+  fileScopeSource?: FileScopeSource;
+}): string[] | undefined {
+  if (!task.fileScope?.length) return undefined;
+  if (task.fileScopeSource === 'inferred' || task.fileScopeSource === 'validated-direct') return undefined;
+  return [...task.fileScope];
+}
+
 /** Return original Git paths that fall outside a trusted write reservation. */
 export function filesOutsideWriteScope(
   files: readonly string[],
