@@ -193,6 +193,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
       coordinationContext: options.coordinationContext,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'openrouter', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -200,7 +201,9 @@ export class OpenRouterCliAdapter implements CliAdapter {
       options.onLog?.(
         `[OpenRouter] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens`,
       );
-      return loopResultToCliResult(result);
+      const cli = loopResultToCliResult(result);
+      if (cli.costInfo) cli.costInfo.model = model;
+      return cli;
     } catch (err) {
       // Rate-limit AND infra/capacity errors must propagate (pause / infra_error),
       // not be buried in a fake failed result the worker reads as an empty success. (INT-1906, INT-2520)

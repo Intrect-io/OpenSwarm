@@ -21,7 +21,24 @@ export interface ChatCompletionLike {
     message: { role: string; content: string | null; tool_calls?: StreamToolCall[] };
     finish_reason: string;
   }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: ChatUsage;
+}
+
+/**
+ * Usage as the agentic loop consumes it. `cost` / `upstream_cost` are the
+ * metered charge in USD (OpenRouter attaches them to the final chunk of every
+ * response; other chat-completions servers omit them, so the loop records the
+ * call as unmetered rather than $0). `cached_tokens` is a subset of
+ * prompt_tokens; `reasoning_tokens` a subset of completion_tokens. (AGT-4178)
+ */
+export interface ChatUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cached_tokens?: number;
+  reasoning_tokens?: number;
+  cost?: number;
+  upstream_cost?: number;
 }
 
 interface StreamChunk {
@@ -32,7 +49,33 @@ interface StreamChunk {
     };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+  usage?: RawChatUsage | null;
+}
+
+/** The wire shape (OpenRouter's usage-accounting fields are optional extras). */
+export interface RawChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  cost?: number | null;
+  cost_details?: { upstream_inference_cost?: number | null } | null;
+  prompt_tokens_details?: { cached_tokens?: number | null } | null;
+  completion_tokens_details?: { reasoning_tokens?: number | null } | null;
+}
+
+/** Normalise a wire usage object; `usage.cost` survives only when it is a finite number. */
+export function normalizeChatUsage(raw: RawChatUsage): ChatUsage {
+  const pt = raw.prompt_tokens ?? 0;
+  const ct = raw.completion_tokens ?? 0;
+  const usage: ChatUsage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: raw.total_tokens ?? pt + ct };
+  const cached = raw.prompt_tokens_details?.cached_tokens;
+  if (typeof cached === 'number') usage.cached_tokens = cached;
+  const reasoning = raw.completion_tokens_details?.reasoning_tokens;
+  if (typeof reasoning === 'number') usage.reasoning_tokens = reasoning;
+  if (typeof raw.cost === 'number' && Number.isFinite(raw.cost)) usage.cost = raw.cost;
+  const upstream = raw.cost_details?.upstream_inference_cost;
+  if (typeof upstream === 'number' && Number.isFinite(upstream)) usage.upstream_cost = upstream;
+  return usage;
 }
 
 /**
@@ -49,11 +92,7 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
   const calls = new Map<number, { id: string; name: string; args: string }>();
 
   for (const chunk of chunks) {
-    if (chunk.usage) {
-      const pt = chunk.usage.prompt_tokens ?? 0;
-      const ct = chunk.usage.completion_tokens ?? 0;
-      usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: chunk.usage.total_tokens ?? pt + ct };
-    }
+    if (chunk.usage) usage = normalizeChatUsage(chunk.usage);
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta ?? {};

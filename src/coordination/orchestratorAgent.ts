@@ -12,6 +12,7 @@
 // once, so scratch cwd alone is not a security boundary.
 
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -245,6 +246,9 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       shellTools: false,
       filesystemTools: false,
       signal: options.signal,
+      // cwd is a scratch dir, so the ledger's project column would be noise;
+      // the repository is carried by the task id instead. (AGT-4178)
+      processContext: { taskId: `${basename(options.repository)}:${options.taskId}`, stage: 'orchestrator' },
     });
     await store.publish({
       repository: options.repository,

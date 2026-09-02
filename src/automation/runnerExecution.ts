@@ -209,6 +209,7 @@ export async function runPreAdmissionDraft(
     taskDescription: task.description || '',
     authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
     projectPath,
+    taskId: task.issueIdentifier ?? taskId,
     model: ctx.draftModel,
     peerIssues: projectDraftPeers(task, ctx.peerIssues),
     onLog: (line) => {
@@ -666,6 +667,7 @@ export async function decomposeTask(
       authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
       projectPath,
       projectName: task.linearProject?.name,
+      taskId: task.issueIdentifier ?? taskId,
       targetMinutes,
       // Planner runs through the configured adapter loop now (not claude -p);
       // leave model unset to use the adapter default when no planner model is configured.
@@ -800,6 +802,7 @@ export async function executePipeline(
           taskDescription: task.description || '',
           authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
           projectPath,
+          taskId: task.issueIdentifier ?? taskId,
           model: ctx.draftModel,
           peerIssues: projectDraftPeers(task, ctx.peerIssues),
           // No fixed timeout: the draft scales its own read/analyze budget to the

@@ -199,6 +199,7 @@ export class LocalModelAdapter implements CliAdapter {
       coordinationContext: options.coordinationContext,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'local', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -207,7 +208,9 @@ export class LocalModelAdapter implements CliAdapter {
         const toolInfo = supportsTools ? `${result.toolCallCount} tool uses` : 'no tools';
         options.onLog(`[${this.logPrefix}] ${result.apiCallCount} API calls, ${toolInfo}, ${result.totalTokens} tokens`);
       }
-      return loopResultToCliResult(result);
+      const cli = loopResultToCliResult(result);
+      if (cli.costInfo) cli.costInfo.model = model;
+      return cli;
     } catch (err) {
       // Rate-limit AND infra/capacity errors (connection refused, 5xx, model not
       // loaded, socket drop) must propagate so the pipeline classifies them

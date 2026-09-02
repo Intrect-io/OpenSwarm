@@ -711,6 +711,19 @@ program
     console.log(`  logs:   ${status.logFile}`);
   });
 
+// openswarm cost
+
+program
+  .command('cost')
+  .description('Show LLM spend from the usage ledger (per API call, metered by the provider)')
+  .option('--since <window>', 'Duration back from now (90m, 24h, 7d) or an ISO date', '24h')
+  .option('--by <key>', 'Group by model | stage | task | project | adapter | day', 'model')
+  .option('--json', 'Print the aggregate as JSON')
+  .action(async (opts: { since: string; by: string; json?: boolean }) => {
+    const { runCostCommand } = await import('./cli/costCommand.js');
+    await runCostCommand(opts);
+  });
+
 // openswarm provider
 
 program
