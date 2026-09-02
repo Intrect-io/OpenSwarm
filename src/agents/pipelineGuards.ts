@@ -12,6 +12,7 @@ import type { PipelineGuardsConfig } from '../core/types.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import { scanFile as scanFileForBs } from '../registry/bsDetector.js';
 import { getWorkingDiffDetail } from '../support/gitTracker.js';
+import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -739,14 +740,20 @@ export async function runGuards(
   config: Partial<PipelineGuardsConfig>,
 ): Promise<GuardsRunResult> {
   const results: GuardResult[] = [];
+  // Keep the original result for reporting/publication, but never feed
+  // generated pytest/venv artifacts into guards that open changed files.
+  const guardWorkerResult = {
+    ...workerResult,
+    filesChanged: workerResult.filesChanged.filter((file) => !isEphemeralWorktreeArtifact(file)),
+  };
 
   if (config.qualityGate) {
     console.warn('[Guard:qualityGate] Deprecated: use autonomous.verify baseline-diff verification instead.');
-    results.push(await runQualityGate(workerResult, projectPath));
+    results.push(await runQualityGate(guardWorkerResult, projectPath));
   }
 
   if (config.fakeDataGuard) {
-    results.push(runFakeDataGuard(workerResult));
+    results.push(runFakeDataGuard(guardWorkerResult));
   }
 
   if (config.branchValidation) {
@@ -754,27 +761,27 @@ export async function runGuards(
   }
 
   if (config.uncertaintyDetection) {
-    results.push(runUncertaintyDetection(workerResult));
+    results.push(runUncertaintyDetection(guardWorkerResult));
   }
 
   if (config.registryCheck) {
-    results.push(runRegistryCheck(workerResult));
+    results.push(runRegistryCheck(guardWorkerResult));
   }
 
   if (config.bsDetector) {
-    results.push(await runBsDetectorGuard(workerResult, projectPath));
+    results.push(await runBsDetectorGuard(guardWorkerResult, projectPath));
   }
 
   if (config.dependencyAntiPatternCheck) {
-    results.push(await runDependencyAntiPatternGuard(workerResult, projectPath));
+    results.push(await runDependencyAntiPatternGuard(guardWorkerResult, projectPath));
   }
 
   if (config.contractEvidenceCheck) {
-    results.push(await runContractEvidenceGuard(workerResult, projectPath));
+    results.push(await runContractEvidenceGuard(guardWorkerResult, projectPath));
   }
 
   if (config.verifiedMetricEvidenceCheck) {
-    results.push(await runVerifiedMetricEvidenceGuard(workerResult, projectPath));
+    results.push(await runVerifiedMetricEvidenceGuard(guardWorkerResult, projectPath));
   }
 
   if (config.deadModuleCheck) {
