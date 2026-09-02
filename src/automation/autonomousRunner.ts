@@ -2063,6 +2063,25 @@ export class AutonomousRunner {
    * Log unmapped/disabled project skips as one aggregate line per category,
    * and stay silent while the summary is identical to the previous heartbeat.
    */
+  /**
+   * The retrospective lane (AGT-4181): the runner reads its own ledger and
+   * files one evidence-rich issue on the largest failure bucket, so the
+   * systemic fixes an operator would derive from the same queries happen
+   * without one. Isolated — a lane failure must not fail the heartbeat.
+   */
+  private async maybeRunLedgerRetrospective(): Promise<void> {
+    if (!this.config.retrospectiveProjectId || !this.durableRuns.isPrimary || this.stopping) return;
+    try {
+      const source = getTaskSource();
+      if (source) {
+        const outcome = await runLedgerRetrospective({ taskSource: source, projectId: this.config.retrospectiveProjectId });
+        if (outcome.filed) this.syslog(`🔁 Retrospective filed ${outcome.identifier}: ${outcome.reason}`);
+      }
+    } catch (error) {
+      console.warn('[AutonomousRunner] Ledger retrospective failed:', error instanceof Error ? error.message : error);
+    }
+  }
+
   private syslogSkipSummary(unmapped: Map<string, number>, disabled: Map<string, number>): void {
     const fmt = (m: Map<string, number>) => [...m.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -2370,43 +2389,34 @@ export class AutonomousRunner {
         this.syslog(`  Filtered: ${tasks.length} → ${filteredTasks.length} (skipped ${tasks.length - filteredTasks.length} completed/failed)`);
       }
 
-      // Parallel processing mode
+      // Parallel processing mode. vela runs this branch on every heartbeat
+      // (maxConcurrentTasks 12, pairMode true) — an early `return` here used to
+      // skip everything below, including the retrospective lane (AGT-4181):
+      // it was configured and deployed for 9+ hours (2026-09-02 20:26–
+      // 2026-09-03 07:55) and never ran once, because vela never takes the
+      // serial branch the lane's call sat in. `else` instead of `return` so
+      // both branches reach the shared tail.
       if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1 && this.config.pairMode) {
         await this.heartbeatParallel(filteredTasks);
-        return;
-      }
+      } else {
+        // 3. Run Decision Engine (single task)
+        this.syslog('⟳ Running Decision Engine...');
+        const decision = await this.engine.heartbeat(filteredTasks);
+        if (this.stopping) return;
+        this.syslog(`→ Decision: ${decision.action} — ${decision.reason}`);
+        this.state.lastDecision = decision;
 
-      // 3. Run Decision Engine (single task)
-      this.syslog('⟳ Running Decision Engine...');
-      const decision = await this.engine.heartbeat(filteredTasks);
-      if (this.stopping) return;
-      this.syslog(`→ Decision: ${decision.action} — ${decision.reason}`);
-      this.state.lastDecision = decision;
-
-      // 4. Handle decision
-      if (decision.action === 'execute' && decision.task) {
-        await this.executeTaskPairMode(decision.task);
-      } else if (decision.action === 'defer' && decision.task) {
-        this.state.pendingApproval = decision.task;
-        await this.requestApproval(decision);
+        // 4. Handle decision
+        if (decision.action === 'execute' && decision.task) {
+          await this.executeTaskPairMode(decision.task);
+        } else if (decision.action === 'defer' && decision.task) {
+          this.state.pendingApproval = decision.task;
+          await this.requestApproval(decision);
+        }
       }
       this.state.consecutiveErrors = 0;
 
-      // The retrospective lane: the runner reads its own ledger and files one
-      // evidence-rich issue on the largest failure bucket, so the systemic
-      // fixes an operator would derive from the same queries happen without
-      // one. Isolated — a lane failure must not fail the heartbeat.
-      if (this.config.retrospectiveProjectId && this.durableRuns.isPrimary && !this.stopping) {
-        try {
-          const source = getTaskSource();
-          if (source) {
-            const outcome = await runLedgerRetrospective({ taskSource: source, projectId: this.config.retrospectiveProjectId });
-            if (outcome.filed) this.syslog(`🔁 Retrospective filed ${outcome.identifier}: ${outcome.reason}`);
-          }
-        } catch (error) {
-          console.warn('[AutonomousRunner] Ledger retrospective failed:', error instanceof Error ? error.message : error);
-        }
-      }
+      await this.maybeRunLedgerRetrospective();
 
     } catch (error) {
       this.state.consecutiveErrors++;
