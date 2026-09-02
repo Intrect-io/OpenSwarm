@@ -2,6 +2,7 @@ import { analyzeIssue } from '../knowledge/index.js';
 import { recallRepoKnowledge } from '../memory/repoKnowledge.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import type { WorkerContext } from '../locale/types.js';
+import { enforcedFileScope } from '../orchestration/writeScope.js';
 import { safeConsole } from '../support/safeLog.js';
 import { collectSiblingWork } from './siblingWork.js';
 import type { PipelineContext } from './pairPipelineTypes.js';
@@ -14,11 +15,11 @@ export async function collectWorkerContext(
     const wc: WorkerContext = {};
     // The runner enforces this boundary after the worker finishes. Exposing it
     // before planning prevents otherwise-valid edits being discovered only by
-    // the post-run scope guard. Legacy raw KG inference is advisory and is NOT
-    // enforced by pairPipeline/publishOnPark, so announcing it as binding here
-    // would make the worker refuse edits that would actually have passed.
-    const enforcedScope = context.task.fileScopeSource === 'inferred' ? undefined : context.task.fileScope;
-    if (enforcedScope?.length) wc.fileScope = [...enforcedScope];
+    // the post-run scope guard. Announce exactly what will be enforced: an
+    // advisory scope presented as binding makes the worker refuse edits that
+    // would have passed.
+    const enforcedScope = enforcedFileScope(context.task);
+    if (enforcedScope) wc.fileScope = enforcedScope;
     if (draft) {
       wc.draftAnalysis = { taskType: draft.taskType, intentSummary: draft.intentSummary, relevantFiles: draft.relevantFiles,
         suggestedApproach: draft.suggestedApproach, projectStats: draft.projectStats, completionCriteria: draft.completionCriteria, sufficient: draft.sufficient };
