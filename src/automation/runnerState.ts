@@ -227,11 +227,23 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     ])
     : undefined;
 
+  // Guards, security audit, verification, worktree setup and publication
+  // report through `stages[]` rather than a typed sub-result. Without this
+  // fallback the ledger recorded 57% of one day's failures with no message
+  // at all (vela, 2026-09-01), and the reason was unrecoverable once the
+  // container's log was gone.
+  const failedStage = [...result.stages].reverse().find((stage) => !stage.success);
+  const stageError = failedStage && 'error' in failedStage.result && typeof failedStage.result.error === 'string'
+    ? `${failedStage.stage}: ${failedStage.result.error}`
+    : undefined;
+
   return pickFailureDetail([
     testerFailure,
     result.lastReviewFeedback,
     result.reviewResult?.feedback,
     result.workerResult?.error,
+    stageError,
+    result.stuckReason,
   ]);
 }
 
