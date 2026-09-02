@@ -583,13 +583,16 @@ export async function inspectWorktreeRecovery(
   repoPath: string,
   issueId: string,
   recordedPath?: string,
+  // Marker owners the ledger has already proven dead (a released lease of a
+  // prior daemon generation). Only the ledger can say this across pid spaces.
+  deadOwners: readonly string[] = [],
 ): Promise<WorktreeRecoveryStatus> {
   const worktreePath = recordedPath
     ? assertManagedWorktreePath(repoPath, recordedPath)
     : resolveWorktreePath(repoPath, issueId);
   if (!existsSync(worktreePath)) return { state: 'missing', worktreePath };
   const active = await readActiveWorktreeMarkers(repoPath, worktreePath);
-  const liveMarker = active.markers.find(markerLooksLive);
+  const liveMarker = active.markers.find((marker) => !(marker.ownerInstanceId && deadOwners.includes(marker.ownerInstanceId)) && markerLooksLive(marker));
   if (liveMarker) return { state: 'active_owner', worktreePath, marker: liveMarker };
   if (existsSync(join(worktreePath, PRESERVE_MARKER))) {
     return preserveMarkerAgeMs(worktreePath) === null

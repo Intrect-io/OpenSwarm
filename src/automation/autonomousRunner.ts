@@ -1503,7 +1503,7 @@ export class AutonomousRunner {
       // Never overlap a replacement with an executor that lost its lease but
       // still owns the filesystem. Missing/ambiguous markers stay parked;
       // preserved work or a dead owner is safe for createWorktree to resume.
-      const recovery = await inspectWorktreeRecovery(run.projectPath, run.issueId, run.worktreePath)
+      const recovery = await inspectWorktreeRecovery(run.projectPath, run.issueId, run.worktreePath, this.durableRuns.deadMarkerOwners(run.issueId))
         .catch((error) => {
           console.warn(`[Reconciler] Worktree evidence unreadable for ${run.identifier ?? run.issueId}:`, error);
           return null;

@@ -308,6 +308,33 @@ describe('createWorktree retry/resume error paths', () => {
     });
   });
 
+  // vela 2026-09-02: a container recreate gives the daemon a new pid namespace,
+  // so every in-flight marker reads as "another pid space" and is trusted for
+  // the full 24h window. The ledger, however, knows that owner as a released
+  // lease of a prior generation. Naming it releases the tree now; an owner the
+  // ledger never claimed stays protected exactly as before.
+  it('treats a foreign-namespace marker as orphaned when the ledger names its owner dead', async () => {
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-prior-generation');
+    const markerPath = join(
+      repo, '.git', 'openswarm', 'active-worktrees', 'INT-1', `${info.activeMarkerToken}.json`,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    marker.ownerInstanceId = 'prior-generation-00000000-0000-4000-8000-000000000000';
+    marker.ownerNamespace = 'some-other-host:pid:[4026531999]';
+    marker.createdAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath)).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+    await expect(inspectWorktreeRecovery(repo, 'INT-1', info.worktreePath, ['unrelated-owner'])).resolves.toMatchObject({
+      state: 'active_owner',
+    });
+    await expect(inspectWorktreeRecovery(
+      repo, 'INT-1', info.worktreePath, ['prior-generation-00000000-0000-4000-8000-000000000000'],
+    )).resolves.toMatchObject({ state: 'orphaned' });
+  });
+
   // The live incident this was written for: the markers already on disk were
   // written before `ownerInstanceId` existed, so the boot comparison cannot
   // reach them. A pid is unique among live processes, which is proof enough —
