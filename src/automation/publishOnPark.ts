@@ -32,12 +32,18 @@ const NO_COMMITS_TO_PUBLISH = /No commits to create PR from/;
 /** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
 export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
 
+/**
+ * NEEDS_HUMAN code for a worker that finished with an explicit
+ * `noChangesReason` on a branch that then had nothing to publish.
+ */
+export const WORKER_NO_CHANGES_PARK_REASON = 'worker_no_changes';
+
 /** The fields these paths read; narrower than the full pipeline result. */
 interface PublishableResult {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
-  workerResult?: { executionOutcomeUnknown?: boolean };
+  workerResult?: { executionOutcomeUnknown?: boolean; noChangesReason?: string };
 }
 
 /** The fields these paths read off the task. */
@@ -296,14 +302,25 @@ export async function publishApprovedWork(
           result.finalStatus = 'failed';
           result.operatorPark = { code: PUBLICATION_SCOPE_PARK_REASON, reason: message };
         } else if (NO_COMMITS_TO_PUBLISH.test(message)) {
-          // The worker claimed success but left the branch identical to its
-          // base (its only edits were runtime artifacts the stager drops).
-          // That is the attempt failing at its job, not the infrastructure
-          // failing the attempt: count it against the task's retry budget so
-          // a fresh attempt gets its chance and STUCK ends it — instead of the
-          // 15-minute infra backoff that cgf-portal AX-874 rode twice in an
-          // hour on 2026-09-02 with nothing to show.
           result.finalStatus = 'failed';
+          const noChangesReason = result.workerResult?.noChangesReason?.trim();
+          if (noChangesReason) {
+            // The worker looked and said, in so many words, that the issue
+            // needs no edit. Re-running the same question is not a retry, it
+            // is the same answer at the same price (cgf-portal AX-874 gave it
+            // four times in a row on 2026-09-02, 921k tokens each, and the
+            // operator never saw a word of it: the ledger only said "No
+            // commits"). Park with the worker's statement so the operator can
+            // close the issue or send it back with what the worker missed.
+            result.failureDetail = `publication: ${message} — worker: ${noChangesReason}`;
+            result.operatorPark = { code: WORKER_NO_CHANGES_PARK_REASON, reason: `Worker finished without edits: ${noChangesReason}` };
+          }
+          // Otherwise the worker claimed edits that were only runtime
+          // artifacts the stager drops. That is the attempt failing at its
+          // job, not the infrastructure failing the attempt: count it against
+          // the task's retry budget so a fresh attempt gets its chance and
+          // STUCK ends it — instead of the 15-minute infra backoff that
+          // cgf-portal AX-874 rode twice in an hour on 2026-09-02.
         } else {
           result.finalStatus = 'infra_error';
         }
