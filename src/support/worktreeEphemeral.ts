@@ -1,11 +1,21 @@
 /** Ephemeral paths under agent worktrees — never task source / never verify input. */
 
 /** Test/runtime outputs are never task source, including on a resumed WIP branch. */
+/**
+ * A Python virtualenv directory by name, at any depth: `.venv`, `venv`,
+ * `.venv-verify`, `.venv.bak`, `.venv_test`, … The old list named the
+ * worktree-level `.venv` link and two known siblings by exact string, so a
+ * worker's `uv venv .venv_test` (cgf-portal AX-868, 2026-09-02) committed
+ * 11,026 interpreter files that the purge then could not see, and the branch
+ * failed the publication fence on every attempt after that.
+ */
+const VENV_DIR = /(?:^|\/)\.?venv[\w.-]*\//;
+/** The worktree-level link/dir entry itself (`.venv`, `venv`, `.venv-verify`, `.venv.bak`) — never `venv_tools.py`. */
+const VENV_ENTRY = /^\.?venv(?:[\w-]*|\.bak)$/;
+
 export function isEphemeralWorktreeArtifact(file: string): boolean {
-  return file === '.venv'
-    || file === '.venv-verify'
-    || file === '.venv.bak'
-    || file.startsWith('.venv.bak/')
+  return VENV_DIR.test(file)
+    || VENV_ENTRY.test(file)
     || file === 'pytest-local'
     // pytest's basetemp (`pytest-of-<user>/…`) anywhere in the tree, and the
     // whole worktree-local `.trash/` quarantine (cgf-portal ships secrets under
@@ -46,7 +56,8 @@ export function ephemeralPathspecRoots(files: string[]): string[] {
     if (/^\.trash(?:\/|$)/.test(file) || /^\.test-tmp(?:-[^/]+)?(?:\/|$)/.test(file) || /^\.pytest-lathe(?:\/|$)/.test(file)) {
       pathspec = root;
     } else {
-      const m = file.match(/^(.*(?:^|\/)pytest-of-[^/]+)/);
+      // One `git rm -r` per virtualenv or pytest basetemp, not one per file.
+      const m = file.match(/^(.*(?:^|\/)pytest-of-[^/]+)/) ?? file.match(/^(.*?(?:^|\/)\.?venv[\w.-]*)\//);
       if (m) pathspec = m[1];
     }
     if (roots.some((r) => pathspec === r || pathspec.startsWith(`${r}/`))) continue;
