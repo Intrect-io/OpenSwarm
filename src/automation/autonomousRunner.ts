@@ -54,6 +54,7 @@ import * as execution from './runnerExecution.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
+import { decideExplicitReadmission } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
@@ -2739,6 +2740,13 @@ export class AutonomousRunner {
         rejected.push({ id: task.id, reason: 'stopping' });
         continue;
       }
+      // The heartbeat filter reopens a parked/terminal ledger row for an
+      // explicitly dispatched task; this path skips that filter, so do the
+      // same here or the coordinator fences the task as superseded.
+      if (task.explicitDispatch === true && !this.readmitForExplicitDispatch(task)) {
+        rejected.push({ id: task.id, reason: 'duplicate' });
+        continue;
+      }
       if (this.enqueueCandidate(task, projectPath)) queued.push(task.id);
       else rejected.push({ id: task.id, reason: 'duplicate' });
     }
@@ -2746,6 +2754,36 @@ export class AutonomousRunner {
       this.trackSchedulerHandler('explicitDispatch', this.runAvailableTasks());
     }
     return { queued, rejected };
+  }
+
+  /**
+   * Apply the operator's redispatch act to the durable row. False only for a
+   * park that dispatching cannot end (an unanswered operator question).
+   */
+  private readmitForExplicitDispatch(task: TaskItem): boolean {
+    if (!this.durableRuns.isPrimary) return true;
+    const id = task.issueId || task.id;
+    const decision = decideExplicitReadmission(this.durableRuns.getRun(id));
+    const label = task.issueIdentifier || id;
+    switch (decision.action) {
+      case 'none': return true;
+      case 'refuse':
+        console.log(`[Scheduler] Explicit dispatch of ${label} refused: ${decision.reason}`);
+        return false;
+      case 'resume-needs-human': {
+        const resumed = this.durableRuns.resumeNeedsHuman(id);
+        if (resumed) console.log(`[Scheduler] Explicit dispatch resumed ${label} from NEEDS_HUMAN (${resumed})`);
+        // A dead external effect resumes through SYNC_PENDING; the heartbeat
+        // drains it, not the scheduler, so make sure one is coming.
+        if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+        return resumed !== null;
+      }
+      case 'mark-ready': {
+        const ready = this.durableRuns.markReady(id);
+        if (ready) console.log(`[Scheduler] Explicit dispatch reopened ${label} as READY`);
+        return ready;
+      }
+    }
   }
 
   /** Execute task in pair mode */
