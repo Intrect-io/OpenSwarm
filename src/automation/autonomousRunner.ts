@@ -1138,7 +1138,7 @@ export class AutonomousRunner {
         const isSandboxOutcomeQuarantine = durableRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
         if (isSandboxOutcomeQuarantine) {
           if (task.explicitDispatch === true) {
-            const resumed = this.durableRuns.resumeNeedsHuman(id);
+            const resumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'sandbox_quarantine_dispatch');
             if (resumed) durableRun = this.durableRuns.getRun(id);
           }
           if (durableRun?.state === 'NEEDS_HUMAN') return false;
@@ -1178,8 +1178,13 @@ export class AutonomousRunner {
         if (operatorReopened || legacyQuestionAnswered || isExactOperatorQuestionPark) {
           const resumed = isExactOperatorQuestionPark
             ? this.durableRuns.resumeNeedsHumanForQuestions(id)
-            : this.durableRuns.resumeNeedsHuman(id);
+            : this.durableRuns.resumeNeedsHuman(id, Date.now(), task.explicitDispatch === true ? 'explicit_dispatch' : 'tracker_todo');
           if (resumed) {
+            // Say it out loud: a park is meant to hold until a person acts, so
+            // every re-admission is either that person or a leak.
+            if (!isExactOperatorQuestionPark) {
+              console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (${task.explicitDispatch === true ? 'explicit dispatch' : `tracker state ${task.linearState}`}), parked under ${durableRun.lastErrorCode ?? 'unknown'}`);
+            }
             durableRun = this.durableRuns.getRun(id);
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
           }
