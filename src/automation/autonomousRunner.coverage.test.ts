@@ -802,6 +802,33 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
     });
   });
 
+  // vela 2026-09-02 13:09–13:35: the coordinator parked a publication-scope
+  // rejection, the failure budget below returned the card to Todo, the next
+  // heartbeat read Todo as an operator reopen and resumed it — a park/resume
+  // cycle every ~4 minutes, each waking the orchestrator sweep.
+  describe('scheduler "failed" event — operatorPark branch', () => {
+    it('parks the card in Backlog like STUCK and never returns it to Todo', async () => {
+      const source = mockTaskSource();
+      runnerExecution.setTaskSource(source);
+      const r = new AutonomousRunner(cfg());
+      const internal = r as unknown as Internal & { completedTaskIds: Set<string>; failedTaskCounts: Map<string, number> };
+      const scheduler = internal.scheduler as unknown as TaskScheduler;
+
+      const reason = 'publication-scope: branch contains files outside reserved write scope: uv.lock';
+      scheduler.startTask(task(), '/repo', async () => pipelineResult('failed', {
+        failureDetail: `publication: ${reason}`,
+        operatorPark: { code: 'publication_scope_mismatch', reason },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 15));
+
+      expect(source.logStuck).toHaveBeenCalledWith('ISSUE-1', 'autonomous-runner', expect.stringContaining('publication_scope_mismatch'));
+      expect(source.updateState).not.toHaveBeenCalledWith('ISSUE-1', 'Todo');
+      expect(source.logBlocked).not.toHaveBeenCalled();
+      expect(internal.completedTaskIds.has('ISSUE-1')).toBe(true);
+      expect(internal.failedTaskCounts.get('ISSUE-1') ?? 0).toBe(0);
+    });
+  });
+
   describe('pickPipelineFailureDetail', () => {
     it('prefers deterministic verification output over an earlier reviewer approval', () => {
       const result = pipelineResult('failed', {
