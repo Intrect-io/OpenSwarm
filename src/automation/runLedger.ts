@@ -15,6 +15,7 @@ import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import { listClaimOwnersInDb } from './runLedgerOwners.js';
+import { consecutiveIdenticalInfraFailuresInDb } from './infraFailureCircuit.js';
 import {
   markNeedsHumanForQuestionsInDb,
   resumeNeedsHumanForQuestionsInDb,
@@ -262,6 +263,11 @@ export class RunLedger {
   /** Every executor that ever claimed this run, newest first. */
   listClaimOwners(issueId: string): string[] {
     return listClaimOwnersInDb(this.db, issueId);
+  }
+
+  /** Finished attempts, newest first, that ended as infra_error with this fingerprint before anything else. */
+  consecutiveIdenticalInfraFailures(issueId: string, fingerprint: string): number {
+    return consecutiveIdenticalInfraFailuresInDb(this.db, issueId, fingerprint);
   }
 
   queueIntegrationRequeue(issueId: string, expectedStateVersion: number, effect: EffectInput, now = Date.now()): boolean {

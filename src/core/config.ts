@@ -340,6 +340,11 @@ const AutonomousConfigSchema = z.object({
    * conflicts to post-merge integration requeue.
    */
   unknownScopeAdmission: z.enum(['serialize', 'admit']).default('serialize'),
+  /**
+   * Consecutive infra_error attempts with one failure fingerprint after which a
+   * run parks for the operator instead of backing off again. 0 disables.
+   */
+  infraFailureCircuit: z.number().int().min(0).max(100).default(6),
   /** Dynamic job profiles for model selection */
   jobProfiles: z.array(JobProfileSchema).optional(),
   /** Pipeline quality guards (bad-edit lint gate, BS detector, etc.) */
@@ -742,6 +747,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       worktreeMode: raw.autonomous.worktreeMode,
       allowSameProjectConcurrent: raw.autonomous.allowSameProjectConcurrent,
       unknownScopeAdmission: raw.autonomous.unknownScopeAdmission,
+      infraFailureCircuit: raw.autonomous.infraFailureCircuit,
       guards: raw.autonomous.guards,
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,

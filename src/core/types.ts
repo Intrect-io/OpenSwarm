@@ -607,6 +607,8 @@ export type AutonomousStartupConfig = {
   allowSameProjectConcurrent?: boolean;
   /** Admission for a task with no resolvable write scope next to a live same-repo run. */
   unknownScopeAdmission?: 'serialize' | 'admit';
+  /** Identical-fingerprint infra_error attempts that park a run (0 disables, default 6). */
+  infraFailureCircuit?: number;
   /** Pipeline guards configuration */
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */
