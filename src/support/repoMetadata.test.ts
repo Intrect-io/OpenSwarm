@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadRepoMetadata, saveRepoMetadata, REPO_METADATA_FILENAME, RepoMetadataError } from './repoMetadata.js';
+import { loadPublicationFreshReview, loadRepoMetadata, saveRepoMetadata, REPO_METADATA_FILENAME, RepoMetadataError } from './repoMetadata.js';
 
 describe('loadRepoMetadata', () => {
   let dir: string;
@@ -71,6 +71,25 @@ describe('loadRepoMetadata', () => {
       maxCostUsdPerDay: 5,
       circuitCooldownMinutes: 60,
     });
+  });
+
+  // The PR-time fresh review is a per-repository opt-in (operator decision
+  // 2026-09-02: OpenSwarm itself yes, its target repositories no), and opting
+  // in must not drag the `automation` block's admission defaults along.
+  it('reads the publication fresh-review opt-in without touching automation defaults', async () => {
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
+
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: { freshReview: true } }));
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
+    const meta = await loadRepoMetadata(dir);
+    expect(meta?.publication).toEqual({ freshReview: true });
+    expect(meta?.automation).toBeUndefined();
+
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: {} }));
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
+
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), '{ not json');
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
   });
 
   it('throws RepoMetadataError on invalid JSON', async () => {

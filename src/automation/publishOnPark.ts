@@ -19,6 +19,13 @@ import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktre
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
+/** Runs once after a reviewed publication succeeded and was durably recorded. */
+export type ApprovedPublicationHook = (publication: {
+  prUrl: string;
+  headSha: string;
+  worktreeInfo: WorktreeInfo;
+}) => Promise<void>;
+
 /** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
 export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
 
@@ -222,6 +229,7 @@ export async function publishApprovedWork(
   task: PublishableTask,
   result: PublishableResult & Pick<PipelineResult, 'failureDetail' | 'operatorPark'> & { success?: boolean; finalStatus?: string; prUrl?: string },
   durability: ExecutionDurabilityHooks | undefined,
+  afterPublication?: ApprovedPublicationHook,
 ): Promise<void> {
   // Create PR (worktree mode + pipeline success = finalStatus 'approved')
   if (worktreeInfo && result.success && result.finalStatus === 'approved') {
@@ -254,6 +262,21 @@ export async function publishApprovedWork(
           },
         });
         console.log(`[Runner] PR created for ${task.issueIdentifier}: ${prUrl}`);
+        if (afterPublication) {
+          try {
+            await afterPublication({ prUrl, headSha, worktreeInfo });
+          } catch (reviewError) {
+            // The PR and durable publication record are already real. A review
+            // infrastructure failure must be visible but cannot pretend the
+            // publication never happened or trigger a duplicate PR on retry.
+            const detail = reviewError instanceof Error ? reviewError.message : String(reviewError);
+            console.error(`[Runner] PR-time review failed for ${task.issueIdentifier}:`, reviewError);
+            broadcastEvent({
+              type: 'log',
+              data: { taskId: task.issueId || task.id, stage: 'pr-review', line: `PR-time review failed: ${detail}` },
+            });
+          }
+        }
       } catch (err) {
         console.error('[Worktree] PR creation failed:', err);
         const message = err instanceof Error ? err.message : String(err);

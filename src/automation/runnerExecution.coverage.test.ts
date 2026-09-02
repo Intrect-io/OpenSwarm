@@ -127,7 +127,7 @@ vi.mock('./runnerState.js', () => ({
 
 // resolveProjectPath / isValidProjectPath dependencies (real versions all read
 // the real filesystem — openswarm.json lookups, directory scans).
-vi.mock('../support/repoMetadata.js', () => ({ loadRepoMetadata }));
+vi.mock('../support/repoMetadata.js', () => ({ loadRepoMetadata, loadPublicationFreshReview: async () => false }));
 vi.mock('../support/projectMapper.js', () => ({ mapLinearProject }));
 vi.mock('fs/promises', () => ({ stat: fsStat }));
 

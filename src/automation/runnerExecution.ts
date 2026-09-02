@@ -33,7 +33,8 @@ import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishApprovedWork, publishParkedWork, shouldPublishParkedWork } from './publishOnPark.js';
-import { loadRepoMetadata } from '../support/repoMetadata.js';
+import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
+import { reviewPublishedPullRequest } from './prPublicationReview.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { applyDraftGates, projectDraftPeers } from './draftGrooming.js';
 import { plannedNewChildren, refuseForChildCap } from './decompositionLimits.js';
@@ -1216,7 +1217,24 @@ export async function executePipeline(
       await publishParkedWork(worktreeInfo, task, ctx.durability);
     }
 
-    await publishApprovedWork(worktreeInfo, task, result, ctx.durability);
+    // The repository, not the daemon, decides whether its published PRs get
+    // the agentic fresh review (openswarm.json `publication.freshReview`).
+    const freshReview = worktreeInfo ? await loadPublicationFreshReview(worktreeInfo.originalPath) : false;
+    await publishApprovedWork(worktreeInfo, task, result, ctx.durability,
+      freshReview ? async ({ prUrl, worktreeInfo: publishedWorktree }) => {
+        const review = await reviewPublishedPullRequest({
+          prUrl,
+          projectPath: publishedWorktree.originalPath,
+          roles,
+          securityAudit: ctx.securityAudit,
+        });
+        const status = review.success ? 'approved' : review.gateRan ? 'changes requested' : 'did not run';
+        broadcastEvent({
+          type: 'log',
+          data: { taskId: task.issueId || task.id, stage: 'pr-review', line: `PR-time fresh review ${status}${review.error ? `: ${review.error}` : ''}` },
+        });
+      } : undefined,
+    );
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');
     return result;
