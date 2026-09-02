@@ -33,6 +33,16 @@ async function pythonCommand(projectPath: string): Promise<string> {
   return 'python';
 }
 
+async function ruffCommand(projectPath: string): Promise<string | undefined> {
+  const candidates = process.platform === 'win32'
+    ? ['.venv-verify/Scripts/ruff.exe', '.venv/Scripts/ruff.exe', 'venv/Scripts/ruff.exe']
+    : ['.venv-verify/bin/ruff', '.venv/bin/ruff', 'venv/bin/ruff'];
+  for (const candidate of candidates) {
+    if (await exists(join(projectPath, candidate))) return `./${candidate}`;
+  }
+  return undefined;
+}
+
 function command(name: string, run: string, kind: VerifyCommand['kind']): VerifyCommand {
   return { name, run, kind, timeoutMs: DEFAULT_TIMEOUT_MS };
 }
@@ -88,6 +98,14 @@ export async function discoverVerifyCommands(projectPath: string): Promise<Verif
     const serialXdist = /(?:^|\s)-n(?:\s|=)/m.test(pytestConfig) ? ' -n 0' : '';
     commands.push(command('pytest', `${await pythonCommand(projectPath)} -m pytest${serialXdist} -x -q`, 'test'));
   }
+
+  // Python lint: only a repository-installed ruff, so an unknown tool is never
+  // introduced and the repository's own ruff config (or ruff's default rule
+  // set, which includes pyflakes F-rules) applies. vega-agent#608 shipped an
+  // undefined name (F821) and 63 pyflakes errors past a green pytest run;
+  // the repository's CI runs `ruff check` and rejected it on arrival.
+  const ruff = await ruffCommand(projectPath);
+  if (ruff) commands.push(command('ruff', `${ruff} check .`, 'lint'));
 
   // Rust repositories use Cargo's native test runner.
   if (await exists(join(projectPath, 'Cargo.toml'))) {

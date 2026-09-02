@@ -73,6 +73,24 @@ describe('discoverVerifyCommands', () => {
     ]);
   });
 
+  // vega-agent#608, 2026-09-02: a green pytest run published an undefined name
+  // (F821) and 63 pyflakes errors; the repository's own CI runs ruff.
+  it('adds a repository-installed ruff after pytest, and only then', async () => {
+    const withRuff = await fixture({
+      'pytest.ini': '[pytest]\n',
+      '.venv/bin/python': '#!/bin/sh\n',
+      '.venv/bin/ruff': '#!/bin/sh\n',
+    });
+    expect(await discoverVerifyCommands(withRuff)).toEqual([
+      { name: 'pytest', run: './.venv/bin/python -m pytest -x -q', kind: 'test', timeoutMs: 300_000 },
+      { name: 'ruff', run: './.venv/bin/ruff check .', kind: 'lint', timeoutMs: 300_000 },
+    ]);
+
+    // No installed ruff: nothing is invented, even with a ruff config present.
+    const withoutRuff = await fixture({ 'pytest.ini': '[pytest]\n', 'ruff.toml': 'line-length = 100\n' });
+    expect((await discoverVerifyCommands(withoutRuff)).map((c) => c.name)).toEqual(['pytest']);
+  });
+
   it('serializes an explicitly configured xdist pytest run for stable base comparison', async () => {
     const root = await fixture({
       'pytest.ini': '[pytest]\naddopts = --tb=short -n auto --dist loadgroup\n',
