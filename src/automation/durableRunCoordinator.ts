@@ -748,7 +748,13 @@ export class DurableRunCoordinator {
     for (const run of this.ledger.listRuns(['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING'])) {
       if (!run.ownerInstanceId || !run.leaseToken) continue;
       const pid = ownerProcessId(run.ownerInstanceId);
-      if (pid == null || this.processIsAlive(pid)) continue;
+      // Docker commonly gives a replacement daemon the same container PID.
+      // The PID probe then finds *this* process even though the persisted UUID
+      // belongs to the daemon generation that was just stopped. A PID cannot
+      // belong to two generations, so this exact mismatch proves the recorded
+      // executor exited and avoids idling the repository for a full lease.
+      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
+      if (pid != null && this.processIsAlive(pid) && !samePidDifferentGeneration) continue;
       const ownership = {
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -802,7 +808,8 @@ export class DurableRunCoordinator {
       // renewal (multiple consecutive misses, not one) before this frees the
       // row, purely as a fallback for when the pid probe can't be trusted.
       const abandonedByAge = now - run.updatedAt >= this.reconcileAbandonMs;
-      if (!abandonedByAge && (pid == null || this.processIsAlive(pid))) continue;
+      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
+      if (!abandonedByAge && !samePidDifferentGeneration && (pid == null || this.processIsAlive(pid))) continue;
       this.confirmExitedClaim({
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,

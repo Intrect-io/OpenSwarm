@@ -992,7 +992,7 @@ describe('DurableRunCoordinator', () => {
     ledger.close();
   });
 
-  it('uses the default PID probe to retain live owners and release dead owners', () => {
+  it('uses the default PID probe to reclaim a prior daemon generation and release dead owners', () => {
     const livePath = dbPath();
     const liveLedger = new RunLedger(livePath);
     liveLedger.registerRun({ issueId: 'LIVE-PID', source: 'linear', projectPath: '/live-repo' }, 1_000);
@@ -1007,7 +1007,8 @@ describe('DurableRunCoordinator', () => {
     expect(liveReplacement.reconcile(4_001)).toHaveLength(1);
     expect(liveLedger.getRun('LIVE-PID')).toMatchObject({
       state: 'NEEDS_RECONCILE',
-      ownerInstanceId: `${process.pid}-live-owner`,
+      ownerInstanceId: undefined,
+      leaseToken: undefined,
     });
     liveReplacement.close();
     liveLedger.close();
