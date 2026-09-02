@@ -605,6 +605,8 @@ export type AutonomousStartupConfig = {
    * blockedBy dependency graph. Default: true. (INT-1975)
    */
   allowSameProjectConcurrent?: boolean;
+  /** Admission for a task with no resolvable write scope next to a live same-repo run. */
+  unknownScopeAdmission?: 'serialize' | 'admit';
   /** Pipeline guards configuration */
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */

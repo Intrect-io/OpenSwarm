@@ -257,6 +257,27 @@ agents:
       });
     });
 
+    it('defaults unknownScopeAdmission to serialize and carries an explicit admit through', () => {
+      const base = {
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
+      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('serialize');
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base, autonomous: { enabled: true, unknownScopeAdmission: 'admit' },
+      }));
+      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('admit');
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base, autonomous: { enabled: true, unknownScopeAdmission: 'yolo' },
+      }));
+      expect(() => loadConfig('/tmp/config.json')).toThrow();
+    });
+
     it('should accept jobProfiles with partial role overrides', () => {
       // Regression: roles used z.record(enum, string), which under Zod v4 requires
       // EVERY pipeline stage as a key — so a profile naming only worker+reviewer

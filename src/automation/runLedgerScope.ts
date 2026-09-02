@@ -35,16 +35,29 @@ export function scopesOverlap(left: Set<string>, right: Set<string>): boolean {
  * Unknown scope on either side fails closed — worktrees isolate filesystem
  * writes, but they do not make two unknown write sets safe to merge.
  */
+export type UnknownScopeAdmission = 'serialize' | 'admit';
+
 export function admitsConflictScope(
   requested: unknown,
   activeScopes: readonly unknown[],
+  unknownScope: UnknownScopeAdmission = 'serialize',
 ): boolean {
   if (activeScopes.length === 0) return true;
   const requestedScope = normalizeConflictScope(requested);
-  if (requestedScope.size === 0) return false;
+  // 'admit': an unknown scope on either side is not evidence of a conflict.
+  // Two known scopes that overlap are still refused. Measured on vela,
+  // 2026-09-02: runs with no resolvable scope were the most successful
+  // class (20 of 117 finished with a PR) yet serialized every repository
+  // to one of them at a time, leaving 9 of 12 slots idle all morning.
+  const admitUnknown = unknownScope === 'admit';
+  if (requestedScope.size === 0) return admitUnknown;
   for (const active of activeScopes) {
     const activeScope = metadataConflictScope(active);
-    if (activeScope.size === 0 || scopesOverlap(requestedScope, activeScope)) return false;
+    if (activeScope.size === 0) {
+      if (admitUnknown) continue;
+      return false;
+    }
+    if (scopesOverlap(requestedScope, activeScope)) return false;
   }
   return true;
 }

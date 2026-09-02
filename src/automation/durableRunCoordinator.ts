@@ -62,6 +62,8 @@ export interface RepositoryAdmissionPolicy {
   maxConcurrent?: number;
   /** Predicted repository-relative write set used for atomic conflict admission. */
   conflictScope?: string[];
+  /** Whether an unknown scope serializes against live same-repo runs (default) or is admitted. */
+  unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;
   maxCostUsdPerDay?: number;
@@ -479,6 +481,7 @@ export class DurableRunCoordinator {
       leaseMs: this.leaseMs,
       maxActiveForProject: options.admission?.maxConcurrent ?? this.maxActiveForProject,
       conflictScope: options.admission?.conflictScope,
+      unknownScopeAdmission: options.admission?.unknownScopeAdmission,
       maxAttemptsPerHour: options.admission?.maxAttemptsPerHour,
       maxFailuresPerHour: options.admission?.maxFailuresPerHour,
       maxCostUsdPerDay: options.admission?.maxCostUsdPerDay,

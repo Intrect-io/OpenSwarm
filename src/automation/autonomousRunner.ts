@@ -1387,6 +1387,7 @@ export class AutonomousRunner {
         // this heartbeat's in-memory conflict check. An empty scope fails
         // closed while another same-repository run is active.
         conflictScope: task.fileScope ?? [],
+        unknownScopeAdmission: this.config.unknownScopeAdmission,
         // A fixed default attempt budget of 12 made a 32-slot daemon trip its
         // repository circuit before the first pool could even fill. Treat this
         // as an explicit repository policy; failure and cost circuits remain

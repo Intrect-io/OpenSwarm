@@ -334,6 +334,12 @@ const AutonomousConfigSchema = z.object({
   worktreeMode: z.boolean().default(false),
   /** Allow concurrent tasks on the same repo (requires worktreeMode). (INT-1975) */
   allowSameProjectConcurrent: z.boolean().default(true),
+  /**
+   * 'serialize' (default) refuses a claim with no resolvable write scope while
+   * another same-repo run is live. 'admit' lets it through and leaves branch
+   * conflicts to post-merge integration requeue.
+   */
+  unknownScopeAdmission: z.enum(['serialize', 'admit']).default('serialize'),
   /** Dynamic job profiles for model selection */
   jobProfiles: z.array(JobProfileSchema).optional(),
   /** Pipeline quality guards (bad-edit lint gate, BS detector, etc.) */
@@ -735,6 +741,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       } : undefined,
       worktreeMode: raw.autonomous.worktreeMode,
       allowSameProjectConcurrent: raw.autonomous.allowSameProjectConcurrent,
+      unknownScopeAdmission: raw.autonomous.unknownScopeAdmission,
       guards: raw.autonomous.guards,
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,

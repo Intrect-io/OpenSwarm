@@ -74,6 +74,11 @@ autonomous:
   stalledInProgressHours: 6
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
+  # What durable admission does with a task whose write scope could not be
+  # resolved while another run in the same repository is live. serialize
+  # (default) fails closed; admit relies on isolated worktrees and post-merge
+  # integration requeue to surface a branch conflict at PR time instead.
+  # unknownScopeAdmission: serialize
   # maxConcurrentPerProject: 64  # Optional hard cap; omit for weighted, work-conserving project fairness
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced

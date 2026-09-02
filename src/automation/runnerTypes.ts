@@ -47,6 +47,13 @@ export interface AutonomousConfig {
   worktreeMode?: boolean;
   /** Allow concurrent tasks on the same repo (requires worktreeMode). Default true. (INT-1975) */
   allowSameProjectConcurrent?: boolean;
+  /**
+   * Durable admission for a task whose write scope could not be resolved
+   * while another run in the same repository is live. 'serialize' (default)
+   * fails closed; 'admit' relies on isolated worktrees plus post-merge
+   * integration requeue to surface any branch conflict at PR time instead.
+   */
+  unknownScopeAdmission?: 'serialize' | 'admit';
   guards?: Partial<import('../core/types.js').PipelineGuardsConfig>;
   verify?: VerifyConfig;
   securityAudit?: SecurityAuditConfig;
