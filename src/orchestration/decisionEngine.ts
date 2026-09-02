@@ -66,6 +66,12 @@ export interface TaskItem {
   fileScope?: string[];    // Reserved repository-relative write scope for admission/execution/publication
   /** Provenance of the reserved write boundary (legacy `inferred` stays advisory). */
   fileScopeSource?: 'declared' | 'validated-direct' | 'drafted' | 'inferred';
+  /**
+   * Pull requests already MERGED or CLOSED for this issue before this attempt
+   * (branch lineage). Rendered to the worker so a reopened issue does not
+   * get re-implemented — or worse, "improved" with unrelated edits.
+   */
+  priorDeliveries?: string[];
   /** Sufficient pre-admission draft reused by the execution pipeline. */
   preAdmissionDraft?: import('../agents/draftAnalyzer.js').DraftAnalysis;
   /** Tracker comments already appended before the pre-admission draft. */

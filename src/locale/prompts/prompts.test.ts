@@ -49,6 +49,20 @@ describe('buildWorkerPrompt', () => {
     expect(result).toContain('tests/router.test.ts');
   });
 
+  // cgf-portal#211 (2026-09-02): the issue's PR #179 had merged, the card came
+  // back, and the worker "improved" an unrelated dev script for lack of work.
+  it('names prior deliveries and tells the worker to stop when nothing remains', () => {
+    for (const [prompts, heading] of [[enPrompts, 'Prior Deliveries (binding)'], [koPrompts, '이전 납품 (구속력 있음)']] as const) {
+      const result = prompts.buildWorkerPrompt({
+        ...base,
+        context: { priorDeliveries: ['https://github.com/o/r/pull/179'] },
+      });
+      expect(result).toContain(heading);
+      expect(result).toContain('https://github.com/o/r/pull/179');
+      expect(result).toContain('noChangesReason');
+    }
+  });
+
   it('returns string containing task title and description', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     expect(result).toContain('Fix login bug');

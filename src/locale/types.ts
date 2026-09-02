@@ -463,6 +463,11 @@ export interface WorkerContext {
    */
   fileScope?: string[];
   /**
+   * Pull requests already merged or closed for this issue. The attempt exists
+   * because the issue was reopened; the worker must not redo delivered work.
+   */
+  priorDeliveries?: string[];
+  /**
    * What the repository's other worktrees are editing right now, so a worker
    * can see an overlap before its branch collides with theirs at integration.
    */

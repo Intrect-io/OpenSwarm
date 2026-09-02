@@ -894,7 +894,9 @@ export async function executePipeline(
   let keepWorktree = true;
 
   if (ctx.worktreeMode && task.issueId && task.issueIdentifier) {
-    const branchName = await prepareAttemptBranch(projectPath, task.issueId, buildBranchName(task.issueIdentifier, task.title));
+    const lineage = await prepareAttemptBranch(projectPath, task.issueId, buildBranchName(task.issueIdentifier, task.title));
+    const branchName = lineage.branchName;
+    if (lineage.consumedPullRequests.length > 0) task.priorDeliveries = lineage.consumedPullRequests;
     try {
       worktreeInfo = await createWorktree(projectPath, task.issueId, branchName);
       actualPath = worktreeInfo.worktreePath;
