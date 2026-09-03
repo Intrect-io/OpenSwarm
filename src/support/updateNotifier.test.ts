@@ -100,7 +100,7 @@ describe('maybeNotifyUpdate (INT-2270)', () => {
 describe('maybeAutoUpdate (INT-2394)', () => {
   const base = { argv: ['n', 'c', 'start'], env: {} as NodeJS.ProcessEnv, isTTY: true };
 
-  it('installs and re-execs when a newer version exists', async () => {
+  it('installs and re-execs when a newer version exists and resolves after install', async () => {
     const install = vi.fn(() => true);
     const reexec = vi.fn();
     const write = vi.fn();
@@ -109,6 +109,7 @@ describe('maybeAutoUpdate (INT-2394)', () => {
       readCache: () => ({ latest: '0.13.0', checkedAt: 1000 }),
       now: () => 1001,
       write, install, reexec,
+      resolvedVersion: () => '0.13.0',
     });
     expect(install).toHaveBeenCalledWith('@intrect/openswarm');
     expect(reexec).toHaveBeenCalledOnce();
@@ -139,6 +140,57 @@ describe('maybeAutoUpdate (INT-2394)', () => {
     });
     expect(install).toHaveBeenCalledOnce();
     expect(reexec).not.toHaveBeenCalled();
+  });
+
+  it('does not claim success or re-exec when install exits 0 but the resolved version is unchanged (AGT-3183)', async () => {
+    const install = vi.fn(() => true);
+    const reexec = vi.fn();
+    const writeCache = vi.fn();
+    const out = vi.fn();
+    await maybeAutoUpdate('0.12.0', {
+      ...base,
+      readCache: () => ({ latest: '0.13.0', checkedAt: 1000 }),
+      now: () => 1001,
+      writeCache, install, reexec,
+      write: out, // deps.write is the output writer, not the cache writer
+      resolvedVersion: () => '0.12.0', // install "succeeded" but the running binary still reports the old version
+      installPrefix: () => '/some/other/prefix',
+    });
+    expect(reexec).not.toHaveBeenCalled();
+    expect(writeCache).toHaveBeenCalledWith({ latest: '0.12.0', checkedAt: 1001, failedInstallVersion: '0.13.0' });
+    const warned = out.mock.calls.map((call) => call[0] as string).join('\n');
+    expect(warned).not.toContain('Updated');
+    expect(warned).toContain('0.13.0');
+    expect(warned).toContain('/some/other/prefix');
+  });
+
+  it('suppresses reinstalling a version already confirmed not to take effect', async () => {
+    const install = vi.fn(() => true);
+    const reexec = vi.fn();
+    await maybeAutoUpdate('0.12.0', {
+      ...base,
+      readCache: () => ({ latest: '0.13.0', checkedAt: 1000, failedInstallVersion: '0.13.0' }),
+      now: () => 1001,
+      install, reexec,
+    });
+    expect(install).not.toHaveBeenCalled();
+    expect(reexec).not.toHaveBeenCalled();
+  });
+
+  it('retries once a genuinely newer version is published, even after a prior failure', async () => {
+    const install = vi.fn(() => true);
+    const reexec = vi.fn();
+    await maybeAutoUpdate('0.12.0', {
+      ...base,
+      // Previously failed on 0.13.0, but the cached `latest` here is 0.14.0 —
+      // a new version was published since, so the suppression must not apply.
+      readCache: () => ({ latest: '0.14.0', checkedAt: 1000, failedInstallVersion: '0.13.0' }),
+      now: () => 1001,
+      install, reexec,
+      resolvedVersion: () => '0.14.0',
+    });
+    expect(install).toHaveBeenCalledOnce();
+    expect(reexec).toHaveBeenCalledOnce();
   });
 
   it('falls back to a passive notice when opted out', async () => {
