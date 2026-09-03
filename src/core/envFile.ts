@@ -10,14 +10,36 @@
 // earlier (more specific) file wins over the same key in a later,
 // more general one.
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 
+/** A key a .env file held that an ambient (shell-exported) value shadowed with a *different* value. */
+export interface ShadowedEnvKey {
+  key: string;
+  /** The .env file the divergent value was found in. */
+  sourcePath: string;
+  fileFingerprint: string;
+  ambientFingerprint: string;
+}
+
 export interface EnvLoadResult {
   paths: string[];
   loadedKeys: string[];
+  /** Keys skipped because a shell export already set them to a *different* value (AGT-4154). */
+  shadowedKeys: ShadowedEnvKey[];
+}
+
+/** Short, one-way fingerprint for comparing two secret values without ever printing either. */
+function fingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
+/** Render one shadowed-key entry as a safe, human-readable warning line. */
+export function formatShadowWarning(entry: ShadowedEnvKey): string {
+  return `⚠️  ${entry.key}: ambient shell value (${entry.ambientFingerprint}) differs from ${entry.sourcePath} (${entry.fileFingerprint}) — the ambient value wins`;
 }
 
 function getSearchPaths(): string[] {
@@ -142,6 +164,8 @@ export function writeEnvVars(path: string, kv: Record<string, string>): void {
 export function loadEnvFile(): EnvLoadResult {
   const paths: string[] = [];
   const loadedKeys: string[] = [];
+  const shadowedKeys: ShadowedEnvKey[] = [];
+  const alreadyReported = new Set<string>();
 
   for (const path of getSearchPaths()) {
     if (!existsSync(path)) continue;
@@ -152,11 +176,21 @@ export function loadEnvFile(): EnvLoadResult {
       const parsed = parseLine(rawLine);
       if (parsed === null) continue;
       const [key, value] = parsed;
-      if (process.env[key] !== undefined) continue;
+      const ambient = process.env[key];
+      if (ambient !== undefined) {
+        // Identical values are not a divergence — stay silent, and only report
+        // the first file that diverges per key (a later, more general file
+        // repeating the same shadow would just be noise).
+        if (ambient !== value && !alreadyReported.has(key)) {
+          alreadyReported.add(key);
+          shadowedKeys.push({ key, sourcePath: path, fileFingerprint: fingerprint(value), ambientFingerprint: fingerprint(ambient) });
+        }
+        continue;
+      }
       process.env[key] = value;
       loadedKeys.push(key);
     }
   }
 
-  return { paths, loadedKeys };
+  return { paths, loadedKeys, shadowedKeys };
 }

@@ -11,7 +11,7 @@ import { runCli } from './runners/cliRunner.js';
 import { setDefaultAdapter } from './adapters/index.js';
 import { readProviderOverride } from './core/providerOverride.js';
 import { loadConfig, validateConfig, generateSampleConfig } from './core/config.js';
-import { loadEnvFile } from './core/envFile.js';
+import { formatShadowWarning, loadEnvFile } from './core/envFile.js';
 import { initTelemetry, track } from './telemetry/telemetry.js';
 import { maybeAutoUpdate } from './support/updateNotifier.js';
 import { safeConsole } from './support/safeLog.js';
@@ -21,7 +21,8 @@ import { parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionPars
 // Load .env so CLI commands (e.g. `auth login --provider linear` reading
 // LINEAR_OAUTH_CLIENT_ID) see the same env the daemon does. Idempotent; never
 // overrides an already-set shell var.
-loadEnvFile();
+const cliEnvLoad = loadEnvFile();
+for (const shadowed of cliEnvLoad.shadowedKeys) console.warn(formatShadowWarning(shadowed));
 
 // Read version from package.json so it stays in sync with the published package.
 // cli.js lives at <pkg>/dist/cli.js, so package.json is one directory up.
