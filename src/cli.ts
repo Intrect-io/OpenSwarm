@@ -788,33 +788,21 @@ program
   .option('-p, --port <port>', 'Port number', parseTcpPortOption, 3847)
   .option('--no-open', 'Start server without opening browser')
   .action(async (opts: { port: number; open: boolean }) => {
-    const port = opts.port;
     const { startWebServer, stopWebServer } = await import('./support/web.js');
-    await startWebServer(port);
-    console.log(`Dashboard running at http://localhost:${port}`);
-
-    if (opts.open) {
-      const { exec } = await import('node:child_process');
-      const url = `http://localhost:${port}`;
-      const cmd = process.platform === 'darwin' ? `open "${url}"`
-        : process.platform === 'win32' ? `start "${url}"`
-        : `xdg-open "${url}"`;
-      exec(cmd, (err) => {
-        if (err) console.log(`Open ${url} in your browser`);
-      });
-    }
-
-    // Keep process alive
-    let stopping = false;
-    process.once('SIGINT', () => {
-      if (stopping) return;
-      stopping = true;
-      void stopWebServer()
-        .catch((error) => console.error('[Dashboard] graceful shutdown failed:', error))
-        .finally(() => {
-          console.log('\nDashboard stopped.');
-          process.exitCode = 0;
-        });
+    const { spawn } = await import('node:child_process');
+    const { getOpenCommand } = await import('./auth/openBrowser.js');
+    const { runDashCommand } = await import('./cli/dashHandler.js');
+    await runDashCommand(opts.port, opts.open, {
+      startWebServer,
+      stopWebServer,
+      spawnBrowser: (url) => {
+        const { command, args } = getOpenCommand(url);
+        return spawn(command, args, { stdio: 'ignore', windowsHide: true });
+      },
+      onSignal: (signal, handler) => { process.once(signal, handler); },
+      log: (message) => console.log(message),
+      logError: (message, error) => console.error(message, error),
+      setExitCode: (code) => { process.exitCode = code; },
     });
   });
 
@@ -1007,7 +995,7 @@ async function launchChatTui(sessionId?: string): Promise<void> {
   let branch: string | undefined;
   try {
     const { execFileSync } = await import('node:child_process');
-    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
+    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 3_000 })
       .toString()
       .trim() || undefined;
   } catch {

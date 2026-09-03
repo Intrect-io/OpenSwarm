@@ -25,7 +25,7 @@ type Status = 'ok' | 'warn' | 'fail';
  * from the label rather than passed separately so a new `line()` call cannot
  * forget it — an unrecognised label simply contributes nothing.
  */
-const failedChecks = new Set<string>();
+let failedChecks = new Set<string>();
 
 /** Label → stable check name. Labels carry variable parts; these do not. */
 function checkName(label: string): string | undefined {
@@ -70,6 +70,7 @@ async function portFree(port: number): Promise<boolean> {
 }
 
 export async function handleDoctor(): Promise<void> {
+  failedChecks = new Set<string>();
   console.log(banner('doctor — environment check'));
   let fatal = false;
 

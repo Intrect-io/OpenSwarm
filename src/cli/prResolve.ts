@@ -8,13 +8,21 @@ import type { PRInfo } from '../github/github.js';
 
 const execFileAsync = promisify(execFile);
 
+// Metadata lookups only (repo view / pr view / rev-parse) — never a clone or
+// fetch — so a bound well under the multi-minute timeouts used elsewhere for
+// network-heavy git operations still leaves headroom while catching a hung
+// `gh`/`git` (stalled network, blocked on an auth prompt) instead of hanging
+// the whole PR command indefinitely.
+const GH_TIMEOUT_MS = 30_000;
+const GIT_TIMEOUT_MS = 30_000;
+
 async function gh(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('gh', args, { cwd, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await execFileAsync('gh', args, { cwd, maxBuffer: 4 * 1024 * 1024, timeout: GH_TIMEOUT_MS });
   return stdout;
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, { cwd });
+  const { stdout } = await execFileAsync('git', args, { cwd, timeout: GIT_TIMEOUT_MS });
   return stdout;
 }
 

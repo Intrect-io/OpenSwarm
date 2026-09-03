@@ -101,6 +101,19 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+  // An uncaught error leaves the process in a state Node no longer guarantees
+  // — but exiting bare still skips `stopService()`/PID-file cleanup, leaking
+  // the dashboard server and letting the next `openswarm start` see a stale
+  // PID file. Route both through the same shutdown path SIGTERM uses.
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err);
+    void shutdown('uncaughtException');
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason);
+    void shutdown('unhandledRejection');
+  });
+
   // Start service
   try {
     await startService(config);
