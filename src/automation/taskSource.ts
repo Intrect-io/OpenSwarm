@@ -80,6 +80,8 @@ export interface ITaskSource {
     description: string,
     options?: { priority?: number; projectId?: string; estimatedMinutes?: number; idempotencyId?: string },
   ): Promise<SubIssueResult>;
+  /** Existing sub-issues of a parent, for deterministic decomposition dedup (AGT-2908). */
+  getChildren?(parentId: string): Promise<Array<{ id: string; identifier: string; title: string; description: string }>>;
   logPairStart(issueId: string, sessionId: string, projectPath: string): Promise<void>;
   logPairComplete(issueId: string, sessionId: string, stats: PairCompleteStats): Promise<void>;
   logBlocked(issueId: string, sessionName: string, reason: string): Promise<void>;
@@ -148,6 +150,9 @@ export class LinearTaskSource implements ITaskSource {
   }
   createSubIssue(parentId: string, title: string, description: string, options?: { priority?: number; projectId?: string; estimatedMinutes?: number; idempotencyId?: string }): Promise<SubIssueResult> {
     return linear.createSubIssue(parentId, title, description, options);
+  }
+  getChildren(parentId: string): Promise<Array<{ id: string; identifier: string; title: string; description: string }>> {
+    return linear.getIssueChildren(parentId);
   }
   logPairStart(issueId: string, sessionId: string, projectPath: string): Promise<void> { return linear.logPairStart(issueId, sessionId, projectPath); }
   logPairComplete(issueId: string, sessionId: string, stats: PairCompleteStats): Promise<void> { return linear.logPairComplete(issueId, sessionId, stats); }

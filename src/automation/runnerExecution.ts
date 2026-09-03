@@ -5,7 +5,7 @@
 
 import { buildBranchName } from '../support/branchNaming.js';
 import { EmbedBuilder } from 'discord.js';
-import { decompositionChildId, reviewerFollowupId } from './decompositionIds.js';
+import { decompositionChildId } from './decompositionIds.js';
 import { pathIsUnderAny, taskEventKey, type TaskItem, type DecisionResult } from '../orchestration/decisionEngine.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 import type { ExecutorResult } from '../orchestration/workflow.js';
@@ -25,7 +25,8 @@ import { analyzeIssue } from '../knowledge/index.js';
 import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
 import { loadAuthoritativeOperatorFeedback } from '../coordination/operatorGuidance.js';
 import { t } from '../locale/index.js';
-import { formatTaskDescription } from '../linear/format.js';
+import { formatTaskDescription, parseFileScopeFromDescription } from '../linear/format.js';
+import { findDuplicateSibling, type ExistingSibling } from './duplicateSubIssueGuard.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import type { Notifier } from '../notify/notifier.js';
 import type { ITaskSource } from './taskSource.js';
@@ -44,6 +45,8 @@ import { pipelineMetadata } from './pipelineMetadata.js';
 import { refreshExecutionTaskContext } from './executionTaskContext.js';
 export { formatExecutionCommentContext } from './executionTaskContext.js';
 export { rateLimitedPipelineResult } from './pipelinePreflight.js';
+import { fileReviewerFollowups } from './reviewerFollowups.js';
+export { fileReviewerFollowups } from './reviewerFollowups.js';
 
 export const PIPELINE_EFFECT_TIMEOUT_MS = 30_000;
 
@@ -333,51 +336,6 @@ export { decompositionChildId };
  * dispatch endpoint so both behave identically (no logic fork). The caller must
  * have already created the parent issue (`parentIssueId`).
  */
-/**
- * File the reviewer's recommendedActions as follow-ups when it approves
- * (INT-1611 restore / INT-1704). With a `parentIssueId` they become sub-issues;
- * without one (INT-1968) they are created as top-level issues so review can still
- * "just file them" off a non-issue branch. Gated by `autoFile` (default OFF);
- * caps at 10; each create is best-effort (failures logged, never throw).
- * Returns the count filed.
- */
-export async function fileReviewerFollowups(
-  source: ITaskSource | null,
-  parentIssueId: string | null | undefined,
-  review: ReviewResult,
-  opts: { autoFile?: boolean; projectId?: string; requireApprove?: boolean } = {},
-): Promise<number> {
-  // Autonomous pipeline files only on approve; the manual `review` command files
-  // regardless of decision (requireApprove: false). (INT-1704 / INT-1969)
-  const requireApprove = opts.requireApprove ?? true;
-  if (!opts.autoFile || !source) return 0;
-  if (requireApprove && review.decision !== 'approve') return 0;
-  const actions = (review.recommendedActions ?? []).slice(0, 10);
-  let filed = 0;
-  for (const [index, a] of actions.entries()) {
-    const title = `[${a.type}] ${a.title}`;
-    const body = a.location
-      ? `Follow-up from reviewer.\n\nLocation: ${a.location}`
-      : 'Follow-up recommended by the reviewer.';
-    try {
-      let created: Awaited<ReturnType<ITaskSource['createSubIssue']>>;
-      if (parentIssueId) {
-        created = await source.createSubIssue(parentIssueId, title, body, {
-          priority: 3,
-          projectId: opts.projectId,
-          idempotencyId: reviewerFollowupId(parentIssueId, index, a),
-        });
-      } else {
-        created = await source.createTask(title, body, opts.projectId);
-      }
-      if ('error' in created) throw new Error(created.error);
-      filed += 1;
-    } catch (err) {
-      console.error(`[Runner] follow-up issue create failed (${a.title}):`, err);
-    }
-  }
-  return filed;
-}
 
 export async function createSubIssuesWithDependencies(
   parentIssueId: string,
@@ -403,8 +361,32 @@ export async function createSubIssuesWithDependencies(
   }> = [];
   const creationErrors: string[] = [];
 
+  // Existing siblings a re-decomposition (or an over-splitting planner) might
+  // duplicate — deterministic file-scope+title check, not the LLM draft gate,
+  // which only ever compares top-level tasks against each other. (AGT-2908)
+  const existingSiblings: ExistingSibling[] = taskSource?.getChildren
+    ? (await taskSource.getChildren(parentIssueId).catch(() => []))
+      .map((child) => ({ id: child.id, identifier: child.identifier, title: child.title, fileScope: parseFileScopeFromDescription(child.description) }))
+    : [];
+
   for (const [index, subTask] of subTasks.entries()) {
     const fileScope = (subTask.fileScope ?? []).filter((f) => typeof f === 'string' && f.trim().length > 0);
+
+    const duplicate = findDuplicateSibling({ title: subTask.title, fileScope }, [...existingSiblings, ...createdSubIssues]);
+    if (duplicate) {
+      console.log(`[AutonomousRunner] Reusing existing sub-issue ${duplicate.sibling.identifier} for "${subTask.title}"`
+        + ` — duplicate of an existing sibling (file-scope ${duplicate.fileScopeScore.toFixed(2)}, title ${duplicate.titleScore.toFixed(2)})`);
+      createdSubIssues.push({
+        id: duplicate.sibling.id,
+        identifier: duplicate.sibling.identifier,
+        title: duplicate.sibling.title,
+        dependencies: subTask.dependencies || [],
+        topoRank: index,
+        estimatedMinutes: subTask.estimatedMinutes,
+        fileScope,
+      });
+      continue;
+    }
 
     const subDescription = formatTaskDescription({
       summary: subTask.description,

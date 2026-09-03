@@ -968,6 +968,27 @@ export async function markIssueDuplicate(issueId: string, canonicalIssueId: stri
   }
 }
 
+/** Existing sub-issues of a parent, for deterministic decomposition dedup (AGT-2908). */
+export async function getIssueChildren(
+  issueId: string,
+): Promise<Array<{ id: string; identifier: string; title: string; description: string }>> {
+  if (!isLinearInitialized()) return [];
+  try {
+    const linear = getClient();
+    const parent = await linear.issue(issueId);
+    const children = await parent.children();
+    return children.nodes.map((child) => ({
+      id: child.id,
+      identifier: child.identifier,
+      title: child.title,
+      description: child.description ?? '',
+    }));
+  } catch (error) {
+    console.error(`[Linear] Failed to fetch children of ${issueId}:`, error);
+    return [];
+  }
+}
+
 /**
  * Add a comment to an issue
  */
