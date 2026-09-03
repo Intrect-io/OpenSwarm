@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
+import { RunLedger } from '../automation/runLedger.js';
 
 const originalCoordinationFile = process.env.OPENSWARM_COORDINATION_FILE;
 const originalAutomationDb = process.env.OPENSWARM_AUTOMATION_DB;
@@ -216,5 +218,65 @@ describe('orchestrator tracker tools', () => {
     expect(found.content).toContain('src/app.ts');
     const none = await tools.executeOrchestratorTrackerTool('host_search_files', { pattern: 'this-string-is-absent-zzzz' }, orchestrator);
     expect(none).toMatchObject({ isError: false, content: '(no matches)' });
+  });
+});
+
+describe('ledger_overview (AGT-4184)', () => {
+  it('is unavailable to worker/reviewer roles', async () => {
+    const { tools } = await setup();
+    for (const actorRole of ['worker', 'reviewer']) {
+      const result = await tools.executeOrchestratorTrackerTool('ledger_overview', {}, {
+        repository: '/repo', taskId: actorRole, actor: `${actorRole}-a`, actorRole,
+      });
+      expect(result).toMatchObject({ isError: true, content: expect.stringContaining('orchestrator') });
+    }
+  });
+
+  it('returns parked runs, failure buckets, and attempt outliers from a seeded ledger', async () => {
+    const { tools } = await setup();
+    new RunLedger(process.env.OPENSWARM_AUTOMATION_DB!).close(); // creates the real schema
+    const db = new Database(process.env.OPENSWARM_AUTOMATION_DB!);
+    const now = Date.now();
+    const insertRun = db.prepare(`
+      INSERT INTO automation_runs(issue_id, source, identifier, project_path, state, attempt_no, last_error_code, last_error_message, pr_url, discovered_at, updated_at)
+      VALUES (?, 'linear', ?, '/repo', ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertRun.run('run-parked', 'AX-1', 'NEEDS_HUMAN', 3, 'publication_scope_mismatch', 'x'.repeat(300), null, now - 120_000, now - 60_000);
+    insertRun.run('run-cycling', 'AX-2', 'RETRY_AT', 47, null, null, null, now - 600_000, now - 10_000);
+    insertRun.run('run-done', 'AX-3', 'DONE', 99, null, null, 'https://github.com/x/y/pull/1', now - 600_000, now - 5_000);
+    const insertAttempt = db.prepare(`
+      INSERT INTO automation_attempts(issue_id, attempt_no, lease_epoch, status, stage, started_at, finished_at, error_message, success)
+      VALUES (?, ?, 1, 'suspended', 'RETRY_AT', ?, ?, ?, 0)
+    `);
+    for (let i = 0; i < 6; i++) {
+      insertRun.run(`run-fail-${i}`, `AX-fail-${i}`, 'RETRY_AT', 1, null, null, null, now - 600_000, now - 60_000);
+      insertAttempt.run(`run-fail-${i}`, 1, now - 60_000, now - 59_000, 'Worker reported success with no changed files and no explicit noChangesReason.');
+    }
+    db.close();
+
+    const orchestrator = { repository: '/repo', taskId: 'orchestrator:sweep', actor: 'orchestrator-a', actorRole: 'orchestrator' };
+    const result = await tools.executeOrchestratorTrackerTool('ledger_overview', {}, orchestrator);
+    expect(result.isError).toBe(false);
+    const overview = JSON.parse(result.content);
+
+    expect(overview.parkedRuns).toHaveLength(1);
+    expect(overview.parkedRuns[0]).toMatchObject({ identifier: 'AX-1', parkedUnder: 'publication_scope_mismatch' });
+    expect(overview.parkedRuns[0].reason.length).toBe(200); // truncated from 300 'x's
+
+    expect(overview.attemptOutliers[0]).toMatchObject({ identifier: 'AX-2', attemptNo: 47, state: 'RETRY_AT' });
+    expect(overview.attemptOutliers.some((row: { identifier: string }) => row.identifier === 'AX-1')).toBe(false);
+    expect(overview.attemptOutliers.some((row: { identifier: string }) => row.identifier === 'AX-3')).toBe(false);
+
+    expect(overview.failureBuckets[0].attempts).toBe(6);
+    expect(overview.failureBuckets[0].distinctIssues).toBe(6);
+  });
+
+  it('returns a bounded {error} instead of throwing when the ledger is unreadable', async () => {
+    const { tools } = await setup();
+    process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'does-not-exist', 'automation.db');
+    const orchestrator = { repository: '/repo', taskId: 'orchestrator:sweep', actor: 'orchestrator-a', actorRole: 'orchestrator' };
+    const result = await tools.executeOrchestratorTrackerTool('ledger_overview', {}, orchestrator);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content)).toHaveProperty('error');
   });
 });

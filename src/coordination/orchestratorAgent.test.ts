@@ -278,6 +278,7 @@ describe('runOrchestrator', () => {
     expect(result.toolsGranted).toEqual([
       'host_read_file', 'host_search_files',
       'tracker_cached_issue', 'tracker_save_comment', 'coordination_answer_question',
+      'ledger_overview',
     ]);
     expect(spawnCli).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       mcpTools: expect.arrayContaining([
