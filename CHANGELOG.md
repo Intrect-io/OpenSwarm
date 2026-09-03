@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.21.6 — 2026-09-03
+
+### Fixed
+
+- **Duplicate sub-issue decomposition.** A deterministic file-scope + title-similarity guard reuses an existing sibling sub-issue instead of creating a near-duplicate when a task gets decomposed twice (AGT-2908).
+- **Shell-expansion bypasses of the destructive-command guard.** Quote-splitting, backslash-escaping, and mid-word command/parameter substitution (including quote-hidden variants) are now rejected; common whitespace-delimited substitution stays allowed (AGT-3436).
+- **CLI/daemon shutdown determinism.** SIGTERM now runs the same dashboard cleanup as SIGINT; uncaught exceptions/rejections route through the same controlled daemon shutdown; browser launch no longer shells out through string interpolation; `openswarm start` is mutually exclusive via a file lock (closing a TOCTOU race between concurrent starts); `openswarm doctor`'s failed-check state resets per invocation instead of accumulating for the process lifetime; PR-command and dashboard subprocess calls are timeout-bounded (AGT-3408).
+- **Symlink-safe workspace/static file resolution.** Python diagnostics paths get canonical workspace containment; `openswarm init` refuses any symlinked config.yaml/.env target (not just the daemon's global config) and writes secrets race-safely; `design-pipeline --force` no longer writes through a symlinked destination; static asset resolution (including the five page shells) uses one race-safe realpath + `O_NOFOLLOW` strategy (AGT-3424).
+- **A shell export silently shadowing a `.env` value now warns**, naming the key and file without ever printing the values (AGT-4154).
+- **Auto-update no longer claims success when the reinstalled binary didn't actually change** — it re-verifies the resolved version after install and surfaces a controlled warning instead (AGT-3183).
+
+### Added
+
+- **Orchestrator `ledger_overview` tool** — read access to parked runs, attempt outliers, and failure buckets from its own run ledger (AGT-4184).
+
 ## 0.21.5 — 2026-09-01
 
 ### Changed

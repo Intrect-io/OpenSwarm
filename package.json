@@ -1,7 +1,7 @@
 {
   "name": "@intrect/openswarm",
-  "version": "0.21.5",
-  "description": "Autonomous AI agent orchestrator \u2014 Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
+  "version": "0.21.6",
+  "description": "Autonomous AI agent orchestrator — Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
