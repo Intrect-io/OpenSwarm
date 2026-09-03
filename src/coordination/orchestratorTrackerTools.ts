@@ -8,6 +8,7 @@ import type { ToolDefinition } from '../adapters/tools.js';
 import { answerHumanQuestion } from './humanQuestions.js';
 import { getCoordinationStore } from './coordinationStore.js';
 import { repositoryKey } from './repositoryCell.js';
+import { executeLedgerOverview, LEDGER_OVERVIEW_TOOL_DEFINITION } from './ledgerOverviewTool.js';
 
 const execFileAsync = promisify(execFile);
 const HOST_READ_MAX_BYTES = 200_000;
@@ -119,6 +120,7 @@ export const ORCHESTRATOR_TRACKER_TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  LEDGER_OVERVIEW_TOOL_DEFINITION,
 ];
 
 export const ORCHESTRATOR_TRACKER_TOOL_NAMES: ReadonlySet<string> = new Set(
@@ -240,6 +242,10 @@ export async function executeOrchestratorTrackerTool(
 
   if (name === 'host_read_file' || name === 'host_search_files') {
     return executeHostReadTool(name, args, context);
+  }
+
+  if (name === 'ledger_overview') {
+    return executeLedgerOverview();
   }
 
   if (name === 'coordination_answer_question') {
