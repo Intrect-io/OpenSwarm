@@ -1,11 +1,18 @@
 name: Release
 
 # Auto-release on a version bump: when a merge to main changes package.json and
-# the version has no tag yet, gate → publish to npm → tag → GitHub release.
-# So the release flow is just "merge a version-bump PR". (INT-2270)
+# the version has no tag yet, gate → publish to npm → tag → GitHub release →
+# dispatch docker-publish.yml. So the release flow is just "merge a
+# version-bump PR". (INT-2270)
 #
 # Requires a repo secret NPM_TOKEN (npm automation token). GITHUB_TOKEN is
-# provided automatically for the tag + release.
+# provided automatically for the tag + release + docker-publish dispatch.
+#
+# The docker-publish.yml dispatch (not its own `release: published` trigger)
+# is required, not cosmetic: GitHub does not let a GITHUB_TOKEN-authored
+# event trigger another workflow, so without this explicit dispatch the GHCR
+# image silently never gets built (confirmed 2026-09-03 — zero runs across
+# every prior release). See docker-publish.yml's own header for the other half.
 
 on:
   push:
@@ -15,6 +22,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 env:
   NODE_VERSION: '22'
@@ -121,3 +129,14 @@ jobs:
             if [ -z "$NOTES" ]; then NOTES="Release v$VERSION"; fi
             gh release create "v$VERSION" --title "v$VERSION" --notes "$NOTES"
           fi
+
+      # See the "Requires a repo secret..." note above: release's own
+      # `release: published` event cannot trigger this workflow itself, so
+      # dispatch it explicitly with the version so it tags semver + latest
+      # instead of falling back to a plain branch tag.
+      - name: Trigger Docker image publish
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: gh workflow run docker-publish.yml --ref main -f version="$VERSION"
