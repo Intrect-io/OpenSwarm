@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  contentTypeFor, readStaticAsset, readThreadBoardShell, resolveStaticRoot, StaticAssetError,
+  contentTypeFor, readAppShell, readStaticAsset, readThreadBoardShell, resolveStaticRoot, StaticAssetError,
 } from './staticAssets.js';
 
 describe('contentTypeFor', () => {
@@ -73,5 +73,29 @@ describe('readStaticAsset', () => {
     void dir;
     const asset = await readStaticAsset('/static/js/main.mjs');
     expect(asset.contentType).toContain('text/javascript');
+  });
+});
+
+describe('readAppShell symlink replacement (AGT-3424)', () => {
+  it('refuses app.html when it has been replaced with a symlink to an external file', async () => {
+    const root = resolveStaticRoot();
+    expect(root).toBeTruthy();
+    const appHtmlPath = join(root!, 'app.html');
+    const backupPath = join(root!, 'app.html.bak-agt3424-test');
+    const escapeDir = mkdtempSync(join(tmpdir(), 'osw-static-escape-'));
+    const outside = join(escapeDir, 'not-app-html.html');
+    writeFileSync(outside, '<html>should never be served as app.html</html>');
+
+    const { renameSync, existsSync: exists, unlinkSync } = await import('node:fs');
+    renameSync(appHtmlPath, backupPath);
+    try {
+      symlinkSync(outside, appHtmlPath);
+      const body = await readAppShell();
+      expect(body).toBeNull();
+    } finally {
+      if (exists(appHtmlPath)) unlinkSync(appHtmlPath);
+      renameSync(backupPath, appHtmlPath);
+      rmSync(escapeDir, { recursive: true, force: true });
+    }
   });
 });

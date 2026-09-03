@@ -11,7 +11,7 @@
 // more general one.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
@@ -121,12 +121,39 @@ function formatEnvLine(key: string, value: string): string {
 }
 
 /**
+ * Read the current .env content for merging, refusing a symlinked path
+ * instead of silently reading through it. A plain `existsSync` + `readFileSync`
+ * check-then-use is racy: a symlink swapped in between the two calls would
+ * both leak an arbitrary file's content into the merge below and get
+ * silently severed by the atomic write that follows. Opening with
+ * `O_NOFOLLOW` and reading via the same held fd closes that window.
+ */
+function readExistingEnvFile(path: string): string {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return ''; // genuinely no existing file — start fresh
+    if (code === 'ELOOP') {
+      throw new Error(`${path} is a symlink — refusing to read/overwrite it. Remove the symlink first if you really want to replace it.`);
+    }
+    throw err;
+  }
+  try {
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Upsert KEY=value pairs into a .env file (used by `openswarm init`). Existing
  * lines for a key are replaced in place (order + comments preserved); new keys
  * are appended. The file is written 0600 since it holds secrets.
  */
 export function writeEnvVars(path: string, kv: Record<string, string>): void {
-  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const existing = readExistingEnvFile(path);
   const lines = existing.length ? existing.split(/\r?\n/) : [];
   const remaining = new Map(Object.entries(kv));
 

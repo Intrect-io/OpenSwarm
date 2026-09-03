@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, statSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir, platform, homedir as realHomedir } from 'node:os';
 import { join } from 'node:path';
 import { formatShadowWarning, writeEnvVars } from './envFile.js';
@@ -64,6 +64,22 @@ describe('writeEnvVars', () => {
     const p = freshEnvPath();
     writeEnvVars(p, { SECRET: 'x' });
     expect(statSync(p).mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses to write through a symlinked .env instead of reading it and severing the link (AGT-3424)', () => {
+    if (platform() === 'win32') return; // symlinkSync requires elevated perms on Windows CI
+    const p = freshEnvPath();
+    const outsideDir = mkdtempSync(join(tmpdir(), 'env-outside-'));
+    const outside = join(outsideDir, 'not-an-env-file.txt');
+    writeFileSync(outside, 'sensitive-content\n');
+    try {
+      symlinkSync(outside, p);
+      expect(() => writeEnvVars(p, { SECRET: 'x' })).toThrow(/symlink/);
+      // Neither the symlink itself nor the file it points to changed.
+      expect(readFileSync(outside, 'utf8')).toBe('sensitive-content\n');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 });
 

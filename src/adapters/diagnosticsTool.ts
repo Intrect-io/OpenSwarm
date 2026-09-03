@@ -81,6 +81,27 @@ function isMissingBinary(err: unknown): boolean {
 }
 
 /**
+ * Split requested paths into those that canonically resolve inside `cwd` and
+ * those that escape it. Python paths get no project-relative bound the way
+ * `runTsc`'s tsconfig walk gives TypeScript (`nearestTsconfigDir` only
+ * matches directories under `root`) — without this, an absolute or
+ * `../`-escaping path would hand `ruff` (and its output, echoed back to the
+ * calling model) a file entirely outside the workspace.
+ */
+function containWorkspacePaths(cwd: string, files: string[]): { kept: string[]; escaped: string[] } {
+  const root = realpathSync(path.resolve(cwd));
+  const kept: string[] = [];
+  const escaped: string[] = [];
+  for (const file of files) {
+    const abs = path.isAbsolute(file) ? file : path.resolve(root, file);
+    const real = existsSync(abs) ? realpathSync(abs) : abs;
+    if (real === root || real.startsWith(root + path.sep)) kept.push(file);
+    else escaped.push(file);
+  }
+  return { kept, escaped };
+}
+
+/**
  * Resolve the TypeScript compiler deterministically: the nearest
  * `node_modules/.bin/tsc` walking up from the project (a real repo's own
  * dependency), else `tsc` from PATH (npm-script contexts). NOT `npx tsc` —
@@ -217,16 +238,20 @@ export async function runDiagnosticsTool(paths: unknown, cwd: string): Promise<s
   }
 
   const tsFiles = requested.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f));
-  const pyFiles = requested.filter((f) => /\.pyi?$/.test(f));
+  const { kept: pyFiles, escaped: pyEscaped } = containWorkspacePaths(cwd, requested.filter((f) => /\.pyi?$/.test(f)));
   const checks: Promise<CheckOutcome>[] = [];
   if (tsFiles.length > 0) checks.push(runTsc(cwd, new Set(tsFiles)));
   if (pyFiles.length > 0) checks.push(runRuff(cwd, pyFiles));
   if (checks.length === 0) {
+    if (pyEscaped.length > 0) {
+      return `diagnostics: refused ${pyEscaped.length} path(s) outside the project root: ${pyEscaped.join(', ')}`;
+    }
     return `diagnostics: no TypeScript/Python files among ${requested.join(', ')} — use the bash tool to run this project's own checks.`;
   }
 
   const outcomes = await Promise.all(checks);
   const lines: string[] = [];
+  if (pyEscaped.length > 0) lines.push(`[ruff] refused ${pyEscaped.length} path(s) outside the project root: ${pyEscaped.join(', ')}`);
   for (const { label, output, infraError } of outcomes) {
     if (infraError) lines.push(`[${label}] SKIPPED: ${infraError}`);
     else if (output) lines.push(`[${label}] errors:\n${output}`);
