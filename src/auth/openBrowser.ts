@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 
-function getOpenCommand(url: string): { command: string; args: string[] } {
+export function getOpenCommand(url: string): { command: string; args: string[] } {
   if (process.platform === 'darwin') {
     return { command: 'open', args: [url] };
   }

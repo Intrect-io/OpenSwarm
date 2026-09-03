@@ -44,6 +44,7 @@ function stubFetch(impl: (url: string, init?: { signal?: AbortSignal }) => Promi
 const STATE_DIR = join(TEST_HOME, '.config', 'openswarm');
 const PID_FILE = join(STATE_DIR, 'openswarm.pid');
 const LOG_FILE = join(STATE_DIR, 'logs', 'openswarm.log');
+const START_LOCK_FILE = join(STATE_DIR, 'openswarm.start.lock');
 
 beforeAll(() => {
   mkdirSync(STATE_DIR, { recursive: true });
@@ -52,9 +53,11 @@ beforeAll(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  spawnMock.mockClear();
   indexPathState.exists = true;
   rmSync(PID_FILE, { force: true });
   rmSync(LOG_FILE, { force: true });
+  rmSync(START_LOCK_FILE, { force: true });
 });
 
 describe('startDaemon', () => {
@@ -112,6 +115,24 @@ describe('startDaemon', () => {
 
     await expect(startDaemon()).rejects.toThrow(/no pid assigned/);
     expect(existsSync(PID_FILE)).toBe(false);
+  });
+
+  it('serializes two concurrent starts (AGT-3408) — only one spawns, the other sees it and refuses', async () => {
+    const { startDaemon } = await import('./daemon.js');
+    stubFetch(async () => new Response('', { status: 500 })); // port never serving
+    // Use this test process's own (genuinely alive) pid so the loser's
+    // isOwnedDaemonProcess() check finds a real, owned daemon rather than a
+    // dead pid it would otherwise clean up and race past.
+    spawnMock.mockImplementation(() => ({ pid: process.pid, unref: vi.fn() }));
+
+    const results = await Promise.allSettled([startDaemon(), startDaemon()]);
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0].reason as Error).message).toMatch(/already running \(pid/);
   });
 });
 

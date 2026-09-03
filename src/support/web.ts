@@ -69,6 +69,11 @@ function isAllowedOrigin(origin: string): boolean {
   return false;
 }
 
+// `systemctl` talking to a wedged user service manager can hang past any
+// caller's patience; bound it so a stuck call surfaces as a controlled error
+// instead of leaving the HTTP request open indefinitely.
+const SYSTEMCTL_TIMEOUT_MS = 10_000;
+
 // Never leak raw Error objects (which include stack traces in many runtimes)
 // or arbitrary thrown values to HTTP responses.
 function safeErrorMessage(err: unknown): string {
@@ -969,8 +974,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/status' && req.method === 'GET') {
         try {
           const result = await new Promise<string>((resolve) => {
-            execFile('systemctl', ['--user', 'is-active', 'openswarm'], (_err, stdout) => {
-              resolve(stdout.trim());
+            execFile('systemctl', ['--user', 'is-active', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err, stdout) => {
+              resolve(err ? 'unknown' : stdout.trim());
             });
           });
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -984,7 +989,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/stop' && req.method === 'POST') {
         try {
           await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'stop', 'openswarm'], (err) => {
+            execFile('systemctl', ['--user', 'stop', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
               if (err) reject(err); else resolve();
             });
           });
@@ -999,7 +1004,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/restart' && req.method === 'POST') {
         try {
           await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'restart', 'openswarm'], (err) => {
+            execFile('systemctl', ['--user', 'restart', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
               if (err) reject(err); else resolve();
             });
           });
