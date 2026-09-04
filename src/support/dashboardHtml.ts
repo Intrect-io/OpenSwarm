@@ -7,664 +7,67 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <title>OpenSwarm :: Supervisor</title>
   <script src="/static/js/themeBoot.js"></script>
   <link rel="stylesheet" href="/static/css/tokens.css">
-  <style>
-    /*
-     * Colour comes from /static/css/tokens.css (AGT-4201) so this page follows
-     * the same palette — and the same light/dark switch — as the rest of the
-     * web surface. The legacy variable names the stylesheet below was written
-     * against are kept as indirections to the semantic tokens (--green =
-     * primary action, --amber = warning, --red = destructive, --dim = secondary
-     * text); no colour literal lives in this file.
-     */
-    :root {
-      --bg:        var(--bg-app);
-      --bg2:       var(--bg-surface);
-      --bg3:       var(--bg-elevated);
-      --green:     var(--accent);
-      --green-dim: var(--accent-subtle);
-      --green-mid: var(--accent);
-      --green-lo:  var(--border);
-      --cyan:      var(--info);
-      --cyan-dim:  var(--accent-subtle);
-      --amber:     var(--warning);
-      --red:       var(--danger);
-      --white:     var(--fg-primary);
-      --dim:       var(--fg-muted);
-      --border2:   var(--border);
-      --radius-sm: 6px;
-      --radius-md: 8px;
-      --radius-lg: 12px;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; overflow: hidden; }
-    body {
-      font-family: var(--font-sans);
-      background: var(--bg);
-      color: var(--white);
-      font-size: 14px;
-      line-height: 1.5;
-      -webkit-font-smoothing: antialiased;
-    }
-    /* Monospace contexts (logs, paths, IDs) still use a mono stack */
-    code, pre, .mono, .log-line, .repo-item-path, .scan-path-row .path, .issue-id {
-      font-family: var(--font-mono);
-    }
-    .hdr-link {
-      color: var(--cyan); font-size: 11px; text-decoration: none; letter-spacing: 0.1em;
-      border: 1px solid var(--cyan-dim); padding: 2px 8px; border-radius: 3px;
-    }
-    .hdr-link:hover { border-color: var(--cyan); }
-    .hdr-links { display: flex; gap: 6px; margin-left: 1rem; flex-wrap: wrap; }
-
-    /* ===== SCROLLBAR ===== */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
-
-    /* ===== HEADER ===== */
-    header {
-      height: 38px;
-      background: var(--bg2);
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      align-items: center;
-      padding: 0 1rem;
-      gap: 0.75rem;
-      flex-shrink: 0;
-    }
-    .hdr-logo {
-      color: var(--green);
-      font-weight: bold;
-      font-size: 14px;
-      letter-spacing: 0.15em;
-    }
-    .hdr-fullname { color: var(--dim); font-size: 11px; letter-spacing: 0.05em; margin-left: 0.25rem; }
-    .hdr-sep { color: var(--dim); margin-left: 0.5rem; }
-    .hdr-sub { color: var(--dim); font-size: 11px; letter-spacing: 0.1em; }
-    .hdr-right { margin-left: auto; display: flex; align-items: center; gap: 0.5rem; }
-    #sse-status {
-      font-size: 10px;
-      padding: 1px 6px;
-      border: 1px solid var(--dim);
-      color: var(--dim);
-      letter-spacing: 0.1em;
-    }
-    #sse-status.connected { border-color: var(--green); color: var(--green); }
-    #sse-status.disconnected { border-color: var(--red); color: var(--red); }
-    .btn {
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: 500;
-      padding: 4px 12px;
-      background: var(--bg2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      color: var(--white);
-      cursor: pointer;
-      letter-spacing: 0.04em;
-      transition: border-color 0.15s, background 0.15s, color 0.15s;
-    }
-    .btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); background: var(--green-dim); }
-    .btn:disabled { opacity: 0.4; cursor: default; }
-    .btn.primary { background: var(--green); border-color: var(--green); color: var(--fg-on-accent); font-weight: 600; }
-    .btn.primary:hover:not(:disabled) { opacity: 0.88; background: var(--green); color: var(--fg-on-accent); }
-    .btn-active { border-color: var(--amber); color: var(--amber); }
-    .btn-active:hover:not(:disabled) { background: var(--warning-subtle); border-color: var(--amber); }
-    .btn-danger { border-color: var(--danger-subtle); color: var(--red); }
-    .btn-danger:hover:not(:disabled) { background: var(--danger-subtle); border-color: var(--red); }
-    .move-to-todo-btn {
-      font-family: inherit;
-      font-size: 9px;
-      padding: 1px 6px;
-      background: transparent;
-      border: 1px solid var(--cyan-dim);
-      color: var(--cyan);
-      cursor: pointer;
-      margin-left: auto;
-      flex-shrink: 0;
-      transition: all 0.15s;
-    }
-    .move-to-todo-btn:hover:not(:disabled) { border-color: var(--cyan); background: var(--cyan-dim); }
-    .move-to-todo-btn:disabled { opacity: 0.4; cursor: default; }
-    .svc-group { display: flex; align-items: center; gap: 4px; margin-right: 8px; }
-    .svc-status {
-      font-size: 9px; padding: 1px 6px;
-      border: 1px solid var(--dim); color: var(--dim);
-      letter-spacing: 0.1em; text-transform: uppercase;
-    }
-    .svc-status.active { border-color: var(--green); color: var(--green); }
-    .svc-status.inactive { border-color: var(--red); color: var(--red); }
-    .svc-sep { color: var(--border); margin: 0 2px; }
-
-    /* ===== STATS BAR ===== */
-    .stats-bar {
-      height: 36px;
-      background: var(--bg2);
-      border-bottom: 1px solid var(--border2);
-      display: flex;
-      align-items: center;
-      padding: 0 1rem;
-      gap: 1.5rem;
-      flex-shrink: 0;
-    }
-    .stat {
-      display: flex;
-      align-items: baseline;
-      gap: 0.4rem;
-    }
-    .stat-label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; }
-    .stat-val { font-size: 13px; font-weight: 500; color: var(--green); }
-    .stat-val.amber { color: var(--amber); }
-    .stat-val.cyan { color: var(--cyan); }
-    .stat-val.red { color: var(--red); }
-    #stat-adapter, #stat-pair-adapters {
-      font-size: 10px;
-      font-weight: 400;
-      letter-spacing: 0.02em;
-    }
-    .provider-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      flex-wrap: wrap;
-      max-width: 420px;
-      padding: 2px;
-      border: 1px solid var(--border);
-      background: var(--bg3);
-    }
-    .provider-btn {
-      font-family: inherit;
-      font-size: 9px;
-      line-height: 1;
-      padding: 4px 8px;
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--dim);
-      cursor: pointer;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-    .provider-btn:hover:not(:disabled) {
-      color: var(--white);
-      border-color: var(--border);
-    }
-    .provider-btn.active {
-      color: var(--green);
-      border-color: var(--green-lo);
-      background: var(--green-dim);
-    }
-    .stat-divider { color: var(--border); }
-
-    /* ===== MAIN GRID ===== */
-    .main-grid {
-      display: grid;
-      grid-template-columns: 290px 1fr 340px;
-      height: calc(100vh - 74px);
-      overflow: hidden;
-    }
-    .col {
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid var(--border);
-      overflow: hidden;
-    }
-    .col:last-child { border-right: none; }
-
-    /* ===== PANEL ===== */
-    .panel { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
-    .panel + .panel { border-top: 1px solid var(--border); }
-    .panel-hdr {
-      height: 28px;
-      padding: 0 0.75rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      background: var(--bg3);
-      border-bottom: 1px solid var(--border2);
-      flex-shrink: 0;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: var(--dim);
-    }
-    .panel-hdr-title { color: var(--green-mid); }
-    .panel-hdr-badge {
-      margin-left: auto;
-      font-size: 9px;
-      color: var(--dim);
-    }
-    .panel-body {
-      flex: 1;
-      overflow-y: auto;
-      padding: 0.5rem;
-    }
-    .empty { color: var(--dim); font-size: 11px; text-align: center; padding: 1.5rem 0.5rem; }
-
-    /* ===== PROJECTS ===== */
-    .proj-card {
-      border: 1px solid var(--border);
-      margin-bottom: 4px;
-      background: var(--bg2);
-    }
-    .proj-card.disabled { opacity: 0.45; }
-    .proj-hdr {
-      display: flex;
-      align-items: center;
-      padding: 5px 7px;
-      gap: 6px;
-      cursor: pointer;
-      user-select: none;
-    }
-    .proj-hdr:hover { background: var(--green-dim); }
-    .proj-arrow { color: var(--dim); font-size: 9px; width: 10px; flex-shrink: 0; }
-    .proj-card.expanded .proj-arrow::before { content: "▼"; }
-    .proj-card:not(.expanded) .proj-arrow::before { content: "▶"; }
-    .proj-info { flex: 1; min-width: 0; }
-    .proj-name { color: var(--green); font-size: 12px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .proj-path { color: var(--dim); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .proj-counts { display: flex; gap: 3px; }
-    .cnt { font-size: 9px; padding: 1px 4px; font-weight: bold; }
-    .cnt-run { color: var(--green); border: 1px solid var(--green-lo); }
-    .cnt-que { color: var(--amber); border: 1px solid var(--warning-subtle); }
-    .cnt-pnd { color: var(--cyan); border: 1px solid var(--cyan-dim); }
-    .proj-toggle { flex-shrink: 0; }
-    .toggle { position: relative; display: inline-block; width: 30px; height: 16px; }
-    .toggle input { opacity: 0; width: 0; height: 0; }
-    .slider {
-      position: absolute; cursor: pointer;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background: var(--bg); border: 1px solid var(--dim);
-      border-radius: 16px; transition: 0.2s;
-    }
-    .slider:before {
-      position: absolute; content: "";
-      height: 10px; width: 10px;
-      left: 2px; bottom: 2px;
-      background: var(--dim); border-radius: 50%; transition: 0.2s;
-    }
-    input:checked + .slider { background: var(--green-dim); border-color: var(--green-lo); }
-    input:checked + .slider:before { background: var(--green); transform: translateX(14px); }
-    .proj-issues { border-top: 1px solid var(--border2); padding: 4px 7px; }
-    .issue-sec-label {
-      font-size: 9px; color: var(--dim); text-transform: uppercase;
-      letter-spacing: 0.1em; margin: 4px 0 2px;
-    }
-    .issue-row {
-      display: flex; align-items: center; gap: 4px;
-      padding: 2px 0; font-size: 11px;
-      border-bottom: 1px solid var(--border2);
-    }
-    .issue-row:last-child { border-bottom: none; }
-    .git-info { color: var(--dim); font-size: 9px; display: flex; gap: 6px; align-items: center; }
-    .git-branch-name { color: var(--cyan); }
-    .git-dirty { color: var(--amber); }
-    .git-sync { color: var(--dim); }
-    .pr-row { display: flex; align-items: center; gap: 4px; padding: 2px 0; font-size: 11px; border-bottom: 1px solid var(--border2); }
-    .pr-row:last-child { border-bottom: none; }
-    .pr-num { color: var(--cyan); font-size: 9px; min-width: 32px; }
-    .pr-branch { color: var(--green-lo); font-size: 9px; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pr-title { flex: 1; color: var(--white); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pr-age { color: var(--dim); font-size: 9px; flex-shrink: 0; }
-    .idot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
-    .idot-run { background: var(--green); }
-    .idot-que { background: var(--amber); }
-    .idot-pnd { background: var(--dim); }
-    .prio { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
-    .prio-1 { background: var(--red); }
-    .prio-2 { background: var(--amber); }
-    .prio-3 { background: var(--green-mid); }
-    .prio-4 { background: var(--dim); }
-    .issue-id { color: var(--cyan); font-size: 9px; min-width: 50px; }
-    .issue-title { flex: 1; color: var(--white); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .issue-row.issue-backlog { opacity: 0.45; }
-
-    /* ===== PROCESS ROW ===== */
-    .proc-row {
-      display: flex; align-items: center; gap: 6px;
-      padding: 4px 6px; border-bottom: 1px solid var(--border2);
-      font-size: 11px;
-    }
-    .proc-pid { color: var(--cyan); font-size: 10px; min-width: 42px; font-variant-numeric: tabular-nums; }
-    .proc-stage { color: var(--green); min-width: 56px; font-weight: bold; text-transform: uppercase; font-size: 10px; }
-    .proc-model { color: var(--dim); font-size: 9px; min-width: 56px; }
-    .proc-dur { color: var(--amber); font-size: 9px; min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
-    .proc-activity { font-size: 10px; min-width: 16px; text-align: center; }
-    .proc-kill {
-      font-family: inherit; font-size: 9px; padding: 1px 5px;
-      background: transparent; border: 1px solid var(--danger-subtle); color: var(--red);
-      cursor: pointer; margin-left: auto;
-    }
-    .proc-kill:hover { background: var(--danger-subtle); border-color: var(--red); }
-
-    /* ===== PIPELINE ===== */
-    .stage-block {
-      border-bottom: 1px solid var(--border2);
-    }
-    .stage-row {
-      display: flex; align-items: center; gap: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
-      cursor: pointer;
-      transition: background 0.12s;
-    }
-    .stage-row:hover { background: var(--bg3); }
-    .stage-row.has-details::after {
-      content: "›"; color: var(--dim); margin-left: 4px;
-      transition: transform 0.15s;
-    }
-    .stage-block.expanded .stage-row.has-details::after {
-      transform: rotate(90deg); display: inline-block;
-    }
-    .sdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: var(--dim); }
-    .sdot.start  { background: var(--amber); }
-    .sdot.complete { background: var(--green); }
-    .sdot.fail   { background: var(--red); }
-    .sname { color: var(--white); min-width: 70px; }
-    .srepo { color: var(--dim); font-size: 10px; min-width: 50px; max-width: 90px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .stask { color: var(--cyan); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .ssummary {
-      color: var(--white); font-size: 11px; flex: 2;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-      opacity: 0.85;
-    }
-    .selapsed { color: var(--amber); font-size: 9px; flex-shrink: 0; min-width: 36px; text-align: right; }
-    .smodel { color: var(--dim); font-size: 9px; flex-shrink: 0; min-width: 56px; text-align: right; }
-    .stokens { color: var(--amber); font-size: 9px; flex-shrink: 0; min-width: 80px; text-align: right; white-space: nowrap; }
-    .sstatus { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
-    /* Expanded details */
-    .stage-details {
-      display: none;
-      padding: 8px 14px 10px 22px;
-      background: rgba(0,0,0,0.18);
-      font-size: 11px;
-      color: var(--white);
-      border-top: 1px dashed var(--border2);
-    }
-    .stage-block.expanded .stage-details { display: block; }
-    .stage-details .sd-line { display: flex; gap: 8px; padding: 1px 0; align-items: baseline; }
-    .stage-details .sd-key { color: var(--dim); font-size: 10px; min-width: 70px; text-transform: uppercase; letter-spacing: 0.06em; }
-    .stage-details .sd-val { color: var(--white); font-size: 11px; flex: 1; word-break: break-all; }
-    .stage-details ul { margin: 2px 0 4px 14px; padding: 0; }
-    .stage-details li { font-family: var(--font-mono); font-size: 10px; color: var(--cyan); padding: 1px 0; }
-    .sd-decision-approve { color: var(--green); font-weight: 600; }
-    .sd-decision-revise  { color: var(--amber); font-weight: 600; }
-    .sd-decision-reject  { color: var(--red); font-weight: 600; }
-
-    /* ===== LOG TAB BAR ===== */
-    .log-tab-bar {
-      display: flex; gap: 0; border-bottom: 1px solid var(--border);
-      padding: 0 4px; overflow-x: auto; flex-shrink: 0;
-    }
-    .log-tab {
-      background: transparent; border: none; border-bottom: 2px solid transparent;
-      color: var(--dim); font-family: inherit; font-size: 10px;
-      padding: 4px 8px; cursor: pointer; white-space: nowrap;
-      text-transform: uppercase; letter-spacing: .05em;
-    }
-    .log-tab:hover { color: var(--green-mid); }
-    .log-tab.active { color: var(--green); border-bottom-color: var(--green); }
-
-    /* ===== LOG ===== */
-    .log-area { font-size: 11px; line-height: 1.5; padding: 4px 0; }
-    .log-line { padding: 3px 8px; display: flex; gap: 6px; align-items: flex-start; border-radius: 2px; margin: 1px 0; }
-    .log-line:hover { background: rgba(255,255,255,0.03); }
-    .log-line.log-success .ltext { color: var(--green); }
-    .log-line.log-fail .ltext { color: var(--red); }
-    .log-line.log-warn .ltext { color: var(--amber); }
-    .log-line.log-system { opacity: 0.6; }
-    .log-line.log-heading { border-top: 1px solid var(--border2); margin-top: 6px; padding-top: 8px; }
-    .ltime { color: var(--dim); font-size: 9px; flex-shrink: 0; min-width: 36px; opacity: 0.7; padding-top: 2px; font-variant-numeric: tabular-nums; }
-    .licon { flex-shrink: 0; min-width: 14px; text-align: center; font-size: 11px; padding-top: 1px; }
-    .ltag { color: var(--green-lo); min-width: 52px; flex-shrink: 0; padding-top: 1px; font-size: 10px; font-weight: 500; }
-    .lstage { color: var(--cyan); min-width: 60px; flex-shrink: 0; font-size: 10px; padding-top: 1px; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.8; }
-    .ltext { color: var(--fg-secondary); word-break: break-word; white-space: pre-wrap; flex: 1; min-width: 0; }
-    .ltext .lhighlight { color: var(--white); font-weight: 500; }
-    .ltext .lcost { color: var(--amber); font-size: 10px; }
-    .ltext .lfiles { color: var(--cyan); font-size: 10px; }
-    .log-line.log-spacer { height: 6px; padding: 0; margin: 0; min-height: 6px; }
-    .log-line.log-separator { opacity: 0.2; padding: 0 8px; margin: 4px 0; }
-    .log-line.log-separator .ltext { color: var(--dim); }
-    .log-line.log-code .ltext { font-family: var(--font-mono); color: var(--cyan); opacity: 0.8; font-size: 10px; }
-    .log-line.log-heading2 .ltext { color: var(--white); font-weight: 600; font-size: 12px; }
-    .log-line.log-tool .ltext { color: var(--dim); font-style: italic; font-size: 10px; }
-
-    /* ===== CHAT ===== */
-    .chat-col { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
-    .chat-messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 0.5rem;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    .chat-line { display: flex; gap: 6px; font-size: 12px; line-height: 1.5; }
-    .chat-prefix {
-      flex-shrink: 0;
-      font-weight: bold;
-    }
-    .chat-user .chat-prefix { color: var(--amber); }
-    .chat-agent .chat-prefix { color: var(--cyan); }
-    .chat-text { color: var(--white); white-space: pre-wrap; word-break: break-word; flex: 1; }
-    .chat-agent .chat-text { color: var(--white); }
-    .chat-user .chat-text { color: var(--amber); }
-    .chat-ts { color: var(--dim); font-size: 9px; flex-shrink: 0; align-self: flex-start; padding-top: 2px; }
-    .chat-thinking { animation: blink 1s infinite; color: var(--cyan); }
-    @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
-
-    .chat-input-area {
-      border-top: 1px solid var(--border);
-      padding: 6px 8px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      background: var(--bg3);
-      flex-shrink: 0;
-    }
-    .chat-prompt { color: var(--green); font-size: 12px; flex-shrink: 0; }
-    .chat-input {
-      flex: 1;
-      background: transparent;
-      border: none;
-      outline: none;
-      font-family: inherit;
-      font-size: 12px;
-      color: var(--green);
-      caret-color: var(--green);
-    }
-    .chat-input::placeholder { color: var(--dim); }
-    .chat-send {
-      font-family: inherit;
-      font-size: 10px;
-      padding: 2px 8px;
-      background: transparent;
-      border: 1px solid var(--green-lo);
-      color: var(--green-mid);
-      cursor: pointer;
-    }
-    .chat-send:hover { border-color: var(--green); color: var(--green); }
-    .chat-send:disabled { opacity: 0.3; cursor: default; }
-
-    /* ===== REPO PICKER ===== */
-    .repo-item {
-      display: flex; align-items: center; gap: 8px;
-      padding: 5px 12px; cursor: pointer; font-size: 11px;
-    }
-    .repo-item:hover { background: var(--green-dim); }
-    .repo-item-name { color: var(--green); font-weight: bold; }
-    .repo-item-path { color: var(--dim); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .repo-item-badge { font-size: 9px; padding: 1px 5px; border: 1px solid var(--green-lo); color: var(--green-mid); flex-shrink: 0; }
-
-    .scan-path-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11px; }
-    .scan-path-row .path { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .scan-path-badge { font-size: 9px; padding: 1px 5px; border: 1px solid var(--border); color: var(--dim); flex-shrink: 0; }
-    .scan-path-remove { background: transparent; border: none; color: var(--red); cursor: pointer; font-size: 12px; padding: 0 2px; flex-shrink: 0; }
-    .scan-path-remove:hover { color: var(--red); }
-
-    /* ===== TAB BAR (hidden on desktop) ===== */
-    .tab-bar { display: none; }
-
-    /* ===== MOBILE RESPONSIVE ===== */
-    @media (max-width: 768px) {
-      html, body { overflow: auto; }
-
-      /* Header */
-      header {
-        height: auto;
-        min-height: 38px;
-        flex-wrap: wrap;
-        padding: 6px 0.75rem;
-        gap: 4px;
-      }
-      .hdr-fullname { display: none; }
-      .hdr-right { width: 100%; justify-content: flex-end; }
-      .svc-group .btn { font-size: 0; padding: 4px 8px; min-height: 32px; }
-      .svc-group #svc-stop-btn::after { content: "\\23F8"; font-size: 12px; }
-      .svc-group #svc-restart-btn::after { content: "\\21BB"; font-size: 12px; }
-      #hb-btn { min-height: 32px; }
-
-      /* Stats bar */
-      .stats-bar {
-        height: auto;
-        min-height: 32px;
-        flex-wrap: wrap;
-        padding: 4px 0.75rem;
-        gap: 0.5rem;
-        font-size: 11px;
-      }
-      .stat-divider { display: none; }
-
-      /* Tab bar */
-      .tab-bar {
-        display: flex;
-        background: var(--bg2);
-        border-bottom: 1px solid var(--border);
-      }
-      .tab {
-        flex: 1;
-        font-family: inherit;
-        font-size: 11px;
-        letter-spacing: 0.1em;
-        padding: 10px 0;
-        min-height: 44px;
-        background: transparent;
-        border: none;
-        border-bottom: 2px solid transparent;
-        color: var(--dim);
-        cursor: pointer;
-        text-align: center;
-        transition: all 0.15s;
-      }
-      .tab.active {
-        color: var(--green);
-        border-bottom-color: var(--green);
-      }
-
-      /* Main grid → single column */
-      .main-grid {
-        display: flex;
-        flex-direction: column;
-        height: auto;
-        min-height: calc(100vh - 160px);
-        overflow: visible;
-      }
-      .col {
-        display: none;
-        border-right: none;
-        overflow: visible;
-        min-height: calc(100vh - 200px);
-      }
-      .col.mob-active {
-        display: flex;
-        flex: 1;
-      }
-
-      /* Repo picker → fullscreen */
-      #repo-picker > div {
-        width: 100% !important;
-        max-height: 90vh !important;
-        margin: 5vh 0 0;
-      }
-      .repo-item { min-height: 44px; }
-
-      /* Chat input → sticky bottom */
-      .chat-input-area {
-        position: sticky;
-        bottom: 0;
-        z-index: 10;
-        min-height: 44px;
-      }
-      .chat-input { min-height: 32px; font-size: 14px; }
-      .chat-send { min-height: 36px; padding: 4px 12px; }
-
-      /* Touch targets */
-      .btn { min-height: 36px; padding: 4px 10px; }
-      .proj-hdr { min-height: 44px; padding: 8px 7px; }
-      .toggle { width: 40px; height: 22px; }
-      .slider:before { height: 14px; width: 14px; left: 3px; bottom: 3px; }
-      input:checked + .slider:before { transform: translateX(18px); }
-    }
-  </style>
+  <link rel="stylesheet" href="/static/css/shell.css">
+  <link rel="stylesheet" href="/static/css/supervisor.css">
 </head>
-<body>
-  <!-- HEADER -->
-  <header>
-    <span class="hdr-logo">OpenSwarm</span>
-    <span class="hdr-fullname">: Vector-Encoded General Agent</span>
-    <span class="hdr-sep">::</span>
-    <span class="hdr-sub">SUPERVISOR</span>
-    <nav class="hdr-links" aria-label="Pages">
-      <a href="/issues" class="hdr-link">ISSUES</a>
-      <a href="/app" class="hdr-link">COCKPIT</a>
-      <a href="/chat" class="hdr-link">CHAT</a>
-      <a href="/orchestration" class="hdr-link">ORCHESTRATION</a>
-      <a href="/threads" class="hdr-link">THREADS</a>
+<body class="page-supervisor">
+  <header class="topbar">
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <span class="page-title">Supervisor</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/" aria-current="page">Supervisor</a>
+      <a href="/app">Cockpit</a>
+      <a href="/chat">Chat</a>
+      <a href="/orchestration">Orchestration</a>
+      <a href="/threads">Threads</a>
+      <a href="/warehouse">Warehouse</a>
+      <a href="/issues">Issues</a>
     </nav>
-    <div class="hdr-right">
-      <button class="btn" id="theme-toggle" type="button" aria-label="Switch theme" aria-pressed="false">◐ THEME</button>
-      <div class="svc-group">
-        <span class="svc-status" id="svc-status">...</span>
-        <span class="svc-sep">│</span>
-        <div class="provider-toggle" id="provider-toggle">
-          <!--PROVIDER_BUTTONS-->
-        </div>
-        <span class="svc-sep">│</span>
-        <button class="btn btn-danger" id="svc-stop-btn" onclick="svcAction('stop')">⏸ STOP</button>
-        <button class="btn" id="svc-restart-btn" onclick="svcAction('restart')">↻ RESTART</button>
-      </div>
-      <span id="sse-status">CONNECTING</span>
-      <button class="btn btn-active" id="hb-btn" onclick="triggerHeartbeat()">▶ HEARTBEAT</button>
-      <button class="btn" id="pr-proc-btn" onclick="triggerPRProcessor()">↻ PR REVIEW</button>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <span id="sse-status" role="status" aria-live="polite">Connecting</span>
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
     </div>
   </header>
 
-  <!-- STATS BAR -->
-  <div class="stats-bar">
-    <div class="stat"><span class="stat-label">RUN</span><span class="stat-val" id="stat-running">0</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">QUEUE</span><span class="stat-val amber" id="stat-queued">0</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">DONE</span><span class="stat-val" id="stat-completed">0</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">PACE</span><span class="stat-val" id="stat-pace">-</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">SSE</span><span class="stat-val cyan" id="stat-sse">-</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">CLI</span><span class="stat-val cyan" id="stat-adapter">-</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">PAIR</span><span class="stat-val cyan" id="stat-pair-adapters">-</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">UPTIME</span><span class="stat-val" id="stat-uptime">-</span></div>
-    <span class="stat-divider">│</span>
-    <div class="stat"><span class="stat-label">COST</span><span class="stat-val cyan" id="stat-cost">$0.00</span></div>
+  <!-- CONTROL BAR: daemon state, default provider, service actions -->
+  <div class="control-bar">
+    <div class="control-group" role="group" aria-label="Daemon service">
+      <span class="svc-status" id="svc-status">…</span>
+      <span class="control-label">Provider</span>
+      <div class="provider-toggle" id="provider-toggle" role="group" aria-label="Default provider">
+        <!--PROVIDER_BUTTONS-->
+      </div>
+      <button class="btn btn-danger btn-sm" id="svc-stop-btn" type="button" onclick="svcAction('stop')">⏸ Stop</button>
+      <button class="btn btn-secondary btn-sm" id="svc-restart-btn" type="button" onclick="svcAction('restart')">↻ Restart</button>
+    </div>
+    <div class="control-spacer"></div>
+    <div class="control-group" role="group" aria-label="Manual triggers">
+      <button class="btn btn-primary btn-sm" id="hb-btn" type="button" onclick="triggerHeartbeat()">▶ Heartbeat</button>
+      <button class="btn btn-secondary btn-sm" id="pr-proc-btn" type="button" onclick="triggerPRProcessor()">↻ PR review</button>
+    </div>
   </div>
 
-  <!-- TAB BAR (mobile only) -->
-  <div class="tab-bar">
-    <button class="tab active" data-tab="0">REPOS</button>
-    <button class="tab" data-tab="1">PIPELINE</button>
-    <button class="tab" data-tab="2">CHAT</button>
+  <!-- STATS STRIP -->
+  <div class="stats-bar" aria-label="Daemon statistics">
+    <div class="stat"><span class="stat-label">Running</span><span class="stat-val" id="stat-running">0</span></div>
+    <div class="stat"><span class="stat-label">Queued</span><span class="stat-val amber" id="stat-queued">0</span></div>
+    <div class="stat"><span class="stat-label">Done</span><span class="stat-val" id="stat-completed">0</span></div>
+    <div class="stat"><span class="stat-label">Pace</span><span class="stat-val" id="stat-pace">-</span></div>
+    <div class="stat"><span class="stat-label">SSE</span><span class="stat-val cyan" id="stat-sse">-</span></div>
+    <div class="stat"><span class="stat-label">CLI</span><span class="stat-val cyan" id="stat-adapter">-</span></div>
+    <div class="stat"><span class="stat-label">Pair</span><span class="stat-val cyan" id="stat-pair-adapters">-</span></div>
+    <div class="stat"><span class="stat-label">Uptime</span><span class="stat-val" id="stat-uptime">-</span></div>
+    <div class="stat"><span class="stat-label">Cost</span><span class="stat-val cyan" id="stat-cost">$0.00</span></div>
+  </div>
+
+  <!-- TAB BAR (narrow screens only) -->
+  <div class="tab-bar" role="tablist" aria-label="Sections">
+    <button class="tab active" type="button" data-tab="0">Repos</button>
+    <button class="tab" type="button" data-tab="1">Pipeline</button>
+    <button class="tab" type="button" data-tab="2">Chat</button>
   </div>
 
   <!-- MAIN GRID -->
@@ -674,156 +77,147 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="col">
       <div class="panel">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">REPOSITORIES</span>
+          <span class="panel-hdr-title">Repositories</span>
           <span class="panel-hdr-badge" id="proj-summary"></span>
-          <button class="btn" style="margin-left:auto;font-size:9px;padding:1px 6px" onclick="openRepoPicker()">+ ADD</button>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="openRepoPicker()">+ Add</button>
         </div>
         <div class="panel-body" id="project-list">
-          <div class="empty">loading...</div>
+          <div class="empty">Loading…</div>
         </div>
       </div>
       <div class="panel" id="monitor-panel">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">MONITORS & PROCESSES</span>
+          <span class="panel-hdr-title">Monitors &amp; processes</span>
           <span class="panel-hdr-badge" id="monitor-count"></span>
         </div>
         <div class="panel-body" id="monitor-list">
-          <div class="empty">no monitors or processes</div>
+          <div class="empty">No monitors or processes</div>
         </div>
       </div>
       <div class="panel" id="coordination-panel">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">AGENT COORDINATION</span>
+          <span class="panel-hdr-title">Agent coordination</span>
           <span class="panel-hdr-badge" id="coordination-count"></span>
         </div>
         <div class="panel-body" id="coordination-summary">
-          <div class="empty">no coordination events</div>
+          <div class="empty">No coordination events</div>
         </div>
-        <a href="/orchestration" style="display:block;text-align:center;padding:8px;color:var(--cyan);font-size:11px;text-decoration:none;border-top:1px solid var(--border2)">⚙ Open orchestration graph →</a>
+        <a href="/orchestration" class="panel-foot-link">Open orchestration graph →</a>
       </div>
     </div>
 
-    <!-- REPO PICKER OVERLAY -->
-    <div id="repo-picker" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);backdrop-filter:blur(4px);z-index:100;align-items:center;justify-content:center">
-      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);width:560px;max-height:75vh;display:flex;flex-direction:column;box-shadow:0 10px 32px rgba(0,0,0,0.5)">
-        <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-          <span style="color:var(--white);font-size:13px;font-weight:600;letter-spacing:.04em">Add repository</span>
-          <button onclick="closeRepoPicker()" style="margin-left:auto;background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:18px;line-height:1;padding:0 4px;border-radius:4px" onmouseover="this.style.color='var(--white)'" onmouseout="this.style.color='var(--dim)'">✕</button>
+    <!-- REPO PICKER DIALOG -->
+    <div id="repo-picker" class="overlay" role="dialog" aria-modal="true" aria-labelledby="repo-picker-title">
+      <div class="dialog">
+        <div class="dialog-head">
+          <h2 id="repo-picker-title">Add repository</h2>
+          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close" onclick="closeRepoPicker()">✕</button>
         </div>
-        <div style="padding:10px 18px;border-bottom:1px solid var(--border2)">
-          <input id="repo-search" type="text" placeholder="Filter repositories…"
-            style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);outline:none;font-family:inherit;font-size:13px;color:var(--white);padding:7px 10px;caret-color:var(--green)"
+        <div class="dialog-toolbar">
+          <input id="repo-search" class="input" type="text" placeholder="Filter repositories…" aria-label="Filter repositories"
             oninput="filterRepos(this.value)" onkeydown="if(event.key==='Escape')closeRepoPicker()">
         </div>
-        <div id="repo-picker-list" style="overflow-y:auto;flex:1;padding:6px 0"></div>
-        <div id="scan-paths-section" style="border-top:1px solid var(--border);padding:12px 18px;background:rgba(13,17,23,0.4)">
-          <div style="color:var(--dim);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Scan paths</div>
+        <div id="repo-picker-list" class="dialog-body"></div>
+        <div id="scan-paths-section" class="dialog-foot">
+          <div class="dialog-section-title">Scan paths</div>
           <div id="scan-paths-list"></div>
-          <div style="display:flex;gap:6px;margin-top:10px">
-            <button class="btn" style="flex:1;justify-content:center" onclick="openFolderBrowser()">📁 Browse for folder…</button>
-            <button class="btn" style="font-size:11px" onclick="toggleManualPathInput()" title="Type a path manually">⌨</button>
+          <div class="dialog-actions">
+            <button class="btn btn-secondary btn-sm grow" type="button" onclick="openFolderBrowser()">📁 Browse for folder…</button>
+            <button class="btn btn-secondary btn-sm btn-icon" type="button" onclick="toggleManualPathInput()" title="Type a path manually" aria-label="Type a path manually">⌨</button>
           </div>
-          <div id="manual-path-row" style="display:none;gap:6px;margin-top:6px">
-            <input id="scan-path-input" type="text" placeholder="/absolute/path/to/scan"
-              style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);outline:none;font-family:inherit;font-size:12px;color:var(--white);padding:5px 8px;caret-color:var(--green)"
+          <div id="manual-path-row" class="dialog-actions">
+            <input id="scan-path-input" class="input grow" type="text" placeholder="/absolute/path/to/scan" aria-label="Path to scan"
               onkeydown="if(event.key==='Enter')addScanPath()">
-            <button class="btn primary" style="font-size:11px" onclick="addScanPath()">Add</button>
+            <button class="btn btn-primary btn-sm" type="button" onclick="addScanPath()">Add</button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- FOLDER BROWSER OVERLAY (native-style picker, server-side fs) -->
-    <div id="folder-browser" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);backdrop-filter:blur(4px);z-index:110;align-items:center;justify-content:center">
-      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);width:620px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 10px 32px rgba(0,0,0,0.5)">
-        <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-          <span style="color:var(--white);font-size:13px;font-weight:600;letter-spacing:.04em">Choose folder to scan</span>
-          <button onclick="closeFolderBrowser()" style="margin-left:auto;background:transparent;border:none;color:var(--dim);cursor:pointer;font-size:18px;line-height:1;padding:0 4px;border-radius:4px" onmouseover="this.style.color='var(--white)'" onmouseout="this.style.color='var(--dim)'">✕</button>
+    <!-- FOLDER BROWSER DIALOG (native-style picker, server-side fs) -->
+    <div id="folder-browser" class="overlay" role="dialog" aria-modal="true" aria-labelledby="folder-browser-title">
+      <div class="dialog">
+        <div class="dialog-head">
+          <h2 id="folder-browser-title">Choose folder to scan</h2>
+          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close" onclick="closeFolderBrowser()">✕</button>
         </div>
-        <div style="padding:10px 18px;border-bottom:1px solid var(--border2);display:flex;align-items:center;gap:6px">
-          <button class="btn" id="fb-up" style="font-size:11px;padding:3px 10px" onclick="folderBrowserUp()" title="Parent directory">↑ Up</button>
-          <input id="fb-path" type="text" readonly
-            style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);outline:none;font-family:'SF Mono',monospace;font-size:12px;color:var(--white);padding:5px 10px">
+        <div class="dialog-toolbar">
+          <button class="btn btn-secondary btn-sm" id="fb-up" type="button" onclick="folderBrowserUp()" title="Parent directory">↑ Up</button>
+          <input id="fb-path" class="input mono" type="text" readonly aria-label="Current folder">
         </div>
-        <div id="fb-list" style="overflow-y:auto;flex:1;padding:4px 0"></div>
-        <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end">
-          <button class="btn" onclick="closeFolderBrowser()">Cancel</button>
-          <button class="btn primary" id="fb-select" onclick="folderBrowserSelect()">Select this folder</button>
+        <div id="fb-list" class="dialog-body"></div>
+        <div class="dialog-foot is-actions">
+          <button class="btn btn-secondary btn-sm" type="button" onclick="closeFolderBrowser()">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="fb-select" type="button" onclick="folderBrowserSelect()">Select this folder</button>
         </div>
       </div>
     </div>
 
     <!-- MIDDLE: PIPELINE + LOG -->
     <div class="col">
-      <div class="panel" style="flex: 0 0 38%">
+      <div class="panel panel-pipeline">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">PIPELINE</span>
+          <span class="panel-hdr-title">Pipeline</span>
           <span class="panel-hdr-badge" id="stage-count"></span>
         </div>
         <div class="panel-body" id="stage-list">
-          <div class="empty">no pipeline events</div>
+          <div class="empty">No pipeline events</div>
         </div>
       </div>
       <div class="panel">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">LIVE LOG</span>
+          <span class="panel-hdr-title">Live log</span>
           <span class="panel-hdr-badge" id="log-count"></span>
         </div>
-        <div class="log-tab-bar" id="log-tab-bar">
-          <button class="log-tab active" data-task="all" onclick="selectLogTab(null)">ALL</button>
+        <div class="log-tab-bar" id="log-tab-bar" role="tablist" aria-label="Log filter">
+          <button class="log-tab active" type="button" data-task="all" onclick="selectLogTab(null)">All</button>
         </div>
         <div class="panel-body log-area" id="log-list">
-          <div class="empty">no log output</div>
+          <div class="empty">No log output</div>
         </div>
       </div>
     </div>
 
-    <!-- RIGHT: CHAT -->
+    <!-- RIGHT: PR PROCESSOR, STUCK, CHAT -->
     <div class="col">
-      <!-- PR PROCESSOR -->
-      <div class="panel" style="flex: 0 0 auto;">
+      <div class="panel panel-auto">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">PR PROCESSOR</span>
+          <span class="panel-hdr-title">PR processor</span>
           <span class="panel-hdr-badge" id="pr-proc-badge"></span>
         </div>
-        <div class="panel-body" style="font-size: 11px; line-height: 1.5;">
-          <div id="pr-proc-body" style="color: var(--dim);">Loading...</div>
+        <div class="panel-body is-dense">
+          <div id="pr-proc-body" class="muted">Loading…</div>
         </div>
       </div>
 
-      <!-- STUCK/FAILED ISSUES -->
-      <div class="panel" style="flex: 0 0 auto; max-height: 200px;">
+      <div class="panel panel-stuck">
         <div class="panel-hdr">
-          <span class="panel-hdr-title">⚠ STUCK/FAILED</span>
+          <span class="panel-hdr-title">Stuck / failed</span>
           <span class="panel-hdr-badge" id="stuck-badge">0</span>
-          <button class="btn" style="margin-left: 0.5rem; font-size: 9px; padding: 1px 6px;" onclick="restartStuckIssues()" id="restart-stuck-btn">↻ RESTART ALL</button>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="restartStuckIssues()" id="restart-stuck-btn">↻ Restart all</button>
         </div>
-        <div class="panel-body" style="font-size: 10px; line-height: 1.4; overflow-y: auto;">
-          <div id="stuck-list" style="color: var(--dim);">Loading...</div>
+        <div class="panel-body is-dense">
+          <div id="stuck-list" class="muted">Loading…</div>
         </div>
       </div>
 
-      <!-- AGENT CHAT -->
-      <div class="panel-hdr">
-        <span class="panel-hdr-title">AGENT CHAT</span>
-        <span class="panel-hdr-badge" id="chat-status"></span>
-      </div>
-      <div class="chat-col">
-        <div class="chat-messages" id="chat-messages"></div>
-        <div class="chat-input-area">
-          <span class="chat-prompt">&gt;</span>
-          <input
-            class="chat-input" id="chat-input"
-            type="text" placeholder="message OpenSwarm..."
-            onkeydown="if(event.key==='Enter')sendChat()"
-          >
-          <button class="chat-send" id="chat-send" onclick="sendChat()">SEND</button>
+      <div class="panel">
+        <div class="panel-hdr">
+          <span class="panel-hdr-title">Agent chat</span>
+          <span class="panel-hdr-badge" id="chat-status"></span>
+        </div>
+        <div class="chat-col">
+          <div class="chat-messages" id="chat-messages" aria-live="polite" aria-label="Conversation with the supervisor agent"></div>
+          <div class="chat-input-area">
+            <input class="input chat-input" id="chat-input" type="text" placeholder="Message OpenSwarm…" aria-label="Message OpenSwarm"
+              autocomplete="off" onkeydown="if(event.key==='Enter'&&!event.isComposing&&event.keyCode!==229)sendChat()">
+            <button class="btn btn-primary btn-sm chat-send" id="chat-send" type="button" onclick="sendChat()">Send</button>
+          </div>
         </div>
       </div>
     </div>
 
   </div>
-
   <script>
     const MAX_LOG = 200;
     const MAX_STAGE = 100;
@@ -923,7 +317,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           break;
         case "heartbeat": {
           const btn = document.getElementById("hb-btn");
-          btn.disabled = false; btn.textContent = "▶ HEARTBEAT";
+          btn.disabled = false; btn.textContent = "▶ Heartbeat";
           break;
         }
         case "pr_processor_start":
@@ -1012,15 +406,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
         // Stuck issues (In Progress for >7 days)
         if (totalStuck > 0) {
-          html += '<div style="color: var(--amber); font-weight: bold; margin-bottom: 4px; font-size: 9px; text-transform: uppercase;">⏱ Stuck (' + totalStuck + ')</div>';
+          html += '<div style="color: var(--amber); font-weight: bold; margin-bottom: 4px; font-size:11px; text-transform: uppercase;">⏱ Stuck (' + totalStuck + ')</div>';
           data.stuckIssues.forEach(issue => {
             const priorityColor = issue.priority === 1 ? 'var(--red)' : issue.priority === 2 ? 'var(--amber)' : 'var(--dim)';
             html += '<div style="margin-bottom: 6px; padding: 4px; border-left: 2px solid ' + priorityColor + '; background: rgba(255, 170, 0, 0.05);">';
             const title = String(issue.title || '');
-            html += '<div style="color: var(--white); font-size: 10px; margin-bottom: 2px;">' + escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '') + '</div>';
-            html += '<div style="color: var(--amber); font-size: 9px;">' + escapeHtml(issue.reason) + '</div>';
+            html += '<div style="color: var(--white); font-size:12px; margin-bottom: 2px;">' + escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '') + '</div>';
+            html += '<div style="color: var(--amber); font-size:11px;">' + escapeHtml(issue.reason) + '</div>';
             if (issue.project?.name) {
-              html += '<div style="color: var(--dim); font-size: 9px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
+              html += '<div style="color: var(--dim); font-size:11px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
             }
             html += '</div>';
           });
@@ -1029,15 +423,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         // Failed issues (retry, failed, blocked labels)
         if (totalFailed > 0) {
           if (totalStuck > 0) html += '<div style="height: 8px;"></div>';
-          html += '<div style="color: var(--red); font-weight: bold; margin-bottom: 4px; font-size: 9px; text-transform: uppercase;">✖ Failed (' + totalFailed + ')</div>';
+          html += '<div style="color: var(--red); font-weight: bold; margin-bottom: 4px; font-size:11px; text-transform: uppercase;">✖ Failed (' + totalFailed + ')</div>';
           data.failedIssues.forEach(issue => {
             const priorityColor = issue.priority === 1 ? 'var(--red)' : issue.priority === 2 ? 'var(--amber)' : 'var(--dim)';
             html += '<div style="margin-bottom: 6px; padding: 4px; border-left: 2px solid ' + priorityColor + '; background: rgba(255, 51, 51, 0.05);">';
             const title = String(issue.title || '');
-            html += '<div style="color: var(--white); font-size: 10px; margin-bottom: 2px;">' + escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '') + '</div>';
-            html += '<div style="color: var(--red); font-size: 9px;">' + escapeHtml(issue.reason) + '</div>';
+            html += '<div style="color: var(--white); font-size:12px; margin-bottom: 2px;">' + escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '') + '</div>';
+            html += '<div style="color: var(--red); font-size:11px;">' + escapeHtml(issue.reason) + '</div>';
             if (issue.project?.name) {
-              html += '<div style="color: var(--dim); font-size: 9px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
+              html += '<div style="color: var(--dim); font-size:11px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
             }
             html += '</div>';
           });
@@ -1080,14 +474,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         html += '<div><span style="color: var(--dim);">Repos:</span> <span style="color: var(--text);">' + (data.repos?.length || 0) + '</span></div>';
 
         if (data.currentPR) {
-          html += '<div><span style="color: var(--amber);">Processing:</span> <span style="color: var(--text); font-family: monospace; font-size: 10px;">' + escapeHtml(data.currentPR) + '</span></div>';
+          html += '<div><span style="color: var(--amber);">Processing:</span> <span style="color: var(--text); font-family: var(--font-mono); font-size:12px;">' + escapeHtml(data.currentPR) + '</span></div>';
         }
 
         html += '<div><span style="color: var(--dim);">Last run:</span> <span style="color: var(--text);">' + formatTime(data.lastRun) + '</span></div>';
         html += '<div><span style="color: var(--dim);">Next run:</span> <span style="color: var(--text);">' + formatTime(data.nextRun) + '</span></div>';
 
         if (data.conflictResolverEnabled) {
-          html += '<div style="color: var(--green); font-size: 10px; margin-top: 4px;">✓ Conflict Resolver: ON</div>';
+          html += '<div style="color: var(--green); font-size:12px; margin-top: 4px;">✓ Conflict Resolver: ON</div>';
         }
 
         html += '</div>';
@@ -1098,11 +492,34 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       }
     }
 
+    // In-page consent for a destructive click (§3.2): the first press turns the
+    // button into the question, the second press answers it. There is no
+    // window.confirm in the Tauri WebView, and a dialog would hide what is
+    // about to happen anyway. Returns true when the caller should stop and
+    // wait for the second press.
+    function armButton(btn, question) {
+      if (!btn) return false;
+      if (btn.classList.contains("is-armed")) {
+        btn.classList.remove("is-armed", "btn-danger");
+        btn.textContent = btn.dataset.idleLabel || btn.textContent;
+        return false;
+      }
+      btn.dataset.idleLabel = btn.textContent;
+      btn.classList.add("is-armed", "btn-danger");
+      btn.textContent = question;
+      setTimeout(function() {
+        if (btn.classList.contains("is-armed") && !btn.disabled) {
+          btn.classList.remove("is-armed", "btn-danger");
+          btn.textContent = btn.dataset.idleLabel || btn.textContent;
+        }
+      }, 6000);
+      return true;
+    }
+
     async function svcAction(action) {
-      const label = action === "stop" ? "STOP" : "RESTART";
-      if (!confirm("Are you sure you want to " + label + " the service?")) return;
       const btnId = action === "stop" ? "svc-stop-btn" : "svc-restart-btn";
       const btn = document.getElementById(btnId);
+      if (armButton(btn, action === "stop" ? "Stop the daemon?" : "Restart the daemon?")) return;
       btn.disabled = true;
       try {
         await fetch("/api/service/" + action, { method: "POST" });
@@ -1117,13 +534,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     // ---- Heartbeat trigger ----
     async function triggerHeartbeat() {
       const btn = document.getElementById("hb-btn");
-      btn.disabled = true; btn.textContent = "⟳ RUNNING";
+      btn.disabled = true; btn.textContent = "⟳ Running…";
       addLogLine({ taskId: "system", stage: "manual", line: "Heartbeat triggered by user" });
       try {
         await fetch("/api/heartbeat", { method: "POST" });
       } catch(e) {
         addLogLine({ taskId: "system", stage: "error", line: "Heartbeat failed: " + e.message });
-        btn.disabled = false; btn.textContent = "▶ HEARTBEAT";
+        btn.disabled = false; btn.textContent = "▶ Heartbeat";
       }
     }
 
@@ -1149,7 +566,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     // ---- PR Processor trigger ----
     async function triggerPRProcessor() {
       const btn = document.getElementById("pr-proc-btn");
-      btn.disabled = true; btn.textContent = "⟳ PROCESSING";
+      btn.disabled = true; btn.textContent = "⟳ Processing…";
       addLogLine({ taskId: "system", stage: "manual", line: "PR Processor triggered by user" });
       try {
         const res = await fetch("/api/trigger-pr-processor", { method: "POST" });
@@ -1160,20 +577,31 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         addLogLine({ taskId: "system", stage: "manual", line: "PR Processor started successfully" });
         setTimeout(() => {
           btn.disabled = false;
-          btn.textContent = "↻ PR REVIEW";
+          btn.textContent = "↻ PR review";
         }, 3000);
       } catch(e) {
         addLogLine({ taskId: "system", stage: "error", line: "PR Processor failed: " + e.message });
-        btn.disabled = false; btn.textContent = "↻ PR REVIEW";
+        btn.disabled = false; btn.textContent = "↻ PR review";
       }
     }
 
     // ---- Restart stuck issues ----
     async function restartStuckIssues() {
-      if (!confirm("Move all stuck/failed issues to Todo?")) return;
       const btn = document.getElementById("restart-stuck-btn");
+      // Two-step, in the page: the first click says what the second will do.
+      if (!btn.classList.contains("is-armed")) {
+        btn.classList.add("is-armed", "btn-danger");
+        btn.textContent = "Move all to Todo?";
+        setTimeout(function() {
+          if (btn.classList.contains("is-armed") && !btn.disabled) {
+            btn.classList.remove("is-armed", "btn-danger"); btn.textContent = "↻ Restart all";
+          }
+        }, 6000);
+        return;
+      }
+      btn.classList.remove("is-armed", "btn-danger");
       btn.disabled = true;
-      btn.textContent = "⟳ PROCESSING...";
+      btn.textContent = "⟳ Processing…";
 
       try {
         const res = await fetch("/api/stuck-issues");
@@ -1209,7 +637,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       }
 
       btn.disabled = false;
-      btn.textContent = "↻ RESTART ALL";
+      btn.textContent = "↻ Restart all";
     }
 
     // ---- Project task updates ----
@@ -1332,7 +760,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             var s = kgData.summary;
             secs.push(
               "<div class=\\"issue-sec-label\\">code health</div>" +
-              "<div style=\\"padding:2px 8px;font-size:10px;color:var(--dim)\\">" +
+              "<div style=\\"padding:2px 8px;font-size:12px;color:var(--dim)\\">" +
                 "modules:" + s.totalModules + " tests:" + s.totalTestFiles +
                 " untested:" + s.untestedModules.length +
                 " churn:" + (s.avgChurnScore || 0).toFixed(2) +
@@ -1365,7 +793,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
               (p.pending.length ? "<span class=\\"cnt cnt-pnd\\">" + p.pending.length + "p</span>" : "") +
             "</div>" +
             "<div class=\\"proj-toggle\\" onclick=\\"event.stopPropagation()\\" style=\\"display:flex;align-items:center;gap:4px\\">" +
-              "<button class=\\"btn\\" style=\\"font-size:8px;padding:1px 4px;opacity:.5\\" data-path=\\"" + escapeAttr(p.path) + "\\" onclick=\\"handleUnpin(this)\\">✕</button>" +
+              "<button class=\\"btn\\" style=\\"font-size:11px;padding:1px 4px;opacity:.5\\" data-path=\\"" + escapeAttr(p.path) + "\\" onclick=\\"handleUnpin(this)\\">✕</button>" +
               "<label class=\\"toggle\\">" +
                 "<input type=\\"checkbox\\" " + checked + " data-path=\\"" + escapeAttr(p.path) + "\\" onchange=\\"handleToggleProject(this)\\">" +
                 "<span class=\\"slider\\"></span>" +
@@ -1955,7 +1383,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           "</div>"
         );
       }
-      list.innerHTML = rows.length > 0 ? rows.join("") : "<div style=\\"color:var(--dim);font-size:10px\\">no scan paths configured</div>";
+      list.innerHTML = rows.length > 0 ? rows.join("") : "<div style=\\"color:var(--dim);font-size:12px\\">no scan paths configured</div>";
     }
 
     async function addScanPath(explicitPath) {
@@ -2106,9 +1534,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         if (res.ok) { processesData = await res.json(); renderMonitorsAndProcesses(); }
       } catch {}
     }
-    async function stopProcess(id, isPipeline) {
-      var verb = isPipeline ? "Cancel task" : "Kill process";
-      if (!confirm(verb + " " + id + "?")) return;
+    async function stopProcess(btn, id, isPipeline) {
+      if (armButton(btn, isPipeline ? "Cancel " + id + "?" : "Kill " + id + "?")) return;
       try {
         await fetch("/api/processes/" + encodeURIComponent(id), { method: "DELETE" });
         processesData = processesData.filter(p => String(p.id) !== String(id));
@@ -2153,13 +1580,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           // a CANCEL button (aborts the pipeline + its in-flight adapter call).
           var lead = isPipeline ? escapeHtml(p.taskId || "task") : p.pid;
           var btn = isPipeline
-            ? '<button class="proc-kill" onclick="stopProcess(' + escapeJsArgAttr(String(p.id)) + ', true)">CANCEL</button>'
-            : '<button class="proc-kill" onclick="stopProcess(' + escapeJsArgAttr(String(p.id)) + ', false)">KILL</button>';
+            ? '<button class="proc-kill" onclick="stopProcess(this, ' + escapeJsArgAttr(String(p.id)) + ', true)">Cancel</button>'
+            : '<button class="proc-kill" onclick="stopProcess(this, ' + escapeJsArgAttr(String(p.id)) + ', false)">Kill</button>';
           return '<div class="proc-row">' +
             '<span class="proc-pid">' + lead + '</span>' +
             '<span class="proc-stage">' + escapeHtml(p.stage) + '</span>' +
             '<span class="proc-model">' + escapeHtml(modelStr) + '</span>' +
-            '<span style="color:var(--dim);font-size:9px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeAttr(p.projectPath || "") + '">' + escapeHtml(projName) + '</span>' +
+            '<span style="color:var(--dim);font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeAttr(p.projectPath || "") + '">' + escapeHtml(projName) + '</span>' +
             '<span class="proc-activity">' + act + '</span>' +
             '<span class="proc-dur">' + dur + '</span>' +
             btn +
@@ -2180,7 +1607,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
               '<span style="margin-left:auto;color:var(--dim)">' + elapsed + '</span>' +
             '</div>' +
             '<div style="color:var(--dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeAttr(m.lastOutput || "") + '">' + lastOut + '</div>' +
-            (m.issueId ? '<div style="color:var(--cyan-dim);font-size:10px;margin-top:1px">' + escapeHtml(m.issueId) + ' | checks: ' + m.checkCount + '</div>' : '') +
+            (m.issueId ? '<div style="color:var(--cyan-dim);font-size:12px;margin-top:1px">' + escapeHtml(m.issueId) + ' | checks: ' + m.checkCount + '</div>' : '') +
           '</div>';
         }).join("");
       }
