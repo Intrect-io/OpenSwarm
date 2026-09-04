@@ -1061,7 +1061,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       taskIds.sort((a, b) => (taskStartMap.get(b) || 0) - (taskStartMap.get(a) || 0));
 
       let html = '<button class="log-tab' + (selectedLogTaskId === null ? ' active' : '')
-        + '" data-task="all" onclick="selectLogTab(null)">ALL</button>';
+        + '" data-task="all" onclick="selectLogTab(null)">All</button>';
 
       for (const tid of taskIds) {
         const info = taskTitleMap.get(tid);
