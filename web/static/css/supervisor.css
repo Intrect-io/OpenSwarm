@@ -508,7 +508,7 @@ body.page-supervisor {
   body.page-supervisor { height: auto; overflow: auto; }
   .topbar-nav, .topbar .page-title { display: none; }
   .control-group { min-width: 0; }
-  .provider-toggle { flex-wrap: wrap; max-width: 100%; }
+  .provider-toggle { flex-wrap: wrap; min-width: 0; max-width: 100%; }
   .stats-bar { white-space: normal; flex-wrap: wrap; gap: var(--space-3); }
 
   .tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--bg-surface); }
