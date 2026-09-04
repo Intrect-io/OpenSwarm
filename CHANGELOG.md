@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.22.1 — 2026-09-04
+
+### Changed
+
+- **Supervisor dashboard (`/`) redesigned on the shared tokens and shell (AGT-4206).** The header is three rows that no longer wrap — topbar with the shared navigation, SSE badge and theme toggle; a control bar with the daemon state, a provider segmented control, Stop / Restart and Heartbeat / PR review; a stats strip with tabular numbers — and the three columns are card panels with sentence-case titles and 12 px minimum body type. The 598-line inline stylesheet moved to `web/static/css/supervisor.css`; the repository picker and folder browser dialogs use classes instead of inline styles.
+- **No `window.confirm` on the supervisor** (the Tauri WebView has none): stopping or restarting the daemon, killing or cancelling a process, and moving stuck issues to Todo now arm the button with the question for six seconds; the second press acts. The chat box ignores Enter during an IME composition.
+
 ## 0.22.0 — 2026-09-04
 
 ### Changed
