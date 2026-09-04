@@ -188,12 +188,16 @@ describe('server-rendered legacy pages (AGT-4201)', () => {
 
   it('alias every legacy variable name to a token that exists', () => {
     const shared = definedTokens();
+    // A page's own `:root` (inline, or in the page stylesheet it links under
+    // web/static/css) may declare legacy names (`--green`, `--dim`) as
+    // indirections; what the page references must be declared somewhere.
+    const declaredInCss = new Set(css.flatMap((file) =>
+      [...readFileSync(file, 'utf8').matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1])));
     for (const file of pages) {
       const source = readFileSync(file, 'utf8');
-      // The page's own `:root` may declare legacy names (`--green`, `--dim`)
-      // as indirections; what they point at must exist in tokens.css.
       const local = new Set([...source.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
-      const missing = referencedTokens(source).filter((name) => !shared.has(name) && !local.has(name));
+      const missing = referencedTokens(source)
+        .filter((name) => !shared.has(name) && !local.has(name) && !declaredInCss.has(name));
       expect(missing, relative(join(__dirname, '..', '..'), file)).toEqual([]);
     }
   });
