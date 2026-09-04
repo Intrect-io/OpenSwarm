@@ -3,42 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenSwarm Warehouse</title>
+  <title>OpenSwarm · Warehouse</title>
+  <script src="/static/js/themeBoot.js"></script>
   <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
   <link rel="stylesheet" href="/static/css/warehouse.css" />
 </head>
-<body>
+<body class="page-warehouse">
   <header class="topbar">
     <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <div>
-      <h1>Warehouse</h1>
-      <p>에이전트가 읽는 로컬 전용 자산 창고</p>
+    <span class="page-title">Warehouse</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/app">Cockpit</a>
+      <a href="/chat">Chat</a>
+      <a href="/orchestration">Orchestration</a>
+      <a href="/threads">Threads</a>
+      <a href="/warehouse" aria-current="page">Warehouse</a>
+      <a href="/">Supervisor</a>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="테마 전환" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
     </div>
   </header>
 
-  <main>
+  <main class="warehouse-main">
     <section class="browser" aria-label="Warehouse files">
       <div class="toolbar">
-        <button id="up" type="button">← 상위</button>
+        <button id="up" type="button" class="btn btn-secondary btn-sm">← 상위</button>
         <nav id="breadcrumbs" class="breadcrumbs" aria-label="Current path"></nav>
-        <button id="refresh" type="button">새로고침</button>
+        <button id="refresh" type="button" class="btn btn-secondary btn-sm">새로고침</button>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>이름</th><th>종류</th><th>크기</th><th>수정 시각</th><th></th></tr></thead>
+          <thead><tr><th>이름</th><th>종류</th><th>크기</th><th>수정 시각</th><th><span class="sr-only">동작</span></th></tr></thead>
           <tbody id="entries"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
         </table>
       </div>
     </section>
 
-    <aside class="upload">
+    <aside class="upload" aria-label="Upload">
       <section class="access" aria-labelledby="access-title">
         <h2 id="access-title">원격 접근</h2>
         <p>로컬이 아닌 브라우저에서는 배포 시 설정한 웹 토큰이 필요합니다.</p>
         <label for="web-token">OpenSwarm 웹 토큰</label>
         <div class="token-row">
-          <input id="web-token" type="password" autocomplete="off" spellcheck="false" />
-          <button id="save-token" type="button">적용</button>
+          <input id="web-token" class="input" type="password" autocomplete="off" spellcheck="false" />
+          <button id="save-token" type="button" class="btn btn-secondary">적용</button>
         </div>
         <button id="clear-token" class="text-button" type="button">이 탭의 토큰 지우기</button>
       </section>
@@ -50,13 +63,13 @@
         <input id="file" type="file" />
       </label>
       <label class="overwrite"><input id="overwrite" type="checkbox" /> 같은 이름이면 덮어쓰기</label>
-      <button id="upload" class="primary" type="button" disabled>업로드</button>
-      <p id="status" class="status" role="status"></p>
+      <button id="upload" class="btn btn-primary" type="button" disabled>업로드</button>
+      <p id="status" class="status-line status" role="status" aria-live="polite"></p>
       <div class="rules">
         <strong>안전 경계</strong>
         <span>에이전트 경로 <code>/warehouse</code>는 읽기 전용입니다.</span>
         <span>삭제 기능은 제공하지 않습니다.</span>
-        <span>기존 파일은 체크박스를 켜야 덮어씁니다.</span>
+        <span>기존 파일은 체크박스를 켜고 한 번 더 확인해야 덮어씁니다.</span>
       </div>
     </aside>
   </main>

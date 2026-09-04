@@ -3,119 +3,106 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenSwarm Repository Threads</title>
-  <style>
-    :root { --bg:#0b0e14; --panel:#11151d; --border:#252c3a; --text:#e6e9ef; --dim:#778094; --cyan:#3b9eff; --green:#4cc38a; --red:#e5484d; --amber:#e8b339; }
-    * { box-sizing: border-box; }
-    body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 "SF Mono",ui-monospace,Menlo,monospace; min-height:100vh; }
-    header { display:flex; gap:16px; align-items:center; padding:12px 18px; border-bottom:1px solid var(--border); }
-    h1 { margin:0; font-size:14px; letter-spacing:1px; }
-    a { color:var(--dim); text-decoration:none; font-size:11px; }
-    a:hover { color:var(--cyan); }
-    #repo { margin-left:auto; min-width:280px; }
-    select,input,textarea,button { color:var(--text); background:#0d1117; border:1px solid var(--border); border-radius:5px; font:inherit; }
-    select,input,textarea { padding:7px 8px; }
-    button { padding:7px 11px; cursor:pointer; }
-    button.primary { color:#081018; background:var(--cyan); border-color:var(--cyan); font-weight:700; }
-    button.danger { color:var(--red); }
-    button:disabled { cursor:default; opacity:.45; }
-    #status { min-height:27px; padding:5px 18px; color:var(--dim); border-bottom:1px solid var(--border); }
-    #status.error { color:var(--red); }
-    main { display:grid; grid-template-columns:minmax(280px,36%) 1fr; height:calc(100vh - 81px); }
-    aside { border-right:1px solid var(--border); min-width:0; display:flex; flex-direction:column; }
-    .toolbar { display:flex; gap:7px; padding:10px; border-bottom:1px solid var(--border); }
-    .toolbar select { flex:1; }
-    #threads { overflow:auto; flex:1; }
-    .thread-card { width:100%; text-align:left; border:0; border-bottom:1px solid var(--border); border-radius:0; padding:11px 12px; background:transparent; }
-    .thread-card:hover,.thread-card.selected { background:#141a24; }
-    .thread-card.selected { box-shadow:inset 3px 0 var(--cyan); }
-    .subject { display:flex; gap:7px; align-items:center; font-weight:700; }
-    .badge { color:var(--dim); border:1px solid var(--border); border-radius:3px; padding:0 4px; font-size:9px; }
-    .badge.open { color:var(--green); }
-    .badge.resolved { color:var(--dim); }
-    .meta { margin-top:4px; color:var(--dim); font-size:10px; overflow-wrap:anywhere; }
-    article { min-width:0; display:flex; flex-direction:column; }
-    #empty { color:var(--dim); padding:24px; }
-    #detail { display:none; min-height:0; flex:1; flex-direction:column; }
-    #detail.visible { display:flex; }
-    .detail-head { padding:14px 16px; border-bottom:1px solid var(--border); }
-    .detail-head h2 { margin:0 0 5px; font-size:16px; }
-    .detail-actions { display:flex; gap:7px; margin-top:9px; }
-    #messages { flex:1; overflow:auto; padding:10px 16px; }
-    .message { padding:9px 10px; margin:7px 0; border:1px solid var(--border); border-radius:6px; background:var(--panel); }
-    .message-head { color:var(--dim); font-size:10px; }
-    .message-body { margin-top:6px; color:#d9e2ef; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.65; }
-    .message-body .inline-code { color:#77d9ff; background:#0a1019; border:1px solid #27364b; border-radius:3px; padding:1px 4px; }
-    .message-body pre { margin:8px 0 2px; padding:10px 12px; overflow:auto; color:#dce7f5; background:#080c12; border:1px solid #26364c; border-radius:5px; line-height:1.55; white-space:pre; }
-    .message-body code { font:12px/1.55 "SF Mono",ui-monospace,Menlo,monospace; }
-    .message-body .token-comment { color:#7f8da3; font-style:italic; }
-    .message-body .token-keyword { color:#c792ea; }
-    .message-body .token-string { color:#c3e88d; }
-    .message-body .token-number { color:#f6c177; }
-    .message-body .token-property { color:#82aaff; }
-    .message-body .token-punctuation { color:#aab7c8; }
-    form { display:grid; gap:8px; }
-    #reply-form { grid-template-columns:1fr auto; padding:12px 16px; border-top:1px solid var(--border); }
-    #reply-form textarea { min-height:54px; resize:vertical; }
-    #new-thread { padding:12px; border-top:1px solid var(--border); }
-    #new-thread textarea { min-height:62px; resize:vertical; }
-    .two { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-    .empty { color:var(--dim); padding:16px; }
-    @media (max-width:800px) { header { flex-wrap:wrap; } #repo { margin-left:0; width:100%; } main { grid-template-columns:1fr; height:auto; } aside { border-right:0; max-height:50vh; } article { min-height:50vh; } }
-  </style>
+  <title>OpenSwarm · Repository threads</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
+  <link rel="stylesheet" href="/static/css/threads.css" />
 </head>
-<body>
-  <header>
-    <h1>▦ REPOSITORY THREADS</h1>
-    <a href="/orchestration">orchestration</a>
-    <a href="/chat">chat</a>
-    <select id="repo" aria-label="Repository"><option value="">Select repository…</option></select>
+<body class="page-threads">
+  <header class="topbar">
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <span class="page-title">Repository threads</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/app">Cockpit</a>
+      <a href="/chat">Chat</a>
+      <a href="/orchestration">Orchestration</a>
+      <a href="/threads" aria-current="page">Threads</a>
+      <a href="/warehouse">Warehouse</a>
+      <a href="/">Supervisor</a>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <select id="repo" class="select" aria-label="Repository"><option value="">Select repository…</option></select>
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
+    </div>
   </header>
-  <div id="status" role="status" aria-live="polite">Loading durable threads across all repositories…</div>
-  <main>
-    <aside>
+
+  <div id="status" class="status-line threads-status" role="status" aria-live="polite">Loading durable threads across all repositories…</div>
+
+  <main class="threads-main">
+    <aside class="threads-list" aria-label="Threads">
       <div class="toolbar">
-        <select id="thread-status" aria-label="Thread status">
-          <option value="open">open threads</option>
-          <option value="resolved">resolved threads</option>
-          <option value="">all threads</option>
+        <select id="thread-status" class="select" aria-label="Thread status">
+          <option value="open">Open threads</option>
+          <option value="resolved">Resolved threads</option>
+          <option value="">All threads</option>
         </select>
-        <button id="refresh" type="button">refresh</button>
+        <button id="refresh" type="button" class="btn btn-secondary">Refresh</button>
       </div>
       <div id="threads"><div class="empty">Loading all repository threads…</div></div>
-      <form id="new-thread">
-        <strong>NEW THREAD</strong>
-        <input name="taskId" required placeholder="Related task ID (for example AGT-4131)" />
-        <input name="subject" required maxlength="240" placeholder="Subject" />
-        <textarea name="body" maxlength="4000" placeholder="Opening evidence or question"></textarea>
+      <form id="new-thread" class="new-thread" aria-labelledby="new-thread-title">
+        <h2 id="new-thread-title">New thread</h2>
+        <label class="field">
+          <span>Related task</span>
+          <input class="input" name="taskId" required placeholder="AGT-4131" />
+        </label>
+        <label class="field">
+          <span>Subject</span>
+          <input class="input" name="subject" required maxlength="240" />
+        </label>
+        <label class="field">
+          <span>Opening evidence or question</span>
+          <textarea class="textarea" name="body" maxlength="4000" rows="3"></textarea>
+        </label>
         <div class="two">
-          <input name="relatedTaskIds" placeholder="More task IDs, comma-separated" />
-          <input name="relatedFiles" placeholder="Repository files, comma-separated" />
+          <label class="field">
+            <span>More task IDs</span>
+            <input class="input" name="relatedTaskIds" placeholder="Comma-separated" />
+          </label>
+          <label class="field">
+            <span>Repository files</span>
+            <input class="input" name="relatedFiles" placeholder="Comma-separated" />
+          </label>
         </div>
-        <button class="primary" type="submit">open thread</button>
+        <button class="btn btn-primary" type="submit">Open thread</button>
       </form>
     </aside>
-    <article>
-      <div id="empty">Select a thread to read its durable history.</div>
+
+    <article class="threads-detail" aria-label="Thread">
+      <div id="empty" class="empty">Select a thread to read its durable history.</div>
       <section id="detail">
         <div class="detail-head">
           <h2 id="detail-subject"></h2>
           <div id="detail-meta" class="meta"></div>
           <div class="detail-actions">
-            <button id="follow" type="button"></button>
-            <button id="resolve" class="danger" type="button">resolve at this version</button>
+            <button id="follow" type="button" class="btn btn-secondary"></button>
+            <button id="resolve" type="button" class="btn btn-danger">Resolve thread</button>
+          </div>
+          <div id="resolve-confirm" class="confirm-card" role="alertdialog" aria-labelledby="resolve-confirm-text" hidden>
+            <p id="resolve-confirm-text" class="confirm-text"></p>
+            <div class="confirm-actions">
+              <button id="resolve-cancel" type="button" class="btn btn-secondary">Keep open</button>
+              <button id="resolve-confirm-btn" type="button" class="btn btn-danger">Resolve</button>
+            </div>
           </div>
         </div>
         <div id="messages"></div>
-        <form id="reply-form">
-          <textarea name="body" required maxlength="4000" placeholder="Reply with a decision, question, or evidence"></textarea>
-          <button class="primary" type="submit">reply</button>
+        <form id="reply-form" class="reply-form">
+          <label class="sr-only" for="reply-body">Reply</label>
+          <textarea id="reply-body" class="textarea" name="body" required maxlength="4000" rows="2" placeholder="Reply with a decision, question, or evidence"></textarea>
+          <button class="btn btn-primary" type="submit">Reply</button>
         </form>
       </section>
     </article>
   </main>
+
   <script type="module">
     import { startThreadBoard } from '/static/js/threadBoard.mjs';
+    import { installThemeToggle } from '/static/js/theme.mjs';
+    installThemeToggle(document, document.getElementById('theme-toggle'));
     startThreadBoard(document);
   </script>
 </body>

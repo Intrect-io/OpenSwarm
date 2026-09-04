@@ -10,26 +10,30 @@ export const ISSUE_BOARD_HTML = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenSwarm :: Issues</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css">
   <style>
+    /* Colour comes from /static/css/tokens.css (AGT-4201); the legacy names
+       below are indirections so this board follows the shared palette and
+       the light/dark switch. No colour literal lives in this file. */
     :root {
-      --bg:        #0a0c0a;
-      --bg2:       #0d100d;
-      --bg3:       #111411;
-      --green:     #00ff41;
-      --green-dim: #003a00;
-      --green-mid: #00aa00;
-      --green-lo:  #005500;
-      --cyan:      #00ccdd;
-      --cyan-dim:  #003344;
-      --amber:     #ffaa00;
-      --red:       #ff3333;
-      --white:     #ccddcc;
-      --dim:       #445544;
-      --border:    #1a2a1a;
+      --bg:        var(--bg-app);
+      --bg2:       var(--bg-surface);
+      --bg3:       var(--bg-elevated);
+      --green:     var(--accent);
+      --green-dim: var(--accent-subtle);
+      --green-mid: var(--accent);
+      --green-lo:  var(--border);
+      --cyan:      var(--info);
+      --cyan-dim:  var(--accent-subtle);
+      --amber:     var(--warning);
+      --red:       var(--danger);
+      --white:     var(--fg-primary);
+      --dim:       var(--fg-muted);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
+      font-family: var(--font-sans);
       background: var(--bg);
       color: var(--white);
       font-size: 13px;
@@ -248,6 +252,7 @@ export const ISSUE_BOARD_HTML = `<!DOCTYPE html>
     <span class="hdr-sub">ISSUE TRACKER</span>
     <div class="hdr-right">
       <span id="stats-summary" style="color:var(--dim);font-size:11px"></span>
+      <button class="btn" id="theme-toggle" type="button" aria-label="Switch theme" aria-pressed="false">◐ THEME</button>
     </div>
   </header>
 
@@ -701,6 +706,10 @@ export const ISSUE_BOARD_HTML = `<!DOCTYPE html>
     loadIssues();
     // 30초 간격 자동 새로고침
     setInterval(loadIssues, 30000);
+  </script>
+  <script type="module">
+    import { installThemeToggle } from '/static/js/theme.mjs';
+    installThemeToggle(document, document.getElementById('theme-toggle'));
   </script>
 </body>
 </html>`;

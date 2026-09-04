@@ -15,6 +15,9 @@ import { SessionPanel } from './sessionPanel.mjs';
 import { DiffPanel } from './diffPanel.mjs';
 import { Nav } from './nav.mjs';
 import { resolveSelection } from './sessionSelection.mjs';
+import { installThemeToggle } from './theme.mjs';
+
+installThemeToggle(document, document.getElementById('theme-toggle'));
 
 const statusDot = document.querySelector('#daemon-status .dot');
 const statusLabel = document.querySelector('#daemon-status .label');

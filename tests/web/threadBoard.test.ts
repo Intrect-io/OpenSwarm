@@ -161,4 +161,48 @@ describe('repository thread board', () => {
     await vi.waitFor(() => expect(calls.some((call) => call.path === '/api/coordination/threads' && call.method === 'POST')).toBe(true));
     view.stop();
   });
+
+  it('asks in the page before resolving when the shell offers a confirm card (AGT-4201 §3.2)', async () => {
+    const doc = shell();
+    doc.getElementById('detail')!.insertAdjacentHTML('beforeend', `
+      <div id="resolve-confirm" hidden>
+        <p id="resolve-confirm-text"></p>
+        <button id="resolve-cancel" type="button"></button>
+        <button id="resolve-confirm-btn" type="button"></button>
+      </div>`);
+    const thread = {
+      id: 'thread-1', repository: '/repo', subject: 'Cut the release', status: 'open', version: 7,
+      relatedTaskIds: [], relatedFiles: [], messageCount: 0, participantCount: 0, updatedAt: 1,
+    };
+    const resolves: unknown[] = [];
+    const fetchImpl = vi.fn(async (path: string, options: Record<string, any> = {}) => {
+      if (path === '/api/work/projects') return response([]);
+      if (path.startsWith('/api/coordination/threads?')) return response({ items: [thread] });
+      if (path.startsWith('/api/coordination/threads/thread-1?')) return response({ thread, participants: [], messages: { items: [] } });
+      if (path.endsWith('/resolve')) { resolves.push(JSON.parse(options.body)); return response({ thread: { ...thread, status: 'resolved' } }); }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const view = startThreadBoard(doc, { fetchImpl, pollMs: 0 });
+    await vi.waitFor(() => expect(doc.querySelector('[data-thread-id="thread-1"]')).not.toBeNull());
+    (doc.querySelector('[data-thread-id="thread-1"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(doc.getElementById('detail-subject')!.textContent).toBe('Cut the release'));
+
+    const card = doc.getElementById('resolve-confirm') as HTMLDivElement;
+    (doc.getElementById('resolve') as HTMLButtonElement).click();
+    expect(card.hidden).toBe(false);
+    expect(doc.getElementById('resolve-confirm-text')!.textContent).toContain('“Cut the release”');
+    expect(doc.getElementById('resolve-confirm-text')!.textContent).toContain('version 7');
+    expect(resolves).toHaveLength(0);
+
+    (doc.getElementById('resolve-cancel') as HTMLButtonElement).click();
+    expect(card.hidden).toBe(true);
+    expect(resolves).toHaveLength(0);
+
+    (doc.getElementById('resolve') as HTMLButtonElement).click();
+    (doc.getElementById('resolve-confirm-btn') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(resolves).toHaveLength(1));
+    expect(resolves[0]).toMatchObject({ expectedVersion: 7 });
+    expect(card.hidden).toBe(true);
+    view.stop();
+  });
 });

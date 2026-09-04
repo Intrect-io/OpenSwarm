@@ -3,155 +3,75 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenSwarm Orchestration</title>
-  <style>
-    :root {
-      --bg: #0b0e14; --panel: #11151d; --border: #1f2633; --white: #e6e9ef;
-      --dim: #6c7086; --cyan: #3b9eff; --green: #4cc38a; --amber: #e8b339;
-      --red: #e5484d; --purple: #9d7cd8;
-    }
-    * { box-sizing: border-box; margin: 0; }
-    body { background: var(--bg); color: var(--white); font: 13px/1.45 "SF Mono", ui-monospace, Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-    header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
-    header h1 { font-size: 14px; letter-spacing: 1px; }
-    header a { color: var(--dim); text-decoration: none; font-size: 11px; }
-    header a:hover { color: var(--cyan); }
-    #stats { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
-    .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 11px; color: var(--dim); }
-    .stat b { color: var(--white); font-size: 13px; margin-right: 4px; }
-    .stat.warn b { color: var(--amber); }
-    main { flex: 1; display: flex; min-height: 0; }
-    #graph-wrap { flex: 1; position: relative; min-width: 0; }
-    #graph { width: 100%; height: 100%; display: block; }
-    #legend { position: absolute; left: 12px; bottom: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 10px; color: var(--dim); }
-    #legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
-    #legend .swatch { width: 10px; height: 10px; border-radius: 50%; }
-    #legend .line { width: 14px; height: 2px; }
-    aside { width: 400px; min-width: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
-    aside > div { min-width: 0; }
-    /* Thin, self-coloured scrollbars: the default chrome is heavy against the
-       dark panel and reads as a defect rather than an affordance. */
-    #feed, .transcript { scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
-    #feed::-webkit-scrollbar, .transcript::-webkit-scrollbar { width: 6px; height: 0; }
-    #feed::-webkit-scrollbar-thumb, .transcript::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
-    #feed::-webkit-scrollbar-track, .transcript::-webkit-scrollbar-track { background: transparent; }
-    aside h2 { font-size: 11px; letter-spacing: 1px; color: var(--dim); padding: 10px 12px 6px; }
-    #detail { border-bottom: 1px solid var(--border); padding: 0 12px 10px; font-size: 12px; min-height: 84px; }
-    #detail .name { color: var(--cyan); font-weight: 700; }
-    #detail .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
-    /* Long opaque values (digests, ids) must never widen the panel: the feed
-       scrolls vertically only, and its rows are free to break anywhere. */
-    #feed { flex: 1 1 40%; overflow-y: auto; overflow-x: hidden; padding: 0 6px 10px; min-height: 120px; }
-    .ev { padding: 6px; border-bottom: 1px solid var(--border); cursor: pointer; border-left: 2px solid transparent; }
-    .ev:hover { background: #10141c; }
-    .ev.focused { border-left-color: var(--white); background: #131926; }
-    .ev-head { display: flex; gap: 6px; align-items: center; font-size: 10px; }
-    .ev .status { font-weight: 700; }
-    .task-chip { color: var(--cyan); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 9px; }
-    .clock { color: var(--dim); margin-left: auto; font-variant-numeric: tabular-nums; }
-    .ev-line { font-size: 11px; margin-top: 3px; color: #b6bdcc; overflow-wrap: anywhere; }
-    .ev-line .who { font-weight: 700; color: var(--white); }
-    .ev-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; min-width: 0; }
-    .chip { font-size: 9px; color: var(--dim); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px;
-            max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .chip b { color: #7d879b; font-weight: 600; margin-right: 3px; }
-    #thread { flex: 1 1 60%; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
-    .thread-head { display: flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 10px; border-bottom: 1px solid var(--border); }
-    .thread-head .participants { color: var(--dim); margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .await-chip { color: #0d1117; background: var(--amber, #e8b339); border-radius: 3px; padding: 0 4px; font-weight: 700; }
-    .transcript { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 12px; }
-    .msg { background: #10141c; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 6px 0; }
-    .msg.from-operator { border-left: 2px solid var(--red); background: #161019; }
-    .msg-head { display: flex; gap: 6px; align-items: baseline; font-size: 10px; }
-    .msg .who { font-weight: 700; }
-    .msg .to { color: var(--dim); }
-    .role-tag { color: var(--dim); font-size: 9px; border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; }
-    .msg-text { font-size: 11px; margin-top: 3px; color: var(--white); white-space: pre-wrap; overflow-wrap: anywhere; }
-    .composer { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); }
-    .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 5px 8px; font: inherit; font-size: 11px; }
-    .composer button { background: var(--cyan, #3b9eff); border: none; border-radius: 4px; color: #0d1117; font: inherit; font-size: 11px; font-weight: 700; padding: 5px 12px; cursor: pointer; }
-    .composer button:disabled { background: var(--border); color: var(--dim); cursor: default; }
-    .composer-status { padding: 0 12px 6px; font-size: 10px; color: var(--dim); min-height: 13px; }
-    .composer-status.is-error { color: var(--red, #f85149); }
-    .empty { color: var(--dim); padding: 14px; font-size: 12px; }
-    .tier-label { fill: var(--dim); font-size: 10px; letter-spacing: 2px; font-weight: 700; }
-    /* A lane header names a task, not a rank: cyan like every other task chip,
-       and unspaced so a real issue key stays readable in the gutter. */
-    .lane-label { fill: var(--cyan); letter-spacing: 0.5px; }
-    .tier-count { fill: #3d4454; font-size: 9px; }
-    /* The one line on the page an operator can act on, so it sits above the
-       graph rather than being a sixth chip in the stat row. */
-    .waiting { padding: 5px 16px; font-size: 11px; color: var(--dim); border-bottom: 1px solid var(--border); }
-    .waiting.is-blocking { color: #0d1117; background: var(--amber); font-weight: 700; }
-    #controls { display: flex; align-items: center; gap: 8px; padding: 6px 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-    #controls input[type="search"], #controls select {
-      background: #0d1117; border: 1px solid var(--border); border-radius: 4px;
-      color: var(--white); font: inherit; font-size: 11px; padding: 3px 6px;
-    }
-    #controls input[type="search"] { min-width: 150px; }
-    #controls label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dim); }
-    #idle-count { color: #3d4454; }
-    /* Positions are stable now (a node's column comes from its address, not its
-       index), so the rare move a node does make is worth animating rather than
-       cutting to. Anyone who asked for less motion gets none. */
-    .node { cursor: pointer; transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1); }
-    @media (prefers-reduced-motion: reduce) {
-      .node { transition: none; }
-      .pulse, .speaking { animation: none; }
-    }
-    .node text { fill: var(--white); font-size: 10px; text-anchor: middle; pointer-events: none; }
-    .node .role-label { fill: var(--dim); font-size: 8px; }
-    .node.dimmed { opacity: 0.25; }
-    .edge { fill: none; opacity: 0.55; }
-    .edge.dimmed { opacity: 0.08; }
-    .pulse { animation: pulse 1.6s ease-in-out infinite; }
-    .speaking { animation: pulse 1.2s ease-in-out infinite; }
-    @keyframes pulse { 0%,100% { opacity: 0.25; } 50% { opacity: 0.9; } }
-  </style>
+  <title>OpenSwarm · Orchestration</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
+  <link rel="stylesheet" href="/static/css/orchestration.css" />
 </head>
-<body>
-  <header>
-    <h1>⚙ ORCHESTRATION</h1>
-    <a href="/">← dashboard</a>
-    <a href="/chat">chat room →</a>
-    <a href="/threads">repository threads →</a>
-    <div id="stats"></div>
+<body class="page-orchestration">
+  <header class="topbar">
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <span class="page-title">Orchestration</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/app">Cockpit</a>
+      <a href="/chat">Chat</a>
+      <a href="/orchestration" aria-current="page">Orchestration</a>
+      <a href="/threads">Threads</a>
+      <a href="/warehouse">Warehouse</a>
+      <a href="/">Supervisor</a>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
+    </div>
   </header>
+
   <div id="waiting" class="waiting" role="status" aria-live="polite"></div>
-  <div id="controls">
-    <input id="filter-search" type="search" autocomplete="off" placeholder="search agents…" aria-label="Search agents" />
-    <select id="filter-task" aria-label="Filter by task" data-options="">
-      <option value="">all tasks</option>
-    </select>
-    <select id="filter-role" aria-label="Filter by role">
-      <option value="">all roles</option>
-      <option value="worker">worker</option>
-      <option value="reviewer">reviewer</option>
-      <option value="orchestrator">orchestrator</option>
-      <option value="review-agent">review agent</option>
-      <option value="daemon">daemon</option>
-      <option value="human">operator</option>
-    </select>
-    <label for="filter-idle">
-      <input id="filter-idle" type="checkbox" /> show idle <span id="idle-count"></span>
-    </label>
+
+  <div class="orch-toolbar">
+    <div id="controls" role="group" aria-label="Filter the board">
+      <input id="filter-search" class="input" type="search" autocomplete="off" placeholder="Search agents…" aria-label="Search agents" />
+      <select id="filter-task" class="select" aria-label="Filter by task" data-options="">
+        <option value="">All tasks</option>
+      </select>
+      <select id="filter-role" class="select" aria-label="Filter by role">
+        <option value="">All roles</option>
+        <option value="worker">worker</option>
+        <option value="reviewer">reviewer</option>
+        <option value="orchestrator">orchestrator</option>
+        <option value="review-agent">review agent</option>
+        <option value="daemon">daemon</option>
+        <option value="human">operator</option>
+      </select>
+      <label for="filter-idle">
+        <input id="filter-idle" type="checkbox" /> Show idle <span id="idle-count"></span>
+      </label>
+    </div>
+    <div id="stats" aria-label="Board statistics"></div>
   </div>
-  <main>
+
+  <main class="orch-main">
     <div id="graph-wrap">
       <svg id="graph" role="img" aria-label="Agent interaction graph"></svg>
-      <div id="legend"></div>
+      <div id="legend" aria-label="Legend"></div>
     </div>
-    <aside>
-      <h2>AGENT DETAIL</h2>
+    <aside class="orch-aside" aria-label="Selection details">
+      <h2>Agent detail</h2>
       <div id="detail"><div class="empty">Select a node</div></div>
-      <h2>EVENT FEED</h2>
+      <h2>Event feed</h2>
       <div id="feed"><div class="empty">Loading…</div></div>
-      <h2>CONVERSATION</h2>
+      <h2>Conversation</h2>
       <div id="thread"><div class="empty">Select an event to read its conversation</div></div>
     </aside>
   </main>
+
   <script type="module">
     import { startOrchestrationView } from '/static/js/orchestrationView.mjs';
+    import { installThemeToggle } from '/static/js/theme.mjs';
+    installThemeToggle(document, document.getElementById('theme-toggle'));
     startOrchestrationView(document);
   </script>
 </body>

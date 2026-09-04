@@ -1,0 +1,204 @@
+/* Chat room (AGT-4201). Consumes tokens.css + shell.css.
+   One chronological room across every task: durable exchanges as threads,
+   every line a speaker addressing someone, and a composer that grows. */
+
+body.page-chat {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Room ────────────────────────────────────────────────────────────── */
+
+.room-wrap { position: relative; flex: 1; min-height: 0; }
+
+.room {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-4) var(--space-4) var(--space-6);
+  /* NEVER smooth: it breaks stick-to-bottom detection. */
+  scroll-behavior: auto;
+}
+.room > .empty { margin: var(--space-12) auto 0; max-width: 40ch; }
+
+.chat-thread {
+  --thread-accent: var(--accent);
+  max-width: 960px;
+  margin: var(--space-3) auto;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--thread-accent);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.chat-thread.thread-system {
+  --thread-accent: var(--warning);
+  margin-block: var(--space-2);
+  background: color-mix(in srgb, var(--warning-subtle) 40%, var(--bg-app));
+}
+
+.thread-head {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: var(--text-xs);
+}
+.thread-system .thread-head { background: transparent; }
+
+.channel-badge {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  background: var(--accent-subtle);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+  line-height: 18px;
+}
+.thread-system .channel-badge { color: var(--warning); border-color: var(--warning); background: var(--warning-subtle); }
+.thread-kind { margin-left: auto; color: var(--fg-muted); white-space: nowrap; }
+
+.issue-link {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: inherit;
+  text-decoration: none;
+  overflow: hidden;
+}
+a.issue-link:hover .issue-title { color: var(--fg-primary); text-decoration: underline; text-underline-offset: 2px; }
+.issue-code { flex: none; color: var(--accent); font-family: var(--font-mono); font-weight: 600; }
+.thread-system .issue-code { color: var(--warning); }
+.issue-sep { flex: none; color: var(--fg-muted); }
+.issue-title { color: var(--fg-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue-link-plain .issue-code { color: var(--fg-muted); }
+
+/* ── Lines ───────────────────────────────────────────────────────────── */
+
+.thread-lines { position: relative; }
+
+.line {
+  --speaker-color: var(--fg-muted);
+  position: relative;
+  padding: var(--space-2) var(--space-4) var(--space-3) calc(var(--space-4) + 18px);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.line + .line { border-top: 1px solid var(--border); }
+.line:hover { background: var(--bg-hover); }
+/* Speaker dot and the rail joining consecutive lines. */
+.line::before {
+  content: "";
+  position: absolute;
+  left: var(--space-4);
+  top: calc(var(--space-2) + 8px);
+  width: 8px; height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--speaker-color);
+}
+.line:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--space-4) + 3.5px);
+  top: calc(var(--space-2) + 18px);
+  bottom: -6px;
+  width: 1px;
+  background: var(--border);
+}
+.thread-system .line { padding-block: var(--space-2); }
+.thread-system .line .who, .thread-system .line .tag { color: var(--fg-muted); }
+.thread-system .line .text { color: var(--fg-secondary); font-size: var(--text-sm); }
+
+.line .meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+.line .clock { color: var(--fg-muted); font-family: var(--font-mono); font-variant-numeric: tabular-nums; margin-right: var(--space-2); }
+.line .who { font-weight: 600; }
+.line .tag { color: var(--fg-muted); margin: 0 var(--space-2) 0 var(--space-1); }
+.line .to { color: var(--fg-muted); margin-right: var(--space-1); }
+.line .sep { color: var(--fg-muted); }
+.line .text {
+  display: block;
+  max-width: 80ch;
+  margin-top: var(--space-1);
+  color: var(--fg-primary);
+  white-space: pre-wrap;
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+}
+.line .text code { color: var(--code-string); }
+
+.mention {
+  display: inline;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  background: var(--accent-subtle);
+  font-weight: 600;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.mention-human { color: var(--danger); background: var(--danger-subtle); }
+
+/* The operator's own lines: a tinted ground, the room's user bubble (§2.2). */
+.line.from-operator { background: var(--bg-user-bubble); }
+.line.from-operator:hover { background: var(--bg-user-bubble); }
+.line.pending { box-shadow: inset 0 0 0 1px var(--warning-subtle); }
+.line.failed .text { color: var(--danger); }
+
+/* ── Composer (§2.1) ─────────────────────────────────────────────────── */
+
+.composer {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.composer-files { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.composer-files:empty { display: none; }
+.composer-row { display: flex; align-items: flex-end; gap: var(--space-2); }
+.composer-text {
+  flex: 1;
+  min-height: 36px;
+  max-height: 40vh;
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.5;
+}
+.composer-status { min-height: 18px; }
+
+body.dropping .room { outline: 2px dashed var(--accent); outline-offset: -6px; }
+
+@media (max-width: 760px) {
+  .room { padding-inline: var(--space-2); }
+  .chat-thread { margin-block: var(--space-2); }
+  .thread-kind { display: none; }
+  .line { padding-left: calc(var(--space-3) + 16px); }
+  .line::before { left: var(--space-3); }
+  .line:not(:last-child)::after { left: calc(var(--space-3) + 3.5px); }
+  .line .text { font-size: var(--text-sm); }
+  /* Keep the composer above the on-screen keyboard's safe area. */
+  .composer { padding-bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px)); }
+}

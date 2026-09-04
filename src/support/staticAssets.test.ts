@@ -24,7 +24,7 @@ describe('resolveStaticRoot', () => {
   });
 
   it('ships the durable repository thread shell', async () => {
-    expect((await readThreadBoardShell())?.toString()).toContain('REPOSITORY THREADS');
+    expect((await readThreadBoardShell())?.toString()).toContain('Repository threads');
   });
 });
 
