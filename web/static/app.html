@@ -3,21 +3,38 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenSwarm</title>
+  <title>OpenSwarm · Cockpit</title>
+  <script src="/static/js/themeBoot.js"></script>
   <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
   <link rel="stylesheet" href="/static/css/cockpit.css" />
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
-<body data-view="issues">
-  <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false">☰</button>
-  <aside class="sidebar">
-    <div class="brand">🐝 OpenSwarm</div>
-    <nav class="view-nav">
+<body class="page-cockpit" data-view="issues">
+  <header class="topbar">
+    <button id="sidebar-toggle" class="btn btn-ghost btn-icon sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false" aria-controls="sidebar">☰</button>
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <span class="page-title">Cockpit</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/app" aria-current="page">Cockpit</a>
+      <a href="/chat">Chat</a>
+      <a href="/orchestration">Orchestration</a>
+      <a href="/threads">Threads</a>
+      <a href="/warehouse">Warehouse</a>
+      <a href="/">Supervisor</a>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
+    </div>
+  </header>
+
+  <aside id="sidebar" class="sidebar" aria-label="Views and sessions">
+    <nav class="view-nav" aria-label="Views">
       <button type="button" class="nav-item" data-view="sessions">Sessions</button>
       <button type="button" class="nav-item" data-view="issues">Issues</button>
-      <a class="nav-item" href="/orchestration">Orchestration</a>
-      <a class="nav-item" href="/chat">Chat room</a>
-      <a class="nav-item" href="/warehouse">Warehouse</a>
     </nav>
     <div class="sidebar-section-head">Repository</div>
     <div id="repo-picker" class="repo-picker"></div>
@@ -35,8 +52,8 @@
           <div class="empty">Select a repository to load its issues.</div>
         </div>
         <footer class="deploy-bar">
-          <span id="selection-summary" class="muted">0 selected</span>
-          <button id="deploy-btn" class="deploy-btn" disabled>Deploy agents</button>
+          <span id="selection-summary" class="muted" role="status" aria-live="polite">0 selected</span>
+          <button id="deploy-btn" class="btn btn-primary deploy-btn" disabled>Deploy agents</button>
         </footer>
       </div>
 

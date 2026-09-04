@@ -296,17 +296,19 @@ export function shortTaskLabel(taskId) {
 
 /** Per-kind edge colors — one hue per interaction family, stable for the legend. */
 export const KIND_COLORS = {
-  'advice-request': '#e8b339',
-  'advice-response': '#4cc38a',
-  'delegation-request': '#e8b339',
-  'delegation-result': '#4cc38a',
-  'human-question': '#e5484d',
-  'human-answer': '#3b9eff',
-  'adapter-route': '#9d7cd8',
-  'review-run': '#4cc38a',
-  'mcp-audit': '#9d7cd8',
-  'thread-update': '#3b9eff',
-  'instruction-snapshot': '#6c7086',
+  // Token references, not colours: the theme (tokens.css) decides what an
+  // exchange kind looks like, and the light palette gets its own values.
+  'advice-request': 'var(--kind-request)',
+  'advice-response': 'var(--kind-response)',
+  'delegation-request': 'var(--kind-request)',
+  'delegation-result': 'var(--kind-response)',
+  'human-question': 'var(--kind-human-question)',
+  'human-answer': 'var(--kind-human-answer)',
+  'adapter-route': 'var(--kind-route)',
+  'review-run': 'var(--kind-response)',
+  'mcp-audit': 'var(--kind-route)',
+  'thread-update': 'var(--kind-human-answer)',
+  'instruction-snapshot': 'var(--kind-plumbing)',
 };
 
 /** Dominant kind of an edge — the color it is drawn with. */

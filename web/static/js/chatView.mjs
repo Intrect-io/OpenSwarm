@@ -10,8 +10,15 @@
 
 import { buildChatThreads, latestAddressable, openQuestionFor } from './conversationModel.mjs';
 import { ROLE_COLORS } from './orchestrationView.mjs';
+import { autogrow, bindDraft, bindEnterToSubmit, setSendEnabled, setSendingState } from './composer.mjs';
+import { createScrollFollow } from './scrollFollow.mjs';
+
+// The pin/release rule lives with the other stream-following behaviour now;
+// re-exported so the room's callers (and its tests) keep one import.
+export { isNearBottom } from './scrollFollow.mjs';
 
 const PENDING = new Set(['open', 'waiting', 'running']);
+const DRAFT_KEY = 'openswarm.chat.draft';
 
 function escapeHtml(text) {
   return String(text ?? '').replace(/[&<>"']/g, (ch) => (
@@ -21,15 +28,6 @@ function escapeHtml(text) {
 
 function clockOf(timestamp) {
   return new Date(timestamp).toLocaleTimeString();
-}
-
-/**
- * Whether the room should stay pinned to the newest line. Reading scrollback
- * must survive a redraw, so the pin releases as soon as the operator scrolls
- * meaningfully away from the bottom.
- */
-export function isNearBottom({ scrollHeight, scrollTop, clientHeight }, slack = 40) {
-  return scrollHeight - scrollTop - clientHeight <= slack;
 }
 
 function mentionMarkup(name, role = '') {
@@ -217,11 +215,15 @@ export function renderThread(thread, mentionTargets = [], taskReferences = new M
 }
 
 /** Entry point: backfill from the trace, render, keep live via SSE + polling. */
-export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000 } = {}) {
+export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000, storage } = {}) {
   const fetcher = fetchImpl ?? ((url, init) => fetch(url, init));
   const byId = new Map();
   let taskReferences = new Map();
-  let stick = true;
+  // Whether the first load has failed and nothing is on screen yet: the empty
+  // state then says "unreachable", not "silent" (§7.1 keeps partial results;
+  // here there are none to keep, so the message is the whole surface).
+  let loadFailed = false;
+  let renderedLines = 0;
 
   const room = doc.getElementById('room');
   const form = doc.getElementById('composer');
@@ -230,7 +232,15 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   const fileInput = doc.getElementById('composer-file');
   const attachButton = doc.getElementById('composer-attach');
   const fileRow = doc.getElementById('composer-files');
+  // Optional shell affordances — absent in the bare test shell and in older
+  // embeds, so every use is guarded.
+  const dropOverlay = doc.getElementById('drop-overlay');
+  const follow = createScrollFollow(room, {
+    button: doc.getElementById('scroll-latest'),
+    liveRegion: doc.getElementById('room-live'),
+  });
   let sending = false;
+  let addressable = false;
   // Files the operator has staged but not yet sent. Held until the message goes
   // out so a refused send does not silently discard them (AGT-4026's rule,
   // applied to attachments).
@@ -242,16 +252,31 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   // a new one.
   const uploaded = new Map();
 
+  /** Recompute whether Send is possible from what the box and the room hold now. */
+  const syncSendState = () => {
+    setSendEnabled(button, {
+      text: input?.value ?? '',
+      files: pendingFiles.length,
+      addressable,
+      sending,
+    });
+  };
+
   const renderFiles = () => {
     if (!fileRow) return;
     fileRow.innerHTML = '';
     pendingFiles.forEach((file, index) => {
       const chip = doc.createElement('span');
       chip.className = 'chip';
-      chip.textContent = `${file.name} (${Math.max(1, Math.round(file.size / 1024))} KB)`;
+      const label = doc.createElement('span');
+      label.className = 'chip-label';
+      label.textContent = `${file.name} (${Math.max(1, Math.round(file.size / 1024))} KB)`;
+      chip.appendChild(label);
       const drop = doc.createElement('button');
       drop.type = 'button';
+      drop.className = 'chip-remove';
       drop.textContent = '×';
+      drop.setAttribute('aria-label', `Remove ${file.name}`);
       drop.title = `Remove ${file.name}`;
       drop.addEventListener('click', () => {
         uploaded.delete(file);
@@ -261,6 +286,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       chip.appendChild(drop);
       fileRow.appendChild(chip);
     });
+    syncSendState();
   };
 
   const stageFiles = (list) => {
@@ -319,12 +345,18 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     sending = pending;
     line.textContent = pending ? 'Sending…' : message;
     line.classList.toggle('is-error', !pending && !!message);
-    const addressable = !!latestAddressable([...byId.values()]);
+    addressable = !!latestAddressable([...byId.values()]);
     if (input) input.disabled = pending || !addressable;
-    if (button) button.disabled = pending || !addressable;
+    setSendingState(button, pending);
+    syncSendState();
   };
 
-  room.addEventListener('scroll', () => { stick = isNearBottom(room); });
+  const emptyState = () => {
+    if (loadFailed) {
+      return '<div class="empty" role="status">Could not reach the daemon — retrying…</div>';
+    }
+    return '<div class="empty">No one has said anything yet.</div>';
+  };
 
   const redraw = () => {
     const events = [...byId.values()];
@@ -341,10 +373,11 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     ];
     room.innerHTML = threads.length
       ? threads.map((thread) => renderThread(thread, mentionTargets, taskReferences)).join('')
-      : '<div class="empty">No one has said anything yet.</div>';
+      : emptyState();
     // The composer can only address an agent that exists; without one the
     // POST would be unroutable (the API requires repository/taskId/recipient).
     const target = latestAddressable(events);
+    addressable = !!target;
     const question = target
       ? openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId })
       : null;
@@ -361,8 +394,11 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
           ? `Answer ${target.actorName || target.actor}: ${(question.summary || '').slice(0, 60)}…`
           : `Message ${target.actorName || target.actor}…`;
     }
-    if (button) button.disabled = !target || sending;
-    if (stick) room.scrollTop = room.scrollHeight;
+    syncSendState();
+    // One announcement per batch of arrivals, not one per line (§8.5).
+    if (lines.length > renderedLines) follow.announce(lines.length - renderedLines);
+    renderedLines = lines.length;
+    follow.follow();
   };
 
   const absorb = (event) => {
@@ -454,23 +490,32 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   async function backfill() {
     try {
       const response = await fetcher('/api/coordination/history?limit=500');
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`history ${response.status}`);
       const snapshot = await response.json();
+      loadFailed = false;
       let changed = false;
       for (const event of snapshot.events ?? []) changed = absorb(event) || changed;
       if (changed || byId.size === 0) redraw();
-    } catch { /* transient; the poll below retries via the board */ }
+    } catch {
+      // Transient; the poll below retries via the board. Until something
+      // lands, say the daemon is unreachable rather than showing an empty room.
+      if (byId.size === 0) { loadFailed = true; redraw(); }
+    }
   }
 
   async function refresh() {
     try {
       const response = await fetcher('/api/coordination');
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`board ${response.status}`);
       const snapshot = await response.json();
+      const recovered = loadFailed;
+      loadFailed = false;
       let changed = false;
       for (const event of snapshot.events ?? []) changed = absorb(event) || changed;
-      if (changed) redraw();
-    } catch { /* transient; the next poll retries */ }
+      if (changed || recovered) redraw();
+    } catch {
+      if (byId.size === 0 && !loadFailed) { loadFailed = true; redraw(); }
+    }
   }
 
   /** Load issue titles/links once from the daemon's local projections. */
@@ -526,9 +571,14 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   doc.addEventListener('dragover', swallowStrayDrop);
   doc.addEventListener('drop', swallowStrayDrop);
 
-  // Drag-and-drop onto the room, the way an operator expects it to work.
+  // Drag-and-drop onto the room, the way an operator expects it to work. The
+  // overlay says what a drop will do (§2.1); the body class keeps the older
+  // outline styling working where the overlay element is absent.
   if (room) {
-    const highlight = (on) => doc.body?.classList.toggle('dropping', on);
+    const highlight = (on) => {
+      doc.body?.classList.toggle('dropping', on);
+      if (dropOverlay) dropOverlay.hidden = !on;
+    };
     room.addEventListener('dragover', (dragEvent) => { dragEvent.preventDefault(); highlight(true); });
     room.addEventListener('dragleave', () => highlight(false));
     room.addEventListener('drop', (dropEvent) => {
@@ -537,6 +587,13 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       stageFiles(dropEvent.dataTransfer?.files);
     });
   }
+
+  // Composer behaviours: grow with the text, Enter sends (never mid-IME),
+  // and an unsent draft survives a reload.
+  const draft = bindDraft(input, { storage: storage ?? doc.defaultView?.localStorage, key: DRAFT_KEY });
+  const regrow = autogrow(input);
+  bindEnterToSubmit(input, form);
+  input?.addEventListener('input', syncSendState);
 
   if (form) {
     form.addEventListener('submit', async (submitEvent) => {
@@ -550,7 +607,12 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       setComposerStatus('', { pending: true });
       const failure = await send(text);
       setComposerStatus(failure ?? '', { pending: false });
-      if (!failure) input.value = '';
+      if (!failure) {
+        input.value = '';
+        draft.clear();
+        regrow();
+        syncSendState();
+      }
     });
   }
 
@@ -559,6 +621,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     stop: () => {
       clearInterval(timer);
       source?.close();
+      follow.stop();
       doc.removeEventListener('dragover', swallowStrayDrop);
       doc.removeEventListener('drop', swallowStrayDrop);
     },

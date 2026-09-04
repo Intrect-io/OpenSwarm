@@ -5,30 +5,32 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenSwarm :: Supervisor</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css">
   <style>
     /*
-     * Design tokens — adapted from VEGA (GitHub Dark inspired).
-     * Legacy variable names are preserved so the rest of the stylesheet keeps
-     * working unchanged; only the values shifted to a calmer, more readable
-     * palette while keeping the semantic intent (--green = primary action,
-     * --amber = warning, --red = destructive, --dim = secondary text).
+     * Colour comes from /static/css/tokens.css (AGT-4201) so this page follows
+     * the same palette — and the same light/dark switch — as the rest of the
+     * web surface. The legacy variable names the stylesheet below was written
+     * against are kept as indirections to the semantic tokens (--green =
+     * primary action, --amber = warning, --red = destructive, --dim = secondary
+     * text); no colour literal lives in this file.
      */
     :root {
-      --bg:        #0d1117;   /* page background */
-      --bg2:       #161b22;   /* surface (cards, header) */
-      --bg3:       #1c2128;   /* surface raised (hover) */
-      --green:     #58a6ff;   /* primary accent (was matrix green) */
-      --green-dim: rgba(88, 166, 255, 0.12);
-      --green-mid: #58a6ff;
-      --green-lo:  #30363d;
-      --cyan:      #79c0ff;
-      --cyan-dim:  rgba(121, 192, 255, 0.14);
-      --amber:     #d29922;
-      --red:       #f85149;
-      --white:     #c9d1d9;   /* primary text */
-      --dim:       #8b949e;   /* muted text */
-      --border:    #30363d;
-      --border2:   rgba(48, 54, 61, 0.55);
+      --bg:        var(--bg-app);
+      --bg2:       var(--bg-surface);
+      --bg3:       var(--bg-elevated);
+      --green:     var(--accent);
+      --green-dim: var(--accent-subtle);
+      --green-mid: var(--accent);
+      --green-lo:  var(--border);
+      --cyan:      var(--info);
+      --cyan-dim:  var(--accent-subtle);
+      --amber:     var(--warning);
+      --red:       var(--danger);
+      --white:     var(--fg-primary);
+      --dim:       var(--fg-muted);
+      --border2:   var(--border);
       --radius-sm: 6px;
       --radius-md: 8px;
       --radius-lg: 12px;
@@ -36,7 +38,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; overflow: hidden; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      font-family: var(--font-sans);
       background: var(--bg);
       color: var(--white);
       font-size: 14px;
@@ -45,8 +47,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }
     /* Monospace contexts (logs, paths, IDs) still use a mono stack */
     code, pre, .mono, .log-line, .repo-item-path, .scan-path-row .path, .issue-id {
-      font-family: "SF Mono", "JetBrains Mono", "Fira Code", Consolas, monospace;
+      font-family: var(--font-mono);
     }
+    .hdr-link {
+      color: var(--cyan); font-size: 11px; text-decoration: none; letter-spacing: 0.1em;
+      border: 1px solid var(--cyan-dim); padding: 2px 8px; border-radius: 3px;
+    }
+    .hdr-link:hover { border-color: var(--cyan); }
+    .hdr-links { display: flex; gap: 6px; margin-left: 1rem; flex-wrap: wrap; }
 
     /* ===== SCROLLBAR ===== */
     ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -99,12 +107,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }
     .btn:hover:not(:disabled) { border-color: var(--green); color: var(--green); background: var(--green-dim); }
     .btn:disabled { opacity: 0.4; cursor: default; }
-    .btn.primary { background: var(--green); border-color: var(--green); color: #0d1117; font-weight: 600; }
-    .btn.primary:hover:not(:disabled) { opacity: 0.88; background: var(--green); color: #0d1117; }
+    .btn.primary { background: var(--green); border-color: var(--green); color: var(--fg-on-accent); font-weight: 600; }
+    .btn.primary:hover:not(:disabled) { opacity: 0.88; background: var(--green); color: var(--fg-on-accent); }
     .btn-active { border-color: var(--amber); color: var(--amber); }
-    .btn-active:hover:not(:disabled) { background: #332200; border-color: var(--amber); }
-    .btn-danger { border-color: #551111; color: var(--red); }
-    .btn-danger:hover:not(:disabled) { background: #220000; border-color: var(--red); }
+    .btn-active:hover:not(:disabled) { background: var(--warning-subtle); border-color: var(--amber); }
+    .btn-danger { border-color: var(--danger-subtle); color: var(--red); }
+    .btn-danger:hover:not(:disabled) { background: var(--danger-subtle); border-color: var(--red); }
     .move-to-todo-btn {
       font-family: inherit;
       font-size: 9px;
@@ -149,7 +157,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .stat-val { font-size: 13px; font-weight: 500; color: var(--green); }
     .stat-val.amber { color: var(--amber); }
     .stat-val.cyan { color: var(--cyan); }
-    .stat-val.red { color: #ff5555; }
+    .stat-val.red { color: var(--red); }
     #stat-adapter, #stat-pair-adapters {
       font-size: 10px;
       font-weight: 400;
@@ -258,7 +266,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .proj-counts { display: flex; gap: 3px; }
     .cnt { font-size: 9px; padding: 1px 4px; font-weight: bold; }
     .cnt-run { color: var(--green); border: 1px solid var(--green-lo); }
-    .cnt-que { color: var(--amber); border: 1px solid #332200; }
+    .cnt-que { color: var(--amber); border: 1px solid var(--warning-subtle); }
     .cnt-pnd { color: var(--cyan); border: 1px solid var(--cyan-dim); }
     .proj-toggle { flex-shrink: 0; }
     .toggle { position: relative; display: inline-block; width: 30px; height: 16px; }
@@ -266,7 +274,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .slider {
       position: absolute; cursor: pointer;
       top: 0; left: 0; right: 0; bottom: 0;
-      background: #111; border: 1px solid var(--dim);
+      background: var(--bg); border: 1px solid var(--dim);
       border-radius: 16px; transition: 0.2s;
     }
     .slider:before {
@@ -324,10 +332,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .proc-activity { font-size: 10px; min-width: 16px; text-align: center; }
     .proc-kill {
       font-family: inherit; font-size: 9px; padding: 1px 5px;
-      background: transparent; border: 1px solid #551111; color: var(--red);
+      background: transparent; border: 1px solid var(--danger-subtle); color: var(--red);
       cursor: pointer; margin-left: auto;
     }
-    .proc-kill:hover { background: #220000; border-color: var(--red); }
+    .proc-kill:hover { background: var(--danger-subtle); border-color: var(--red); }
 
     /* ===== PIPELINE ===== */
     .stage-block {
@@ -378,14 +386,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .stage-details .sd-key { color: var(--dim); font-size: 10px; min-width: 70px; text-transform: uppercase; letter-spacing: 0.06em; }
     .stage-details .sd-val { color: var(--white); font-size: 11px; flex: 1; word-break: break-all; }
     .stage-details ul { margin: 2px 0 4px 14px; padding: 0; }
-    .stage-details li { font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 10px; color: var(--cyan); padding: 1px 0; }
+    .stage-details li { font-family: var(--font-mono); font-size: 10px; color: var(--cyan); padding: 1px 0; }
     .sd-decision-approve { color: var(--green); font-weight: 600; }
     .sd-decision-revise  { color: var(--amber); font-weight: 600; }
     .sd-decision-reject  { color: var(--red); font-weight: 600; }
 
     /* ===== LOG TAB BAR ===== */
     .log-tab-bar {
-      display: flex; gap: 0; border-bottom: 1px solid #1a2a1a;
+      display: flex; gap: 0; border-bottom: 1px solid var(--border);
       padding: 0 4px; overflow-x: auto; flex-shrink: 0;
     }
     .log-tab {
@@ -410,14 +418,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     .licon { flex-shrink: 0; min-width: 14px; text-align: center; font-size: 11px; padding-top: 1px; }
     .ltag { color: var(--green-lo); min-width: 52px; flex-shrink: 0; padding-top: 1px; font-size: 10px; font-weight: 500; }
     .lstage { color: var(--cyan); min-width: 60px; flex-shrink: 0; font-size: 10px; padding-top: 1px; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.8; }
-    .ltext { color: #99aa99; word-break: break-word; white-space: pre-wrap; flex: 1; min-width: 0; }
+    .ltext { color: var(--fg-secondary); word-break: break-word; white-space: pre-wrap; flex: 1; min-width: 0; }
     .ltext .lhighlight { color: var(--white); font-weight: 500; }
     .ltext .lcost { color: var(--amber); font-size: 10px; }
     .ltext .lfiles { color: var(--cyan); font-size: 10px; }
     .log-line.log-spacer { height: 6px; padding: 0; margin: 0; min-height: 6px; }
     .log-line.log-separator { opacity: 0.2; padding: 0 8px; margin: 4px 0; }
     .log-line.log-separator .ltext { color: var(--dim); }
-    .log-line.log-code .ltext { font-family: 'JetBrains Mono', 'Fira Code', monospace; color: var(--cyan); opacity: 0.8; font-size: 10px; }
+    .log-line.log-code .ltext { font-family: var(--font-mono); color: var(--cyan); opacity: 0.8; font-size: 10px; }
     .log-line.log-heading2 .ltext { color: var(--white); font-weight: 600; font-size: 12px; }
     .log-line.log-tool .ltext { color: var(--dim); font-style: italic; font-size: 10px; }
 
@@ -490,8 +498,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     .scan-path-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11px; }
     .scan-path-row .path { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .scan-path-badge { font-size: 9px; padding: 1px 5px; border: 1px solid #333; color: #556655; flex-shrink: 0; }
-    .scan-path-remove { background: transparent; border: none; color: #553333; cursor: pointer; font-size: 12px; padding: 0 2px; flex-shrink: 0; }
+    .scan-path-badge { font-size: 9px; padding: 1px 5px; border: 1px solid var(--border); color: var(--dim); flex-shrink: 0; }
+    .scan-path-remove { background: transparent; border: none; color: var(--red); cursor: pointer; font-size: 12px; padding: 0 2px; flex-shrink: 0; }
     .scan-path-remove:hover { color: var(--red); }
 
     /* ===== TAB BAR (hidden on desktop) ===== */
@@ -606,8 +614,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <span class="hdr-fullname">: Vector-Encoded General Agent</span>
     <span class="hdr-sep">::</span>
     <span class="hdr-sub">SUPERVISOR</span>
-    <a href="/issues" style="color:var(--cyan);font-size:11px;text-decoration:none;margin-left:1rem;letter-spacing:0.1em;border:1px solid var(--cyan-dim);padding:2px 8px;border-radius:3px">ISSUES</a>
+    <nav class="hdr-links" aria-label="Pages">
+      <a href="/issues" class="hdr-link">ISSUES</a>
+      <a href="/app" class="hdr-link">COCKPIT</a>
+      <a href="/chat" class="hdr-link">CHAT</a>
+      <a href="/orchestration" class="hdr-link">ORCHESTRATION</a>
+      <a href="/threads" class="hdr-link">THREADS</a>
+    </nav>
     <div class="hdr-right">
+      <button class="btn" id="theme-toggle" type="button" aria-label="Switch theme" aria-pressed="false">◐ THEME</button>
       <div class="svc-group">
         <span class="svc-status" id="svc-status">...</span>
         <span class="svc-sep">│</span>
@@ -1317,7 +1332,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             var s = kgData.summary;
             secs.push(
               "<div class=\\"issue-sec-label\\">code health</div>" +
-              "<div style=\\"padding:2px 8px;font-size:10px;color:#88aa88\\">" +
+              "<div style=\\"padding:2px 8px;font-size:10px;color:var(--dim)\\">" +
                 "modules:" + s.totalModules + " tests:" + s.totalTestFiles +
                 " untested:" + s.untestedModules.length +
                 " churn:" + (s.avgChurnScore || 0).toFixed(2) +
@@ -1940,7 +1955,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           "</div>"
         );
       }
-      list.innerHTML = rows.length > 0 ? rows.join("") : "<div style=\\"color:#334433;font-size:10px\\">no scan paths configured</div>";
+      list.innerHTML = rows.length > 0 ? rows.join("") : "<div style=\\"color:var(--dim);font-size:10px\\">no scan paths configured</div>";
     }
 
     async function addScanPath(explicitPath) {
@@ -2334,6 +2349,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     // 렌더링 성능: 스테이지 업데이트 폴링 제거 (SSE 이벤트 활용)
     // setInterval(() => { if (stageRows.length) renderStages(); }, 10000);
+  </script>
+  <script type="module">
+    import { installThemeToggle } from '/static/js/theme.mjs';
+    installThemeToggle(document, document.getElementById('theme-toggle'));
   </script>
 </body>
 </html>`;

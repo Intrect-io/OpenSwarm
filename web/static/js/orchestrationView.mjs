@@ -15,23 +15,41 @@ import { layoutTiers } from './tierLayout.mjs';
 import {
   buildThreads, chatLineOf, isUtterance, metadataPairs, openQuestionFor, taskLabelOf, threadFor,
 } from './conversationModel.mjs';
+import { autogrow, bindEnterToSubmit, setSendEnabled, setSendingState } from './composer.mjs';
 
+// Token references, not colours (AGT-4201): every role's paint is declared
+// once in tokens.css, so the light theme and the chat room agree with the graph.
 export const ROLE_COLORS = {
-  worker: '#3b9eff',
-  reviewer: '#4cc38a',
-  orchestrator: '#e8b339',
-  'review-agent': '#9d7cd8',
-  daemon: '#6c7086',
-  human: '#e5484d',
-  agent: '#8b93a5',
+  worker: 'var(--role-worker)',
+  reviewer: 'var(--role-reviewer)',
+  orchestrator: 'var(--role-orchestrator)',
+  'review-agent': 'var(--role-review-agent)',
+  daemon: 'var(--role-daemon)',
+  human: 'var(--role-human)',
+  agent: 'var(--role-agent)',
 };
 
 const PENDING = new Set(['open', 'waiting', 'running']);
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+/**
+ * Apply an SVG paint. A custom-property reference in a presentation attribute
+ * resolves in current engines, but the inline style is what the cascade is
+ * guaranteed to read — so a token is written to both, and the attribute stays
+ * inspectable.
+ */
+function paint(node, key, value) {
+  const text = String(value);
+  node.setAttribute(key, text);
+  if (text.startsWith('var(') && typeof node.style?.setProperty === 'function') node.style.setProperty(key, text);
+}
+
 function el(doc, tag, attrs = {}) {
   const node = doc.createElementNS(SVG_NS, tag);
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === 'fill' || key === 'stroke') paint(node, key, value);
+    else node.setAttribute(key, String(value));
+  }
   return node;
 }
 
@@ -181,13 +199,13 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
     if (index % 2 === 1) {
       bandLayer.appendChild(el(doc, 'rect', {
         x: 0, y: band.y0, width, height: band.y1 - band.y0,
-        fill: '#ffffff', 'fill-opacity': 0.025, 'data-band': band.id,
+        class: 'band-stripe', 'data-band': band.id,
       }));
     }
     if (index > 0) {
       bandLayer.appendChild(el(doc, 'line', {
         x1: 0, y1: band.y0, x2: width, y2: band.y0,
-        stroke: '#1f2633', 'stroke-dasharray': band.kind === 'lane' ? '2 4' : '4 6',
+        class: 'band-rule', 'stroke-dasharray': band.kind === 'lane' ? '2 4' : '4 6',
       }));
     }
     const label = el(doc, 'text', {
@@ -208,7 +226,7 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
   });
   bandLayer.appendChild(el(doc, 'line', {
     x1: labelGutter - 14, y1: bands[0].y0, x2: labelGutter - 14, y2: bands[bands.length - 1].y1,
-    stroke: '#1f2633',
+    class: 'gutter-rule',
   }));
 
   const neighbors = new Set();
@@ -246,7 +264,7 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
       const my = (a.y + b.y) / 2 + (a.x - b.x) * 0.12;
       path.setAttribute('d', `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`);
       path.setAttribute('class', `edge${selected && edge.from !== selected && edge.to !== selected ? ' dimmed' : ''}`);
-      path.setAttribute('stroke', KIND_COLORS[dominantKind(edge)] ?? '#6c7086');
+      paint(path, 'stroke', KIND_COLORS[dominantKind(edge)] ?? 'var(--kind-plumbing)');
       path.setAttribute('stroke-width', String(Math.min(6, 1 + Math.log2(1 + edge.count))));
       path.querySelector('title').textContent =
         `${nameOf(edge.from)} → ${nameOf(edge.to)}: ${edge.count} (${Object.entries(edge.kinds).map(([k, n]) => `${k}×${n}`).join(', ')})`;
@@ -273,17 +291,17 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
 
       const radius = nodeRadius(node);
       if (node.pendingCount > 0) {
-        group.appendChild(el(doc, 'circle', { r: radius + 6, fill: 'none', stroke: '#e8b339', 'stroke-width': 2, class: 'pulse' }));
+        group.appendChild(el(doc, 'circle', { r: radius + 6, fill: 'none', stroke: 'var(--warning)', 'stroke-width': 2, class: 'pulse' }));
       }
       if (node.id === speaking) {
         group.setAttribute('data-speaking', 'true');
         group.appendChild(el(doc, 'circle', {
-          r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 2.5, class: 'speaking',
+          r: radius + 10, fill: 'none', stroke: 'var(--fg-primary)', 'stroke-width': 2.5, class: 'speaking',
         }));
       } else if (node.id === spokenTo) {
         group.setAttribute('data-spoken-to', 'true');
         group.appendChild(el(doc, 'circle', {
-          r: radius + 10, fill: 'none', stroke: '#e6e9ef', 'stroke-width': 1.5,
+          r: radius + 10, fill: 'none', stroke: 'var(--fg-primary)', 'stroke-width': 1.5,
           'stroke-opacity': 0.45, 'stroke-dasharray': '3 4', class: 'spoken-to',
         }));
       }
@@ -291,7 +309,7 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
         r: radius,
         fill: ROLE_COLORS[node.role] ?? ROLE_COLORS.agent,
         'fill-opacity': node.active ? 0.9 : 0.35,
-        stroke: node.id === selected ? '#e6e9ef' : 'transparent',
+        stroke: node.id === selected ? 'var(--fg-primary)' : 'transparent',
         'stroke-width': 2,
       }));
       const label = el(doc, 'text', { y: radius + 12 });
@@ -307,7 +325,7 @@ export function renderLegend(doc) {
   const rows = [
     ...Object.entries(ROLE_COLORS).filter(([role]) => role !== 'agent')
       .map(([role, color]) => `<div class="row"><span class="swatch" style="background:${color}"></span>${role}</div>`),
-    '<div class="row" style="margin-top:6px;border-top:1px solid #1f2633;padding-top:4px">edges</div>',
+    '<div class="row legend-section">edges</div>',
     `<div class="row"><span class="line" style="background:${KIND_COLORS['advice-request']}"></span>advice / delegation</div>`,
     `<div class="row"><span class="line" style="background:${KIND_COLORS['human-question']}"></span>human question</div>`,
     `<div class="row"><span class="line" style="background:${KIND_COLORS['adapter-route']}"></span>route / mcp</div>`,
@@ -394,8 +412,8 @@ export function renderDetail(doc, model, events, selected) {
 }
 
 function statusColor(status) {
-  if (PENDING.has(status)) return '#e8b339';
-  return status === 'failed' || status === 'expired' ? '#e5484d' : '#4cc38a';
+  if (PENDING.has(status)) return 'var(--status-pending)';
+  return status === 'failed' || status === 'expired' ? 'var(--status-failed)' : 'var(--status-done)';
 }
 
 function clockOf(timestamp) {
@@ -439,7 +457,8 @@ function applyComposerState(doc, form, pending) {
     input.disabled = active;
     if (pending?.text !== undefined) input.value = pending.text;
   }
-  if (button) button.disabled = active;
+  setSendingState(button, active);
+  setSendEnabled(button, { text: input?.value ?? '', addressable: true, sending: active });
 }
 
 function dialogueLine(event, max = 140) {
@@ -524,9 +543,9 @@ export function renderThread(doc, thread, onSend, pending = null) {
   const target = thread.replyTo ? escapeHtml(thread.replyTo.name) : null;
   const composer = target
     ? `<form class="composer" id="composer">
-        <input id="composer-text" type="text" autocomplete="off"
-          placeholder="Reply to ${target}…" aria-label="Reply to ${target}" />
-        <button type="submit">Send</button>
+        <textarea id="composer-text" class="textarea" rows="1" autocomplete="off"
+          placeholder="Reply to ${target}…" aria-label="Reply to ${target}"></textarea>
+        <button type="submit" class="btn btn-primary">Send</button>
        </form>`
     : '<div class="empty">No agent in this exchange can be addressed</div>';
 
@@ -544,6 +563,14 @@ export function renderThread(doc, thread, onSend, pending = null) {
   // therefore lives in the caller and is re-applied on every render below,
   // rather than being held in DOM nodes this handler captured.
   applyComposerState(doc, form, pending);
+  // The box is rebuilt on every render, so its behaviours are re-bound here:
+  // grow with the reply, Enter sends (never mid-IME), Send lights up with text.
+  const box = doc.getElementById('composer-text');
+  autogrow(box);
+  bindEnterToSubmit(box, form);
+  box?.addEventListener('input', () => {
+    setSendEnabled(form.querySelector('button'), { text: box.value, addressable: true, sending: !!pending?.active });
+  });
 
   form.addEventListener('submit', (submitEvent) => {
     submitEvent.preventDefault();

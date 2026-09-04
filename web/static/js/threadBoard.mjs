@@ -152,12 +152,20 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
   const reply = doc.getElementById('reply-form');
   const follow = doc.getElementById('follow');
   const resolve = doc.getElementById('resolve');
+  // Optional in-page confirmation for resolving (§3.2). Shells without it
+  // (older embeds, the bare test shell) resolve on the first click.
+  const confirmCard = doc.getElementById('resolve-confirm');
+  const confirmText = doc.getElementById('resolve-confirm-text');
+  const confirmButton = doc.getElementById('resolve-confirm-btn');
+  const cancelButton = doc.getElementById('resolve-cancel');
   const state = { repository: '', threads: [], selectedId: null, detail: null, stopped: false, generation: 0 };
 
   const say = (message, error = false) => {
     status.textContent = message;
-    status.className = error ? 'error' : '';
+    status.className = error ? 'status-line threads-status is-error error' : 'status-line threads-status';
   };
+
+  const hideConfirm = () => { if (confirmCard) confirmCard.hidden = true; };
 
   const repositoryForThread = (threadId = state.selectedId) => state.threads
     .find((thread) => thread.id === threadId)?.repository ?? state.repository;
@@ -165,6 +173,8 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
 
   async function loadDetail(threadId = state.selectedId) {
     if (!threadId || state.stopped) return;
+    // A pending "resolve X?" must not outlive the thread it named.
+    if (threadId !== state.detail?.thread?.id) hideConfirm();
     try {
       const detail = await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(threadId)}?${repositoryQuery(threadId)}&messageLimit=200`);
       if (state.stopped || threadId !== state.selectedId) return;
@@ -317,8 +327,9 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     }
   });
 
-  resolve.addEventListener('click', async () => {
+  const performResolve = async () => {
     if (!state.selectedId || !state.detail) return;
+    hideConfirm();
     try {
       await request(fetchImpl, `/api/coordination/threads/${encodeURIComponent(state.selectedId)}/resolve`, {
         method: 'POST', body: JSON.stringify({
@@ -329,7 +340,21 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     } catch (error) {
       say(error instanceof Error ? error.message : String(error), true);
     }
+  };
+
+  resolve.addEventListener('click', () => {
+    if (!state.selectedId || !state.detail) return;
+    // Resolving is one-way for the agents on the thread, so the card names
+    // the thread and the version and asks once — in the page, since the
+    // Tauri WebView has no window.confirm.
+    if (!confirmCard || !confirmButton) { void performResolve(); return; }
+    const { subject, version } = state.detail.thread;
+    if (confirmText) confirmText.textContent = `Resolve “${subject}” at version ${version}? Agents can no longer post to it.`;
+    confirmCard.hidden = false;
+    confirmButton.focus();
   });
+  confirmButton?.addEventListener('click', () => { void performResolve(); });
+  cancelButton?.addEventListener('click', () => { hideConfirm(); resolve.focus(); });
 
   void loadRepositories();
   const timer = pollMs > 0 ? setInterval(() => { void loadThreads(); }, pollMs) : null;

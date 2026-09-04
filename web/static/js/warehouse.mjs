@@ -1,3 +1,5 @@
+import { installThemeToggle } from './theme.mjs';
+
 const entriesBody = document.querySelector('#entries');
 const breadcrumbs = document.querySelector('#breadcrumbs');
 const upButton = document.querySelector('#up');
@@ -50,8 +52,19 @@ async function api(url, options) {
 }
 
 function setStatus(message, kind = '') {
-  status.className = `status${kind ? ` ${kind}` : ''}`;
+  status.className = `status-line status${kind ? ` is-${kind} ${kind}` : ''}`;
   status.textContent = message;
+}
+
+// Replacing a file is the one thing here an operator cannot take back, so the
+// checkbox alone is not consent: the first click names the file that would be
+// replaced and asks once more, in the page (§3.2 — no window.confirm).
+let armedOverwrite = null;
+
+function disarmOverwrite() {
+  armedOverwrite = null;
+  uploadButton.classList.remove('is-armed');
+  uploadButton.textContent = '업로드';
 }
 
 function renderBreadcrumbs() {
@@ -146,14 +159,28 @@ fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
   fileLabel.textContent = file ? `${file.name} · ${formatBytes(file.size)}` : '파일을 선택하세요';
   uploadButton.disabled = !file;
+  disarmOverwrite();
+});
+
+overwriteInput.addEventListener('change', () => {
+  if (!overwriteInput.checked) disarmOverwrite();
 });
 
 uploadButton.addEventListener('click', async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
-  uploadButton.disabled = true;
-  setStatus('업로드 중…');
   const target = joinPath(currentPath, file.name);
+  if (overwriteInput.checked && armedOverwrite !== target) {
+    armedOverwrite = target;
+    uploadButton.classList.add('is-armed');
+    uploadButton.textContent = '덮어쓰기 확인';
+    setStatus(`/${target} 을(를) 새 파일로 바꿉니다. 한 번 더 누르면 실행합니다.`, 'warning');
+    return;
+  }
+  disarmOverwrite();
+  uploadButton.disabled = true;
+  uploadButton.setAttribute('aria-busy', 'true');
+  setStatus('업로드 중…', 'pending');
   try {
     const overwrite = overwriteInput.checked ? '&overwrite=true' : '';
     await api(`/api/warehouse/file?path=${encodeURIComponent(target)}${overwrite}`, {
@@ -169,6 +196,7 @@ uploadButton.addEventListener('click', async () => {
   } catch (error) {
     setStatus(error.message, 'error');
   } finally {
+    uploadButton.removeAttribute('aria-busy');
     uploadButton.disabled = !fileInput.files?.length;
   }
 });
@@ -191,4 +219,5 @@ clearTokenButton.addEventListener('click', () => {
 
 upButton.addEventListener('click', () => loadTree(parts(currentPath).slice(0, -1).join('/')));
 refreshButton.addEventListener('click', () => loadTree(currentPath));
+installThemeToggle(document, document.querySelector('#theme-toggle'));
 loadTree('');

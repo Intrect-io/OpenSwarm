@@ -2,108 +2,57 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>OpenSwarm Chat Room</title>
-  <style>
-    :root {
-      --bg: #0b0e14; --panel: #11151d; --border: #1f2633; --white: #e6e9ef;
-      --dim: #6c7086; --cyan: #3b9eff; --green: #4cc38a; --amber: #e8b339;
-      --red: #e5484d; --purple: #9d7cd8;
-    }
-    * { box-sizing: border-box; margin: 0; }
-    body { background: var(--bg); color: var(--white); font: 13px/1.5 "SF Mono", ui-monospace, Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-    header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
-    header h1 { font-size: 14px; letter-spacing: 1px; }
-    header a { color: var(--dim); text-decoration: none; font-size: 11px; }
-    header a:hover { color: var(--cyan); }
-    #room { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px 16px 20px;
-            scrollbar-width: thin; scrollbar-color: #2a3140 transparent; }
-    #room::-webkit-scrollbar { width: 6px; }
-    #room::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 3px; }
-    #room::-webkit-scrollbar-track { background: transparent; }
-    .chat-thread { --thread-accent: var(--cyan); max-width: 1320px; margin: 10px auto; border: 1px solid #202838; border-radius: 8px; background: #0f141d; overflow: hidden; box-shadow: inset 3px 0 var(--thread-accent); }
-    .chat-thread.thread-system { --thread-accent: var(--amber); margin-block: 6px; background: #0d1118; border-color: #292719; box-shadow: inset 2px 0 rgba(232, 179, 57, 0.75); }
-    .thread-head { min-height: 31px; display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 15px; border-bottom: 1px solid #202838; background: #111824; }
-    .thread-system .thread-head { min-height: 27px; padding-block: 4px; background: #14130e; border-color: #292719; }
-    .channel-badge { flex: none; color: #a9d4ff; background: #102c47; border: 1px solid #285f8d; border-radius: 3px; padding: 0 6px; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
-    .thread-system .channel-badge { color: #f0ca71; background: #332b12; border-color: #746022; }
-    .thread-kind { margin-left: auto; color: #68758c; font-size: 10.5px; white-space: nowrap; }
-    .issue-link { min-width: 0; display: inline-flex; align-items: baseline; gap: 7px; color: inherit; text-decoration: none; overflow: hidden; }
-    a.issue-link:hover .issue-title { color: #cde6ff; text-decoration: underline; text-underline-offset: 2px; }
-    .issue-code { flex: none; color: #83c2ff; font-weight: 750; }
-    .thread-system .issue-code { color: #e8c466; }
-    .issue-sep { flex: none; color: #4d586b; }
-    .issue-title { color: #aeb9ca; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .issue-link-plain .issue-code { color: #9aa6bd; }
-    .thread-lines { position: relative; }
-    .thread-lines .line { position: relative; max-width: none; margin: 0; padding: 10px 14px 11px 31px; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-    .thread-lines .line + .line { border-top: 1px solid rgba(42, 53, 72, 0.65); }
-    .thread-lines .line::before { content: ""; position: absolute; left: 16px; top: 18px; width: 6px; height: 6px; border-radius: 50%; background: var(--speaker-color); box-shadow: 0 0 7px color-mix(in srgb, var(--speaker-color) 65%, transparent); }
-    .thread-lines .line:not(:last-child)::after { content: ""; position: absolute; left: 18.5px; top: 25px; bottom: -9px; width: 1px; background: #303b4e; }
-    .thread-lines .line:hover { background: #121925; }
-    .thread-system .thread-lines .line { padding-block: 7px 8px; background: transparent; }
-    .thread-system .thread-lines .line:hover { background: #12130f; }
-    .thread-system .line .who, .thread-system .line .tag { color: #8d8b7f !important; }
-    .thread-system .line .text { color: #b9b8ae; font-size: 12.5px; line-height: 1.6; margin-top: 4px; }
-    .line { --speaker-color: var(--dim); max-width: 1320px; padding: 11px 14px 12px; margin: 8px auto; border: 1px solid #202838; border-radius: 7px; background: #0f141d; box-shadow: inset 3px 0 var(--speaker-color); overflow-wrap: anywhere; }
-    .line:hover { background: #121925; border-color: #2a3548; }
-    .line .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0; min-width: 0; font-size: 11.5px; line-height: 1.55; }
-    .line .clock { color: #748099; font-variant-numeric: tabular-nums; margin-right: 8px; }
-    .line .who { font-weight: 700; }
-    .line .who::before { content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%; background: var(--speaker-color); box-shadow: 0 0 7px color-mix(in srgb, var(--speaker-color) 65%, transparent); }
-    .line .tag { color: #9aa6bd; background: #171e2a; border: 1px solid #293347; border-radius: 10px; padding: 0 6px; margin: 0 8px 0 6px; }
-    .line .to { color: var(--dim); margin-right: 6px; }
-    .line .sep { color: #596276; }
-    .line .text { display: block; max-width: 112ch; color: #e1e6f0; white-space: pre-wrap; margin-top: 7px; padding-left: 18px; font-size: 14px; line-height: 1.7; }
-    .line .text code { color: #b9d9ff; background: #080c12; border: 1px solid #28354a; border-radius: 4px; padding: 1px 5px; font: 0.92em/1.5 "SF Mono", ui-monospace, Menlo, monospace; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-    .mention { display: inline; color: #b8dcff; background: #143253; border: 1px solid #2f73aa; border-radius: 4px; padding: 1px 5px; font-weight: 750; box-shadow: 0 0 0 1px rgba(59, 158, 255, 0.08); box-decoration-break: clone; -webkit-box-decoration-break: clone; }
-    .mention-human { color: #ffc4c7; background: #4a2026; border-color: #9b424a; }
-    .line.from-operator { --speaker-color: var(--red); background: #191318; border-color: #3b252c; }
-    .line.pending { outline: 1px solid rgba(232, 179, 57, 0.25); }
-    .line.failed .text { color: #ff7479; }
-    @media (max-width: 760px) {
-      #room { padding-inline: 8px; }
-      .line { padding: 9px 10px 10px; margin-block: 6px; }
-      .line .text { padding-left: 0; }
-      .chat-thread { margin-block: 7px; }
-      .thread-head { padding-inline: 10px; }
-      .thread-kind { display: none; }
-      .thread-lines .line { margin: 0; padding-left: 25px; }
-      .thread-lines .line::before { left: 11px; }
-      .thread-lines .line:not(:last-child)::after { left: 13.5px; }
-    }
-    .composer { display: flex; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--border); }
-    .composer input { flex: 1; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; color: var(--white); padding: 6px 10px; font: inherit; font-size: 12px; }
-    .composer input:disabled { color: var(--dim); }
-    .composer button { background: var(--cyan); border: none; border-radius: 4px; color: #0d1117; font: inherit; font-size: 12px; font-weight: 700; padding: 6px 14px; cursor: pointer; }
-    .composer button:disabled { background: var(--border); color: var(--dim); cursor: default; }
-    .composer-status { padding: 0 16px 8px; font-size: 11px; color: var(--dim); min-height: 14px; }
-    .composer button#composer-attach { background: transparent; border: 1px solid var(--border); color: var(--dim); padding: 6px 10px; }
-    .composer-files { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px; }
-    .composer-files:empty { display: none; }
-    .composer-files .chip { display: inline-flex; align-items: center; gap: 6px; background: #0d1117; border: 1px solid var(--border); border-radius: 12px; padding: 2px 10px; font-size: 11px; color: var(--white); }
-    .composer-files .chip button { background: none; border: none; color: var(--dim); cursor: pointer; font: inherit; padding: 0; }
-    body.dropping #room { outline: 2px dashed var(--cyan); outline-offset: -6px; }
-    .composer-status.is-error { color: var(--red, #f85149); }
-    .empty { color: var(--dim); padding: 14px; font-size: 12px; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>OpenSwarm · Chat room</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
+  <link rel="stylesheet" href="/static/css/chat.css" />
 </head>
-<body>
-  <header>
-    <h1>💬 CHAT ROOM</h1>
-    <a href="/">← dashboard</a>
-    <a href="/orchestration">orchestration</a>
+<body class="page-chat">
+  <header class="topbar">
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <span class="page-title">Chat room</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/app">Cockpit</a>
+      <a href="/chat" aria-current="page">Chat</a>
+      <a href="/orchestration">Orchestration</a>
+      <a href="/threads">Threads</a>
+      <a href="/warehouse">Warehouse</a>
+      <a href="/">Supervisor</a>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
+    </div>
   </header>
-  <div id="room" aria-label="Agent chat room" aria-live="polite"><div class="empty">Loading…</div></div>
-  <form class="composer" id="composer">
-    <input id="composer-file" type="file" multiple hidden aria-hidden="true" />
-    <button type="button" id="composer-attach" title="Attach files">📎</button>
-    <input id="composer-text" type="text" autocomplete="off" placeholder="Loading…" aria-label="Message the agents" />
-    <button type="submit">Send</button>
-  </form>
-  <div id="composer-files" class="composer-files"></div>
+
+  <main class="chat-main">
+    <div class="room-wrap">
+      <div id="room" class="room" aria-label="Agent chat room"><div class="empty">Loading the room…</div></div>
+      <div id="drop-overlay" class="drop-overlay" hidden>Drop to attach</div>
+      <button type="button" id="scroll-latest" class="scroll-latest" hidden>↓ Latest</button>
+      <div id="room-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+    </div>
+
+    <form class="composer" id="composer" aria-label="Message the agents">
+      <div id="composer-files" class="composer-files" aria-label="Attached files"></div>
+      <div class="composer-row">
+        <input id="composer-file" type="file" multiple hidden aria-hidden="true" />
+        <button type="button" id="composer-attach" class="btn btn-ghost btn-icon" aria-label="Attach files" title="Attach files">📎</button>
+        <textarea id="composer-text" class="textarea composer-text" rows="1" autocomplete="off" placeholder="Loading…" aria-label="Message the agents"></textarea>
+        <button type="submit" id="composer-send" class="btn btn-primary" disabled>Send</button>
+      </div>
+      <div id="composer-status" class="status-line composer-status" role="status" aria-live="polite"></div>
+    </form>
+  </main>
+
   <script type="module">
     import { startChatView } from '/static/js/chatView.mjs';
+    import { installThemeToggle } from '/static/js/theme.mjs';
+    installThemeToggle(document, document.getElementById('theme-toggle'));
     startChatView(document);
   </script>
 </body>

@@ -1,0 +1,96 @@
+/* Repository threads (AGT-4201). Consumes tokens.css + shell.css.
+   Durable decisions per repository: a list on the left, one thread's
+   history and reply box on the right. */
+
+body.page-threads {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--text-sm);
+}
+
+.topbar #repo { min-width: 240px; max-width: 40vw; }
+
+.threads-status {
+  min-height: 28px;
+  padding: var(--space-1) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+#status.error { color: var(--danger); }
+
+.threads-main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 36%) 1fr;
+  height: calc(100vh - var(--topbar-h) - 28px);
+}
+
+/* ── List ────────────────────────────────────────────────────────────── */
+
+.threads-list { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg-surface); }
+.toolbar { display: flex; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
+.toolbar .select { flex: 1; }
+#threads { flex: 1; overflow: auto; }
+
+.thread-card {
+  width: 100%;
+  padding: var(--space-3);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.thread-card:hover { background: var(--bg-hover); }
+.thread-card.selected { background: var(--accent-subtle); box-shadow: inset 3px 0 var(--accent); }
+.thread-card:focus-visible { box-shadow: inset 3px 0 var(--accent), var(--focus-ring); }
+.subject { display: flex; gap: var(--space-2); align-items: center; font-weight: 600; }
+.thread-card .badge { font-size: 10px; }
+.badge.open { color: var(--success); border-color: var(--success); background: var(--success-subtle); }
+.badge.resolved { color: var(--fg-muted); }
+.thread-card .meta, .detail-head .meta { margin-top: var(--space-1); color: var(--fg-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
+
+.new-thread { display: grid; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--border); }
+.new-thread h2 { margin: 0; font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-muted); }
+.new-thread .textarea { min-height: 62px; resize: vertical; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+
+/* ── Detail ──────────────────────────────────────────────────────────── */
+
+.threads-detail { min-width: 0; display: flex; flex-direction: column; }
+#empty { padding: var(--space-6); }
+#detail { display: none; min-height: 0; flex: 1; flex-direction: column; }
+#detail.visible { display: flex; }
+.detail-head { padding: var(--space-4); border-bottom: 1px solid var(--border); }
+.detail-head h2 { margin: 0 0 var(--space-1); font-size: var(--text-lg); }
+.detail-actions { display: flex; gap: var(--space-2); margin-top: var(--space-3); flex-wrap: wrap; }
+.detail-head .confirm-card { margin-top: var(--space-3); }
+
+#messages { flex: 1; overflow: auto; padding: var(--space-3) var(--space-4); }
+.message { margin: var(--space-2) 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-surface); max-width: var(--content-max); }
+.message-head { color: var(--fg-muted); font-size: var(--text-xs); }
+.message-body { margin-top: var(--space-2); color: var(--fg-primary); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-body); }
+.message-body .inline-code { color: var(--code-string); background: var(--bg-code); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1px 4px; }
+.message-body pre { margin: var(--space-2) 0 2px; padding: var(--space-3); overflow: auto; color: var(--fg-primary); background: var(--bg-code); border: 1px solid var(--border); border-radius: var(--radius-sm); line-height: 1.55; white-space: pre; }
+.message-body code { font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55; }
+.message-body .token-comment { color: var(--code-comment); font-style: italic; }
+.message-body .token-keyword { color: var(--code-keyword); }
+.message-body .token-string { color: var(--code-string); }
+.message-body .token-number { color: var(--code-number); }
+.message-body .token-property { color: var(--code-property); }
+.message-body .token-punctuation { color: var(--code-punctuation); }
+
+.reply-form { display: grid; grid-template-columns: 1fr auto; gap: var(--space-2); align-items: end; padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); background: var(--bg-surface); }
+.reply-form .textarea { min-height: 54px; resize: vertical; }
+
+@media (max-width: 800px) {
+  .threads-main { grid-template-columns: 1fr; height: auto; }
+  .threads-list { border-right: 0; max-height: 50vh; }
+  .threads-detail { min-height: 50vh; }
+  .topbar #repo { max-width: 100%; }
+  .two { grid-template-columns: 1fr; }
+}

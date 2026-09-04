@@ -21,28 +21,28 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run lint
 
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
     needs: lint
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run typecheck
 
   build:
@@ -56,7 +56,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run build
       - uses: actions/upload-artifact@v7
         with:
@@ -89,7 +89,7 @@ jobs:
           # "loopback: Failed RTM_NEWADDR: Operation not permitted".
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       # Coverage thresholds live in vitest.config.ts (ratcheted floor below the
       # measured baseline — see that file's comment). Previously `npm test` had
       # no --coverage flag anywhere in CI, so the threshold was configured but
@@ -109,7 +109,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm test -- --run src/adapters/processTree.windows.test.ts
 
   loc-gate:
