@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.22.0 — 2026-09-04
+
+### Changed
+
+- **One design system across the web surface (AGT-4201).** Cockpit, chat, orchestration, threads, warehouse, and the supervisor / issue-board pages now draw every colour, spacing, radius, type size, and motion value from `tokens.css`; the semantic vocabulary (`--bg-*`, `--fg-*`, accent / danger / warning / success, role / kind / status colours) replaces four divergent palettes and 150+ hardcoded hex values. Shared primitives in `shell.css` (sticky topbar with one navigation, buttons, inputs, chips, badges, cards, status and empty states, focus ring, reduced-motion) back every page.
+- **Light theme.** `[data-theme="light"]` is a value swap applied before first paint by `themeBoot.js`; every page has a toggle that persists the choice and follows the OS until one is made.
+- **Chat composer and stream following.** Autogrowing textarea (Enter sends, Shift+Enter breaks the line, IME-safe), Send disabled on empty, in-place sending state, draft persistence, labelled attachment chips, drop overlay. The room stays pinned to the newest line until the operator scrolls up, then offers "↓ Latest" and announces arrivals once per batch to assistive tech.
+- **Destructive actions confirm in the page**, naming the target: resolving a repository thread, overwriting a warehouse file.
+- **Inter (latin variable subset, OFL) is vendored** as the brand font with a Korean system fallback stack.
+
+### Added
+
+- `tests/web/tokens.test.ts` — the token contract: every `var()` resolves, no colour literal outside `tokens.css`, no inline `<style>` in a page shell, every shell links tokens + shell + theme boot in order and shares one navigation, every icon-only button has a name.
+
+### Fixed
+
+- **CI: `npm ci` no longer waits on the registry audit / fund endpoints** (`--prefer-offline --no-audit --no-fund`), which had stalled the Lint job for its whole timeout; lint / typecheck timeouts widened to 10 minutes.
+
 ## 0.21.6 — 2026-09-03
 
 ### Fixed
