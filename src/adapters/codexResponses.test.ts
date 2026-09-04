@@ -138,6 +138,33 @@ describe('unsupported-model fallback', () => {
   });
 });
 
+describe('Responses stream terminal events', () => {
+  it('propagates an incomplete 200 stream instead of returning an empty successful response', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      [
+        'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    type CreateApiCaller = (
+      initialToken: string,
+      accountId: string,
+      store: unknown,
+      model: string,
+    ) => (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<unknown>;
+    const adapter = new CodexResponsesAdapter() as unknown as { createApiCaller: CreateApiCaller };
+
+    await expect(adapter.createApiCaller('token', 'account', {}, 'gpt-5.6-terra')(
+      [{ role: 'user', content: 'Return a short answer.' }],
+      [],
+    )).rejects.toThrow('incomplete');
+  });
+});
+
 describe('chatToResponsesInput', () => {
   it('lifts system messages into instructions and keeps user/assistant as input', () => {
     const messages: ChatMessage[] = [

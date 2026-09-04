@@ -133,6 +133,8 @@ interface SseEvent {
   arguments?: string;
   response?: {
     model?: string;
+    incomplete_details?: { reason?: string };
+    error?: { message?: string };
     usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
   };
 }
@@ -241,6 +243,7 @@ async function consumeResponsesStream(
 
   const decoder = new TextDecoder();
   let buffer = '';
+  let terminalError: string | undefined;
   // Reasoning summary streams token-by-token; buffer and emit whole lines so the
   // live log shows readable thoughts instead of one-word-per-line spam.
   let reasoningBuf = '';
@@ -257,6 +260,11 @@ async function consumeResponsesStream(
   const handle = (ev: SseEvent | null) => {
     if (!ev) return;
     events.push(ev);
+    if (ev.type === 'response.incomplete') {
+      terminalError = `Responses stream incomplete${ev.response?.incomplete_details?.reason ? `: ${ev.response.incomplete_details.reason}` : ''}`;
+    } else if (ev.type === 'response.failed') {
+      terminalError = `Responses stream failed${ev.response?.error?.message ? `: ${ev.response.error.message}` : ''}`;
+    }
     if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
     if (onReasoning && ev.type === 'response.reasoning_summary_text.delta' && ev.delta) {
       reasoningBuf += ev.delta;
@@ -277,6 +285,8 @@ async function consumeResponsesStream(
   }
   handle(parseSseLine(buffer));
   flushReasoning(true);
+
+  if (terminalError) throw new Error(terminalError);
 
   return reduceResponsesEvents(events);
 }
