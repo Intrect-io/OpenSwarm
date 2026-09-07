@@ -16,6 +16,10 @@ describe('per-provider usage-limit recognition (INT-2520 audit)', () => {
     ['OpenAI 429 rate_limit_exceeded', '{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for gpt-5 …"}}'],
     ['OpenAI 429 insufficient_quota', '{"error":{"type":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}'],
     ['OpenRouter 402 insufficient credits', '{"error":{"code":402,"message":"Insufficient credits. Add more to continue."}}'],
+    // Verbatim from the run that surfaced AGT-4215: OpenRouter relaying an upstream
+    // BYOK provider's own exhausted-balance wording, which is NOT "insufficient credits".
+    ['OpenRouter 402 relaying upstream BYOK balance',
+      '{"error":{"message":"Provider returned error","code":402,"metadata":{"raw":"{\\"code\\":402,\\"msg\\":\\"insufficient balance\\"}","provider_name":"AtlasCloud","is_byok":true}}}'],
     ['HTTP 429 too many requests (local)', 'Local API error (429): Too Many Requests'],
   ];
   for (const [name, output] of REAL_LIMIT_OUTPUTS) {
@@ -32,6 +36,12 @@ describe('per-provider usage-limit recognition (INT-2520 audit)', () => {
       'Implemented credit purchase flow and out-of-stock handling.',
       'The cache window is 5min; processed 429 rows in the batch.',
       'Refactored rateLimiter.ts to reset the counter each window.',
+      // "insufficient balance" is the stock error string of wallet/payment code, and
+      // these signatures are scanned against raw model output. A worker editing such
+      // a repo must not pause the scheduler — which is why the AGT-4215 signature is
+      // anchored on the provider's JSON key rather than added as a bare substring.
+      "throw new Error('Insufficient balance') // wallet guard",
+      'if (res.status === 402) throw new Error("Insufficient balance for this transfer");',
     ];
     for (const b of benign) {
       expect(matchesRateLimitMessage(b)).toBe(false);
@@ -154,10 +164,92 @@ describe('runAgenticLoop rate-limit propagation (INT-1906 blocker)', () => {
     ).rejects.toThrow(/fetch failed/);
   });
 
-  it('does NOT re-throw an ordinary (non-rate-limit, non-infra) API error', async () => {
-    const callApi = async () => { throw new Error('the model returned malformed JSON'); };
-    const res = await runAgenticLoop({ prompt: 'x', cwd: process.cwd(), model: 't', callApi, webTools: false, maxTurns: 2 });
+  // The preserve-progress property this has guarded since INT-2520: an error that is
+  // neither a rate limit nor infra must not kill a run that has already caused a SIDE
+  // EFFECT, because a worker may have edited files or run commands that throwing
+  // would discard. AGT-4215 moved the boundary rather than removing the property —
+  // it is now keyed on that side effect (editToolCount / executedCommands) instead of
+  // on a turn counter, so a read-only run, which can never acquire one, is never
+  // silently handed an error string as its "result".
+  it('does NOT re-throw an ordinary API error once the run has done real work', async () => {
+    let n = 0;
+    const callApi = async () => {
+      n += 1;
+      if (n === 1) {
+        return {
+          choices: [{
+            message: { role: 'assistant', content: null, tool_calls: [
+              { id: 'c1', type: 'function' as const, function: { name: 'bash', arguments: JSON.stringify({ command: 'echo agt4215' }) } },
+            ] },
+            finish_reason: 'tool_calls',
+          }],
+        };
+      }
+      throw new Error('the model returned malformed JSON');
+    };
+    const res = await runAgenticLoop({ prompt: 'x', cwd: process.cwd(), model: 't', callApi: callApi as never, webTools: false, maxTurns: 3 });
+    expect(res.executedCommands.length).toBeGreaterThan(0);
     expect(res.text).toContain('API error');
+  });
+
+  // The read-only case the turn-based first cut missed: a reviewer has no edit or
+  // bash tool, so it can never accumulate progress. A failure on its SECOND call
+  // must still propagate, or the operator gets "no parseable verdict" one turn later.
+  it('re-throws when a later call fails but the run never produced a side effect', async () => {
+    let n = 0;
+    const callApi = async () => {
+      n += 1;
+      if (n === 1) {
+        return {
+          choices: [{
+            message: { role: 'assistant', content: null, tool_calls: [
+              { id: 'c1', type: 'function' as const, function: { name: 'read_file', arguments: JSON.stringify({ path: 'nope.ts' }) } },
+            ] },
+            finish_reason: 'tool_calls',
+          }],
+        };
+      }
+      throw new Error('the model returned malformed JSON');
+    };
+    await expect(
+      runAgenticLoop({ prompt: 'x', cwd: process.cwd(), model: 't', callApi: callApi as never, webTools: false, maxTurns: 3 }),
+    ).rejects.toThrow(/agentic-loop: API call failed with no work to preserve/);
+  });
+
+  // The other side of that boundary. Returning this as a normal result gave the
+  // caller a "success" whose entire body was an error string; parseReviewerResult
+  // then reported "no parseable verdict" and the CLI blamed the adapter. Measured
+  // on 14/14 audit areas where the real cause was a 402 billing failure. (AGT-4215)
+  it('re-throws an ordinary API error that kills the FIRST call', async () => {
+    const callApi = async () => { throw new Error('the model returned malformed JSON'); };
+    await expect(
+      runAgenticLoop({ prompt: 'x', cwd: process.cwd(), model: 't', callApi, webTools: false, maxTurns: 2 }),
+    ).rejects.toThrow(/agentic-loop: API call failed with no work to preserve/);
+  });
+
+  // And it must be classified as infra, or each in-process adapter's own catch
+  // re-swallows it into {exitCode: 1, stdout: ''} — spawnCli does not inspect
+  // exitCode for adapters implementing run(), so the empty stdout would reach the
+  // parser and reproduce the very message this fix removes. (AGT-4215)
+  it('marks that first-call failure as infra so every layer re-throws it', async () => {
+    const callApi = async () => { throw new Error('the model returned malformed JSON'); };
+    const err = await runAgenticLoop({ prompt: 'x', cwd: process.cwd(), model: 't', callApi, webTools: false, maxTurns: 2 })
+      .then(() => null, (e: unknown) => e);
+    expect(isInfraError(err)).toBe(true);
+  });
+
+  // End-to-end shape of the reported incident: the upstream 402 arrives on call #1.
+  // It must surface as a RateLimitError (pause + a billing message), never as a
+  // swallowed result the reviewer parser turns into "no parseable verdict".
+  it('surfaces an upstream "insufficient balance" 402 on the first call as a rate limit', async () => {
+    const callApi = async () => {
+      // Verbatim shape: the phrase arrives nested inside a JSON string, so the real
+      // bytes carry backslashes — \"msg\":\"insufficient balance\".
+      throw new Error(String.raw`OpenRouter API error (402): {"error":{"message":"Provider returned error","code":402,"metadata":{"raw":"{\"code\":402,\"msg\":\"insufficient balance\"}","provider_name":"AtlasCloud","is_byok":true}}}`);
+    };
+    await expect(
+      runAgenticLoop({ prompt: 'x', cwd: process.cwd(), model: 't', callApi, webTools: false, maxTurns: 2 }),
+    ).rejects.toBeInstanceOf(RateLimitError);
   });
 
   it('preserves a TYPED RateLimitError whose human message detectRateLimit would miss (INT-2519)', async () => {
@@ -271,6 +363,18 @@ describe('resolveLimitResponse gating (INT-2907)', () => {
   it('still pauses on the out-of-credits 402 openrouter actually sends', async () => {
     await expect(
       resolveLimitResponse('openrouter', 402, new Headers(), '{"error":{"message":"Insufficient credits. Add more to continue."}}', state()),
+    ).rejects.toBeInstanceOf(RateLimitError);
+  });
+
+  // An upstream BYOK provider proxied through OpenRouter reports ITS balance, in its
+  // own words. Before AGT-4215 this matched no signature, so it returned 'other' and
+  // the agentic loop swallowed it into a normal result — the operator was told the
+  // reviewer produced "no parseable verdict" when the account simply needed topping up.
+  it('pauses on a 402 relaying an upstream provider\'s "insufficient balance"', async () => {
+    const body = '{"error":{"message":"Provider returned error","code":402,"metadata":'
+      + '{"raw":"{\\"code\\":402,\\"msg\\":\\"insufficient balance\\"}","provider_name":"AtlasCloud","is_byok":true}}}';
+    await expect(
+      resolveLimitResponse('openrouter', 402, new Headers(), body, state()),
     ).rejects.toBeInstanceOf(RateLimitError);
   });
 });
