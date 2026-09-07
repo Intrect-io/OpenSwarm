@@ -74,6 +74,18 @@ const RATE_LIMIT_REGEXES: readonly RegExp[] = [
   // or as an "(429)" status echo from an adapter's error wrapper.
   /\b429\b[\s\S]{0,30}(rate.?limit|too many|quota)/,
   /error \(429\)/,
+  // An upstream BYOK provider proxied THROUGH OpenRouter reports ITS exhausted
+  // balance in its own words — OpenRouter answers 402 with
+  // metadata.raw = {"code":402,"msg":"insufficient balance"}. A bare
+  // "insufficient balance" substring cannot go in the list above: it is the stock
+  // error string of wallet/payment/banking code, and these signatures are scanned
+  // against raw model output, so a worker merely editing such a repo would trip it
+  // and pause the scheduler. Anchoring on the JSON key keeps it provider-shaped.
+  // The backslashes are not optional: the phrase arrives nested inside a JSON
+  // STRING, so the real bytes are \"msg\":\"insufficient balance\" — a pattern
+  // written without them matches the shape people expect and never the one that
+  // actually arrives. (AGT-4215)
+  /"msg\\?"\s*:\s*\\?"insufficient balance/,
 ];
 
 /** True when `text` carries any provider's usage/rate/quota-limit signature. */
@@ -140,6 +152,11 @@ const QUOTA_EXHAUSTED_SUBSTRINGS: readonly string[] = [
   'insufficient_quota',
   'exceeded your current quota',
   'insufficient credits',
+  // Spent money, not a short window: an upstream BYOK provider relaying its own
+  // empty balance through OpenRouter. Waiting cannot clear it, so it belongs here
+  // (pause) rather than in the throttle path, which would burn the retry budget
+  // on three escalating sleeps and then fail anyway. (AGT-4215)
+  'insufficient balance',
   'requires more credits',
   'purchase more credits',
   'out of credits',

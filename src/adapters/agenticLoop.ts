@@ -497,6 +497,32 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         throw err;
       }
       onLog?.(`✖ API error: ${msg}`);
+      // Swallowing an API error hands the caller a "result" whose entire body is an
+      // error string. Downstream, parseReviewerResult finds no verdict in it and
+      // reports "no parseable verdict", so the CLI blames the adapter and tells the
+      // operator to check `codex exec`. The case that surfaced this was a 402
+      // billing failure from an upstream BYOK provider: a payment problem presented
+      // as a parser bug, across 14/14 audit areas.
+      //
+      // Swallow ONLY when this run has already caused a side effect worth keeping.
+      // That is the property INT-2520 protects — a worker may have edited files or
+      // run commands that throwing would discard — and `editToolCount` /
+      // `executedCommands` state it directly. A turn counter does not: a read-only
+      // run (reviewer, auditor, `openswarm review`) has no edit or bash tool at all,
+      // so it can never acquire progress, yet a turn-based test would start
+      // swallowing from its second call and reproduce the very misdiagnosis above
+      // one turn later.
+      //
+      // The 'agentic-loop:' prefix is what makes propagation work. Returning a
+      // plain error here would be re-swallowed by each in-process adapter's own
+      // catch into `{exitCode: 1, stdout: ''}`, and spawnCli does not inspect
+      // exitCode for adapters that implement run() — the empty stdout would reach
+      // the parser and produce the same wrong message. The prefix matches
+      // INFRA_ERROR_PATTERNS, so isInfraError re-throws it at every layer and the
+      // real cause reaches the operator. (AGT-4215)
+      if (editToolCount === 0 && executedCommands.length === 0) {
+        throw new Error(`agentic-loop: API call failed with no work to preserve: ${msg}`, { cause: err });
+      }
       finalText = `API error: ${msg}`;
       break;
     }
