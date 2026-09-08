@@ -26,19 +26,21 @@ import type { DecisionResult, TaskItem } from '../orchestration/decisionEngine.j
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { ITaskSource } from './taskSource.js';
 
-const { detectFileConflictsMock, resolveTaskFileScopeMock, fileScopesConflictMock } = vi.hoisted(() => ({
+const { detectFileConflictsMock, resolveTaskFileScopeMock, describeScopeConflictMock } = vi.hoisted(() => ({
   detectFileConflictsMock: vi.fn(),
   resolveTaskFileScopeMock: vi.fn(async (task: TaskItem) => {
     task.fileScope ??= [`scope/${task.id}`];
     return task.fileScope;
   }),
-  fileScopesConflictMock: vi.fn(() => false),
+  // null = no conflict. The runner now reads a reason object so it can log WHY
+  // a candidate was deferred, not just that it was (AGT-4233).
+  describeScopeConflictMock: vi.fn((): unknown => null),
 }));
 
 vi.mock('../orchestration/conflictDetector.js', () => ({
   detectFileConflicts: detectFileConflictsMock,
   resolveTaskFileScope: resolveTaskFileScopeMock,
-  fileScopesConflict: fileScopesConflictMock,
+  describeScopeConflict: describeScopeConflictMock,
 }));
 
 const { runLedgerRetrospectiveMock } = vi.hoisted(() => ({
@@ -174,8 +176,8 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       candidate.fileScope ??= [`scope/${candidate.id}`];
       return candidate.fileScope;
     });
-    fileScopesConflictMock.mockReset();
-    fileScopesConflictMock.mockReturnValue(false);
+    describeScopeConflictMock.mockReset();
+    describeScopeConflictMock.mockReturnValue(null);
   }, 30000);
 
   afterEach(() => {
@@ -286,7 +288,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
       const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
-      fileScopesConflictMock.mockReturnValueOnce(true);
+      describeScopeConflictMock.mockReturnValueOnce({ kind: 'overlap', shared: ['src/shared.ts'] });
       internal.scheduler.getRunningTasks = () => [{
         runId: 'active-run',
         task: activeTask,
@@ -300,7 +302,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
       expect(safe).toEqual(new Set());
-      expect(fileScopesConflictMock).toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope);
+      // Third argument is the admission policy the durable gate also reads;
+      // passing it is the fix for AGT-4233.
+      expect(describeScopeConflictMock)
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'serialize');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 
@@ -385,7 +390,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
       const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
-      fileScopesConflictMock.mockReturnValueOnce(true);
+      describeScopeConflictMock.mockReturnValueOnce({ kind: 'overlap', shared: ['src/shared.ts'] });
       internal.scheduler.getRunningTasks = () => [{
         runId: 'active-run',
         task: activeTask,
@@ -399,7 +404,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
       expect(safe).toEqual(new Set());
-      expect(fileScopesConflictMock).toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope);
+      // Third argument is the admission policy the durable gate also reads;
+      // passing it is the fix for AGT-4233.
+      expect(describeScopeConflictMock)
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'serialize');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 
