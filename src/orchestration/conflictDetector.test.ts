@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectFileConflicts } from './conflictDetector.js';
+import { describeScopeConflict, detectFileConflicts, fileScopesConflict } from './conflictDetector.js';
 import type { TaskItem } from './decisionEngine.js';
 
 // These tests exercise the planner-declared `fileScope` path. When every task
@@ -154,5 +154,69 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     );
 
     expect(result.safe.map((t) => t.id)).toEqual(['unknown']);
+  });
+});
+
+
+// The pre-admission worktree gate compares one candidate against one live
+// worker. It used to ignore `unknownScopeAdmission` entirely, so `admit` was
+// honoured by the durable gate and silently dropped here — one running task
+// deferred every other candidate and left 11 of 12 slots idle (AGT-4233).
+describe('describeScopeConflict', () => {
+  it('defers an unknown candidate scope under serialize', () => {
+    expect(describeScopeConflict(undefined, ['src/a.ts'], 'serialize'))
+      .toEqual({ kind: 'unknown-candidate' });
+  });
+
+  it('defers an unknown active scope under serialize', () => {
+    expect(describeScopeConflict(['src/a.ts'], [], 'serialize'))
+      .toEqual({ kind: 'unknown-active' });
+  });
+
+  it('admits an unknown scope on either side under admit', () => {
+    expect(describeScopeConflict(undefined, ['src/a.ts'], 'admit')).toBeNull();
+    expect(describeScopeConflict(['src/a.ts'], undefined, 'admit')).toBeNull();
+    expect(describeScopeConflict(undefined, undefined, 'admit')).toBeNull();
+  });
+
+  it('still refuses two known scopes that overlap, even under admit', () => {
+    expect(describeScopeConflict(['src/a.ts'], ['src/a.ts'], 'admit'))
+      .toEqual({ kind: 'overlap', shared: ['src/a.ts'] });
+  });
+
+  it('names every candidate entry that collides, so a deferral can be read', () => {
+    const reason = describeScopeConflict(
+      ['src/a.ts', 'src/b.ts', 'docs/readme.md'],
+      ['src/a.ts', 'src/b.ts'],
+      'admit',
+    );
+
+    expect(reason).toEqual({ kind: 'overlap', shared: ['src/a.ts', 'src/b.ts'] });
+  });
+
+  it('treats a directory scope as covering its files', () => {
+    expect(describeScopeConflict(['src/api/handler.ts'], ['src/api'], 'admit'))
+      .toEqual({ kind: 'overlap', shared: ['src/api/handler.ts'] });
+  });
+
+  it('lets disjoint known scopes run together under either policy', () => {
+    expect(describeScopeConflict(['src/a.ts'], ['src/b.ts'], 'serialize')).toBeNull();
+    expect(describeScopeConflict(['src/a.ts'], ['src/b.ts'], 'admit')).toBeNull();
+  });
+
+  it('defaults to serialize when no policy is passed', () => {
+    expect(describeScopeConflict(undefined, ['src/a.ts'])).toEqual({ kind: 'unknown-candidate' });
+  });
+});
+
+describe('fileScopesConflict (compatibility wrapper)', () => {
+  it('keeps the historical fail-closed answer for unknown scopes', () => {
+    expect(fileScopesConflict(undefined, ['src/a.ts'])).toBe(true);
+    expect(fileScopesConflict(['src/a.ts'], [])).toBe(true);
+  });
+
+  it('reports overlap and disjointness as before', () => {
+    expect(fileScopesConflict(['src/a.ts'], ['src/a.ts'])).toBe(true);
+    expect(fileScopesConflict(['src/a.ts'], ['src/b.ts'])).toBe(false);
   });
 });

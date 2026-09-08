@@ -169,12 +169,62 @@ export async function resolveTaskFileScope(
   return [];
 }
 
+/**
+ * Why a candidate cannot start beside an active worker. `overlap` carries the
+ * candidate-side entries that matched, so a deferral can name files instead of
+ * only asserting a conflict.
+ */
+export type ScopeConflictReason =
+  | { kind: 'overlap'; shared: string[] }
+  | { kind: 'unknown-candidate' }
+  | { kind: 'unknown-active' };
+
+/** Candidate-side entries that overlap something the active worker will write. */
+function sharedScopeEntries(candidate: Set<string>, active: Set<string>): string[] {
+  const shared: string[] = [];
+  for (const entry of candidate) {
+    for (const other of active) {
+      if (conflictScopeEntriesOverlap(entry, other)) {
+        shared.push(entry);
+        break;
+      }
+    }
+  }
+  return shared;
+}
+
+/**
+ * Compare one candidate's write scope against one active worker's.
+ *
+ * `serialize` is the historical fail-closed rule: an unknown scope on either
+ * side blocks. `admit` is the same rule the durable admission gate already
+ * applies (`admitsConflictScope`, src/automation/runLedgerScope.ts) — an
+ * unknown scope is not evidence of a conflict, while two KNOWN scopes that
+ * overlap are still refused.
+ *
+ * Both gates must read one policy. vela ran with `unknownScopeAdmission: admit`
+ * while this gate still serialized every repository, so one running task
+ * deferred every other candidate and left 11 of 12 slots idle (AGT-4233) — the
+ * same symptom #518 measured and fixed on the durable gate alone.
+ */
+export function describeScopeConflict(
+  candidate: string[] | undefined,
+  active: string[] | undefined,
+  unknownScopeAdmission: 'serialize' | 'admit' = 'serialize',
+): ScopeConflictReason | null {
+  const a = normalizeScope(candidate);
+  const b = normalizeScope(active);
+  const admitUnknown = unknownScopeAdmission === 'admit';
+  if (a.size === 0) return admitUnknown ? null : { kind: 'unknown-candidate' };
+  if (b.size === 0) return admitUnknown ? null : { kind: 'unknown-active' };
+  // Cheap set test first; only enumerate the matches when there is one.
+  if (!conflictScopesOverlap(a, b)) return null;
+  return { kind: 'overlap', shared: sharedScopeEntries(a, b) };
+}
+
 /** Unknown scope conflicts fail closed while another same-repo worker is live. */
 export function fileScopesConflict(left: string[] | undefined, right: string[] | undefined): boolean {
-  const a = normalizeScope(left);
-  const b = normalizeScope(right);
-  if (a.size === 0 || b.size === 0) return true;
-  return conflictScopesOverlap(a, b);
+  return describeScopeConflict(left, right, 'serialize') !== null;
 }
 
 /**

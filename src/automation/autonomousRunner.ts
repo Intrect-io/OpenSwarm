@@ -76,9 +76,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import {
+  describeScopeConflict,
   detectFileConflicts,
-  fileScopesConflict,
   resolveTaskFileScope,
+  type ScopeConflictReason,
 } from '../orchestration/conflictDetector.js';
 import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
@@ -143,6 +144,26 @@ export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
   'allowSameProjectConcurrent' | 'worktreeMode'
 >): boolean {
   return (config.allowSameProjectConcurrent ?? true) && (config.worktreeMode ?? false);
+}
+
+/** Short, stable label for a task in operator-facing logs. */
+function taskLabel(task: TaskItem): string {
+  return task.issueIdentifier || task.id.slice(0, 8);
+}
+
+/**
+ * One-line cause for a deferral log. Without this the operator only sees that a
+ * candidate was deferred, not whether a scope was unknown or which files
+ * actually collided — the gap that made AGT-4233 need a ledger dig to diagnose.
+ * The file list is capped so one blocked heartbeat cannot flood the log.
+ */
+function describeConflictCause(reason: ScopeConflictReason, activeLabel: string): string {
+  if (reason.kind === 'unknown-candidate') return 'candidate write scope unknown';
+  if (reason.kind === 'unknown-active') return `${activeLabel} write scope unknown`;
+  if (reason.shared.length === 0) return `overlaps ${activeLabel}`;
+  const shown = reason.shared.slice(0, 3);
+  const rest = reason.shared.length - shown.length;
+  return `overlaps ${activeLabel} on ${shown.join(', ')}${rest > 0 ? ` +${rest} more` : ''}`;
 }
 
 export type RunnableCandidate = { task: TaskItem; projectPath: string };
@@ -2676,15 +2697,32 @@ export class AutonomousRunner {
         // alone leaves a race window across heartbeat cycles.
         const active = this.scheduler.getRunningTasks()
           .filter(running => normalizeProjectPath(running.projectPath) === projPath);
+        // Read the SAME policy the durable admission gate reads
+        // (admitsConflictScope, runLedgerScope.ts). While this gate ignored it,
+        // `unknownScopeAdmission: admit` was live on vela yet one running task
+        // still deferred every other candidate — 11 of 12 slots idle with 126
+        // executable tasks waiting (AGT-4233).
+        const admission = this.config.unknownScopeAdmission ?? 'serialize';
         const runnable = group.filter(candidate => {
-          const conflict = active.some(running => fileScopesConflict(
-            candidate.task.fileScope,
-            running.task.fileScope,
-          ));
-          if (conflict) {
-            this.syslog(`Conflict with active worktree — deferring: ${candidate.task.issueIdentifier || candidate.task.id.slice(0, 8)} ${candidate.task.title}`);
+          let blockedBy: { label: string; reason: ScopeConflictReason } | undefined;
+          for (const running of active) {
+            const reason = describeScopeConflict(
+              candidate.task.fileScope,
+              running.task.fileScope,
+              admission,
+            );
+            if (reason) {
+              blockedBy = { label: taskLabel(running.task), reason };
+              break;
+            }
           }
-          return !conflict;
+          if (blockedBy) {
+            this.syslog(
+              `Conflict with active worktree (${describeConflictCause(blockedBy.reason, blockedBy.label)})`
+              + ` — deferring: ${taskLabel(candidate.task)} ${candidate.task.title}`,
+            );
+          }
+          return !blockedBy;
         });
         if (runnable.length === 0) continue;
 
