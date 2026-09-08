@@ -219,6 +219,14 @@ export function pickFailureDetail(candidates: Array<string | undefined>): string
 
 /** Prefer the stage that actually failed over earlier successful feedback. */
 export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
+  const workerFailure = result.workerResult?.success === false
+    ? pickFailureDetail([
+      result.workerResult.error,
+      result.workerResult.haltReason,
+      result.workerResult.noChangesReason,
+      result.workerResult.summary,
+    ])
+    : undefined;
   const testerFailure = result.testerResult?.success === false
     ? pickFailureDetail([
       result.testerResult.error,
@@ -243,7 +251,7 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     testerFailure,
     result.lastReviewFeedback,
     result.reviewResult?.feedback,
-    result.workerResult?.error,
+    workerFailure,
     stageError,
     result.stuckReason,
   ]);

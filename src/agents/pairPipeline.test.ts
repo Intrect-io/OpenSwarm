@@ -467,6 +467,7 @@ describe('PairPipeline model selection', () => {
 
     expect(result.finalStatus).toBe('infra_error');
     expect(result.success).toBe(false);
+    expect(result.failureDetail).toBe('worker: codex CLI failed with code 1: Reading prompt from stdin...');
     // Same result-contract guarantee as the rate-limit case above (INT-2424).
     expect(result.stages).toHaveLength(1);
     expect(result.stages[0]).toMatchObject({ stage: 'worker', success: false });
@@ -489,7 +490,21 @@ describe('PairPipeline model selection', () => {
 
     expect(result.finalStatus).toBe('infra_error');
     expect(result.stages).toHaveLength(1);
+    expect(result.failureDetail).toBe('worker: getaddrinfo ENOTFOUND api.openai.com');
     expect(result.stages[0]).toMatchObject({ stage: 'worker', success: false });
+  });
+
+  it.each([
+    [new Error('model resolver configuration invalid'), 'failed', 'model resolver configuration invalid'],
+    ['getaddrinfo ENOTFOUND api.openai.com', 'infra_error', 'getaddrinfo ENOTFOUND api.openai.com'],
+  ])('preserves an exception before a stage result exists: %s', async (error, status, message) => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({ stages: ['worker'], maxIterations: 1 });
+    pipeline.on('stage:start', () => { throw error; });
+    const result = await pipeline.run(task(), process.cwd());
+    expect(result.finalStatus).toBe(status);
+    expect(result.stages).toEqual([]);
+    expect(result.failureDetail).toBe(`pipeline: ${message}`);
   });
 
   // INT-2393: when role model is omitted, the pipeline:stage events must carry

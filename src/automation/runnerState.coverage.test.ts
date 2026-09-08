@@ -303,6 +303,28 @@ describe('pickFailureDetail (INT-2504)', () => {
 describe('pickPipelineFailureDetail stage fallback', () => {
   const base = { success: false, sessionId: 's', iterations: 1, totalDuration: 10 } as const;
 
+  it.each(['haltReason', 'noChangesReason', 'summary'])('preserves a failed worker %s when error is absent', (field) => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'failed', stages: [],
+      workerResult: { success: false, error: 'Unknown error', [field]: 'pytest missing; prerequisite AGT-3961 remains open' },
+    } as never)).toBe('pytest missing; prerequisite AGT-3961 remains open');
+  });
+
+  it('does not treat a successful worker summary as a failure cause', () => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'failed', stages: [],
+      workerResult: { success: true, summary: 'Implementation complete' },
+    } as never)).toBeUndefined();
+  });
+
+  it('keeps the terminal exception ahead of earlier stage feedback', () => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'infra_error', stages: [],
+      failureDetail: 'worktree attachment: sqlite busy',
+      reviewResult: { decision: 'approve', feedback: 'approved' },
+    } as never)).toBe('worktree attachment: sqlite busy');
+  });
+
   it('names the failed stage when no typed sub-result carries the error', () => {
     // vela 2026-09-01: guards, security audit and publication all fail through
     // stages[], and 57% of that day's ledger rows had no error message.

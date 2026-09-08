@@ -118,11 +118,9 @@ export interface PipelineResult {
   prUrl?: string;
   totalCost?: CostInfo;
   /**
-   * Cause of a failure that happened outside the staged pipeline — today the
-   * publication step, which runs after every stage succeeded. `stages[]`
-   * cannot carry it (there is no 'pr' stage), and without it the ledger
-   * recorded these attempts with no message at all (vela AGT-3844: 48
-   * attempts, half of them blank).
+   * Operation/stage and original cause of the terminal failure, including
+   * thrown pipeline errors, worktree setup, durable fences and publication.
+   * Takes precedence over prior stage feedback in the failure ledger.
    */
   failureDetail?: string;
   /**
