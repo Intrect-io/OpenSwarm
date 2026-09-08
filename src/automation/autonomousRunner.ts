@@ -836,7 +836,7 @@ export class AutonomousRunner {
       // resumes on its own. This is what kept completable tasks (worker had already
       // edited files) STUCK in production. (INT-2010)
       if (result.finalStatus === 'infra_error') {
-        const detail = result.workerResult?.error || result.reviewResult?.feedback || 'infra/CLI execution error';
+        const detail = pickPipelineFailureDetail(result) || 'infra/CLI execution error';
         if (task.issueId) {
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.
@@ -1104,6 +1104,7 @@ export class AutonomousRunner {
       this.recordPipelineHistory(task, {
         success: false, sessionId: `scheduler-error-${task.id}-${Date.now()}`, stages: [],
         finalStatus: timeout ? 'infra_error' : 'failed', failureSignal: timeout ? 'timeout' : undefined,
+        failureDetail: `scheduler execution: ${error instanceof Error ? error.message : String(error)}`,
         totalDuration: Math.max(0, Date.now() - startedAt), iterations: 0,
         taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectName: task.linearProject?.name, projectPath, taskTitle: task.title },
       });
@@ -1455,6 +1456,7 @@ export class AutonomousRunner {
       return {
         success: false,
         sessionId: `repo-admission-error-${Date.now()}`,
+        failureDetail: `repository admission policy: ${error instanceof Error ? error.message : String(error)}`,
         stages: [],
         finalStatus: 'infra_error',
         totalDuration: 0,

@@ -241,6 +241,7 @@ export class PairPipeline extends EventEmitter {
         sessionId: session.id,
         stages,
         finalStatus: cancelled ? 'cancelled' : rateLimited ? 'rate_limited' : infra ? 'infra_error' : 'failed',
+        failureDetail: `${classifiedStage?.stage ?? 'pipeline'}: ${error instanceof Error ? error.message : String(error)}`,
         failureSignal: isTimeoutError(error) ? 'timeout' : undefined,
         rateLimitResetsAt: rateLimited && (error as RateLimitError).resetsAt
           ? (error as RateLimitError).resetsAt! * 1000

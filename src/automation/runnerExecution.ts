@@ -890,6 +890,7 @@ export async function executePipeline(
           iterations: 0,
           totalDuration: 0,
           finalStatus: 'infra_error',
+          failureDetail: 'worktree attachment: durable lease fence rejected worktree attachment',
           stages: [],
         };
       }
@@ -931,6 +932,7 @@ export async function executePipeline(
         totalDuration: 0,
         finalStatus: 'infra_error',
         repositoryInfra: !worktreeInfo && !isCoordinationFailure,
+        failureDetail: `worktree ${worktreeInfo ? 'attachment' : 'creation'}: ${err instanceof Error ? err.message : String(err)}`,
         stages: [],
       };
     }
@@ -1029,7 +1031,7 @@ export async function executePipeline(
       console.log(`[${taskPrefix}] Stage started: ${stage}`);
       if (ctx.durability) {
         trackPipelineEffect(
-          'Durable stage transition',
+          `Durable stage transition (${stage})`,
           () => ctx.durability!.onStage(stage),
           true,
         );
@@ -1195,6 +1197,7 @@ export async function executePipeline(
     if (lifecycleFailure) {
       result.success = false;
       result.finalStatus = 'infra_error';
+      result.failureDetail = lifecycleFailure.message;
     }
 
     const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);

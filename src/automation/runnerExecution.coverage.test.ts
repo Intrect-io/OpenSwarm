@@ -787,7 +787,7 @@ describe('runnerExecution.ts coverage extension', () => {
     it('returns a repository-scoped infra_error without ever constructing the pipeline when worktree creation fails (AGT-4038)', async () => {
       createWorktree.mockRejectedValue(new Error('git worktree add: disk full'));
       const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
-      expect(result).toMatchObject({ finalStatus: 'infra_error', success: false });
+      expect(result).toMatchObject({ finalStatus: 'infra_error', success: false, failureDetail: 'worktree creation: git worktree add: disk full' });
       expect(result.repositoryInfra).toBe(true); // disk full is the repo's own fault
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
     });
@@ -798,7 +798,7 @@ describe('runnerExecution.ts coverage extension', () => {
     ])('does not blame the repository when %s (AGT-4038)', async (_label, message) => {
       createWorktree.mockRejectedValue(new WorktreeCoordinationError(message));
       const result = await executePipeline(makeCtx({ worktreeMode: true }), task(), '/repo');
-      expect(result).toMatchObject({ finalStatus: 'infra_error', success: false });
+      expect(result).toMatchObject({ finalStatus: 'infra_error', success: false, failureDetail: `worktree creation: ${message}` });
       expect(result.repositoryInfra).toBeFalsy(); // coordination, not disk/git health
     });
 
@@ -811,7 +811,7 @@ describe('runnerExecution.ts coverage extension', () => {
         onPublication: vi.fn(async () => true),
       };
       const result = await executePipeline(makeCtx({ worktreeMode: true, durability }), task(), '/repo');
-      expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
+      expect(result).toMatchObject({ success: false, finalStatus: 'infra_error', failureDetail: 'worktree attachment: sqlite busy' });
       expect(result.repositoryInfra).toBeFalsy(); // ledger contention, not the repo's git state
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
       expect(preserveWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-1' }), 'worktree setup or durable attachment failed');
@@ -982,13 +982,13 @@ describe('runnerExecution.ts coverage extension', () => {
       rejectFence(false);
       const result = await execution;
 
-      expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
+      expect(result).toMatchObject({ success: false, finalStatus: 'infra_error', failureDetail: 'Durable stage transition (worker): durable lease fence rejected the event' });
       expect(commitAndCreatePR).not.toHaveBeenCalled();
       expect(preserveWorktree).toHaveBeenCalledTimes(1);
       expect(removeWorktree).not.toHaveBeenCalled();
       const runOptions = fp.run.mock.calls[0][2] as { signal: AbortSignal };
       expect(runOptions.signal.aborted).toBe(true);
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Durable stage transition failed'), expect.any(Error));
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Durable stage transition (worker) failed'), expect.any(Error));
     });
 
     it('posts a worker-start audit comment only for the worker stage on a task with an issueId', async () => {

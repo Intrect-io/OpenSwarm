@@ -114,6 +114,7 @@ function fencedResult(result: PipelineResult): PipelineResult {
     ...result,
     success: false,
     finalStatus: 'infra_error',
+    failureDetail: 'durable completion: lease fence rejected result from an expired or replaced owner',
     failureSignal: result.failureSignal ?? 'timeout',
   };
 }
