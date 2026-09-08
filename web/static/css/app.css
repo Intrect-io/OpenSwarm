@@ -186,6 +186,11 @@
 }
 .console-toggle:hover { color: var(--fg-primary); border-color: var(--border-strong); }
 
+@media (max-width: 900px), (pointer: coarse) {
+  .console-toggle, .issue-row { min-height: 44px; }
+  .repo-picker select { min-height: 44px; font-size: 16px; }
+}
+
 .work-card .console {
   margin-top: var(--space-2);
   /* Deep ground against the card so the stream reads as a terminal. */
