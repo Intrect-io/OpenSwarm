@@ -124,9 +124,9 @@ export async function incrementalUpdate(
     const candidate = resolve(root, file);
     const lexicalRelative = relative(root, candidate);
     if (lexicalRelative === '..' || lexicalRelative.startsWith(`..${sep}`) || isAbsolute(lexicalRelative)) {
-      throw new Error(`Changed path escapes repository root: ${file}`);
+      throw new Error(`Changed path escapes repository root through a symlink: ${file}`);
     }
-    let canonical = candidate;
+    let canonical: string;
     try {
       canonical = await realpath(candidate);
     } catch {
@@ -167,6 +167,7 @@ export async function incrementalUpdate(
         continue;
       }
       const metrics = computeMetrics(content, language);
+
       graph.addNode({
         id: relPath,
         type: isTest ? 'test_file' : 'module',
@@ -174,20 +175,16 @@ export async function incrementalUpdate(
         path: relPath,
         metrics,
       });
-      const node = graph.getNode(relPath);
-      if (node) {
-        await parseImports(graph, projectPath, node);
-      }
+      graph.addEdge({ source: relPath === '.' ? '.' : relPath, target: relPath, type: 'contains' });
     }
   }
-
-  // Re-run test mapping
-  mapTestsToModules(graph);
-  graph.scannedAt = Date.now();
 }
 
 // Internal: Directory Walking
 
+/**
+ * Walk directory tree and collect nodes
+ */
 async function walkDirectory(
   graph: KnowledgeGraph,
   currentPath: string,
@@ -204,8 +201,7 @@ async function walkDirectory(
     return;
   }
   if (graph.nodeCount >= maxNodes) {
-    console.warn(`[Scanner] Reached node budget of ${maxNodes} — stopping directory walk`);
-    return;
+    throw new Error(`Graph scan exceeded node budget of ${maxNodes} — scan aborted`);
   }
 
   let entries;
@@ -217,8 +213,7 @@ async function walkDirectory(
 
   for (const entry of entries) {
     if (graph.nodeCount >= maxNodes) {
-      console.warn(`[Scanner] Reached node budget of ${maxNodes} — stopping directory walk`);
-      return;
+      throw new Error(`Graph scan exceeded node budget of ${maxNodes} — scan aborted`);
     }
 
     const entryPath = join(currentPath, entry.name);
@@ -269,135 +264,154 @@ async function parseImports(
   projectPath: string,
   node: GraphNode,
 ): Promise<void> {
-  const fullPath = join(projectPath, node.path);
+  const filePath = join(projectPath, node.path);
   let content: string;
   try {
-    content = await readFile(fullPath, 'utf-8');
+    content = await readBoundedRegularFile(filePath, MAX_FILE_SIZE);
   } catch {
     return;
   }
 
-  const language = node.metrics?.language ?? 'other';
-  const importPaths: Array<{ raw: string; isRelative: boolean }> = [];
+  const language = node.metrics?.language;
+  if (!language) return;
 
   if (language === 'typescript') {
-    for (const regex of [TS_IMPORT_FROM, TS_REQUIRE, TS_DYNAMIC_IMPORT]) {
-      // Reset regex state
-      regex.lastIndex = 0;
-      let match;
-      while ((match = regex.exec(content)) !== null) {
-        const raw = match[1];
-        if (raw.startsWith('.')) {
-          importPaths.push({ raw, isRelative: true });
-        }
+    // TypeScript imports
+    const importMatches = content.matchAll(TS_IMPORT_FROM);
+    for (const match of importMatches) {
+      const importPath = match[1];
+      const resolved = resolveRelativeImport(importPath, node.path);
+      if (resolved && graph.hasNode(resolved)) {
+        graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
+      }
+    }
+
+    // require()
+    const requireMatches = content.matchAll(TS_REQUIRE);
+    for (const match of requireMatches) {
+      const importPath = match[1];
+      const resolved = resolveRelativeImport(importPath, node.path);
+      if (resolved && graph.hasNode(resolved)) {
+        graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
+      }
+    }
+
+    // Dynamic imports
+    const dynamicMatches = content.matchAll(TS_DYNAMIC_IMPORT);
+    for (const match of dynamicMatches) {
+      const importPath = match[1];
+      const resolved = resolveRelativeImport(importPath, node.path);
+      if (resolved && graph.hasNode(resolved)) {
+        graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
       }
     }
   } else if (language === 'python') {
-    for (const regex of [PY_FROM_IMPORT, PY_IMPORT]) {
-      regex.lastIndex = 0;
-      let match;
-      while ((match = regex.exec(content)) !== null) {
-        const raw = match[1];
-        if (raw.startsWith('.')) {
-          importPaths.push({ raw, isRelative: true });
-        }
+    // Python imports
+    const fromMatches = content.matchAll(PY_FROM_IMPORT);
+    for (const match of fromMatches) {
+      const modulePath = match[1].replace(/\./g, '/');
+      const resolved = resolveRelativeImport(modulePath, node.path);
+      if (resolved && graph.hasNode(resolved)) {
+        graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
       }
     }
-  }
 
-  for (const { raw } of importPaths) {
-    const resolved = resolveRelativeImport(node.path, raw);
-    if (resolved && graph.hasNode(resolved)) {
-      graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
+    const importMatches = content.matchAll(PY_IMPORT);
+    for (const match of importMatches) {
+      const modulePath = match[1].replace(/\./g, '/');
+      const resolved = resolveRelativeImport(modulePath, node.path);
+      if (resolved && graph.hasNode(resolved)) {
+        graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
+      }
     }
   }
 }
 
-function resolveRelativeImport(fromPath: string, importPath: string): string | null {
-  const dir = dirname(fromPath);
-  const resolved = resolve('/', dir, importPath);
-
-  // Try with extensions
-  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '/index.ts', '/index.tsx', '/index.js', '/index.jsx']) {
-    const candidate = resolved + ext;
-    if (candidate.startsWith('/')) {
-      const relative = candidate.slice(1);
-      if (!relative.includes('..')) {
-        return relative;
+/**
+ * Resolve a relative import path to an absolute path within the project
+ */
+function resolveRelativeImport(importPath: string, currentPath: string): string | null {
+  if (importPath.startsWith('.')) {
+    const dir = dirname(currentPath);
+    const resolved = resolve(dir, importPath);
+    // Try common extensions
+    const extensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mjs', '/index.cjs', '/__init__.py'];
+    for (const ext of extensions) {
+      const candidate = resolved + ext;
+      if (candidate.startsWith('/')) {
+        // Absolute path — not a project import
+        continue;
       }
+      return candidate;
     }
   }
   return null;
 }
 
-// Internal: Test ↔ Module Mapping
-
+/**
+ * Map test files to source modules
+ */
 function mapTestsToModules(graph: KnowledgeGraph): void {
   const testFiles = graph.getNodesByType('test_file');
-  for (const testFile of testFiles) {
-    const candidates = guessSourceFromTestName(testFile.name, testFile.path);
-    for (const candidate of candidates) {
-      if (graph.hasNode(candidate)) {
-        graph.addEdge({ source: testFile.id, target: candidate, type: 'tests' });
+  for (const test of testFiles) {
+    const sources = guessSourceFromTestName(test.name, test.path);
+    for (const source of sources) {
+      if (graph.hasNode(source)) {
+        graph.addEdge({ source: test.id, target: source, type: 'tests' });
       }
     }
   }
 }
 
+/**
+ * Guess source module from test file name
+ */
 function guessSourceFromTestName(testName: string, testPath: string): string[] {
   const candidates: string[] = [];
 
   // Remove test suffix
-  let base = testName
+  let baseName = testName
     .replace(/\.test\.(ts|tsx|js|jsx|mjs|cjs)$/, '')
     .replace(/\.spec\.(ts|tsx|js|jsx|mjs|cjs)$/, '')
     .replace(/_test\.py$/, '')
     .replace(/^test_/, '')
     .replace(/\.test\.py$/, '');
 
-  // Try same directory
-  const dir = dirname(testPath);
-  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw']) {
-    candidates.push(join(dir, `${base}${ext}`));
-  }
-
-  // Try parent directory (common for __tests__/foo.test.ts → foo.ts)
-  const parentDir = dirname(dir);
-  if (parentDir !== '.') {
-    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw']) {
-      candidates.push(join(parentDir, `${base}${ext}`));
-    }
+  if (baseName) {
+    const dir = dirname(testPath);
+    candidates.push(join(dir, baseName + '.ts'));
+    candidates.push(join(dir, baseName + '.tsx'));
+    candidates.push(join(dir, baseName + '.js'));
+    candidates.push(join(dir, baseName + '.py'));
   }
 
   return candidates;
 }
 
-// Internal: Helpers
-
+/**
+ * Detect programming language from file extension
+ */
 function detectLanguage(ext: string): Language {
-  switch (ext) {
-    case '.ts':
-    case '.tsx':
-    case '.js':
-    case '.jsx':
-    case '.mjs':
-    case '.cjs':
-      return 'typescript';
-    case '.py':
-    case '.pyw':
-      return 'python';
-    default:
-      return 'other';
-  }
+  if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'typescript';
+  if (['.py', '.pyw'].includes(ext)) return 'python';
+  return 'typescript'; // Default
 }
 
+/**
+ * Check if a file is a test file
+ */
 function isTestFile(name: string): boolean {
-  return TEST_FILE_PATTERNS.some(p => p.test(name));
+  return TEST_FILE_PATTERNS.some(pattern => pattern.test(name));
 }
 
+/**
+ * Compute metrics for a module
+ */
 function computeMetrics(content: string, language: Language): ModuleMetrics {
   const lines = content.split('\n');
-  const loc = lines.filter((l: string) => l.trim().length > 0).length;
+  const loc = lines.length;
+  const codeLines = lines.filter((line: string) => line.trim().length > 0).length;
+  const commentLines = lines.filter((line: string) => line.trim().startsWith('//') || line.trim().startsWith('#') || line.trim().startsWith('/*') || line.trim().startsWith('*')).length;
 
   let exportCount = 0;
   let importCount = 0;
