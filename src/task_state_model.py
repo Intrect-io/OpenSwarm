@@ -6,11 +6,12 @@ from datetime import datetime
 from typing import Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field
+    from pydantic import BaseModel, ConfigDict, Field, model_validator, validator
 except ImportError:  # Pydantic v1 compatibility
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, validator
 
     ConfigDict = None  # type: ignore[assignment]
+    model_validator = None  # type: ignore[assignment]
 
 
 TaskExecutionStatus = Literal[
@@ -52,6 +53,23 @@ class ExecutionState(AliasModel):
     retry_count: int = Field(default=0, alias="retryCount")
     confidence: int | None = Field(default=None, ge=0, le=100)
     last_session_id: str | None = Field(default=None, alias="lastSessionId")
+
+    if model_validator is not None:
+
+        @model_validator(mode="before")
+        @classmethod
+        def _validate_confidence_integer(cls, values: dict) -> dict:
+            conf = values.get("confidence")
+            if conf is not None and not isinstance(conf, int):
+                raise ValueError(f"confidence must be an integer, got {type(conf).__name__}")
+            return values
+    else:
+
+        @validator("confidence", pre=True)
+        def _validate_confidence_integer_v1(cls, v):
+            if v is not None and not isinstance(v, int):
+                raise ValueError(f"confidence must be an integer, got {type(v).__name__}")
+            return v
 
 
 class OpenSwarmTaskState(AliasModel):
