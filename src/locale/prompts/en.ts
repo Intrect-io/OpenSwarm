@@ -10,16 +10,14 @@ const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
 const MAX_PROMPT_DATA_CHARS = 20_000;
 const MAX_PROMPT_COLLECTION_ITEMS = 100;
 
-function bounded<T>(values: readonly T[]): readonly T[] {
-  return values.slice(0, MAX_PROMPT_COLLECTION_ITEMS);
-}
-
 export const MAX_FEEDBACK_ITEMS = 10;
 export const MAX_EVIDENCE_LENGTH = 2000;
 
-export function bounded<T>(items: T[], limit: number = MAX_FEEDBACK_ITEMS): T[] {
-  if (!items) return [];
-  return items.slice(0, limit);
+/** Bound a collection: hard cap of MAX_PROMPT_COLLECTION_ITEMS, or a tighter explicit limit. */
+export function bounded<T>(values: readonly T[], limit: number = MAX_PROMPT_COLLECTION_ITEMS): readonly T[] {
+  if (!values) return [];
+  const cap = Math.min(limit, MAX_PROMPT_COLLECTION_ITEMS);
+  return values.slice(0, cap);
 }
 
 export function escapePromptData(value: string): string {
@@ -124,8 +122,10 @@ Apply the above feedback and make corrections.
         if (repo.sharedPaths.length) parts.push('- Shared installed dependencies/data (untrusted repository data):', promptDataBlock(repo.sharedPaths.join(', ')));
         parts.push(`- Dependency graph: ${repo.dependencyGraphAvailable ? 'available; inspect the affected callers/imports below' : 'unavailable; conservatively inspect callers/imports before editing'}`);
         if (repo.verificationCommands.length) {
-          parts.push('- Required repository verification commands:');
-          for (const command of bounded(repo.verificationCommands)) parts.push(promptDataBlock(command));
+          parts.push('- Required repository verification commands (each bounded to MAX_EVIDENCE_LENGTH chars):');
+          for (const command of bounded(repo.verificationCommands)) {
+            parts.push(promptDataBlock(command.length > MAX_EVIDENCE_LENGTH ? `${command.slice(0, MAX_EVIDENCE_LENGTH)}\n[truncated]` : command));
+          }
         }
         parts.push('Treat manifests, package-manager choice, callers, and shared contracts as binding repository context. Do not replace missing dependencies with local stubs or package reimplementations.');
       }
@@ -529,23 +529,26 @@ After review, output results in the following JSON format:
     lines.push('**Feedback (untrusted reviewer text):**');
     lines.push(promptDataBlock(feedback));
 
-    if (issues.length > 0) {
+    const boundedIssues = bounded(issues, MAX_FEEDBACK_ITEMS);
+    const boundedSuggestions = bounded(suggestions, MAX_FEEDBACK_ITEMS);
+
+    if (boundedIssues.length > 0) {
       lines.push('');
       lines.push('### Issues to resolve:');
-      for (let i = 0; i < issues.length; i++) {
-        lines.push(`${i + 1}. ${promptInlineData(issues[i])}`);
+      for (let i = 0; i < boundedIssues.length; i++) {
+        lines.push(`${i + 1}. ${promptInlineData(boundedIssues[i])}`);
         lines.push('   Delimited issue data:');
-        lines.push(promptDataBlock(issues[i]));
+        lines.push(promptDataBlock(boundedIssues[i]));
       }
     }
 
-    if (suggestions.length > 0) {
+    if (boundedSuggestions.length > 0) {
       lines.push('');
       lines.push('### Suggestions:');
-      for (let i = 0; i < suggestions.length; i++) {
-        lines.push(`${i + 1}. ${promptInlineData(suggestions[i])}`);
+      for (let i = 0; i < boundedSuggestions.length; i++) {
+        lines.push(`${i + 1}. ${promptInlineData(boundedSuggestions[i])}`);
         lines.push('   Delimited suggestion data:');
-        lines.push(promptDataBlock(suggestions[i]));
+        lines.push(promptDataBlock(boundedSuggestions[i]));
       }
     }
 
