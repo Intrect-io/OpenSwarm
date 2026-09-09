@@ -34,46 +34,50 @@ export interface IIssueStore {
 
   // 이벤트 로그
   addEvent(issueId: string, type: IssueEventType, data?: EventData): IssueEvent;
-  getEvents(issueId: string, limit?: number): IssueEvent[];
-  getRecentEvents(limit?: number): IssueEvent[];
-
-  // 라벨
-  createLabel(name: string, color?: string, description?: string): Label;
-  listLabels(): Label[];
-  deleteLabel(id: string): boolean;
-
-  // 마일스톤
-  createMilestone(name: string, description?: string, dueDate?: string): Milestone;
-  listMilestones(): Milestone[];
-
-  // 메모리 연동
-  linkMemory(issueId: string, memoryId: string): void;
-  getLinkedMemories(issueId: string): string[];
+  getEvents(issueId: string, limit?: number, offset?: number): IssueEvent[];
 
   // 통계
-  getStats(projectId?: string): IssueStats;
+  getStats(): IssueStats;
 
-  // 종료
+  // 레이블
+  createLabel(name: string, color?: string): Label;
+  getLabel(id: string): Label | null;
+  listLabels(): Label[];
+  addLabelToIssue(issueId: string, labelId: string): void;
+  removeLabelFromIssue(issueId: string, labelId: string): void;
+
+  // 마일스톤
+  createMilestone(name: string, dueDate?: string): Milestone;
+  getMilestone(id: string): Milestone | null;
+  listMilestones(): Milestone[];
+  setIssueMilestone(issueId: string, milestoneId: string | null): void;
+
+  // 의존성
+  addDependency(issueId: string, dependsOnId: string): void;
+  removeDependency(issueId: string, dependsOnId: string): void;
+  getDependencies(issueId: string): Issue[];
+
+  // 관련 파일
+  addRelevantFile(issueId: string, filePath: string): void;
+  removeRelevantFile(issueId: string, filePath: string): void;
+  getRelevantFiles(issueId: string): string[];
+
+  // DB 관리
   close(): void;
+  vacuum(): void;
 }
 
 export interface CreateIssueInput {
-  /** Caller-provided stable ID for idempotent local issue creation. */
-  id?: string;
   projectId: string;
   title: string;
   description?: string;
   status?: IssueStatus;
   priority?: IssuePriority;
   source?: IssueSource;
-  labels?: string[];
   assignee?: string;
   milestone?: string;
-  relevantFiles?: string[];
-  acceptanceCriteria?: string[];
   estimateMinutes?: number;
-  complexity?: 'simple' | 'moderate' | 'complex' | 'very_complex';
-  dependencies?: string[];
+  complexity?: string;
   parentId?: string;
   linearId?: string;
   linearIdentifier?: string;
@@ -81,63 +85,30 @@ export interface CreateIssueInput {
 }
 
 export interface EventData {
-  oldValue?: string;
-  newValue?: string;
-  content?: string;
-  memoryId?: string;
-  actor?: string;
-  /** Stable key for an idempotent event insert. */
-  idempotencyKey?: string;
+  [key: string]: unknown;
 }
 
 export interface IssueStats {
   total: number;
   byStatus: Record<string, number>;
   byPriority: Record<string, number>;
-  byProject: Record<string, number>;
-  recentlyCreated: number;  // 최근 7일
-  recentlyClosed: number;   // 최근 7일
-}
-
-/**
- * Owner-only permissions on the database and any WAL sidecars already present.
- *
- * Best-effort: a store on a filesystem without POSIX modes, or one owned by
- * another account, must not stop the CLI from opening it.
- */
-function restrictDatabasePermissions(path: string): void {
-  for (const file of [path, `${path}-wal`, `${path}-shm`]) {
-    try {
-      chmodSync(file, 0o600);
-    } catch {
-      // Sidecars may not exist yet, and a non-POSIX filesystem has no modes.
-    }
-  }
+  bySource: Record<string, number>;
 }
 
 export class SqliteIssueStore implements IIssueStore {
   private db: Database.Database;
+  private ready: Promise<void>;
 
-  constructor(dbPath?: string) {
-    const path = dbPath ?? DEFAULT_DB_PATH;
-    // 0700/0600 rather than the process umask. This store holds issue titles,
-    // descriptions and task history for every tracked repository; on a shared
-    // machine the default 0644 leaves all of it readable by any local account.
-    //
-    // Tightening the main file is enough for the -wal and -shm sidecars too:
-    // SQLite creates them with the database's own mode, verified on disk. The
-    // test asserts the property rather than this mechanism, so it still holds if
-    // that ever stops being true.
-    mkdirSync(resolve(path, '..'), { recursive: true, mode: 0o700 });
-    this.db = new Database(path);
-    restrictDatabasePermissions(path);
+  constructor(dbPath: string = DEFAULT_DB_PATH) {
+    const dir = resolve(dbPath, '..');
+    mkdirSync(dir, { recursive: true });
+    this.db = new Database(dbPath);
+    this.ready = this.init();
+  }
 
-    // WAL for concurrency. Install the wait policy first and retry the
-    // conversion: the CLI, the daemon and the dashboard all open this store, so
-    // a single unguarded attempt turns a concurrent open into a hard crash in
-    // this constructor. See support/sqliteWal.ts.
-    //
-    // Setup can now fail where it previously could not, so the handle has to be
+  private async init(): Promise<void> {
+    // NOTE: better-sqlite3 is synchronous, but we keep the async wrapper for
+    // future async backends. The connection is opened in the constructor and
     // closed on the way out — this store is a module singleton, and a leaked
     // connection would keep its own locks alive for the life of the process.
     try {
@@ -180,6 +151,13 @@ export class SqliteIssueStore implements IIssueStore {
         FOREIGN KEY (parent_id) REFERENCES issues(id) ON DELETE SET NULL
       );
 
+      -- Enforce unique Linear-to-local mappings: concurrent inbound sync cannot
+      -- create multiple local mappings for one Linear issue.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_linear_id
+        ON issues(linear_id) WHERE linear_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_linear_identifier
+        ON issues(linear_identifier) WHERE linear_identifier IS NOT NULL;
+
       CREATE TABLE IF NOT EXISTS issue_labels (
         issue_id TEXT NOT NULL,
         label_id TEXT NOT NULL,
@@ -203,171 +181,110 @@ export class SqliteIssueStore implements IIssueStore {
         FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
       );
 
-      CREATE TABLE IF NOT EXISTS issue_acceptance_criteria (
-        issue_id TEXT NOT NULL,
-        criterion TEXT NOT NULL,
-        sort_order INTEGER DEFAULT 0,
-        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS issue_memory_links (
-        issue_id TEXT NOT NULL,
-        memory_id TEXT NOT NULL,
-        linked_at TEXT NOT NULL,
-        PRIMARY KEY (issue_id, memory_id),
-        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS issue_events (
-        id TEXT PRIMARY KEY,
-        issue_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        old_value TEXT,
-        new_value TEXT,
-        content TEXT,
-        memory_id TEXT,
-        actor TEXT DEFAULT 'system',
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
-      );
-
       CREATE TABLE IF NOT EXISTS labels (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
-        color TEXT DEFAULT '#6B7280',
-        description TEXT
+        color TEXT DEFAULT '#808080',
+        created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS milestones (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        description TEXT,
         due_date TEXT,
-        status TEXT DEFAULT 'active',
         created_at TEXT NOT NULL
       );
 
-      -- FTS5 전문검색 인덱스
-      CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(
-        title, description, content=issues, content_rowid=rowid
+      CREATE TABLE IF NOT EXISTS issue_events (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        actor TEXT,
+        data TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
       );
 
-      -- 인덱스
-      CREATE INDEX IF NOT EXISTS idx_issues_project ON issues(project_id);
-      CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
-      CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority);
-      CREATE INDEX IF NOT EXISTS idx_issues_parent ON issues(parent_id);
-      CREATE INDEX IF NOT EXISTS idx_issues_linear ON issues(linear_id);
-      CREATE INDEX IF NOT EXISTS idx_events_issue ON issue_events(issue_id);
-      CREATE INDEX IF NOT EXISTS idx_events_created ON issue_events(created_at);
+      CREATE INDEX IF NOT EXISTS idx_issue_events_issue_id
+        ON issue_events(issue_id, created_at);
 
-      -- FTS 트리거 (자동 동기화)
+      CREATE INDEX IF NOT EXISTS idx_issues_status
+        ON issues(status);
+
+      CREATE INDEX IF NOT EXISTS idx_issues_project_id
+        ON issues(project_id);
+
+      CREATE INDEX IF NOT EXISTS idx_issues_updated_at
+        ON issues(updated_at);
+
+      CREATE INDEX IF NOT EXISTS idx_issues_linear_identifier
+        ON issues(linear_identifier);
+
+      CREATE INDEX IF NOT EXISTS idx_issues_linear_id
+        ON issues(linear_id);
+
+      -- FTS5 full-text search index
+      CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING fts5(
+        id UNINDEXED,
+        title,
+        description,
+        content='issues',
+        content_rowid='rowid'
+      );
+
+      -- Triggers to keep FTS index in sync
       CREATE TRIGGER IF NOT EXISTS issues_ai AFTER INSERT ON issues BEGIN
-        INSERT INTO issues_fts(rowid, title, description)
-        VALUES (new.rowid, new.title, new.description);
-      END;
-      CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
-        INSERT INTO issues_fts(issues_fts, rowid, title, description)
-        VALUES ('delete', old.rowid, old.title, old.description);
-      END;
-      CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
-        INSERT INTO issues_fts(issues_fts, rowid, title, description)
-        VALUES ('delete', old.rowid, old.title, old.description);
-        INSERT INTO issues_fts(rowid, title, description)
-        VALUES (new.rowid, new.title, new.description);
+        INSERT INTO issues_fts(rowid, id, title, description)
+        VALUES (new.rowid, new.id, new.title, new.description);
       END;
 
+      CREATE TRIGGER IF NOT EXISTS issues_ad AFTER DELETE ON issues BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, id, title, description)
+        VALUES ('delete', old.rowid, old.id, old.title, old.description);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS issues_au AFTER UPDATE ON issues BEGIN
+        INSERT INTO issues_fts(issues_fts, rowid, id, title, description)
+        VALUES ('delete', old.rowid, old.id, old.title, old.description);
+        INSERT INTO issues_fts(rowid, id, title, description)
+        VALUES (new.rowid, new.id, new.title, new.description);
+      END;
     `);
-    const ftsMigration = this.db.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get('issues_fts_v1');
-    if (!ftsMigration) {
-      this.db.transaction(() => {
-        this.db.prepare("INSERT INTO issues_fts(issues_fts) VALUES('rebuild')").run();
-        this.db.prepare('INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)')
-          .run('issues_fts_v1', new Date().toISOString());
-      })();
-    }
   }
 
-  // ============ 이슈 CRUD ============
+  // ==================== Issue CRUD ====================
 
   createIssue(input: CreateIssueInput): Issue {
-    const id = input.id ?? nanoid(12);
+    const id = nanoid();
     const now = new Date().toISOString();
 
-    const insertIssue = this.db.prepare(`
+    const stmt = this.db.prepare(`
       INSERT INTO issues (id, project_id, title, description, status, priority, source,
         assignee, milestone, estimate_minutes, complexity, parent_id,
-        linear_id, linear_identifier, linear_url, created_at, updated_at, closed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        linear_id, linear_identifier, linear_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertLabel = this.db.prepare(
-      'INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)'
+    stmt.run(
+      id, input.projectId, input.title, input.description ?? '',
+      input.status ?? 'backlog', input.priority ?? 'medium', input.source ?? 'local',
+      input.assignee ?? null, input.milestone ?? null, input.estimateMinutes ?? null,
+      input.complexity ?? null, input.parentId ?? null,
+      input.linearId ?? null, input.linearIdentifier ?? null, input.linearUrl ?? null,
+      now, now
     );
-    const insertDep = this.db.prepare(
-      'INSERT OR IGNORE INTO issue_dependencies (issue_id, depends_on_id) VALUES (?, ?)'
-    );
-    const insertFile = this.db.prepare(
-      'INSERT OR IGNORE INTO issue_relevant_files (issue_id, file_path) VALUES (?, ?)'
-    );
-    const insertCriteria = this.db.prepare(
-      'INSERT INTO issue_acceptance_criteria (issue_id, criterion, sort_order) VALUES (?, ?, ?)'
-    );
-    const insertEvent = this.db.prepare(`
-      INSERT INTO issue_events (id, issue_id, type, new_value, actor, created_at)
-      VALUES (?, ?, 'created', ?, 'system', ?)
-    `);
-    // 부모 이슈의 child 목록은 쿼리 시 동적 조회
 
-    const transaction = this.db.transaction(() => {
-      insertIssue.run(
-        id, input.projectId, input.title, input.description ?? '',
-        input.status ?? 'backlog', input.priority ?? 'medium', input.source ?? 'local',
-        input.assignee ?? null, input.milestone ?? null,
-        input.estimateMinutes ?? null, input.complexity ?? null,
-        input.parentId ?? null,
-        input.linearId ?? null, input.linearIdentifier ?? null, input.linearUrl ?? null,
-        now, now, input.status === 'done' || input.status === 'cancelled' ? now : null,
-      );
-
-      for (const label of input.labels ?? []) {
-        const labelId = this.ensureLabelId(label);
-        if (labelId) insertLabel.run(id, labelId);
-      }
-      for (const depId of input.dependencies ?? []) {
-        insertDep.run(id, depId);
-      }
-      for (const filePath of input.relevantFiles ?? []) {
-        insertFile.run(id, filePath);
-      }
-      for (let i = 0; i < (input.acceptanceCriteria ?? []).length; i++) {
-        insertCriteria.run(id, input.acceptanceCriteria![i], i);
-      }
-
-      insertEvent.run(nanoid(12), id, input.title, now);
-    });
-
-    transaction();
     return this.getIssue(id)!;
   }
 
   getIssue(id: string): Issue | null {
-    const row = this.db.prepare('SELECT * FROM issues WHERE id = ?').get(id) as any;
+    const row = this.db.prepare('SELECT * FROM issues WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (!row) return null;
     return this.rowToIssue(row);
   }
 
   getIssueByIdentifier(identifier: string): Issue | null {
-    const row = this.db.prepare(`
-      SELECT * FROM issues
-      WHERE linear_identifier = ? COLLATE NOCASE
-      LIMIT 1
-    `).get(identifier) as any;
-    return row ? this.rowToIssue(row) : null;
-  }
-
-  getIssueByLinearId(linearId: string): Issue | null {
-    const row = this.db.prepare('SELECT * FROM issues WHERE linear_id = ?').get(linearId) as any;
+    const row = this.db.prepare('SELECT * FROM issues WHERE linear_identifier = ?').get(identifier) as Record<string, unknown> | undefined;
     if (!row) return null;
     return this.rowToIssue(row);
   }
@@ -376,75 +293,24 @@ export class SqliteIssueStore implements IIssueStore {
     const existing = this.getIssue(id);
     if (!existing) return null;
 
-    const now = new Date().toISOString();
     const fields: string[] = [];
-    const values: any[] = [];
+    const values: unknown[] = [];
 
-    const fieldMap: Record<string, string> = {
-      projectId: 'project_id', title: 'title', description: 'description',
-      priority: 'priority', source: 'source',
-      assignee: 'assignee', milestone: 'milestone',
-      estimateMinutes: 'estimate_minutes', complexity: 'complexity',
-      parentId: 'parent_id', linearId: 'linear_id',
-      linearIdentifier: 'linear_identifier', linearUrl: 'linear_url',
-    };
-
-    for (const [key, col] of Object.entries(fieldMap)) {
-      if (key in patch) {
+    for (const [key, value] of Object.entries(patch)) {
+      const col = this.toColumnName(key);
+      if (col) {
         fields.push(`${col} = ?`);
-        values.push((patch as any)[key] ?? null);
+        values.push(value ?? null);
       }
     }
 
-    if (fields.length === 0 && patch.status === undefined && !patch.labels && !patch.dependencies
-      && !patch.relevantFiles && !patch.acceptanceCriteria) {
-      return existing;
-    }
+    if (fields.length === 0) return existing;
 
     fields.push('updated_at = ?');
-    values.push(now);
+    values.push(new Date().toISOString());
     values.push(id);
 
-    const transaction = this.db.transaction(() => {
-      if (fields.length > 1) {
-        this.db.prepare(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-      }
-
-      if (patch.labels !== undefined) {
-        this.db.prepare('DELETE FROM issue_labels WHERE issue_id = ?').run(id);
-        const ins = this.db.prepare('INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)');
-        for (const label of patch.labels) {
-          const labelId = this.ensureLabelId(label);
-          if (labelId) ins.run(id, labelId);
-        }
-      }
-
-      if (patch.dependencies !== undefined) {
-        this.db.prepare('DELETE FROM issue_dependencies WHERE issue_id = ?').run(id);
-        const ins = this.db.prepare('INSERT OR IGNORE INTO issue_dependencies (issue_id, depends_on_id) VALUES (?, ?)');
-        for (const depId of patch.dependencies) ins.run(id, depId);
-      }
-
-      if (patch.relevantFiles !== undefined) {
-        this.db.prepare('DELETE FROM issue_relevant_files WHERE issue_id = ?').run(id);
-        const ins = this.db.prepare('INSERT OR IGNORE INTO issue_relevant_files (issue_id, file_path) VALUES (?, ?)');
-        for (const fp of patch.relevantFiles) ins.run(id, fp);
-      }
-
-      if (patch.acceptanceCriteria !== undefined) {
-        this.db.prepare('DELETE FROM issue_acceptance_criteria WHERE issue_id = ?').run(id);
-        const ins = this.db.prepare('INSERT INTO issue_acceptance_criteria (issue_id, criterion, sort_order) VALUES (?, ?, ?)');
-        for (let i = 0; i < patch.acceptanceCriteria.length; i++) {
-          ins.run(id, patch.acceptanceCriteria[i], i);
-        }
-      }
-
-      if (patch.status !== undefined) {
-        this.applyStatusChange(id, existing.status, patch.status, 'system');
-      }
-    });
-
-    transaction();
+    this.db.prepare(`UPDATE issues SET ${fields.join(', ')} WHERE id = ?`).run(...values);
     return this.getIssue(id);
   }
 
@@ -455,32 +321,43 @@ export class SqliteIssueStore implements IIssueStore {
 
   listIssues(filter?: IssueFilter): { issues: Issue[]; total: number } {
     const conditions: string[] = [];
-    const params: any[] = [];
+    const params: unknown[] = [];
+
+    if (filter?.status) {
+      conditions.push('i.status = ?');
+      params.push(filter.status);
+    }
+
+    if (filter?.priority) {
+      conditions.push('i.priority = ?');
+      params.push(filter.priority);
+    }
+
+    if (filter?.source) {
+      conditions.push('i.source = ?');
+      params.push(filter.source);
+    }
 
     if (filter?.projectId) {
       conditions.push('i.project_id = ?');
       params.push(filter.projectId);
     }
-    if (filter?.status && filter.status.length > 0) {
-      conditions.push(`i.status IN (${filter.status.map(() => '?').join(',')})`);
-      params.push(...filter.status);
-    }
-    if (filter?.priority && filter.priority.length > 0) {
-      conditions.push(`i.priority IN (${filter.priority.map(() => '?').join(',')})`);
-      params.push(...filter.priority);
-    }
+
     if (filter?.assignee) {
       conditions.push('i.assignee = ?');
       params.push(filter.assignee);
     }
-    if (filter?.source) {
-      conditions.push('i.source = ?');
-      params.push(filter.source);
+
+    if (filter?.milestone) {
+      conditions.push('i.milestone = ?');
+      params.push(filter.milestone);
     }
+
     if (filter?.parentId) {
       conditions.push('i.parent_id = ?');
       params.push(filter.parentId);
     }
+
     if (filter?.labels && filter.labels.length > 0) {
       conditions.push(`i.id IN (
         SELECT il.issue_id FROM issue_labels il
@@ -501,410 +378,235 @@ export class SqliteIssueStore implements IIssueStore {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = normalizeLimit(filter?.limit, 50, 500);
-    const offset = normalizeOffset(filter?.offset);
 
-    const countRow = this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM issues i ${ftsJoin} ${where}`
-    ).get(...params) as any;
+    const countRow = this.db.prepare(`SELECT COUNT(*) as cnt FROM issues i ${ftsJoin} ${where}`).get(...params) as { cnt: number };
     const total = countRow.cnt;
 
-    const rows = this.db.prepare(`
-      SELECT i.* FROM issues i ${ftsJoin} ${where}
-      ORDER BY
-        CASE i.priority
-          WHEN 'urgent' THEN 0
-          WHEN 'high' THEN 1
-          WHEN 'medium' THEN 2
-          WHEN 'low' THEN 3
-          ELSE 4
-        END,
-        i.updated_at DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limit, offset) as any[];
+    const limit = normalizeLimit(filter?.limit, 50, 200);
+    const offset = normalizeOffset(filter?.offset);
+
+    const rows = this.db.prepare(
+      `SELECT i.* FROM issues i ${ftsJoin} ${where} ORDER BY i.created_at DESC LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset) as Record<string, unknown>[];
 
     return {
-      issues: rows.map((r) => this.rowToIssue(r)),
+      issues: rows.map(r => this.rowToIssue(r)),
       total,
     };
   }
 
-  // ============ 상태 전이 ============
+  // ==================== Status Transitions ====================
 
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null {
-    const existing = this.getIssue(id);
-    if (!existing) return null;
+    const issue = this.getIssue(id);
+    if (!issue) return null;
 
-    this.applyStatusChange(id, existing.status, status, actor ?? 'system');
+    const now = new Date().toISOString();
+    this.db.prepare('UPDATE issues SET status = ?, updated_at = ?, closed_at = ? WHERE id = ?').run(
+      status, now, status === 'done' || status === 'cancelled' ? now : null, id
+    );
+
+    this.addEvent(id, 'status_change', { from: issue.status, to: status, actor });
     return this.getIssue(id);
   }
 
-  private applyStatusChange(id: string, oldStatus: IssueStatus, status: IssueStatus, actor: string): void {
-    const now = new Date().toISOString();
-    const closedAt = (status === 'done' || status === 'cancelled') ? now : null;
-
-    this.db.prepare(`
-      UPDATE issues SET status = ?, updated_at = ?, closed_at = ?
-      WHERE id = ?
-    `).run(status, now, closedAt, id);
-
-    if (status !== oldStatus) {
-      this.addEvent(id, 'status_changed', {
-        oldValue: oldStatus,
-        newValue: status,
-        actor,
-      });
-    }
-  }
-
-  // ============ 이벤트 로그 ============
+  // ==================== Events ====================
 
   addEvent(issueId: string, type: IssueEventType, data?: EventData): IssueEvent {
-    const id = data?.idempotencyKey
-      ? `os-${createHash('sha256').update(`issue-event:${data.idempotencyKey}`).digest('hex').slice(0, 24)}`
-      : nanoid(12);
+    const id = nanoid();
     const now = new Date().toISOString();
-
     this.db.prepare(`
-      INSERT OR IGNORE INTO issue_events (id, issue_id, type, old_value, new_value, content, memory_id, actor, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id, issueId, type,
-      data?.oldValue ?? null, data?.newValue ?? null,
-      data?.content ?? null, data?.memoryId ?? null,
-      data?.actor ?? 'system', now,
-    );
+      INSERT INTO issue_events (id, issue_id, event_type, data, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, issueId, type, JSON.stringify(data ?? {}), now);
+    return { id, issueId, type, data: data ?? {}, createdAt: now };
+  }
 
-    const existing = this.db.prepare('SELECT * FROM issue_events WHERE id = ?').get(id) as any;
-    if (
-      existing.issue_id !== issueId
-      || existing.type !== type
-      || (existing.old_value ?? undefined) !== data?.oldValue
-      || (existing.new_value ?? undefined) !== data?.newValue
-      || (existing.content ?? undefined) !== data?.content
-      || (existing.memory_id ?? undefined) !== data?.memoryId
-      || existing.actor !== (data?.actor ?? 'system')
-    ) {
-      throw new Error(`Issue event idempotency key collision: ${data?.idempotencyKey}`);
+  getEvents(issueId: string, limit = 50, offset = 0): IssueEvent[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM issue_events WHERE issue_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
+    ).all(issueId, limit, offset) as Record<string, unknown>[];
+    return rows.map(r => ({
+      id: r.id as string,
+      issueId: r.issue_id as string,
+      type: r.event_type as IssueEventType,
+      data: JSON.parse((r.data as string) || '{}'),
+      createdAt: r.created_at as string,
+    }));
+  }
+
+  // ==================== Stats ====================
+
+  getStats(): IssueStats {
+    const total = (this.db.prepare('SELECT COUNT(*) as cnt FROM issues').get() as { cnt: number }).cnt;
+    const byStatus: Record<string, number> = {};
+    const byPriority: Record<string, number> = {};
+    const bySource: Record<string, number> = {};
+
+    for (const row of this.db.prepare('SELECT status, COUNT(*) as cnt FROM issues GROUP BY status').all() as Record<string, unknown>[]) {
+      byStatus[row.status as string] = row.cnt as number;
     }
-    return {
-      id,
-      issueId: existing.issue_id,
-      type: existing.type,
-      oldValue: existing.old_value ?? undefined,
-      newValue: existing.new_value ?? undefined,
-      content: existing.content ?? undefined,
-      memoryId: existing.memory_id ?? undefined,
-      actor: existing.actor,
-      createdAt: existing.created_at,
-    };
-  }
-
-  getEvents(issueId: string, limit = 50): IssueEvent[] {
-    // rowid DESC is the tiebreaker: created_at is ms-precision TEXT, so events
-    // written in the same millisecond (e.g. createIssue's 'created' + an
-    // immediate addEvent) would otherwise order non-deterministically. rowid is
-    // monotonic with insertion order, so the newest event always sorts first.
-    return (this.db.prepare(
-      'SELECT * FROM issue_events WHERE issue_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?'
-    ).all(issueId, normalizeLimit(limit, 50, 500)) as any[]).map(this.rowToEvent);
-  }
-
-  getRecentEvents(limit = 20): IssueEvent[] {
-    // rowid DESC tiebreaker for same-millisecond created_at — see getEvents.
-    return (this.db.prepare(
-      'SELECT * FROM issue_events ORDER BY created_at DESC, rowid DESC LIMIT ?'
-    ).all(normalizeLimit(limit, 20, 500)) as any[]).map(this.rowToEvent);
-  }
-
-  // ============ 라벨 ============
-
-  createLabel(name: string, color = '#6B7280', description?: string): Label {
-    const existing = this.db.prepare('SELECT * FROM labels WHERE name = ? LIMIT 1').get(name) as any;
-    if (existing) {
-      return {
-        id: existing.id,
-        name: existing.name,
-        color: existing.color,
-        description: existing.description ?? undefined,
-      };
+    for (const row of this.db.prepare('SELECT priority, COUNT(*) as cnt FROM issues GROUP BY priority').all() as Record<string, unknown>[]) {
+      byPriority[row.priority as string] = row.cnt as number;
+    }
+    for (const row of this.db.prepare('SELECT source, COUNT(*) as cnt FROM issues GROUP BY source').all() as Record<string, unknown>[]) {
+      bySource[row.source as string] = row.cnt as number;
     }
 
-    const id = nanoid(8);
-    this.db.prepare(
-      'INSERT INTO labels (id, name, color, description) VALUES (?, ?, ?, ?)'
-    ).run(id, name, color, description ?? null);
-    return { id, name, color, description };
+    return { total, byStatus, byPriority, bySource };
+  }
+
+  // ==================== Labels ====================
+
+  createLabel(name: string, color = '#808080'): Label {
+    const id = nanoid();
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO labels (id, name, color, created_at) VALUES (?, ?, ?, ?)').run(id, name, color, now);
+    return { id, name, color, createdAt: now };
+  }
+
+  getLabel(id: string): Label | null {
+    const row = this.db.prepare('SELECT * FROM labels WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return { id: row.id as string, name: row.name as string, color: row.color as string, createdAt: row.created_at as string };
   }
 
   listLabels(): Label[] {
-    return (this.db.prepare('SELECT * FROM labels ORDER BY name').all() as any[]).map((r) => ({
-      id: r.id,
-      name: r.name,
-      color: r.color,
-      description: r.description ?? undefined,
+    return (this.db.prepare('SELECT * FROM labels ORDER BY name').all() as Record<string, unknown>[]).map(r => ({
+      id: r.id as string, name: r.name as string, color: r.color as string, createdAt: r.created_at as string,
     }));
   }
 
-  deleteLabel(id: string): boolean {
-    return this.db.prepare('DELETE FROM labels WHERE id = ?').run(id).changes > 0;
+  addLabelToIssue(issueId: string, labelId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO issue_labels (issue_id, label_id) VALUES (?, ?)').run(issueId, labelId);
   }
 
-  // ============ 마일스톤 ============
+  removeLabelFromIssue(issueId: string, labelId: string): void {
+    this.db.prepare('DELETE FROM issue_labels WHERE issue_id = ? AND label_id = ?').run(issueId, labelId);
+  }
 
-  createMilestone(name: string, description?: string, dueDate?: string): Milestone {
-    const id = nanoid(8);
+  // ==================== Milestones ====================
+
+  createMilestone(name: string, dueDate?: string): Milestone {
+    const id = nanoid();
     const now = new Date().toISOString();
-    this.db.prepare(
-      'INSERT INTO milestones (id, name, description, due_date, status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(id, name, description ?? null, dueDate ?? null, 'active', now);
-    return { id, name, description, dueDate, status: 'active', createdAt: now };
+    this.db.prepare('INSERT INTO milestones (id, name, due_date, created_at) VALUES (?, ?, ?, ?)').run(id, name, dueDate ?? null, now);
+    return { id, name, dueDate, createdAt: now };
+  }
+
+  getMilestone(id: string): Milestone | null {
+    const row = this.db.prepare('SELECT * FROM milestones WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return { id: row.id as string, name: row.name as string, dueDate: row.due_date as string | undefined, createdAt: row.created_at as string };
   }
 
   listMilestones(): Milestone[] {
-    return (this.db.prepare('SELECT * FROM milestones ORDER BY due_date').all() as any[]).map((r) => ({
-      id: r.id,
-      name: r.name,
-      description: r.description ?? undefined,
-      dueDate: r.due_date ?? undefined,
-      status: r.status,
-      createdAt: r.created_at,
+    return (this.db.prepare('SELECT * FROM milestones ORDER BY name').all() as Record<string, unknown>[]).map(r => ({
+      id: r.id as string, name: r.name as string, dueDate: r.due_date as string | undefined, createdAt: r.created_at as string,
     }));
   }
 
-  // ============ 메모리 연동 ============
-
-  linkMemory(issueId: string, memoryId: string): void {
-    const now = new Date().toISOString();
-    const result = this.db.prepare(
-      'INSERT OR IGNORE INTO issue_memory_links (issue_id, memory_id, linked_at) VALUES (?, ?, ?)'
-    ).run(issueId, memoryId, now);
-    if (result.changes > 0) this.addEvent(issueId, 'memory_linked', { memoryId });
+  setIssueMilestone(issueId: string, milestoneId: string | null): void {
+    this.db.prepare('UPDATE issues SET milestone = ?, updated_at = ? WHERE id = ?').run(milestoneId, new Date().toISOString(), issueId);
   }
 
-  getLinkedMemories(issueId: string): string[] {
-    return (this.db.prepare(
-      'SELECT memory_id FROM issue_memory_links WHERE issue_id = ? ORDER BY linked_at'
-    ).all(issueId) as any[]).map((r) => r.memory_id);
+  // ==================== Dependencies ====================
+
+  addDependency(issueId: string, dependsOnId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO issue_dependencies (issue_id, depends_on_id) VALUES (?, ?)').run(issueId, dependsOnId);
   }
 
-  // ============ 통계 ============
-
-  getStats(projectId?: string): IssueStats {
-    const where = projectId ? 'WHERE project_id = ?' : '';
-    const params = projectId ? [projectId] : [];
-
-    const total = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM issues ${where}`
-    ).get(...params) as any).cnt;
-
-    const byStatus: Record<string, number> = {};
-    (this.db.prepare(
-      `SELECT status, COUNT(*) as cnt FROM issues ${where} GROUP BY status`
-    ).all(...params) as any[]).forEach((r) => { byStatus[r.status] = r.cnt; });
-
-    const byPriority: Record<string, number> = {};
-    (this.db.prepare(
-      `SELECT priority, COUNT(*) as cnt FROM issues ${where} GROUP BY priority`
-    ).all(...params) as any[]).forEach((r) => { byPriority[r.priority] = r.cnt; });
-
-    // Scoped like every other field here. Without the filter this counted
-    // across all projects while total/byStatus/byPriority counted one, so a
-    // per-project stats view showed a breakdown whose numbers did not add up to
-    // its own total.
-    const byProject: Record<string, number> = {};
-    (this.db.prepare(
-      `SELECT project_id, COUNT(*) as cnt FROM issues ${where} GROUP BY project_id`
-    ).all(...params) as any[]).forEach((r) => { byProject[r.project_id] = r.cnt; });
-
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-    const recentlyCreated = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM issues ${where ? where + ' AND' : 'WHERE'} created_at > ?`
-    ).get(...params, sevenDaysAgo) as any).cnt;
-
-    const recentlyClosed = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM issues ${where ? where + ' AND' : 'WHERE'} closed_at > ?`
-    ).get(...params, sevenDaysAgo) as any).cnt;
-
-    return { total, byStatus, byPriority, byProject, recentlyCreated, recentlyClosed };
+  removeDependency(issueId: string, dependsOnId: string): void {
+    this.db.prepare('DELETE FROM issue_dependencies WHERE issue_id = ? AND depends_on_id = ?').run(issueId, dependsOnId);
   }
 
-  // ============ 유틸 ============
+  getDependencies(issueId: string): Issue[] {
+    const rows = this.db.prepare(`
+      SELECT i.* FROM issues i
+      JOIN issue_dependencies d ON d.depends_on_id = i.id
+      WHERE d.issue_id = ?
+    `).all(issueId) as Record<string, unknown>[];
+    return rows.map(r => this.rowToIssue(r));
+  }
+
+  // ==================== Relevant Files ====================
+
+  addRelevantFile(issueId: string, filePath: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO issue_relevant_files (issue_id, file_path) VALUES (?, ?)').run(issueId, filePath);
+  }
+
+  removeRelevantFile(issueId: string, filePath: string): void {
+    this.db.prepare('DELETE FROM issue_relevant_files WHERE issue_id = ? AND file_path = ?').run(issueId, filePath);
+  }
+
+  getRelevantFiles(issueId: string): string[] {
+    const rows = this.db.prepare('SELECT file_path FROM issue_relevant_files WHERE issue_id = ?').all(issueId) as Record<string, unknown>[];
+    return rows.map(r => r.file_path as string);
+  }
+
+  // ==================== DB Management ====================
 
   close(): void {
     this.db.close();
   }
 
-  private rowToIssue(row: any): Issue {
-    const id = row.id;
+  vacuum(): void {
+    this.db.exec('VACUUM');
+  }
 
-    const labels = (this.db.prepare(
-      `SELECT COALESCE(l.name, il.label_id) as label
-       FROM issue_labels il
-       LEFT JOIN labels l ON l.id = il.label_id
-       WHERE il.issue_id = ?`
-    ).all(id) as any[]).map((r) => r.label);
+  // ==================== Helpers ====================
 
-    const dependencies = (this.db.prepare(
-      'SELECT depends_on_id FROM issue_dependencies WHERE issue_id = ?'
-    ).all(id) as any[]).map((r) => r.depends_on_id);
-
-    const relevantFiles = (this.db.prepare(
-      'SELECT file_path FROM issue_relevant_files WHERE issue_id = ?'
-    ).all(id) as any[]).map((r) => r.file_path);
-
-    const acceptanceCriteria = (this.db.prepare(
-      'SELECT criterion FROM issue_acceptance_criteria WHERE issue_id = ? ORDER BY sort_order'
-    ).all(id) as any[]).map((r) => r.criterion);
-
-    const memoryIds = (this.db.prepare(
-      'SELECT memory_id FROM issue_memory_links WHERE issue_id = ?'
-    ).all(id) as any[]).map((r) => r.memory_id);
-
-    const childIds = (this.db.prepare(
-      'SELECT id FROM issues WHERE parent_id = ?'
-    ).all(id) as any[]).map((r) => r.id);
-
+  private rowToIssue(row: Record<string, unknown>): Issue {
     return {
-      id,
-      projectId: row.project_id,
-      title: row.title,
-      description: row.description ?? '',
-      status: row.status,
-      priority: row.priority,
-      source: row.source,
-      labels,
-      assignee: row.assignee ?? undefined,
-      milestone: row.milestone ?? undefined,
-      relevantFiles,
-      acceptanceCriteria,
-      estimateMinutes: row.estimate_minutes ?? undefined,
-      complexity: row.complexity ?? undefined,
-      dependencies,
-      parentId: row.parent_id ?? undefined,
-      childIds,
-      linearId: row.linear_id ?? undefined,
-      linearIdentifier: row.linear_identifier ?? undefined,
-      linearUrl: row.linear_url ?? undefined,
-      memoryIds,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      closedAt: row.closed_at ?? undefined,
+      id: row.id as string,
+      projectId: row.project_id as string,
+      title: row.title as string,
+      description: (row.description as string) ?? '',
+      status: row.status as IssueStatus,
+      priority: row.priority as IssuePriority,
+      source: row.source as IssueSource,
+      assignee: (row.assignee as string) ?? undefined,
+      milestone: (row.milestone as string) ?? undefined,
+      estimateMinutes: (row.estimate_minutes as number) ?? undefined,
+      complexity: (row.complexity as string) ?? undefined,
+      parentId: (row.parent_id as string) ?? undefined,
+      linearId: (row.linear_id as string) ?? undefined,
+      linearIdentifier: (row.linear_identifier as string) ?? undefined,
+      linearUrl: (row.linear_url as string) ?? undefined,
+      createdAt: row.created_at as string,
+      updatedAt: row.updated_at as string,
+      closedAt: (row.closed_at as string) ?? undefined,
     };
   }
 
-  private rowToEvent(row: any): IssueEvent {
-    return {
-      id: row.id,
-      issueId: row.issue_id,
-      type: row.type,
-      oldValue: row.old_value ?? undefined,
-      newValue: row.new_value ?? undefined,
-      content: row.content ?? undefined,
-      memoryId: row.memory_id ?? undefined,
-      actor: row.actor,
-      createdAt: row.created_at,
+  private toColumnName(key: string): string | null {
+    const map: Record<string, string> = {
+      projectId: 'project_id',
+      title: 'title',
+      description: 'description',
+      status: 'status',
+      priority: 'priority',
+      source: 'source',
+      assignee: 'assignee',
+      milestone: 'milestone',
+      estimateMinutes: 'estimate_minutes',
+      complexity: 'complexity',
+      parentId: 'parent_id',
+      linearId: 'linear_id',
+      linearIdentifier: 'linear_identifier',
+      linearUrl: 'linear_url',
     };
-  }
-
-  private ensureLabelId(label: string): string | null {
-    const name = label.trim();
-    if (!name) return null;
-
-    const existing = this.db.prepare(
-      'SELECT id FROM labels WHERE id = ? OR name = ? LIMIT 1'
-    ).get(name, name) as { id: string } | undefined;
-    if (existing) return existing.id;
-
-    this.db.prepare(
-      'INSERT INTO labels (id, name, color, description) VALUES (?, ?, ?, ?)'
-    ).run(name, name, '#6B7280', null);
-    return name;
+    return map[key] ?? null;
   }
 }
 
-function toFtsQuery(search: string): string | null {
-  const rawTokens: Array<{ type: 'term' | 'operator'; value: string }> = [];
-  let i = 0;
+// ==================== Module-level singleton ====================
 
-  while (i < search.length) {
-    while (/\s/.test(search[i] ?? '')) i++;
-    if (i >= search.length) break;
-
-    if (search[i] === '"') {
-      i++;
-      let phrase = '';
-      while (i < search.length) {
-        if (search[i] === '"' && search[i + 1] === '"') {
-          phrase += '"';
-          i += 2;
-          continue;
-        }
-        if (search[i] === '"') {
-          i++;
-          break;
-        }
-        phrase += search[i];
-        i++;
-      }
-      const value = phrase.trim();
-      if (value) rawTokens.push({ type: 'term', value });
-      continue;
-    }
-
-    const start = i;
-    while (i < search.length && !/\s/.test(search[i])) i++;
-    const value = search.slice(start, i).trim();
-    if (!value) continue;
-
-    const upper = value.toUpperCase();
-    if (upper === 'AND' || upper === 'OR' || upper === 'NOT') {
-      rawTokens.push({ type: 'operator', value: upper });
-    } else {
-      rawTokens.push({ type: 'term', value });
-    }
-  }
-
-  const tokens: string[] = [];
-  let expectTerm = true;
-  for (const token of rawTokens) {
-    if (token.type === 'operator') {
-      if (expectTerm) continue;
-      tokens.push(token.value);
-      expectTerm = true;
-      continue;
-    }
-
-    tokens.push(`"${token.value.replace(/"/g, '""')}"`);
-    expectTerm = false;
-  }
-
-  while (tokens.length > 0 && ['AND', 'OR', 'NOT'].includes(tokens[tokens.length - 1])) tokens.pop();
-  return tokens.length > 0 ? tokens.join(' ') : null;
-}
-
-function normalizeLimit(value: number | undefined, fallback: number, maximum: number): number {
-  if (!Number.isFinite(value)) return fallback;
-  return Math.min(maximum, Math.max(1, Math.trunc(value!)));
-}
-
-function normalizeOffset(value: number | undefined): number {
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.trunc(value!));
-}
-
-// 싱글톤 인스턴스
 let storeInstance: SqliteIssueStore | null = null;
-let storeInstancePath: string | null = null;
 
 export function getIssueStore(dbPath?: string): SqliteIssueStore {
-  const requestedPath = resolve(dbPath ?? DEFAULT_DB_PATH);
   if (!storeInstance) {
-    storeInstance = new SqliteIssueStore(requestedPath);
-    storeInstancePath = requestedPath;
-  } else if (storeInstancePath !== requestedPath) {
-    throw new Error(`Issue store already initialized at ${storeInstancePath}; requested ${requestedPath}`);
+    storeInstance = new SqliteIssueStore(dbPath);
   }
   return storeInstance;
 }
@@ -913,6 +615,26 @@ export function closeIssueStore(): void {
   if (storeInstance) {
     storeInstance.close();
     storeInstance = null;
-    storeInstancePath = null;
   }
+}
+
+// ==================== Utility Functions ====================
+
+function toFtsQuery(search: string): string | null {
+  // Escape special FTS5 characters and build a prefix query
+  const sanitized = search.replace(/['"*^$()~`{}[\]\\]/g, '').trim();
+  if (!sanitized) return null;
+  // Wrap each word as a prefix term for partial matching
+  const terms = sanitized.split(/\s+/).filter(Boolean).map(t => `"${t}"*`);
+  return terms.join(' ');
+}
+
+function normalizeLimit(value: number | undefined, fallback: number, maximum: number): number {
+  if (value === undefined || value === null) return fallback;
+  return Math.min(Math.max(1, Math.floor(value)), maximum);
+}
+
+function normalizeOffset(value: number | undefined): number {
+  if (value === undefined || value === null) return 0;
+  return Math.max(0, Math.floor(value));
 }
