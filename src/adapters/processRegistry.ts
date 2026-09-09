@@ -67,10 +67,18 @@ export function registerProcess(info: ProcessInfo, proc: ChildProcess): void {
   proc.stdout?.on('data', updateActivity);
   proc.stderr?.on('data', updateActivity);
 
-  // Cleanup on close
+  // Cleanup on close — verify ownership before acting so a reused PID does not
+  // cause this handler to clean up a newer process that happens to share the same
+  // numeric PID (PID reuse is real on busy systems).
   proc.on('close', (code, signal) => {
     const entry = registry.get(info.pid);
-    const durationMs = entry ? Date.now() - entry.spawnedAt : 0;
+    // Ownership check: the entry must match this exact process identity (taskId +
+    // spawnedAt), not just the PID. A reused PID would have a different spawnedAt
+    // or taskId.
+    if (!entry || entry.taskId !== info.taskId || entry.spawnedAt !== info.spawnedAt) {
+      return;
+    }
+    const durationMs = Date.now() - entry.spawnedAt;
     registry.delete(info.pid);
     processHandles.delete(info.pid);
     activityThrottle.delete(info.pid);
@@ -106,60 +114,41 @@ export function getAllProcesses(): ProcessInfo[] {
 }
 
 /**
- * Kill a tracked process. Sends SIGTERM first, then SIGKILL after 5s.
+ * Kill a tracked process.
+ * Returns true if the process was found and signalled.
+ * When force=true, uses SIGKILL instead of SIGTERM.
  */
 export async function killProcess(pid: number, force = false): Promise<boolean> {
-  const entry = registry.get(pid);
-  if (!entry) return false;
+  const proc = processHandles.get(pid);
+  if (!proc) return false;
 
   try {
-    const proc = processHandles.get(pid);
-    if (proc) {
-      if (force) {
-        terminateCliProcessTree(proc);
-      } else {
-        signalCliProcessTree(proc, 'SIGTERM');
-        // Escalate the same process group. The npm wrapper may exit before its
-        // native CLI/MCP descendants, so checking only proc.exitCode is unsafe.
-        const escalation = setTimeout(() => terminateCliProcessTree(proc), 5000);
-        escalation.unref();
-      }
-      return true;
+    if (force) {
+      await terminateCliProcessTree(proc, pid);
+    } else {
+      await signalCliProcessTree(proc, pid);
     }
-    // No handle means we cannot prove this PID is still the child we spawned.
-    // Signalling it anyway is the ownership hazard this registry exists to
-    // remove: PIDs are recycled, and a delayed escalation in particular would
-    // land on whatever unrelated process inherited the number. Registration and
-    // handle are written and cleared together, so this is a defensive branch —
-    // report it rather than guessing.
-    console.warn(`[ProcessRegistry] No process handle for pid ${pid}; refusing to signal by PID`);
-    registry.delete(pid);
-    activityThrottle.delete(pid);
-    return false;
+    return true;
   } catch {
-    // Process already gone
-    registry.delete(pid);
-    processHandles.delete(pid);
-    activityThrottle.delete(pid);
     return false;
   }
 }
 
 /**
- * Start periodic health checker that verifies processes are still alive.
- * Removes stale entries from the registry.
+ * Start periodic health checker that removes stale entries
+ * where the process handle has already exited.
  */
 export function startHealthChecker(intervalMs = 30000): void {
   if (healthCheckTimer) return;
+
   healthCheckTimer = setInterval(() => {
+    const now = Date.now();
     for (const [pid, info] of registry) {
-      try {
-        process.kill(pid, 0); // No-op signal — just checks if alive
-      } catch {
-        // Process is dead but wasn't cleaned up
-        const durationMs = Date.now() - info.spawnedAt;
+      const proc = processHandles.get(pid);
+      if (!proc) {
+        // Handle missing but no process — treat as stale
+        const durationMs = now - info.spawnedAt;
         registry.delete(pid);
-        processHandles.delete(pid);
         activityThrottle.delete(pid);
         broadcastEvent({
           type: 'process:exit',
