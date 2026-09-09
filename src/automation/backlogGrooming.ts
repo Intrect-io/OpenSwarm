@@ -221,8 +221,9 @@ export async function applyBacklogGrooming(
   return applied;
 }
 
-export function filterGroomableTasks(tasks: TaskItem[]): TaskItem[] {
+export function filterGroomableTasks(tasks: TaskItem[], scope?: Set<string>): TaskItem[] {
   return tasks.filter(task => {
+    if (scope && !scope.has(task.issueId ?? task.id ?? '')) return false;
     const state = task.linearState?.toLowerCase();
     return state === 'todo' || state === 'backlog' || state === 'in progress' || state === 'in review';
   });
