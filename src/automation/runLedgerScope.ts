@@ -32,15 +32,16 @@ export function scopesOverlap(left: Set<string>, right: Set<string>): boolean {
  * Decide whether a claim may join the runs already live in one repository.
  *
  * The cap controls capacity; this controls safety inside that capacity.
- * Unknown scope on either side fails closed — worktrees isolate filesystem
- * writes, but they do not make two unknown write sets safe to merge.
+ * Unknown scope on either side is not a conflict under the default `admit`
+ * policy — worktrees isolate live edits. Known overlapping write sets still
+ * refuse. Pass `serialize` to restore the Codex-era fail-closed hold.
  */
 export type UnknownScopeAdmission = 'serialize' | 'admit';
 
 export function admitsConflictScope(
   requested: unknown,
   activeScopes: readonly unknown[],
-  unknownScope: UnknownScopeAdmission = 'serialize',
+  unknownScope: UnknownScopeAdmission = 'admit',
 ): boolean {
   if (activeScopes.length === 0) return true;
   const requestedScope = normalizeConflictScope(requested);

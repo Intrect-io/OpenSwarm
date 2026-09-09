@@ -336,6 +336,91 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     internal.durableRuns.close();
   });
 
+  it('keeps a NEEDS_HUMAN park parked while the pool is saturated (AGT-4257 idle gate)', async () => {
+    // idle_fill exists to stop free slots sitting empty. With no free slot the
+    // park has nothing to fill, and lifting it anyway is the AGT-4155 loop:
+    // re-claim, re-execute, re-park, once per heartbeat, at attempt 20.
+    const internal = await makeRunner();
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+
+    expect(internal.filterAlreadyProcessed([{ ...TASK, linearState: 'In Progress' }])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('un-parks at most one row per free slot per heartbeat (AGT-4257 idle budget)', async () => {
+    // One free slot must not turn every parked row READY at once — the rows
+    // beyond the slot count would only compete with fresh work on the next
+    // heartbeat, having lost their park for nothing.
+    const internal = await makeRunner();
+    const second: TaskItem = {
+      ...TASK, id: 'AGT-2', issueId: 'AGT-2', issueIdentifier: 'AGT-2', title: 'also parked',
+    };
+    internal.durableRuns.observeTask(second, REPO);
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(1);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+    internal.durableRuns.markNeedsHuman('AGT-2', 'Reviewer rejected 4 attempts: still failing lint');
+
+    const selected = internal.filterAlreadyProcessed([TASK, second]);
+
+    expect(selected).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    expect(internal.durableRuns.getRun('AGT-2')?.state).toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('charges a NEEDS_HUMAN row with the stuck label once and admits it (AGT-4257 idle budget)', async () => {
+    // The NEEDS_HUMAN lift and the stuck-label recovery are idle fill for the
+    // same row. Charged twice, one task eats two slots' budget; at budget 1 the
+    // second charge rejects a row whose park the first lift already erased.
+    const internal = await makeRunner();
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(1);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+    const stuck: TaskItem = { ...TASK, linearState: 'Backlog', labels: ['swarm:stuck'] };
+
+    expect(internal.filterAlreadyProcessed([stuck])).toEqual([stuck]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
+    internal.durableRuns.close();
+  });
+
+  it('skips an In Progress card this daemon never claimed (INT-1979 guard kept under AGT-4257)', async () => {
+    // A bare Linear 'In Progress' with only the row observeTask wrote is
+    // someone else's work — a human, or another daemon. Admitting it
+    // re-decomposes work already in progress (INT-1980: duplicate sub-issues
+    // and a redundant PR). This daemon's own parks reach here as READY after
+    // idle fill and still pass.
+    const internal = await makeRunner();
+    const external: TaskItem = { ...TASK, linearState: 'In Progress' };
+
+    expect(internal.filterAlreadyProcessed([external])).toEqual([]);
+    internal.durableRuns.close();
+  });
+
+  it('idle-fills a finished run whose card is In Progress, but never one In Review (AGT-4257)', async () => {
+    const internal = await makeRunner();
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'EXECUTING', {})).toBe(true);
+    expect(ledger.transition(claim!, 'SYNC_PENDING', {})).toBe(true);
+    expect(ledger.finalizeSyncedRun('AGT-1')).toBe(true);
+    ledger.close();
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
+
+    // In Review: its PR is waiting on the merge gate. Re-executing makes a
+    // duplicate PR, so a finished run there is not work to fill a slot with.
+    expect(internal.filterAlreadyProcessed([{ ...TASK, linearState: 'In Review' }])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
+
+    // In Progress with a free slot is idle fill of this daemon's own run.
+    const inProgress: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.filterAlreadyProcessed([inProgress])).toEqual([inProgress]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
+    internal.durableRuns.close();
+  });
+
   it('resumes an unrelated NEEDS_HUMAN park when the operator dispatches it again (AGT-4155)', async () => {
     // The park stays terminal for the autonomous loop but must remain
     // recoverable by an operator ACT — the issue board or `work` CLI saying

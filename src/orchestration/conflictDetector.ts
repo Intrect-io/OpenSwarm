@@ -89,6 +89,8 @@ export interface ConflictDetectionOptions {
   /** Repay one deferred unknown task by admitting it alone on an idle repository. */
   preferUnknownExclusive?: boolean;
   preferredUnknownTaskId?: string;
+  /** Candidate-vs-candidate unknown-scope policy. Default admit (cheap-model fan-out). */
+  unknownScopeAdmission?: 'serialize' | 'admit';
 }
 
 function pairKey(left: number, right: number): string {
@@ -210,7 +212,7 @@ function sharedScopeEntries(candidate: Set<string>, active: Set<string>): string
 export function describeScopeConflict(
   candidate: string[] | undefined,
   active: string[] | undefined,
-  unknownScopeAdmission: 'serialize' | 'admit' = 'serialize',
+  unknownScopeAdmission: 'serialize' | 'admit' = 'admit',
 ): ScopeConflictReason | null {
   const a = normalizeScope(candidate);
   const b = normalizeScope(active);
@@ -263,11 +265,12 @@ export async function detectFileConflicts(
     for (let j = i + 1; j < tasks.length; j++) {
       const modulesJ = taskImpacts.get(j);
       if (unknownScopeIndices.has(i) || unknownScopeIndices.has(j)) {
-        // Worktrees isolate filesystem writes, but they do not make two unknown
-        // write sets safe to merge. Serialize uncertainty and retry after the
-        // known owner exits.
-        pairShared.set(`${i}:${j}`, new Set([UNKNOWN_SCOPE]));
-        uf.union(i, j);
+        // Codex-era fail-closed: one unknown serialized the whole repository.
+        // Cheap-model default is admit — unknown is not evidence of overlap.
+        if (options.unknownScopeAdmission === 'serialize') {
+          pairShared.set(`${i}:${j}`, new Set([UNKNOWN_SCOPE]));
+          uf.union(i, j);
+        }
         continue;
       }
 

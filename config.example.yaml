@@ -75,10 +75,9 @@ autonomous:
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
   # What durable admission does with a task whose write scope could not be
-  # resolved while another run in the same repository is live. serialize
-  # (default) fails closed; admit relies on isolated worktrees and post-merge
-  # integration requeue to surface a branch conflict at PR time instead.
-  # unknownScopeAdmission: serialize
+  # resolved while another run in the same repository is live. admit (default)
+  # relies on isolated worktrees; serialize is the Codex-era fail-closed hold.
+  # unknownScopeAdmission: admit
   # An infrastructure failure is not the task's fault and is never counted
   # toward STUCK — but the same infrastructure failure on this many consecutive
   # attempts is not a blip. Park the run for the operator with the cause named

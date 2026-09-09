@@ -857,7 +857,11 @@ export async function reconcileDependencyBlockers(
     if (!DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES.has(state.execution.status)) continue;
     if (state.dependencyIssueIds.length === 0) continue;
     const updatedAtMs = Date.parse(state.updatedAt);
-    if (Number.isFinite(updatedAtMs) && now - updatedAtMs < staleAfterMs) continue;
+    // Current-fetch dependents are upserted this heartbeat, so updatedAt is
+    // always fresh. Skipping them is why AGT-4121 stayed blocked after AGT-4254
+    // shipped: its six Linear-Done blockers were never eligible for lookup.
+    const fromCurrentFetch = knownTaskIds.has(state.issueId);
+    if (!fromCurrentFetch && Number.isFinite(updatedAtMs) && now - updatedAtMs < staleAfterMs) continue;
     for (const depId of state.dependencyIssueIds) {
       if (isDependencyTerminal(getTaskState(depId))) continue;
       if (knownTaskIds.has(depId)) continue; // still open per this fetch — not stale

@@ -40,9 +40,10 @@ describe('canonical conflict scope policy', () => {
     ['C:\\repo\\file.ts'],
     ['../outside.ts'],
     ['unknown-file-scope'],
-  ])('fails closed for unsafe or unknown scope %j', (requested) => {
+  ])('treats unsafe or unknown scope %j as empty; durable admission defaults to admit', (requested) => {
     expect(normalizeConflictScope(requested)).toEqual(new Set());
     expect(fileScopesConflict(requested, ['src/safe.ts'])).toBe(true);
-    expect(admitsConflictScope(requested, [{ fileScope: ['src/safe.ts'] }])).toBe(false);
+    expect(admitsConflictScope(requested, [{ fileScope: ['src/safe.ts'] }])).toBe(true);
+    expect(admitsConflictScope(requested, [{ fileScope: ['src/safe.ts'] }], 'serialize')).toBe(false);
   });
 });

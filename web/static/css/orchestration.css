@@ -3,6 +3,7 @@
 
 body.page-orchestration {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -35,6 +36,7 @@ body.page-orchestration {
 #controls input[type="search"] { min-width: 160px; }
 #controls label { display: flex; align-items: center; gap: var(--space-1); font-size: var(--text-sm); color: var(--fg-muted); }
 #controls input[type="checkbox"] { accent-color: var(--accent); }
+#controls .input, #controls .select { width: auto; }
 #idle-count { color: var(--fg-muted); }
 
 #stats { display: flex; gap: var(--space-2); margin-left: auto; flex-wrap: wrap; }
@@ -176,8 +178,21 @@ body.page-orchestration {
 .composer-status.is-error { color: var(--danger); }
 
 @media (max-width: 900px) {
-  .orch-main { flex-direction: column; }
-  #graph-wrap { min-height: 40vh; }
-  .orch-aside { width: auto; max-height: 55vh; border-left: 0; border-top: 1px solid var(--border); }
-  #stats { margin-left: 0; }
+  body.page-orchestration { height: auto; overflow: auto; }
+  .orch-main { flex: none; flex-direction: column; }
+  #controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; }
+  #controls .input, #controls .select { width: 100%; min-height: 44px; font-size: 16px; }
+  #controls input[type="search"] { grid-column: 1 / -1; min-width: 0; }
+  #controls label { min-height: 44px; grid-column: 1 / -1; }
+  #stats { margin-left: 0; flex-wrap: nowrap; overflow-x: auto; width: 100%; }
+  #stats .stat { flex-shrink: 0; }
+  #graph-wrap { flex: none; overflow-x: auto; }
+  #graph { width: max(100%, 720px); height: 440px; }
+  #legend { position: static; width: 100%; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); border-radius: 0; }
+  #legend .legend-section { margin: 0; padding: 0; border: 0; display: contents; }
+  .orch-aside { width: auto; border-left: 0; border-top: 1px solid var(--border); }
+  #feed { flex: none; max-height: 40dvh; }
+  #thread { flex: none; min-height: 180px; padding-bottom: env(safe-area-inset-bottom); }
+  .transcript { flex: none; max-height: 50dvh; }
+  .composer .textarea { min-height: 44px; font-size: 16px; }
 }

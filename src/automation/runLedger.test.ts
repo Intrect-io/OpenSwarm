@@ -470,7 +470,7 @@ describe('RunLedger claim and fencing races', () => {
     ledger.close();
   });
 
-  it('fails closed when a parallel claim explicitly supplies an unknown scope', () => {
+  it('fails closed when a parallel claim supplies an unknown scope under serialize', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'KNOWN', '/same-repo', ['src/known.ts']);
     register(ledger, 'UNKNOWN', '/same-repo');
@@ -480,7 +480,7 @@ describe('RunLedger claim and fencing races', () => {
     })).not.toBeNull();
     expect(ledger.claimRun('UNKNOWN', {
       ownerInstanceId: 'unknown', leaseMs: 1_000, now: 2_001,
-      maxActiveForProject: 2, conflictScope: [],
+      maxActiveForProject: 2, conflictScope: [], unknownScopeAdmission: 'serialize',
     })).toBeNull();
     ledger.close();
   });

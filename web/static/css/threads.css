@@ -4,12 +4,14 @@
 
 body.page-threads {
   min-height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   font-size: var(--text-sm);
 }
 
-.topbar #repo { min-width: 240px; max-width: 40vw; }
+.topbar #repo { width: 240px; max-width: 40vw; }
 
 .threads-status {
   min-height: 28px;
@@ -28,10 +30,10 @@ body.page-threads {
 
 /* ── List ────────────────────────────────────────────────────────────── */
 
-.threads-list { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg-surface); }
+.threads-list { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg-surface); }
 .toolbar { display: flex; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border); }
 .toolbar .select { flex: 1; }
-#threads { flex: 1; overflow: auto; }
+#threads { flex: 1; min-height: 120px; overflow: auto; }
 
 .thread-card {
   width: 100%;
@@ -61,7 +63,7 @@ body.page-threads {
 
 /* ── Detail ──────────────────────────────────────────────────────────── */
 
-.threads-detail { min-width: 0; display: flex; flex-direction: column; }
+.threads-detail { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 #empty { padding: var(--space-6); }
 #detail { display: none; min-height: 0; flex: 1; flex-direction: column; }
 #detail.visible { display: flex; }
@@ -88,9 +90,19 @@ body.page-threads {
 .reply-form .textarea { min-height: 54px; resize: vertical; }
 
 @media (max-width: 800px) {
+  body.page-threads { height: auto; overflow: auto; }
   .threads-main { grid-template-columns: 1fr; height: auto; }
-  .threads-list { border-right: 0; max-height: 50vh; }
-  .threads-detail { min-height: 50vh; }
-  .topbar #repo { max-width: 100%; }
+  .threads-list { overflow: visible; border-right: 0; border-bottom: 1px solid var(--border); }
+  #threads { flex: none; max-height: 40dvh; }
+  .threads-detail { min-height: 240px; }
+  #messages { flex: none; max-height: 60dvh; }
+  .reply-form { padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
   .two { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 1100px) {
+  .page-threads .topbar .page-title { display: none; }
+  .page-threads .topbar-actions { flex: 1; min-width: 0; }
+  .page-threads .topbar-spacer { display: none; }
+  .topbar #repo { flex: 1; width: 0; max-width: none; }
 }

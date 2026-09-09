@@ -23,6 +23,7 @@
 
 body.page-supervisor {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -509,10 +510,11 @@ body.page-supervisor {
 
 @media (max-width: 768px) {
   body.page-supervisor { height: auto; overflow: auto; }
-  .topbar-nav, .topbar .page-title { display: none; }
   .control-group { min-width: 0; }
-  .provider-toggle { flex-wrap: wrap; min-width: 0; max-width: 100%; }
-  .stats-bar { white-space: normal; flex-wrap: wrap; gap: var(--space-3); }
+  .provider-toggle { overflow-x: auto; min-width: 0; max-width: 100%; }
+  .provider-btn { flex-shrink: 0; min-height: 44px; }
+  .stats-bar { gap: var(--space-4); }
+  .stats-bar .stat { flex-shrink: 0; }
 
   .tab-bar { display: flex; border-bottom: 1px solid var(--border); background: var(--bg-surface); }
   .tab {

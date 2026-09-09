@@ -42,6 +42,7 @@ import {
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
+import { citedPathsAreEphemeral } from '../support/worktreeEphemeral.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler, normalizeProjectPath } from '../orchestration/taskScheduler.js';
@@ -55,7 +56,7 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
-import { decideExplicitReadmission } from './explicitDispatchReadmission.js';
+import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
@@ -1148,10 +1149,19 @@ export class AutonomousRunner {
     let noProject = 0;
     let unresolvable = 0;
     const toUnstick: string[] = [];
+    // AGT-4257 idle_fill lifts parked and backed-off rows so free slots do not
+    // sit empty. Bounded by this heartbeat's free slot count: a saturated pool
+    // must not churn its parks (AGT-4155 reached attempt 20 that way), and one
+    // free slot must not un-park every row at once.
+    let idleFillBudget = this.scheduler.hasAvailableSlot() ? this.scheduler.getAvailableSlots() : 0;
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
       const isStuck = task.labels?.includes(STUCK_LABEL) ?? false;
       let durableRun = this.durableRuns.getRun(id);
+      // Set once this task has spent idle budget, so a later branch in this
+      // same pass (the stuck-label recovery) neither charges it twice nor
+      // skips a row whose park idle_fill has already erased.
+      let idleLifted = false;
 
       if (
         this.durableRuns.isPrimary
@@ -1161,36 +1171,67 @@ export class AutonomousRunner {
           || durableRun.state === 'DECOMPOSED'
           || durableRun.state === 'CANCELLED'
         )
-        && (task.linearState === 'Todo' || task.linearState === 'Backlog'
-          || task.linearState === 'In Progress' || task.linearState === 'In Review')
-        && this.durableRuns.markReady(id)
       ) {
-        durableRun = this.durableRuns.getRun(id);
+        // 'Todo' (or an explicit dispatch) is the operator reopening a finished
+        // run — never gated. Backlog / In Progress are idle fill under AGT-4257
+        // and spend budget. 'In Review' is a published PR waiting on the merge
+        // gate: re-executing it makes a duplicate PR, so it is not work to fill.
+        const operatorReopened = task.linearState === 'Todo' || task.explicitDispatch === true;
+        const idleReopen = !operatorReopened
+          && (task.linearState === 'Backlog' || task.linearState === 'In Progress')
+          && idleFillBudget > 0;
+        if ((operatorReopened || idleReopen) && this.durableRuns.markReady(id)) {
+          if (idleReopen) {
+            idleFillBudget--;
+            idleLifted = true;
+          }
+          durableRun = this.durableRuns.getRun(id);
+        }
       }
 
       if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
-        const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
-        if (idleResumed) {
-          console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (idle_fill)`);
-          const lifted = this.durableRuns.getRun(id);
-          if (lifted) durableRun = lifted;
-          if (idleResumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+        const isOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON
+          || (durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false);
+        // AGT-4256: a guard/publication park that only named ephemeral paths
+        // (.test_venv, pytest-local) is not a human decision. Resume even when
+        // Linear is still In Progress so the next heartbeat can pick the work.
+        // Checked before idle_fill so a false park never spends idle budget.
+        if (!isOperatorQuestionPark && citedPathsAreEphemeral(durableRun.lastErrorMessage ?? '')) {
+          const resumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'unspecified');
+          if (resumed) {
+            console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (ephemeral-only guard park)`);
+            durableRun = this.durableRuns.getRun(id);
+            if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+          }
+        }
+        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0) {
+          const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
+          if (idleResumed) {
+            idleFillBudget--;
+            idleLifted = true;
+            console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (idle_fill, ${idleFillBudget} free slot(s) left)`);
+            const lifted = this.durableRuns.getRun(id);
+            if (lifted) durableRun = lifted;
+            if (idleResumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+          }
         }
       }
 
       if (this.durableRuns.isPrimary && durableRun) {
         // AGT-4257: a parked/backoff row is still work. Lift it so claimRun
-        // can take the slot instead of the heartbeat returning skip.
-        if (
-          durableRun.state === 'RETRY_AT'
-          || durableRun.state === 'WAITING_EXTERNAL'
+        // can take the slot instead of the heartbeat returning skip — one row
+        // per free slot. An elapsed RETRY_AT needs no lift and passes below
+        // without spending budget. WAITING_EXTERNAL is a run whose published
+        // effect is still pending, not a park: lifting it re-runs the task on
+        // top of its own in-flight publish.
+        const idleLiftable = (durableRun.state === 'RETRY_AT' && (durableRun.retryAt ?? 0) > Date.now())
           || durableRun.state === 'NEEDS_SPEC'
-          || durableRun.state === 'NEEDS_ENV'
-        ) {
-          if (this.durableRuns.markReady(id)) {
-            const lifted = this.durableRuns.getRun(id);
-            if (lifted) durableRun = lifted;
-          }
+          || durableRun.state === 'NEEDS_ENV';
+        if (idleLiftable && idleFillBudget > 0 && this.durableRuns.markReady(id)) {
+          idleFillBudget--;
+          idleLifted = true;
+          const lifted = this.durableRuns.getRun(id);
+          if (lifted) durableRun = lifted;
         }
         if (!durableRun) return false;
         if (['DONE', 'DECOMPOSED', 'CANCELLED', 'NEEDS_HUMAN'].includes(durableRun.state)) return false;
@@ -1260,7 +1301,15 @@ export class AutonomousRunner {
       }
       if (stuckDecision === 'skip-stuck') {
         // AGT-4257: a stuck label must not idle an enabled pool. Linear still
-        // showing the card means the work is wanted.
+        // showing the card means the work is wanted — but only a free slot
+        // justifies re-running an issue whose retries are exhausted.
+        if (!idleLifted) {
+          if (idleFillBudget <= 0) {
+            stuckSkipped++;
+            return false;
+          }
+          idleFillBudget--;
+        }
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         clearRejection(id);
@@ -1270,20 +1319,43 @@ export class AutonomousRunner {
         return true;
       }
 
-      if (legacyIsAuthority && this.completedTaskIds.has(id)) {
+      // AGT-4257 (ledger-off): a locally completed or retry-exhausted issue whose
+      // card sits in a parked state is idle fill, on the same budget as the
+      // ledger lifts. (An active card — Todo / In Progress / In Review — never
+      // reaches here: classifyStuck already returned 'recover' for it above.)
+      if (legacyIsAuthority
+          && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
+        if (idleFillBudget <= 0) return false;
+        idleFillBudget--;
+        idleLifted = true;
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         recovered++;
         return true;
       }
-      if (legacyIsAuthority && (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT) {
-        this.failedTaskCounts.delete(id);
-        recovered++;
-        return true;
-      }
 
-      // AGT-4257: In Progress without a local claim is still work. Skipping it
-      // idled the enabled pool while Linear cards sat in In Progress.
+      // External-claim guard (INT-1979 dup): an issue set to 'In Progress' that THIS
+      // daemon never claimed is owned by a human or another agent — picking it up
+      // would re-decompose work someone is already doing (that spawned duplicate
+      // INT-1980 sub-issues + a redundant PR). markTaskInProgress writes
+      // execution.status='in_progress' when WE claim, so our own in-flight work
+      // (incl. resumption after a restart) still passes; a bare Linear 'In Progress'
+      // with no local claim record is skipped. An explicit dispatch is the
+      // operator handing it over and passes.
+      //
+      // Under the ledger the ownership signal is the attempt counter, not the
+      // state: observeTask registers every fetched card as READY (attempt 0),
+      // so a state test admitted every external card. A row this daemon has
+      // claimed at least once (attempt ≥ 1) is its own work — a backoff, a
+      // finished run reopened — and passes; so does a row idle fill lifted in
+      // this very pass, since only this daemon's own parks are lifted.
+      if (task.linearState === 'In Progress' && task.explicitDispatch !== true && !idleLifted) {
+        if (this.durableRuns.isPrimary) {
+          if (!durableRun || durableRun.attemptNo === 0) return false;
+        } else if (getTaskState(id)?.execution?.status !== 'in_progress') {
+          return false;
+        }
+      }
 
       if (legacyIsAuthority) {
         // Check if task is in exponential backoff period — unless the only thing
@@ -1291,9 +1363,18 @@ export class AutonomousRunner {
         // an `ask_human` park, so left alone it makes the operator's reply land
         // up to two hours after they sent it.
         if (!canRetryNow(id, this.failedTaskRetryTimes)) {
-          // AGT-4257: free slots chew the backoff instead of sitting idle.
-          clearRetryTime(id, this.failedTaskRetryTimes);
-          recovered++;
+          if (this.answerArrivedFor(id)) {
+            clearRetryTime(id, this.failedTaskRetryTimes);
+            answered++;
+          } else if (idleFillBudget > 0) {
+            // AGT-4257: free slots chew the backoff instead of sitting idle.
+            idleFillBudget--;
+            clearRetryTime(id, this.failedTaskRetryTimes);
+            recovered++;
+          } else {
+            backoffSkipped++;
+            return false; // Skip tasks still in backoff period
+          }
         }
         // Admitted, so the park is spent — retire it here and it expires with the
         // attempt that caused it, the way the ledger's error code does. Left set,
@@ -2704,7 +2785,7 @@ export class AutonomousRunner {
         // `unknownScopeAdmission: admit` was live on vela yet one running task
         // still deferred every other candidate — 11 of 12 slots idle with 126
         // executable tasks waiting (AGT-4233).
-        const admission = this.config.unknownScopeAdmission ?? 'serialize';
+        const admission = this.config.unknownScopeAdmission ?? 'admit';
         const runnable = group.filter(candidate => {
           let blockedBy: { label: string; reason: ScopeConflictReason } | undefined;
           for (const running of active) {
@@ -2742,8 +2823,11 @@ export class AutonomousRunner {
           ? await detectFileConflicts(runnableTasks, projPath, {
             preferUnknownExclusive: true,
             preferredUnknownTaskId: debtTask.task.id,
+            unknownScopeAdmission: admission,
           })
-          : await detectFileConflicts(runnableTasks, projPath);
+          : await detectFileConflicts(runnableTasks, projPath, {
+            unknownScopeAdmission: admission,
+          });
 
         for (const t of result.safe) {
           safeTasks.add(t.id);
