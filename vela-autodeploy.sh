@@ -25,6 +25,7 @@ HEALTH_TIMEOUT_SEC=90
 RATE_LIMIT_MIN=55  # skip if container StartedAt < this many minutes ago
 IMAGE_PREFIX="openswarm:vela"   # tag = openswarm:vela-YYYYMMDD-HHMM-amd64
 VELA_BUILD_SCRIPT="${DEPLOY_DIR}/vela-build.sh"
+AUTOMATION_DB="${HOME}/.openswarm/automation.db"
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -44,38 +45,26 @@ die() {
   exit 1
 }
 
-# Rollback: restore previous image tag in compose file and redeploy.
-# Prefers the pre-deploy compose backup (exact known-good state); falls back
-# to a sed tag swap when no backup exists. If no previous tag is known either,
-# log loudly but do not destroy the running container.
+# Rollback: restore previous compose tag and redeploy
 rollback_to() {
-  local prev_tag="${1:-}"
-  local backup_file="${2:-}"
-
-  # Preferred path: restore the exact compose file captured before deploy.
-  if [[ -n "${backup_file}" && -f "${backup_file}" ]]; then
-    log "ROLLBACK restoring compose file from backup ${backup_file}"
-    if cp "${backup_file}" "${COMPOSE_FILE}"; then
-      log "ROLLBACK redeploying with restored compose file ..."
-      if docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_STRICT}" up -d --no-deps "${SERVICE_NAME}" 2>&1; then
-        log "ROLLBACK redeploy succeeded (compose backup restored)"
-        return 0
-      fi
-      warn "ROLLBACK redeploy with restored compose failed — trying tag-swap fallback"
-    else
-      warn "ROLLBACK could not copy backup — trying tag-swap fallback"
-    fi
-  fi
-
-  # Fallback: sed the image tag back to the previous one.
+  local prev_tag="$1"
+  local compose_backup="$2"
   if [[ -z "${prev_tag}" ]]; then
-    warn "ROLLBACK no previous image tag known and no usable compose backup — cannot roll back"
-    warn "ROLLBACK the running container is unchanged; manual intervention required"
+    warn "ROLLBACK no previous image tag known — cannot roll back"
     return 1
   fi
-
-  log "ROLLBACK reverting compose image tag to ${prev_tag}"
-  sed -i "s|${IMAGE_PREFIX}-[0-9]\{8\}-[0-9]\{4\}-amd64|${prev_tag}|g" "${COMPOSE_FILE}"
+  if [[ -n "${compose_backup}" && -f "${compose_backup}" ]]; then
+    cp "${compose_backup}" "${COMPOSE_FILE}"
+    log "ROLLBACK restored compose file from backup"
+  else
+    # In-place sed: replace the new tag with the previous one
+    local new_tag
+    new_tag="$(sed -n 's/.*image:\s*\(openswarm:vela-[0-9]\{8\}-[0-9]\{4\}-amd64\).*/\1/p' "${COMPOSE_FILE}" | head -1)"
+    if [[ -n "${new_tag}" ]]; then
+      sed -i "s|${new_tag}|${prev_tag}|g" "${COMPOSE_FILE}"
+      log "ROLLBACK reverted tag ${new_tag} → ${prev_tag} in compose file"
+    fi
+  fi
 
   log "ROLLBACK redeploying with ${prev_tag} ..."
   if docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_STRICT}" up -d --no-deps "${SERVICE_NAME}" 2>&1; then
@@ -143,58 +132,30 @@ log "STEP 3  ledger safety window"
 LEDGER_ACTIVE=-1
 LEDGER_CHECK_FAILED=false
 
-if command -v curl &>/dev/null; then
-  # Try health endpoint first
-  HEALTH_BODY=""
-  if HEALTH_BODY="$(curl -sf --max-time 5 "${HEALTH_URL}" 2>/dev/null)"; then
-    LEDGER_ACTIVE="$(echo "${HEALTH_BODY}" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    # Try common field names for active run states
-    for key in ('activeRuns', 'activeTasks', 'inFlight', 'busySlots', 'runningCount'):
-        if key in d:
-            print(d[key])
-            sys.exit(0)
-    # Fallback: count from ledger summary if present
-    ledger = d.get('ledger', d.get('runLedger', {}))
-    active_states = {'VERIFYING', 'PUBLISHING', 'EXECUTING', 'CLAIMED'}
-    total = 0
-    for state, count in ledger.get('byState', {}).items():
-        if state in active_states:
-            total += count
-    print(total)
-except Exception:
-    print(-1)
-" 2>/dev/null)" || LEDGER_ACTIVE=-1
+# Query the automation database directly for active run states.
+# DB path: ~/.openswarm/automation.db (from src/automation/automationDbPath.ts:44)
+# Schema: src/automation/runLedgerSchema.ts — automation_runs table with state column
+if command -v sqlite3 &>/dev/null && [[ -f "${AUTOMATION_DB}" ]]; then
+  LEDGER_ACTIVE="$(sqlite3 "${AUTOMATION_DB}" "
+    SELECT COUNT(*) FROM automation_runs
+    WHERE state IN ('VERIFYING', 'PUBLISHING', 'EXECUTING', 'CLAIMED')
+  " 2>/dev/null)" || LEDGER_ACTIVE=-1
 
-    if [[ "${LEDGER_ACTIVE}" -lt 0 ]]; then
-      # Health endpoint didn't expose ledger — try direct API call
-      LEDGER_BODY=""
-      if LEDGER_BODY="$(curl -sf --max-time 5 "http://localhost:3847/api/ledger/summary" 2>/dev/null)"; then
-        LEDGER_ACTIVE="$(echo "${LEDGER_BODY}" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-active_states = {'VERIFYING', 'PUBLISHING', 'EXECUTING', 'CLAIMED'}
-total = 0
-for state, count in d.get('byState', {}).items():
-    if state in active_states:
-        total += count
-print(total)
-" 2>/dev/null)" || LEDGER_ACTIVE=-1
-      else
-        LEDGER_CHECK_FAILED=true
-      fi
-    fi
-  else
+  if [[ "${LEDGER_ACTIVE}" -lt 0 ]]; then
+    warn "       sqlite3 query failed for ${AUTOMATION_DB}"
     LEDGER_CHECK_FAILED=true
   fi
 else
+  if ! command -v sqlite3 &>/dev/null; then
+    warn "       sqlite3 not found — cannot query ledger DB"
+  else
+    warn "       automation DB not found at ${AUTOMATION_DB}"
+  fi
   LEDGER_CHECK_FAILED=true
 fi
 
 if [[ "${LEDGER_CHECK_FAILED}" == "true" ]]; then
-  warn "SKIP  cannot reach daemon health/ledger endpoint — daemon may be down or starting"
+  warn "SKIP  cannot query automation DB — daemon may be down or starting"
   exit 0
 fi
 
@@ -236,56 +197,62 @@ if [[ ! -x "${VELA_BUILD_SCRIPT}" ]]; then
   die "vela-build.sh not found or not executable at ${VELA_BUILD_SCRIPT}"
 fi
 
-# Generate image tag: openswarm:vela-YYYYMMDD-HHMM-amd64
-# IMAGE_PREFIX already carries "vela", so the suffix must not repeat it.
-TAG_SUFFIX="$(date -u +%Y%m%d-%H%M)-amd64"
-NEW_IMAGE="${IMAGE_PREFIX}-${TAG_SUFFIX}"
-
-if [[ "${DRY_RUN}" == "true" ]]; then
-  log "DRY-RUN would build: ${NEW_IMAGE} from SHA ${MAIN_SHA}"
-  log "DRY-RUN would backup compose file and set image tag"
-  log "DRY-RUN would run: docker compose -f ${COMPOSE_FILE} -f ${COMPOSE_STRICT} up -d ${SERVICE_NAME}"
-  log "DRY-RUN would write ${MAIN_SHA} to ${LAST_BUILT_SHA_FILE}"
-  log "DRY-RUN complete — no changes made"
-  exit 0
+# Read current image tag from compose file for rollback
+PREV_IMAGE=""
+if [[ -f "${COMPOSE_FILE}" ]]; then
+  PREV_IMAGE="$(sed -n 's/.*image:\s*\(openswarm:vela-[0-9]\{8\}-[0-9]\{4\}-amd64\).*/\1/p' "${COMPOSE_FILE}" | head -1)" || true
+fi
+if [[ -n "${PREV_IMAGE}" ]]; then
+  log "       current image = ${PREV_IMAGE}"
+else
+  log "       no previous image tag found in compose file"
 fi
 
 # Backup compose file before modifying
 COMPOSE_BACKUP="${COMPOSE_FILE}.bak.$(date +%s)"
-cp "${COMPOSE_FILE}" "${COMPOSE_BACKUP}"
-log "       backed up ${COMPOSE_FILE} → ${COMPOSE_BACKUP}"
-
-# Record the previous image tag for rollback
-PREV_IMAGE=""
 if [[ -f "${COMPOSE_FILE}" ]]; then
-  PREV_IMAGE="$(grep -oE "${IMAGE_PREFIX}-[0-9]{8}-[0-9]{4}-amd64" "${COMPOSE_FILE}" 2>/dev/null | head -1)" || PREV_IMAGE=""
+  cp "${COMPOSE_FILE}" "${COMPOSE_BACKUP}"
+  log "       backed up compose file to ${COMPOSE_BACKUP}"
 fi
 
-# Build the image
+# Build new image
 log "       running ${VELA_BUILD_SCRIPT} ${MAIN_SHA} ..."
-if ! bash "${VELA_BUILD_SCRIPT}" "${MAIN_SHA}"; then
-  die "vela-build.sh failed for SHA ${MAIN_SHA}"
+NEW_IMAGE=""
+if [[ "${DRY_RUN}" == "true" ]]; then
+  NEW_IMAGE="${IMAGE_PREFIX}-dryrun-${MAIN_SHA:0:8}"
+  log "       DRY-RUN would build ${NEW_IMAGE}"
+else
+  NEW_IMAGE="$("${VELA_BUILD_SCRIPT}" "${MAIN_SHA}" 2>&1 | tail -1)" || \
+    die "vela-build.sh failed for SHA ${MAIN_SHA}"
 fi
-log "       build complete"
+log "       built image = ${NEW_IMAGE}"
 
-# Tag the build with our deploy tag
-log "       tagging image as ${NEW_IMAGE}"
-docker tag "openswarm:build-${MAIN_SHA}" "${NEW_IMAGE}" 2>/dev/null || \
-  docker tag "openswarm:${MAIN_SHA}" "${NEW_IMAGE}" 2>/dev/null || \
-  warn "       could not tag build image — will use existing tag in compose"
-
-# Update compose file with new image tag
-sed -i "s|${IMAGE_PREFIX}-[0-9]\{8\}-[0-9]\{4\}-amd64|${NEW_IMAGE}|g" "${COMPOSE_FILE}"
-log "       updated compose image tag to ${NEW_IMAGE}"
+# Update image tag in compose file
+if [[ -f "${COMPOSE_FILE}" ]]; then
+  if [[ -n "${PREV_IMAGE}" ]]; then
+    sed -i "s|${PREV_IMAGE}|${NEW_IMAGE}|g" "${COMPOSE_FILE}"
+    log "       updated compose tag: ${PREV_IMAGE} → ${NEW_IMAGE}"
+  else
+    # No previous tag — replace any openswarm:vela-* tag
+    sed -i "s|openswarm:vela-[0-9]\{8\}-[0-9]\{4\}-amd64|${NEW_IMAGE}|g" "${COMPOSE_FILE}"
+    log "       set compose tag to ${NEW_IMAGE}"
+  fi
+else
+  die "compose file not found at ${COMPOSE_FILE}"
+fi
 
 # Deploy
-log "       deploying ..."
-if ! docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_STRICT}" up -d --no-deps "${SERVICE_NAME}" 2>&1; then
-  warn "       deploy failed — attempting rollback"
-  rollback_to "${PREV_IMAGE}" "${COMPOSE_BACKUP}" || true
-  die "deploy failed, rolled back to ${PREV_IMAGE:-previous}"
+log "       deploying with docker compose up -d ..."
+if [[ "${DRY_RUN}" == "true" ]]; then
+  log "       DRY-RUN would run: docker compose -f ${COMPOSE_FILE} -f ${COMPOSE_STRICT} up -d ${SERVICE_NAME}"
+else
+  if ! docker compose -f "${COMPOSE_FILE}" -f "${COMPOSE_STRICT}" up -d --no-deps "${SERVICE_NAME}" 2>&1; then
+    warn "       deploy failed — attempting rollback"
+    rollback_to "${PREV_IMAGE}" "${COMPOSE_BACKUP}" || true
+    die "deploy failed, rolled back to ${PREV_IMAGE:-previous}"
+  fi
+  log "       docker compose up -d succeeded"
 fi
-log "       docker compose up -d succeeded"
 
 # ── Step 6: Verify ─────────────────────────────────────────────────────────
 
