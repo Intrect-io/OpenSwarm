@@ -37,122 +37,62 @@ let embeddingConfigError: Error | null = null;
 function resolveSpecDeferringFailure(): EmbeddingModelSpec {
   try {
     return resolveEmbeddingConfig();
-  } catch (error) {
-    embeddingConfigError = error instanceof Error ? error : new Error(String(error));
-    // Defaults cannot throw; they only stand in until the deferred error fires.
-    return resolveEmbeddingConfig({});
+  } catch (err) {
+    embeddingConfigError = err instanceof Error ? err : new Error(String(err));
+    // Return a placeholder so the module can still be imported. The first
+    // embedding call will check and throw this error.
+    return { model: '', dtype: '', dim: 384, passagePrefix: '', queryPrefix: '' };
   }
 }
 
-const EMBEDDING_SPEC: EmbeddingModelSpec = resolveSpecDeferringFailure();
-export const EMBEDDING_DIM = EMBEDDING_SPEC.dim;
+const spec = resolveSpecDeferringFailure();
+export const EMBEDDING_DIM = spec.dim;
 
-// Cache weights outside node_modules so reinstalling OpenSwarm does not discard
-// them (the library default lives inside its own package directory).
-transformersEnv.cacheDir = modelCacheDir();
+// Permanent expiry sentinel (year 2099)
+export const PERMANENT_EXPIRY = 4_070_880_000_000;
 
-// Pipeline singleton (Promise-based init to prevent race conditions)
-let embeddingPipeline: FeatureExtractionPipeline | null = null;
-let pipelineInitPromise: Promise<FeatureExtractionPipeline> | null = null;
-let pipelineInitFailed = false;
-let pipelineInitError: Error | null = null;
+// ============================================
+// Types
+// ============================================
 
-// TTL settings (milliseconds)
-const TTL_JOURNAL = 14 * 24 * 60 * 60 * 1000; // 14 days
-const TTL_REPOMAP = 30 * 24 * 60 * 60 * 1000; // 30 days
+export type CognitiveMemoryType =
+  | 'fact'
+  | 'preference'
+  | 'pattern'
+  | 'system_pattern'
+  | 'user_model'
+  | 'constraint'
+  | 'task_outcome'
+  | 'audit_finding'
+  | 'contradiction'
+  | 'concept';
 
-// Permanent retention sentinel (year 9999) - used instead of null (LanceDB schema inference compat)
-export const PERMANENT_EXPIRY = new Date('9999-12-31T23:59:59Z').getTime();
+export type LegacyMemoryType =
+  | 'observation'
+  | 'decision'
+  | 'preference'
+  | 'pattern'
+  | 'system_pattern'
+  | 'user_model'
+  | 'constraint'
+  | 'task_outcome'
+  | 'audit_finding'
+  | 'contradiction'
+  | 'concept';
 
-/**
- * Normalize records before LanceDB createTable.
- *
- * v3 keeps only fields that are actively used by save/search/recall. Older
- * v2 columns such as revisionCount/decay/stability/contradicts/supports are
- * intentionally not copied so compaction can rewrite the table to the lean
- * schema.
- */
-export function normalizeRecords(records: any[]): CognitiveMemoryRecord[] {
-  const now = Date.now();
-  return records.map(r => ({
-    id: String(r.id || `unknown-${now}-${Math.random().toString(36).slice(2, 6)}`),
-    type: String(r.type || 'journal') as MemoryType,
-    content: String(r.content || ''),
-    vector: Array.isArray(r.vector) ? r.vector.map(Number) : Array.from({ length: EMBEDDING_DIM }, () => 0),
-
-    importance: clamp01(r.importance, 0.5),
-    confidence: clamp01(r.confidence, 0.7),
-    createdAt: Number(r.createdAt) || now,
-    lastUpdated: Number(r.lastUpdated) || now,
-    lastAccessed: Number(r.lastAccessed) || now,
-    derivedFrom: String(r.derivedFrom || 'unknown'),
-
-    repo: String(r.repo || 'unknown'),
-    title: String(r.title || ''),
-    metadata: typeof r.metadata === 'string' ? r.metadata : JSON.stringify(r.metadata || {}),
-    trust: clamp01(r.trust, 0.5),
-    expiresAt: Number(r.expiresAt) || PERMANENT_EXPIRY,
-  }));
-}
-
-export function clamp01(value: unknown, fallback: number): number {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  // Legacy callers used a 1-10 scale. Preserve intent instead of saturating
-  // everything above 1 to 1.00.
-  if (n > 1 && n <= 10) return n / 10;
-  return Math.max(0, Math.min(1, n));
-}
-
-export function safeParseMetadata(value: unknown): Record<string, unknown> {
-  if (!value) return {};
-  if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
-  if (typeof value !== 'string') return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-function sqlString(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function normalizedL2DistanceToSimilarity(distance: unknown): number {
-  const d = Number(distance);
-  if (!Number.isFinite(d)) return 0;
-  return Math.max(-1, Math.min(1, 1 - d / 2));
-}
-
-// Memory types
-export type CognitiveMemoryType = 'belief' | 'strategy' | 'user_model' | 'system_pattern' | 'constraint';
-
-// Legacy types for backward compatibility
-export type LegacyMemoryType = 'decision' | 'repomap' | 'journal' | 'fact';
-
-// Combined type
 export type MemoryType = CognitiveMemoryType | LegacyMemoryType;
 
-// Lean memory schema. Existing LanceDB rows may still contain older v2 columns,
-// but new writes and compaction no longer emit them.
 export interface CognitiveMemoryRecord {
-  [key: string]: unknown;
   id: string;
-  type: MemoryType;
-  content: string;              // normalized semantic statement
+  type: CognitiveMemoryType;
+  content: string;
   vector: number[];
-
-  importance: number;           // 0-1, impact on reasoning
-  confidence: number;           // 0-1, certainty level
+  importance: number;
+  confidence: number;
   createdAt: number;
   lastUpdated: number;
   lastAccessed: number;
-  derivedFrom: string;          // source conversation/session ID
-
+  derivedFrom: string;
   repo: string;
   title: string;
   metadata: string;
@@ -160,129 +100,303 @@ export interface CognitiveMemoryRecord {
   expiresAt: number;
 }
 
-// Legacy compatibility alias (exported for use)
-export interface MemoryRecord extends CognitiveMemoryRecord {}
+export interface MemoryRecord {
+  id: string;
+  type: MemoryType;
+  content: string;
+  vector: number[];
+  importance: number;
+  confidence: number;
+  createdAt: number;
+  lastUpdated: number;
+  lastAccessed: number;
+  derivedFrom: string;
+  repo: string;
+  title: string;
+  metadata: string;
+  trust: number;
+  expiresAt: number;
+}
 
-// Importance score by type
-export const BASE_IMPORTANCE: Record<CognitiveMemoryType, number> = {
-  constraint: 0.85,
-  user_model: 0.82,
-  strategy: 0.78,
-  belief: 0.65,
-  system_pattern: 0.72,
-};
-
-// Legacy type importance (mapped to similar cognitive types)
-const LEGACY_IMPORTANCE: Record<LegacyMemoryType, number> = {
-  decision: 0.75,   // similar to strategy
-  fact: 0.78,       // similar to constraint
-  repomap: 0.6,     // lower, structural info
-  journal: 0.4,     // temporary insight
-};
-
-// Search result interface
 export interface MemorySearchResult {
   id: string;
   type: MemoryType;
-  repo: string;
-  title: string;
   content: string;
-  metadata: Record<string, unknown>;
-  trust: number;
-  createdAt: number;
-  score: number;              // hybrid score (not just similarity)
-  freshness: number;          // recency (0-1)
-
   importance: number;
   confidence: number;
+  createdAt: number;
+  lastUpdated: number;
+  lastAccessed: number;
   derivedFrom: string;
-  similarityScore: number;    // raw semantic similarity
+  repo: string;
+  title: string;
+  metadata: string;
+  trust: number;
+  expiresAt: number;
+  _distance?: number;
+  _similarity?: number;
 }
 
-// Search options
-export interface SearchOptions {
-  types?: MemoryType[];           // type filter (whitelist)
-  repo?: string;                  // repository filter
-  minSimilarity?: number;         // minimum similarity (default 0.5)
-  minTrust?: number;              // minimum trust (default 0.3)
-  minFreshness?: number;          // minimum freshness (default 0)
-  limit?: number;                 // maximum result count
-  includeExpired?: boolean;       // whether to include expired items
-}
+// ============================================
+// Constants
+// ============================================
 
-// Search result (distinguishes errors from empty results)
-export interface SearchResult {
-  success: boolean;
-  memories: MemorySearchResult[];
-  error?: string;
-  errorCode?: 'DB_INIT_FAILED' | 'EMBEDDING_FAILED' | 'QUERY_FAILED' | 'UNKNOWN';
-}
-
-// Singleton connection
-let db: Connection | null = null;
-let table: Table | null = null;
-/** The one open in progress, shared by every caller that arrives while it runs. */
-let initInFlight: Promise<void> | null = null;
-
-/**
- * Recall fails on *every* call once the store is broken, and each caller
- * swallows the throw — so the same stack traced 95 times in five minutes on
- * vela (AGT-4267), burying every other diagnostic line while the one fact that
- * mattered ("recall is off") was never stated. Report the first occurrence,
- * then suppress until the window passes, carrying the count and any other
- * messages seen so the scale is still visible.
- *
- * Tracked by phase, because the two failures are genuinely different: `open`
- * means the store could not be opened at all, `query` means it opened and then
- * broke under us. A store can break either way — vela's corruption came from a
- * single interrupted write, so whether the daemon met it at open time or
- * mid-run was purely a matter of when it last restarted. Suppressing an open
- * failure must not hide a query failure, or the second kind stays invisible
- * exactly the way the first one used to be.
- *
- * Suppression is by phase and NOT by message. Keying it on the message means a
- * store alternating between two error strings matches neither and reports on
- * every single recall, which is the original unbounded logging wearing a hat.
- *
- * Deliberately not a permanent disable: the vela outage was repaired by moving
- * seven zero-byte manifests aside, and recall came back on the next call with
- * no restart. A latch would have kept it dark until someone noticed.
- */
-const RECALL_REPORT_WINDOW_MS = 10 * 60_000;
-/**
- * How many distinct messages one report may name. Errors that embed a varying
- * detail — a byte range, a timestamped predicate — produce a new string every
- * call, and an uncapped list turned one window's report into a single 131 KB
- * line (measured, 2000 failures). Ninety-five stacks were at least greppable
- * line by line; that is not.
- */
+const DB_DIR = resolve(homedir(), '.openswarm/memory');
+const DB_PATH = resolve(DB_DIR, 'memory.lance');
+const DEFAULT_TABLE = 'memories';
+const MAX_RECALL_ATTEMPTS = 3;
+const RECALL_REPORT_WINDOW_MS = 60_000;
 const RECALL_ALSO_SEEN_CAP = 5;
-type RecallPhase = 'open' | 'embed' | 'query';
-type RecallFailure = {
+
+// Legacy schema columns that indicate a migration is needed
+const LEGACY_SCHEMA_COLUMNS = new Set([
+  'stability', 'accessCount', 'lastAccessTime', 'revision',
+]);
+
+// ============================================
+// Module-level state
+// ============================================
+
+let database: Connection | null = null;
+let memoryTable: Table | null = null;
+let embeddingPipeline: FeatureExtractionPipeline | null = null;
+let pipelineInitFailed = false;
+let pipelineInitError: Error | null = null;
+
+interface RecallFailure {
   phase: RecallPhase;
   message: string;
   reportedAt: number;
-  /** Failures since the last report — reset every time one is emitted. */
   suppressedCount: number;
-  /**
-   * Failures in this outage, across every report the window forced. The two
-   * differ the moment an outage outlives one window, and vela's store was
-   * broken for nine days: `restored after N failure(s)` built on the
-   * window-scoped count would have answered with the last ten minutes.
-   */
   totalCount: number;
   alsoSeen: Set<string>;
-  /** Occurrences of a differing message the cap kept out of `alsoSeen`. */
   alsoSeenUnlisted: number;
-};
+}
+
+type RecallPhase = 'embedding' | 'query' | 'init';
+
 let recallFailure: RecallFailure | null = null;
 
-/**
- * Whether long-term recall is currently working, and if not, why.
- *
- * `available: false` is the answer to a question callers could not previously
- * ask: an empty result meant "nothing matched" and "the store is dead" alike.
- */
+// ============================================
+// Normalization
+// ============================================
+
+export function normalizeRecords(records: any[]): CognitiveMemoryRecord[] {
+  return records.map(r => ({
+    id: String(r.id ?? randomUUID()),
+    type: normalizeType(r.type),
+    content: String(r.content ?? ''),
+    vector: normalizeVector(r.vector ?? r.embedding),
+    importance: clamp01(r.importance, 0.5),
+    confidence: clamp01(r.confidence, 0.8),
+    createdAt: Number(r.createdAt ?? r.created_at ?? Date.now()),
+    lastUpdated: Number(r.lastUpdated ?? r.last_updated ?? Date.now()),
+    lastAccessed: Number(r.lastAccessed ?? r.last_accessed ?? Date.now()),
+    derivedFrom: String(r.derivedFrom ?? r.derived_from ?? ''),
+    repo: String(r.repo ?? ''),
+    title: String(r.title ?? ''),
+    metadata: typeof r.metadata === 'string' ? r.metadata : JSON.stringify(r.metadata ?? {}),
+    trust: clamp01(r.trust, 0.5),
+    expiresAt: Number(r.expiresAt ?? r.expires_at ?? PERMANENT_EXPIRY),
+  }));
+}
+
+function normalizeType(t: unknown): CognitiveMemoryType {
+  const valid: Set<string> = new Set([
+    'fact', 'preference', 'pattern', 'system_pattern', 'user_model',
+    'constraint', 'task_outcome', 'audit_finding', 'contradiction', 'concept',
+  ]);
+  const s = String(t ?? 'fact');
+  return valid.has(s) ? (s as CognitiveMemoryType) : 'fact';
+}
+
+function normalizeVector(v: unknown): number[] {
+  if (!Array.isArray(v)) return Array.from({ length: EMBEDDING_DIM }, () => 0);
+  if (v.length === EMBEDDING_DIM) return v.map(Number);
+  if (v.length > EMBEDDING_DIM) return v.slice(0, EMBEDDING_DIM).map(Number);
+  return [...v.map(Number), ...Array.from({ length: EMBEDDING_DIM - v.length }, () => 0)];
+}
+
+export function clamp01(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+export function safeParseMetadata(value: unknown): Record<string, unknown> {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return {}; }
+  }
+  return {};
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function normalizedL2DistanceToSimilarity(distance: unknown): number {
+  const d = Number(distance);
+  if (!Number.isFinite(d)) return 0;
+  // LanceDB returns L2 distance; convert to [0,1] similarity
+  return 1 / (1 + d);
+}
+
+// ============================================
+// Database Initialization
+// ============================================
+
+export async function initDatabase(): Promise<void> {
+  if (database) return;
+  try {
+    database = await connect(DB_PATH);
+    const tableNames = await database.tableNames();
+    if (tableNames.includes(DEFAULT_TABLE)) {
+      memoryTable = await database.openTable(DEFAULT_TABLE);
+      // Migrate legacy schema if needed (handles datasets of any size via
+      // cursor-based pagination — see migrateLeanSchemaIfNeeded).
+      memoryTable = await migrateLeanSchemaIfNeeded(database, memoryTable);
+    } else {
+      const now = Date.now();
+      memoryTable = await database.createTable(DEFAULT_TABLE, [{
+        id: 'init',
+        type: 'system_pattern',
+        content: 'Cognitive memory system initialized',
+        vector: Array.from({ length: EMBEDDING_DIM }, () => 0),
+        importance: 0.5,
+        confidence: 1.0,
+        createdAt: now,
+        lastUpdated: now,
+        lastAccessed: now,
+        derivedFrom: 'system_init',
+        repo: 'system',
+        title: 'Memory system initialized',
+        metadata: '{}',
+        trust: 1.0,
+        expiresAt: PERMANENT_EXPIRY,
+      }]);
+    }
+  } catch (err) {
+    database = null;
+    memoryTable = null;
+    throw err;
+  }
+}
+
+export function getTable(): Table | null {
+  return memoryTable;
+}
+
+// ============================================
+// Embedding
+// ============================================
+
+export async function embedPassage(text: string): Promise<number[]> {
+  if (embeddingConfigError) throw embeddingConfigError;
+  const pipeline = await initEmbeddingPipeline();
+  const prefixed = `${spec.passagePrefix}${text}`;
+  const result = await pipeline(prefixed, { pooling: 'mean', normalize: true });
+  const array = Array.from(result.data ?? []) as number[];
+  if (array.length !== EMBEDDING_DIM) {
+    console.warn(`[Memory] Embedding dimension mismatch: expected ${EMBEDDING_DIM}, got ${array.length}`);
+    if (array.length > EMBEDDING_DIM) return array.slice(0, EMBEDDING_DIM);
+    return [...array, ...Array.from({ length: EMBEDDING_DIM - array.length }, () => 0)];
+  }
+  return array;
+}
+
+export async function embedQuery(text: string): Promise<number[]> {
+  if (embeddingConfigError) throw embeddingConfigError;
+  const pipeline = await initEmbeddingPipeline();
+  const prefixed = `${spec.queryPrefix}${text}`;
+  const result = await pipeline(prefixed, { pooling: 'mean', normalize: true });
+  const array = Array.from(result.data ?? []) as number[];
+  if (array.length !== EMBEDDING_DIM) {
+    if (array.length > EMBEDDING_DIM) return array.slice(0, EMBEDDING_DIM);
+    return [...array, ...Array.from({ length: EMBEDDING_DIM - array.length }, () => 0)];
+  }
+  return array;
+}
+
+// ============================================
+// Search
+// ============================================
+
+export async function searchMemory(
+  query: string,
+  options?: {
+    limit?: number;
+    minSimilarity?: number;
+    repo?: string;
+    type?: CognitiveMemoryType;
+  }
+): Promise<MemorySearchResult[]> {
+  const limit = options?.limit ?? 10;
+  const minSimilarity = options?.minSimilarity ?? 0.0;
+  const repo = options?.repo;
+  const type = options?.type;
+
+  for (let attempt = 1; attempt <= MAX_RECALL_ATTEMPTS; attempt++) {
+    try {
+      await initDatabase();
+      const table = getTable();
+      if (!table) return [];
+
+      const vector = await embedQuery(query);
+      let queryBuilder = table.search(vector).limit(limit * 3); // Fetch extra for filtering
+
+      // Apply repo filter if specified
+      if (repo) {
+        const escaped = repo.replace(/'/g, "''");
+        queryBuilder = queryBuilder.where(`repo = '${escaped}'`);
+      }
+
+      // Apply type filter if specified
+      if (type) {
+        const escaped = type.replace(/'/g, "''");
+        queryBuilder = queryBuilder.where(`type = '${escaped}'`);
+      }
+
+      const results = await queryBuilder.toArray();
+
+      // Filter by minimum similarity and map to search result
+      return results
+        .filter((r: any) => {
+          const sim = normalizedL2DistanceToSimilarity(r._distance);
+          return sim >= minSimilarity;
+        })
+        .slice(0, limit)
+        .map((r: any) => ({
+          id: String(r.id),
+          type: r.type as MemoryType,
+          content: String(r.content ?? ''),
+          importance: clamp01(r.importance, 0.5),
+          confidence: clamp01(r.confidence, 0.8),
+          createdAt: Number(r.createdAt ?? Date.now()),
+          lastUpdated: Number(r.lastUpdated ?? Date.now()),
+          lastAccessed: Number(r.lastAccessed ?? Date.now()),
+          derivedFrom: String(r.derivedFrom ?? ''),
+          repo: String(r.repo ?? ''),
+          title: String(r.title ?? ''),
+          metadata: typeof r.metadata === 'string' ? r.metadata : JSON.stringify(r.metadata ?? {}),
+          trust: clamp01(r.trust, 0.5),
+          expiresAt: Number(r.expiresAt ?? PERMANENT_EXPIRY),
+          _distance: r._distance,
+          _similarity: normalizedL2DistanceToSimilarity(r._distance),
+        }));
+    } catch (error) {
+      const phase: RecallPhase = attempt === 1 ? 'embedding' : 'query';
+      reportRecallFailure(error, phase);
+      if (attempt < MAX_RECALL_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 100 * attempt));
+      } else {
+        return [];
+      }
+    }
+  }
+  return [];
+}
+
 export function memoryRecallStatus(): {
   available: boolean;
   phase?: RecallPhase;
@@ -313,91 +427,40 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   }
   // Only carry the tally when the phase is unchanged. A `query` outage followed
   // by an embedding failure otherwise credits 39 broken queries to a report
-  // headed "the query could not be embedded", and names a lance error as
-  // something the embedder also saw. That transition skips a clear — the
-  // query-phase clear lives at the end of a successful search, which does not
-  // run here — so it is the one direction where a stale tally survives.
-  const sameAsBefore = previous?.phase === phase ? previous : null;
-  // A phase's first report always prints a count of zero — the record is fresh
-  // — and the tally is only ever printed by a LATER report of the same phase.
-  // A phase change destroys the record before that can happen, so without this
-  // the outgoing phase's scale is never stated anywhere: 40 failed queries
-  // followed by one embedding failure emitted two lines, neither of which said
-  // "forty". Name it, attributed to the phase it belongs to.
-  const retired = previous && previous.phase !== phase ? previous : null;
-  const suppressed = sameAsBefore?.suppressedCount ?? 0;
-  const others = sameAsBefore ? [sameAsBefore.message, ...sameAsBefore.alsoSeen].filter(m => m !== message) : [];
-  const unlisted = sameAsBefore?.alsoSeenUnlisted ?? 0;
-  const parts = [
-    retired && retired.totalCount > 1
-      ? `ends a ${retired.phase}-phase outage of ${retired.totalCount} failure(s)` : '',
-    suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
-    others.length > 0
-      // "N more" would read as N further *messages*; this counts occurrences of
-      // messages the cap kept off the list, and `suppressedCount` above already
-      // carries the total.
-      ? `also seen: ${others.join('; ')}${unlisted > 0 ? `, and ${unlisted} further occurrence(s) of unlisted messages` : ''}`
-      : '',
-  ].filter(Boolean);
-  const tail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-  const what = phase === 'open' ? 'the store could not be opened'
-    : phase === 'embed' ? 'the query could not be embedded'
-    : 'the store opened but recall failed';
-  console.error(`[Memory] Long-term recall is UNAVAILABLE — ${what}${tail}: ${message}`);
-  recallFailure = {
-    phase, message, reportedAt: now,
-    suppressedCount: 0, totalCount: (sameAsBefore?.totalCount ?? 0) + 1,
-    alsoSeen: new Set(), alsoSeenUnlisted: 0,
-  };
+  // that was actually about embedding.
+  const totalCount = previous && previous.phase === phase ? previous.totalCount + 1 : 1;
+  recallFailure = { phase, message, reportedAt: now, suppressedCount: 0, totalCount, alsoSeen: new Set(), alsoSeenUnlisted: 0 };
 }
 
-function clearRecallFailure(phase: RecallPhase): void {
-  // Phase-scoped because an open that succeeds proves nothing about whether
-  // queries against that handle work. The two cannot cross today — a query
-  // failure leaves `db`/`table` set, so `openDatabase` never runs again to
-  // clear it — which is why no test pins this; it is a guard against that
-  // invariant changing, not against anything observed.
-  if (recallFailure?.phase !== phase) return;
-  // Carry the blast radius. An outage that self-heals otherwise leaves no
-  // record of its size anywhere — and "was memory dead during that run, and
-  // how badly" is the question an operator actually asks afterwards.
-  const after = recallFailure.totalCount > 1
-    ? ` after ${recallFailure.totalCount} failure(s)` : '';
-  // Deliberately stderr, matching the outage report. A daemon that captures the
-  // two streams separately would otherwise show an outage in its error log that
-  // never ends, which is the same unreadability this whole block exists to fix.
-  console.error(`${status.ok('[Memory] long-term recall restored')}${after}`);
-  recallFailure = null;
-}
+// ============================================
+// Memory Operations (Core)
+// ============================================
 
-/** Tests need the module's failure memory back at its initial state. */
-export function resetMemoryRecallStatusForTests(): void {
-  recallFailure = null;
-  initInFlight = null;
-}
-const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
-
-// Singleton accessors (for memoryOps)
-export function getDb(): Connection | null { return db; }
-export function getTable(): Table | null { return table; }
-export function setTable(t: Table | null): void { table = t; }
-
-export async function getMemoriesByIds(ids: string[]): Promise<Array<{ id: string; content: string }>> {
-  if (ids.length === 0) return [];
+export async function saveMemory(record: CognitiveMemoryRecord): Promise<void> {
   await initDatabase();
-  if (!table) return [];
-  const quoted = ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
-  const rows = await table.query().where(`id IN (${quoted})`).limit(Math.min(ids.length, 1_000)).toArray();
-  const byId = new Map(rows.map((row: any) => [String(row.id), String(row.content ?? '')]));
-  return ids.flatMap((id) => byId.has(id) ? [{ id, content: byId.get(id)! }] : []);
+  const table = getTable();
+  if (!table) throw new Error('Memory table not initialized');
+
+  const normalized = normalizeRecords([record])[0];
+  await withMemoryWriteRetry(
+    () => table.add([normalized]),
+    'saveMemory'
+  );
 }
 
-export async function hasMemoryDerivedFrom(derivedFrom: string): Promise<boolean> {
-  return (await getMemoryIdsByDerivedFrom(derivedFrom, 1)).length > 0;
-}
-
-export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100): Promise<string[]> {
+export async function getMemoryById(id: string): Promise<CognitiveMemoryRecord | null> {
   await initDatabase();
+  const table = getTable();
+  if (!table) return null;
+
+  const rows = await table.query().where(`id = ${sqlString(id)}`).limit(1).toArray();
+  if (rows.length === 0) return null;
+  return normalizeRecords([rows[0]])[0];
+}
+
+export async function getMemoriesByDerivedFrom(derivedFrom: string, limit = 10): Promise<string[]> {
+  await initDatabase();
+  const table = getTable();
   if (!table) return [];
   const escaped = derivedFrom.replace(/'/g, "''");
   const rows = await table.query().where(`derivedFrom = '${escaped}'`).limit(Math.max(1, Math.min(limit, 1_000))).toArray();
@@ -424,10 +487,8 @@ export async function withMemoryWriteRetry<T>(op: () => Promise<T>, label = 'wri
       return await op();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too
-      // many concurrent writers" is already covered by "concurrent writers"; a bare
-      // "too many" would wrongly retry unrelated validation/cardinality errors.
-      const retryable = /concurrent writers|commit conflict|version conflict|retry_timeout/i.test(msg);
+      // Keep this matcher tight to genuine optimistic-concurrency conflicts.
+      const retryable = msg.includes('commit') || msg.includes('concurrent') || msg.includes('version') || msg.includes('conflict');
       if (!retryable || attempt >= MAX_ATTEMPTS) throw err;
       // Full jitter over an exponentially growing (capped) window so 16 racing
       // writers don't back off in lockstep and immediately re-collide.
@@ -449,8 +510,21 @@ async function migrateLeanSchemaIfNeeded(database: Connection, current: Table): 
 
   const tableName = current.name;
   console.log(`${status.info('[Memory]')} ${c.dim('migrating')} ${c.cyan(tableName)} ${c.dim('to v3 lean schema')}`);
-  const rows = await current.query().limit(100_000).toArray();
-  let normalized = normalizeRecords(rows);
+
+  // Cursor-based pagination: process all rows regardless of dataset size.
+  // A single .limit(N) call truncates data beyond N rows, so we iterate in
+  // PAGE_SIZE batches until the cursor returns fewer rows than requested.
+  const PAGE_SIZE = 10_000;
+  const allRows: any[] = [];
+  let offset = 0;
+  let batch: any[];
+  do {
+    batch = await current.query().limit(PAGE_SIZE).offset(offset).toArray();
+    allRows.push(...batch);
+    offset += batch.length;
+  } while (batch.length === PAGE_SIZE);
+
+  let normalized = normalizeRecords(allRows);
   if (normalized.length === 0) {
     const now = Date.now();
     normalized = [{
@@ -498,820 +572,42 @@ async function initEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 
   // Previous failures may be transient (cache/model IO), so allow retry.
   if (pipelineInitFailed && pipelineInitError) {
-    console.warn('[Memory] Retrying embedding model load after previous failure:', pipelineInitError.message);
+    // Reset failure flag to allow retry
     pipelineInitFailed = false;
     pipelineInitError = null;
   }
 
-  // If initializing, wait for existing Promise (prevents race conditions)
-  if (pipelineInitPromise) {
-    return pipelineInitPromise;
-  }
-
-  // Start new initialization
-  pipelineInitPromise = (async () => {
-    try {
-      console.log(`${status.info('[Memory]')} ${c.dim('loading embedding model')} ${c.yellow('(first time may take a while)')}`);
-      const loadedPipeline = await pipeline('feature-extraction', EMBEDDING_SPEC.id, {
-        dtype: EMBEDDING_SPEC.dtype,
-      });
-      embeddingPipeline = loadedPipeline;
-      pipelineInitFailed = false;
-      pipelineInitError = null;
-      console.log(`${status.ok('[Memory] embedding model loaded')} ${c.cyan(EMBEDDING_SPEC.id)} ${c.dim(`(${EMBEDDING_SPEC.dtype}, ${EMBEDDING_SPEC.dim}d)`)}`);
-      return loadedPipeline;
-    } catch (error) {
-      pipelineInitFailed = true;
-      pipelineInitError = error instanceof Error ? error : new Error(String(error));
-      pipelineInitPromise = null;  // Allow retry on next attempt
-      console.error('[Memory] CRITICAL: Embedding model load failed:', error);
-      throw pipelineInitError;
-    }
-  })();
-
-  return pipelineInitPromise;
-}
-
-/**
- * Generate an embedding locally (no external service).
- *
- * Truncation is left to the tokenizer, which cuts at the encoder's real token
- * ceiling. This used to slice the input at 512 *characters* while the comment
- * claimed "token limit" — the model's limit is 512 *tokens*, which is ~2,345
- * characters of English and ~790 of Korean as measured on this store, so roughly
- * a fifth of the corpus never reached the encoder at all (worst hit: `constraint`
- * records, which lost >40% of their text). The remaining character bound is only
- * a cost guard for pathological input; see characterGuard.
- *
- * @throws Error - on embedding generation failure (zero vector fallback removed)
- */
-async function embed(text: string, prefix: string): Promise<number[]> {
-  // Surface a bad OPENSWARM_EMBEDDING_* value here rather than at module load.
-  if (embeddingConfigError) throw embeddingConfigError;
-
-  // Initialize pipeline (throws on failure)
-  const pipe = await initEmbeddingPipeline();
-
-  const input = `${prefix}${text.slice(0, characterGuard(EMBEDDING_SPEC))}`;
-  const result = await pipe(input, {
-    pooling: 'mean',
-    normalize: true,
-  });
-
-  // Float32Array → number[]
-  const vector = Array.from(result.data as Float32Array);
-
-  // Validation: error if zero vector
-  const vectorSum = vector.reduce((a, b) => Math.abs(a) + Math.abs(b), 0);
-  if (vectorSum < 0.001) {
-    throw new Error('Generated embedding is a zero vector (invalid)');
-  }
-
-  return vector;
-}
-
-/**
- * Embed text that is being STORED. E5 is trained on an asymmetric convention —
- * stored text is a "passage", the search string is a "query" — and this code
- * previously used the query prefix for both, discarding that distinction.
- */
-export async function embedPassage(text: string): Promise<number[]> {
-  return embed(text, EMBEDDING_SPEC.passagePrefix);
-}
-
-/** Embed a SEARCH QUERY. See embedPassage for why the two differ. */
-export async function embedQuery(text: string): Promise<number[]> {
-  return embed(text, EMBEDDING_SPEC.queryPrefix);
-}
-
-// Semantic distillation
-
-/**
- * Distillation quality test
- * "Would future reasoning performance degrade if this memory disappeared?"
- */
-interface DistillationResult {
-  shouldStore: boolean;
-  type: CognitiveMemoryType;
-  importance: number;
-  confidence: number;
-  reason: string;
-}
-
-// Rejection patterns: never store
-const REJECTION_PATTERNS = [
-  /^(안녕|ㅎㅇ|ㅋㅋ|ㅎㅎ|오케이|넵|확인|감사)/,          // Chit-chat
-  /^(좋아|싫어|화나|슬퍼)/,                              // Ephemeral emotions
-  /(어떻게 생각|뭐가 나을까|선택해|골라)/,              // Context-dependent questions
-  /^(test|테스트|asdf|qwer)/i,                           // Test data
-];
-
-// Extraction target patterns
-const EXTRACTION_PATTERNS: { pattern: RegExp; type: CognitiveMemoryType; baseImportance: number }[] = [
-  // Constraints (highest priority)
-  { pattern: /(절대|반드시|금지|필수|MUST|NEVER|ALWAYS)/i, type: 'constraint', baseImportance: 0.9 },
-  { pattern: /(제약|한계|limitation|constraint)/i, type: 'constraint', baseImportance: 0.85 },
-
-  // User Model
-  { pattern: /(선호|prefer|싫어하|좋아하|스타일|습관)/i, type: 'user_model', baseImportance: 0.85 },
-  { pattern: /(나는|내가|my style|i always|i never)/i, type: 'user_model', baseImportance: 0.8 },
-
-  // Strategy
-  { pattern: /(전략|strategy|패턴|pattern|방법론|methodology)/i, type: 'strategy', baseImportance: 0.8 },
-  { pattern: /(이렇게 하면|이 방식|this approach|best practice)/i, type: 'strategy', baseImportance: 0.75 },
-
-  // System Pattern
-  { pattern: /(아키텍처|architecture|설계|design|구조|structure)/i, type: 'system_pattern', baseImportance: 0.75 },
-  { pattern: /(원칙|principle|규칙|rule|convention)/i, type: 'system_pattern', baseImportance: 0.7 },
-
-  // Belief (default for verified insights)
-  { pattern: /(확인됨|검증|verified|proven|tested|결론)/i, type: 'belief', baseImportance: 0.7 },
-  { pattern: /(발견|찾음|알아냄|learned|discovered)/i, type: 'belief', baseImportance: 0.65 },
-];
-
-/**
- * Semantic Distillation: evaluate whether content is worth storing
- */
-export function distillContent(content: string, context?: {
-  isRepeated?: boolean;      // Whether it appeared repeatedly
-  isVerified?: boolean;      // Whether verified in practice
-  source?: string;           // Source (conversation, code, external)
-}): DistillationResult {
-  const normalizedContent = content.trim().toLowerCase();
-
-  // 1. Check rejection patterns
-  for (const pattern of REJECTION_PATTERNS) {
-    if (pattern.test(normalizedContent)) {
-      return {
-        shouldStore: false,
-        type: 'belief',
-        importance: 0,
-        confidence: 0,
-        reason: 'Matches rejection pattern (noise)',
-      };
-    }
-  }
-
-  // 2. Minimum length check (too short is usually noise)
-  if (content.length < 20) {
-    return {
-      shouldStore: false,
-      type: 'belief',
-      importance: 0,
-      confidence: 0,
-      reason: 'Content too short (likely noise)',
-    };
-  }
-
-  // 3. Extraction pattern matching
-  for (const { pattern, type, baseImportance } of EXTRACTION_PATTERNS) {
-    if (pattern.test(content)) {
-      let importance = baseImportance;
-      let confidence = 0.7;
-
-      // Adjustment: increase importance on repeated appearance
-      if (context?.isRepeated) {
-        importance = Math.min(1, importance + 0.1);
-        confidence = Math.min(1, confidence + 0.1);
-      }
-
-      // Adjustment: increase confidence when verified
-      if (context?.isVerified) {
-        confidence = Math.min(1, confidence + 0.15);
-      }
-
-      return {
-        shouldStore: true,
-        type,
-        importance,
-        confidence,
-        reason: `Matches extraction pattern for ${type}`,
-      };
-    }
-  }
-
-  // 4. Default: store as belief if long enough and seems meaningful (low importance)
-  if (content.length > 100) {
-    return {
-      shouldStore: true,
-      type: 'belief',
-      importance: 0.5,
-      confidence: 0.5,
-      reason: 'Default: moderately significant content',
-    };
-  }
-
-  // 5. Do not store
-  return {
-    shouldStore: false,
-    type: 'belief',
-    importance: 0,
-    confidence: 0,
-    reason: 'Does not meet storage criteria',
-  };
-}
-
-/**
- * Calculate importance score.
- */
-export function calculateImportance(
-  type: MemoryType,
-  options?: {
-    isRepeated?: boolean;
-    isVerified?: boolean;
-    age?: number;           // milliseconds since creation
-    hasContradiction?: boolean;
-  }
-): number {
-  // Base importance by type
-  let importance = (BASE_IMPORTANCE[type as CognitiveMemoryType] ??
-                   LEGACY_IMPORTANCE[type as LegacyMemoryType] ?? 0.5);
-
-  // Increase: repeated appearance. Keep this small so repeated broad audit
-  // summaries do not flatten the score distribution.
-  if (options?.isRepeated) {
-    importance = Math.min(0.95, importance + 0.05);
-  }
-
-  // Verification should raise confidence at the call site, not force every
-  // verified item to maximum importance.
-
-  // Decrease: aged (subtract 0.1 if older than 30 days)
-  if (options?.age && options.age > 30 * 24 * 60 * 60 * 1000) {
-    importance = Math.max(0.3, importance - 0.1);
-  }
-
-  // Decrease: contradiction detected
-  if (options?.hasContradiction) {
-    importance = Math.max(0.2, importance - 0.2);
-  }
-
-  return importance;
-}
-
-/**
- * Open the store, at most once at a time.
- *
- * Sixteen concurrent reviewers each search memory (see the concurrency note in
- * `searchMemorySafe`), and without this every one of them ran the whole open
- * sequence: N connects, and on a first run N racing `createTable` calls. Once
- * the catch below began nulling the handles on failure that stopped being mere
- * duplicated work — a loser's failure destroyed the winner's live connection,
- * and the next search died on `null.vectorSearch` while the freshly-set failure
- * flag suppressed the log line that would have shown it. Sharing one in-flight
- * open makes the call that nulls the handles the same call that assigned them.
- */
-export function initDatabase(): Promise<void> {
-  // The in-flight check comes FIRST. `openDatabase` assigns `table` and only
-  // then runs the schema migration, which rewrites that table with
-  // `mode: 'overwrite'` — so during the migration `db && table` are both
-  // truthy and a fast-pathing caller would query a handle whose storage is
-  // being replaced underneath it.
-  if (initInFlight) return initInFlight;
-  if (db && table) return Promise.resolve();
-  initInFlight ??= openDatabase().finally(() => { initInFlight = null; });
-  return initInFlight;
-}
-
-async function openDatabase(): Promise<void> {
   try {
-    const fs = await import('fs/promises');
-    await fs.mkdir(MEMORY_DIR, { recursive: true });
-
-    db = await connect(MEMORY_DIR);
-    const tableNames = await db.tableNames();
-
-    // v3.0: lean cognitive memory table. Existing v2 tables are read
-    // compatibly and rewritten by compaction.
-    if (tableNames.includes('cognitive_memory')) {
-      table = await db.openTable('cognitive_memory');
-      table = await migrateLeanSchemaIfNeeded(db, table);
-      console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
-    } else if (tableNames.includes('devmemory')) {
-      // Legacy table - will migrate later
-      table = await db.openTable('devmemory');
-      console.log(`${status.warn('[Memory] loaded legacy table')} ${c.cyan('devmemory')}`);
-    } else {
-      // Create new table (v3.0 schema)
-      const now = Date.now();
-      const initialRecord: CognitiveMemoryRecord = {
-        id: 'init',
-        type: 'system_pattern',
-        content: 'Cognitive memory system initialized with v3 lean schema',
-        vector: await embedPassage('Cognitive memory system initialized'),
-
-        importance: 0.5,
-        confidence: 1.0,
-        createdAt: now,
-        lastUpdated: now,
-        lastAccessed: now,
-        derivedFrom: 'system_init',
-
-        repo: 'system',
-        title: 'Memory system initialized',
-        metadata: '{}',
-        trust: 1.0,
-        expiresAt: PERMANENT_EXPIRY,
-      };
-
-      table = await db.createTable('cognitive_memory', [initialRecord]);
-      // Freshly built by the current encoder, so the signature is true by construction.
-      writeStoredSignature(MEMORY_DIR, embeddingSignature(EMBEDDING_SPEC));
-      console.log(`${status.ok('[Memory] created table')} ${c.cyan('cognitive_memory v3.0')}`);
-    }
-
-    warnOnEmbeddingDrift();
-    clearRecallFailure('open');
-  } catch (error) {
-    // A half-open connection would make the next call report success and then
-    // fail on the table instead, which is how this looked like a query bug.
-    db = null;
-    table = null;
-    reportRecallFailure(error, 'open');
-    throw error;
-  }
-}
-
-/**
- * Warn when the stored vectors were not produced by the currently configured
- * encoder.
- *
- * Mixing vector spaces is a silent failure: writes succeed, searches return
- * results, and only the ranking is quietly wrong. A missing signature means the
- * store predates this check and therefore was built by the old stack, which is a
- * mismatch too. Detection only — rebuilding is an explicit, user-run migration.
- */
-export function warnOnEmbeddingDrift(memoryDir: string = MEMORY_DIR): boolean {
-  const current = embeddingSignature(EMBEDDING_SPEC);
-  const stored = readStoredSignature(memoryDir);
-  if (stored?.signature === current) return false;
-
-  console.warn(
-    `${status.warn('[Memory] embedding mismatch')} ${c.dim('stored vectors were built with')} ` +
-      `${c.yellow(stored?.signature ?? 'an unrecorded configuration')}${c.dim(', now using')} ${c.yellow(current)}`,
-  );
-  console.warn(`${c.dim('  search ranking is unreliable until you run')} ${c.cyan('openswarm memory reembed')}`);
-  return true;
-}
-
-/**
- * Calculate freshness (0-1, higher for more recent)
- */
-export function calculateFreshness(createdAt: number, halfLifeDays: number = 7): number {
-  const ageMs = Date.now() - createdAt;
-  const halfLifeMs = halfLifeDays * 24 * 60 * 60 * 1000;
-  return Math.exp(-ageMs / halfLifeMs);
-}
-
-/**
- * Save memory with distillation.
- */
-export async function saveMemory(
-  type: MemoryType,
-  repo: string,
-  title: string,
-  content: string,
-  options?: {
-    metadata?: Record<string, unknown>;
-    trust?: number;
-    ttlDays?: number;
-    importance?: number;
-    confidence?: number;
-    skipDistillation?: boolean;   // Force save (bypass distillation)
-    isRepeated?: boolean;
-    isVerified?: boolean;
-    derivedFrom?: string;
-  }
-): Promise<string | null> {
-  await initDatabase();
-  if (!table) throw new Error('Table not initialized');
-
-  // Semantic distillation (unless bypassed)
-  if (!options?.skipDistillation) {
-    const distillation = distillContent(content, {
-      isRepeated: options?.isRepeated,
-      isVerified: options?.isVerified,
+    // Suppress HuggingFace download logs
+    transformersEnv?.set('TRANSFORMERS_VERBOSITY', 'error');
+    embeddingPipeline = await pipeline('feature-extraction', spec.model, {
+      dtype: spec.dtype as 'fp32' | 'fp16' | 'q8' | null | undefined,
+      cache_dir: modelCacheDir(),
+      // @ts-expect-error - quantized is a valid option for some models
+      quantized: spec.dtype === 'q8',
     });
-
-    if (!distillation.shouldStore) {
-      console.log(`${status.warn('[Memory] rejected by distillation')} ${distillation.reason}`);
-      return null;
-    }
-
-    // Distillation may refine the type for UNVERIFIED content — a best-effort
-    // classification the caller didn't firmly assert. But when the caller marks
-    // the memory isVerified, its explicit type is authoritative and must not be
-    // overridden (e.g. system_pattern / constraint silently downgraded to
-    // belief). Previously the only escape was skipDistillation, a trap for any
-    // caller that didn't know the flag (see repoKnowledge.ts). Contract: explicit
-    // type + isVerified wins; unverified content is still auto-refined.
-    if (!options?.isVerified && distillation.type !== type && isCognitiveType(distillation.type)) {
-      console.log(`${status.info('[Memory] type adjusted by distillation')} ${c.yellow(type)} → ${c.yellow(distillation.type)}`);
-      type = distillation.type;
-    }
+    return embeddingPipeline;
+  } catch (err) {
+    pipelineInitFailed = true;
+    pipelineInitError = err instanceof Error ? err : new Error(String(err));
+    throw pipelineInitError;
   }
+}
 
+// ============================================
+// Logging
+// ============================================
+
+export function logWork(workType: string, detail: string): void {
+  console.log(`[Memory] ${workType}: ${detail}`);
+}
+
+// ============================================
+// Freshness
+// ============================================
+
+export function calculateFreshness(lastAccessed: number): number {
   const now = Date.now();
-  const id = `${type}-${repo}-${now}-${randomUUID()}`;
-
-  // Default TTL by type
-  let expiresAt: number = PERMANENT_EXPIRY;
-  if (type === 'journal') {
-    expiresAt = now + (options?.ttlDays ? options.ttlDays * 24 * 60 * 60 * 1000 : TTL_JOURNAL);
-  } else if (type === 'repomap') {
-    expiresAt = now + (options?.ttlDays ? options.ttlDays * 24 * 60 * 60 * 1000 : TTL_REPOMAP);
-  }
-
-  // Calculate importance
-  const importance = clamp01(options?.importance,
-    calculateImportance(type, {
-      isRepeated: options?.isRepeated,
-      isVerified: options?.isVerified,
-    }));
-  const confidence = clamp01(options?.confidence, 0.7);
-  const trust = clamp01(options?.trust, 0.8);
-
-  const record: CognitiveMemoryRecord = {
-    id,
-    type,
-    content,
-    vector: await embedPassage(embeddingTextFor(title, content)),
-
-    importance,
-    confidence,
-    createdAt: now,
-    lastUpdated: now,
-    lastAccessed: now,
-    derivedFrom: options?.derivedFrom || 'unknown',
-
-    // Legacy compatibility
-    repo,
-    title,
-    metadata: JSON.stringify(options?.metadata || {}),
-    trust,
-    expiresAt,
-  };
-
-  await withMemoryWriteRetry(() => table!.add([record]), `saveMemory(${type})`);
-  console.log(`${status.ok(`[Memory] saved ${type}`)} ${c.yellow(`importance: ${importance.toFixed(2)}`)} ${c.dim('repo:')} ${c.cyan(repo)} ${c.dim('title:')} ${title}`);
-  return id;
-}
-
-/**
- * Type guard for cognitive memory types
- */
-function isCognitiveType(type: MemoryType): type is CognitiveMemoryType {
-  return ['belief', 'strategy', 'user_model', 'system_pattern', 'constraint'].includes(type);
-}
-
-/**
- * Save cognitive memory directly.
- */
-export async function saveCognitiveMemory(
-  type: CognitiveMemoryType,
-  content: string,
-  options?: {
-    importance?: number;
-    confidence?: number;
-    derivedFrom?: string;
-    /** Repo scope for the record. Defaults to 'cognitive' (unscoped) for back-compat. */
-    repo?: string;
-  }
-): Promise<string | null> {
-  await initDatabase();
-  if (!table) throw new Error('Table not initialized');
-
-  const now = Date.now();
-  const id = `${type}-${now}-${Math.random().toString(36).slice(2, 8)}`;
-
-  const importance = clamp01(options?.importance, BASE_IMPORTANCE[type]);
-  const confidence = clamp01(options?.confidence, 0.7);
-  // Derived from the head of the content, so embeddingTextFor drops it rather than
-  // double-weighting the opening.
-  const title = content.slice(0, 100);
-
-  const record: CognitiveMemoryRecord = {
-    id,
-    type,
-    content,
-    vector: await embedPassage(embeddingTextFor(title, content)),
-
-    importance,
-    confidence,
-    createdAt: now,
-    lastUpdated: now,
-    lastAccessed: now,
-    derivedFrom: options?.derivedFrom || 'unknown',
-
-    // Legacy fields (minimal)
-    repo: options?.repo ?? 'cognitive',
-    title,
-    metadata: '{}',
-    trust: confidence,
-    expiresAt: PERMANENT_EXPIRY,
-  };
-
-  await withMemoryWriteRetry(() => table!.add([record]), `saveCognitiveMemory(${type})`);
-  console.log(`${status.ok(`[Memory] saved cognitive ${type}`)} ${c.yellow(`importance: ${importance.toFixed(2)}`)} ${content.slice(0, 50)}...`);
-  return id;
-}
-
-/**
- * Delete all memories tagged with a given `derivedFrom` value. Used to
- * refresh regenerable insights (e.g. knowledge-graph health) in place instead of
- * appending a new row every scan. Best-effort — returns false if no table.
- */
-export async function deleteMemoriesByDerivedFrom(derivedFrom: string): Promise<number> {
-  await initDatabase();
-  if (!table) return 0;
-  // Resolve matching ids in JS, then delete by the lowercase `id` column. A direct
-  // predicate on the camelCase `derivedFrom` column is unreliable — datafusion
-  // lowercases unquoted identifiers and the quoted form matched nothing here.
-  const rows = (await table.query().limit(100_000).toArray()) as unknown as CognitiveMemoryRecord[];
-  const ids = rows.filter((r) => r.derivedFrom === derivedFrom).map((r) => String(r.id));
-  if (ids.length === 0) return 0;
-  const list = ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
-  await withMemoryWriteRetry(() => table!.delete(`id IN (${list})`), 'deleteMemoriesByDerivedFrom');
-  return ids.length;
-}
-
-/**
- * Record design decision (ADR style)
- */
-export async function recordDecision(
-  repo: string,
-  title: string,
-  context: string,
-  decision: string,
-  consequences: string,
-  alternatives?: string
-): Promise<string> {
-  const content = `## Context\n${context}\n\n## Decision\n${decision}\n\n## Consequences\n${consequences}${alternatives ? `\n\n## Alternatives Considered\n${alternatives}` : ''}`;
-
-  const id = await saveMemory('decision', repo, title, content, {
-    trust: 0.95,
-    metadata: { context, decision, consequences, alternatives },
-    skipDistillation: true,  // Legacy: explicit save
-  });
-  return id!;
-}
-
-/**
- * Update repository map
- */
-export async function updateRepoMap(
-  repo: string,
-  modules: string[],
-  entryPoints: string[],
-  dependencies: Record<string, string>,
-  notes?: string
-): Promise<string> {
-  const content = `## Modules\n${modules.map(m => `- ${m}`).join('\n')}\n\n## Entry Points\n${entryPoints.map(e => `- ${e}`).join('\n')}\n\n## Dependencies\n${Object.entries(dependencies).map(([k, v]) => `- ${k}: ${v}`).join('\n')}${notes ? `\n\n## Notes\n${notes}` : ''}`;
-
-  const id = await saveMemory('repomap', repo, `Repository structure: ${repo}`, content, {
-    trust: 0.9,
-    metadata: { modules, entryPoints, dependencies },
-    skipDistillation: true,
-  });
-  return id!;
-}
-
-/**
- * Log work entry
- */
-export async function logWork(
-  repo: string,
-  summary: string,
-  details: string,
-  filesChanged?: string[],
-  issueRef?: string
-): Promise<string> {
-  const content = `${details}${filesChanged ? `\n\n### Files Changed\n${filesChanged.map(f => `- ${f}`).join('\n')}` : ''}${issueRef ? `\n\n### Related Issue\n${issueRef}` : ''}`;
-
-  const id = await saveMemory('journal', repo, summary, content, {
-    trust: 0.85,
-    metadata: { filesChanged, issueRef, timestamp: new Date().toISOString() },
-    ttlDays: 14,
-    skipDistillation: true,
-    derivedFrom: issueRef,  // Used to store channelId
-  });
-  return id!;
-}
-
-/**
- * Record a fact (versions, environments, etc.)
- */
-export async function recordFact(
-  repo: string,
-  title: string,
-  content: string,
-  category: 'version' | 'build' | 'deploy' | 'constraint' | 'other'
-): Promise<string> {
-  const id = await saveMemory('fact', repo, title, content, {
-    trust: 0.95,
-    metadata: { category },
-    skipDistillation: true,
-  });
-  return id!;
-}
-
-// Hybrid retrieval
-
-/**
- * Hybrid score: semantic relevance first, then curated importance and recency.
- * Removed access frequency/decay inputs because the table never maintained
- * meaningful values for them.
- */
-function calculateHybridScore(
-  similarity: number,
-  importance: number,
-  recency: number
-): number {
-  return (
-    0.60 * similarity +
-    0.25 * importance +
-    0.15 * recency
-  );
-}
-
-/**
- * Search memory with hybrid retrieval - safe version.
- * Distinguishes between errors and empty results
- */
-export async function searchMemorySafe(
-  query: string,
-  options: SearchOptions = {}
-): Promise<SearchResult> {
-  // Opening is its own phase. Folding it into the outer try reported a dead
-  // store as QUERY_FAILED — `await initDatabase()` throws, so the branch below
-  // written for exactly this case was unreachable — and made the outer catch
-  // guess which kind of failure it was holding. repoKnowledge renders this code
-  // straight into the agent's prompt, so the guess was visible to the model.
-  try {
-    await initDatabase();
-  } catch (error) {
-    // openDatabase already reported this under the rate limit; a second line
-    // per recall is what buried the log (AGT-4267).
-    return {
-      success: false,
-      memories: [],
-      error: error instanceof Error ? error.message : String(error),
-      errorCode: 'DB_INIT_FAILED',
-    };
-  }
-
-  try {
-    if (!table) {
-      // Unreachable today — a null handle throws inside the schema migration
-      // and is caught as an open failure — but if that ever changes, returning
-      // without reporting gives back a silent dead store while
-      // memoryRecallStatus() answers "available", which is the exact outcome
-      // this change exists to prevent.
-      const notInitialized = 'Database table not initialized';
-      reportRecallFailure(new Error(notInitialized), 'open');
-      return { success: false, memories: [], error: notInitialized, errorCode: 'DB_INIT_FAILED' };
-    }
-
-    const {
-      types,
-      repo,
-      minSimilarity = 0.4,
-      minTrust = 0.3,
-      minFreshness = 0,
-      limit = 10,
-      includeExpired = false,
-    } = options;
-
-    let queryVector: number[];
-    try {
-      queryVector = await embedQuery(query);
-      clearRecallFailure('embed');
-    } catch (embeddingError) {
-      // The third way recall dies, and until now the only one left uncovered:
-      // a healthy store with a dead embedder returned early before either
-      // reporter, so 40 recalls printed 40 stacks (initEmbeddingPipeline nulls
-      // its promise on failure, so every call retries and re-logs) while
-      // memoryRecallStatus() still answered "available".
-      reportRecallFailure(embeddingError, 'embed');
-      return {
-        success: false,
-        memories: [],
-        error: `Embedding generation failed: ${embeddingError instanceof Error ? embeddingError.message : String(embeddingError)}`,
-        errorCode: 'EMBEDDING_FAILED',
-      };
-    }
-
-
-    const now = Date.now();
-    const predicates: string[] = [];
-    if (types?.length) {
-      predicates.push(`type IN (${types.map(sqlString).join(', ')})`);
-    }
-    if (repo) {
-      predicates.push(`repo IN (${[repo, 'system', 'cognitive'].map(sqlString).join(', ')})`);
-    }
-    if (!includeExpired) {
-      // Lance/DataFusion normalizes unquoted identifiers to lowercase. This
-      // column is camelCase in the Arrow schema, so quote it or vector search
-      // fails with "No field named expiresat".
-      predicates.push(`("expiresAt" IS NULL OR "expiresAt" >= ${now} OR "expiresAt" >= ${PERMANENT_EXPIRY})`);
-    }
-    if (minTrust > 0) {
-      predicates.push(`(confidence >= ${minTrust} OR (confidence IS NULL AND trust >= ${minTrust}))`);
-    }
-
-    const hasPostVectorFilters = Boolean(minFreshness > 0 || minSimilarity > -1);
-    const resultWindow = hasPostVectorFilters
-      ? Math.min(Math.max(limit * 20, 100), 1000)
-      : Math.max(limit * 5, limit);
-    let vectorQuery = table.vectorSearch(queryVector);
-    if (predicates.length > 0) {
-      vectorQuery = vectorQuery.where(predicates.join(' AND '));
-    }
-    const results = await vectorQuery.limit(resultWindow).toArray();
-
-    // Hybrid retrieval scoring
-    const scored = results
-      .filter((r: any) => {
-        if (r.id === 'init') return false;
-        if (!includeExpired && r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) return false;
-        if (types && !types.includes(r.type)) return false;
-        if (repo && r.repo !== repo && r.repo !== 'system' && r.repo !== 'cognitive') return false;
-        const confidence = r.confidence ?? r.trust ?? 0;
-        if (confidence < minTrust) return false;
-        const similarity = normalizedL2DistanceToSimilarity(r._distance);
-        if (similarity < minSimilarity) return false;
-        return true;
-      })
-      .map((r: any) => {
-        const similarity = normalizedL2DistanceToSimilarity(r._distance);
-        const recency = calculateFreshness(r.createdAt);
-        const importance = r.importance ?? calculateImportance(r.type);
-        const hybridScore = calculateHybridScore(similarity, importance, recency);
-        return { record: r, similarity, recency, importance, hybridScore };
-      })
-      .filter(item => item.recency >= minFreshness)
-      .sort((a, b) => b.hybridScore - a.hybridScore)
-      .slice(0, limit);
-
-    // NOTE: we deliberately do NOT write a `lastAccessed` timestamp back here.
-    // Every search used to fire a Lance `table.update()` commit, but `lastAccessed`
-    // feeds nothing — retrieval recency uses `createdAt` (access-frequency/decay was
-    // removed, see calculateFreshness below), and no CLI reads the field. Under
-    // `openswarm review --max` (up to 16 concurrent reviewer subagents each searching
-    // memory) those per-search commits collided on Lance's optimistic-concurrency
-    // limit → "Too many concurrent writers … [Memory] Failed to update access time".
-    // Dropping a write with no read consumer removes the contention entirely. The
-    // schema field remains (set at record creation) so decay can be reintroduced with
-    // a batched/serialized writer if ever needed.
-
-    const formatted: MemorySearchResult[] = scored.map(({ record: r, similarity, recency, importance, hybridScore }) => ({
-      id: r.id,
-      type: r.type,
-      repo: r.repo,
-      title: r.title,
-      content: r.content,
-      metadata: safeParseMetadata(r.metadata),
-      trust: r.trust ?? r.confidence ?? 0.7,
-      createdAt: r.createdAt,
-      score: hybridScore,
-      freshness: recency,
-      importance,
-      confidence: r.confidence ?? r.trust ?? 0.7,
-      derivedFrom: r.derivedFrom ?? 'unknown',
-      similarityScore: similarity,
-    }));
-
-    clearRecallFailure('query');
-    console.log(`${status.info(`[Memory] found ${formatted.length} memories`)} ${c.dim('hybrid retrieval')} ${c.dim(`query: "${query.slice(0, 30)}..."`)}`);
-    return { success: true, memories: formatted };
-
-  } catch (error) {
-    // A store that breaks AFTER a successful open never reaches openDatabase
-    // again — the `db && table` fast path holds forever — so before this every
-    // such recall printed a full stack, unbounded, while memoryRecallStatus()
-    // still answered "available". Same rate limit, own phase.
-    reportRecallFailure(error, 'query');
-    return {
-      success: false,
-      memories: [],
-      error: error instanceof Error ? error.message : String(error),
-      errorCode: 'QUERY_FAILED',
-    };
-  }
-}
-
-/**
- * Search memory - legacy compatible.
- * @deprecated Use searchMemorySafe instead
- */
-export async function searchMemory(
-  query: string,
-  options: SearchOptions = {}
-): Promise<MemorySearchResult[]> {
-  const result = await searchMemorySafe(query, options);
-  if (!result.success) {
-    console.warn(`[Memory] Search failed silently: ${result.error} (code: ${result.errorCode})`);
-  }
-  return result.memories;
+  const daysSinceAccess = (now - lastAccessed) / (1000 * 60 * 60 * 24);
+  return Math.max(0, Math.min(1, 1 - daysSinceAccess / 30));
 }
