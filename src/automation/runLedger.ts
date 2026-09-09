@@ -386,7 +386,9 @@ export class RunLedger {
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
       // An ask_human park carries its own exact-correlation resume contract.
       // Linear state changes and generic operator recovery must not bypass it.
-      if (row.last_error_code === OPERATOR_QUESTION_PARK_REASON) return null;
+      // idle_fill is the exception: empty slots + in-scope work beat the wait
+      // (AGT-4257). The cheap-model pool should keep chewing, not sit parked.
+      if (row.last_error_code === OPERATOR_QUESTION_PARK_REASON && trigger !== 'idle_fill') return null;
       const deadEffects = (this.db.prepare(`
         SELECT COUNT(*) AS count FROM automation_effects
         WHERE issue_id = ? AND status = 'dead'

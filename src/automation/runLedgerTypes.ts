@@ -263,4 +263,4 @@ export const NON_FAILURE_RESULT_STATUSES: readonly string[] = [
  * AX-874 left NEEDS_HUMAN unattended at 18:25 on 2026-09-02, the trace could
  * only say that it had happened.
  */
-export type ParkResumeTrigger = 'explicit_dispatch' | 'tracker_todo' | 'sandbox_quarantine_dispatch' | 'unspecified';
+export type ParkResumeTrigger = 'explicit_dispatch' | 'tracker_todo' | 'sandbox_quarantine_dispatch' | 'idle_fill' | 'unspecified';

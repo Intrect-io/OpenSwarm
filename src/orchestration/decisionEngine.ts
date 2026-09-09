@@ -231,9 +231,8 @@ export interface DecisionEngineConfig {
   dryRun: boolean;
 
   /**
-   * Treat Linear "Backlog" as an actionable work queue (legacy behavior). When
-   * false (default), Backlog is "parked": only Todo/In Progress/In Review are
-   * actionable, so moving an issue to Backlog stops the daemon picking it up.
+   * Treat Linear "Backlog" as an actionable work queue. Default true (AGT-4257)
+   * so free slots chew parked work. Set false to park Backlog again.
    */
   includeBacklog?: boolean;
 
@@ -259,7 +258,7 @@ const DEFAULT_CONFIG: DecisionEngineConfig = {
   allowedProjects: [],
   autoExecute: false,       // Default is manual approval
   dryRun: false,
-  includeBacklog: false,    // Backlog is parked, not a queue (R5)
+  includeBacklog: true,     // AGT-4257: Backlog is still work when slots are free
 };
 
 function expandHomePath(input: string): string {
@@ -332,16 +331,16 @@ export function isAllowedProjectPath(projectPath: string, allowedProjects: strin
 }
 
 /**
- * Linear states the daemon will NOT act on. Backlog is "parked" (opt back in via
- * DecisionEngineConfig.includeBacklog); Done/Canceled are terminal.
+ * Linear states the daemon will NOT act on unless opted in. Done/Canceled are
+ * terminal. Backlog is admitted when includeBacklog is true (AGT-4257 default).
  */
 const NON_ACTIONABLE_LINEAR_STATES = new Set(['Backlog', 'Done', 'Canceled', 'Cancelled']);
 
 /**
- * R5: whether the daemon should act on an issue in the given Linear state. Only
- * Todo/In Progress/In Review (and unknown states, conservatively) are actionable;
- * Backlog is parked and Done/Canceled are terminal. `includeBacklog` opts back
- * into the legacy "Backlog is a work queue" behavior.
+ * Whether the daemon should act on an issue in the given Linear state.
+ * Todo/In Progress/In Review and unknown states are always actionable.
+ * Done/Canceled are terminal. Backlog is a queue when includeBacklog is true
+ * (DecisionEngine default and config default since AGT-4257).
  */
 export function isActionableLinearState(linearState: string | undefined, includeBacklog = false): boolean {
   if (!linearState) return true; // unknown state → don't gate (conservative)
@@ -446,6 +445,8 @@ export class DecisionEngine {
 
   constructor(config: Partial<DecisionEngineConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+    // `{ ...DEFAULT, includeBacklog: undefined }` would re-park Backlog.
+    this.config.includeBacklog = config.includeBacklog ?? DEFAULT_CONFIG.includeBacklog;
   }
 
   /**

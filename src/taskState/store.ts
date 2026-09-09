@@ -686,7 +686,8 @@ export function getTaskReadiness(task: TaskItem): {
     const reactivated =
       linearState === 'Todo' ||
       linearState === 'In Progress' ||
-      linearState === 'In Review';
+      linearState === 'In Review' ||
+      linearState === 'Backlog';
     if (!reactivated) {
       return {
         ready: false,

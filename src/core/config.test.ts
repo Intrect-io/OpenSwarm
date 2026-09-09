@@ -257,6 +257,22 @@ agents:
       });
     });
 
+    it('defaults includeBacklog to true so free slots chew parked work (AGT-4257)', () => {
+      const base = {
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
+      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(true);
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base, autonomous: { enabled: true, includeBacklog: false },
+      }));
+      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(false);
+    });
+
     it('defaults unknownScopeAdmission to serialize and carries an explicit admit through', () => {
       const base = {
         language: 'en',

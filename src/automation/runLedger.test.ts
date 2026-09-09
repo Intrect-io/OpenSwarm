@@ -261,6 +261,28 @@ describe('RunLedger operator re-admission (AGT-4033)', () => {
     ledger.close();
   });
 
+  it('idle_fill is the only generic trigger that lifts an unanswered ask_human park (AGT-4257)', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'AX-4257');
+    const claimed = claim(ledger, 'AX-4257', 'daemon');
+    expect(ledger.transition(claimed, 'RETRY_AT', {
+      retryAt: 99_000,
+      errorCode: 'waiting_on_operator',
+    }, 1_100)).toBe(true);
+    expect(ledger.markNeedsHumanForQuestions(
+      'AX-4257', ['hq-idle'], 'waiting for operator', 1_200,
+    )).toBe(true);
+    expect(ledger.getRun('AX-4257')?.state).toBe('NEEDS_HUMAN');
+
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_300)).toBeNull();
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_300, 'tracker_todo')).toBeNull();
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_300, 'explicit_dispatch')).toBeNull();
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_400, 'idle_fill')).toBe('READY');
+    expect(ledger.getRun('AX-4257')?.state).toBe('READY');
+
+    ledger.close();
+  });
+
   it('claims it once the answer brings it forward', () => {
     // `markReady` is the transition the runner uses when the board shows the
     // operator replied — the backoff was only ever a poll for that reply.
