@@ -218,33 +218,38 @@ export async function reconcileContradiction(
     const table = getTable();
     if (!table) return false;
 
-    const keep = await loadMemoryById(table, keepId);
-    const remove = await loadMemoryById(table, removeId);
+    // Serialise the full read-modify-write under withMemoryWriteRetry so that
+    // concurrent reconcileContradiction calls re-read the latest records before
+    // writing and do not silently overwrite each other's changes.
+    return await withMemoryWriteRetry(async () => {
+      const keep = await loadMemoryById(table!, keepId);
+      const remove = await loadMemoryById(table!, removeId);
 
-    if (!keep || !remove) return false;
+      if (!keep || !remove) return false;
 
-    // Update kept memory with resolution
-    const meta = safeParseMetadata(keep.metadata);
-    const contradictions = Array.isArray(meta.contradictions) ? meta.contradictions : [];
-    contradictions.push({
-      resolvedWith: removeId,
-      resolution,
-      timestamp: Date.now(),
-    });
+      // Update kept memory with resolution
+      const meta = safeParseMetadata(keep.metadata);
+      const contradictions = Array.isArray(meta.contradictions) ? meta.contradictions : [];
+      contradictions.push({
+        resolvedWith: removeId,
+        resolution,
+        timestamp: Date.now(),
+      });
 
-    keep.metadata = JSON.stringify({
-      ...meta,
-      contradictions,
-      resolvedContradictions: [
-        ...(Array.isArray(meta.resolvedContradictions) ? meta.resolvedContradictions : []),
-        removeId,
-      ],
-    });
+      keep.metadata = JSON.stringify({
+        ...meta,
+        contradictions,
+        resolvedContradictions: [
+          ...(Array.isArray(meta.resolvedContradictions) ? meta.resolvedContradictions : []),
+          removeId,
+        ],
+      });
 
-    await updateMemoryRecord(table, keep);
-    await deleteMemoryIds(table, [removeId]);
+      await updateMemoryRecord(table!, keep);
+      await deleteMemoryIds(table!, [removeId]);
 
-    return true;
+      return true;
+    }, 'reconcileContradiction');
   } catch (error) {
     console.error('[Memory] Reconcile contradiction error:', error);
     return false;
