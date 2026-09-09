@@ -119,7 +119,7 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   };
   // Only headers/fields that are genuinely UNIX-epoch seconds or seconds-from-now:
   //  - x-codex-primary-reset-at: epoch seconds
-  //  - Retry-After: seconds-from-now (→ convert to epoch)
+  //  - Retry-After: seconds-from-now (→ convert to epoch) OR an HTTP-date
   //  - body "resets_at": epoch seconds
   // Deliberately NOT x-ratelimit-reset-requests/-tokens: OpenAI returns those as
   // DURATION strings ("1s", "6ms", "2m59s"), not epoch — parseInt would yield a
@@ -127,8 +127,15 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   // 60s default, which is correct rather than wrong. (INT-2520 review)
   const codexReset = fromHeader('x-codex-primary-reset-at');
   if (codexReset != null) return codexReset;
-  const retryAfter = fromHeader('retry-after');
-  if (retryAfter != null) return Math.floor(Date.now() / 1000) + retryAfter;
+  const retryAfter = headers?.get('retry-after');
+  if (retryAfter != null) {
+    // RFC 7231 §7.1.3: Retry-After is either delta-seconds or an HTTP-date.
+    // Delta-seconds → seconds-from-now; HTTP-date → absolute epoch seconds.
+    const delta = parseInt(retryAfter, 10);
+    if (Number.isFinite(delta)) return Math.floor(Date.now() / 1000) + delta;
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) return Math.floor(dateMs / 1000);
+  }
   return parseResetsAtFromBody(body);
 }
 
