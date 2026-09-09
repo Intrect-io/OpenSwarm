@@ -13,6 +13,8 @@ export interface PrCommentSummary {
   kind: 'changes_requested' | 'critical_comment' | 'inline';
   path?: string;
   line?: number;
+  /** Stable discussion key for per-discussion resolution tracking. */
+  discussionKey?: string;
 }
 
 export interface PrStatusSnapshot {
@@ -44,46 +46,50 @@ export function isCriticalCommentBody(body: string): boolean {
 
 /**
  * Pick the highest-priority blocker.
- * Order: conflicts → review comments → CI failure → CI pending → none.
- * Pure.
+ * Priority: conflicts > comments > CI failure > pending CI > unknown CI > none.
  */
-export function classifyBlocker(input: {
+export function classifyBlocker(opts: {
   hasConflicts: boolean;
   changesRequestedCount: number;
   criticalCommentCount: number;
   ci: CIStatus;
 }): PrBlocker {
-  if (input.hasConflicts) return 'conflicts';
-  if (input.changesRequestedCount > 0 || input.criticalCommentCount > 0) return 'comments';
-  if (input.ci.status === 'failure') return 'ci';
-  if (input.ci.status === 'pending') return 'pending_ci';
-  if (input.ci.status === 'unknown') return 'unknown_ci';
+  if (opts.hasConflicts) return 'conflicts';
+  if (opts.changesRequestedCount > 0 || opts.criticalCommentCount > 0) return 'comments';
+  if (opts.ci.status === 'failure') return 'ci';
+  if (opts.ci.status === 'pending') return 'pending_ci';
+  if (opts.ci.status === 'unknown') return 'unknown_ci';
   return 'none';
 }
 
-/** Build review-feedback summaries from formal reviews. Pure. */
+/** Extract changes-requested review summaries. Pure. */
 export function summarizeChangesRequested(
   reviews: PRReviewComment[],
 ): PrCommentSummary[] {
-  const latest = new Map<string, PRReviewComment>();
-  for (const review of reviews) {
-    const existing = latest.get(review.author);
-    if (!existing || new Date(review.createdAt) > new Date(existing.createdAt)) {
-      latest.set(review.author, review);
-    }
-  }
-  return Array.from(latest.values())
+  return reviews
     .filter((r) => r.state === 'CHANGES_REQUESTED')
     .map((r) => ({
       author: r.author,
       body: (r.body || '').slice(0, 500),
       kind: 'changes_requested' as const,
+      discussionKey: `review:${r.author}:${r.id ?? r.body?.slice(0, 40)}`,
     }));
+}
+
+/**
+ * Build a stable discussion key for an issue/PR comment.
+ * Uses the comment's node_id when available, otherwise falls back to
+ * author+createdAt to produce a stable identifier across calls.
+ */
+function commentDiscussionKey(c: { author: string; body: string; createdAt?: string; id?: string }): string {
+  if (c.id) return `comment:${c.id}`;
+  if (c.createdAt) return `comment:${c.author}:${c.createdAt}`;
+  return `comment:${c.author}:${c.body.slice(0, 40)}`;
 }
 
 /** Filter issue comments down to critical ones. Pure. */
 export function summarizeCriticalComments(
-  comments: Array<{ author: string; body: string }>,
+  comments: Array<{ author: string; body: string; createdAt?: string; id?: string }>,
 ): PrCommentSummary[] {
   return comments
     .filter((c) => isCriticalCommentBody(c.body))
@@ -91,6 +97,7 @@ export function summarizeCriticalComments(
       author: c.author,
       body: c.body.slice(0, 500),
       kind: 'critical_comment' as const,
+      discussionKey: commentDiscussionKey(c),
     }));
 }
 
@@ -98,7 +105,7 @@ export interface PrStatusDeps {
   checkConflicts: (repo: string, prNumber: number) => Promise<boolean>;
   checkCI: (repo: string, prNumber: number) => Promise<CIStatus>;
   getReviews: (repo: string, prNumber: number) => Promise<PRReviewComment[]>;
-  getComments: (repo: string, prNumber: number) => Promise<Array<{ author: string; body: string; createdAt: string }>>;
+  getComments: (repo: string, prNumber: number) => Promise<Array<{ author: string; body: string; createdAt: string; id?: string }>>;
 }
 
 async function defaultDeps(): Promise<PrStatusDeps> {
@@ -180,9 +187,9 @@ export function formatPrStatus(s: PrStatusSnapshot): string {
   }
 
   if (s.changesRequested.length) {
-    lines.push(`  reviews:  ${s.changesRequested.length} CHANGES_REQUESTED`);
-    for (const r of s.changesRequested.slice(0, 5)) {
-      lines.push(`    - ${r.author}: ${r.body.split('\n')[0].slice(0, 80)}`);
+    lines.push(`  reviews:  ${s.changesRequested.length} requesting changes`);
+    for (const r of s.changesRequested) {
+      lines.push(`    - ${r.author}: ${(r.body || '').replace(/\n/g, ' ').slice(0, 80)}`);
     }
   } else {
     lines.push('  reviews:  none requesting changes');

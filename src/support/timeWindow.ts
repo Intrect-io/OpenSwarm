@@ -53,66 +53,78 @@ export const DEFAULT_TIME_WINDOW: TimeWindowConfig = {
   timezone: 'Asia/Seoul',
 };
 
-const DEFAULT_TIMEZONE = DEFAULT_TIME_WINDOW.timezone ?? 'Asia/Seoul';
-const WEEKDAY_INDEX: Record<string, number> = {
-  Sun: 0,
-  Mon: 1,
-  Tue: 2,
-  Wed: 3,
-  Thu: 4,
-  Fri: 5,
-  Sat: 6,
-};
+const DEFAULT_TIMEZONE = 'Asia/Seoul';
 
 /**
- * Convert time string to minutes
- * "09:30" -> 570
+ * Convert time string to minutes from midnight
  */
-function timeToMinutes(time: string): number {
+export function timeToMinutes(time: string): number {
   const [hours, minutes] = time.split(':').map(Number);
   return hours * 60 + minutes;
 }
 
 /**
- * Check if current time is within a specific range
+ * Check if current time is within a time range
+ * Handles overnight ranges (e.g., 22:00 ~ 06:00)
  */
-function isInTimeRange(currentMinutes: number, range: TimeRange): boolean {
+export function isInTimeRange(currentMinutes: number, range: TimeRange): boolean {
   const start = timeToMinutes(range.start);
   const end = timeToMinutes(range.end);
 
-  // Handle midnight crossing (e.g. 22:00 ~ 06:00)
-  if (start > end) {
-    return currentMinutes >= start || currentMinutes <= end;
+  if (start <= end) {
+    // Normal range (e.g., 08:00 ~ 18:00)
+    return currentMinutes >= start && currentMinutes < end;
+  } else {
+    // Overnight range (e.g., 22:00 ~ 06:00)
+    return currentMinutes >= start || currentMinutes < end;
   }
-
-  return currentMinutes >= start && currentMinutes <= end;
 }
 
-function getCurrentTimeParts(timezone: string | undefined): {
+/**
+ * Get current time in KST (Asia/Seoul)
+ * @deprecated Use getCurrentTimeParts with explicit timezone
+ */
+export function _getKSTTime(): Date {
+  const now = new Date();
+  const kstOffset = 9 * 60; // KST is UTC+9
+  const localOffset = now.getTimezoneOffset();
+  const diff = kstOffset + localOffset;
+  return new Date(now.getTime() + diff * 60 * 1000);
+}
+
+/**
+ * Get current time parts (day of week, minutes from midnight, formatted time)
+ */
+export function getCurrentTimeParts(timezone: string | undefined): {
   day: number;
   minutes: number;
   time: string;
-  timezone: string;
 } {
-  const resolvedTimezone = timezone || DEFAULT_TIMEZONE;
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: resolvedTimezone,
+  const tz = timezone || DEFAULT_TIMEZONE;
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
     weekday: 'short',
     hour: '2-digit',
     minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(new Date());
-
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const hours = Number(values.hour);
-  const minutes = Number(values.minute);
-  const day = WEEKDAY_INDEX[values.weekday];
-
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(now);
+  const dayMap: Record<string, number> = {
+    sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+  };
+  let day = 0;
+  let hour = 0;
+  let minute = 0;
+  for (const p of parts) {
+    if (p.type === 'weekday') day = dayMap[p.value.toLowerCase()] ?? 0;
+    if (p.type === 'hour') hour = parseInt(p.value, 10);
+    if (p.type === 'minute') minute = parseInt(p.value, 10);
+  }
   return {
     day,
-    minutes: hours * 60 + minutes,
-    time: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
-    timezone: resolvedTimezone,
+    minutes: hour * 60 + minute,
+    time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
   };
 }
 
@@ -211,56 +223,26 @@ function findNextAllowedWindow(currentDay: number, currentMinutes: number, confi
 /**
  * Format current time
  */
-function formatCurrentTime(timezone: string | undefined): string {
-  const current = getCurrentTimeParts(timezone);
-  const label = current.timezone === 'Asia/Seoul' ? 'KST' : current.timezone;
-  return `${current.time} ${label}`;
+export function formatCurrentTime(timezone: string | undefined): string {
+  const parts = getCurrentTimeParts(timezone);
+  return parts.time;
 }
 
 /**
- * Get current market status
+ * Get market status
  */
 export function getMarketStatus(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
-  status: 'pre_market' | 'regular' | 'post_market' | 'closed';
+  status: 'open' | 'closed';
   description: string;
   canWork: boolean;
 } {
   const result = isWorkAllowed(config);
-  const current = getCurrentTimeParts(config.timezone);
-  const totalMinutes = current.minutes;
 
-  if (config.restrictedDays && config.restrictedDays.length > 0 && !config.restrictedDays.includes(current.day)) {
+  if (result.allowed) {
     return {
-      status: 'closed',
-      description: t('timeWindow.marketStatus.closed'),
-      canWork: result.allowed,
-    };
-  }
-
-  // Pre-market hours: 08:30 ~ 09:00
-  if (totalMinutes >= 510 && totalMinutes < 540) {
-    return {
-      status: 'pre_market',
-      description: t('timeWindow.marketStatus.preMarket'),
-      canWork: result.allowed,
-    };
-  }
-
-  // Regular market hours: 09:00 ~ 15:30
-  if (totalMinutes >= 540 && totalMinutes < 930) {
-    return {
-      status: 'regular',
-      description: t('timeWindow.marketStatus.regular'),
-      canWork: result.allowed,
-    };
-  }
-
-  // Post-market hours: 15:40 ~ 18:00
-  if (totalMinutes >= 940 && totalMinutes < 1080) {
-    return {
-      status: 'post_market',
-      description: t('timeWindow.marketStatus.postMarket'),
-      canWork: result.allowed,
+      status: 'open',
+      description: t('timeWindow.marketStatus.open'),
+      canWork: true,
     };
   }
 
@@ -277,7 +259,7 @@ export function getMarketStatus(config: TimeWindowConfig = DEFAULT_TIME_WINDOW):
  * Throws error if blocked
  */
 export function assertWorkAllowed(taskName?: string): void {
-  const result = isWorkAllowed();
+  const result = isWorkAllowed(currentConfig);
 
   if (!result.allowed) {
     const msg = taskName
@@ -293,32 +275,60 @@ export function assertWorkAllowed(taskName?: string): void {
 }
 
 /**
- * Time window status summary (for Discord reporting)
+ * Get time window summary
  */
 export function getTimeWindowSummary(): string {
-  const work = isWorkAllowed();
-  const market = getMarketStatus();
+  const config = currentConfig;
+  if (!config.enabled) {
+    return t('timeWindow.summaryDisabled');
+  }
 
-  const icon = work.allowed ? '🟢' : '🔴';
-  const status = work.allowed ? t('timeWindow.workAllowed') : t('timeWindow.workBlocked');
+  const result = isWorkAllowed(config);
+  const lines: string[] = [];
 
-  return `${icon} **${status}**
-${t('timeWindow.currentTime', { time: work.currentTime })}
-${t('timeWindow.status', { description: market.description })}
-${!work.allowed && work.nextAllowedTime ? t('timeWindow.nextAllowed', { time: work.nextAllowedTime }) : ''}`.trim();
+  lines.push(t('timeWindow.summaryHeader', { timezone: config.timezone || DEFAULT_TIMEZONE }));
+  lines.push(t('timeWindow.currentStatus', { status: result.allowed ? '✅' : '❌', time: result.currentTime }));
+
+  if (config.allowedWindows.length > 0) {
+    const windows = config.allowedWindows.map(w => `${w.start}-${w.end}`).join(', ');
+    lines.push(t('timeWindow.allowedWindows', { windows }));
+  }
+
+  if (config.blockedWindows.length > 0) {
+    const blocked = config.blockedWindows.map(w => `${w.start}-${w.end}`).join(', ');
+    lines.push(t('timeWindow.blockedWindows', { windows: blocked }));
+  }
+
+  if (config.restrictedDays && config.restrictedDays.length > 0) {
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const days = config.restrictedDays.map(d => dayNames[d]).join(', ');
+    lines.push(t('timeWindow.restrictedDays', { days }));
+  }
+
+  if (!result.allowed && result.nextAllowedTime) {
+    lines.push(t('timeWindow.nextAllowedTime', { time: result.nextAllowedTime }));
+  }
+
+  return lines.join('\n');
 }
 
-/**
- * Allow external configuration updates
- */
+// Mutable active configuration (initialised from DEFAULT)
 let currentConfig: TimeWindowConfig = { ...DEFAULT_TIME_WINDOW };
 
+/**
+ * Update the active time-window configuration.
+ * Validates before applying.
+ */
 export function setTimeWindowConfig(config: Partial<TimeWindowConfig>): void {
-  const next = { ...currentConfig, ...config };
-  const validRange = (range: TimeRange): boolean => /^([01]\d|2[0-3]):[0-5]\d$/.test(range.start) && /^([01]\d|2[0-3]):[0-5]\d$/.test(range.end);
-  if (!Array.isArray(next.allowedWindows) || !next.allowedWindows.every(validRange)) throw new Error('Invalid allowed time window');
-  if (!Array.isArray(next.blockedWindows) || !next.blockedWindows.every(validRange)) throw new Error('Invalid blocked time window');
-  if (next.restrictedDays && (!Array.isArray(next.restrictedDays) || next.restrictedDays.some((day) => !Number.isInteger(day) || day < 0 || day > 6))) {
+  const next: TimeWindowConfig = { ...currentConfig, ...config };
+  // Validate ranges
+  for (const w of [...(next.allowedWindows || []), ...(next.blockedWindows || [])]) {
+    if (!/^\d{2}:\d{2}$/.test(w.start) || !/^\d{2}:\d{2}$/.test(w.end)) {
+      throw new Error(`Invalid time format: ${w.start}-${w.end}`);
+    }
+  }
+  if (next.restrictedDays && (next.restrictedDays.length > 7 ||
+    next.restrictedDays.some((day) => !Number.isInteger(day) || day < 0 || day > 6))) {
     throw new Error('restrictedDays must contain integers from 0 to 6');
   }
   try {

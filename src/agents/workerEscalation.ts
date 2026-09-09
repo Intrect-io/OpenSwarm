@@ -40,6 +40,10 @@ export function resolveWorkerStageOverrides(input: {
   const escalateModel = workerCfg?.escalateModel;
   const shouldEscalate = iteration >= escalateThreshold && !!escalateModel;
 
+  // The effective model that preceded this escalation — the model actually
+  // used in the previous iteration, not the configured base.
+  const precedingModel = baseModel ?? workerCfg?.model;
+
   let overrides: WorkerStageOverrides | undefined = shouldEscalate
     ? { model: escalateModel }
     : (baseModel ? { model: baseModel } : undefined);
@@ -49,7 +53,7 @@ export function resolveWorkerStageOverrides(input: {
     broadcastEvent({ type: 'pipeline:escalation', data: {
       taskId: input.taskId,
       iteration,
-      fromModel: workerCfg?.model,
+      fromModel: precedingModel,
       toModel: escalateModel,
     } });
   }
@@ -65,12 +69,8 @@ export function resolveWorkerStageOverrides(input: {
  * a configured higher worker model and/or a reasoning-effort bump to 'high'.
  *
  * The model comparison is against the model the NEXT iteration would use
- * anyway: when the iteration-count escalation is already in effect,
- * re-targeting the same escalateModel is a no-op — only the effort bump would
- * add anything, and if that's spent too the caller aborts instead of burning
- * an iteration on an escalation that changes nothing.
- *
- * Returns undefined when no meaningful escalation remains.
+ * anyway: when the iteration-count escalation is already in effect, the
+ * signal has nothing new to offer on the model axis.
  */
 export function buildRepeatEscalation(input: {
   workerCfg: RoleConfig | undefined;
