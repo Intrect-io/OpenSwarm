@@ -95,7 +95,7 @@ async function capturePackageJsons(projectPath: string, commands: VerifyCommand[
   const root = resolve(projectPath);
   for (const command of commands) {
     let directory = resolve(root, command.cwd ?? '.');
-    while (directory === root || directory.startsWith(`${root}/`)) {
+    while (directory === root || directory.startsWith(`${root}${sep}`)) {
       const source = await readFile(join(directory, 'package.json'), 'utf8').catch(() => undefined);
       if (source !== undefined) {
         packages.push([relative(root, directory), source]);

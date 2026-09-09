@@ -410,6 +410,11 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     'chmod 7"7"7 somefile',
     'r${empty}m -rf /foo',
     'r"$(true)"m -rf /foo', // mid-word splice hidden from the raw text by quotes, exposed once they are stripped
+    // AGT-3455 audit: quoting/escaping that reconstructs a blocked verb at
+    // shell-eval time without ever containing its literal contiguous token.
+    'r"m" -rf /foo', // quote-split verb
+    '\\rm -rf /foo', // backslash-escaped verb
+    "g''it clean -fdx", // quote-split git subcommand
   ];
 
   it.each(expansionBypassCommands)('blocks expansion-based bypass: %s', async (cmd) => {
