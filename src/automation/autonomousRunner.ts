@@ -1586,6 +1586,19 @@ export class AutonomousRunner {
             this.durableRuns.markNeedsHuman(run.issueId, `Published PR was closed without merge: ${pr.url}`);
             continue;
           }
+          // A draft is the branch saying it is not finished — either the run
+          // parked and published for visibility, or the PR-time review
+          // rejected it and moved it back (AGT-4270). Recovering it as
+          // 'approved' would close the issue on work nobody accepted, and the
+          // draft flag means no human is prompted to look either. Send it back
+          // to be worked; the commits stay on the branch, so the next attempt
+          // continues instead of starting over.
+          if (pr.isDraft) {
+            if (this.durableRuns.markReady(run.issueId)) {
+              console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) — returned to the queue rather than completed`);
+            }
+            continue;
+          }
           const publishedTask = task ?? runRecordToTask(run);
           const recoveredResult: PipelineResult = {
             success: true,

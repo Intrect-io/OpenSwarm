@@ -37,6 +37,7 @@ vi.mock('node:child_process', () => ({ execFile: execFileMock, spawn: spawnMock 
 import {
   checkPRConflicts,
   commentOnPR,
+  convertPRToDraft,
   getMergedPRsOrThrow,
   getOpenPRs,
   getPRBaseBranch,
@@ -120,6 +121,36 @@ describe('post-merge GitHub state (AGT-4078)', () => {
       mergedAt: '2026-08-30T00:00:00.000Z',
       mergeCommitOid: 'merge-7',
     }]);
+  });
+});
+
+describe('convertPRToDraft (AGT-4270)', () => {
+  beforeEach(() => {
+    execFileMock.mockReset();
+  });
+
+  it('un-readies the pull request through gh, scoped to its own repository', async () => {
+    // --repo matters: `gh pr ready` resolves a bare number against the current
+    // directory's remote, and the daemon calls this from wherever it happens
+    // to be — a missing scope would draft PR 42 of some other repository.
+    mockGhStdout('');
+
+    await convertPRToDraft('acme/repo', 42);
+
+    expect(execFileMock.mock.calls[0]?.[1]).toEqual(['pr', 'ready', '42', '--undo', '--repo', 'acme/repo']);
+  });
+
+  it('propagates a failure instead of swallowing it', async () => {
+    // A PR left marked ready after a rejected review is exactly the state the
+    // caller's rollback exists to stop someone merging, so it has to learn
+    // that the flip did not happen. (The neighbouring commentOnPR swallows —
+    // right for a status ping, wrong here.)
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args.at(-1) as (err: Error | null, stdout: string, stderr: string) => void;
+      callback(new Error('gh: 403 Forbidden'), '', '');
+    });
+
+    await expect(convertPRToDraft('acme/repo', 42)).rejects.toThrow(/403 Forbidden/);
   });
 });
 

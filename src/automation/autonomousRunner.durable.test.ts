@@ -393,6 +393,65 @@ describe('AutonomousRunner durable completion race', () => {
     internal.durableRuns.close();
   });
 
+  it('returns a run whose PR is a draft to the queue instead of completing it (AGT-4270)', async () => {
+    // A draft is the branch saying it is not finished — either the run parked
+    // and published for visibility, or the PR-time review rejected it and
+    // moved it back. `pr list` reports a draft's state as OPEN, so the
+    // recovery below would otherwise read it as delivery and close the issue
+    // Done on work nobody accepted — with the draft flag meaning no human is
+    // prompted to look either.
+    const [{ AutonomousRunner }, execution] = await Promise.all([
+      import('./autonomousRunner.js'),
+      import('./runnerExecution.js'),
+    ]);
+    const bin = join(root, 'draft-bin');
+    const repo = join(root, 'draft-repo');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh
+case "$*" in
+  *"pr list --head"*) echo '[{"url":"https://github.com/acme/repo/pull/92","state":"OPEN","isDraft":true,"headRefOid":"abc92"}]';;
+esac
+`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    const logPairComplete = vi.fn(async () => {});
+    execution.setTaskSource({
+      kind: 'linear',
+      fetchTasks: vi.fn(async () => []),
+      getExecutionComments: vi.fn(async () => []),
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
+      logPairComplete, logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(),
+      logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'draft-recovery.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.durableRuns.importLegacyRun({
+      issueId: 'drafted', source: 'linear', identifier: 'INT-92', title: 'rejected at PR time',
+      projectPath: repo, state: 'NEEDS_RECONCILE', branchName: 'swarm/INT-92',
+    });
+    internal.executePipeline = vi.fn(async () => resultFixture());
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath}`;
+    try {
+      await internal.reconcileDurableArtifacts([]);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+
+    // Back in the queue, not completed: the issue stays open and the commits
+    // stay on the branch, so the next attempt continues rather than restarting.
+    expect(internal.durableRuns.getRun('drafted')).toMatchObject({ state: 'READY' });
+    expect(logPairComplete).not.toHaveBeenCalled();
+    internal.durableRuns.close();
+  });
+
   it('recovers a PR published before process death without rerunning the pipeline', async () => {
     const [{ AutonomousRunner }, execution] = await Promise.all([
       import('./autonomousRunner.js'),

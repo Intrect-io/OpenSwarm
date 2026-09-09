@@ -20,7 +20,7 @@ describe('PR-time publication review', () => {
     freshReview.mockResolvedValue({ success: true, iterations: 0, gateRan: true });
     await expect(reviewPublishedPullRequest({
       prUrl: 'https://github.com/acme/repo/pull/42', projectPath: '/work/repo',
-    })).resolves.toEqual({ success: true, error: undefined, gateRan: true });
+    })).resolves.toEqual({ success: true, error: undefined, gateRan: true, changesRequested: undefined });
     expect(freshReview).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'acme/repo', number: 42 }),
       '/work/repo',

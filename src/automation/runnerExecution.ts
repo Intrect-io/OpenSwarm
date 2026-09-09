@@ -1227,10 +1227,11 @@ export async function executePipeline(
         // issue closed, the worktree deleted, the PR left sitting there
         // looking ready to merge.
         //
-        // `gateRan === false` is the review failing to run at all (a bad URL,
-        // a crashed processor). That says nothing about the code, so it must
-        // not roll a good PR back.
-        if (review.success || review.gateRan === false) return;
+        // Only the reviewer's own objection rolls anything back. `success`
+        // is also false when the review merely broke — no diff, a crashed
+        // processor, or a failure posting the comment AFTER an approval —
+        // and none of those say anything about the code.
+        if (!review.changesRequested) return;
         await rollBackReviewedPublication({ prUrl, task, result, error: review.error });
       } : undefined,
     );

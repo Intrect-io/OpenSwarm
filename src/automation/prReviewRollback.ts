@@ -4,7 +4,7 @@
 
 import { convertPRToDraft } from '../github/index.js';
 import { broadcastEvent } from '../core/eventHub.js';
-import { parsePublishedPullRequest } from './prPublicationReview.js';
+import { parsePublishedPullRequest } from './publishedPullRequest.js';
 
 /** Marker on `failureDetail` so the ledger and the retry can recognise this cause. */
 export const PR_REVIEW_ROLLBACK_PREFIX = 'pr-review: changes requested';
