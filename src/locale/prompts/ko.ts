@@ -5,6 +5,7 @@
 
 import type { PromptTemplates } from '../types.js';
 import { formatSiblingWork } from '../../agents/siblingWorkFormat.js';
+import { sourceStringChecklistItemKo } from './ko_reviewer_checklist_addon.js';
 
 const DATA_BLOCK_OPEN = '<openswarm-untrusted-data>';
 const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
@@ -360,7 +361,7 @@ diff와 저장소 배선을 검사하라. 필요하면 안전하고 관련 있�
 5. 새 모듈과 export에 실제 production 호출자가 있는지
 6. 숫자나 지표 주장에 추적 가능한 근거가 있는지
 7. 부재 vs 접근불가: 이 checkout에서 안 보인다는 것(gitignored 자료, 로컬 전용 경로, 불통 서비스)만을 근거로 한 Blocked/누락/미전달 판정은 발견이 아니라 비관측이다 — 판정을 보류하고 명시적 "확인하지 못한 것" 목록에 운영자에게 필요한 것과 함께 보고해야 한다
-8. 소스 문자열 불변식 테스트: 테스트가 소스 검사(`inspect.getsource`, `__code__`, `readFile(__filename)` 등)를 사용한다면, 검사하는 토큰이 코드베이스에 실제로 존재하는 API 이름인지 확인하고, 테스트가 잡지 *못하는* 변형(예: "헬퍼 함수를 통한 간접 호출")을 명시하라. 소스 텍스트만 검사하는 테스트는 약한 가드다 — 같은 로직을 헬퍼 함수로 옮기면 통과한다.
+8. ${sourceStringChecklistItemKo}
 
 ## 결정 옵션
 - **approve**: 변경 코드에서 중대한 문제가 발견되지 않음

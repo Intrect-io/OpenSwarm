@@ -4,6 +4,7 @@
 
 import type { PromptTemplates } from '../types.js';
 import { formatSiblingWork } from '../../agents/siblingWorkFormat.js';
+import { sourceStringChecklistItem } from './en_reviewer_checklist_addon.js';
 
 const DATA_BLOCK_OPEN = '<openswarm-untrusted-data>';
 const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
@@ -362,7 +363,7 @@ coverage only when the code or diff provides concrete evidence of that gap.
 5. New modules and exports have real production callers
 6. Numeric or metric claims have traceable evidence
 7. Absence vs inaccessibility: a verdict (Blocked / missing / not delivered) grounded solely in something being absent from this checkout (gitignored data, local-only paths, unreachable services) is a non-observation, not a finding — it must be withheld and reported under an explicit "Could not verify" list with what is needed from the operator
-8. Source-string invariant tests: if the test uses source inspection (e.g., `inspect.getsource`, `__code__`, `readFile(__filename)`), verify it checks for real API names that exist in the codebase and document what mutation it cannot catch (e.g., "indirect calls via helper"). A test that only checks source text is a weak guard — it passes when the same logic is moved to a helper function.
+8. ${sourceStringChecklistItem}
 
 ## Decision Options
 - **approve**: No material issue found in the changed code
