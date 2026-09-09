@@ -25,6 +25,7 @@ import {
   OPERATOR_QUESTION_PARK_REASON,
 } from '../coordination/operatorAnswers.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
+import type { CoordinatorResolution } from './coordinatorResolution.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -64,6 +65,16 @@ export interface DurableExecuteOptions {
   /** Service shutdown is a resumable interruption, unlike an operator cancel. */
   retryCancellation?: (result: PipelineResult, claim: RunClaim) => boolean;
   admission?: RepositoryAdmissionPolicy;
+  /**
+   * Resolve a deterministic operator park before it is committed to
+   * NEEDS_HUMAN. The callback is pure policy; tracker/ledger side effects stay
+   * in this coordinator so a completion or bounded retry cannot split state.
+   */
+  resolveOperatorPark?: (
+    task: TaskItem,
+    result: PipelineResult,
+    attemptNo: number,
+  ) => CoordinatorResolution | undefined;
 }
 
 export interface RepositoryAdmissionPolicy {
@@ -626,6 +637,35 @@ export class DurableRunCoordinator {
     }
 
     if (leaseLost) return fencedResult(result);
+    // A deterministic park is normally terminal. A repository-authored DoD
+    // contract may, however, make two narrow outcomes coordinator-owned:
+    // explicitly accepted no-change work can complete through the normal
+    // outbox, and an ephemeral-only publication fence may receive one bounded
+    // retry. Resolve before recording the attempt so the durable row records
+    // the outcome that actually governs the next state.
+    if (result.operatorPark && options.resolveOperatorPark) {
+      const resolution = options.resolveOperatorPark(task, result, claim.attemptNo);
+      if (resolution?.action === 'complete') {
+        result = {
+          ...result,
+          success: true,
+          finalStatus: 'approved',
+          operatorPark: undefined,
+          coordinatorResolution: { action: 'complete', reason: resolution.reason },
+        };
+      } else if (resolution?.action === 'retry') {
+        result = {
+          ...result,
+          success: false,
+          finalStatus: 'deferred',
+          retryAt: resolution.retryAt,
+          operatorPark: undefined,
+          coordinatorResolution: { action: 'retry', reason: resolution.reason },
+          failureDetail: `coordinator: ${resolution.reason}`,
+        };
+      }
+    }
+
     // GitHub publication is an external side effect. If it succeeded but the
     // pipeline could not durably attach/finalize it, execution must stop here:
     // a normal RETRY_AT would allow another worker to mutate the published

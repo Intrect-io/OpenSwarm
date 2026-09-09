@@ -37,6 +37,7 @@ import {
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
 } from '../automation/durableRunCoordinator.js';
+import { planCoordinatorResolution } from '../automation/coordinatorResolution.js';
 import type { EffectClaim } from '../automation/runLedger.js';
 import { setAutomationDbPath } from '../automation/automationDbPath.js';
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
@@ -612,6 +613,11 @@ async function runWorkCommandInner(
             cancelEffect: (_result, claim) => buildWorkCancellationEffect(row.task, claim.attemptNo),
             // Interruptions are resumable — never turn Ctrl-C into a tracker cancel.
             retryCancellation: () => true,
+            resolveOperatorPark: (parkedTask, parkedResult, attemptNo) => planCoordinatorResolution({
+              task: parkedTask,
+              result: parkedResult,
+              attemptNo,
+            }),
           },
         );
       }, (settled) => {
