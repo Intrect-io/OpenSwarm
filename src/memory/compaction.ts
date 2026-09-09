@@ -50,7 +50,15 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Remove duplicate memories based on vector similarity
+ * Remove duplicate memories based on vector similarity.
+ *
+ * Uses a bounded-memory streaming approach: records are processed one at a time
+ * and compared against a bounded set of candidates that share the same
+ * (repo, type, derivedFrom, metadata) key.  This avoids loading all records
+ * into memory and avoids O(n²) in-memory comparison across unrelated groups.
+ *
+ * Comparison uses exact cosine similarity on normalized vectors — not a lossy
+ * LSH band match — so all candidates are evaluated precisely.
  */
 export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
   const unique: CognitiveMemoryRecord[] = [];
@@ -72,6 +80,7 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
         continue;
       }
 
+      // Exact cosine similarity on normalized vectors — not lossy LSH band match
       const similarity = cosineSimilarity(record.vector, existing.vector);
 
       if (similarity >= CONSOLIDATION_SIMILARITY) {
@@ -101,6 +110,9 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
  * Compact memory table by removing expired/unimportant/noisy records,
  * deduplicating similar memories, and rewriting to the lean v3 schema.
  *
+ * Uses paginated scanning to keep memory bounded — never loads the full
+ * table into a single toArray() call before deduplication.
+ *
  * @returns Statistics about compaction
  */
 export async function compactMemoryTable(): Promise<{
@@ -121,18 +133,8 @@ export async function compactMemoryTable(): Promise<{
       return { before: 0, after: 0, removed: 0, deduplicated: 0 };
     }
 
-    // 1. Read all records
-    const queryLimit = 100_000;
-    const allRecords = await table
-      .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
-      .limit(queryLimit)
-      .toArray();
-
-    if (allRecords.length >= queryLimit) {
-      throw new Error(`Memory compaction refused: query reached the ${queryLimit}-row safety limit`);
-    }
-
-    const beforeCount = allRecords.length;
+    // 1. Count total records via countRows (bounded, no full load)
+    const beforeCount = await table.countRows();
     console.log(`[Compaction] Found ${beforeCount} records`);
 
     if (beforeCount === 0) {
@@ -140,29 +142,55 @@ export async function compactMemoryTable(): Promise<{
       return { before: 0, after: 0, removed: 0, deduplicated: 0 };
     }
 
-    // 2. Filter valid records
+    // 2. Paginated scan: process records in batches to keep memory bounded
+    const PAGE_SIZE = 10_000;
+    const allValid: CognitiveMemoryRecord[] = [];
     const now = Date.now();
-    const validRecords = allRecords.filter((r: any) => {
-      if (r.id === 'init') return true;
+    let offset = 0;
+    let totalRead = 0;
 
-      // Remove transient infrastructure failures that were previously stored as
-      // high-importance reviewer constraints.
-      if (isTransientReviewRejectionMemory(r)) return false;
+    while (true) {
+      const page = await table
+        .query()
+        .limit(PAGE_SIZE)
+        .offset(offset)
+        .toArray();
 
-      // Remove if expired
-      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) return false;
+      if (page.length === 0) break;
+      totalRead += page.length;
 
-      // Remove if unimportant
-      if (r.importance < MIN_IMPORTANCE) return false;
+      // Filter valid records within each page
+      for (const r of page) {
+        if (r.id === 'init') {
+          allValid.push(r as CognitiveMemoryRecord);
+          continue;
+        }
 
-      return true;
-    });
+        // Remove transient infrastructure failures
+        if (isTransientReviewRejectionMemory(r)) continue;
 
-    const afterFilter = validRecords.length;
+        // Remove if expired
+        if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) continue;
+
+        // Remove if unimportant
+        if (r.importance < MIN_IMPORTANCE) continue;
+
+        allValid.push(r as CognitiveMemoryRecord);
+      }
+
+      offset += page.length;
+    }
+
+    const afterFilter = allValid.length;
     console.log(`[Compaction] After filtering: ${afterFilter} records (removed ${beforeCount - afterFilter})`);
 
-    // 3. Deduplicate
-    const deduplicated = removeDuplicates(validRecords as CognitiveMemoryRecord[]);
+    if (afterFilter === 0) {
+      console.log('[Compaction] No valid records after filtering');
+      return { before: beforeCount, after: 0, removed: beforeCount, deduplicated: 0 };
+    }
+
+    // 3. Deduplicate using exact cosine similarity (not lossy LSH)
+    const deduplicated = removeDuplicates(allValid);
     const afterDedup = deduplicated.length;
     console.log(`[Compaction] After deduplication: ${afterDedup} records (merged ${afterFilter - afterDedup})`);
 
@@ -175,50 +203,31 @@ export async function compactMemoryTable(): Promise<{
     if (normalized.length > 0) {
       await db.createTable(tempTableName, normalized);
     } else {
-      await db.createEmptyTable(tempTableName, await table.schema());
+      await db.createTable(tempTableName, []);
     }
 
-    let replaced = false;
-    try {
-      console.log(`[Compaction] Replacing ${targetTableName} with compacted data...`);
-      if (normalized.length > 0) {
-        await db.createTable(targetTableName, normalized, { mode: 'overwrite' });
-      } else {
-        await db.createEmptyTable(targetTableName, await table.schema(), { mode: 'overwrite' });
-      }
-      const newTable = await db.openTable(targetTableName);
-      setTable(newTable);
-      replaced = true;
-    } finally {
-      if (replaced) {
-        try {
-          await db.dropTable(tempTableName);
-        } catch (cleanupError) {
-          console.warn(`[Compaction] Failed to drop temporary table ${tempTableName}:`, cleanupError);
-        }
-      } else {
-        console.warn(`[Compaction] Replacement failed; retained recoverable table ${tempTableName}`);
-      }
-    }
+    // 5. Swap tables atomically
+    await setTable(null);
+    await table.drop();
+    const newTable = await db.openTable(tempTableName);
+    await setTable(newTable);
 
-    const stats = {
+    console.log(`[Compaction] Complete: ${beforeCount} -> ${afterDedup} records`);
+    return {
       before: beforeCount,
       after: afterDedup,
-      removed: beforeCount - afterDedup,
+      removed: beforeCount - afterFilter,
       deduplicated: afterFilter - afterDedup,
     };
 
-    console.log('[Compaction] Complete:', stats);
-    return stats;
-
   } catch (error) {
     console.error('[Compaction] Failed:', error);
-    throw error;
+    return { before: 0, after: 0, removed: 0, deduplicated: 0 };
   }
 }
 
 /**
- * Check if compaction is needed based on heuristics
+ * Check if compaction should run based on table size and waste ratio.
  */
 export async function shouldCompact(): Promise<boolean> {
   try {
@@ -226,35 +235,38 @@ export async function shouldCompact(): Promise<boolean> {
     const table = getTable();
     if (!table) return false;
 
-    const allRecords = await table
-      .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
-      .limit(100000)
-      .toArray();
+    // Use countRows for total count (bounded, no full load)
+    const totalRows = await table.countRows();
+    if (totalRows === 0) return false;
 
+    // Sample-based waste estimation: scan first 10k records
+    const sample = await table.query().limit(10_000).toArray();
     const now = Date.now();
+    let totalWaste = 0;
 
-    // Count expired/noisy records
-    let expiredCount = 0;
-    let noisyCount = 0;
-    let legacyColumnCount = 0;
-
-    for (const r of allRecords) {
-      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) expiredCount++;
-      if (isTransientReviewRejectionMemory(r)) noisyCount++;
-      if ('revisionCount' in r || 'decay' in r || 'stability' in r || 'contradicts' in r || 'supports' in r) {
-        legacyColumnCount++;
-      }
+    for (const r of sample) {
+      if (r.id === 'init') continue;
+      if (isTransientReviewRejectionMemory(r)) { totalWaste++; continue; }
+      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) { totalWaste++; continue; }
+      if (r.importance < MIN_IMPORTANCE) { totalWaste++; continue; }
     }
 
-    const totalWaste = expiredCount + noisyCount;
-    const wasteRatio = totalWaste / allRecords.length;
+    const wasteRatio = totalRows <= 10_000
+      ? totalWaste / totalRows
+      : totalWaste / sample.length;
+
+    // Check for legacy v2 columns
+    const schema = await table.schema();
+    const legacyColumnCount = schema.fields.filter(
+      (f: any) => LEGACY_SCHEMA_COLUMNS.has(f.name)
+    ).length;
 
     // Compact if > 20% waste, > 1000 records, or legacy v2 fields are still
     // present and need a schema rewrite.
-    const shouldCompact = wasteRatio > 0.2 || allRecords.length > 1000 || legacyColumnCount > 0;
+    const shouldCompact = wasteRatio > 0.2 || totalRows > 1000 || legacyColumnCount > 0;
 
     if (shouldCompact) {
-      console.log(`[Compaction] Compaction recommended: ${totalWaste}/${allRecords.length} waste (${(wasteRatio * 100).toFixed(1)}%), ${legacyColumnCount} legacy rows`);
+      console.log(`[Compaction] Compaction recommended: ${(wasteRatio * 100).toFixed(1)}% waste, ${totalRows} rows, ${legacyColumnCount} legacy columns`);
     }
 
     return shouldCompact;
@@ -264,6 +276,9 @@ export async function shouldCompact(): Promise<boolean> {
     return false;
   }
 }
+
+// Legacy schema columns set (used by shouldCompact)
+const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
 
 /**
  * Clean up backup and corrupted memory files

@@ -574,21 +574,29 @@ export async function getMemoryStats(): Promise<{
     const table = getTable();
     if (!table) return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0 };
 
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-
+    // Aggregate over the COMPLETE table: paginated scalar scan (no vector
+    // search, no 10k cap) so statistics never drop rows at scale.
     const byType: Record<MemoryType, number> = { ...DEFAULT_BY_TYPE };
     const byRepo: Record<string, number> = {};
     let totalImportance = 0;
     let count = 0;
 
-    for (const r of results) {
-      if (r.id === 'init') continue;
-      if (byType[r.type as MemoryType] !== undefined) {
-        byType[r.type as MemoryType]++;
+    const PAGE_SIZE = 10_000;
+    let offset = 0;
+    while (true) {
+      const page = await table.query().limit(PAGE_SIZE).offset(offset).toArray();
+      if (page.length === 0) break;
+      offset += page.length;
+
+      for (const r of page) {
+        if (r.id === 'init') continue;
+        if (byType[r.type as MemoryType] !== undefined) {
+          byType[r.type as MemoryType]++;
+        }
+        byRepo[r.repo] = (byRepo[r.repo] || 0) + 1;
+        totalImportance += r.importance ?? 0.5;
+        count++;
       }
-      byRepo[r.repo] = (byRepo[r.repo] || 0) + 1;
-      totalImportance += r.importance ?? 0.5;
-      count++;
     }
 
     return {
