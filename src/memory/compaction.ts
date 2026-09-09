@@ -45,20 +45,18 @@ function cosineSimilarity(a: number[], b: number[]): number {
     normB += b[i] * b[i];
   }
 
-  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-  return denominator === 0 ? 0 : dotProduct / denominator;
+  if (normA === 0 || normB === 0) return 0;
+
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+const LEGACY_SCHEMA_COLUMNS = new Set([
+  'embedding', 'v2_metadata', 'v2_tags', 'v2_category',
+]);
+
 /**
- * Remove duplicate memories based on vector similarity.
- *
- * Uses a bounded-memory streaming approach: records are processed one at a time
- * and compared against a bounded set of candidates that share the same
- * (repo, type, derivedFrom, metadata) key.  This avoids loading all records
- * into memory and avoids O(n²) in-memory comparison across unrelated groups.
- *
- * Comparison uses exact cosine similarity on normalized vectors — not a lossy
- * LSH band match — so all candidates are evaluated precisely.
+ * Remove duplicate records using exact cosine similarity on all candidates
+ * — not lossy LSH band match — so all candidates are evaluated precisely.
  */
 export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
   const unique: CognitiveMemoryRecord[] = [];
@@ -189,7 +187,7 @@ export async function compactMemoryTable(): Promise<{
       return { before: beforeCount, after: 0, removed: beforeCount, deduplicated: 0 };
     }
 
-    // 3. Deduplicate using exact cosine similarity (not lossy LSH)
+    // 3. Deduplicate using exact cosine similarity on all candidates
     const deduplicated = removeDuplicates(allValid);
     const afterDedup = deduplicated.length;
     console.log(`[Compaction] After deduplication: ${afterDedup} records (merged ${afterFilter - afterDedup})`);
@@ -206,9 +204,10 @@ export async function compactMemoryTable(): Promise<{
       await db.createTable(tempTableName, []);
     }
 
-    // 5. Swap tables atomically
+    // 5. Swap tables atomically: use db.dropTable() (not table.drop()) for
+    //    LanceDB compatibility — Table.drop() does not exist on the type.
     await setTable(null);
-    await table.drop();
+    await db.dropTable(targetTableName);
     const newTable = await db.openTable(tempTableName);
     await setTable(newTable);
 
@@ -265,41 +264,30 @@ export async function shouldCompact(): Promise<boolean> {
     // present and need a schema rewrite.
     const shouldCompact = wasteRatio > 0.2 || totalRows > 1000 || legacyColumnCount > 0;
 
-    if (shouldCompact) {
-      console.log(`[Compaction] Compaction recommended: ${(wasteRatio * 100).toFixed(1)}% waste, ${totalRows} rows, ${legacyColumnCount} legacy columns`);
-    }
-
+    console.log(`[Compaction] Check: ${totalRows} rows, ${(wasteRatio * 100).toFixed(1)}% waste, ${legacyColumnCount} legacy columns → ${shouldCompact ? 'compact' : 'skip'}`);
     return shouldCompact;
-
   } catch (error) {
-    console.error('[Compaction] shouldCompact check failed:', error);
+    console.error('[Compaction] Check error:', error);
     return false;
   }
 }
 
-// Legacy schema columns set (used by shouldCompact)
-const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
-
 /**
- * Clean up backup and corrupted memory files
+ * Clean up backup files from previous compaction runs
  */
 export async function cleanupBackupFiles(): Promise<number> {
-  const { readdir, unlink } = await import('fs/promises');
-  const { resolve } = await import('path');
-  const { homedir } = await import('os');
-
-  const memoryDir = resolve(homedir(), '.openswarm/memory');
-
   try {
-    const files = await readdir(memoryDir);
+    const { readdir, unlink } = await import('fs/promises');
+    const path = await import('path');
+    const os = await import('os');
+    const tmpDir = os.tmpdir();
+
+    const files = await readdir(tmpDir);
     let removed = 0;
 
     for (const file of files) {
-      // Remove .corrupted and .bak files/directories
-      if (file.includes('.corrupted') || file.endsWith('.bak')) {
-        const fullPath = resolve(memoryDir, file);
-        console.log(`[Cleanup] Removing backup: ${file}`);
-
+      if (file.startsWith('memory_backup_') || file.startsWith('memory_compact_')) {
+        const fullPath = path.join(tmpDir, file);
         try {
           // Try to remove as file first, then as directory
           await unlink(fullPath).catch(async () => {
