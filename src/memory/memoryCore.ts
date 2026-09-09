@@ -225,60 +225,99 @@ let table: Table | null = null;
 let initInFlight: Promise<void> | null = null;
 
 /**
- * A store that cannot be opened fails on *every* recall, and each caller
+ * Recall fails on *every* call once the store is broken, and each caller
  * swallows the throw — so the same stack traced 95 times in five minutes on
  * vela (AGT-4267), burying every other diagnostic line while the one fact that
- * mattered ("recall is off") was never stated. Report the first occurrence and
- * then only on a change or once a window has passed, carrying the count so the
- * scale is still visible.
+ * mattered ("recall is off") was never stated. Report the first occurrence,
+ * then suppress until the window passes, carrying the count and any other
+ * messages seen so the scale is still visible.
+ *
+ * Tracked by phase, because the two failures are genuinely different: `open`
+ * means the store could not be opened at all, `query` means it opened and then
+ * broke under us. A store can break either way — vela's corruption came from a
+ * single interrupted write, so whether the daemon met it at open time or
+ * mid-run was purely a matter of when it last restarted. Suppressing an open
+ * failure must not hide a query failure, or the second kind stays invisible
+ * exactly the way the first one used to be.
+ *
+ * Suppression is by phase and NOT by message. Keying it on the message means a
+ * store alternating between two error strings matches neither and reports on
+ * every single recall, which is the original unbounded logging wearing a hat.
  *
  * Deliberately not a permanent disable: the vela outage was repaired by moving
  * seven zero-byte manifests aside, and recall came back on the next call with
  * no restart. A latch would have kept it dark until someone noticed.
  */
-const DB_INIT_REPORT_WINDOW_MS = 10 * 60_000;
-let dbInitFailure: { message: string; reportedAt: number; suppressedCount: number } | null = null;
+const RECALL_REPORT_WINDOW_MS = 10 * 60_000;
+type RecallPhase = 'open' | 'query';
+type RecallFailure = {
+  phase: RecallPhase;
+  message: string;
+  reportedAt: number;
+  suppressedCount: number;
+  alsoSeen: Set<string>;
+};
+let recallFailure: RecallFailure | null = null;
 
-/** Whether long-term recall is currently unavailable, and why. */
-export function memoryRecallStatus(): { available: boolean; error?: string; suppressedCount?: number } {
-  if (!dbInitFailure) return { available: true };
+/**
+ * Whether long-term recall is currently working, and if not, why.
+ *
+ * `available: false` is the answer to a question callers could not previously
+ * ask: an empty result meant "nothing matched" and "the store is dead" alike.
+ */
+export function memoryRecallStatus(): {
+  available: boolean;
+  phase?: RecallPhase;
+  error?: string;
+  suppressedCount?: number;
+} {
+  if (!recallFailure) return { available: true };
   return {
     available: false,
-    error: dbInitFailure.message,
-    suppressedCount: dbInitFailure.suppressedCount,
+    phase: recallFailure.phase,
+    error: recallFailure.message,
+    suppressedCount: recallFailure.suppressedCount,
   };
 }
 
-function reportDbInitFailure(error: unknown): void {
+function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   const message = error instanceof Error ? error.message : String(error);
   const now = Date.now();
-  const previous = dbInitFailure;
-  if (previous && previous.message === message && now - previous.reportedAt < DB_INIT_REPORT_WINDOW_MS) {
+  const previous = recallFailure;
+  if (previous && previous.phase === phase && now - previous.reportedAt < RECALL_REPORT_WINDOW_MS) {
     previous.suppressedCount += 1;
+    if (message !== previous.message) previous.alsoSeen.add(message);
     return;
   }
-  // Carry the count across a changed message too. Keying the credit on message
-  // equality means a store that alternates between two error strings reports
-  // "0 suppressed" forever while burying every occurrence of each.
   const suppressed = previous?.suppressedCount ?? 0;
-  const priorNote = previous && previous.message !== message ? `, last reported: ${previous.message}` : '';
-  const tail = suppressed > 0 ? ` (${suppressed} failure(s) suppressed since the last report${priorNote})` : '';
-  console.error(`[Memory] Long-term recall is UNAVAILABLE — the store could not be opened${tail}: ${message}`);
-  dbInitFailure = { message, reportedAt: now, suppressedCount: 0 };
+  const others = previous ? [...previous.alsoSeen, previous.message].filter(m => m !== message) : [];
+  const parts = [
+    suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
+    others.length > 0 ? `also seen: ${others.join('; ')}` : '',
+  ].filter(Boolean);
+  const tail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+  const what = phase === 'open' ? 'the store could not be opened' : 'the store opened but recall failed';
+  console.error(`[Memory] Long-term recall is UNAVAILABLE — ${what}${tail}: ${message}`);
+  recallFailure = { phase, message, reportedAt: now, suppressedCount: 0, alsoSeen: new Set() };
 }
 
-function clearDbInitFailure(): void {
-  if (!dbInitFailure) return;
+function clearRecallFailure(phase: RecallPhase): void {
+  // Phase-scoped because an open that succeeds proves nothing about whether
+  // queries against that handle work. The two cannot cross today — a query
+  // failure leaves `db`/`table` set, so `openDatabase` never runs again to
+  // clear it — which is why no test pins this; it is a guard against that
+  // invariant changing, not against anything observed.
+  if (recallFailure?.phase !== phase) return;
   // Deliberately stderr, matching the outage report. A daemon that captures the
   // two streams separately would otherwise show an outage in its error log that
   // never ends, which is the same unreadability this whole block exists to fix.
   console.error(`${status.ok('[Memory] long-term recall restored')}`);
-  dbInitFailure = null;
+  recallFailure = null;
 }
 
 /** Tests need the module's failure memory back at its initial state. */
 export function resetMemoryRecallStatusForTests(): void {
-  dbInitFailure = null;
+  recallFailure = null;
   initInFlight = null;
 }
 const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
@@ -668,6 +707,12 @@ export function calculateImportance(
  * open makes the call that nulls the handles the same call that assigned them.
  */
 export function initDatabase(): Promise<void> {
+  // The in-flight check comes FIRST. `openDatabase` assigns `table` and only
+  // then runs the schema migration, which rewrites that table with
+  // `mode: 'overwrite'` — so during the migration `db && table` are both
+  // truthy and a fast-pathing caller would query a handle whose storage is
+  // being replaced underneath it.
+  if (initInFlight) return initInFlight;
   if (db && table) return Promise.resolve();
   initInFlight ??= openDatabase().finally(() => { initInFlight = null; });
   return initInFlight;
@@ -721,13 +766,13 @@ async function openDatabase(): Promise<void> {
     }
 
     warnOnEmbeddingDrift();
-    clearDbInitFailure();
+    clearRecallFailure('open');
   } catch (error) {
     // A half-open connection would make the next call report success and then
     // fail on the table instead, which is how this looked like a query bug.
     db = null;
     table = null;
-    reportDbInitFailure(error);
+    reportRecallFailure(error, 'open');
     throw error;
   }
 }
@@ -1042,8 +1087,25 @@ export async function searchMemorySafe(
   query: string,
   options: SearchOptions = {}
 ): Promise<SearchResult> {
+  // Opening is its own phase. Folding it into the outer try reported a dead
+  // store as QUERY_FAILED — `await initDatabase()` throws, so the branch below
+  // written for exactly this case was unreachable — and made the outer catch
+  // guess which kind of failure it was holding. repoKnowledge renders this code
+  // straight into the agent's prompt, so the guess was visible to the model.
   try {
     await initDatabase();
+  } catch (error) {
+    // openDatabase already reported this under the rate limit; a second line
+    // per recall is what buried the log (AGT-4267).
+    return {
+      success: false,
+      memories: [],
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: 'DB_INIT_FAILED',
+    };
+  }
+
+  try {
     if (!table) {
       return {
         success: false,
@@ -1156,26 +1218,21 @@ export async function searchMemorySafe(
       similarityScore: similarity,
     }));
 
+    clearRecallFailure('query');
     console.log(`${status.info(`[Memory] found ${formatted.length} memories`)} ${c.dim('hybrid retrieval')} ${c.dim(`query: "${query.slice(0, 30)}..."`)}`);
     return { success: true, memories: formatted };
 
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    const recall = memoryRecallStatus();
-    // An unopenable store surfaces here too, once per recall, because the throw
-    // from initDatabase lands in this catch. That duplicate is what made the log
-    // unreadable (AGT-4267) — but silence it by identity, not by "an outage is
-    // outstanding". The broader guard would also swallow a genuine query error
-    // that happened to coincide with one.
-    if (recall.error !== errorMsg) console.error('[Memory] Search error:', error);
+    // A store that breaks AFTER a successful open never reaches openDatabase
+    // again — the `db && table` fast path holds forever — so before this every
+    // such recall printed a full stack, unbounded, while memoryRecallStatus()
+    // still answered "available". Same rate limit, own phase.
+    reportRecallFailure(error, 'query');
     return {
       success: false,
       memories: [],
-      error: errorMsg,
-      // `await initDatabase()` throws, so the DB_INIT_FAILED branch above never
-      // sees this case and callers were told a dead store was a failed query.
-      // repoKnowledge renders this code straight into the agent's prompt.
-      errorCode: recall.available ? 'QUERY_FAILED' : 'DB_INIT_FAILED',
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: 'QUERY_FAILED',
     };
   }
 }

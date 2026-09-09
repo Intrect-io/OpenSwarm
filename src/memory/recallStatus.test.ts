@@ -100,26 +100,136 @@ describe('memory recall status (AGT-4267)', () => {
 
     const reports = reportsIn(errors);
     expect(reports).toHaveLength(2);
-    expect(reports[1]).toContain('4 failure(s) suppressed since the last report');
+    expect(reports[1]).toContain('4 further failure(s) since the last report');
     expect(core.memoryRecallStatus().suppressedCount).toBe(0);
   });
 
-  it('reports again when the failure changes, and does not lose the earlier count', async () => {
-    connect.mockRejectedValue(corrupt());
+  it('bounds reports even when the store alternates between two errors', async () => {
+    // Suppressing only *identical* messages matches neither of an alternating
+    // pair, so every recall reports — the original unbounded logging wearing a
+    // hat. The window has to bound reports, not identical reports.
     const core = await import('./memoryCore.js');
     core.resetMemoryRecallStatusForTests();
-    for (let i = 0; i < 4; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+    let n = 0;
+    connect.mockImplementation(async () => {
+      n += 1;
+      throw n % 2 === 0 ? new Error('Too many concurrent writers') : corrupt();
+    });
 
+    for (let i = 0; i < 20; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+
+    const reports = reportsIn(errors);
+    expect(reports).toHaveLength(1);
+    expect(core.memoryRecallStatus().suppressedCount).toBe(19);
+  });
+
+  it('names the other errors it saw while suppressing, not just the last one', async () => {
+    vi.useFakeTimers();
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    connect.mockRejectedValueOnce(corrupt());
+    await expect(core.initDatabase()).rejects.toThrow();
     connect.mockRejectedValue(new Error('ENOSPC: no space left on device'));
+    for (let i = 0; i < 3; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+
+    vi.advanceTimersByTime(11 * 60_000);
     await expect(core.initDatabase()).rejects.toThrow();
 
     const reports = reportsIn(errors);
     expect(reports).toHaveLength(2);
     expect(reports[1]).toContain('ENOSPC');
-    // Crediting the count only when the message matches would let two
-    // alternating errors report "0 suppressed" forever while burying both.
-    expect(reports[1]).toContain('3 failure(s) suppressed');
+    expect(reports[1]).toContain('3 further failure(s)');
+    // The suppressed window held a different error; dropping it loses the only
+    // record that the store failed two distinct ways.
     expect(reports[1]).toContain('Invalid range 0..0');
+  });
+
+  it('rate-limits a store that breaks AFTER it opened, and stops claiming it is available', async () => {
+    // The `db && table` fast path holds for the process lifetime, so this never
+    // re-enters openDatabase: before, 40 recalls printed 40 stacks while
+    // memoryRecallStatus() answered available:true for a store failing 100% of
+    // recalls. vela's corruption came from one interrupted write, so meeting it
+    // mid-run rather than at startup was purely a matter of restart timing.
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    connect.mockResolvedValue({
+      ...openable(),
+      openTable: async () => ({
+        schema: async () => ({ fields: [] }),
+        vectorSearch: () => { throw corrupt(); },
+      }),
+    });
+
+    for (let i = 0; i < 40; i += 1) {
+      const res = await core.searchMemorySafe('anything');
+      expect(res.errorCode).toBe('QUERY_FAILED');
+    }
+
+    expect(reportsIn(errors)).toHaveLength(1);
+    expect(reportsIn(errors)[0]).toContain('the store opened but recall failed');
+    const st = core.memoryRecallStatus();
+    expect(st.available).toBe(false);
+    expect(st.phase).toBe('query');
+    expect(st.suppressedCount).toBe(39);
+  });
+
+  it('clears a query-phase outage when a recall actually succeeds again', async () => {
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    let broken = true;
+    connect.mockResolvedValue({
+      ...openable(),
+      openTable: async () => ({
+        schema: async () => ({ fields: [] }),
+        vectorSearch: () => {
+          if (broken) throw corrupt();
+          return { where: () => ({ limit: () => ({ toArray: async () => [] }) }) };
+        },
+      }),
+    });
+    await core.searchMemorySafe('anything');
+    expect(core.memoryRecallStatus().phase).toBe('query');
+
+    broken = false;
+    await core.searchMemorySafe('anything');
+
+    expect(core.memoryRecallStatus().available).toBe(true);
+    expect(errors.some(e => e.includes('long-term recall restored'))).toBe(true);
+  });
+
+  it('makes a caller arriving mid-open wait rather than reading a table being rewritten', async () => {
+    // openDatabase assigns `table` and only then runs the schema migration,
+    // which rewrites that table with mode:'overwrite'. Checking `db && table`
+    // before the in-flight promise let a second caller fast-path straight onto
+    // the handle whose storage was being replaced.
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    let releaseMigration: () => void = () => {};
+    let migrationEntered: () => void = () => {};
+    const migrationGate = new Promise<void>(r => { releaseMigration = r; });
+    // Resolves the moment the migration starts reading the schema, i.e. exactly
+    // when `table` is assigned but its storage is about to be rewritten. Waiting
+    // a fixed number of ticks instead would let the second call arrive before
+    // `table` was set, where both orderings behave the same and pin nothing.
+    const migrationStarted = new Promise<void>(r => { migrationEntered = r; });
+    connect.mockResolvedValue({
+      tableNames: async () => ['cognitive_memory'],
+      openTable: async () => ({
+        schema: async () => { migrationEntered(); await migrationGate; return { fields: [] }; },
+      }),
+    });
+
+    const first = core.initDatabase();
+    await migrationStarted;
+    let secondSettled = false;
+    const second = core.initDatabase().then(() => { secondSettled = true; });
+
+    await new Promise(r => setTimeout(r, 5));
+    expect(secondSettled).toBe(false);
+
+    releaseMigration();
+    await Promise.all([first, second]);
+    expect(secondSettled).toBe(true);
   });
 
   it('does not re-log the same failure a second time as a "Search error"', async () => {
@@ -139,13 +249,11 @@ describe('memory recall status (AGT-4267)', () => {
     }
 
     expect(reportsIn(errors)).toHaveLength(1);
-    expect(errors.filter(e => e.includes('Search error'))).toHaveLength(0);
   });
 
-  it('still logs a genuine query error while an outage is outstanding', async () => {
-    // Guarding on "is an outage outstanding" instead of "is this the same
-    // error" would swallow a real defect that merely coincided with one — which
-    // is exactly how the concurrency bug below stayed invisible.
+  it('still reports a genuine query error on a healthy store', async () => {
+    // The two phases are tracked separately so that suppressing one kind of
+    // failure cannot hide the other.
     const core = await import('./memoryCore.js');
     core.resetMemoryRecallStatusForTests();
     connect.mockResolvedValue({
@@ -160,7 +268,8 @@ describe('memory recall status (AGT-4267)', () => {
 
     expect(res.success).toBe(false);
     expect(res.errorCode).toBe('QUERY_FAILED');
-    expect(errors.filter(e => e.includes('Search error'))).toHaveLength(1);
+    expect(reportsIn(errors)).toHaveLength(1);
+    expect(reportsIn(errors)[0]).toContain('No field named expiresat');
   });
 
   it('does not latch — an externally repaired store comes back without a restart', async () => {
