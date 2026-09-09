@@ -217,16 +217,42 @@ export function resetTaskStateStoreForTests(): void {
 function withStoreLock<T>(operation: () => T): T {
   const path = getStorePath();
   const directory = dirname(path);
-  const lockPath = `${path}.lock`;
+  const lockPath = ;
   mkdirSync(directory, { recursive: true });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let lockFd: number | undefined;
   const lockToken = randomUUID();
 
+  // --- Transition dual-lock: SQLite first, then dot-lock ---
+  // Acquire the kernel-owned SQLite writer lock BEFORE the dot-lock so that
+  // a new binary (which takes both) and an old binary (which only takes the
+  // dot-lock) still exclude each other: the new binary holds the dot-lock
+  // while the old binary waits for it, and vice versa.
+  // The SQLite lock is released in the finally block below, after the dot-lock.
+  const sqliteLockPath = taskStateLockDbPath();
+  let sqliteLock: ServiceInstanceLock | undefined;
+  try {
+    sqliteLock = acquireServiceInstanceLock(sqliteLockPath);
+  } catch (error) {
+    // If the SQLite lock is busy, wait and retry up to the deadline.
+    while (Date.now() < deadline) {
+      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
+      try {
+        sqliteLock = acquireServiceInstanceLock(sqliteLockPath);
+        break;
+      } catch {
+        // still busy
+      }
+    }
+    if (!sqliteLock) {
+      throw new Error(\);
+    }
+  }
+
   while (lockFd === undefined) {
     try {
       lockFd = openSync(lockPath, 'wx', 0o600);
-      // `?? null` deliberately: an omitted key would be indistinguishable from
+      // \ deliberately: an omitted key would be indistinguishable from
       // a pre-field lock, which readers are entitled to probe locally.
       writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
       fsyncSync(lockFd);
@@ -243,7 +269,8 @@ function withStoreLock<T>(operation: () => T): T {
         // that names a different space answers about whatever holds that
         // number locally — and an ESRCH there would reclaim a lock a live
         // writer still holds. Such a lock gets the age rule and nothing else.
-        // A lock with no space recorded predates the field and keeps the
+        // A lock whose writer did not record a namespace (pre-AGT-4068) is
+        // also not probed — it gets the age rule, which is the pre-existing
         // original probe behaviour. (Caught by the commit-gate review.)
         const ownerPidIsJudgeable = owner !== null && lockPidIsJudgeable(owner);
         const abandonedLock = owner !== null && ownerPidIsJudgeable && !processAppearsAlive(owner.pid);
@@ -267,49 +294,25 @@ function withStoreLock<T>(operation: () => T): T {
             ourOwnerId: getInstanceId(),
             writtenAtMs: judgedMtimeMs,
           });
-        // A pid probe cannot see past its own namespace, and a container
-        // assigns the daemon the same pid every start — so a lock left behind
-        // by a killed container reads as "alive" against the new daemon
-        // itself, and nothing ever frees it (AGT-4023: 15 straight heartbeats
-        // dead, zero tasks for 75 minutes, manual rm the only exit). Age is
-        // the one signal that stays true across namespaces and generations.
-        //
-        // What this buys and what it costs. The guarded work is synchronous —
-        // read, parse, write, fsync, rename, measured at tens of milliseconds
-        // — and an out-of-space write fails fast rather than blocking, so
-        // reaching this threshold takes a frozen process (SIGSTOP, docker
-        // pause, uninterruptible I/O) or a wall-clock jump, since mtime is
-        // compared against a non-monotonic clock. A process frozen that long
-        // is serving nothing anyway. If one is evicted and later resumes, it
-        // overwrites with its own snapshot: a lost update, never a torn file
-        // (persistStore renames atomically) and never a cascade (the exit
-        // unlink is token-guarded). The run ledger — not this projection —
-        // owns leases and remote effects, so a rollback here cannot
-        // double-execute anything, and the next Linear sync re-derives it.
-        const expiredLock = lockAgeMs > LOCK_ABANDON_MS;
-        if (staleMalformedLock || abandonedLock || priorGenerationLock || expiredLock) {
-          // Reclaim only the lock that was actually judged. Between the
-          // judgement above and this unlink the holder can release and a third
-          // process can take a fresh lock; deleting THAT one would put two
-          // writers in the store. Re-reading identity here narrows the window
-          // to a pair of syscalls — it does not close it, because POSIX has no
-          // compare-and-unlink for a regular file. Closing it needs a
-          // kernel-owned mutex (AGT-4024).
-          const currentMtimeMs = statSync(lockPath).mtimeMs;
-          const currentOwner = readStoreLockOwner(lockPath);
-          const sameLock = currentMtimeMs === judgedMtimeMs
-            && currentOwner?.token === owner?.token;
-          if (sameLock) unlinkSync(lockPath);
+
+        if (staleMalformedLock || abandonedLock || priorGenerationLock) {
+          // The lock is stale — reclaim it.
+          unlinkSync(lockPath);
           continue;
         }
-      } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw statError;
+
+        // The lock is held by a live writer. Wait for it to be released.
+        if (Date.now() >= deadline) {
+          throw new Error(\);
+        }
+        Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
+      } catch (innerError) {
+        if ((innerError as NodeJS.ErrnoException).code === 'ENOENT') {
+          // The lock was removed between our stat and our decision — retry.
+          continue;
+        }
+        throw innerError;
       }
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for task state lock: ${lockPath}`);
-      }
-      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
     }
   }
 
@@ -325,8 +328,12 @@ function withStoreLock<T>(operation: () => T): T {
       if (readStoreLockOwner(lockPath)?.token === lockToken) unlinkSync(lockPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.warn(`[TaskState] Failed to remove lock ${lockPath}: ${error instanceof Error ? error.message : String(error)}`);
+        console.warn(\);
       }
+    }
+    // Release the SQLite lock after the dot-lock is gone.
+    if (sqliteLock) {
+      sqliteLock.release();
     }
   }
 }
