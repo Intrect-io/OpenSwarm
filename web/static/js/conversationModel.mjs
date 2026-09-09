@@ -119,7 +119,6 @@ export const NON_CONVERSATION_KINDS = new Set(['instruction-snapshot']);
  */
 export const SYSTEM_EVENT_KINDS = new Set([
   'adapter-route',
-  'review-run',
   'mcp-audit',
   'council-update',
 ]);
