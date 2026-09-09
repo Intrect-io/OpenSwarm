@@ -35,29 +35,49 @@ function isAtlasCloudModel(id: string): boolean {
  * undefined so the target adapter resolves its own default via
  * getDefaultModel(). No hardcoded per-provider model ids beyond stable
  * prefixes/aliases.
+ *
+ * When a model is rejected, logs a warning with the role (if provided),
+ * the rejected model id, and the adapter name so the operator can see
+ * what happened instead of discovering it silently at runtime.
  */
-export function mapModelForProvider(adapter: AdapterName, model: string | undefined): string | undefined {
+export function mapModelForProvider(
+  adapter: AdapterName,
+  model: string | undefined,
+  role?: string,
+): string | undefined {
   const current = (model || '').trim();
   if (!current) return undefined;
-  if (adapter === 'codex' || adapter === 'codex-responses' || adapter === 'cc-router') {
-    // ChatGPT-account Codex only runs gpt-* slugs; anything else → adapter default.
-    return current.startsWith('gpt-') ? current : undefined;
+
+  const accepted = ((): string | undefined => {
+    if (adapter === 'codex' || adapter === 'codex-responses' || adapter === 'cc-router') {
+      // ChatGPT-account Codex only runs gpt-* slugs; anything else → adapter default.
+      return current.startsWith('gpt-') ? current : undefined;
+    }
+    if (adapter === 'cursor') {
+      return current;
+    }
+    if (adapter === 'claude') {
+      // The claude CLI accepts claude-* ids and version-agnostic aliases.
+      return current.startsWith('claude-') || CLAUDE_ALIASES.has(current) ? current : undefined;
+    }
+    if (adapter === 'atlascloud') {
+      // Unlike gpt-*/claude-*, Atlas ids have no shared prefix — check membership
+      // against its own catalog instead.
+      return isAtlasCloudModel(current) ? current : undefined;
+    }
+    // openrouter/gpt/local/lmstudio: a namespaced id ("vendor/model") may carry
+    // over; a bare id from another provider usually won't — drop to the default.
+    // Exclude ids that are recognizably Atlas Cloud's own namespace so a switch
+    // away from atlascloud doesn't leak its id into these instead.
+    return current.includes('/') && !isAtlasCloudModel(current) ? current : undefined;
+  })();
+
+  if (accepted === undefined) {
+    const tag = role ? `Role '${role}' ` : '';
+    console.warn(
+      `[modelCompat] ${tag}rejected model '${current}' for adapter '${adapter}', falling back to adapter default`,
+    );
   }
-  if (adapter === 'cursor') {
-    return current;
-  }
-  if (adapter === 'claude') {
-    // The claude CLI accepts claude-* ids and version-agnostic aliases.
-    return current.startsWith('claude-') || CLAUDE_ALIASES.has(current) ? current : undefined;
-  }
-  if (adapter === 'atlascloud') {
-    // Unlike gpt-*/claude-*, Atlas ids have no shared prefix — check membership
-    // against its own catalog instead.
-    return isAtlasCloudModel(current) ? current : undefined;
-  }
-  // openrouter/gpt/local/lmstudio: a namespaced id ("vendor/model") may carry
-  // over; a bare id from another provider usually won't — drop to the default.
-  // Exclude ids that are recognizably Atlas Cloud's own namespace so a switch
-  // away from atlascloud doesn't leak its id into these instead.
-  return current.includes('/') && !isAtlasCloudModel(current) ? current : undefined;
+
+  return accepted;
 }

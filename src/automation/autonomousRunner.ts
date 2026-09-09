@@ -3388,8 +3388,8 @@ export class AutonomousRunner {
     // provider; otherwise drop it (undefined) so the target adapter resolves its
     // own default via getDefaultModel(). Shared with the planner's model guard
     // (src/adapters/modelCompat.ts) so both stay in sync. (INT-2510)
-    const mapModelForProvider = (model: string | undefined, _role?: string): string | undefined =>
-      mapModelForAdapter(adapter, model);
+    const mapModelForProvider = (model: string | undefined, role?: string): string | undefined =>
+      mapModelForAdapter(adapter, model, role);
 
     this.config.defaultAdapter = adapter;
 

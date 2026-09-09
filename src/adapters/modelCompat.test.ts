@@ -29,36 +29,40 @@ describe('mapModelForProvider', () => {
     expect(mapModelForProvider('claude', 'z-ai/glm-5.2')).toBeUndefined(); // OpenRouter escalation
   });
 
-  it('openrouter-style adapters keep namespaced ids only', () => {
+  it('openrouter keeps namespaced ids, drops bare ids and atlascloud ids', () => {
     expect(mapModelForProvider('openrouter', 'anthropic/claude-sonnet-5')).toBe('anthropic/claude-sonnet-5');
     expect(mapModelForProvider('openrouter', 'claude-sonnet-5')).toBeUndefined();
-    expect(mapModelForProvider('gpt', 'sonnet')).toBeUndefined();
-    expect(mapModelForProvider('local', 'qwen/qwen3-coder')).toBe('qwen/qwen3-coder');
+    expect(mapModelForProvider('openrouter', 'gpt-5.5')).toBeUndefined();
+    expect(mapModelForProvider('openrouter', 'zai-org/GLM-4.6')).toBeUndefined(); // atlascloud id
   });
 
-  it('empty/blank models resolve to undefined (adapter default)', () => {
-    expect(mapModelForProvider('claude', undefined)).toBeUndefined();
-    expect(mapModelForProvider('claude', '  ')).toBeUndefined();
+  it('cursor passes everything through', () => {
+    expect(mapModelForProvider('cursor', 'gpt-5.5')).toBe('gpt-5.5');
+    expect(mapModelForProvider('cursor', 'claude-sonnet-5')).toBe('claude-sonnet-5');
+    expect(mapModelForProvider('cursor', '')).toBeUndefined();
   });
 
-  // Regression: atlascloud and openrouter both name models "vendor/model", but
-  // the vendor slugs are different catalogs (OpenRouter's z-ai/glm-5.2 vs
-  // Atlas's own zai-org/GLM-4.6). Before this fix, atlascloud fell into the
-  // generic "any namespaced id survives" branch, so switching provider to
-  // atlascloud kept an openrouter-configured reviewer/worker model verbatim —
-  // confirmed live against api.atlascloud.ai: that id 400s ("not found") on
-  // every single call, failing every review.
+ ​it('gpt passes namespaced ids and drops bare ids', () => {
+    expect(mapModelForProvider('gpt', 'openai/gpt-5')).toBe('openai/gpt-5');
+    expect(mapModelForProvider('gpt', 'gpt-5.5')).toBeUndefined();
+  });
+
+  it('local passes namespaced ids and drops bare ids', () => {
+    expect(mapModelForProvider('local', 'ollama/gemma3')).toBe('ollama/gemma3');
+    expect(mapModelForProvider('local', 'gemma3')).toBeUndefined();
+  });
+
+  it('lmstudio passes namespaced ids and drops bare ids', () => {
+    expect(mapModelForProvider('lmstudio', 'lm-studio/gemma-3-4b')).toBe('lm-studio/gemma-3-4b');
+    expect(mapModelForProvider('lmstudio', 'gemma-3-4b')).toBeUndefined();
+  });
+
   describe('atlascloud', () => {
-    it('keeps a curated Atlas Cloud id', () => {
-      expect(mapModelForProvider('atlascloud', 'deepseek-ai/deepseek-v4-pro')).toBe('deepseek-ai/deepseek-v4-pro');
+    it('keeps curated models', () => {
+      expect(mapModelForProvider('atlascloud', 'deepseek/deepseek-v4-pro')).toBe('deepseek/deepseek-v4-pro');
     });
 
-    it('drops an OpenRouter-namespaced id even though it looks like "vendor/model"', () => {
-      expect(mapModelForProvider('atlascloud', 'z-ai/glm-5.2')).toBeUndefined();
-      expect(mapModelForProvider('atlascloud', 'deepseek/deepseek-v4-flash')).toBeUndefined();
-    });
-
-    it('keeps an id found in the live-fetched catalog cache even when not curated', () => {
+    it('keeps models found in the live-fetched catalog cache even when not curated', () => {
       vi.mocked(readCachedCatalog).mockReturnValue({ models: ['qwen/qwen3.5-flash'], fetchedAt: '2026-08-04T00:00:00.000Z' });
       expect(mapModelForProvider('atlascloud', 'qwen/qwen3.5-flash')).toBe('qwen/qwen3.5-flash');
     });
@@ -67,6 +71,48 @@ describe('mapModelForProvider', () => {
       expect(mapModelForProvider('openrouter', 'zai-org/GLM-4.6')).toBeUndefined();
       // An id genuinely foreign to Atlas still carries over to openrouter as before.
       expect(mapModelForProvider('openrouter', 'z-ai/glm-5.2')).toBe('z-ai/glm-5.2');
+    });
+  });
+
+  describe('discard warning', () => {
+    it('logs warning when codex-responses rejects an OpenRouter model id', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(mapModelForProvider('codex-responses', 'deepseek/deepseek-v4-flash', 'worker')).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Role 'worker' rejected model 'deepseek/deepseek-v4-flash' for adapter 'codex-responses'"),
+      );
+      warn.mockRestore();
+    });
+
+    it('logs warning when openrouter rejects a codex gpt-* model id', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(mapModelForProvider('openrouter', 'gpt-5.6-terra', 'decompose')).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Role 'decompose' rejected model 'gpt-5.6-terra' for adapter 'openrouter'"),
+      );
+      warn.mockRestore();
+    });
+
+    it('logs warning without role when role is omitted', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(mapModelForProvider('claude', 'gpt-5.5')).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("rejected model 'gpt-5.5' for adapter 'claude'"),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.not.stringContaining('Role'),
+      );
+      warn.mockRestore();
+    });
+
+    it('does not log warning when model is accepted', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(mapModelForProvider('codex-responses', 'gpt-5.6-terra', 'worker')).toBe('gpt-5.6-terra');
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
     });
   });
 });
