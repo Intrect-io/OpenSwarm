@@ -1,7 +1,7 @@
 {
   "name": "@intrect/openswarm",
   "version": "0.21.4",
-  "description": "Autonomous AI agent orchestrator \u2014 Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
+  "description": "Autonomous AI agent orchestrator — Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -78,7 +78,12 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/expect": "^4.1.8",
+    "@vitest/runner": "^4.1.8",
+    "@vitest/snapshot": "^4.1.8",
+    "@vitest/spy": "^4.1.8",
+    "@vitest/utils": "^4.1.8",
     "bun-types": "^1.1.0",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",
@@ -86,7 +91,7 @@
     "playwright": "^1.47.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.8"
   },
   "engines": {
     "node": ">=22"
