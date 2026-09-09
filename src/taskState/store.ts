@@ -728,6 +728,113 @@ export function releaseDependentTasks(completedIssueId: string): OpenSwarmTaskSt
   return released;
 }
 
+/** Structural subset of ITaskSource — avoids importing automation/taskSource.js, which
+ *  already imports enrichTaskFromState from this module. */
+interface DependencyLookupSource {
+  lookupIssueState(issueIdOrIdentifier: string): Promise<
+    | { ok: true; issue: { state: string; stateType?: string } | null }
+    | { ok: false; error: string }
+  >;
+}
+
+export interface DependencyBlockerReconcileOptions {
+  source: DependencyLookupSource | null;
+  /** Issue ids present in the current heartbeat's fresh fetch. A dependency id found
+   *  here is still Todo/In Progress/In Review/Backlog — genuinely open, skip the lookup. */
+  knownTaskIds?: ReadonlySet<string>;
+  now?: number;
+  /** Only reconsider a dependent task that has sat blocked at least this long —
+   *  a decomposition just created seconds ago is not yet stale. */
+  staleAfterMs?: number;
+  maxLookups?: number;
+}
+
+export interface DependencyBlockerReconcileResult {
+  /** Distinct unresolved dependency ids that were candidates this pass. */
+  eligible: number;
+  lookedUp: number;
+  /** Dependencies confirmed terminal (Done/Cancelled) by a live lookup. */
+  resolved: number;
+  /** Dependent tasks released as a result. */
+  released: number;
+}
+
+/**
+ * Reconcile dependency ids that a Done Linear issue leaves behind.
+ *
+ * `releaseDependentTasks` only fires when the daemon's own pipeline observes a
+ * completion (runnerExecution.ts). A blocker finished through any other path —
+ * merged by a human, completed in a different session — never triggers it, and
+ * getTaskReadiness's fallback to the locally cached `dependencyIssueIds` (used
+ * whenever the fresh Linear fetch's `blockedBy` comes back empty, which it always
+ * does once the blocker is Done and drops out of the slim fetch) then blocks the
+ * dependent forever. Terminal issues are invisible to the regular slim fetch
+ * (Todo/In Progress/In Review/Backlog only), so this is the explicit per-issue
+ * read that can see them — same shape as reconcileTrackerTerminalRuns, applied to
+ * taskState instead of the durable ledger. (isResolved() only recognizes a literal
+ * Done state, same pre-existing scope as releaseDependentTasks — a Cancelled
+ * blocker is not covered here either.)
+ *
+ * Only tasks still in a not-yet-executed phase (todo/ready/blocked) are
+ * considered. dependencyIssueIds is never cleared once a task moves on (done,
+ * in_progress, decomposed, ...) — without this filter, an unrelated stale
+ * dependency entry left on an already-finished task would get resolved by this
+ * sweep and incorrectly reset that task's status back to 'todo' via
+ * releaseDependentTasks. A dependent isn't necessarily marked 'blocked' up
+ * front — getTaskReadiness gates on dependencyIssueIds at read time regardless
+ * of the stored execution.status, and only releaseDependentTasks itself writes
+ * 'blocked' when it finds a dependency still outstanding — so 'todo'/'ready'
+ * both need to stay in scope, not just 'blocked'.
+ */
+const DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES = new Set<TaskExecutionStatus>(['todo', 'ready', 'blocked']);
+
+export async function reconcileDependencyBlockers(
+  options: DependencyBlockerReconcileOptions,
+): Promise<DependencyBlockerReconcileResult> {
+  const result: DependencyBlockerReconcileResult = { eligible: 0, lookedUp: 0, resolved: 0, released: 0 };
+  const { source } = options;
+  if (!source) return result;
+
+  const now = options.now ?? Date.now();
+  const staleAfterMs = options.staleAfterMs ?? 60 * 60_000;
+  const maxLookups = Math.max(1, Math.floor(options.maxLookups ?? 20));
+  const knownTaskIds = options.knownTaskIds ?? new Set<string>();
+
+  const candidateDepIds = new Set<string>();
+  for (const state of listTaskStates()) {
+    if (!DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES.has(state.execution.status)) continue;
+    if (state.dependencyIssueIds.length === 0) continue;
+    const updatedAtMs = Date.parse(state.updatedAt);
+    if (Number.isFinite(updatedAtMs) && now - updatedAtMs < staleAfterMs) continue;
+    for (const depId of state.dependencyIssueIds) {
+      if (isResolved(getTaskState(depId))) continue;
+      if (knownTaskIds.has(depId)) continue; // still open per this fetch — not stale
+      candidateDepIds.add(depId);
+    }
+  }
+  result.eligible = candidateDepIds.size;
+
+  for (const depId of candidateDepIds) {
+    if (result.lookedUp >= maxLookups) break;
+    let lookup: Awaited<ReturnType<DependencyLookupSource['lookupIssueState']>>;
+    try {
+      lookup = await source.lookupIssueState(depId);
+    } catch (error) {
+      lookup = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    result.lookedUp++;
+    if (!lookup.ok || !lookup.issue) continue; // fail closed — stays blocked, retried next pass
+
+    updateTaskLinearState(depId, lookup.issue.state);
+    if (isResolved(getTaskState(depId))) {
+      result.resolved++;
+      result.released += releaseDependentTasks(depId).length;
+    }
+  }
+
+  return result;
+}
+
 export function completeParentIfChildrenDone(childIssueId: string): OpenSwarmTaskState | null {
   const childState = getTaskState(childIssueId);
   if (!childState?.parentIssueId) return null;
