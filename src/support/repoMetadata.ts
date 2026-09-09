@@ -84,12 +84,15 @@ const RepoMetadataSchema = z.object({
   publication: z.object({
     /**
      * Run the agentic fresh review (`openswarm pr review --fresh`) once, right
-     * after the PR is published. Worker attempts stay on deterministic guards
-     * and verification; this is the only LLM review in the autonomous loop,
-     * and it is per repository — OpenSwarm itself opts in, its target
-     * repositories do not (operator decision, 2026-09-02).
+     * after the PR is published.
+     *
+     * Opt-OUT since AGT-4270. It was opt-in, and the per-attempt reviewer had
+     * been switched off in favour of it — but no repository ever opted in, so
+     * between the two decisions the loop shipped pull requests that no LLM had
+     * read at all. Measured on 2026-09-09: 2 of 28 published PRs were mergeable
+     * as they stood (AGT-4263).
      */
-    freshReview: z.boolean().default(false),
+    freshReview: z.boolean().default(true),
   }).optional(),
   /** Free-form notes the swarm should keep in mind. */
   notes: z.string().optional(),
@@ -170,14 +173,18 @@ export async function saveRepoMetadata(repoPath: string, meta: RepoMetadata): Pr
  * a missing/malformed file yields `undefined` (the caller then falls back to an
  * effort-derived or default timeout). Never throws. (INT-2415)
  */
-/** Whether this repository asked for a fresh review after each published PR. */
+/**
+ * Whether published PRs from this repository get the fresh review. On by
+ * default; a repository turns it off with `publication.freshReview: false`.
+ */
 export async function loadPublicationFreshReview(repoPath: string): Promise<boolean> {
   try {
-    return (await loadRepoMetadata(repoPath))?.publication?.freshReview === true;
+    return (await loadRepoMetadata(repoPath))?.publication?.freshReview !== false;
   } catch {
-    // An unreadable openswarm.json already warns elsewhere; a review is an
-    // opt-in extra, so an unparseable file means "not opted in".
-    return false;
+    // An unreadable openswarm.json already warns elsewhere. Reviewing anyway
+    // costs one review; skipping publishes an unread PR, which is the failure
+    // this default exists to prevent.
+    return true;
   }
 }
 

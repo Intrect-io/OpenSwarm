@@ -34,6 +34,7 @@ import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishApprovedWork, publishParkedIfNeeded } from './publishOnPark.js';
+import { rollBackReviewedPublication } from './prReviewRollback.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
 import { prepareAttemptBranch } from '../support/branchLineage.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
@@ -1202,13 +1203,12 @@ export async function executePipeline(
 
     const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);
 
-    // The repository, not the daemon, decides whether its published PRs get
-    // the agentic fresh review (openswarm.json `publication.freshReview`).
+    // On by default; a repository turns it off with `publication.freshReview:
+    // false` in openswarm.json.
     const freshReview = worktreeInfo ? await loadPublicationFreshReview(worktreeInfo.originalPath) : false;
     await publishApprovedWork(worktreeInfo, task, result, ctx.durability,
       freshReview ? async ({ prUrl, worktreeInfo: publishedWorktree }) => {
-        // Loaded on demand: the review pulls in the whole PR processor, which
-        // only an opted-in repository ever needs.
+        // Loaded on demand: the review pulls in the whole PR processor.
         const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
         const review = await reviewPublishedPullRequest({
           prUrl,
@@ -1221,6 +1221,17 @@ export async function executePipeline(
           type: 'log',
           data: { taskId: task.issueId || task.id, stage: 'pr-review', line: `PR-time fresh review ${status}${review.error ? `: ${review.error}` : ''}` },
         });
+        // A verdict nobody acts on is not a gate. Until AGT-4270 this hook
+        // logged the line above and returned, so a PR the reviewer had just
+        // asked for changes on still finished the run as 'approved' — the
+        // issue closed, the worktree deleted, the PR left sitting there
+        // looking ready to merge.
+        //
+        // `gateRan === false` is the review failing to run at all (a bad URL,
+        // a crashed processor). That says nothing about the code, so it must
+        // not roll a good PR back.
+        if (review.success || review.gateRan === false) return;
+        await rollBackReviewedPublication({ prUrl, task, result, error: review.error });
       } : undefined,
     );
     if (!parkedPublished) await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);
