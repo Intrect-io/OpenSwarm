@@ -189,7 +189,7 @@ export async function runWorkerWithOptionalFanout(input: {
       projectPath: input.projectPath,
       baseWorkerOptions: workerOptions,
       candidates,
-      concurrency: fanoutConfig.concurrency ?? Math.min(candidates.length, 3),
+      concurrency: fanoutConfig.concurrency ?? candidates.length,
       keepSandboxes: fanoutConfig.keepSandboxes,
       linkSharedPaths: fanoutConfig.linkSharedPaths,
       guards: input.guards,

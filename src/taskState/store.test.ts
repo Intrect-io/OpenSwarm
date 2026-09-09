@@ -374,6 +374,34 @@ describe('task state store', () => {
     expect(result.lookedUp).toBe(0);
   });
 
+  it('reconcileDependencyBlockers still looks up blockers of a current-fetch dependent that was just upserted', async () => {
+    upsertTaskState('AGT-4114', {
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Backlog',
+    });
+    upsertTaskState('AGT-4121', {
+      dependencyIssueIds: ['AGT-4114'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookupIssueState = async (id: string) => id === 'AGT-4114'
+      ? { ok: true as const, issue: { state: 'Done', stateType: 'completed' } }
+      : { ok: false as const, error: 'unexpected id' };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      knownTaskIds: new Set(['AGT-4121']),
+    });
+
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect(getTaskReadiness({
+      id: 'AGT-4121', source: 'linear' as const, title: 'waiting', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4121',
+    }).ready).toBe(true);
+  });
+
   it('reconcileDependencyBlockers fails closed when the lookup errors', async () => {
     upsertTaskState('AGT-ERR-BLOCKER', {
       execution: { status: 'in_progress', retryCount: 0 },

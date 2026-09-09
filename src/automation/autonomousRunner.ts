@@ -2748,7 +2748,7 @@ export class AutonomousRunner {
         // `unknownScopeAdmission: admit` was live on vela yet one running task
         // still deferred every other candidate — 11 of 12 slots idle with 126
         // executable tasks waiting (AGT-4233).
-        const admission = this.config.unknownScopeAdmission ?? 'serialize';
+        const admission = this.config.unknownScopeAdmission ?? 'admit';
         const runnable = group.filter(candidate => {
           let blockedBy: { label: string; reason: ScopeConflictReason } | undefined;
           for (const running of active) {
@@ -2786,8 +2786,11 @@ export class AutonomousRunner {
           ? await detectFileConflicts(runnableTasks, projPath, {
             preferUnknownExclusive: true,
             preferredUnknownTaskId: debtTask.task.id,
+            unknownScopeAdmission: admission,
           })
-          : await detectFileConflicts(runnableTasks, projPath);
+          : await detectFileConflicts(runnableTasks, projPath, {
+            unknownScopeAdmission: admission,
+          });
 
         for (const t of result.safe) {
           safeTasks.add(t.id);

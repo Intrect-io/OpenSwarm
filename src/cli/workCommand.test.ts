@@ -688,7 +688,7 @@ describe('runWorkCommand — options plumbing', () => {
     expect(deps.logs.join('\n')).toContain('2 non-overlapping wave(s)');
   });
 
-  it('defaults concurrency to min(selected, autonomous.maxConcurrentTasks ?? 4)', async () => {
+  it('defaults concurrency to min(selected, autonomous.maxConcurrentTasks ?? 64)', async () => {
     const createCoordinator = vi.fn(() => fakeCoordinator());
     const deps = baseDeps({
       createCoordinator,
@@ -835,7 +835,7 @@ describe('pure helpers', () => {
     ];
 
     expect(buildConflictFreeWaves(rows).map((wave) => wave.map(({ task }) => task.id)))
-      .toEqual([['a', 'b'], ['c'], ['unknown']]);
+      .toEqual([['a', 'b', 'unknown'], ['c']]);
   });
 
   it('summarizeSettled maps approved success to a removed worktree', () => {

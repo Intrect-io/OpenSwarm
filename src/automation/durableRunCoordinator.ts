@@ -81,7 +81,7 @@ export interface RepositoryAdmissionPolicy {
   maxConcurrent?: number;
   /** Predicted repository-relative write set used for atomic conflict admission. */
   conflictScope?: string[];
-  /** Whether an unknown scope serializes against live same-repo runs (default) or is admitted. */
+  /** Whether an unknown scope serializes against live same-repo runs or is admitted (default admit). */
   unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;

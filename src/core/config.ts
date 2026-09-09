@@ -132,7 +132,7 @@ const RoleConfigSchema = z.object({
     enabled: z.boolean().optional(),
     mode: z.enum(['report', 'execute']).optional(),
     minScore: z.number().min(1).max(10).optional(),
-    concurrency: z.number().int().min(1).max(3).optional(),
+    concurrency: z.number().int().min(1).max(256).optional(),
     keepSandboxes: z.boolean().optional(),
     linkSharedPaths: z.boolean().optional(),
     candidates: z.array(z.object({
@@ -337,11 +337,11 @@ const AutonomousConfigSchema = z.object({
   /** Allow concurrent tasks on the same repo (requires worktreeMode). (INT-1975) */
   allowSameProjectConcurrent: z.boolean().default(true),
   /**
-   * 'serialize' (default) refuses a claim with no resolvable write scope while
-   * another same-repo run is live. 'admit' lets it through and leaves branch
-   * conflicts to post-merge integration requeue.
+   * 'admit' (default) lets a claim with no resolvable write scope join other
+   * same-repo runs; worktrees isolate live edits and known file-scope overlap
+   * still refuses. 'serialize' is the Codex-era fail-closed holdover.
    */
-  unknownScopeAdmission: z.enum(['serialize', 'admit']).default('serialize'),
+  unknownScopeAdmission: z.enum(['serialize', 'admit']).default('admit'),
   /**
    * Consecutive infra_error attempts with one failure fingerprint after which a
    * run parks for the operator instead of backing off again. 0 disables.

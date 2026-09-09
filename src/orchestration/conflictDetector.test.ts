@@ -121,7 +121,7 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.conflictGroups).toHaveLength(0);
   });
 
-  it('runs the known maximal wave before an unknown scope', async () => {
+  it('lets unknown scopes run with disjoint known work under the default admit policy', async () => {
     const result = await detectFileConflicts(
       [
         task('unknown', 1, ['unknown-file-scope']),
@@ -131,26 +131,45 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
       PROJECT,
     );
 
+    expect(new Set(result.safe.map((t) => t.id))).toEqual(new Set(['unknown', 'known-a', 'known-b']));
+    expect(result.conflictGroups).toHaveLength(0);
+  });
+
+  it('still serializes unknown scopes when the caller asks for the Codex-era hold', async () => {
+    const result = await detectFileConflicts(
+      [
+        task('unknown', 1, ['unknown-file-scope']),
+        task('known-a', 2, ['src/a.ts']),
+        task('known-b', 2, ['src/b.ts']),
+      ],
+      PROJECT,
+      { unknownScopeAdmission: 'serialize' },
+    );
+
     expect(result.safe.map((t) => t.id)).toEqual(['known-a', 'known-b']);
     expect(result.conflictGroups).toHaveLength(1);
     expect(result.conflictGroups[0].sharedModules).toEqual(['unknown-file-scope']);
   });
 
-  it('admits exactly one task when every scope is unknown', async () => {
+  it('admits every unknown-scope task concurrently by default', async () => {
     const result = await detectFileConflicts(
       [task('first', 2), task('second', 1), task('third', 3)],
       PROJECT,
     );
 
-    expect(result.safe.map((t) => t.id)).toEqual(['second']);
-    expect(result.conflictGroups).toHaveLength(1);
+    expect(new Set(result.safe.map((t) => t.id))).toEqual(new Set(['first', 'second', 'third']));
+    expect(result.conflictGroups).toHaveLength(0);
   });
 
-  it('can repay a deferred unknown as an exclusive wave', async () => {
+  it('can repay a deferred unknown as an exclusive wave under serialize', async () => {
     const result = await detectFileConflicts(
       [task('known', 1, ['src/known.ts']), task('unknown', 4)],
       PROJECT,
-      { preferUnknownExclusive: true, preferredUnknownTaskId: 'unknown' },
+      {
+        preferUnknownExclusive: true,
+        preferredUnknownTaskId: 'unknown',
+        unknownScopeAdmission: 'serialize',
+      },
     );
 
     expect(result.safe.map((t) => t.id)).toEqual(['unknown']);
@@ -204,8 +223,8 @@ describe('describeScopeConflict', () => {
     expect(describeScopeConflict(['src/a.ts'], ['src/b.ts'], 'admit')).toBeNull();
   });
 
-  it('defaults to serialize when no policy is passed', () => {
-    expect(describeScopeConflict(undefined, ['src/a.ts'])).toEqual({ kind: 'unknown-candidate' });
+  it('defaults to admit when no policy is passed', () => {
+    expect(describeScopeConflict(undefined, ['src/a.ts'])).toBeNull();
   });
 });
 

@@ -538,7 +538,7 @@ program
   .description('Pick Linear issues and deploy an agent pipeline per issue into isolated git worktrees')
   .argument('[issueIds...]', 'Issue ids/identifiers (e.g. INT-123); omit for the interactive picker')
   .option('--path <path>', 'Repository path (default: cwd)')
-  .option('--concurrency <n>', 'Max issues in flight (default: min(selected, config autonomous.maxConcurrentTasks ?? 4))', parsePositiveIntegerOption)
+  .option('--concurrency <n>', 'Max issues in flight (default: min(selected, config autonomous.maxConcurrentTasks ?? 64))', parsePositiveIntegerOption)
   .option('--dry-run', 'Print the execution plan (issue → branch/worktree/resume) and exit')
   .option('--yes', 'Skip the confirmation prompt')
   .option('--adapter <name>', 'Adapter override for the worker/reviewer')

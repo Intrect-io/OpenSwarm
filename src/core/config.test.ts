@@ -257,7 +257,7 @@ agents:
       });
     });
 
-    it('defaults unknownScopeAdmission to serialize and carries an explicit admit through', () => {
+    it('defaults unknownScopeAdmission to admit and carries an explicit serialize through', () => {
       const base = {
         language: 'en',
         linear: { apiKey: 'k', teamId: 't' },
@@ -265,12 +265,12 @@ agents:
       };
       vi.mocked(existsSync).mockReturnValue(true);
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
-      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('serialize');
+      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('admit');
 
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
-        ...base, autonomous: { enabled: true, unknownScopeAdmission: 'admit' },
+        ...base, autonomous: { enabled: true, unknownScopeAdmission: 'serialize' },
       }));
-      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('admit');
+      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('serialize');
 
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
         ...base, autonomous: { enabled: true, unknownScopeAdmission: 'yolo' },

@@ -66,10 +66,29 @@ describe('loadRepoMetadata', () => {
     expect(meta?.automation).toEqual({
       enabled: true,
       maxConcurrent: 2,
-      maxAttemptsPerHour: 12,
       maxFailuresPerHour: 6,
       maxCostUsdPerDay: 5,
       circuitCooldownMinutes: 60,
+    });
+  });
+
+  it('does not inject a hidden maxConcurrent of 1 when the key is omitted', async () => {
+    writeFileSync(
+      join(dir, REPO_METADATA_FILENAME),
+      JSON.stringify({ schemaVersion: 1, automation: { enabled: true } }),
+    );
+    const meta = await loadRepoMetadata(dir);
+    expect(meta?.automation?.maxConcurrent).toBeUndefined();
+    expect(meta?.automation?.maxAttemptsPerHour).toBeUndefined();
+  });
+
+  it('accepts a per-repo cap up to the daemon global maximum', async () => {
+    writeFileSync(
+      join(dir, REPO_METADATA_FILENAME),
+      JSON.stringify({ schemaVersion: 1, automation: { maxConcurrent: 64 } }),
+    );
+    await expect(loadRepoMetadata(dir)).resolves.toMatchObject({
+      automation: { maxConcurrent: 64 },
     });
   });
 
