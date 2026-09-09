@@ -39,20 +39,24 @@ export function resolveConfirm(raw: string, def: boolean): boolean {
 }
 
 export interface Prompter {
-  /** Free-text question; returns the trimmed answer or `def` if blank. */
-  ask(question: string, def?: string): Promise<string>;
-  /** Numbered menu; re-prompts until a valid option is chosen. */
-  choose<T>(question: string, options: ChoiceOption<T>[]): Promise<T>;
-  /** Yes/no; blank answer takes `def`. */
-  confirm(question: string, def?: boolean): Promise<boolean>;
+  ask(q: string, def?: string): Promise<string>;
+  choose<T>(q: string, options: ChoiceOption<T>[]): Promise<T>;
+  confirm(q: string, def?: boolean): Promise<boolean>;
   close(): void;
 }
 
+/** Maximum number of queued stdin lines to prevent unbounded memory growth. */
+const MAX_LINE_QUEUE = 100;
+
+/**
+ * Create an interactive prompter backed by readline.
+ *
+ * Drains readline's `line` events into a bounded queue and hands them out one
+ * at a time. rl.question (both callback and promises forms) drops lines when a
+ * pipe delivers several at once and then EOFs; queueing the line events is
+ * robust for both piped stdin and a live TTY.
+ */
 export function createPrompter(input: Readable = processStdin, output: Writable = processStdout): Prompter {
-  // Drain readline's `line` events into a queue and hand them out one at a time.
-  // rl.question (both callback and promises forms) drops lines when a pipe
-  // delivers several at once and then EOFs; queueing the line events is robust
-  // for both piped stdin and a live TTY.
   const rl = createInterface({ input, output });
   const lineQueue: string[] = [];
   const waiters: Array<{ resolve: (l: string) => void; reject: (e: Error) => void }> = [];
@@ -61,7 +65,11 @@ export function createPrompter(input: Readable = processStdin, output: Writable 
   rl.on('line', (line: string) => {
     const w = waiters.shift();
     if (w) w.resolve(line);
-    else lineQueue.push(line);
+    else {
+      lineQueue.push(line);
+      // Bound queue to prevent unbounded memory growth (INT-XXXX)
+      if (lineQueue.length > MAX_LINE_QUEUE) lineQueue.shift();
+    }
   });
   rl.on('close', () => {
     closed = true;
