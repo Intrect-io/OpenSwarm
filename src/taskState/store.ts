@@ -72,6 +72,10 @@ export const OpenSwarmTaskStateSchema = z.object({
   execution: ExecutionStateSchema.default({ status: 'backlog', retryCount: 0 }),
   worktree: WorktreeStateSchema.default({}),
   updatedAt: z.string(),
+  /** Last time reconcileDependencyBlockers looked this id up. Distinct from
+   *  updatedAt so a worker touching the blocker does not look like a lookup. */
+  dependencyCheckedAt: z.string().optional(),
+  dependencyLookupFailed: z.boolean().optional(),
 });
 
 function createTaskMap(
@@ -648,6 +652,21 @@ function isResolved(state: OpenSwarmTaskState | undefined): boolean {
   return state.execution.status === 'done' || state.linearState === 'Done';
 }
 
+function isCanceledLinearState(linearState: string | undefined): boolean {
+  const name = linearState?.trim().toLowerCase();
+  return name === 'canceled' || name === 'cancelled';
+}
+
+/** A blocker that can no longer move work forward. Done is the historical
+ *  isResolved contract (parent-completion still uses that). Canceled is
+ *  terminal for dependencies — vela 2026-09-09: 20 locally-Canceled STO-*
+ *  ids sat at the front of reconcileDependencyBlockers' Set and consumed
+ *  maxLookups forever because isResolved ignored them. */
+function isDependencyTerminal(state: OpenSwarmTaskState | undefined): boolean {
+  if (isResolved(state)) return true;
+  return isCanceledLinearState(state?.linearState);
+}
+
 export function getTaskReadiness(task: TaskItem): {
   ready: boolean;
   blockedBy: string[];
@@ -683,7 +702,7 @@ export function getTaskReadiness(task: TaskItem): {
     return { ready: true, blockedBy: [] };
   }
 
-  const unresolved = dependencyIssueIds.filter((depId) => !isResolved(getTaskState(depId)));
+  const unresolved = dependencyIssueIds.filter((depId) => !isDependencyTerminal(getTaskState(depId)));
   if (unresolved.length > 0) {
     return {
       ready: false,
@@ -702,7 +721,7 @@ export function releaseDependentTasks(completedIssueId: string): OpenSwarmTaskSt
   for (const state of Object.values(store.tasks)) {
     if (!state.dependencyIssueIds.includes(completedIssueId)) continue;
 
-    const unresolved = state.dependencyIssueIds.filter((depId) => !isResolved(store.tasks[depId]));
+    const unresolved = state.dependencyIssueIds.filter((depId) => !isDependencyTerminal(store.tasks[depId]));
     if (unresolved.length > 0) {
       upsertTaskState(state.issueId, {
         execution: {
@@ -747,6 +766,11 @@ export interface DependencyBlockerReconcileOptions {
    *  a decomposition just created seconds ago is not yet stale. */
   staleAfterMs?: number;
   maxLookups?: number;
+  /** Skip a blocker looked up this recently — same role as
+   *  reconcileTrackerTerminalRuns' recheckAfterMs. Default 6h. */
+  recheckAfterMs?: number;
+  /** Failed lookups retry sooner than a confirmed-open skip. Default 15m. */
+  errorRecheckAfterMs?: number;
 }
 
 export interface DependencyBlockerReconcileResult {
@@ -771,9 +795,17 @@ export interface DependencyBlockerReconcileResult {
  * dependent forever. Terminal issues are invisible to the regular slim fetch
  * (Todo/In Progress/In Review/Backlog only), so this is the explicit per-issue
  * read that can see them — same shape as reconcileTrackerTerminalRuns, applied to
- * taskState instead of the durable ledger. (isResolved() only recognizes a literal
- * Done state, same pre-existing scope as releaseDependentTasks — a Cancelled
- * blocker is not covered here either.)
+ * taskState instead of the durable ledger.
+ *
+ * Canceled/Cancelled blockers are terminal for dependents (isDependencyTerminal)
+ * even though isResolved stays Done-only for completeParentIfChildrenDone.
+ * Live vela 2026-09-09: 20 locally-Canceled STO-* ids occupied maxLookups
+ * every heartbeat, so AGT-4207 (157th, Linear already Done) was never reached.
+ *
+ * Lookups are capped. Candidates are the blockers due for a check, sorted
+ * never-checked then oldest-checked (same rotation as reconcileTrackerTerminalRuns).
+ * A lookup — success or fail-closed — stamps dependencyCheckedAt so the same
+ * 20 cannot consume the cap on the next heartbeat.
  *
  * Only tasks still in a not-yet-executed phase (todo/ready/blocked) are
  * considered. dependencyIssueIds is never cleared once a task moves on (done,
@@ -788,6 +820,18 @@ export interface DependencyBlockerReconcileResult {
  */
 const DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES = new Set<TaskExecutionStatus>(['todo', 'ready', 'blocked']);
 
+function blockerCheckedAtMs(state: OpenSwarmTaskState | undefined): number {
+  if (!state?.dependencyCheckedAt) return 0;
+  const ms = Date.parse(state.dependencyCheckedAt);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function blockerUpdatedAtMs(state: OpenSwarmTaskState | undefined): number {
+  if (!state?.updatedAt) return 0;
+  const ms = Date.parse(state.updatedAt);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 export async function reconcileDependencyBlockers(
   options: DependencyBlockerReconcileOptions,
 ): Promise<DependencyBlockerReconcileResult> {
@@ -797,24 +841,35 @@ export async function reconcileDependencyBlockers(
 
   const now = options.now ?? Date.now();
   const staleAfterMs = options.staleAfterMs ?? 60 * 60_000;
+  const recheckAfterMs = options.recheckAfterMs ?? 6 * 60 * 60_000;
+  const errorRecheckAfterMs = options.errorRecheckAfterMs ?? 15 * 60_000;
   const maxLookups = Math.max(1, Math.floor(options.maxLookups ?? 20));
   const knownTaskIds = options.knownTaskIds ?? new Set<string>();
 
-  const candidateDepIds = new Set<string>();
+  const byId = new Map<string, { depId: string; lastChecked: number; lastSeen: number }>();
   for (const state of listTaskStates()) {
     if (!DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES.has(state.execution.status)) continue;
     if (state.dependencyIssueIds.length === 0) continue;
     const updatedAtMs = Date.parse(state.updatedAt);
     if (Number.isFinite(updatedAtMs) && now - updatedAtMs < staleAfterMs) continue;
     for (const depId of state.dependencyIssueIds) {
-      if (isResolved(getTaskState(depId))) continue;
+      if (isDependencyTerminal(getTaskState(depId))) continue;
       if (knownTaskIds.has(depId)) continue; // still open per this fetch — not stale
-      candidateDepIds.add(depId);
+      if (byId.has(depId)) continue;
+      const blocker = getTaskState(depId);
+      const lastChecked = blockerCheckedAtMs(blocker);
+      const skipFor = blocker?.dependencyLookupFailed ? errorRecheckAfterMs : recheckAfterMs;
+      if (lastChecked > 0 && now - lastChecked < skipFor) continue;
+      byId.set(depId, { depId, lastChecked, lastSeen: blockerUpdatedAtMs(blocker) });
     }
   }
-  result.eligible = candidateDepIds.size;
+  const candidates = [...byId.values()].sort(
+    (a, b) => a.lastChecked - b.lastChecked || a.lastSeen - b.lastSeen || a.depId.localeCompare(b.depId),
+  );
+  result.eligible = candidates.length;
 
-  for (const depId of candidateDepIds) {
+  const checkedAt = new Date(now).toISOString();
+  for (const { depId } of candidates) {
     if (result.lookedUp >= maxLookups) break;
     let lookup: Awaited<ReturnType<DependencyLookupSource['lookupIssueState']>>;
     try {
@@ -823,10 +878,15 @@ export async function reconcileDependencyBlockers(
       lookup = { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
     result.lookedUp++;
-    if (!lookup.ok || !lookup.issue) continue; // fail closed — stays blocked, retried next pass
-
-    updateTaskLinearState(depId, lookup.issue.state);
-    if (isResolved(getTaskState(depId))) {
+    if (lookup.ok && lookup.issue) {
+      updateTaskLinearState(depId, lookup.issue.state);
+      upsertTaskState(depId, { dependencyCheckedAt: checkedAt, dependencyLookupFailed: false });
+    } else {
+      // Stamp on fail-closed so a persistent lookup error cannot monopolize
+      // the cap. Retries after errorRecheckAfterMs (15m), not recheckAfterMs (6h).
+      upsertTaskState(depId, { dependencyCheckedAt: checkedAt, dependencyLookupFailed: true });
+    }
+    if (isDependencyTerminal(getTaskState(depId))) {
       result.resolved++;
       result.released += releaseDependentTasks(depId).length;
     }
