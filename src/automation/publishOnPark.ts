@@ -17,7 +17,7 @@ import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeS
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
-import { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
+import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
@@ -349,7 +349,7 @@ export async function publishApprovedWork(
             // commits"). Park with the worker's statement so the operator can
             // close the issue or send it back with what the worker missed.
             result.failureDetail = `publication: ${message} — worker: ${noChangesReason}`;
-            result.operatorPark = { code: WORKER_NO_CHANGES_PARK_REASON, reason: `Worker finished without edits: ${noChangesReason}` };
+            result.operatorPark = { code: WORKER_NO_CHANGES_PARK_REASON, reason: `${WORKER_NO_CHANGES_STATEMENT_PREFIX} ${noChangesReason}` };
           }
           // Otherwise the worker claimed edits that were only runtime
           // artifacts the stager drops. That is the attempt failing at its

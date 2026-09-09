@@ -116,6 +116,7 @@ import {
 } from './explicitDispatchRecovery.js';
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
+import { coordinatorResolutionComment, planCoordinatorResolution } from './coordinatorResolution.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -598,6 +599,16 @@ export class AutonomousRunner {
       console.log(`[Scheduler] Task completed: ${taskCtx} ${task.title}`);
       broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: result.success, duration: result.totalDuration } });
       this.recordPipelineHistory(task, result);
+      if (result.coordinatorResolution?.action === 'complete' && task.issueId) {
+        const marker = `coordinator-complete:${task.issueId}:${result.sessionId}`;
+        const source = getTaskSource();
+        if (source) {
+          source.addComment(task.issueId, coordinatorResolutionComment({
+            action: 'complete',
+            reason: result.coordinatorResolution.reason,
+          }), marker).catch((error) => console.warn('[Coordinator] Completion note failed:', error));
+        }
+      }
       await reportToDiscord(formatPipelineResultEmbed(result));
 
       // Track as completed ONLY on success to prevent re-selection (persist to disk)
@@ -694,6 +705,17 @@ export class AutonomousRunner {
       const retryLabel = new Date(retryAt).toISOString();
       console.log(`[Scheduler] Task deferred: ${taskCtx} ${task.title} — retry at ${retryLabel}`);
       this.recordPipelineHistory(task, result);
+      if (result.coordinatorResolution?.action === 'retry' && task.issueId) {
+        const marker = `coordinator-retry:${task.issueId}:${result.sessionId}`;
+        const source = getTaskSource();
+        if (source) {
+          source.addComment(task.issueId, coordinatorResolutionComment({
+            action: 'retry',
+            reason: result.coordinatorResolution.reason,
+            retryAt,
+          }), marker).catch((error) => console.warn('[Coordinator] Retry note failed:', error));
+        }
+      }
       broadcastEvent({
         type: 'log',
         data: {
@@ -1481,6 +1503,11 @@ export class AutonomousRunner {
         successEffect: (result, claim) => buildCompletionEffect(task, result, claim.attemptNo),
         cancelEffect: (_result, claim) => buildCancellationEffect(task, claim.attemptNo),
         retryCancellation: () => this.stopping,
+        resolveOperatorPark: (parkedTask, parkedResult, attemptNo) => planCoordinatorResolution({
+          task: parkedTask,
+          result: parkedResult,
+          attemptNo,
+        }),
       },
     );
   }

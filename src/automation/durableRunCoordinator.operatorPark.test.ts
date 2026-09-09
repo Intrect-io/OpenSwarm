@@ -7,6 +7,8 @@ import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { DurableRunCoordinator } from './durableRunCoordinator.js';
 import { RunLedger } from './runLedger.js';
+import { formatDoDContract } from './dodContract.js';
+import { planCoordinatorResolution } from './coordinatorResolution.js';
 
 const roots: string[] = [];
 
@@ -69,6 +71,80 @@ describe('DurableRunCoordinator operatorPark', () => {
       .prepare("SELECT data_json FROM automation_events WHERE issue_id = 'scope' AND kind = 'operator_resumed' ORDER BY sequence DESC LIMIT 1")
       .get() as { data_json: string } | undefined;
     expect(JSON.parse(resumed?.data_json ?? '{}')).toMatchObject({ trigger: 'tracker_todo', parkedUnder: 'publication_scope_mismatch' });
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('lets an explicit no-change DoD complete through the durable success path', async () => {
+    const ledgerPath = dbPath();
+    const ledger = new RunLedger(ledgerPath);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const noChangeTask = {
+      ...task('no-change'),
+      description: formatDoDContract({
+        version: 1,
+        completion: { noChanges: 'complete' },
+        automation: { scopeMismatch: 'park', maxRepairs: 0 },
+      }),
+    };
+    const parked: PipelineResult = {
+      success: false,
+      sessionId: 's',
+      stages: [],
+      finalStatus: 'failed',
+      totalDuration: 1,
+      iterations: 1,
+      operatorPark: { code: 'worker_no_changes', reason: 'Worker finished without edits: already satisfied' },
+    };
+
+    const result = await coordinator.execute(noChangeTask, '/repo', async () => parked, {
+      resolveOperatorPark: (candidate, candidateResult, attemptNo) => planCoordinatorResolution({
+        task: candidate,
+        result: candidateResult,
+        attemptNo,
+      }),
+      successEffect: (_pipeline, claim) => ({
+        kind: 'tracker.complete',
+        dedupeKey: `no-change:${claim.attemptNo}`,
+        payload: { via: 'coordinator' },
+      }),
+    });
+
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved', coordinatorResolution: { action: 'complete' } });
+    expect(ledger.getRun('no-change')).toMatchObject({ state: 'SYNC_PENDING' });
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('defers an ephemeral-only fence without entering NEEDS_HUMAN', async () => {
+    const ledgerPath = dbPath();
+    const ledger = new RunLedger(ledgerPath);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const parked: PipelineResult = {
+      success: false,
+      sessionId: 's',
+      stages: [],
+      finalStatus: 'failed',
+      totalDuration: 1,
+      iterations: 1,
+      operatorPark: {
+        code: 'publication_scope_mismatch',
+        reason: 'publication-scope: branch contains files outside reserved write scope: pytest-local/case/output.txt',
+      },
+    };
+
+    const result = await coordinator.execute(task('ephemeral'), '/repo', async () => parked, {
+      resolveOperatorPark: (candidate, candidateResult, attemptNo) => planCoordinatorResolution({
+        task: candidate,
+        result: candidateResult,
+        attemptNo,
+        now: 1000,
+      }),
+    });
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'deferred', coordinatorResolution: { action: 'retry' } });
+    expect(ledger.getRun('ephemeral')).toMatchObject({ state: 'RETRY_AT' });
+    expect(ledger.getRun('ephemeral')?.retryAt).toBeGreaterThan(Date.now());
     coordinator.close();
     ledger.close();
   });

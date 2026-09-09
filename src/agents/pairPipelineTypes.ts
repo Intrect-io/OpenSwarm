@@ -131,6 +131,8 @@ export interface PipelineResult {
    * on three such runs on 2026-09-02 before anyone looked.
    */
   operatorPark?: { code: string; reason: string };
+  /** Deterministic coordinator action applied before durable park/complete. */
+  coordinatorResolution?: { action: 'complete' | 'retry'; reason: string };
 }
 
 /**
@@ -141,6 +143,8 @@ export interface PipelineResult {
  * diff for this issue as written.
  */
 export const WORKER_NO_CHANGES_PARK_REASON = 'worker_no_changes';
+/** Publication-path park: the worker stated why no source edit was required. */
+export const WORKER_NO_CHANGES_STATEMENT_PREFIX = 'Worker finished without edits:';
 
 export interface PipelineContext {
   task: TaskItem;
