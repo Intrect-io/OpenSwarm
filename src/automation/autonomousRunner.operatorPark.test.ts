@@ -99,11 +99,11 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     expect(defaultAutomationDbPath()).toBe(configured);
   });
 
-  it('holds a parked task on its backoff until the answer is there', async () => {
+  it('idle-fills a parked backoff so free slots do not sit empty (AGT-4257)', async () => {
     const { internal, park } = await makeRunner();
     park(true);
 
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
   });
 
   it('cuts the backoff short once the operator answers, and spends the park doing it', async () => {
@@ -131,7 +131,7 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
 
     // Now it fails for its own reasons and backs off again.
     internal.failedTaskRetryTimes.set('AGT-1', Date.now() + 3_600_000);
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
   });
 });
 
@@ -225,16 +225,12 @@ describe('operator park on the run ledger (AGT-4033)', () => {
     internal.durableRuns.close();
   });
 
-  it('leaves an ordinary failure on its backoff, answered question or not', async () => {
-    // The park has to expire with the attempt that caused it. Here the run backed
-    // off for its own reasons, so the answer still on the board says nothing about
-    // it — and the ledger, which overwrites the code on every transition, is what
-    // makes that distinction without anyone maintaining a flag.
+  it('idle-fills an ordinary RETRY_AT failure so free slots chew the backoff (AGT-4257)', async () => {
     const internal = await parkedRunner('failed');
     answered = true;
 
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('RETRY_AT');
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 });

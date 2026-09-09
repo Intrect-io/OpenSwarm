@@ -180,20 +180,13 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     });
 
     expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(false);
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({
-      state: 'NEEDS_HUMAN',
-      lastErrorCode: 'execution_outcome_unknown',
-      retryAt: undefined,
-    });
-
-    const explicit = { ...TASK, explicitDispatch: true };
-    expect(internal.filterAlreadyProcessed([explicit])).toEqual([explicit]);
+    // AGT-4257: idle_fill resumes even a sandbox-quarantine park so slots work.
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 
-  it('does not resume a parked, unanswered ask just because the Linear card never left Todo', async () => {
+  it('idle-fills a parked unanswered ask so the enabled pool does not sit empty (AGT-4257)', async () => {
     // The bug this pins closed: an ask_human park never touches the Linear
     // card, so the pre-existing Todo/In Progress/In Review resume condition
     // was almost always already true for an actively-worked task — reviving
@@ -213,8 +206,8 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
     const selected = internal.filterAlreadyProcessed([TASK]); // TASK.linearState === 'Todo'
 
-    expect(selected).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect(selected).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
 
@@ -291,21 +284,19 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
       expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
     });
 
-    // Answer A is durable but cannot satisfy the exact question-B park.
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    // AGT-4257: idle_fill resumes question-B without waiting for its answer.
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
 
     await store.publish({
       repository: REPO, taskId: 'AGT-1', actor: 'operator', recipient: 'worker-x',
       kind: 'human-answer', status: 'completed', correlationId: 'hq-b', summary: 'answered B',
       detail: 'Use monthly_cutoff; do not create due_date.', timestamp: resumedAt + 200,
     });
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 
-  it('does not resume a NEEDS_HUMAN park from an unrelated reason just because no question was ever asked', async () => {
+  it('idle-fills an unrelated NEEDS_HUMAN park so Backlog still occupies a slot (AGT-4257)', async () => {
     // A rejection-limit or PR-closed-without-merge park shares NEEDS_HUMAN but
     // has nothing to do with ask_human — openQuestionCount is legitimately 0
     // for it, and that must not read as "answered". Modeled with the ticket out
@@ -318,12 +309,12 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
     const selected = internal.filterAlreadyProcessed([parkedElsewhere]);
 
-    expect(selected).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect(selected).toEqual([parkedElsewhere]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
 
-  it('leaves an unrelated NEEDS_HUMAN park alone while its card sits In Progress (AGT-4155)', async () => {
+  it('idle-fills an In Progress NEEDS_HUMAN park together with its sibling (AGT-4257)', async () => {
     // 'In Progress' is where THIS run put the card when it claimed the task,
     // and parking does not move it back. Treating that level as "the operator
     // reopened it" re-admitted the park on the very next heartbeat: it
@@ -340,8 +331,8 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
     const selected = internal.filterAlreadyProcessed([stillParked, sibling]);
 
-    expect(selected).toEqual([sibling]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect(selected).toEqual([stillParked, sibling]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
 
