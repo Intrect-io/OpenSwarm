@@ -12,10 +12,10 @@
  */
 
 import { promises as fs } from 'fs';
-import { resolve, basename, join } from 'path';
+import { resolve, basename, join, relative, posix } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 
 // Codex storage path
 const CODEX_DIR = resolve(homedir(), '.openswarm/codex');
@@ -54,104 +54,95 @@ export async function initCodex(): Promise<void> {
   await fs.mkdir(CODEX_DIR, { recursive: true });
   await fs.mkdir(join(CODEX_DIR, '.sessions'), { recursive: true });
 
-  // Create index.md if it doesn't exist
   const indexPath = join(CODEX_DIR, 'index.md');
   try {
     await fs.access(indexPath);
   } catch {
-    const initialIndex = `# Codex - Session Records
-
-> Auto-generated work record archive
+    // Create initial index
+    const initialContent = `# Codex - Session Index
 
 ## Recent Sessions
 
-_No sessions recorded yet._
-
-## By Tags
-
-## By Repository
-
 ---
-_Last updated: ${new Date().toISOString()}_
+
+*Last updated: ${new Date().toISOString()}*
 `;
-    await fs.writeFile(indexPath, initialIndex, 'utf-8');
-    console.log('[Codex] Initialized index.md');
+    await fs.writeFile(indexPath, initialContent, 'utf-8');
   }
 }
 
 /**
- * Generate date-based paths
+ * Get date-based paths for session storage
  */
-function getDatePaths(date: Date): { monthDir: string; prefix: string } {
+export function getDatePaths(date: Date): { monthDir: string; prefix: string } {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  const time = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`;
-
   return {
     monthDir: `${year}-${month}`,
-    prefix: `${day}-${time}`,
+    prefix: `${day}`,
   };
 }
 
 /**
- * Generate a slug (for filenames)
+ * Slugify text for filenames
  */
-function slugify(text: string): string {
+export function slugify(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^\w\s가-힣-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .slice(0, 50)
-    .replace(/-$/, '');
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
 }
 
 /**
- * The part of a session filename that makes it unique.
- *
- * Derived from a hash rather than the first N characters of the id. Ids look
- * like `session-<ms>`, and taking the leading 12 characters left only the first
- * four digits of the timestamp — a value that stays the same for ~11.6 days
- * (10^9 ms). Uniqueness therefore collapsed to the `DD-HHMM` prefix plus the
- * title slug, so two sessions with the same title in the same minute silently
- * overwrote each other. A hash discriminates whatever shape the id takes,
- * including a leading- or trailing-common one.
+ * Generate a collision-resistant session ID using crypto hash
+ * of timestamp and random bytes.
+ */
+export function generateSessionId(): string {
+  const timestamp = Date.now().toString(16);
+  const random = randomBytes(16).toString('hex');
+  const hash = createHash('sha256').update(`${timestamp}-${random}`).digest('hex');
+  return `session-${hash.slice(0, 16)}`;
+}
+
+/**
+ * Session filename suffix from session ID
  */
 export function sessionFilenameSuffix(id: string): string {
-  return createHash('sha256').update(id).digest('hex').slice(0, 12);
+  // Extract the hex portion after "session-" for a short unique suffix
+  const hex = id.replace(/^session-/, '');
+  return hex.slice(0, 8);
 }
 
 /**
- * Format elapsed duration
+ * Format duration
  */
-function formatDuration(startMs: number, endMs: number): string {
-  const diffMs = endMs - startMs;
-  const minutes = Math.floor(diffMs / 60000);
-  if (minutes < 60) return `${minutes}min`;
-  const hours = Math.floor(minutes / 60);
-  const remainingMins = minutes % 60;
-  return `${hours}h ${remainingMins}min`;
+export function formatDuration(startMs: number, endMs: number): string {
+  const diff = endMs - startMs;
+  const minutes = Math.floor(diff / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 /**
  * Result emoji
  */
-function resultEmoji(result: CodexSession['result']): string {
+export function resultEmoji(result: CodexSession['result']): string {
   switch (result) {
-    case 'success':
-      return '✅';
-    case 'partial':
-      return '⚠️';
-    case 'failed':
-      return '❌';
-    case 'ongoing':
-      return '🔄';
+    case 'success': return '✅';
+    case 'partial': return '🟡';
+    case 'failed': return '❌';
+    case 'ongoing': return '🔄';
+    default: return '❓';
   }
 }
 
 /**
- * Generate summary document
+ * Generate summary markdown
  */
 function generateSummary(session: CodexSession, detailPath: string): string {
   const date = new Date(session.startedAt);
@@ -167,7 +158,11 @@ function generateSummary(session: CodexSession, detailPath: string): string {
     ? formatDuration(session.startedAt, session.endedAt)
     : 'ongoing';
 
-  const relativeDetailPath = join('..', '.sessions', basename(detailPath));
+  // Use posix.relative for platform-independent relative paths in markdown links
+  const relativeDetailPath = posix.relative(
+    posix.join(...CODEX_DIR.split(/[\\/]/)),
+    posix.join(...detailPath.split(/[\\/]/)),
+  );
 
   let md = `# ${session.title}
 > ${dateStr} | Duration: ~${duration} | [Detail Record](${relativeDetailPath})
@@ -312,7 +307,11 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
   const indexPath = join(CODEX_DIR, 'index.md');
   let content = await fs.readFile(indexPath, 'utf-8');
 
-  const relativePath = summaryPath.replace(CODEX_DIR + '/', '');
+  // Use posix.relative for platform-independent relative paths in markdown links
+  const relativePath = posix.relative(
+    posix.join(...CODEX_DIR.split(/[\\/]/)),
+    posix.join(...summaryPath.split(/[\\/]/)),
+  );
   const date = new Date(session.startedAt);
   const dateStr = date.toLocaleDateString('en-US', {
     month: '2-digit',
@@ -334,22 +333,15 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
     const afterSection = sectionEnd !== -1 ? content.slice(sectionEnd) : '';
 
     // Get existing entries (keep max 20)
-    const existingSection = content.slice(recentIdx + recentHeader.length, sectionEnd !== -1 ? sectionEnd : undefined);
-    const existingEntries = existingSection
-      .split('\n')
-      .filter(line => line.trim().startsWith('-'))
-      .slice(0, 19);
+    const existingSection = content.slice(recentIdx + recentHeader.length, sectionEnd);
+    const existingEntries = existingSection.split('\n').filter(l => l.trim().startsWith('- '));
 
-    const newSection = `\n\n${newEntry}\n${existingEntries.join('\n')}\n`;
-
-    content = beforeSection + newSection + afterSection;
+    const allEntries = [newEntry, ...existingEntries].slice(0, 20);
+    content = `${beforeSection}\n${allEntries.join('\n')}\n${afterSection}`;
+  } else {
+    // No recent sessions section found, append
+    content += `\n## Recent Sessions\n${newEntry}\n`;
   }
-
-  // Update last-updated timestamp
-  content = content.replace(
-    /_Last updated:.*_/,
-    `_Last updated: ${new Date().toISOString()}_`
-  );
 
   await fs.writeFile(indexPath, content, 'utf-8');
   console.log('[Codex] Updated index.md');
@@ -364,7 +356,7 @@ export class SessionBuilder {
 
   constructor(title: string) {
     this.session = {
-      id: `session-${Date.now()}`,
+      id: generateSessionId(),
       title,
       startedAt: Date.now(),
       tags: [],

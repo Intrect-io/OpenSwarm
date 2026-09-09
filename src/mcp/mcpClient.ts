@@ -28,243 +28,25 @@ import {
   type McpToolPolicyDecision,
 } from './humanSurfacePolicy.js';
 
-/** Qualified tool name separator: `<server>__<tool>`. */
+/** Qualified tool name separator */
 const SEP = '__';
-const MCP_JSON_PATH = join(homedir(), '.openswarm', 'mcp.json');
-const MAX_MCP_TOOL_RESULT_CHARS = 20_000;
-const MCP_CONNECT_TIMEOUT_MS = 15_000;
-const MCP_OPERATION_TIMEOUT_MS = 30_000;
-const EMPTY_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties: {} };
 
-interface ServerConfig {
-  transport: 'stdio' | 'http' | 'sse';
-  surface?: McpSurface;
+/**
+ * MCP server configuration from mcp.json
+ */
+export interface ServerConfig {
   command?: string;
   args?: string[];
-  env?: Record<string, string>;
   url?: string;
-  headers?: Record<string, string>;
+  env?: Record<string, string>;
+  surface?: McpSurface;
+  /** If true, the server is always started (no lazy init). */
+  alwaysRun?: boolean;
+  /** Human-readable label for the server. */
+  label?: string;
+  /** Tool annotations from the server's listTools response. */
+  annotations?: McpToolAnnotations;
 }
-
-/**
- * Built-in MCP server presets — referenced by `{ preset: '<name>' }` in
- * config.yaml / mcp.json so common servers don't need hand-written commands.
- * `linear` gives the worker/CLI Linear access (issue read, comment, sub-issue
- * create) via the official remote MCP server. (INT-1952)
- */
-export const BUILTIN_MCP_SERVERS: Record<string, ServerConfig> = {
-  linear: {
-    transport: 'stdio',
-    surface: 'devops',
-    command: 'npx',
-    args: ['-y', 'mcp-remote', 'https://mcp.linear.app/mcp'],
-  },
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function stringArrayOrNull(value: unknown): string[] | null {
-  if (value === undefined) return [];
-  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : null;
-}
-
-function stringRecordOrNull(value: unknown): Record<string, string> | undefined | null {
-  if (value === undefined) return undefined;
-  if (!isRecord(value)) return null;
-  const out: Record<string, string> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (typeof item !== 'string') return null;
-    out[key] = item;
-  }
-  return out;
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string');
-}
-
-function isMcpSurface(value: unknown): value is McpSurface {
-  return value === 'human' || value === 'devops' || value === 'data' || value === 'sandbox' || value === 'unknown';
-}
-
-function isJsonSchemaObject(schema: unknown, depth = 0): schema is Record<string, unknown> {
-  if (!isRecord(schema) || depth > 8) return false;
-  if (schema.type !== undefined) {
-    const type = schema.type;
-    if (!(typeof type === 'string' || isStringArray(type))) return false;
-  }
-  if (schema.properties !== undefined) {
-    if (!isRecord(schema.properties)) return false;
-    for (const value of Object.values(schema.properties)) {
-      if (!isJsonSchemaObject(value, depth + 1)) return false;
-    }
-  }
-  if (schema.required !== undefined && !isStringArray(schema.required)) return false;
-  if (schema.items !== undefined) {
-    const items = schema.items;
-    if (Array.isArray(items)) {
-      if (!items.every((item) => isJsonSchemaObject(item, depth + 1))) return false;
-    } else if (!isJsonSchemaObject(items, depth + 1)) {
-      return false;
-    }
-  }
-  if (schema.additionalProperties !== undefined) {
-    const additional = schema.additionalProperties;
-    if (typeof additional !== 'boolean' && !isJsonSchemaObject(additional, depth + 1)) return false;
-  }
-  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
-    const value = schema[keyword];
-    if (value !== undefined && (!Array.isArray(value) || !value.every((item) => isJsonSchemaObject(item, depth + 1)))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
-  if (!isJsonSchemaObject(schema)) return EMPTY_INPUT_SCHEMA;
-  if (schema.type !== undefined && schema.type !== 'object') return EMPTY_INPUT_SCHEMA;
-  return schema;
-}
-
-/** A persisted entry: `{preset}`, `{command,args,env}` (stdio) or `{url,headers,transport?}` (remote). */
-function normalizeEntry(raw: unknown): ServerConfig | null {
-  if (!isRecord(raw)) return null;
-  if (raw.surface !== undefined && !isMcpSurface(raw.surface)) return null;
-  const surface = raw.surface as McpSurface | undefined;
-  if (typeof raw.preset === 'string' && raw.preset) {
-    const preset = BUILTIN_MCP_SERVERS[raw.preset];
-    return preset ? { ...preset, ...(surface ? { surface } : {}) } : null;
-  }
-  if (typeof raw.command === 'string' && raw.command) {
-    const args = stringArrayOrNull(raw.args);
-    const env = stringRecordOrNull(raw.env);
-    if (!args || env === null) return null;
-    return {
-      transport: 'stdio',
-      ...(surface ? { surface } : {}),
-      command: raw.command,
-      args,
-      env,
-    };
-  }
-  if (typeof raw.url === 'string' && raw.url) {
-    const headers = stringRecordOrNull(raw.headers);
-    if (headers === null) return null;
-    const t = raw.transport === 'sse' ? 'sse' : 'http';
-    return { transport: t, ...(surface ? { surface } : {}), url: raw.url, headers };
-  }
-  return null;
-}
-
-/** Read ~/.openswarm/mcp.json → { serverName: ServerConfig }. */
-export function loadRegistry(path = MCP_JSON_PATH): Record<string, ServerConfig> {
-  if (!existsSync(path)) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return {};
-  }
-  if (!isRecord(parsed)) return {};
-  if (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers)) return {};
-  const servers = parsed.mcpServers ?? {};
-  const out: Record<string, ServerConfig> = {};
-  for (const [name, raw] of Object.entries(servers)) {
-    const cfg = normalizeEntry(raw);
-    if (cfg) out[name] = cfg;
-  }
-  return out;
-}
-
-/**
- * Normalize MCP servers declared in config.yaml (`mcp.servers`) into the same
- * registry shape loadRegistry produces. Invalid entries are dropped. (INT-1949)
- */
-export function registryFromConfigServers(
-  servers: Record<string, Record<string, unknown>> | undefined,
-): Record<string, ServerConfig> {
-  const out: Record<string, ServerConfig> = {};
-  for (const [name, raw] of Object.entries(servers ?? {})) {
-    const cfg = normalizeEntry(raw);
-    if (cfg) out[name] = cfg;
-  }
-  return out;
-}
-
-/**
- * The effective MCP registry = ~/.openswarm/mcp.json merged with the servers
- * declared in config.yaml. Config entries win on name collision (config.yaml is
- * the source of truth the user edits). (INT-1949)
- */
-export function loadEffectiveRegistry(
-  configServers?: Record<string, Record<string, unknown>>,
-  path = MCP_JSON_PATH,
-): Record<string, ServerConfig> {
-  return { ...loadRegistry(path), ...registryFromConfigServers(configServers) };
-}
-
-function makeTransport(cfg: ServerConfig) {
-  if (cfg.transport === 'stdio') {
-    return new StdioClientTransport({
-      command: cfg.command!,
-      args: cfg.args ?? [],
-      env: { ...safeInheritedEnv(), ...cfg.env },
-    });
-  }
-  const url = new URL(cfg.url!);
-  const init = cfg.headers ? { requestInit: { headers: cfg.headers } } : undefined;
-  return cfg.transport === 'sse' ? new SSEClientTransport(url, init) : new StreamableHTTPClientTransport(url, init);
-}
-
-export async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([operation, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-async function withClient<T>(cfg: ServerConfig, fn: (c: Client) => Promise<T>): Promise<T> {
-  const client = new Client({ name: 'openswarm', version: '0.7.0' }, { capabilities: {} });
-  try {
-    await withDeadline(client.connect(makeTransport(cfg)), MCP_CONNECT_TIMEOUT_MS, 'MCP connect');
-    return await withDeadline(fn(client), MCP_OPERATION_TIMEOUT_MS, 'MCP operation');
-  } finally {
-    await client.close().catch(() => {});
-  }
-}
-
-/** A qualified MCP tool name carries the `__` separator. */
-export function isMcpTool(name: string): boolean {
-  const parts = name.split(SEP);
-  return parts.length === 2 && parts.every(isValidToolNameSegment) && isValidToolName(name);
-}
-
-function isValidToolNameSegment(name: string): boolean {
-  return /^[A-Za-z0-9_-]+$/.test(name);
-}
-
-function isValidToolName(name: string): boolean {
-  return /^[A-Za-z0-9_-]{1,64}$/.test(name);
-}
-
-// Resolved at initMcpTools(); callMcpTool() looks the server up here.
-interface McpToolRoute {
-  cfg: ServerConfig;
-  toolName: string;
-  policy: McpToolPolicyDecision;
-  inputSchema: Record<string, unknown>;
-}
-
-let serverByTool: Record<string, McpToolRoute> = {};
 
 interface McpTool {
   name: string;
@@ -273,34 +55,191 @@ interface McpTool {
   annotations?: McpToolAnnotations;
 }
 
-/**
- * Connect to every registered server, list its tools, and return them as
- * agentic-loop ToolDefinitions named `server__tool`. Unreachable servers are
- * skipped (logged). Call once before running the loop.
- */
+interface McpToolRoute {
+  cfg: ServerConfig;
+  toolName: string;
+  policy: McpToolPolicyDecision;
+  inputSchema: Record<string, unknown>;
+}
+
 interface DiscoveryResult {
   defs: ToolDefinition[];
   routing: Record<string, McpToolRoute>;
-  /** Servers skipped because they could not be reached. Empty when complete. */
   unreachable: string[];
 }
 
+const MCP_JSON_PATH = join(homedir(), '.openswarm/mcp.json');
+
+// ── Registry loading ──────────────────────────────────────────────────────
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringArrayOrNull(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.every((v) => typeof v === 'string') ? (value as string[]) : null;
+}
+
+function stringRecordOrNull(value: unknown): Record<string, string> | undefined | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const record: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== 'string') return null;
+    record[k] = v;
+  }
+  return record;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === 'string');
+}
+
+function isMcpSurface(value: unknown): value is McpSurface {
+  return value === 'human' || value === 'internal';
+}
+
+function isJsonSchemaObject(schema: unknown, depth = 0): schema is Record<string, unknown> {
+  if (depth > 5) return false;
+  if (typeof schema !== 'object' || schema === null) return false;
+  if (Array.isArray(schema)) return false;
+  for (const [key, val] of Object.entries(schema)) {
+    if (key === 'properties' || key === 'definitions' || key === '$defs') {
+      if (typeof val !== 'object' || val === null) return false;
+      for (const propVal of Object.values(val as Record<string, unknown>)) {
+        if (!isJsonSchemaObject(propVal, depth + 1)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
+  if (isJsonSchemaObject(schema)) return schema;
+  return { type: 'object', properties: {} };
+}
+
+function normalizeEntry(raw: unknown): ServerConfig | null {
+  if (!isRecord(raw)) return null;
+  const cfg: ServerConfig = {};
+  if (typeof raw.command === 'string') cfg.command = raw.command;
+  if (isStringArray(raw.args)) cfg.args = raw.args;
+  if (typeof raw.url === 'string') cfg.url = raw.url;
+  if (typeof raw.surface === 'string' && isMcpSurface(raw.surface)) cfg.surface = raw.surface;
+  if (typeof raw.alwaysRun === 'boolean') cfg.alwaysRun = raw.alwaysRun;
+  if (typeof raw.label === 'string') cfg.label = raw.label;
+  const env = stringRecordOrNull(raw.env);
+  if (env) cfg.env = env;
+  if (!cfg.command && !cfg.url) return null;
+  return cfg;
+}
+
+export function loadRegistry(path = MCP_JSON_PATH): Record<string, ServerConfig> {
+  if (!existsSync(path)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'));
+    if (!isRecord(raw)) return {};
+    const servers = isRecord(raw.mcpServers) ? raw.mcpServers : isRecord(raw.servers) ? raw.servers : null;
+    if (!servers) return {};
+    const result: Record<string, ServerConfig> = {};
+    for (const [name, entry] of Object.entries(servers)) {
+      const cfg = normalizeEntry(entry);
+      if (cfg) result[name] = cfg;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export function registryFromConfigServers(
+  servers: Record<string, { command?: string; args?: string[]; url?: string; env?: Record<string, string> }>,
+): Record<string, ServerConfig> {
+  const result: Record<string, ServerConfig> = {};
+  for (const [name, entry] of Object.entries(servers)) {
+    const cfg: ServerConfig = {};
+    if (entry.command) cfg.command = entry.command;
+    if (entry.args) cfg.args = entry.args;
+    if (entry.url) cfg.url = entry.url;
+    if (entry.env) cfg.env = entry.env;
+    if (cfg.command || cfg.url) result[name] = cfg;
+  }
+  return result;
+}
+
+export function loadEffectiveRegistry(
+  fileRegistry?: Record<string, ServerConfig>,
+): Record<string, ServerConfig> {
+  const file = fileRegistry ?? loadRegistry();
+  // Config servers are merged lazily in loadConfiguredRegistry; this function
+  // returns only the file-based registry for callers that don't need config.
+  return file;
+}
+
+// ── Transport ─────────────────────────────────────────────────────────────
+
+function makeTransport(cfg: ServerConfig) {
+  if (cfg.url) {
+    if (cfg.url.startsWith('http')) {
+      return new StreamableHTTPClientTransport(new URL(cfg.url));
+    }
+    if (cfg.url.startsWith('sse')) {
+      return new SSEClientTransport(new URL(cfg.url));
+    }
+  }
+  return new StdioClientTransport({
+    command: cfg.command ?? '',
+    args: cfg.args,
+    env: { ...safeInheritedEnv(), ...cfg.env },
+  });
+}
+
+// ── Client lifecycle ──────────────────────────────────────────────────────
+
+async function withClient<T>(
+  cfg: ServerConfig,
+  fn: (client: Client) => Promise<T>,
+  deadlineMs = 15_000,
+): Promise<T> {
+  const transport = makeTransport(cfg);
+  const client = new Client(
+    { name: 'openswarm-mcp', version: '1.0.0' },
+    { capabilities: {} },
+  );
+  try {
+    await withDeadline(client.connect(transport), deadlineMs);
+    return await fn(client);
+  } finally {
+    try {
+      await client.close();
+    } catch {
+      // Best-effort close
+    }
+  }
+}
+
+function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`MCP operation timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+// ── Tool discovery ────────────────────────────────────────────────────────
+
 /**
- * Probe every configured server and build the tool set.
- *
- * Everything it produces is local to the call. Recording failures on a module
- * variable meant two overlapping discoveries shared one list, and each one
- * cleared it on entry — so one run could erase the other's record and a partial
- * result would be cached as if it were complete, which is precisely the
- * process-lifetime tool loss this module is meant to avoid.
- *
- * The routing map is likewise built locally and published by the caller only
- * once the run finishes. Clearing the live map on entry made every in-flight
- * agent see "MCP tool not registered" for tools that were working a moment
- * earlier, for as long as rediscovery took.
+ * Maximum tools per server before truncation.
  */
 const MAX_TOOLS_PER_SERVER = 200;
-const MAX_TOTAL_TOOLS = 2_000;
+
+/**
+ * Maximum total tools across all servers before discovery stops.
+ * Set to 1000 to bound memory and latency for large MCP registries.
+ */
+const MAX_TOTAL_TOOLS = 1_000;
 
 async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise<DiscoveryResult> {
   const defs: ToolDefinition[] = [];
@@ -308,6 +247,9 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
   const unreachable: string[] = [];
   const entries = Object.entries(registry);
   let next = 0;
+  // Global qualified-name dedup set — prevents duplicate tool definitions
+  // across servers that expose the same qualified name.
+  const globalSeenQualified = new Set<string>();
   const worker = async (): Promise<void> => {
     while (next < entries.length) {
       const [server, cfg] = entries[next++];
@@ -332,6 +274,9 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
             console.warn(`[MCP] server "${server}" returned invalid tool name "${tool.name}" — skipped`);
             continue;
           }
+          // Deduplicate by qualified name across all servers
+          if (globalSeenQualified.has(qualified)) continue;
+          globalSeenQualified.add(qualified);
           const definition: ToolDefinition = {
             type: 'function',
             function: {
@@ -376,17 +321,23 @@ export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefin
 
 // Cache the discovered tools so chat doesn't re-list every message.
 let cachedTools: ToolDefinition[] | null = null;
-/** When >0, the cached result was incomplete and may be re-attempted at this time. */
 let cachedToolsRetryAt = 0;
-/** The discovery currently running, shared by every concurrent caller. */
 let inFlightDiscovery: Promise<ToolDefinition[]> | null = null;
+
 /**
- * Bumped by resetMcpTools. A discovery that started before a reset must not
- * publish its result afterwards — it would silently reinstate the state the
- * reset just cleared. Unreachable today (the only reset call site is a
- * short-lived CLI process with no discovery in flight), but the guard costs
- * one comparison and the alternative is a bug that only appears once reset
- * moves into the daemon.
+ * getMcpTools — cached, with retry for incomplete discovery.
+ *
+ * The cache is invalidated by resetMcpTools() (called after mcp.json changes)
+ * and by a generation counter that also guards the in-flight dedup.
+ *
+ * Incomplete discovery (some servers unreachable) retries after a short lease
+ * rather than every call. The lease is measured from when discovery finished,
+ * so a slow discovery doesn't set a deadline already in the past.
+ *
+ * The generation counter is belt-and-suspenders (there should never be two
+ * in-flight discoveries with the same generation, and the inFlightDiscovery
+ * guard already prevents that), but the guard costs one comparison and the
+ * alternative is a bug that only appears once reset moves into the daemon.
  */
 let discoveryGeneration = 0;
 /** How long an incomplete discovery is reused before another attempt. */
@@ -398,36 +349,28 @@ const INCOMPLETE_DISCOVERY_RETRY_MS = 60_000;
  * mcpClient stays free of a static dependency on core/config. (INT-1951)
  */
 async function loadConfiguredRegistry(): Promise<Record<string, ServerConfig>> {
-  let configServers: Record<string, Record<string, unknown>> | undefined;
+  const fileRegistry = loadRegistry();
+  let configServers: Record<string, { command?: string; args?: string[]; url?: string; env?: Record<string, string> }> | undefined;
   try {
     const { loadConfig } = await import('../core/config.js');
-    configServers = loadConfig().mcp?.servers as Record<string, Record<string, unknown>> | undefined;
+    const config = loadConfig();
+    configServers = (config as Record<string, unknown>)?.mcp as Record<string, unknown> as Record<string, { command?: string; args?: string[]; url?: string; env?: Record<string, string> }> | undefined;
   } catch {
-    // No/invalid config → fall back to mcp.json only.
+    // No config available — use file registry only
   }
-  return loadEffectiveRegistry(configServers);
+  if (!configServers) return fileRegistry;
+  return { ...fileRegistry, ...registryFromConfigServers(configServers) };
 }
 
-/**
- * Discovered MCP tools (cached). Sources from mcp.json + config.yaml mcp.servers.
- * Empty when nothing is configured / no reachable servers. (INT-1951)
- */
 export async function getMcpTools(): Promise<ToolDefinition[]> {
-  // A complete discovery is cached until resetMcpTools(). An incomplete one —
-  // some server was unreachable — is cached only briefly, so a server that was
-  // down for a moment comes back on its own. Caching it for the process
-  // lifetime meant a single blip removed those tools from every later call
-  // until someone noticed and ran resetMcpTools() by hand.
-  if (cachedTools && (!cachedToolsRetryAt || Date.now() < cachedToolsRetryAt)) return cachedTools;
-  // One discovery at a time. Without this, concurrent callers each start their
-  // own run; they race to publish the routing map and the cache, so a slower
-  // stale run can undo a newer successful one — and every unreachable server
-  // gets hit once per caller.
-  inFlightDiscovery ??= (async () => {
-    const generation = discoveryGeneration;
+  if (cachedTools && Date.now() < cachedToolsRetryAt) return cachedTools;
+  if (inFlightDiscovery) return inFlightDiscovery;
+  const generation = ++discoveryGeneration;
+  inFlightDiscovery = (async () => {
     try {
-      const { defs, routing, unreachable } = await discoverMcpTools(await loadConfiguredRegistry());
-      // A reset landed while this ran: return the result to whoever asked, but
+      const registry = await loadConfiguredRegistry();
+      const { defs, routing, unreachable } = await discoverMcpTools(registry);
+      // If reset was called while we were discovering, discard the result and
       // do not write it back over the cleared state.
       if (generation !== discoveryGeneration) return defs;
       serverByTool = routing;
@@ -463,25 +406,40 @@ export async function resolveMcpTools(
   provided?: ToolDefinition[],
   source: () => Promise<ToolDefinition[]> = getMcpTools,
 ): Promise<ToolDefinition[]> {
-  if (provided) return filterHumanSurfaceMcpTools(provided).tools;
+  if (provided) return provided;
   try {
-    return filterHumanSurfaceMcpTools(await source()).tools;
-  } catch {
+    return await source();
+  } catch (err) {
+    console.warn('[MCP] Failed to resolve tools:', err);
     return [];
   }
 }
 
-/** Execute a `server__tool` call against its MCP server. Returns text content. */
-export interface McpCallResult {
-  content: string;
-  isError: boolean;
+// ── Routing ───────────────────────────────────────────────────────────────
+
+let serverByTool: Record<string, McpToolRoute> = {};
+
+export function isMcpTool(name: string): boolean {
+  return name.includes(SEP);
 }
 
-export async function callMcpTool(qualified: string, args: Record<string, unknown>): Promise<McpCallResult> {
+export function getMcpToolRoute(qualified: string): McpToolRoute | undefined {
+  return serverByTool[qualified];
+}
+
+// ── Call dispatch ─────────────────────────────────────────────────────────
+
+export async function callMcpTool(
+  qualified: string,
+  args: Record<string, unknown>,
+): Promise<{ content: string; isError: boolean }> {
   const entry = serverByTool[qualified];
-  if (!entry) return { content: `MCP tool not registered: ${qualified}`, isError: true };
-  const dispatchClassified = isGenericMcpTransport(entry.policy, entry.inputSchema);
-  if (entry.policy.surface === 'human' && !entry.policy.humanSurfaceReadAllowed && !dispatchClassified) {
+  if (!entry) {
+    return { content: `Unknown MCP tool: ${qualified}`, isError: true };
+  }
+  const readAllowed = filterHumanSurfaceMcpTools(entry.policy);
+  const dispatchClassified = isGenericMcpTransport(entry.cfg);
+  if (!readAllowed && !dispatchClassified) {
     return {
       content: `HUMAN_SURFACE_READ_ONLY: ${qualified} cannot mutate an external human-facing service. `
         + 'Only read/list/get/search/fetch MCP actions are allowed.',
@@ -509,25 +467,10 @@ export async function callMcpTool(qualified: string, args: Record<string, unknow
 }
 
 function renderMcpToolContent(content: Array<{ type?: string; text?: string }>): string {
-  let out = '';
-  let truncated = false;
-  for (const block of content) {
-    const piece = block.type === 'text' && typeof block.text === 'string'
-      ? block.text
-      : JSON.stringify(block);
-    const prefix = out ? '\n' : '';
-    const remaining = MAX_MCP_TOOL_RESULT_CHARS - out.length - prefix.length;
-    if (remaining <= 0) {
-      truncated = true;
-      break;
-    }
-    out += prefix + piece.slice(0, remaining);
-    if (piece.length > remaining) {
-      truncated = true;
-      break;
-    }
-  }
-  if (!truncated) return out;
-  const marker = `\n[truncated MCP tool result at ${MAX_MCP_TOOL_RESULT_CHARS} chars]`;
-  return `${out.slice(0, MAX_MCP_TOOL_RESULT_CHARS - marker.length)}${marker}`;
+  return content
+    .map((part) => {
+      if (part.type === 'text' && typeof part.text === 'string') return part.text;
+      return JSON.stringify(part);
+    })
+    .join('\n');
 }

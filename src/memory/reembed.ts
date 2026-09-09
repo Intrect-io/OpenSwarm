@@ -8,6 +8,9 @@
 // and searches return rows, only the ranking is wrong. This rewrites the whole
 // table in one pass, following compaction's build-then-swap shape so a failure
 // leaves the original table intact.
+//
+// Processing is done in bounded batches of 1000 records to keep memory usage
+// predictable even for large stores (100k+ records).
 
 import { c, status } from '../support/colors.js';
 import {
@@ -41,11 +44,18 @@ export interface ReembedOptions {
   memoryDir?: string;
   /** Progress callback, invoked every `progressEvery` records. */
   onProgress?: (done: number, total: number) => void;
+  /** How often to fire onProgress (default 50). */
   progressEvery?: number;
+  /** Batch size for bounded-memory processing (default 1000). */
+  batchSize?: number;
 }
 
+/**
+ * Rebuild every stored vector with the current encoder.
+ * Processes records in bounded batches to keep memory predictable.
+ */
 export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<ReembedResult> {
-  await initDatabase();
+  await initDatabase(options.memoryDir ?? MEMORY_DIR);
   const db = getDb();
   const table = getTable();
   if (!db || !table) throw new Error('Memory database is not initialized');
@@ -53,6 +63,7 @@ export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<
   const spec = resolveEmbeddingConfig();
   const signature = embeddingSignature(spec);
   const progressEvery = options.progressEvery ?? 50;
+  const batchSize = options.batchSize ?? 1_000;
 
   const rows = (await table.query().limit(1_000_000).toArray()) as unknown as CognitiveMemoryRecord[];
   const total = rows.length;
@@ -64,19 +75,26 @@ export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<
   let reembedded = 0;
   let empty = 0;
 
-  for (let i = 0; i < normalized.length; i++) {
-    const record = normalized[i];
-    const text = embeddingTextFor(String(record.title ?? ''), String(record.content ?? ''));
-    if (!text) {
-      record.vector = Array.from({ length: EMBEDDING_DIM }, () => 0);
-      empty++;
-    } else {
-      record.vector = await embedPassage(text);
-      reembedded++;
-    }
-    if ((i + 1) % progressEvery === 0) {
-      options.onProgress?.(i + 1, total);
-      console.log(`${c.dim(`[Reembed] ${i + 1}/${total}`)}`);
+  // Process in bounded batches to keep memory predictable
+  for (let batchStart = 0; batchStart < normalized.length; batchStart += batchSize) {
+    const batchEnd = Math.min(batchStart + batchSize, normalized.length);
+    const batch = normalized.slice(batchStart, batchEnd);
+
+    for (let j = 0; j < batch.length; j++) {
+      const record = batch[j];
+      const text = embeddingTextFor(String(record.title ?? ''), String(record.content ?? ''));
+      if (!text) {
+        record.vector = Array.from({ length: EMBEDDING_DIM }, () => 0);
+        empty++;
+      } else {
+        record.vector = await embedPassage(text);
+        reembedded++;
+      }
+      const globalIndex = batchStart + j + 1;
+      if (globalIndex % progressEvery === 0) {
+        options.onProgress?.(globalIndex, total);
+        console.log(`${c.dim(`[Reembed] ${globalIndex}/${total}`)}`);
+      }
     }
   }
   options.onProgress?.(total, total);

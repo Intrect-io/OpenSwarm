@@ -18,7 +18,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { searchRepoMemoryText } from '../memory/repoKnowledge.js';
 import { z } from 'zod';
 
-const MAX_CONCURRENT_SEARCHES = 3;
+const MAX_CONCURRENT_SEARCHES = 4;
 const SEARCH_DEADLINE_MS = 10_000;
 
 // Simple semaphore to bound concurrent memory searches
@@ -31,10 +31,7 @@ async function acquireSearchSlot(): Promise<void> {
     return;
   }
   return new Promise<void>((resolve) => {
-    searchQueue.push(() => {
-      activeSearches++;
-      resolve();
-    });
+    searchQueue.push(resolve);
   });
 }
 
@@ -77,19 +74,24 @@ async function main(): Promise<void> {
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [SEARCH_TOOL] }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [SEARCH_TOOL],
+  }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    if (req.params.name !== 'search_memory') {
-      return { content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }], isError: true };
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name !== 'search_memory') {
+      return {
+        content: [{ type: 'text', text: `Unknown tool: ${request.params.name}` }],
+        isError: true,
+      };
     }
     try {
-      const args = SearchArgumentsSchema.parse(req.params.arguments ?? {});
+      const args = SearchArgumentsSchema.parse(request.params.arguments ?? {});
       await acquireSearchSlot();
       let text: string;
       try {
-        const searchPromise = searchRepoMemoryText(process.cwd(), args.query, args.limit);
-        const deadlinePromise = new Promise<never>((_, reject) =>
+        const searchPromise = searchRepoMemoryText(args.query, args.limit);
+        const deadlinePromise = new Promise<string>((_, reject) =>
           setTimeout(() => reject(new Error('Memory search timed out')), SEARCH_DEADLINE_MS)
         );
         text = await Promise.race([searchPromise, deadlinePromise]);
