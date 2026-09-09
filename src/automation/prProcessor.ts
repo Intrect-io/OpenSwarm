@@ -417,7 +417,7 @@ export class PRProcessor {
   async freshReview(
     pr: PRInfo,
     projectPath: string,
-  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean }> {
+  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; changesRequested?: boolean }> {
     const key = `${pr.repo}#${pr.number}`;
     this.currentPR = key;
 
@@ -425,6 +425,7 @@ export class PRProcessor {
     // produced nothing" from "the reviewer concluded and a later step failed".
     // (INT-3914)
     let verdictProduced = false;
+    let changesRequested = false;
     let worktreePath: string | null = null;
     let prHeadRef: string | null = null;
     let baseRef: string | null = null;
@@ -531,6 +532,11 @@ export class PRProcessor {
         return { success: false, error: `No diff found against ${base}`, iterations: 0, gateRan: false };
       }
       verdictProduced = true;
+      // Remembered before the comment is posted. `success: false` covers both
+      // "the reviewer objected" and "the review broke", and posting the
+      // comment can fail on its own (403, rate limit) AFTER an approval — a
+      // caller that acts on the verdict must not read that as an objection.
+      changesRequested = review.decision !== 'approve';
 
       // Names the exact commit reviewed: a long-running review racing a new
       // push must not read as an approval of commits it never saw.
@@ -549,11 +555,12 @@ export class PRProcessor {
         error: review.decision === 'approve' ? undefined : (review.feedback || 'Reviewer requested changes'),
         iterations: 0,
         gateRan: true,
+        changesRequested,
       };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} fresh review error:`, errorMsg);
-      return { success: false, error: errorMsg, iterations: 0, gateRan: verdictProduced };
+      return { success: false, error: errorMsg, iterations: 0, gateRan: verdictProduced, changesRequested };
     } finally {
       if (worktreePath) {
         try {

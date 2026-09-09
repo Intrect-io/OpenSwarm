@@ -802,6 +802,20 @@ function execGhComment(repo: string, prNumber: number, body: string): Promise<vo
   });
 }
 
+/**
+ * Move a published pull request back to draft.
+ *
+ * The autonomous loop publishes before it knows whether the work is good. When
+ * the PR-time review then asks for changes, the PR must stop looking mergeable
+ * to everyone who sees it — a human skimming the list cannot tell a reviewed PR
+ * from an unreviewed one, and the swarm's own draft-peer gating reads the flag
+ * too. Throws so the caller can record that the rollback itself failed rather
+ * than reporting a PR as parked when it is still marked ready.
+ */
+export async function convertPRToDraft(repo: string, prNumber: number): Promise<void> {
+  await ghExec('pr', 'ready', String(prNumber), '--undo', '--repo', repo);
+}
+
 export async function commentOnPR(repo: string, prNumber: number, body: string): Promise<void> {
   try {
     await execGhComment(repo, prNumber, body);

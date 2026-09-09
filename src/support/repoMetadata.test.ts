@@ -92,11 +92,14 @@ describe('loadRepoMetadata', () => {
     });
   });
 
-  // The PR-time fresh review is a per-repository opt-in (operator decision
-  // 2026-09-02: OpenSwarm itself yes, its target repositories no), and opting
-  // in must not drag the `automation` block's admission defaults along.
-  it('reads the publication fresh-review opt-in without touching automation defaults', async () => {
-    await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
+  // AGT-4270: opt-OUT, not opt-in. It was opt-in while the per-attempt reviewer
+  // was switched off in its favour, and no repository ever opted in — so the
+  // loop published pull requests no LLM had read (2 of 28 mergeable as they
+  // stood, 2026-09-09). Only an explicit `false` turns it off now. Reading it
+  // must still not drag the `automation` block's admission defaults along.
+  it('runs the publication fresh review unless a repository opts out', async () => {
+    // No openswarm.json at all — the common case, and the one that was silent.
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
 
     writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: { freshReview: true } }));
     await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
@@ -104,11 +107,18 @@ describe('loadRepoMetadata', () => {
     expect(meta?.publication).toEqual({ freshReview: true });
     expect(meta?.automation).toBeUndefined();
 
+    // A publication block that says nothing about reviews still gets one.
     writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: {} }));
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
+
+    // Only this turns it off.
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: { freshReview: false } }));
     await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
 
+    // An unreadable file must not be read as an opt-out: reviewing anyway
+    // costs one review, skipping publishes an unread PR.
     writeFileSync(join(dir, REPO_METADATA_FILENAME), '{ not json');
-    await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
   });
 
   it('throws RepoMetadataError on invalid JSON', async () => {

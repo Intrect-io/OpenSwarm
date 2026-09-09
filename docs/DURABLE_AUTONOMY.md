@@ -124,20 +124,31 @@ run with guessed defaults.
 A separate `publication` block decides what happens to the pull requests the
 swarm publishes from this repository. Worker attempts run only deterministic
 guards and verification; the agentic fresh review (`openswarm pr review
---fresh`) runs once, right after the PR is published, and only where the
-repository opts in:
+--fresh`) runs once, right after the PR is published. It is on by default — a
+repository turns it off with:
 
 ```json
 {
   "publication": {
-    "freshReview": true
+    "freshReview": false
   }
 }
 ```
 
-It lives outside `automation` so opting in does not pull that block's admission
-defaults in with it. A review failure is logged on the run but never undoes the
-publication or re-publishes the PR.
+It lives outside `automation` so the setting does not pull that block's
+admission defaults in with it.
+
+When the reviewer asks for changes, the publication is undone (AGT-4270): the
+PR goes back to draft so nobody merges it, and the run drops out of `approved`
+so the worktree is preserved and the task returns to the queue. The commits and
+the durable record stay — deleting them would strand the work and invite a
+duplicate PR. A review that merely *failed* — no diff against the merge base, a
+crashed processor, or a failure posting the comment after an approval — says
+nothing about the code and undoes nothing.
+
+That draft flag is load-bearing downstream: the reconciler treats a draft PR on
+a run's branch as work still in progress and returns the run to the queue,
+rather than reading an open PR as delivery and completing the issue.
 
 ## Operations
 
