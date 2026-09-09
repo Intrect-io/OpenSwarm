@@ -15,11 +15,15 @@ import type { Plugin } from 'graphql-yoga';
 
 /**
  * 실행 비용이 큰 레지스트리 뮤테이션의 대표 비용 (cost units).
- * bulkRegisterEntities는 최대 100개 엔티티를 쓰기 때문에 단일 필드 비용을 100으로 부과한다.
+ * bulkRegisterEntities는 최대 100개 엔티티를 쓰기 때문에 단일 필드 비용을 500으로 부과한다.
  */
-export const BULK_REGISTER_ENTITIES_COST = 100;
+export const BULK_REGISTER_ENTITIES_COST = 500;
 
-export const MUTATION_COSTS: Record<string, number> = {
+/**
+ * 뮤테이션 루트 최상위 필드의 실행 대표 비용 매핑.
+ * (DoD 명칭: FIELD_COSTS — 뮤테이션/쿼리 루트 필드 비용 테이블)
+ */
+export const FIELD_COSTS: Record<string, number> = {
   bulkRegisterEntities: BULK_REGISTER_ENTITIES_COST,
 };
 
@@ -31,7 +35,7 @@ const MAX_EXPANSION_DEPTH = 100;
 
 export interface QueryCostOptions {
   maximumCost?: number;
-  mutationCosts?: Record<string, number>;
+  fieldCosts?: Record<string, number>;
 }
 
 function readMaximumCostFromEnv(): number | undefined {
@@ -47,11 +51,11 @@ function readMaximumCostFromEnv(): number | undefined {
  */
 function fieldCost(
   node: FieldNode,
-  mutationCosts: Record<string, number>,
+  fieldCosts: Record<string, number>,
   inMutationRoot: boolean,
 ): number {
   if (inMutationRoot) {
-    const mutationCost = mutationCosts[node.name.value];
+    const mutationCost = fieldCosts[node.name.value];
     if (mutationCost !== undefined) return mutationCost;
   }
   return 1;
@@ -64,7 +68,7 @@ function fieldCost(
 function costOfSelectionSet(
   selectionSet: SelectionSetNode,
   fragments: Map<string, FragmentDefinitionNode>,
-  mutationCosts: Record<string, number>,
+  fieldCosts: Record<string, number>,
   inMutationRoot: boolean,
   depth: number,
 ): number {
@@ -74,21 +78,21 @@ function costOfSelectionSet(
   for (const selection of selectionSet.selections) {
     switch (selection.kind) {
       case 'Field': {
-        cost += fieldCost(selection, mutationCosts, inMutationRoot);
+        cost += fieldCost(selection, fieldCosts, inMutationRoot);
         if (selection.selectionSet) {
           // 뮤테이션 루트의 중첩 필드는 CodeEntity 등 하위 타입이므로 루트 가산 대상이 아니다.
-          cost += costOfSelectionSet(selection.selectionSet, fragments, mutationCosts, false, depth + 1);
+          cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, false, depth + 1);
         }
         break;
       }
       case 'InlineFragment': {
-        cost += costOfSelectionSet(selection.selectionSet, fragments, mutationCosts, inMutationRoot, depth + 1);
+        cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, inMutationRoot, depth + 1);
         break;
       }
       case 'FragmentSpread': {
         const fragment = fragments.get(selection.name.value);
         if (fragment) {
-          cost += costOfSelectionSet(fragment.selectionSet, fragments, mutationCosts, inMutationRoot, depth + 1);
+          cost += costOfSelectionSet(fragment.selectionSet, fragments, fieldCosts, inMutationRoot, depth + 1);
         }
         break;
       }
@@ -99,9 +103,11 @@ function costOfSelectionSet(
 
 /**
  * 문서 전체의 예상 실행 비용. alias와 fragment spread로 인한 리졸버 호출 곱셈을 반영한다.
+ * 각 Field 노드는 별개 노드이므로 같은 뮤테이션에 alias가 N개 있으면 N배 비용이 발생하고,
+ * 같은 파편을 N번 spread하면 그 안의 비싼 뮤테이션 비용도 N배로 곱해진다.
  */
-export function calculateQueryCost(document: DocumentNode, options: QueryCostOptions = {}): number {
-  const mutationCosts = options.mutationCosts ?? MUTATION_COSTS;
+export function calculateOperationCost(document: DocumentNode, options: QueryCostOptions = {}): number {
+  const fieldCosts = options.fieldCosts ?? FIELD_COSTS;
 
   const fragments = new Map<string, FragmentDefinitionNode>();
   for (const definition of document.definitions) {
@@ -114,7 +120,7 @@ export function calculateQueryCost(document: DocumentNode, options: QueryCostOpt
   for (const definition of document.definitions) {
     if (definition.kind === 'OperationDefinition') {
       const inMutationRoot = definition.operation === 'mutation';
-      cost += costOfSelectionSet(definition.selectionSet, fragments, mutationCosts, inMutationRoot, 0);
+      cost += costOfSelectionSet(definition.selectionSet, fragments, fieldCosts, inMutationRoot, 0);
     }
   }
   return cost;
@@ -125,13 +131,13 @@ export function calculateQueryCost(document: DocumentNode, options: QueryCostOpt
  */
 export function useQueryCostAnalysis(options: QueryCostOptions = {}): Plugin {
   const maximumCost = options.maximumCost ?? readMaximumCostFromEnv() ?? DEFAULT_QUERY_COST_LIMIT;
-  const mutationCosts = options.mutationCosts ?? MUTATION_COSTS;
+  const fieldCosts = options.fieldCosts ?? FIELD_COSTS;
 
   return {
     onParse() {
       return ({ result }) => {
         if (!result || result instanceof Error) return;
-        const cost = calculateQueryCost(result, { mutationCosts });
+        const cost = calculateOperationCost(result, { fieldCosts });
         if (cost > maximumCost) {
           throw new GraphQLError(
             `Query cost ${cost} exceeds the maximum allowed cost of ${maximumCost}.`,
