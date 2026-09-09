@@ -44,20 +44,15 @@ async function replyWithEmbed(msg: Message, content: string, color: number = 0x0
  * !status [session] - Check status
  */
 export async function handleStatus(msg: Message, sessionName?: string): Promise<void> {
-  if (!getAgentStatus) {
-    await replyWithEmbed(msg, t('discord.errors.notInitialized'));
-    return;
-  }
-
-  const statuses = getAgentStatus(sessionName);
+  const statuses = getAgentStatus();
   if (statuses.length === 0) {
-    await replyWithEmbed(msg, t('discord.status.noAgents'));
+    await replyWithEmbed(msg, t('discord.status.noSessions'));
     return;
   }
 
   const lines = statuses.map(s => {
     const emoji = s.paused ? '⏸️' : '▶️';
-    return `${emoji} **${s.name}** — ${s.status}${s.paused ? ` (${t('discord.status.paused')})` : ''}`;
+    return `${emoji} **${s.name}** — ${s.status}`;
   });
 
   await replyWithEmbed(msg, lines.join('\n'));
@@ -147,48 +142,68 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
     return;
   }
 
-  const issues = linear.fetchIssuesForStates();
-  const issue = issues.find(i => i.identifier === issueId.toUpperCase());
-  if (!issue) {
-    await msg.reply(t('discord.issue.notFound', { id: issueId }));
-    return;
+  try {
+    const issue = await linear.fetchIssue(issueId);
+    if (!issue) {
+      await msg.reply(t('discord.issue.notFound', { id: issueId }));
+      return;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${issue.identifier} — ${issue.title}`)
+      .setDescription(clampAndSanitize(issue.description || t('discord.issue.noDescription'), 4096))
+      .setColor(0x00ae86)
+      .setTimestamp(issue.updatedAt);
+
+    if (issue.state) {
+      embed.addFields({ name: t('discord.issue.state'), value: issue.state, inline: true });
+    }
+
+    if (issue.assignee) {
+      embed.addFields({ name: t('discord.issue.assignee'), value: issue.assignee, inline: true });
+    }
+
+    await msg.reply({ embeds: [embed] });
+  } catch (err) {
+    await msg.reply(t('discord.issue.loadError', { error: clampDiscordText(err instanceof Error ? err.message : String(err), 500) }));
   }
-
-  const embed = new EmbedBuilder()
-    .setTitle(`${issue.identifier} — ${issue.title}`)
-    .setDescription(clampDiscordText(issue.description || t('discord.issue.noDescription'), 4096))
-    .setColor(0x00ae86)
-    .setTimestamp();
-
-  if (issue.state) embed.addFields({ name: t('discord.issue.state'), value: issue.state, inline: true });
-  if (issue.assignee) embed.addFields({ name: t('discord.issue.assignee'), value: issue.assignee, inline: true });
-
-  await msg.reply({ embeds: [embed] });
 }
 
 /**
  * !log <session> [lines] - Show session log
  */
 export async function handleLog(msg: Message, _sessionName: string, _lines: number): Promise<void> {
-  await msg.reply(t('discord.log.usage'));
+  await msg.reply(t('discord.log.notImplemented'));
 }
 
 /**
  * !ci - Check CI status
  */
 export async function handleCI(msg: Message): Promise<void> {
-  await msg.reply(t('discord.ci.checking'));
+  const status = github.getCIStatus();
+  if (!status) {
+    await msg.reply(t('discord.ci.noStatus'));
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(t('discord.ci.title'))
+    .setDescription(clampAndSanitize(status.description || '', 4096))
+    .setColor(status.success ? 0x00ff41 : 0xff0000)
+    .setTimestamp(status.updatedAt);
+
+  await msg.reply({ embeds: [embed] });
 }
 
 /**
  * !notifications - Show notifications
  */
 export async function handleNotifications(msg: Message): Promise<void> {
-  await msg.reply(t('discord.notifications.none'));
+  await msg.reply(t('discord.notifications.notImplemented'));
 }
 
 /**
- * !dev <repo> <task> - Run a development task
+ * !dev <repo> <task> - Run a dev task
  */
 export async function handleDev(msg: Message, args: string[]): Promise<void> {
   if (args.length < 2) {
@@ -220,59 +235,37 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
   let result: Awaited<ReturnType<typeof dev.runDevTask>>;
   try {
     result = await dev.runDevTask(
-    repo,
-    task,
-    msg.author.username,
-    // onProgress: intermediate progress notification every 10 seconds
-    (chunk) => {
-      progressChunks.push(chunk);
+      repo,
+      task,
+      msg.author.username,
+      // onProgress: intermediate progress notification every 10 seconds
+      (chunk) => {
+        progressChunks.push(chunk);
 
-      if (!progressTimer) {
-        progressTimer = setTimeout(async () => {
-          progressTimer = null;
-          const combined = progressChunks.join('').slice(-500);
-          progressChunks = [];
-          if (settled || !combined.trim()) return;
-          try {
-            _lastProgressMsg = await msg.reply(`${t('discord.dev.inProgress', { repo })}\n\`\`\`\n${combined}\n\`\`\``);
-          } catch { /* ignore */ }
-        }, 10000);
-      }
-    },
-    // onComplete: send result on completion
-    async (output, exitCode) => {
-      // The task's actual end, for both a normal close and a spawn error.
-      stopProgressReporting();
-
-      // Split result for sending (Discord 2000 char limit)
-      const MAX_LEN = 1800;
-      const truncated = output.length > MAX_LEN * 3
-        ? `...(${output.length - MAX_LEN * 3} chars omitted)\n\n${output.slice(-MAX_LEN * 3)}`
-        : output;
-
-      const statusEmoji = exitCode === 0 ? '✅' : '⚠️';
-      const header = `${statusEmoji} ${t('discord.dev.completed', { repo, exitCode: exitCode ?? 'unknown' })}`;
-
-      // If result is short, send at once
-      if (truncated.length <= MAX_LEN) {
-        await msg.reply(`${header}\n\`\`\`\n${truncated}\n\`\`\``);
-        return;
-      }
-
-      // Otherwise send header + chunks
-      await msg.reply(header);
-      for (let i = 0; i < truncated.length; i += MAX_LEN) {
-        const chunk = truncated.slice(i, i + MAX_LEN);
-        await msg.reply(`\`\`\`\n${chunk}\n\`\`\``);
-      }
-    });
+        if (!progressTimer) {
+          progressTimer = setTimeout(async () => {
+            progressTimer = null;
+            const combined = progressChunks.join('').slice(-500);
+            progressChunks = [];
+            if (settled || !combined.trim()) return;
+            try {
+              _lastProgressMsg = await msg.reply(`${t('discord.dev.inProgress', { repo })}\n\`\`\`\`\n${combined}\n\`\`\``);
+            } catch { /* best-effort progress update */ }
+          }, 10_000);
+        }
+      },
+    );
   } catch (err) {
     // runDevTask threw before the child was registered (e.g. spawn failed), so
     // onComplete will never fire. Previously this propagated out of handleDev
     // with the timer still armed, and a stale "in progress" reply arrived ten
     // seconds after the error had already been reported to the user.
+    // Catch and report a bounded generic error instead of propagating raw
+    // dev-task internals to the Discord user.
     stopProgressReporting();
-    throw err;
+    const safeMsg = clampDiscordText(err instanceof Error ? err.message : String(err), 500);
+    await msg.reply(`❌ ${t('discord.dev.taskError', { error: safeMsg })}`);
+    return;
   }
 
   if ('error' in result) {
@@ -396,8 +389,7 @@ export async function handleSchedule(msg: Message, args: string[]): Promise<void
     return;
   }
 
-  // Unknown subcommand
-  await msg.reply(t('discord.schedule.helpText'));
+  await msg.reply(t('discord.schedule.usage'));
 }
 
 /**
@@ -441,20 +433,9 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
     const tags = afterTitle.split(/\s+/).filter(t => t.length > 0);
 
     // Session save request message
-    await msg.reply(t('discord.codex.saving', { title, tags: tags.length > 0 ? tags.map(tag => `\`${tag}\``).join(' ') : t('discord.codex.noTags') }));
-
-    // Actual save should be called after Claude completes work
-    // Here we save an empty session (can be updated later)
     try {
-      const { summaryPath } = await codex.quickSave({
-        title,
-        tags,
-        description: '',
-        result: 'incomplete',
-        startedAt: Date.now(),
-        endedAt: Date.now(),
-      });
-      await msg.reply(t('discord.codex.saved', { path: summaryPath }));
+      const result = await codex.saveSession(title, tags);
+      await msg.reply(t('discord.codex.saveSuccess', { id: result.id }));
     } catch (err) {
       await msg.reply(t('discord.codex.saveError', { error: clampDiscordText(err instanceof Error ? err.message : String(err), 500) }));
     }
@@ -478,7 +459,7 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
 
       const embed = new EmbedBuilder()
         .setTitle(t('discord.codex.sessionTitle', { id }))
-        .setDescription(clampAndSanitize(session.description || t('discord.codex.noDescription'), 4096))
+        .setDescription(clampAndSanitize(session.description || '', 4096))
         .setColor(0x9b59b6)
         .setTimestamp(session.startedAt);
 
