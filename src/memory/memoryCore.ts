@@ -221,6 +221,66 @@ export interface SearchResult {
 // Singleton connection
 let db: Connection | null = null;
 let table: Table | null = null;
+/** The one open in progress, shared by every caller that arrives while it runs. */
+let initInFlight: Promise<void> | null = null;
+
+/**
+ * A store that cannot be opened fails on *every* recall, and each caller
+ * swallows the throw — so the same stack traced 95 times in five minutes on
+ * vela (AGT-4267), burying every other diagnostic line while the one fact that
+ * mattered ("recall is off") was never stated. Report the first occurrence and
+ * then only on a change or once a window has passed, carrying the count so the
+ * scale is still visible.
+ *
+ * Deliberately not a permanent disable: the vela outage was repaired by moving
+ * seven zero-byte manifests aside, and recall came back on the next call with
+ * no restart. A latch would have kept it dark until someone noticed.
+ */
+const DB_INIT_REPORT_WINDOW_MS = 10 * 60_000;
+let dbInitFailure: { message: string; reportedAt: number; suppressedCount: number } | null = null;
+
+/** Whether long-term recall is currently unavailable, and why. */
+export function memoryRecallStatus(): { available: boolean; error?: string; suppressedCount?: number } {
+  if (!dbInitFailure) return { available: true };
+  return {
+    available: false,
+    error: dbInitFailure.message,
+    suppressedCount: dbInitFailure.suppressedCount,
+  };
+}
+
+function reportDbInitFailure(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const now = Date.now();
+  const previous = dbInitFailure;
+  if (previous && previous.message === message && now - previous.reportedAt < DB_INIT_REPORT_WINDOW_MS) {
+    previous.suppressedCount += 1;
+    return;
+  }
+  // Carry the count across a changed message too. Keying the credit on message
+  // equality means a store that alternates between two error strings reports
+  // "0 suppressed" forever while burying every occurrence of each.
+  const suppressed = previous?.suppressedCount ?? 0;
+  const priorNote = previous && previous.message !== message ? `, last reported: ${previous.message}` : '';
+  const tail = suppressed > 0 ? ` (${suppressed} failure(s) suppressed since the last report${priorNote})` : '';
+  console.error(`[Memory] Long-term recall is UNAVAILABLE — the store could not be opened${tail}: ${message}`);
+  dbInitFailure = { message, reportedAt: now, suppressedCount: 0 };
+}
+
+function clearDbInitFailure(): void {
+  if (!dbInitFailure) return;
+  // Deliberately stderr, matching the outage report. A daemon that captures the
+  // two streams separately would otherwise show an outage in its error log that
+  // never ends, which is the same unreadability this whole block exists to fix.
+  console.error(`${status.ok('[Memory] long-term recall restored')}`);
+  dbInitFailure = null;
+}
+
+/** Tests need the module's failure memory back at its initial state. */
+export function resetMemoryRecallStatusForTests(): void {
+  dbInitFailure = null;
+  initInFlight = null;
+}
 const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
 
 // Singleton accessors (for memoryOps)
@@ -596,11 +656,24 @@ export function calculateImportance(
 }
 
 /**
- * Initialize database
+ * Open the store, at most once at a time.
+ *
+ * Sixteen concurrent reviewers each search memory (see the concurrency note in
+ * `searchMemorySafe`), and without this every one of them ran the whole open
+ * sequence: N connects, and on a first run N racing `createTable` calls. Once
+ * the catch below began nulling the handles on failure that stopped being mere
+ * duplicated work — a loser's failure destroyed the winner's live connection,
+ * and the next search died on `null.vectorSearch` while the freshly-set failure
+ * flag suppressed the log line that would have shown it. Sharing one in-flight
+ * open makes the call that nulls the handles the same call that assigned them.
  */
-export async function initDatabase(): Promise<void> {
-  if (db && table) return;
+export function initDatabase(): Promise<void> {
+  if (db && table) return Promise.resolve();
+  initInFlight ??= openDatabase().finally(() => { initInFlight = null; });
+  return initInFlight;
+}
 
+async function openDatabase(): Promise<void> {
   try {
     const fs = await import('fs/promises');
     await fs.mkdir(MEMORY_DIR, { recursive: true });
@@ -648,8 +721,13 @@ export async function initDatabase(): Promise<void> {
     }
 
     warnOnEmbeddingDrift();
+    clearDbInitFailure();
   } catch (error) {
-    console.error('[Memory] Database init error:', error);
+    // A half-open connection would make the next call report success and then
+    // fail on the table instead, which is how this looked like a query bug.
+    db = null;
+    table = null;
+    reportDbInitFailure(error);
     throw error;
   }
 }
@@ -1083,12 +1161,21 @@ export async function searchMemorySafe(
 
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error('[Memory] Search error:', error);
+    const recall = memoryRecallStatus();
+    // An unopenable store surfaces here too, once per recall, because the throw
+    // from initDatabase lands in this catch. That duplicate is what made the log
+    // unreadable (AGT-4267) — but silence it by identity, not by "an outage is
+    // outstanding". The broader guard would also swallow a genuine query error
+    // that happened to coincide with one.
+    if (recall.error !== errorMsg) console.error('[Memory] Search error:', error);
     return {
       success: false,
       memories: [],
       error: errorMsg,
-      errorCode: 'QUERY_FAILED',
+      // `await initDatabase()` throws, so the DB_INIT_FAILED branch above never
+      // sees this case and callers were told a dead store was a failed query.
+      // repoKnowledge renders this code straight into the agent's prompt.
+      errorCode: recall.available ? 'QUERY_FAILED' : 'DB_INIT_FAILED',
     };
   }
 }
