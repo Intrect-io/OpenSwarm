@@ -35,6 +35,7 @@ describe('isEphemeralWorktreeArtifact', () => {
   it('still recognises the worktree-level scratch it always did', () => {
     expect(isEphemeralWorktreeArtifact('.venv')).toBe(true);
     expect(isEphemeralWorktreeArtifact('pytest-of-openswarm/pytest-3/x')).toBe(true);
+    expect(isEphemeralWorktreeArtifact('pytest-local/test_case_current')).toBe(true);
     expect(isEphemeralWorktreeArtifact('.trash/AX-1/pytest-a3/out')).toBe(true);
   });
 
