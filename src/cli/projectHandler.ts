@@ -49,7 +49,9 @@ export function loadRepos(file: string = REPOS_FILE): ReposConfig {
   } catch (error) {
     const recoveryPath = `${file}.corrupt-${Date.now()}`;
     try { renameSync(file, recoveryPath); } catch { /* preserve original error below */ }
-    throw new Error(`Repository registry is malformed at ${file}; preserved as ${recoveryPath}: ${error instanceof Error ? error.message : String(error)}`);
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`Repository registry is malformed at ${file}; quarantined to ${recoveryPath}: ${detail}`);
+    throw new Error(`Repository registry quarantine failure at ${file}: ${detail}`);
   }
 }
 

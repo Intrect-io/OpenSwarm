@@ -137,16 +137,15 @@ export async function generateDailyReports(): Promise<void> {
     // Retry only failed projects (up to 1 retry each)
     if (failCount > 0) {
       console.log(`[DailyReporter] Retrying ${failCount} failed project(s): ${failedProjects.join(', ')}`);
-      for (const project of activeProjects) {
-        const result = projectResults.find(r => r.id === project.id);
-        if (result && !result.ok) {
+      for (const result of projectResults) {
+        if (!result.ok) {
           try {
-            const projectPath = projectPathMapping.get(project.id);
-            await postStatusUpdate(project.id, project.name, projectPath);
+            const projectPath = projectPathMapping.get(result.id);
+            await postStatusUpdate(result.id, result.name, projectPath);
             result.ok = true;
-            console.log(`[DailyReporter] Retry succeeded for "${project.name}"`);
+            console.log(`[DailyReporter] Retry succeeded for "${result.name}"`);
           } catch (err) {
-            console.error(`[DailyReporter] Retry also failed for "${project.name}":`, err);
+            console.error(`[DailyReporter] Retry also failed for "${result.name}":`, err);
           }
         }
       }
