@@ -15,6 +15,22 @@ import { rollBackReviewedPublication } from './prReviewRollback.js';
 import type { DefaultRolesConfig, SecurityAuditConfig } from '../core/types.js';
 import type { PublishableResult, PublishableTask } from './publishOnPark.js';
 
+/**
+ * PR + head sha pairs already reviewed by this process.
+ *
+ * A parked run resumes on the same branch, and `commitAndCreatePRWithHead`
+ * reuses an open PR rather than opening a second one — so a task that parks
+ * five times used to pay five full reviews of an unchanged diff and append up
+ * to five byte-identical "did not run" notices. The sha the publication
+ * already hands us is the key that makes the work once-per-diff.
+ */
+const reviewedPublications = new Set<string>();
+
+/** Tests need the once-per-sha memory back at its initial state. */
+export function resetReviewedPublicationsForTests(): void {
+  reviewedPublications.clear();
+}
+
 export interface PublicationReviewHookInput {
   task: PublishableTask;
   result: PublishableResult & { success?: boolean; finalStatus?: string; prUrl?: string };
@@ -54,7 +70,10 @@ export function buildPublicationReviewHook(
   input: PublicationReviewHookInput,
 ): (ctx: { prUrl: string; headSha: string; worktreeInfo: { originalPath: string } }) => Promise<void> {
   const { task, result, roles, securityAudit, rollbackOnRejection } = input;
-  return async ({ prUrl, worktreeInfo }) => {
+  return async ({ prUrl, headSha, worktreeInfo }) => {
+    const alreadyReviewed = `${prUrl}@${headSha}`;
+    if (reviewedPublications.has(alreadyReviewed)) return;
+    reviewedPublications.add(alreadyReviewed);
     // Loaded on demand: the review pulls in the whole PR processor.
     const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
     const review = await reviewPublishedPullRequest({
@@ -70,6 +89,12 @@ export function buildPublicationReviewHook(
       },
     });
 
+    // A verdict that was reached but could not be POSTED (`commentOnPROrThrow`
+    // refusing after the decision) also leaves the PR without it, and on a
+    // draft nothing else records it. Not handled here: `error` carries the
+    // reviewer's feedback on a clean rejection too (prProcessor.ts:555), so
+    // this layer cannot tell the two apart. Distinguishing them needs a
+    // `verdictPosted` flag from the processor — filed rather than guessed.
     if (!review.gateRan) {
       const pr = parsePublishedPullRequest(prUrl);
       // Best-effort, and defensively so. `commentOnPR` swallows today, but a

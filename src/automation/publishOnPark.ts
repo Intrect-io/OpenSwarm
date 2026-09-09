@@ -107,6 +107,7 @@ export async function publishParkedWork(
     console.warn(`[Runner] Parked publication fenced for ${task.issueIdentifier}; leaving the branch unpublished`);
     return;
   }
+  let published: { prUrl: string; headSha: string } | null = null;
   try {
     const publication = await commitAndCreatePRWithHead(
       worktreeInfo,
@@ -137,12 +138,7 @@ export async function publishParkedWork(
     const attached = await durability?.onPublication(prUrl, headSha) ?? true;
     if (attached) {
       console.log(`[Runner] Parked run published as draft for ${task.issueIdentifier}: ${prUrl}`);
-      // A draft is the *least* reviewed thing this daemon emits — the run
-      // stopped because it could not finish — and until AGT-4278 it was also
-      // the only publication no reviewer ever looked at. The verdict cannot
-      // roll anything back here (it is already a draft), but it is the
-      // starting point for whoever picks the draft up.
-      if (afterPublication) await afterPublication({ prUrl, headSha, worktreeInfo });
+      published = { prUrl, headSha };
     } else {
       console.warn(`[Runner] Parked publication for ${task.issueIdentifier} was not durably attached (lease fence); the PR exists at ${prUrl} and will be reused by branch name`);
     }
@@ -153,6 +149,22 @@ export async function publishParkedWork(
     const detail = err instanceof Error ? err.message : String(err);
     if (!/No commits to create PR from/.test(detail)) {
       console.warn(`[Runner] Could not publish parked work for ${task.issueIdentifier}: ${detail}`);
+    }
+  }
+
+  // A draft is the *least* reviewed thing this daemon emits — the run stopped
+  // because it could not finish — and until AGT-4278 it was also the only
+  // publication no reviewer ever looked at. The verdict cannot roll anything
+  // back here (it is already a draft), but it is the starting point for
+  // whoever picks the draft up.
+  //
+  // Outside the try above on purpose: a hook that throws must not be reported
+  // as "could not publish parked work" when the PR exists and was attached.
+  if (published && afterPublication) {
+    try {
+      await afterPublication({ ...published, worktreeInfo });
+    } catch (err) {
+      console.warn(`[Runner] Post-publication review failed for ${task.issueIdentifier}:`, err);
     }
   }
 }

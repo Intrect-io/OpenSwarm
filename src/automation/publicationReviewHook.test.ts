@@ -18,7 +18,7 @@ const rollBackReviewedPublication = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('./prReviewRollback.js', () => ({ rollBackReviewedPublication }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
-import { buildPublicationReviewHook } from './publicationReviewHook.js';
+import { buildPublicationReviewHook, resetReviewedPublicationsForTests } from './publicationReviewHook.js';
 
 const PR = 'https://github.com/Intrect-io/OpenSwarm/pull/580';
 const ctx = { prUrl: PR, headSha: 'abc1234', worktreeInfo: { originalPath: '/work/OpenSwarm' } };
@@ -36,6 +36,7 @@ describe('publication review hook (AGT-4278)', () => {
     reviewPublishedPullRequest.mockReset();
     commentOnPR.mockClear();
     rollBackReviewedPublication.mockClear();
+    resetReviewedPublicationsForTests();
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -104,6 +105,30 @@ describe('publication review hook (AGT-4278)', () => {
     commentOnPR.mockRejectedValueOnce(new Error('403 from GitHub'));
 
     await expect(hook(true)(ctx)).resolves.toBeUndefined();
+  });
+
+  it('reviews a given PR+sha once, however many times the run re-parks on it', async () => {
+    // A parked run resumes on the same branch and reuses the open PR, so a task
+    // that parks five times paid five full reviews of an unchanged diff and
+    // appended five identical notices.
+    reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'timeout' });
+
+    const h = hook(false);
+    await h(ctx);
+    await h(ctx);
+    await hook(false)(ctx);
+
+    expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(1);
+    expect(commentOnPR).toHaveBeenCalledTimes(1);
+  });
+
+  it('reviews again when the branch moved on', async () => {
+    reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'timeout' });
+
+    await hook(false)(ctx);
+    await hook(false)({ ...ctx, headSha: 'def5678' });
+
+    expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(2);
   });
 
   it('reviews an unparseable PR URL nowhere rather than crashing', async () => {
