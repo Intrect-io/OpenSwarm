@@ -321,6 +321,9 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     // re-claimed, re-executed, re-published and re-parked, once per cycle,
     // holding a slot the whole time. Observed in production at attempt 20.
     const internal = await makeRunner();
+    // Through a real claim: a park is always reached by attempting the task, and
+    // the attempt counter is what marks the row as this daemon's own work.
+    await seedConsecutiveUnansweredAttempts(1);
     internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
     const stillParked: TaskItem = { ...TASK, linearState: 'In Progress' };
     // The slot the park was holding has to go somewhere: an unrelated task in
@@ -388,16 +391,53 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     // A bare Linear 'In Progress' with only the row observeTask wrote is
     // someone else's work — a human, or another daemon. Admitting it
     // re-decomposes work already in progress (INT-1980: duplicate sub-issues
-    // and a redundant PR). This daemon's own parks reach here as READY after
-    // idle fill and still pass.
+    // and a redundant PR). observeTask registers every fetched card as READY,
+    // so the row existing proves nothing; the attempt counter does.
     const internal = await makeRunner();
     const external: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.durableRuns.getRun('AGT-1')?.attemptNo).toBe(0);
 
     expect(internal.filterAlreadyProcessed([external])).toEqual([]);
     internal.durableRuns.close();
   });
 
-  it('idle-fills a finished run whose card is In Progress, but never one In Review (AGT-4257)', async () => {
+  it('admits an In Progress card this daemon has claimed before (INT-1979 guard)', async () => {
+    // The other side of the same gate: once claimRun has bumped the attempt,
+    // the card being In Progress is this run's own doing — parking never moves
+    // it back — so its backoff and parks must still reach the pipeline.
+    const internal = await makeRunner();
+    await seedConsecutiveUnansweredAttempts(1);
+    expect(internal.durableRuns.getRun('AGT-1')?.attemptNo).toBeGreaterThan(0);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+
+    const claimed: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.filterAlreadyProcessed([claimed])).toEqual([claimed]);
+    internal.durableRuns.close();
+  });
+
+  it('admits a legacy-imported row whose local claim marker says it is ours (INT-1979 guard)', async () => {
+    // migrateLegacyRunState imports a card in flight at cutover from the very
+    // marker markTaskInProgress writes, and importRun inserts at attempt 0.
+    // attempt_no only grows inside claimRun, which this filter gates, so
+    // judging that row by the counter alone would deadlock it with no path
+    // back except a manual move to Todo.
+    const internal = await makeRunner();
+    const store = await import('../taskState/store.js');
+    store.upsertTaskState('AGT-1', {
+      execution: { status: 'in_progress', retryCount: 0 },
+    } as Parameters<typeof store.upsertTaskState>[1]);
+    expect(internal.durableRuns.getRun('AGT-1')?.attemptNo).toBe(0);
+
+    const inFlight: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.filterAlreadyProcessed([inFlight])).toEqual([inFlight]);
+    internal.durableRuns.close();
+  });
+
+  it('reopens a finished run from Backlog only — never In Progress or In Review (AGT-4257)', async () => {
+    // durableRunCoordinator.observeTask states the rule this mirrors: a terminal
+    // run reopens on Todo or an explicit dispatch, never on In Progress, which
+    // a human or another daemon may own. In Review is a published PR waiting on
+    // the merge gate — re-running it makes a duplicate PR.
     const internal = await makeRunner();
     const { RunLedger } = await import('./runLedger.js');
     const ledger = new RunLedger(dbPath);
@@ -409,14 +449,14 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     ledger.close();
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
 
-    // In Review: its PR is waiting on the merge gate. Re-executing makes a
-    // duplicate PR, so a finished run there is not work to fill a slot with.
-    expect(internal.filterAlreadyProcessed([{ ...TASK, linearState: 'In Review' }])).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
+    for (const linearState of ['In Review', 'In Progress'] as const) {
+      expect(internal.filterAlreadyProcessed([{ ...TASK, linearState }])).toEqual([]);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
+    }
 
-    // In Progress with a free slot is idle fill of this daemon's own run.
-    const inProgress: TaskItem = { ...TASK, linearState: 'In Progress' };
-    expect(internal.filterAlreadyProcessed([inProgress])).toEqual([inProgress]);
+    // Backlog with a free slot is idle fill: nobody is working that card.
+    const backlog: TaskItem = { ...TASK, linearState: 'Backlog' };
+    expect(internal.filterAlreadyProcessed([backlog])).toEqual([backlog]);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });

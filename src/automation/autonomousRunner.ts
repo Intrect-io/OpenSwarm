@@ -1173,13 +1173,14 @@ export class AutonomousRunner {
         )
       ) {
         // 'Todo' (or an explicit dispatch) is the operator reopening a finished
-        // run — never gated. Backlog / In Progress are idle fill under AGT-4257
-        // and spend budget. 'In Review' is a published PR waiting on the merge
-        // gate: re-executing it makes a duplicate PR, so it is not work to fill.
+        // run — never gated. 'Backlog' is idle fill under AGT-4257 and spends
+        // budget. 'In Progress' and 'In Review' are excluded on purpose, the
+        // same rule durableRunCoordinator.observeTask states for this exact
+        // transition: In Progress may be owned by a human or another daemon,
+        // and In Review is a published PR waiting on the merge gate. Reopening
+        // either re-decomposes or re-publishes work that already exists.
         const operatorReopened = task.linearState === 'Todo' || task.explicitDispatch === true;
-        const idleReopen = !operatorReopened
-          && (task.linearState === 'Backlog' || task.linearState === 'In Progress')
-          && idleFillBudget > 0;
+        const idleReopen = !operatorReopened && task.linearState === 'Backlog' && idleFillBudget > 0;
         if ((operatorReopened || idleReopen) && this.durableRuns.markReady(id)) {
           if (idleReopen) {
             idleFillBudget--;
@@ -1327,7 +1328,6 @@ export class AutonomousRunner {
           && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
         if (idleFillBudget <= 0) return false;
         idleFillBudget--;
-        idleLifted = true;
         this.completedTaskIds.delete(id);
         this.failedTaskCounts.delete(id);
         recovered++;
@@ -1343,16 +1343,20 @@ export class AutonomousRunner {
       // with no local claim record is skipped. An explicit dispatch is the
       // operator handing it over and passes.
       //
-      // Under the ledger the ownership signal is the attempt counter, not the
-      // state: observeTask registers every fetched card as READY (attempt 0),
-      // so a state test admitted every external card. A row this daemon has
-      // claimed at least once (attempt ≥ 1) is its own work — a backoff, a
-      // finished run reopened — and passes; so does a row idle fill lifted in
-      // this very pass, since only this daemon's own parks are lifted.
-      if (task.linearState === 'In Progress' && task.explicitDispatch !== true && !idleLifted) {
+      // Under the ledger, state alone cannot answer "is this ours": observeTask
+      // registers every fetched card as READY and cacheTrackerObservation writes
+      // DONE/CANCELLED straight from tracker state, both without a claim. Two
+      // signals do:
+      //   - attemptNo >= 1: claimRun is the only writer of that counter.
+      //   - the legacy in_progress marker, which markTaskInProgress writes when
+      //     WE claim. It is also what migrateLegacyRunState read to import an
+      //     in-flight card at cutover, so it keeps that row — imported at
+      //     attempt 0 — from deadlocking behind a counter only claimRun grows.
+      if (task.linearState === 'In Progress' && task.explicitDispatch !== true) {
+        const locallyClaimed = getTaskState(id)?.execution?.status === 'in_progress';
         if (this.durableRuns.isPrimary) {
-          if (!durableRun || durableRun.attemptNo === 0) return false;
-        } else if (getTaskState(id)?.execution?.status !== 'in_progress') {
+          if (!durableRun || (durableRun.attemptNo === 0 && !locallyClaimed)) return false;
+        } else if (!locallyClaimed) {
           return false;
         }
       }
