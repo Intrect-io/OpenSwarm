@@ -107,6 +107,9 @@ function parseChunkLine(line: string): StreamChunk | null {
   }
 }
 
+/** Hard cap for retained partial-frame data in the SSE buffer (64 KB). */
+const MAX_CONTENT_LENGTH = 64 * 1024;
+
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
   res: Response,
@@ -128,6 +131,10 @@ export async function consumeChatCompletionsStream(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    // Enforce hard cap on partial-frame buffer to prevent memory exhaustion
+    if (buffer.length > MAX_CONTENT_LENGTH) {
+      buffer = buffer.slice(-MAX_CONTENT_LENGTH);
+    }
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) handle(parseChunkLine(line));
