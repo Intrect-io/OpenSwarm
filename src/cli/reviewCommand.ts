@@ -34,16 +34,30 @@ import {
  */
 const REVIEW_BUDGET_FREE_FILES = 10;
 const REVIEW_BUDGET_MAX_TURNS_CAP = 60;
-const REVIEW_BUDGET_TIMEOUT_CAP_MS = 900_000; // 15 min
+const REVIEW_BUDGET_TIMEOUT_BASE_MS = 900_000; // 15 min — 5 min cut OpenRouter mid-verdict
+const REVIEW_BUDGET_TIMEOUT_CAP_MS = 1_800_000; // 30 min
+const REVIEW_BUDGET_TIMEOUT_PER_FILE_MS = 20_000;
+const OPENROUTER_REVIEW_TIMEOUT_BASE_MS = 1_200_000; // 20 min
+const OPENROUTER_REVIEW_TIMEOUT_CAP_MS = 2_700_000; // 45 min
 
 export function scaledReviewMaxTurns(changedFileCount: number, base = 20): number {
   if (changedFileCount <= REVIEW_BUDGET_FREE_FILES) return base;
   return Math.min(REVIEW_BUDGET_MAX_TURNS_CAP, base + Math.ceil((changedFileCount - REVIEW_BUDGET_FREE_FILES) / 2));
 }
 
-export function scaledReviewTimeoutMs(changedFileCount: number, base = 300_000): number {
-  if (changedFileCount <= REVIEW_BUDGET_FREE_FILES) return base;
-  return Math.min(REVIEW_BUDGET_TIMEOUT_CAP_MS, base + (changedFileCount - REVIEW_BUDGET_FREE_FILES) * 15_000);
+export function scaledReviewTimeoutMs(
+  changedFileCount: number,
+  base?: number,
+  adapter?: string,
+): number {
+  const openrouter = (adapter ?? '').toLowerCase() === 'openrouter';
+  const effectiveBase = base ?? (openrouter ? OPENROUTER_REVIEW_TIMEOUT_BASE_MS : REVIEW_BUDGET_TIMEOUT_BASE_MS);
+  const cap = openrouter ? OPENROUTER_REVIEW_TIMEOUT_CAP_MS : REVIEW_BUDGET_TIMEOUT_CAP_MS;
+  if (changedFileCount <= REVIEW_BUDGET_FREE_FILES) return effectiveBase;
+  return Math.min(
+    cap,
+    effectiveBase + (changedFileCount - REVIEW_BUDGET_FREE_FILES) * REVIEW_BUDGET_TIMEOUT_PER_FILE_MS,
+  );
 }
 
 /** Synthesize a WorkerResult describing the working-tree changes for the reviewer. */
@@ -474,7 +488,7 @@ export async function runReviewCommand(
         priorReviewContext: history.context,
         readOnly: opts.readOnly,
         maxTurns: opts.maxTurns ?? scaledReviewMaxTurns(changed.length),
-        timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length),
+        timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length, undefined, opts.adapter),
         diff: await deps.getDiff?.(c, opts.base) ?? await defaultGetDiff(c, opts.base),
         onLog,
       });

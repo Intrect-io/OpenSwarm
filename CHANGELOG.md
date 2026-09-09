@@ -4,13 +4,14 @@
 
 ### Changed
 
+- **`openswarm review` keeps more wall-clock for OpenRouter (AGT-4258).** Default budget is 15 minutes (20 on `openrouter`), scaling to 30 / 45. `--max` areas inherit the same scale instead of falling back to a 5-minute reviewer default.
+- **OpenRouter routes for speed per dollar (AGT-4258).** Completions keep the model id (no `:nitro` suffix) and send `provider.sort: throughput` plus `preferred_max_latency` (default 2s). A `/endpoints` probe sets `max_price` to the cheapest listed backend × 3 so a Cerebras-class 10× markup cannot win on throughput alone. `OPENROUTER_PROVIDER_ONLY` still replaces the object. OpenAI-routed models stay off ZDR.
 - **Heartbeat fills free slots instead of idling (AGT-4257).** Linear Backlog is a work queue by default (`autonomous.includeBacklog: true`). Parks (`NEEDS_HUMAN`, including unanswered `ask_human`), `RETRY_AT`, and legacy backoff are lifted via `idle_fill` when an enabled project still wants the card. Predicted file-scope overlap no longer `Decision: defer` under `unknownScopeAdmission: admit` (vela default) — worktrees isolate; `serialize` keeps the Codex-era hold.
 - **Codex-era spawn caps removed (AGT-4255).** `unknownScopeAdmission` defaults to `admit`, per-repo `maxConcurrent` no longer injects 1 or hard-caps at 10, and worker fan-out follows the candidate list.
 
 ### Fixed
 
 - **`.test_venv` is ephemeral (AGT-4256).** The venv regex missed dotted test venvs, so a publication/BS guard park idled the pool (AGT-3827). Resume treats those paths as non-human parks.
-
 
 ## 0.22.1 — 2026-09-04
 

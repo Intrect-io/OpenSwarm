@@ -8,6 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenRouterCliAdapter, createApiCaller, applyPromptCaching } from './openrouter.js';
+import { resetOpenRouterPriceCapCache } from './openrouterProvider.js';
 import { RateLimitError } from './rateLimitError.js';
 import { getAdapter } from './index.js';
 import type { ChatMessage } from './agenticLoop.js';
@@ -15,6 +16,7 @@ import type { ChatMessage } from './agenticLoop.js';
 describe('OpenRouterCliAdapter', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    resetOpenRouterPriceCapCache();
   });
 
   it('registers as a named adapter', () => {
@@ -123,7 +125,11 @@ describe('OpenRouterCliAdapter', () => {
     const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
     await callApi([{ role: 'user', content: 'hi' }], []);
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.provider).toEqual({ data_collection: 'deny', sort: 'throughput' });
+    expect(body.provider).toEqual({
+      data_collection: 'deny',
+      sort: 'throughput',
+      preferred_max_latency: 2,
+    });
     expect(body.reasoning).toBeUndefined(); // not disabled unless requested
   });
 
@@ -135,7 +141,26 @@ describe('OpenRouterCliAdapter', () => {
     const callApi = createApiCaller('sk-or-test', 'openai/gpt-5');
     await callApi([{ role: 'user', content: 'hi' }], []);
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.provider).toBeUndefined();
+    expect(body.provider).toEqual({
+      sort: 'throughput',
+      preferred_max_latency: 2,
+    });
+    expect(body.provider).not.toHaveProperty('data_collection');
+  });
+
+  it('attaches a floor × multiplier max_price when the caller looked endpoints up', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const callApi = createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', {
+      maxPrice: { prompt: 0.204, completion: 0.504 },
+    });
+    await callApi([{ role: 'user', content: 'hi' }], []);
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.model).toBe('deepseek/deepseek-v4-flash');
+    expect(body.provider.max_price).toEqual({ prompt: 0.204, completion: 0.504 });
+    expect(String(body.model)).not.toContain(':nitro');
   });
 
   it('disables reasoning for non-OpenAI models when requested', async () => {

@@ -34,6 +34,11 @@ import {
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
+import {
+  buildOpenRouterProviderPreferences,
+  lookupOpenRouterPriceCap,
+  type OpenRouterMaxPrice,
+} from './openrouterProvider.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 // Picked from the Atlas pool benchmark (benchmarks/, INT-3106): v4-flash passed
@@ -151,11 +156,14 @@ export class OpenRouterCliAdapter implements CliAdapter {
     }
 
     const model = options.model ?? await this.getDefaultModel();
+    const routed = await lookupOpenRouterPriceCap(apiKey, model);
     const callApi = createApiCaller(apiKey, model, {
       disableReasoning: options.disableReasoning,
       onToken: options.onToken,
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? 300000,
+      maxPrice: routed?.maxPrice,
+      providerOrder: routed?.order,
     });
 
     // MCP tools: caller-provided, else self-source from the registry. (INT-1951)
@@ -241,6 +249,10 @@ export interface ApiCallerOptions {
    * #345 wired this into atlascloud/codexResponses but missed this adapter,
    * leaving a silent OpenRouter connection able to hang a worker. */
   timeoutMs?: number;
+  /** Floor × multiplier from /endpoints — omit when the probe has not run. */
+  maxPrice?: OpenRouterMaxPrice;
+  /** Live (throughput/latency)/price ranking, when OpenRouter publishes metrics. */
+  providerOrder?: string[];
 }
 
 export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOptions = {}) {
@@ -255,32 +267,17 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       stream: true,
       stream_options: { include_usage: true },
     };
-    // Explicit provider pin (INT-3105): OPENROUTER_PROVIDER_ONLY routes every
-    // request to the named provider slug(s) with no fallback — e.g.
-    // `atlas-cloud` to burn sponsorship credits deterministically in tests.
-    // The pin is the caller's explicit intent, so it replaces the ZDR default
-    // below (combining them could leave zero eligible providers).
-    const pinnedProviders = (process.env.OPENROUTER_PROVIDER_ONLY ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (pinnedProviders.length > 0) {
-      body.provider = { only: pinnedProviders, allow_fallbacks: false };
-    } else if (!/^openai\//i.test(model)) {
-      // ZDR(Zero Data Retention) — 데이터를 보존하지 않는 provider로만 라우팅.
-      // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
-      // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
-      // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
-      //
-      // sort: 'throughput' picks the fastest ZDR-eligible endpoint instead of
-      // OpenRouter's default (load-balanced / cheapest-first) order. The
-      // 2026-06-09 worker benchmark found the same model 5x slower on one
-      // provider than another (qwen3-coder: 2759 tok/s on DeepInfra vs 160 on
-      // Novita) — provider, not model choice, was the dominant speed factor.
-      // A slow provider burns a stage's turn/timeout budget for no quality
-      // gain, so throughput is worth more here than shaving cents off price.
-      body.provider = { data_collection: 'deny', sort: 'throughput' };
-    }
+    // Nitro-speed routing without the `:nitro` suffix (that suffix also
+    // unlocks paid priority tiers). Throughput sort + latency preference,
+    // then a max_price ceiling at floor × 3 so Cerebras-class 10× markups
+    // cannot win on speed alone (AGT-4258, AX-568).
+    // OPENROUTER_PROVIDER_ONLY still replaces the whole object (INT-3105).
+    const provider = buildOpenRouterProviderPreferences({
+      model,
+      maxPrice: opts.maxPrice,
+      order: opts.providerOrder,
+    });
+    if (provider) body.provider = provider;
     // 추론 불필요 역할은 reasoning 토큰을 끈다. glm-4.7-flash처럼 non-thinking
     // 모델엔 무영향, 추론형 모델(glm-5 등)을 worker로 바꿔도 토큰 낭비를 막는다.
     // 단, OpenAI 추론 모델(gpt-5 등)은 "Reasoning is mandatory"로 이 플래그를

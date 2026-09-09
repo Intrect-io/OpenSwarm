@@ -16,6 +16,7 @@ import type { AdapterName } from '../adapters/types.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
+import { scaledReviewTimeoutMs } from './reviewCommand.js';
 import { c, status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
 import type { SecurityFinding } from '../verify/securityAudit.js';
@@ -509,7 +510,7 @@ export function buildAuditReviewerOptions(
     projectPath: cwd,
     adapterName: opts.adapter,
     maxTurns: opts.maxTurns,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(area.files.length, undefined, opts.adapter),
     signal: opts.signal,
     priorReviewContext: opts.priorReviewContextByArea?.[area.label],
     onLog,

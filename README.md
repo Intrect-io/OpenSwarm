@@ -334,7 +334,7 @@ adapter: codex   # codex · codex-responses · cc-router · cursor · gpt · ope
 
 > **Claude Code (`claude -p`)** is supported as an **opt-in fallback** (and powers the `claude -p` chat path) — install the `claude` CLI and authenticate it; `openswarm init` and `openswarm doctor` detect it. It is a valid `adapter:` value, but opt-in: nothing falls back to it automatically. Switch to it when another provider runs out of quota with `openswarm provider claude`.
 
-The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edit/bash with verification guards), enables ZDR (`data_collection: deny`) for non-OpenAI models, and applies Anthropic prompt caching automatically. Local backends are auto-detected on standard ports (Ollama `:11434`, LM Studio `:1234`); use `lmstudio` for a dedicated LM Studio endpoint (`LMSTUDIO_BASE_URL`, default `http://localhost:1234`).
+The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edit/bash with verification guards), enables ZDR (`data_collection: deny`) for non-OpenAI models, and applies Anthropic prompt caching automatically. Requests sort providers by throughput and prefer low latency (nitro-speed, without the `:nitro` suffix that unlocks paid priority tiers), then cap price at the cheapest endpoint × `OPENROUTER_PRICE_MULTIPLIER` (default `3`). Pin a backend with `OPENROUTER_PROVIDER_ONLY`. Local backends are auto-detected on standard ports (Ollama `:11434`, LM Studio `:1234`); use `lmstudio` for a dedicated LM Studio endpoint (`LMSTUDIO_BASE_URL`, default `http://localhost:1234`).
 
 ### Autonomous coordination and supervision
 
