@@ -2,15 +2,26 @@
 
 ## [Unreleased]
 
+
+## 0.23.0 — 2026-09-10
+
+The autonomous loop was shipping pull requests that no LLM had read, and its
+heartbeat was leaving slots idle next to work it was willing to do. This
+release closes both, and puts a bound on the second so the first cannot be
+paid for with churn.
+
 ### Changed
 
-- **Heartbeat fills free slots instead of idling (AGT-4257).** Linear Backlog is a work queue by default (`autonomous.includeBacklog: true`). Parks (`NEEDS_HUMAN`, including unanswered `ask_human`), `RETRY_AT`, and legacy backoff are lifted via `idle_fill` when an enabled project still wants the card. Predicted file-scope overlap no longer `Decision: defer` under `unknownScopeAdmission: admit` (vela default) — worktrees isolate; `serialize` keeps the Codex-era hold.
+- **The published PR gets reviewed, and the verdict counts (AGT-4270).** `publication.freshReview` is now opt-**out** — only an explicit `false` disables it. It had been opt-in while the per-attempt reviewer was switched off in its favour, and no repository ever opted in, so between the two decisions the loop published work no reviewer had seen. When the reviewer asks for changes the publication is undone: the PR returns to draft, the run drops out of `approved`, the worktree is preserved and the task returns to the queue — the commits and the durable record stay, so the next attempt continues rather than starting over. A review that merely *failed* (no diff against the merge base, a crashed processor, a comment that could not be posted after an approval) says nothing about the code and undoes nothing.
+- **A draft pull request is no longer read as delivery (AGT-4270).** `gh pr list` reports a draft's state as `OPEN`, so the reconciler used to recover one as `approved` and close its issue. It now returns the run to the queue instead — provided the tracker card is still live, since re-running work needs a card the heartbeat can see (AGT-4094).
+- **Heartbeat fills free slots instead of idling (AGT-4257).** Linear Backlog is a work queue by default (`autonomous.includeBacklog: true`). Parks (`NEEDS_HUMAN`, including unanswered `ask_human`), `RETRY_AT`, and legacy backoff are lifted via `idle_fill` when an enabled project still wants the card — **bounded by the number of free slots**, so a saturated pool cannot churn its parks the way AGT-4155 did (re-claim, re-execute, re-park, once per cycle, observed at attempt 20). An answered `ask_human` is exempt from that budget: the operator's reply must not queue behind capacity. A terminal run reopens on `Todo` or an explicit dispatch, and on `Backlog` as idle fill — never on `In Progress` or `In Review`, which a human may own or a merge gate may be holding. Predicted file-scope overlap no longer `Decision: defer` under `unknownScopeAdmission: admit` (vela default) — worktrees isolate; `serialize` keeps the Codex-era hold.
 - **Codex-era spawn caps removed (AGT-4255).** `unknownScopeAdmission` defaults to `admit`, per-repo `maxConcurrent` no longer injects 1 or hard-caps at 10, and worker fan-out follows the candidate list.
 
 ### Fixed
 
+- **Concurrent `codex-responses` reviewers no longer queue inside undici (AGT-4220).** `chatgpt.com` negotiates h2, so Node's global `fetch` carried concurrent requests as streams over a couple of connections and the Nth reviewer waited for a stream slot before it was ever written to a socket — `review --max` failed every area at 300 s. A dedicated HTTP/1.1 dispatcher for Codex traffic buys back what a process boundary used to: queue time fell from a 17.30 s median to 0.01 s, and 16 areas at concurrency 16 returned verdicts with no timeouts.
 - **`.test_venv` is ephemeral (AGT-4256).** The venv regex missed dotted test venvs, so a publication/BS guard park idled the pool (AGT-3827). Resume treats those paths as non-human parks.
-
+- **Mobile dashboard navigation and panels (AGT-4238).** Threads no longer forces a 599 px layout viewport, the new-thread form stays inside its container, navigation is reachable on small screens, and the Orchestration panel can be scrolled to its end. Verified across 6 pages × 5 widths × 2 themes in a real browser.
 
 ## 0.22.1 — 2026-09-04
 
