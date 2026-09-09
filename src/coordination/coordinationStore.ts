@@ -43,16 +43,24 @@ export interface CoordinationEvent {
   /** Canonical repository-cell identity shared by sibling Git worktrees. */
   repoKey?: string;
   taskId: string;
+  /**
+   * Human-readable name for `taskId`, which is an issue UUID. Publishers stamp
+   * the issue identifier (e.g. `AGT-4001`) when they know it so the dashboard
+   * can say which issue an event belongs to instead of printing a UUID.
+   */
   taskLabel?: string;
-  sourceTaskId: string;
+  /** Explicit routing envelope. Absent on legacy events. */
+  sourceTaskId?: string;
   sourceTaskLabel?: string;
-  targetTaskId: string;
+  targetTaskId?: string;
   targetTaskLabel?: string;
   actor: string;
   actorName?: string;
+  /** Role the actor was running as (worker/reviewer/orchestrator/review-agent/daemon/human). Absent on legacy events. */
   actorRole?: string;
-  recipient: string;
+  recipient?: string;
   recipientName?: string;
+  /** Role of the addressee, when the publisher knows it. */
   recipientRole?: string;
   kind: CoordinationKind;
   status: CoordinationStatus;
@@ -61,6 +69,13 @@ export interface CoordinationEvent {
   detail?: string;
   metadata?: Record<string, string | number | boolean | null>;
   fingerprint: string;
+}
+
+interface CoordinationState {
+  version: 1;
+  nextSeq: number;
+  events: CoordinationEvent[];
+  consumed: Record<string, string[]>;
 }
 
 export interface PublishCoordinationEvent {
@@ -76,7 +91,7 @@ export interface PublishCoordinationEvent {
   actor: string;
   actorName?: string;
   actorRole?: string;
-  recipient: string;
+  recipient?: string;
   recipientName?: string;
   recipientRole?: string;
   kind: CoordinationKind;
@@ -120,18 +135,15 @@ export function redactCoordinationMetadata(
   metadata: PublishCoordinationEvent['metadata'],
 ): PublishCoordinationEvent['metadata'] {
   if (!metadata) return undefined;
-  const redacted: Record<string, string | number | boolean | null> = {};
+  const clean: NonNullable<PublishCoordinationEvent['metadata']> = {};
   for (const [key, value] of Object.entries(metadata)) {
-    redacted[key] = SECRET_FIELD.test(key) ? '[redacted]' : value;
+    clean[key] = SECRET_FIELD.test(key)
+      ? '[redacted]'
+      : typeof value === 'string'
+        ? cleanText(value, 500)
+        : value;
   }
-  return redacted;
-}
-
-export interface CoordinationState {
-  version: number;
-  nextSeq: number;
-  events: CoordinationEvent[];
-  consumed: Record<string, string[]>;
+  return clean;
 }
 
 function fingerprint(input: PublishCoordinationEvent): string {
@@ -173,7 +185,6 @@ export { coordinationFilePath, coordinationStateDir };
 export class CoordinationStore {
   private readonly path: string;
   private writeQueue: Promise<void> = Promise.resolve();
-  private priorityWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(path = coordinationFilePath()) {
     this.path = resolve(path);
@@ -196,18 +207,12 @@ export class CoordinationStore {
    * daemon on the same home directory. Without it two processes can both read
    * seq=N and both write seq=N+1, which silently drops one event and duplicates
    * a sequence the dashboard uses to reconcile its stream.
-   *
-   * When `priority` is true the operation runs on a separate `priorityWriteQueue`
-   * that is not blocked by the main `writeQueue`. This is used for `human-answer`
-   * events so an operator reply completes in well under a second while tasks are
-   * running. Both queues still acquire the same cross-process file lock, so seq
-   * integrity is preserved.
    */
   private async mutate<T>(operation: (state: CoordinationState) => T, priority = false): Promise<T> {
     let result!: T;
     let failure: unknown;
     const queue = priority ? this.priorityWriteQueue : this.writeQueue;
-    const next = queue.then(async () => {
+    const settled = queue.then(async () => {
       try {
         result = await withFileLock(`${this.path}.lock`, async () => {
           const state = this.load();
@@ -220,11 +225,16 @@ export class CoordinationStore {
       }
     });
     if (priority) {
-      this.priorityWriteQueue = next;
+      // The priority lane must not absorb a failed machine write's rejection:
+      // chain the settled promise so the lane itself never rejects, and keep
+      // the machine lane's tail pointing at this write so a later machine
+      // write cannot read the board before this one lands.
+      this.priorityWriteQueue = settled.then(() => undefined);
+      this.writeQueue = this.writeQueue.then(() => settled).then(() => undefined);
     } else {
-      this.writeQueue = next;
+      this.writeQueue = settled.then(() => undefined);
     }
-    await next;
+    await settled;
     if (failure) throw failure;
     return result;
   }
@@ -254,7 +264,6 @@ export class CoordinationStore {
       ? legacyFingerprint(normalized)
       : undefined;
     let isNew = true;
-    const isPriority = normalized.kind === 'human-answer';
     const event = await this.mutate((state) => {
       const existing = state.events.find((candidate) => candidate.fingerprint === digest
         || (legacyDigest !== undefined
@@ -303,7 +312,7 @@ export class CoordinationStore {
         state.consumed[consumer] = ids.filter((id) => liveIds.has(id));
       }
       return created;
-    }, isPriority);
+    });
     // Announce only genuinely new events. A deduplicated publish is not news:
     // it would add a second dashboard row for one message, and — because the
     // Linear board mirror listens on 'coordination:published' — echo an event
@@ -320,63 +329,104 @@ export class CoordinationStore {
     return event;
   }
 
-  async consume(consumer: string, options: { repository?: string; repoKey?: string; taskId?: string; includeAll?: boolean }): Promise<CoordinationEvent[]> {
-    return this.mutate((state) => {
-      const scope = JSON.stringify([options.repoKey ?? options.repository ?? '', options.taskId ?? '', consumer]);
-      // Read the legacy address-only bucket as well so an upgrade cannot
-      // redeliver mail that this agent consumed before scoped identities existed.
-      const seen = new Set([...(state.consumed[scope] ?? []), ...(state.consumed[consumer] ?? [])]);
-      const fresh = state.events.filter((event) => !seen.has(event.id));
-      if (options.includeAll) return fresh;
-      const scopeKey = options.repoKey ?? options.repository ?? '';
-      return fresh.filter((event) => {
-        if (event.repoKey) return event.repoKey === scopeKey;
-        return event.repository === scopeKey;
-      });
-    });
-  }
-
-  markConsumed(consumer: string, eventIds: string[], options: { repository?: string; repoKey?: string; taskId?: string } = {}): Promise<void> {
-    return this.mutate((state) => {
-      const scope = JSON.stringify([options.repoKey ?? options.repository ?? '', options.taskId ?? '', consumer]);
-      const bucket = state.consumed[scope] ??= [];
-      for (const id of eventIds) {
-        if (!bucket.includes(id)) bucket.push(id);
-      }
-      // Also write to the legacy address-only bucket so a downgrade does not
-      // redeliver mail this agent already consumed.
-      const legacy = state.consumed[consumer] ??= [];
-      for (const id of eventIds) {
-        if (!legacy.includes(id)) legacy.push(id);
-      }
-    });
-  }
-
-  read(): CoordinationEvent[] {
-    return this.load().events;
-  }
-
-  state(): CoordinationState {
-    return this.load();
-  }
-
-  exchange(correlationId: string): CoordinationEvent[] {
-    return this.load().events.filter((event) => event.correlationId === correlationId);
-  }
-
-  openQuestionCount(repository: string, taskId: string): number {
+  list(options: { repository?: string; repoKey?: string; taskId?: string; involvedTaskId?: string; afterSeq?: number; limit?: number } = {}): CoordinationEvent[] {
     const state = this.load();
-    const settled = new Set<string>();
-    for (const event of state.events) {
-      if (event.kind === 'human-answer' && event.status === 'completed') {
-        settled.add(event.correlationId);
-      }
+    const repository = options.repository ? resolve(options.repository) : undefined;
+    return state.events
+      .filter((event) => options.repoKey
+        ? (event.repoKey ? event.repoKey === options.repoKey : !repository || event.repository === repository)
+        : !repository || event.repository === repository)
+      .filter((event) => !options.taskId || event.taskId === options.taskId)
+      .filter((event) => !options.involvedTaskId
+        || (event.sourceTaskId ?? event.taskId) === options.involvedTaskId
+        || (event.targetTaskId ?? event.taskId) === options.involvedTaskId)
+      .filter((event) => event.seq > (options.afterSeq ?? 0))
+      .slice(-(Math.min(Math.max(options.limit ?? 200, 0), 500)));
+  }
+
+  /**
+   * Locate a still-waiting human question anywhere in the retained board.
+   *
+   * Deliberately not `list()`: that caps at the most recent 500 events, and an
+   * operator answering an old question must not be told it does not exist just
+   * because the board has been busy since it was asked.
+   */
+  /**
+   * Whether every question this task has asked now has an answer.
+   *
+   * Asked of the durable store, which counts rather than fetches, so no window
+   * can hide an older unanswered question and make a still-blocked run look
+   * ready. When that store is unavailable the answer is no: the in-memory board
+   * is a ring and would give exactly the false "all answered" this exists to
+   * prevent. Saying no costs a task its early re-admission and it waits out the
+   * backoff — which is what happened before any of this existed.
+   */
+  allQuestionsAnswered(taskId: string): boolean {
+    const standings = questionStandings(taskId);
+    if (!standings) return false;
+    return standings.asked > 0 && standings.unanswered === 0;
+  }
+
+  /** Durable task-scoped operator decisions, including full answer detail. */
+  resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
+    return resolvedHumanAnswers(taskId);
+  }
+
+  /**
+   * One exchange, whole, from both the durable trace and the board.
+   *
+   * Scoped by correlation id rather than task: an exchange is a question and its
+   * answer, so nothing else on a busy task can push either out of view.
+   */
+  exchange(correlationId: string): CoordinationEvent[] {
+    const merged = new Map<string, CoordinationEvent>();
+    for (const event of queryTrace({ correlationId, limit: 1_000 })) merged.set(event.id, event);
+    for (const event of this.load().events) {
+      if (event.correlationId === correlationId) merged.set(event.id, event);
     }
-    return new Set(state.events
-      .filter((event) => event.kind === 'human-question'
-        && event.status === 'waiting'
-        && event.repository === repository
-        && event.taskId === taskId
+    return [...merged.values()].sort((a, b) => a.seq - b.seq);
+  }
+
+  findQuestion(correlationId: string): CoordinationEvent | undefined {
+    // The exchange, not the board: a question that has been pushed out of the
+    // ring is still a question someone is parked on, and resolving it only from
+    // memory means the operator is told their pending question does not exist —
+    // on exactly the busy tasks that produce the most of them.
+    return this.exchange(correlationId).find((event) =>
+      event.kind === 'human-question' && event.status === 'waiting');
+  }
+
+  /**
+   * The blocking question an agent is still parked on.
+   *
+   * The dashboard can only reason about the events it has loaded, which is a
+   * window over a ring buffer — a question older than that window is invisible
+   * to it, and an operator's reply would be filed as an ordinary note while the
+   * agent stayed blocked. The retained board is here, so the decision belongs
+   * here (AGT-4030).
+   *
+   * The newest unsettled question wins when several are open: a run stops at
+   * the question it asked, so the latest is what the agent is parked on and
+   * what the operator is reading.
+   */
+  /**
+   * How many blocking questions this task has asked and not yet had answered,
+   * regardless of exact wording. 0 means nothing is outstanding.
+   *
+   * Counts distinct correlation IDs, not raw events: a paged question carries
+   * two events (the `waiting` ask, the `running` page confirmation) under the
+   * same correlation ID, and a re-dispatch that rephrases the same blocker
+   * mints a different one for the same underlying wait (AGT-4042).
+   */
+  openQuestionCount(repository: string, taskId: string): number {
+    const events = this.list({ repository, taskId, limit: 500 });
+    const settled = new Set(events
+      .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+      .map((event) => event.correlationId));
+    return new Set(events
+      .filter((event) =>
+        event.kind === 'human-question'
+        && (event.status === 'waiting' || event.status === 'running')
         && !settled.has(event.correlationId))
       .map((event) => event.correlationId)).size;
   }
@@ -390,75 +440,122 @@ export class CoordinationStore {
    * blocker. A board-only read there would leave an older sibling permanently
    * unanswered in the durable trace once enough other traffic evicted it from
    * the board, and `allQuestionsAnswered` would never see that task as
-   * unblocked.
+   * answered again (AGT-4042).
    */
-  allQuestionsAnswered(taskId: string): boolean {
-    const state = this.load();
-    const settled = new Set<string>();
-    for (const event of state.events) {
-      if (event.kind === 'human-answer' && event.status === 'completed') {
-        settled.add(event.correlationId);
-      }
+  openQuestions(repository: string, taskId: string): CoordinationEvent[] {
+    const merged = new Map<string, CoordinationEvent>();
+    for (const event of queryTrace({ repository, taskId, kinds: ['human-question', 'human-answer'], limit: 1_000 })) {
+      merged.set(event.id, event);
     }
-    const boardOpen = new Set(state.events
-      .filter((event) => event.kind === 'human-question' && event.status === 'waiting' && event.taskId === taskId)
+    for (const event of this.list({ repository, taskId, limit: 500 })) merged.set(event.id, event);
+    const events = [...merged.values()];
+    const settled = new Set(events
+      .filter((event) => event.kind === 'human-answer' && event.status === 'completed')
       .map((event) => event.correlationId));
-    // Remove board-settled questions from the trace set so we only check
-    // questions that the board has already evicted.
-    const traceOpen = queryTrace(taskId)
-      .filter((event) => event.kind === 'human-question' && event.status === 'waiting')
-      .filter((event) => !boardOpen.has(event.correlationId))
-      .filter((event) => !settled.has(event.correlationId));
-    return boardOpen.size === 0 && traceOpen.length === 0;
+    const open = new Map<string, CoordinationEvent>();
+    for (const event of events) {
+      if (event.kind === 'human-question'
+        && (event.status === 'waiting' || event.status === 'running')
+        && !settled.has(event.correlationId)) open.set(event.correlationId, event);
+    }
+    return [...open.values()];
   }
 
   /**
-   * Return the most recent `human-answer` for each open question correlation
-   * ID, merging board and durable trace. Used by `askHuman` to replay answers
-   * after a restart.
+   * When this task's most recent operator answer landed, or undefined if it
+   * never had one. Bounds how far back a caller may read an "unanswered
+   * streak" of the same kind, so a pre-answer attempt cannot be folded into a
+   * new question's count just because it shares the same outcome (AGT-4042).
+   *
+   * SQL-filtered by kind against the durable trace, not the live board: the
+   * board evicts, and a task's trace stream also carries every other kind it
+   * produces, so even a wide recent-events window can push an old answer out
+   * of view before this ever sees it — silently un-bounding the caller's walk.
    */
-  resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
-    return resolvedHumanAnswers(taskId, this.load().events);
+  lastAnsweredAt(taskId: string): number | undefined {
+    return lastTraceEventOfKind(taskId, 'human-answer', 'completed')?.timestamp;
   }
 
-  /**
-   * Return the most recent event of a given kind for a task, checking the board
-   * first and falling back to the durable trace.
-   */
-  lastEventOfKind(taskId: string, kind: CoordinationKind): CoordinationEvent | undefined {
-    const board = this.load().events.filter((event) => event.taskId === taskId && event.kind === kind);
-    if (board.length > 0) return board[board.length - 1];
-    return lastTraceEventOfKind(taskId, kind);
+  findOpenQuestionFor(
+    actor: string,
+    scope: { repository?: string; taskId?: string } = {},
+  ): CoordinationEvent | undefined {
+    // An address is not unique on its own: agents name themselves, so two on
+    // different tasks can both answer to "sable". The caller passes the task it
+    // is speaking into, and without one this refuses rather than guessing —
+    // answering the wrong task's blocking question would unpark an agent with
+    // an answer meant for someone else.
+    if (!scope.taskId && !scope.repository) return undefined;
+    const repository = scope.repository ? resolve(scope.repository) : undefined;
+    const events = this.load().events;
+    const settled = new Set(events
+      .filter((event) => ['completed', 'expired', 'failed'].includes(event.status))
+      .map((event) => event.correlationId));
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      if (event.kind === 'human-question'
+        && event.status === 'waiting'
+        && event.actor === actor
+        && (!repository || event.repository === repository)
+        && (!scope.taskId || event.taskId === scope.taskId)
+        && !settled.has(event.correlationId)) return event;
+    }
+    return undefined;
   }
 
-  /**
-   * Return the most recent event matching a predicate, checking the board first
-   * and falling back to the durable trace.
-   */
-  lastEvent(taskId: string, predicate: (event: CoordinationEvent) => boolean): CoordinationEvent | undefined {
-    const board = this.load().events.filter((event) => event.taskId === taskId && predicate(event));
-    if (board.length > 0) return board[board.length - 1];
-    return lastTraceEventOfKind(taskId, undefined, predicate);
+  async consume(consumer: string, options: { repository?: string; repoKey?: string; taskId?: string; includeAll?: boolean }): Promise<CoordinationEvent[]> {
+    return this.mutate((state) => {
+      const scope = JSON.stringify([options.repoKey ?? options.repository ?? '', options.taskId ?? '', consumer]);
+      // Read the legacy address-only bucket as well so an upgrade cannot
+      // redeliver mail that this agent consumed before scoped identities existed.
+      const seen = new Set([...(state.consumed[scope] ?? []), ...(state.consumed[consumer] ?? [])]);
+      const repository = options.repository ? resolve(options.repository) : undefined;
+      const events = state.events.filter((event) =>
+        (options.repoKey
+          ? (event.repoKey ? event.repoKey === options.repoKey : !repository || event.repository === repository)
+          : !repository || event.repository === repository)
+        && (!options.taskId || (event.targetTaskId ?? event.taskId) === options.taskId)
+        && (options.includeAll || !event.recipient || event.recipient === consumer)
+        && !seen.has(event.id));
+      state.consumed[scope] = [...seen, ...events.map((event) => event.id)].slice(-MAX_EVENTS);
+      return events;
+    });
   }
 
-  /**
-   * Return the most recent event with a given correlationId, checking the board
-   * first and falling back to the durable trace.
-   */
-  eventByCorrelationId(correlationId: string): CoordinationEvent | undefined {
-    const board = this.load().events.filter((event) => event.correlationId === correlationId);
-    if (board.length > 0) return board[board.length - 1];
-    return queryTrace(undefined, correlationId).pop();
+  /** Recent routable participants in one canonical repository cell. */
+  peers(options: {
+    repoKey: string;
+    repository?: string;
+    roles?: string[];
+    taskIds?: string[];
+    exclude?: { address: string; taskId: string };
+    limit?: number;
+    now?: number;
+    activeWindowMs?: number;
+  }): CoordinationPeer[] {
+    return coordinationPeers(this.load().events, options);
+  }
+
+  snapshot(repository?: string): { events: CoordinationEvent[]; pending: CoordinationEvent[] } {
+    const events = this.list({ repository, limit: 500 });
+    const latest = new Map<string, CoordinationEvent>();
+    for (const event of events) {
+      const previous = latest.get(event.correlationId);
+      if (!previous || event.seq > previous.seq) latest.set(event.correlationId, event);
+    }
+    return {
+      events,
+      pending: [...latest.values()].filter((event) => ['open', 'waiting', 'running'].includes(event.status)),
+    };
   }
 }
 
-let singleton: CoordinationStore | undefined;
-
+let defaultStore: CoordinationStore | undefined;
 export function getCoordinationStore(): CoordinationStore {
-  if (!singleton) singleton = new CoordinationStore();
-  return singleton;
+  defaultStore ??= new CoordinationStore();
+  return defaultStore;
 }
 
 export function resetCoordinationStoreForTests(): void {
-  singleton = undefined;
+  defaultStore = undefined;
 }
