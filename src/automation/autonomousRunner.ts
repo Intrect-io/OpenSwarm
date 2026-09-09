@@ -198,18 +198,6 @@ export function decisionSelectionBudget(availableSlots: number, candidateCount: 
 }
 
 /**
- * Prefix stamped on a NEEDS_HUMAN run's `lastErrorMessage` when this file
- * parked it for a repeated, unanswered `ask_human` question (AGT-4042).
- *
- * `markNeedsHuman` is shared with unrelated parks (a rejection limit, a PR
- * closed without merge — see the other call sites in this file), each with its
- * own resume condition. This is how the filter below tells "this one resumes
- * when the operator answers" from "this one resumes when Linear state changes"
- * without adding a second column or state for what is still one ledger state.
- */
-const OPERATOR_QUESTION_PARK_MARKER = '[operator-question]';
-
-/**
  * Record, or retire, the stand-in park signal for a task whose park cannot be
  * carried by the run ledger.
  *
