@@ -2408,13 +2408,18 @@ export class AutonomousRunner {
         this.syslog(`✓ Tracker cache: ${trackerReconcile.fromFetch} bulk hit(s), ${trackerReconcile.lookedUp} explicit lookup(s), ${trackerReconcile.terminal} terminal ledger row(s) reconciled`);
       }
       const knownTaskIds = new Set<string>();
+      const priorityDepIds = new Set<string>();
       for (const t of tasks) {
         if (t.issueId) knownTaskIds.add(t.issueId);
         if (t.id) knownTaskIds.add(t.id);
+        for (const depId of t.blockedBy ?? []) priorityDepIds.add(depId);
+        const cached = getTaskState(t.issueId || t.id);
+        for (const depId of cached?.dependencyIssueIds ?? []) priorityDepIds.add(depId);
       }
       const depReconcile = await reconcileDependencyBlockers({
         source: getTaskSource(),
         knownTaskIds,
+        priorityDepIds,
       });
       if (depReconcile.lookedUp > 0) {
         this.syslog(`✓ Dependency cache: ${depReconcile.lookedUp} explicit lookup(s), ${depReconcile.resolved} blocker(s) confirmed done, ${depReconcile.released} dependent task(s) released`);

@@ -652,19 +652,19 @@ function isResolved(state: OpenSwarmTaskState | undefined): boolean {
   return state.execution.status === 'done' || state.linearState === 'Done';
 }
 
-function isCanceledLinearState(linearState: string | undefined): boolean {
+function isDependencyTerminalLinearState(linearState: string | undefined): boolean {
   const name = linearState?.trim().toLowerCase();
-  return name === 'canceled' || name === 'cancelled';
+  return name === 'canceled' || name === 'cancelled' || name === 'duplicate';
 }
 
 /** A blocker that can no longer move work forward. Done is the historical
- *  isResolved contract (parent-completion still uses that). Canceled is
- *  terminal for dependencies — vela 2026-09-09: 20 locally-Canceled STO-*
- *  ids sat at the front of reconcileDependencyBlockers' Set and consumed
- *  maxLookups forever because isResolved ignored them. */
+ *  isResolved contract (parent-completion still uses that). Canceled/Duplicate
+ *  are terminal for dependencies — vela 2026-09-09: Canceled STO-* ids occupied
+ *  maxLookups, and AGT-4115 (Duplicate on Linear, In Progress locally) kept
+ *  AGT-4121 blocked after AGT-4253. Matches trackerTerminalReconciler. */
 function isDependencyTerminal(state: OpenSwarmTaskState | undefined): boolean {
   if (isResolved(state)) return true;
-  return isCanceledLinearState(state?.linearState);
+  return isDependencyTerminalLinearState(state?.linearState);
 }
 
 export function getTaskReadiness(task: TaskItem): {
@@ -771,6 +771,10 @@ export interface DependencyBlockerReconcileOptions {
   recheckAfterMs?: number;
   /** Failed lookups retry sooner than a confirmed-open skip. Default 15m. */
   errorRecheckAfterMs?: number;
+  /** Dependency ids blocking tasks in this heartbeat's Linear fetch.
+   *  Looked up before the rest of the store so a live queue cannot starve
+   *  behind July KT-* Backlog from projects this daemon does not run. */
+  priorityDepIds?: ReadonlySet<string>;
 }
 
 export interface DependencyBlockerReconcileResult {
@@ -802,8 +806,8 @@ export interface DependencyBlockerReconcileResult {
  * Live vela 2026-09-09: 20 locally-Canceled STO-* ids occupied maxLookups
  * every heartbeat, so AGT-4207 (157th, Linear already Done) was never reached.
  *
- * Lookups are capped. Candidates are the blockers due for a check, sorted
- * never-checked then oldest-checked (same rotation as reconcileTrackerTerminalRuns).
+ * Lookups are capped. Candidates due for a check are sorted heartbeat-priority
+ * first (deps of tasks in this fetch), then never-checked, then oldest-checked.
  * A lookup — success or fail-closed — stamps dependencyCheckedAt so the same
  * 20 cannot consume the cap on the next heartbeat.
  *
@@ -845,8 +849,9 @@ export async function reconcileDependencyBlockers(
   const errorRecheckAfterMs = options.errorRecheckAfterMs ?? 15 * 60_000;
   const maxLookups = Math.max(1, Math.floor(options.maxLookups ?? 20));
   const knownTaskIds = options.knownTaskIds ?? new Set<string>();
+  const priorityDepIds = options.priorityDepIds ?? new Set<string>();
 
-  const byId = new Map<string, { depId: string; lastChecked: number; lastSeen: number }>();
+  const byId = new Map<string, { depId: string; lastChecked: number; lastSeen: number; priority: number }>();
   for (const state of listTaskStates()) {
     if (!DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES.has(state.execution.status)) continue;
     if (state.dependencyIssueIds.length === 0) continue;
@@ -860,11 +865,16 @@ export async function reconcileDependencyBlockers(
       const lastChecked = blockerCheckedAtMs(blocker);
       const skipFor = blocker?.dependencyLookupFailed ? errorRecheckAfterMs : recheckAfterMs;
       if (lastChecked > 0 && now - lastChecked < skipFor) continue;
-      byId.set(depId, { depId, lastChecked, lastSeen: blockerUpdatedAtMs(blocker) });
+      byId.set(depId, {
+        depId,
+        lastChecked,
+        lastSeen: blockerUpdatedAtMs(blocker),
+        priority: priorityDepIds.has(depId) ? 1 : 0,
+      });
     }
   }
   const candidates = [...byId.values()].sort(
-    (a, b) => a.lastChecked - b.lastChecked || a.lastSeen - b.lastSeen || a.depId.localeCompare(b.depId),
+    (a, b) => b.priority - a.priority || a.lastChecked - b.lastChecked || a.lastSeen - b.lastSeen || a.depId.localeCompare(b.depId),
   );
   result.eligible = candidates.length;
 

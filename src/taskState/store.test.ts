@@ -539,6 +539,68 @@ describe('task state store', () => {
     }).ready).toBe(true);
   });
 
+  it('treats a Duplicate blocker as terminal so dependents are not waiting on it', () => {
+    upsertTaskState('AGT-4115', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'Duplicate',
+    });
+    upsertTaskState('AGT-4121', {
+      dependencyIssueIds: ['AGT-4115'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    expect(getTaskReadiness({
+      id: 'AGT-4121', source: 'linear' as const, title: 'waiting', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4121',
+    }).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers looks up heartbeat-priority deps before older out-of-scope ones', async () => {
+    const future = Date.now() + 2 * 60 * 60_000;
+    for (let i = 0; i < 20; i++) {
+      const id = `OLD-${String(i).padStart(2, '0')}`;
+      upsertTaskState(id, {
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+      upsertTaskState(`DEP-ON-OLD-${i}`, {
+        dependencyIssueIds: [id],
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+    }
+    upsertTaskState('AGT-4114', {
+      execution: { status: 'backlog', retryCount: 0 },
+      linearState: 'Backlog',
+    });
+    upsertTaskState('AGT-4121-LIVE', {
+      dependencyIssueIds: ['AGT-4114'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookedUp: string[] = [];
+    const lookupIssueState = async (id: string) => {
+      lookedUp.push(id);
+      if (id === 'AGT-4114') return { ok: true as const, issue: { state: 'Done', stateType: 'completed' } };
+      return { ok: true as const, issue: { state: 'Todo', stateType: 'unstarted' } };
+    };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+      priorityDepIds: new Set(['AGT-4114']),
+    });
+
+    expect(lookedUp[0]).toBe('AGT-4114');
+    expect(result.resolved).toBe(1);
+    expect(getTaskReadiness({
+      id: 'AGT-4121-LIVE', source: 'linear' as const, title: 'live', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4121-LIVE',
+    }).ready).toBe(true);
+  });
+
   it('reconciles stale in_progress against Linear state (R5)', () => {
     // Operator parks an actively-running issue → local in_progress is stale.
     markTaskInProgress('KT-400', { linearState: 'In Progress' });
