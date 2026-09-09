@@ -37,7 +37,7 @@ export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
 export { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
 
 /** The fields these paths read; narrower than the full pipeline result. */
-interface PublishableResult {
+export interface PublishableResult {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
@@ -46,7 +46,7 @@ interface PublishableResult {
 }
 
 /** The fields these paths read off the task. */
-interface PublishableTask {
+export interface PublishableTask {
   /** Required: the broadcast events key on `issueId || id`. */
   id: string;
   issueId?: string;
@@ -96,6 +96,7 @@ export async function publishParkedWork(
   worktreeInfo: WorktreeInfo,
   task: PublishableTask,
   durability: ExecutionDurabilityHooks | undefined,
+  afterPublication?: ApprovedPublicationHook,
 ): Promise<void> {
   // The same lease fence the approved path uses. Without it an executor that
   // already lost its claim — expired lease, a newer generation now owning the
@@ -136,6 +137,12 @@ export async function publishParkedWork(
     const attached = await durability?.onPublication(prUrl, headSha) ?? true;
     if (attached) {
       console.log(`[Runner] Parked run published as draft for ${task.issueIdentifier}: ${prUrl}`);
+      // A draft is the *least* reviewed thing this daemon emits — the run
+      // stopped because it could not finish — and until AGT-4278 it was also
+      // the only publication no reviewer ever looked at. The verdict cannot
+      // roll anything back here (it is already a draft), but it is the
+      // starting point for whoever picks the draft up.
+      if (afterPublication) await afterPublication({ prUrl, headSha, worktreeInfo });
     } else {
       console.warn(`[Runner] Parked publication for ${task.issueIdentifier} was not durably attached (lease fence); the PR exists at ${prUrl} and will be reused by branch name`);
     }
@@ -163,9 +170,10 @@ export async function publishParkedIfNeeded(
   task: PublishableTask,
   result: PublishableResult,
   durability: ExecutionDurabilityHooks | undefined,
+  afterPublication?: ApprovedPublicationHook,
 ): Promise<boolean> {
   if (!worktreeInfo || !shouldPublishParkedWork(true, result)) return false;
-  await publishParkedWork(worktreeInfo, task, durability);
+  await publishParkedWork(worktreeInfo, task, durability, afterPublication);
   return true;
 }
 

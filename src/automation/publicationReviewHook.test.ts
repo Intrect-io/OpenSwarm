@@ -1,0 +1,116 @@
+// ============================================
+// OpenSwarm — every publication gets a verdict, or says why it did not (AGT-4278)
+// ============================================
+//
+// Measured on vela 2026-09-10: of nine published pull requests, two carried a
+// reviewer verdict. The gate was not weak, it was narrow. Draft publications —
+// the output of runs that STOPPED, i.e. the least finished work the daemon
+// emits — never reached it at all, and the ones that did failed open silently
+// when the reviewer timed out.
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const reviewPublishedPullRequest = vi.hoisted(() => vi.fn());
+vi.mock('./prPublicationReview.js', () => ({ reviewPublishedPullRequest }));
+const commentOnPR = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('../github/github.js', () => ({ commentOnPR }));
+const rollBackReviewedPublication = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('./prReviewRollback.js', () => ({ rollBackReviewedPublication }));
+vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
+
+import { buildPublicationReviewHook } from './publicationReviewHook.js';
+
+const PR = 'https://github.com/Intrect-io/OpenSwarm/pull/580';
+const ctx = { prUrl: PR, headSha: 'abc1234', worktreeInfo: { originalPath: '/work/OpenSwarm' } };
+
+function hook(rollbackOnRejection: boolean) {
+  return buildPublicationReviewHook({
+    task: { id: 't1', issueId: 'AGT-1', issueIdentifier: 'AGT-1', title: 'x' },
+    result: { success: true, finalStatus: 'approved' },
+    rollbackOnRejection,
+  } as Parameters<typeof buildPublicationReviewHook>[0]);
+}
+
+describe('publication review hook (AGT-4278)', () => {
+  beforeEach(() => {
+    reviewPublishedPullRequest.mockReset();
+    commentOnPR.mockClear();
+    rollBackReviewedPublication.mockClear();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('says on the PR when the reviewer produced no verdict, naming the reason', async () => {
+    // #579 and #580 both died on `openrouter timeout after 300000ms` and were
+    // published anyway. An unreviewed PR looked exactly like a reviewed one.
+    reviewPublishedPullRequest.mockResolvedValue({
+      success: false, gateRan: false, error: 'openrouter timeout after 300000ms',
+    });
+
+    await hook(true)(ctx);
+
+    expect(commentOnPR).toHaveBeenCalledTimes(1);
+    const [repo, number, body] = commentOnPR.mock.calls[0];
+    expect(repo).toBe('Intrect-io/OpenSwarm');
+    expect(number).toBe(580);
+    expect(body).toContain('without a reviewer verdict');
+    expect(body).toContain('openrouter timeout after 300000ms');
+    // A review that never ran said nothing about the code, so nothing rolls back.
+    expect(rollBackReviewedPublication).not.toHaveBeenCalled();
+  });
+
+  it('does not roll back a draft, but still gets it reviewed', async () => {
+    // The verdict cannot undo a draft — it is already a draft, and the run
+    // already parked. It is the starting point for whoever picks it up.
+    reviewPublishedPullRequest.mockResolvedValue({
+      success: false, gateRan: true, changesRequested: true, error: 'drops four passing tests',
+    });
+
+    await hook(false)(ctx);
+
+    expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(1);
+    expect(rollBackReviewedPublication).not.toHaveBeenCalled();
+    expect(commentOnPR).not.toHaveBeenCalled();
+  });
+
+  it('rolls back a ready publication the reviewer rejected', async () => {
+    reviewPublishedPullRequest.mockResolvedValue({
+      success: false, gateRan: true, changesRequested: true, error: 'drops four passing tests',
+    });
+
+    await hook(true)(ctx);
+
+    expect(rollBackReviewedPublication).toHaveBeenCalledTimes(1);
+    expect(rollBackReviewedPublication.mock.calls[0][0]).toMatchObject({
+      prUrl: PR, error: 'drops four passing tests',
+    });
+  });
+
+  it('stays quiet when the reviewer approved', async () => {
+    reviewPublishedPullRequest.mockResolvedValue({ success: true, gateRan: true, changesRequested: false });
+
+    await hook(true)(ctx);
+
+    expect(commentOnPR).not.toHaveBeenCalled();
+    expect(rollBackReviewedPublication).not.toHaveBeenCalled();
+  });
+
+  it('does not fail the run when it cannot post the did-not-run notice', async () => {
+    // The reviewer already failed; failing to say so must not also fail the
+    // run. Guarded at this call site rather than relying on `commentOnPR`'s
+    // own swallow, so swapping it for `commentOnPROrThrow` cannot turn a
+    // courtesy note into a run failure.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'boom' });
+    commentOnPR.mockRejectedValueOnce(new Error('403 from GitHub'));
+
+    await expect(hook(true)(ctx)).resolves.toBeUndefined();
+  });
+
+  it('reviews an unparseable PR URL nowhere rather than crashing', async () => {
+    reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'boom' });
+
+    await hook(true)({ ...ctx, prUrl: 'not-a-pr-url' });
+
+    expect(commentOnPR).not.toHaveBeenCalled();
+  });
+});
