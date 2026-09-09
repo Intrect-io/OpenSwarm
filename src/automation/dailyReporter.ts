@@ -41,11 +41,11 @@ export function registerProjectPath(projectId: string, projectPath: string): voi
 }
 
 /**
- * Start daily reporter with cron schedule
+ * Start daily reporter
  */
 export function startDailyReporter(config: DailyReporterConfig): void {
   if (!config.enabled) {
-    console.log('[DailyReporter] Disabled in configuration');
+    console.log('[DailyReporter] Disabled by config');
     return;
   }
 
@@ -54,17 +54,21 @@ export function startDailyReporter(config: DailyReporterConfig): void {
     return;
   }
 
-  const schedule = config.schedule || '0 18 * * *'; // Default: 6 PM daily
+  const schedule = config.schedule || '0 18 * * *';
+  console.log(`[DailyReporter] Starting with schedule: ${schedule}`);
 
   cronJob = new Cron(schedule, async () => {
-    if (reportInFlight) return;
-    reportInFlight = generateDailyReports()
-      .catch((error) => console.error('[DailyReporter] Scheduled report failed:', error))
-      .finally(() => { reportInFlight = null; });
-    await reportInFlight;
+    if (reportInFlight) {
+      console.log('[DailyReporter] Previous report still in progress — skipping');
+      return;
+    }
+    reportInFlight = generateDailyReports();
+    try {
+      await reportInFlight;
+    } finally {
+      reportInFlight = null;
+    }
   });
-
-  console.log(`[DailyReporter] Started with schedule: ${schedule}`);
 }
 
 /**
@@ -79,23 +83,16 @@ export function stopDailyReporter(): void {
 }
 
 /**
- * Manually trigger daily reports (for testing)
+ * Generate daily reports for all active projects
+ * Tracks per-project outcomes so retries target only failed projects.
  */
 export async function generateDailyReports(): Promise<void> {
-  if (!linearClient) {
-    console.warn('[DailyReporter] LinearClient not set, skipping reports');
+  if (!linearClient || !teamId) {
+    console.warn('[DailyReporter] Linear client or team ID not configured');
     return;
   }
-
-  if (!teamId) {
-    console.warn('[DailyReporter] Team ID not set, skipping reports');
-    return;
-  }
-
-  console.log('[DailyReporter] Generating daily reports...');
 
   try {
-    // Fetch all active projects from Linear
     const team = await linearClient.team(teamId);
     if (!team) {
       console.warn('[DailyReporter] Team not found');
@@ -117,22 +114,43 @@ export async function generateDailyReports(): Promise<void> {
 
     console.log(`[DailyReporter] Found ${activeProjects.length} active projects`);
 
-    // Generate status update for each project
-    let successCount = 0;
-    let failCount = 0;
+    // Track per-project publication outcome so retries target only failed projects
+    const projectResults: { id: string; name: string; ok: boolean }[] = [];
 
     for (const project of activeProjects) {
       try {
         const projectPath = projectPathMapping.get(project.id);
         await postStatusUpdate(project.id, project.name, projectPath);
-        successCount++;
+        projectResults.push({ id: project.id, name: project.name, ok: true });
       } catch (err) {
         console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
-        failCount++;
+        projectResults.push({ id: project.id, name: project.name, ok: false });
       }
     }
 
+    const successCount = projectResults.filter(r => r.ok).length;
+    const failCount = projectResults.filter(r => !r.ok).length;
+    const failedProjects = projectResults.filter(r => !r.ok).map(r => r.name);
+
     console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
+
+    // Retry only failed projects (up to 1 retry each)
+    if (failCount > 0) {
+      console.log(`[DailyReporter] Retrying ${failCount} failed project(s): ${failedProjects.join(', ')}`);
+      for (const project of activeProjects) {
+        const result = projectResults.find(r => r.id === project.id);
+        if (result && !result.ok) {
+          try {
+            const projectPath = projectPathMapping.get(project.id);
+            await postStatusUpdate(project.id, project.name, projectPath);
+            result.ok = true;
+            console.log(`[DailyReporter] Retry succeeded for "${project.name}"`);
+          } catch (err) {
+            console.error(`[DailyReporter] Retry also failed for "${project.name}":`, err);
+          }
+        }
+      }
+    }
 
     // Send summary to Discord
     if (discordReporter && successCount > 0) {
