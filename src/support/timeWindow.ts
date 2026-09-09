@@ -296,8 +296,9 @@ export function assertWorkAllowed(taskName?: string): void {
  * Time window status summary (for Discord reporting)
  */
 export function getTimeWindowSummary(): string {
-  const work = isWorkAllowed();
-  const market = getMarketStatus();
+  const config = getTimeWindowConfig();
+  const work = isWorkAllowed(config);
+  const market = getMarketStatus(config);
 
   const icon = work.allowed ? '🟢' : '🔴';
   const status = work.allowed ? t('timeWindow.workAllowed') : t('timeWindow.workBlocked');
