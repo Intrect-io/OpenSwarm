@@ -97,10 +97,21 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
   return new Promise<OAuthFlowResult>((resolve, reject) => {
     const settlement = new PkceSettlement();
     const exchangeAbort = new AbortController();
+    // The response of the callback that claimed the exchange. If cancellation
+    // (login timeout / server error) wins while that exchange is mid-flight,
+    // this is the socket we must terminate instead of leaving the browser
+    // waiting on a flow we have already abandoned.
+    let claimedResponse: ServerResponse | null = null;
 
     const timeout = setTimeout(() => {
       if (settlement.finish()) {
         exchangeAbort.abort(new Error('OAuth login timed out'));
+        // The exchange may be mid-flight with a claimed response still open.
+        // Destroy it so the browser does not hang on a socket whose flow we
+        // just abandoned; the catch path below owns the response only when it
+        // is still the one settling.
+        claimedResponse?.destroy();
+        claimedResponse = null;
         server.close();
         reject(new Error('OAuth login timed out (120s). 다시 시도하세요.'));
       }
@@ -130,6 +141,7 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
         res.end('OAuth callback already being processed');
         return;
       }
+      claimedResponse = res;
 
       if (error) {
         settlement.finish();
@@ -245,6 +257,8 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
     server.on('error', (err) => {
       if (settlement.finish()) {
         exchangeAbort.abort(err);
+        claimedResponse?.destroy();
+        claimedResponse = null;
         clearTimeout(timeout);
         reject(new Error(`Callback server error: ${err.message}`));
       }
