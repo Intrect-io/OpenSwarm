@@ -449,6 +449,31 @@ describe('buildReviewerPrompt', () => {
     expect(ko).toContain('경계 입력');
   });
 
+  it('contains source-string invariant test checklist item (weak guard detection)', () => {
+    // Default (change) mode — the main worker→reviewer gate.
+    const en = enPrompts.buildReviewerPrompt(opts);
+    expect(en).toContain('Source-string invariant tests');
+    expect(en).toContain('inspect.getsource');
+    expect(en).toContain('weak guard');
+    // Verdict-limitation instruction must be present, not just the detection signal.
+    expect(en).toContain('approve only with that limitation stated');
+    // ko mirror
+    const ko = koPrompts.buildReviewerPrompt(opts);
+    expect(ko).toContain('소스 문자열 불변식 테스트');
+    expect(ko).toContain('inspect.getsource');
+    expect(ko).toContain('약한 가드');
+    expect(ko).toContain('판정에 그 한계가 적힌 경우에만 승인');
+  });
+
+  it('contains source-string invariant test checklist item in direct mode too', () => {
+    const en = enPrompts.buildReviewerPrompt({ ...opts, mode: 'direct' });
+    expect(en).toContain('Source-string invariant tests');
+    expect(en).toContain('approve only with that limitation stated');
+    const ko = koPrompts.buildReviewerPrompt({ ...opts, mode: 'direct' });
+    expect(ko).toContain('소스 문자열 불변식 테스트');
+    expect(ko).toContain('판정에 그 한계가 적힌 경우에만 승인');
+  });
+
   it('adds deterministic-evidence instructions symmetrically when evidence exists', () => {
     const verificationEvidence = '## Verification Evidence (deterministic, harness-run)\n- test (test): head=pass, base=skipped, newFailure=no, 1.0s';
     const en = enPrompts.buildReviewerPrompt({ ...opts, verificationEvidence });

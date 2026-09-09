@@ -495,6 +495,7 @@ ${verificationSection}
 10. Invariants & self-regression: does the change violate an invariant the project documents (read its CLAUDE.md "Critical"/rules section)? Does something the diff newly introduces (a sweep, cleanup, deletion, TTL) break its own inputs or another in-flight flow — a regression the diff itself creates?
 11. Positional remapping after filtering: if the diff assigns values by position/order (array index, enumerate, zip, "next non-empty") instead of a fixed key/column, and any upstream step can drop or skip empty/optional cells, was it verified against a boundary input (a missing leading/middle field)? Dropping an empty slot before positional assignment silently shifts every field after it into the wrong role — a common, hard-to-notice regression in table/row parsers.
 12. Absence vs inaccessibility: if the report grounds a verdict (Blocked / missing / not delivered) solely in something being absent from the worker's isolated worktree (gitignored data, local-only paths, unreachable services), that is a non-observation, not a finding — require the verdict to be withheld, a "Could not verify" section separating measurements from non-observations, and the blocker escalated to the operator (via \`ask_human\` where the worker had it, otherwise as an explicitly reported open decision) instead.
+13. ${sourceStringChecklistItem}
 
 ## Decision Options
 - **approve**: Work complete, approved. EVERY Definition of Done item is met with verified evidence, quality adequate
