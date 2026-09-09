@@ -1,5 +1,4 @@
-import { spawn } from 'child_process';
-import { isWindows } from '../support/platform';
+import { spawn } from 'node:child_process';
 
 function getOpenCommand(url: string): { command: string; args: string[] } {
   if (process.platform === 'darwin') {
@@ -32,14 +31,9 @@ export function openBrowser(url: string): void {
   const { command, args } = getOpenCommand(url);
   const child = spawn(command, args, {
     stdio: 'ignore',
-    detached: true,
     windowsHide: true,
   });
-  child.unref();
   let reported = false;
-=======
-```
-
 
   // Still worth saying when the launcher itself failed: it tells the user the
   // link above is now their only route, rather than leaving them to guess

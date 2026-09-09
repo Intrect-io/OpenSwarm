@@ -12,9 +12,6 @@ let linearClient: LinearClient | null = null;
 let discordReporter: ((content: any) => Promise<void>) | null = null;
 let teamId: string | null = null;
 let reportInFlight: Promise<void> | null = null;
-=======
-```
-
 // Project path mapping (projectId → projectPath) for knowledge graph metrics
 let projectPathMapping = new Map<string, string>();
 
@@ -85,17 +82,15 @@ export function stopDailyReporter(): void {
  * Manually trigger daily reports (for testing)
  */
 export async function generateDailyReports(): Promise<void> {
-  const release = await reportMutex.acquire();
-  try {
-    if (reportInFlight) {
-      console.log('[DailyReporter] Daily report generation already in progress, skipping');
-      return;
-    }
+  if (!linearClient) {
+    console.warn('[DailyReporter] LinearClient not set, skipping reports');
+    return;
+  }
 
-    if (!linearClient || !teamId) {
-      console.warn('[DailyReporter] Linear client or team ID not set, skipping daily report');
-      return;
-    }
+  if (!teamId) {
+    console.warn('[DailyReporter] Team ID not set, skipping reports');
+    return;
+  }
 
   console.log('[DailyReporter] Generating daily reports...');
 
@@ -175,28 +170,5 @@ async function sendDiscordSummary(
     console.log('[DailyReporter] Discord summary sent');
   } catch (err) {
     console.error('[DailyReporter] Failed to send Discord summary:', err);
-  }
-  } finally {
-    release();
-  }
-} finally {
-  release();
-}
-} finally {
-  release();
-}
-}
-mary sent');
-  } catch (err) {
-    console.error('[DailyReporter] Failed to send Discord summary:', err);
-  }
-}
-r);
-  }
-}
-porter] Failed to send Discord summary:', err);
-  }
-}
-r);
   }
 }

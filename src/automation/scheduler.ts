@@ -5,37 +5,6 @@
 
 import { Cron } from 'croner';
 import { spawn } from 'child_process';
-import { Writable } from 'stream';
-
-class BoundedStreamCollector extends Writable {
-  private chunks: Buffer[] = [];
-  private totalLength = 0;
-  private readonly maxLength: number;
-
-  constructor(maxLength: number = 1024 * 1024) { // 1MB default
-    super();
-    this.maxLength = maxLength;
-  }
-
-  _write(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
-    if (this.totalLength + chunk.length > this.maxLength) {
-      callback();
-      return;
-    }
-    this.chunks.push(chunk);
-    this.totalLength += chunk.length;
-    callback();
-  }
-
-  getBuffer(): Buffer {
-    return Buffer.concat(this.chunks, this.totalLength);
-  }
-
-  getLength(): number {
-    return this.totalLength;
-  }
-}
-import { streamToBoundedString } from '../support/streamUtils';
 import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
@@ -250,14 +219,8 @@ async function runClaudeCli(
         '--max-turns',
         '15',
       ],
-      { 
+      {
         cwd: expandedPath,
-        maxBuffer: 10 * 1024 * 1024 // 10MB buffer limit
-      }
-    );
-=======
-```
-
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       },
