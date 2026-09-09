@@ -22,6 +22,7 @@ import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
 import { getInstanceId } from '../support/healthEndpoint.js';
+import { acquireServiceInstanceLock } from '../support/serviceInstanceLock.js';
 
 const TASK_STATE_MARKER = '<!-- openswarm:task-state:v1 -->';
 
