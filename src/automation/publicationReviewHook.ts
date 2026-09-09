@@ -11,6 +11,7 @@
 import { broadcastEvent } from '../core/eventHub.js';
 import { commentOnPR } from '../github/github.js';
 import { parsePublishedPullRequest } from './publishedPullRequest.js';
+import { collectTestCaseDeltas, deletedTestNotice } from './deletedTestGuard.js';
 import { rollBackReviewedPublication } from './prReviewRollback.js';
 import type { DefaultRolesConfig, SecurityAuditConfig } from '../core/types.js';
 import type { PublishableResult, PublishableTask } from './publishOnPark.js';
@@ -57,6 +58,23 @@ function couldNotRunNotice(error: string | undefined): string {
     + 'note exists so it does not._';
 }
 
+/** Say on the PR when a change removes test cases. Best-effort, never fatal. */
+async function noteDeletedTests(prUrl: string, worktreePath: string | undefined): Promise<void> {
+  if (!worktreePath) return;
+  const pr = parsePublishedPullRequest(prUrl);
+  if (!pr) return;
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const run = async (args: string[]) => (await exec('git', ['-C', worktreePath, ...args])).stdout;
+    const finding = await collectTestCaseDeltas('origin/HEAD', run);
+    if (finding.removed > 0) await commentOnPR(pr.repo, pr.number, deletedTestNotice(finding));
+  } catch (err) {
+    console.warn('[Runner] Could not check the change for deleted tests:', err);
+  }
+}
+
 /**
  * Build the hook that reviews a freshly published pull request.
  *
@@ -68,7 +86,11 @@ function couldNotRunNotice(error: string | undefined): string {
  */
 export function buildPublicationReviewHook(
   input: PublicationReviewHookInput,
-): (ctx: { prUrl: string; headSha: string; worktreeInfo: { originalPath: string } }) => Promise<void> {
+): (ctx: {
+  prUrl: string;
+  headSha: string;
+  worktreeInfo: { originalPath: string; worktreePath?: string };
+}) => Promise<void> {
   const { task, result, roles, securityAudit, rollbackOnRejection } = input;
   return async ({ prUrl, headSha, worktreeInfo }) => {
     const alreadyReviewed = `${prUrl}@${headSha}`;
@@ -79,6 +101,11 @@ export function buildPublicationReviewHook(
     const review = await reviewPublishedPullRequest({
       prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit,
     });
+    // Before the verdict, because it does not depend on one and must survive a
+    // reviewer that times out — which is exactly the state PR #580 shipped in.
+    // Deterministic: "the diff removes test cases" is a property of the text.
+    await noteDeletedTests(prUrl, worktreeInfo.worktreePath);
+
     const status = review.success ? 'approved' : review.gateRan ? 'changes requested' : 'did not run';
     broadcastEvent({
       type: 'log',
