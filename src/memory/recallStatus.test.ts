@@ -106,6 +106,32 @@ describe('memory recall status (AGT-4267)', () => {
     expect(core.memoryRecallStatus().suppressedCount).toBe(0);
   });
 
+  it('reports the whole outage on recovery, not just the last window', async () => {
+    // The suppressed count resets on every re-report the window forces, so an
+    // outage spanning three windows would have announced its last ten minutes
+    // as its size. vela's store was broken for nine days — the headline case
+    // for this ticket is exactly the one where that number is wrong by orders
+    // of magnitude.
+    vi.useFakeTimers();
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    connect.mockRejectedValue(corrupt());
+
+    for (let i = 0; i < 5; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+    vi.advanceTimersByTime(11 * 60_000);
+    for (let i = 0; i < 5; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+    vi.advanceTimersByTime(11 * 60_000);
+    for (let i = 0; i < 3; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+    // Three reports, and the last one has only 2 failures behind it.
+    expect(reportsIn(errors)).toHaveLength(3);
+    expect(core.memoryRecallStatus().suppressedCount).toBe(2);
+
+    connect.mockResolvedValue(openable());
+    await core.initDatabase();
+
+    expect(errors.some(e => /long-term recall restored after 13 failure\(s\)/.test(e))).toBe(true);
+  });
+
   it('bounds reports even when the store alternates between two errors', async () => {
     // Suppressing only *identical* messages matches neither of an alternating
     // pair, so every recall reports — the original unbounded logging wearing a
@@ -216,8 +242,14 @@ describe('memory recall status (AGT-4267)', () => {
       if (embedderBroken) throw new Error('failed to allocate tensor');
       return { data: Float32Array.from([1, 0, 0, 0]) };
     });
-    for (let i = 0; i < 40; i += 1) await core.searchMemorySafe('anything');
-    expect(core.memoryRecallStatus().suppressedCount).toBe(39);
+    // Spans two windows on purpose: the suppressed count resets on the
+    // re-report, so it and the outage total diverge (19 vs 40) and the report
+    // has to name the second.
+    vi.useFakeTimers();
+    for (let i = 0; i < 20; i += 1) await core.searchMemorySafe('anything');
+    vi.advanceTimersByTime(11 * 60_000);
+    for (let i = 0; i < 20; i += 1) await core.searchMemorySafe('anything');
+    expect(core.memoryRecallStatus().suppressedCount).toBe(19);
 
     embedderBroken = true;
     expect((await core.searchMemorySafe('anything')).errorCode).toBe('EMBEDDING_FAILED');

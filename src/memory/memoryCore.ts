@@ -262,7 +262,15 @@ type RecallFailure = {
   phase: RecallPhase;
   message: string;
   reportedAt: number;
+  /** Failures since the last report — reset every time one is emitted. */
   suppressedCount: number;
+  /**
+   * Failures in this outage, across every report the window forced. The two
+   * differ the moment an outage outlives one window, and vela's store was
+   * broken for nine days: `restored after N failure(s)` built on the
+   * window-scoped count would have answered with the last ten minutes.
+   */
+  totalCount: number;
   alsoSeen: Set<string>;
   /** Occurrences of a differing message the cap kept out of `alsoSeen`. */
   alsoSeenUnlisted: number;
@@ -296,6 +304,7 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   const previous = recallFailure;
   if (previous && previous.phase === phase && now - previous.reportedAt < RECALL_REPORT_WINDOW_MS) {
     previous.suppressedCount += 1;
+    previous.totalCount += 1;
     if (message !== previous.message && !previous.alsoSeen.has(message)) {
       if (previous.alsoSeen.size < RECALL_ALSO_SEEN_CAP) previous.alsoSeen.add(message);
       else previous.alsoSeenUnlisted += 1;
@@ -320,8 +329,8 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   const others = sameAsBefore ? [sameAsBefore.message, ...sameAsBefore.alsoSeen].filter(m => m !== message) : [];
   const unlisted = sameAsBefore?.alsoSeenUnlisted ?? 0;
   const parts = [
-    retired && retired.suppressedCount > 0
-      ? `ends a ${retired.phase}-phase outage of ${retired.suppressedCount + 1} failure(s)` : '',
+    retired && retired.totalCount > 1
+      ? `ends a ${retired.phase}-phase outage of ${retired.totalCount} failure(s)` : '',
     suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
     others.length > 0
       // "N more" would read as N further *messages*; this counts occurrences of
@@ -337,7 +346,8 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   console.error(`[Memory] Long-term recall is UNAVAILABLE — ${what}${tail}: ${message}`);
   recallFailure = {
     phase, message, reportedAt: now,
-    suppressedCount: 0, alsoSeen: new Set(), alsoSeenUnlisted: 0,
+    suppressedCount: 0, totalCount: (sameAsBefore?.totalCount ?? 0) + 1,
+    alsoSeen: new Set(), alsoSeenUnlisted: 0,
   };
 }
 
@@ -351,8 +361,8 @@ function clearRecallFailure(phase: RecallPhase): void {
   // Carry the blast radius. An outage that self-heals otherwise leaves no
   // record of its size anywhere — and "was memory dead during that run, and
   // how badly" is the question an operator actually asks afterwards.
-  const after = recallFailure.suppressedCount > 0
-    ? ` after ${recallFailure.suppressedCount + 1} failure(s)` : '';
+  const after = recallFailure.totalCount > 1
+    ? ` after ${recallFailure.totalCount} failure(s)` : '';
   // Deliberately stderr, matching the outage report. A daemon that captures the
   // two streams separately would otherwise show an outage in its error log that
   // never ends, which is the same unreadability this whole block exists to fix.
