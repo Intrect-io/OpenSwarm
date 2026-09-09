@@ -36,13 +36,26 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     expect(result.conflictGroups).toHaveLength(0);
   });
 
-  it('defers the lower-priority task when scopes overlap', async () => {
+  it('admits overlapping known scopes under the default admit policy (AGT-4257)', async () => {
+    const result = await detectFileConflicts(
+      [
+        task('A', 3, ['src/shared.ts', 'src/a.ts']),
+        task('B', 1, ['src/shared.ts', 'src/b.ts']),
+      ],
+      PROJECT,
+    );
+    expect(new Set(result.safe.map((t) => t.id))).toEqual(new Set(['A', 'B']));
+    expect(result.conflictGroups).toHaveLength(0);
+  });
+
+  it('defers the lower-priority task when scopes overlap under serialize', async () => {
     const result = await detectFileConflicts(
       [
         task('A', 3, ['src/shared.ts', 'src/a.ts']),
         task('B', 1, ['src/shared.ts', 'src/b.ts']), // higher priority (1 < 3)
       ],
       PROJECT,
+      { unknownScopeAdmission: 'serialize' },
     );
 
     // Only the higher-priority task is safe to run now.
@@ -56,6 +69,7 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
     const result = await detectFileConflicts(
       [task('A', 2, ['./src/Shared.ts']), task('B', 2, ['src/shared.ts'])],
       PROJECT,
+      { unknownScopeAdmission: 'serialize' },
     );
     expect(result.conflictGroups).toHaveLength(1);
     expect(result.safe).toHaveLength(1);
@@ -69,6 +83,7 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
         task('C', 2, ['src/independent.ts']),
       ],
       PROJECT,
+      { unknownScopeAdmission: 'serialize' },
     );
 
     const safeIds = new Set(result.safe.map((t) => t.id));
@@ -87,6 +102,7 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
         task('C', 1, ['src/b-c.ts']),
       ],
       PROJECT,
+      { unknownScopeAdmission: 'serialize' },
     );
 
     expect(result.conflictGroups).toHaveLength(1);
@@ -102,6 +118,7 @@ describe('detectFileConflicts (planner-declared file scope)', () => {
         task('third', 2, ['src/shared.ts']),
       ],
       PROJECT,
+      { unknownScopeAdmission: 'serialize' },
     );
 
     expect(result.conflictGroups[0].tasks.map((t) => t.id)).toEqual(['first', 'second', 'third']);
@@ -198,7 +215,7 @@ describe('describeScopeConflict', () => {
     expect(describeScopeConflict(undefined, undefined, 'admit')).toBeNull();
   });
 
-  it('still refuses two known scopes that overlap, even under admit', () => {
+  it('still names a known overlap under admit; heartbeat skips this gate (AGT-4257)', () => {
     expect(describeScopeConflict(['src/a.ts'], ['src/a.ts'], 'admit'))
       .toEqual({ kind: 'overlap', shared: ['src/a.ts'] });
   });

@@ -283,14 +283,15 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       });
     });
 
-    it('defers overlapping scopes even when each issue runs in its own worktree', async () => {
+    it('admits overlapping scopes against a live worktree under admit (AGT-4257)', async () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+        unknownScopeAdmission: 'admit',
       }));
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
       const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
-      describeScopeConflictMock.mockReturnValueOnce({ kind: 'overlap', shared: ['src/shared.ts'] });
+      detectFileConflictsMock.mockResolvedValue({ safe: [candidate], conflictGroups: [] });
       internal.scheduler.getRunningTasks = () => [{
         runId: 'active-run',
         task: activeTask,
@@ -303,12 +304,11 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
-      expect(safe).toEqual(new Set());
-      // Third argument is the admission policy the durable gate also reads;
-      // passing it is the fix for AGT-4233.
-      expect(describeScopeConflictMock)
-        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'admit');
-      expect(detectFileConflictsMock).not.toHaveBeenCalled();
+      expect(safe).toEqual(new Set(['candidate']));
+      expect(describeScopeConflictMock).not.toHaveBeenCalled();
+      expect(detectFileConflictsMock).toHaveBeenCalledWith([candidate], '/repo', {
+        unknownScopeAdmission: 'admit',
+      });
     });
 
     it('still fans out disjoint scopes across isolated worktrees', async () => {
@@ -388,9 +388,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(refetched.preAdmissionDraft?.relevantFiles).toEqual(['src/drafted.ts']);
     });
 
-    it('still defers overlapping scopes when worktree fan-out is disabled', async () => {
+    it('still defers overlapping scopes when the operator asks for serialize', async () => {
       const r = new AutonomousRunner(cfg({
-        allowSameProjectConcurrent: false, worktreeMode: true, maxConcurrentTasks: 3,
+        allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+        unknownScopeAdmission: 'serialize',
       }));
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
@@ -409,10 +410,8 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
       expect(safe).toEqual(new Set());
-      // Third argument is the admission policy the durable gate also reads;
-      // passing it is the fix for AGT-4233.
       expect(describeScopeConflictMock)
-        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'admit');
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'serialize');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 

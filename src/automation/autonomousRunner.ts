@@ -2705,7 +2705,11 @@ export class AutonomousRunner {
         // still deferred every other candidate — 11 of 12 slots idle with 126
         // executable tasks waiting (AGT-4233).
         const admission = this.config.unknownScopeAdmission ?? 'admit';
-        const runnable = group.filter(candidate => {
+        // AGT-4257: `admit` never defers on predicted writes. A drafted
+        // `docs/integrations.md` shared by 29 CGF cards emptied the pool.
+        const runnable = admission === 'admit'
+          ? group
+          : group.filter(candidate => {
           let blockedBy: { label: string; reason: ScopeConflictReason } | undefined;
           for (const running of active) {
             const reason = describeScopeConflict(

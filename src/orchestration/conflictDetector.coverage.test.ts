@@ -57,6 +57,7 @@ describe('detectFileConflicts UnionFind rank tie-break branches', () => {
         task('D', 3, ['shared-03.ts', 'shared-13.ts']),
       ],
       PROJECT,
+      { unknownScopeAdmission: 'serialize' },
     );
 
     expect(result.conflictGroups).toHaveLength(1);
@@ -113,6 +114,7 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
     const result = await detectFileConflicts(
       [task('A', 3), task('B', 1)], // no fileScope declared -> falls back to analyzeIssue
       project,
+      { unknownScopeAdmission: 'serialize' },
     );
 
     expect(result.conflictGroups).toHaveLength(1);

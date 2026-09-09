@@ -199,10 +199,9 @@ function sharedScopeEntries(candidate: Set<string>, active: Set<string>): string
  * Compare one candidate's write scope against one active worker's.
  *
  * `serialize` is the historical fail-closed rule: an unknown scope on either
- * side blocks. `admit` is the same rule the durable admission gate already
- * applies (`admitsConflictScope`, src/automation/runLedgerScope.ts) — an
- * unknown scope is not evidence of a conflict, while two KNOWN scopes that
- * overlap are still refused.
+ * side blocks. `admit` treats unknown as not-evidence. Heartbeat admission
+ * under `admit` skips this gate entirely (AGT-4257) so a drafted overlap
+ * cannot empty free slots.
  *
  * Both gates must read one policy. vela ran with `unknownScopeAdmission: admit`
  * while this gate still serialized every repository, so one running task
@@ -253,6 +252,12 @@ export async function detectFileConflicts(
       else unknownScopeIndices.add(idx);
     })
   );
+
+  // AGT-4257: `admit` is advisory scope only. Predicted overlap must not
+  // empty free slots — worktrees isolate, merge later.
+  if ((options.unknownScopeAdmission ?? 'admit') === 'admit') {
+    return { safe: [...tasks], conflictGroups: [] };
+  }
 
   // Step 2: 태스크 쌍 비교로 교집합 계산 → Union-Find로 충돌 그룹 병합
   const uf = new UnionFind(tasks.length);

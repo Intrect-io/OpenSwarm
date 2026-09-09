@@ -30,9 +30,10 @@ describe('canonical conflict scope policy', () => {
     { name: 'disjoint files', left: ['src/a.ts'], right: ['src/b.ts'], conflict: false },
   ];
 
-  it.each(cases)('$name is identical in scheduler and durable admission', ({ left, right, conflict }) => {
+  it.each(cases)('$name is identical in scheduler and durable admission under serialize', ({ left, right, conflict }) => {
     expect(fileScopesConflict(left, right)).toBe(conflict);
-    expect(admitsConflictScope(left, [{ fileScope: right }])).toBe(!conflict);
+    expect(admitsConflictScope(left, [{ fileScope: right }], 'serialize')).toBe(!conflict);
+    expect(admitsConflictScope(left, [{ fileScope: right }])).toBe(true);
   });
 
   it.each([

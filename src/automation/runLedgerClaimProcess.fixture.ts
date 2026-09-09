@@ -20,6 +20,7 @@ try {
     leaseMs: 60_000,
     maxActiveForProject: maxActiveText ? Number(maxActiveText) : 1,
     conflictScope: scopeText ? [scopeText] : undefined,
+    unknownScopeAdmission: 'serialize',
     now: Number(nowText),
   });
   process.stdout.write(claimed ? 'claimed\n' : 'blocked\n');

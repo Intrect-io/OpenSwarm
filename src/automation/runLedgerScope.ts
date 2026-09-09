@@ -32,9 +32,9 @@ export function scopesOverlap(left: Set<string>, right: Set<string>): boolean {
  * Decide whether a claim may join the runs already live in one repository.
  *
  * The cap controls capacity; this controls safety inside that capacity.
- * Unknown scope on either side is not a conflict under the default `admit`
- * policy — worktrees isolate live edits. Known overlapping write sets still
- * refuse. Pass `serialize` to restore the Codex-era fail-closed hold.
+ * Under the default `admit` policy worktrees isolate live edits, so neither
+ * an unknown scope nor a known overlap refuses the claim (AGT-4257). Pass
+ * `serialize` to restore the Codex-era fail-closed hold.
  */
 export type UnknownScopeAdmission = 'serialize' | 'admit';
 
@@ -44,13 +44,12 @@ export function admitsConflictScope(
   unknownScope: UnknownScopeAdmission = 'admit',
 ): boolean {
   if (activeScopes.length === 0) return true;
+  // AGT-4257: worktrees isolate. `admit` never refuses on predicted writes —
+  // a drafted `docs/integrations.md` shared by 29 CGF cards deferred the
+  // pool while 49 slots sat empty. `serialize` is the Codex-era hold.
+  if (unknownScope === 'admit') return true;
   const requestedScope = normalizeConflictScope(requested);
-  // 'admit': an unknown scope on either side is not evidence of a conflict.
-  // Two known scopes that overlap are still refused. Measured on vela,
-  // 2026-09-02: runs with no resolvable scope were the most successful
-  // class (20 of 117 finished with a PR) yet serialized every repository
-  // to one of them at a time, leaving 9 of 12 slots idle all morning.
-  const admitUnknown = unknownScope === 'admit';
+  const admitUnknown = false;
   if (requestedScope.size === 0) return admitUnknown;
   for (const active of activeScopes) {
     const activeScope = metadataConflictScope(active);

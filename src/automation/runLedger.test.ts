@@ -449,6 +449,7 @@ describe('RunLedger claim and fencing races', () => {
     expect(ledger.claimRun('SCOPE-OVERLAP', {
       ownerInstanceId: 'c', leaseMs: 1_000, now: 2_002,
       maxActiveForProject: 3, conflictScope: ['./SRC/A.ts'],
+      unknownScopeAdmission: 'serialize',
     })).toBeNull();
     expect(ledger.listRuns(['CLAIMED'])).toHaveLength(2);
     ledger.close();
@@ -488,7 +489,7 @@ describe('RunLedger claim and fencing races', () => {
   // vela 2026-09-02: 9 of 12 slots idle because every repository serialized
   // to one unscoped run. The operator can now choose to rely on isolated
   // worktrees and post-merge integration requeue instead.
-  it('admits unknown scopes on either side under unknownScopeAdmission=admit, still refusing a known overlap', () => {
+  it('admits unknown and known-overlapping scopes under unknownScopeAdmission=admit (AGT-4257)', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'UNKNOWN-1', '/same-repo');
     register(ledger, 'UNKNOWN-2', '/same-repo');
@@ -497,13 +498,10 @@ describe('RunLedger claim and fencing races', () => {
     const admit = { leaseMs: 1_000, maxActiveForProject: 4, unknownScopeAdmission: 'admit' as const };
 
     expect(ledger.claimRun('UNKNOWN-1', { ...admit, ownerInstanceId: 'u1', now: 2_000, conflictScope: [] })).not.toBeNull();
-    // Unknown next to unknown.
     expect(ledger.claimRun('UNKNOWN-2', { ...admit, ownerInstanceId: 'u2', now: 2_001, conflictScope: [] })).not.toBeNull();
-    // Known next to unknown actives.
     expect(ledger.claimRun('KNOWN-A', { ...admit, ownerInstanceId: 'a', now: 2_002, conflictScope: ['src/a.ts'] })).not.toBeNull();
-    // Known overlap is still a conflict.
-    expect(ledger.claimRun('KNOWN-A2', { ...admit, ownerInstanceId: 'a2', now: 2_003, conflictScope: ['src/a.ts'] })).toBeNull();
-    expect(ledger.listRuns(['CLAIMED'])).toHaveLength(3);
+    expect(ledger.claimRun('KNOWN-A2', { ...admit, ownerInstanceId: 'a2', now: 2_003, conflictScope: ['src/a.ts'] })).not.toBeNull();
+    expect(ledger.listRuns(['CLAIMED'])).toHaveLength(4);
     ledger.close();
   });
 
