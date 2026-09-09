@@ -1,6 +1,6 @@
 {
   "name": "@intrect/openswarm",
-  "version": "0.22.1",
+  "version": "0.23.0",
   "description": "Autonomous AI agent orchestrator — Claude, GPT, Codex, and local models (Ollama/LMStudio/llama.cpp)",
   "license": "MIT",
   "type": "module",
@@ -87,7 +87,7 @@
     "playwright": "^1.47.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.0.18"
   },
   "engines": {
     "node": ">=22"
