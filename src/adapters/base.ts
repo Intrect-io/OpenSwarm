@@ -41,7 +41,6 @@ export async function spawnCli(
     ? { ...requestedOptions, diagnosticsTool: false }
     : requestedOptions;
   const maxBuffer = options.maxBuffer ?? 32 * 1024 * 1024;
-  const timeout = options.timeoutMs ?? 30000; // 30 seconds default
   // Fail closed before anything runs. `readOnly` is asked for when the input is
   // untrusted, so an adapter that ignores it would hand a full toolset to an
   // agent reading attacker-authored files. Refusing is loud; ignoring is not.
@@ -94,16 +93,15 @@ export async function spawnCli(
     }
   }
 
-  // Build the command spec (temp file, args, etc.)
-  // The temp directory is created inside the try so that a failure partway
-  // through — a full filesystem, say — still gets cleaned up. One directory
-  // at once: a unique 0700 directory, created atomically by the OS.
+  // ---- Temp prompt file ----
+  // Write the prompt to a temp file so the CLI can read it from disk.
+  // This avoids shell escaping issues with large prompts.
   let promptDir: string | undefined;
-  let cleanupPaths: string[] = [];
-
+  let promptFile: string | undefined;
+  const cleanupPaths: string[] = [];
   try {
-    promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-prompt-'));
-    const promptFile = join(promptDir, 'prompt.txt');
+    promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-'));
+    promptFile = join(promptDir, 'prompt.txt');
     if (lifecycleController.signal.aborted) {
       const reason = lifecycleController.signal.reason;
       throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
@@ -214,24 +212,35 @@ export async function spawnCli(
       let settled = false;
       const cleanupLifecycle = (): void => {
         if (exitDrainTimer) clearTimeout(exitDrainTimer);
-        lifecycleController.signal.removeEventListener('abort', onAbort);
+        cleanupDeadline();
         untrackCliProcessTree(proc);
       };
-
       const settle = (result: CliRunResult): void => {
-        if (settled) return;
-        settled = true;
         cleanupLifecycle();
         resolve(result);
       };
 
+      // ---- Process tracking ----
+      registerProcess(
+        {
+          pid: proc.pid ?? 0,
+          taskId: runOptions.taskId ?? 'unknown',
+          stage: runOptions.stage ?? 'cli',
+          model: adapter.name,
+          projectPath: runOptions.cwd ?? process.cwd(),
+          spawnedAt: startTime,
+          lastActivityAt: Date.now(),
+        },
+        proc,
+      );
+
+      // ---- Timeout / cancellation ----
       const onAbort = (): void => {
         if (settled) return;
-        // lifecycleController was aborted — terminate the process tree
-        terminateCliProcessTree(proc);
-        // Drain remaining output for up to 2s so stream parsing can capture
-        // any final structured result before settling.
+        settled = true;
+        // Drain remaining output for 2s before force-killing
         exitDrainTimer = setTimeout(() => {
+          terminateCliProcessTree(proc);
           const durationMs = Date.now() - startTime;
           settle({
             stdout,
@@ -292,9 +301,10 @@ export async function spawnCli(
  * Extract the first stream-json error result from retained stdout.
  * Stream-json events are newline-delimited. This scans the retained (possibly
  * truncated) stdout for a result event that signals failure. Truncation may
- * lose the tail, but the result event is typically near the end — if it was
- * cut off, the caller falls back to the generic error message. Exported for
- * tests. (INT-2509)
+ * cut mid-event, but the retained prefix is still valid JSON-per-line, so
+ * scanning line-by-line is safe. If the error event was in the truncated tail,
+ * this returns empty string and the caller falls back to the generic error
+ * message. Exported for tests. (INT-2509)
  */
 export function extractStreamJsonError(stdout: string): string {
   for (const line of stdout.split('\n')) {
