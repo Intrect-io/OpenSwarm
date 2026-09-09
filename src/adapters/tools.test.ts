@@ -418,6 +418,35 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     expect(result.content).toContain('BLOCKED');
   });
 
+  // Audit 2026-08-09 (src/adapters 3/3): printf-style octal/hex escapes and
+  // process substitution also reconstruct a blocked verb at shell-eval time
+  // while the raw text contains neither a blocked token nor a mid-word splice.
+  const obfuscationBypassCommands = [
+    "printf '\\162\\155 -rf /foo' | bash",   // octal escapes decode to rm
+    "printf '\\x72\\x6d -rf /foo' | bash",   // hex escapes decode to rm
+    'echo <(rm -rf /foo)',                       // process substitution
+    'echo >(rm -rf /foo)',                       // output process substitution
+    'cat <(chmod 777 somefile)',                 // process substitution, other blocked verb
+  ];
+
+  it.each(obfuscationBypassCommands)('blocks obfuscation-based bypass: %s', async (cmd) => {
+    const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('BLOCKED');
+  });
+
+  // Legitimate uses of the same syntax must keep working.
+  const legitimateObfuscationCommands = [
+    "printf '%s\\n' hello",
+    'diff <(ls a) <(ls b)',
+    'grep -r "\\d{3}" src/',
+  ];
+
+  it.each(legitimateObfuscationCommands)('allows legitimate escape/substitution use: %s', async (cmd) => {
+    const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
+    expect(result.content).not.toContain('BLOCKED');
+  });
+
   // Whitespace-delimited substitution (the overwhelmingly common real-world
   // shape) must keep working — only mid-word gluing is rejected.
   const legitimateExpansionCommands = [

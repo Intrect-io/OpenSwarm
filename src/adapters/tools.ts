@@ -296,13 +296,17 @@ async function searchWithGitGrep(
  */
 function normalizeForGuard(command: string): string {
   return command
+    // Decode printf/ANSI-C-style escapes FIRST: `printf '\162\155 -rf x' | bash`
+    // and `$'\162\155 ...'` execute `rm -rf x` while the raw text holds no
+    // blocked token. Decoding before the generic backslash strip matters —
+    // `\\(.)` would consume the escape's backslash and leave bare digits.
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_m, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\\(\d{3})/g, (_m, octal) => String.fromCharCode(parseInt(octal, 8)))
     .replace(/\\(.)/g, '$1')
-    .replace(/['"]/g, '')
-    // Decode octal escape sequences like \\162\\155 → rm
-    .replace(/\\(\\d{3})/g, (_m, octal) => String.fromCharCode(parseInt(octal, 8)))
-    // Decode hex escape sequences like \\x72\\x6d → rm
-    .replace(/\\x([0-9a-fA-F]{2})/g, (_m, hex) => String.fromCharCode(parseInt(hex, 16)));
-}/** Command/parameter-substitution spans; open and close pair unambiguously (unlike bare backticks alone). */
+    .replace(/['"]/g, '');
+}
+
+/** Command/parameter-substitution spans; open and close pair unambiguously (unlike bare backticks alone). */
 const SUBSTITUTION_SPAN_PATTERNS = [/\$\([^()]*\)/g, /\$\{[^{}]*\}/g, /`[^`]*`/g, /<\([^()]*\)/g, />\([^()]*\)/g];
 
 /**
