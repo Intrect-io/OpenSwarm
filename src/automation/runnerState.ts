@@ -137,24 +137,26 @@ export function getDailyCompletedCount(): number {
  */
 export function incrementDailyCompleted(): void {
   ensurePaceDir();
-  let state: DailyPaceState;
-  try {
-    if (existsSync(DAILY_PACE_FILE)) {
-      const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
-      state = JSON.parse(raw) as DailyPaceState;
-    } else {
+  void withFileLock(DAILY_PACE_FILE + '.lock', async () => {
+    let state: DailyPaceState;
+    try {
+      if (existsSync(DAILY_PACE_FILE)) {
+        const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
+        state = JSON.parse(raw) as DailyPaceState;
+      } else {
+        state = { date: '', completedCount: 0 };
+      }
+    } catch {
       state = { date: '', completedCount: 0 };
     }
-  } catch {
-    state = { date: '', completedCount: 0 };
-  }
-  const today = new Date().toLocaleDateString('en-CA');
-  if (state.date !== today) {
-    state.date = today;
-    state.completedCount = 0;
-  }
-  state.completedCount++;
-  atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(state));
+    const today = new Date().toLocaleDateString('en-CA');
+    if (state.date !== today) {
+      state.date = today;
+      state.completedCount = 0;
+    }
+    state.completedCount++;
+    atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(state));
+  });
 }
 
 /**
@@ -388,19 +390,21 @@ function ensureDecompositionStateLoaded(): DecompositionState {
 }
 
 export function recordDecomposition(issueId: string, subtaskCount: number): void {
-  const state = ensureDecompositionStateLoaded();
-  state.decompositions[issueId] = {
-    issueId,
-    decomposedAt: new Date().toISOString(),
-    subtaskCount,
-  };
-  state.dailyCreationCount++;
-  try {
-    ensureParentDir(DECOMPOSITION_STATE_FILE);
-    atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[DecompositionState] Failed to save:', err);
-  }
+  void withFileLock(DECOMPOSITION_STATE_FILE + '.lock', async () => {
+    const state = ensureDecompositionStateLoaded();
+    state.decompositions[issueId] = {
+      issueId,
+      decomposedAt: new Date().toISOString(),
+      subtaskCount,
+    };
+    state.dailyCreationCount++;
+    try {
+      ensureParentDir(DECOMPOSITION_STATE_FILE);
+      atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[DecompositionState] Failed to save:', err);
+    }
+  });
 }
 
 export function getDecompositionCount(): number {
@@ -441,21 +445,23 @@ function ensureProjectSelectionLoaded(): ProjectSelectionState {
 }
 
 export function recordProjectSelection(projectName: string): void {
-  const state = ensureProjectSelectionLoaded();
-  const entry = state.projects[projectName] || {
-    projectName,
-    lastSelected: new Date().toISOString(),
-    selectionCount: 0,
-  };
-  entry.lastSelected = new Date().toISOString();
-  entry.selectionCount++;
-  state.projects[projectName] = entry;
-  try {
-    ensureParentDir(PROJECT_SELECTION_FILE);
-    atomicWriteFileSync(PROJECT_SELECTION_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[ProjectSelection] Failed to save:', err);
-  }
+  void withFileLock(PROJECT_SELECTION_FILE + '.lock', async () => {
+    const state = ensureProjectSelectionLoaded();
+    const entry = state.projects[projectName] || {
+      projectName,
+      lastSelected: new Date().toISOString(),
+      selectionCount: 0,
+    };
+    entry.lastSelected = new Date().toISOString();
+    entry.selectionCount++;
+    state.projects[projectName] = entry;
+    try {
+      ensureParentDir(PROJECT_SELECTION_FILE);
+      atomicWriteFileSync(PROJECT_SELECTION_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[ProjectSelection] Failed to save:', err);
+    }
+  });
 }
 
 export function loadProjectSelection(): ProjectSelectionState {
@@ -508,14 +514,16 @@ export function getTaskState(issueId: string): TaskStateEntry | undefined {
 }
 
 export function setTaskState(issueId: string, entry: TaskStateEntry): void {
-  const state = ensureTaskStateLoaded();
-  state.tasks[issueId] = entry;
-  try {
-    ensureParentDir(TASK_STATE_FILE);
-    atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[TaskState] Failed to save:', err);
-  }
+  void withFileLock(TASK_STATE_FILE + '.lock', async () => {
+    const state = ensureTaskStateLoaded();
+    state.tasks[issueId] = entry;
+    try {
+      ensureParentDir(TASK_STATE_FILE);
+      atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[TaskState] Failed to save:', err);
+    }
+  });
 }
 
 export function getAllTaskStates(): TaskStateEntry[] {
