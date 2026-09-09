@@ -93,14 +93,33 @@ export function buildPublicationReviewHook(
 }) => Promise<void> {
   const { task, result, roles, securityAudit, rollbackOnRejection } = input;
   return async ({ prUrl, headSha, worktreeInfo }) => {
-    const alreadyReviewed = `${prUrl}@${headSha}`;
-    if (reviewedPublications.has(alreadyReviewed)) return;
-    reviewedPublications.add(alreadyReviewed);
+    // Only the park path may skip. The approved path's whole job is to ACT on
+    // the verdict, and this cache remembers "seen", not what was decided — so
+    // skipping there disarms the rollback exactly where a reviewer already
+    // objected. A rolled-back run resumes the preserved worktree, commits
+    // nothing new (the implementation is already there and looks finished),
+    // and republishes the same PR at the same sha; a cache hit would then
+    // finish it `approved` with the objection unaddressed. That is AGT-4270's
+    // failure — a verdict nobody acts on — reintroduced.
+    const dedupKey = rollbackOnRejection ? null : `${prUrl}@${headSha}`;
+    if (dedupKey) {
+      if (reviewedPublications.has(dedupKey)) return;
+      reviewedPublications.add(dedupKey);
+    }
     // Loaded on demand: the review pulls in the whole PR processor.
-    const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
-    const review = await reviewPublishedPullRequest({
-      prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit,
-    });
+    let review: Awaited<ReturnType<typeof import('./prPublicationReview.js')['reviewPublishedPullRequest']>>;
+    try {
+      const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
+      review = await reviewPublishedPullRequest({
+        prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit,
+      });
+    } catch (err) {
+      // The key goes in before the review so concurrent callers collapse; a
+      // review that never produced a verdict must not leave the sha marked
+      // done, or the draft is never reviewed and nothing says why.
+      if (dedupKey) reviewedPublications.delete(dedupKey);
+      throw err;
+    }
     // Before the verdict, because it does not depend on one and must survive a
     // reviewer that times out — which is exactly the state PR #580 shipped in.
     // Deterministic: "the diff removes test cases" is a property of the text.

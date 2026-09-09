@@ -122,6 +122,46 @@ describe('publication review hook (AGT-4278)', () => {
     expect(commentOnPR).toHaveBeenCalledTimes(1);
   });
 
+  it('re-reviews an approved republication at the same sha, so the rollback still fires', async () => {
+    // A rolled-back run resumes the preserved worktree, commits nothing new —
+    // the implementation is already there and looks finished — and
+    // republishes the SAME PR at the SAME sha. Skipping the review there
+    // finishes it `approved` with the reviewer's objection unaddressed, which
+    // is AGT-4270's failure arriving through a cache.
+    reviewPublishedPullRequest.mockResolvedValue({
+      success: false, gateRan: true, changesRequested: true, error: 'still wrong',
+    });
+
+    await hook(true)(ctx);
+    await hook(true)(ctx);
+
+    expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(2);
+    expect(rollBackReviewedPublication).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a draft review suppress the approved review of the same sha', async () => {
+    // Same key, two different contracts: one may roll back, the other may not.
+    reviewPublishedPullRequest.mockResolvedValue({
+      success: false, gateRan: true, changesRequested: true, error: 'still wrong',
+    });
+
+    await hook(false)(ctx);
+    await hook(true)(ctx);
+
+    expect(rollBackReviewedPublication).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mark a sha reviewed when the review never produced anything', async () => {
+    reviewPublishedPullRequest.mockRejectedValueOnce(new Error('import failed'));
+
+    await expect(hook(false)(ctx)).rejects.toThrow('import failed');
+
+    reviewPublishedPullRequest.mockResolvedValue({ success: true, gateRan: true, changesRequested: false });
+    await hook(false)(ctx);
+
+    expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(2);
+  });
+
   it('reviews again when the branch moved on', async () => {
     reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'timeout' });
 

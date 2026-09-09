@@ -161,6 +161,19 @@ describe('parked publication is reviewed too (AGT-4278)', () => {
     expect(hook).not.toHaveBeenCalled();
   });
 
+  it('does not review a publication that never happened', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from'));
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(hook).not.toHaveBeenCalled();
+  });
+
   it('reports a throwing reviewer as a review failure, not as a failed publication', async () => {
     commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/44', headSha: 'head-44' });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
