@@ -180,20 +180,13 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     });
 
     expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(false);
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({
-      state: 'NEEDS_HUMAN',
-      lastErrorCode: 'execution_outcome_unknown',
-      retryAt: undefined,
-    });
-
-    const explicit = { ...TASK, explicitDispatch: true };
-    expect(internal.filterAlreadyProcessed([explicit])).toEqual([explicit]);
+    // AGT-4257: idle_fill resumes even a sandbox-quarantine park so slots work.
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 
-  it('does not resume a parked, unanswered ask just because the Linear card never left Todo', async () => {
+  it('idle-fills a parked unanswered ask so the enabled pool does not sit empty (AGT-4257)', async () => {
     // The bug this pins closed: an ask_human park never touches the Linear
     // card, so the pre-existing Todo/In Progress/In Review resume condition
     // was almost always already true for an actively-worked task — reviving
@@ -213,8 +206,8 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
     const selected = internal.filterAlreadyProcessed([TASK]); // TASK.linearState === 'Todo'
 
-    expect(selected).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect(selected).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
 
@@ -291,21 +284,19 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
       expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
     });
 
-    // Answer A is durable but cannot satisfy the exact question-B park.
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    // AGT-4257: idle_fill resumes question-B without waiting for its answer.
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
 
     await store.publish({
       repository: REPO, taskId: 'AGT-1', actor: 'operator', recipient: 'worker-x',
       kind: 'human-answer', status: 'completed', correlationId: 'hq-b', summary: 'answered B',
       detail: 'Use monthly_cutoff; do not create due_date.', timestamp: resumedAt + 200,
     });
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 
-  it('does not resume a NEEDS_HUMAN park from an unrelated reason just because no question was ever asked', async () => {
+  it('idle-fills an unrelated NEEDS_HUMAN park so Backlog still occupies a slot (AGT-4257)', async () => {
     // A rejection-limit or PR-closed-without-merge park shares NEEDS_HUMAN but
     // has nothing to do with ask_human — openQuestionCount is legitimately 0
     // for it, and that must not read as "answered". Modeled with the ticket out
@@ -318,18 +309,21 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
     const selected = internal.filterAlreadyProcessed([parkedElsewhere]);
 
-    expect(selected).toEqual([]);
-    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect(selected).toEqual([parkedElsewhere]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
 
-  it('leaves an unrelated NEEDS_HUMAN park alone while its card sits In Progress (AGT-4155)', async () => {
+  it('idle-fills an In Progress NEEDS_HUMAN park together with its sibling (AGT-4257)', async () => {
     // 'In Progress' is where THIS run put the card when it claimed the task,
     // and parking does not move it back. Treating that level as "the operator
     // reopened it" re-admitted the park on the very next heartbeat: it
     // re-claimed, re-executed, re-published and re-parked, once per cycle,
     // holding a slot the whole time. Observed in production at attempt 20.
     const internal = await makeRunner();
+    // Through a real claim: a park is always reached by attempting the task, and
+    // the attempt counter is what marks the row as this daemon's own work.
+    await seedConsecutiveUnansweredAttempts(1);
     internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
     const stillParked: TaskItem = { ...TASK, linearState: 'In Progress' };
     // The slot the park was holding has to go somewhere: an unrelated task in
@@ -340,8 +334,130 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
     const selected = internal.filterAlreadyProcessed([stillParked, sibling]);
 
-    expect(selected).toEqual([sibling]);
+    expect(selected).toEqual([stillParked, sibling]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('keeps a NEEDS_HUMAN park parked while the pool is saturated (AGT-4257 idle gate)', async () => {
+    // idle_fill exists to stop free slots sitting empty. With no free slot the
+    // park has nothing to fill, and lifting it anyway is the AGT-4155 loop:
+    // re-claim, re-execute, re-park, once per heartbeat, at attempt 20.
+    const internal = await makeRunner();
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+
+    expect(internal.filterAlreadyProcessed([{ ...TASK, linearState: 'In Progress' }])).toEqual([]);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('un-parks at most one row per free slot per heartbeat (AGT-4257 idle budget)', async () => {
+    // One free slot must not turn every parked row READY at once — the rows
+    // beyond the slot count would only compete with fresh work on the next
+    // heartbeat, having lost their park for nothing.
+    const internal = await makeRunner();
+    const second: TaskItem = {
+      ...TASK, id: 'AGT-2', issueId: 'AGT-2', issueIdentifier: 'AGT-2', title: 'also parked',
+    };
+    internal.durableRuns.observeTask(second, REPO);
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(1);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+    internal.durableRuns.markNeedsHuman('AGT-2', 'Reviewer rejected 4 attempts: still failing lint');
+
+    const selected = internal.filterAlreadyProcessed([TASK, second]);
+
+    expect(selected).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    expect(internal.durableRuns.getRun('AGT-2')?.state).toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  it('charges a NEEDS_HUMAN row with the stuck label once and admits it (AGT-4257 idle budget)', async () => {
+    // The NEEDS_HUMAN lift and the stuck-label recovery are idle fill for the
+    // same row. Charged twice, one task eats two slots' budget; at budget 1 the
+    // second charge rejects a row whose park the first lift already erased.
+    const internal = await makeRunner();
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(1);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+    const stuck: TaskItem = { ...TASK, linearState: 'Backlog', labels: ['swarm:stuck'] };
+
+    expect(internal.filterAlreadyProcessed([stuck])).toEqual([stuck]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
+    internal.durableRuns.close();
+  });
+
+  it('skips an In Progress card this daemon never claimed (INT-1979 guard kept under AGT-4257)', async () => {
+    // A bare Linear 'In Progress' with only the row observeTask wrote is
+    // someone else's work — a human, or another daemon. Admitting it
+    // re-decomposes work already in progress (INT-1980: duplicate sub-issues
+    // and a redundant PR). observeTask registers every fetched card as READY,
+    // so the row existing proves nothing; the attempt counter does.
+    const internal = await makeRunner();
+    const external: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.durableRuns.getRun('AGT-1')?.attemptNo).toBe(0);
+
+    expect(internal.filterAlreadyProcessed([external])).toEqual([]);
+    internal.durableRuns.close();
+  });
+
+  it('admits an In Progress card this daemon has claimed before (INT-1979 guard)', async () => {
+    // The other side of the same gate: once claimRun has bumped the attempt,
+    // the card being In Progress is this run's own doing — parking never moves
+    // it back — so its backoff and parks must still reach the pipeline.
+    const internal = await makeRunner();
+    await seedConsecutiveUnansweredAttempts(1);
+    expect(internal.durableRuns.getRun('AGT-1')?.attemptNo).toBeGreaterThan(0);
+    internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');
+
+    const claimed: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.filterAlreadyProcessed([claimed])).toEqual([claimed]);
+    internal.durableRuns.close();
+  });
+
+  it('admits a legacy-imported row whose local claim marker says it is ours (INT-1979 guard)', async () => {
+    // migrateLegacyRunState imports a card in flight at cutover from the very
+    // marker markTaskInProgress writes, and importRun inserts at attempt 0.
+    // attempt_no only grows inside claimRun, which this filter gates, so
+    // judging that row by the counter alone would deadlock it with no path
+    // back except a manual move to Todo.
+    const internal = await makeRunner();
+    const store = await import('../taskState/store.js');
+    store.upsertTaskState('AGT-1', {
+      execution: { status: 'in_progress', retryCount: 0 },
+    } as Parameters<typeof store.upsertTaskState>[1]);
+    expect(internal.durableRuns.getRun('AGT-1')?.attemptNo).toBe(0);
+
+    const inFlight: TaskItem = { ...TASK, linearState: 'In Progress' };
+    expect(internal.filterAlreadyProcessed([inFlight])).toEqual([inFlight]);
+    internal.durableRuns.close();
+  });
+
+  it('reopens a finished run from Backlog only — never In Progress or In Review (AGT-4257)', async () => {
+    // durableRunCoordinator.observeTask states the rule this mirrors: a terminal
+    // run reopens on Todo or an explicit dispatch, never on In Progress, which
+    // a human or another daemon may own. In Review is a published PR waiting on
+    // the merge gate — re-running it makes a duplicate PR.
+    const internal = await makeRunner();
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'EXECUTING', {})).toBe(true);
+    expect(ledger.transition(claim!, 'SYNC_PENDING', {})).toBe(true);
+    expect(ledger.finalizeSyncedRun('AGT-1')).toBe(true);
+    ledger.close();
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
+
+    for (const linearState of ['In Review', 'In Progress'] as const) {
+      expect(internal.filterAlreadyProcessed([{ ...TASK, linearState }])).toEqual([]);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('DONE');
+    }
+
+    // Backlog with a free slot is idle fill: nobody is working that card.
+    const backlog: TaskItem = { ...TASK, linearState: 'Backlog' };
+    expect(internal.filterAlreadyProcessed([backlog])).toEqual([backlog]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 
