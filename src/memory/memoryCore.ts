@@ -309,10 +309,19 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   // query-phase clear lives at the end of a successful search, which does not
   // run here — so it is the one direction where a stale tally survives.
   const sameAsBefore = previous?.phase === phase ? previous : null;
+  // A phase's first report always prints a count of zero — the record is fresh
+  // — and the tally is only ever printed by a LATER report of the same phase.
+  // A phase change destroys the record before that can happen, so without this
+  // the outgoing phase's scale is never stated anywhere: 40 failed queries
+  // followed by one embedding failure emitted two lines, neither of which said
+  // "forty". Name it, attributed to the phase it belongs to.
+  const retired = previous && previous.phase !== phase ? previous : null;
   const suppressed = sameAsBefore?.suppressedCount ?? 0;
   const others = sameAsBefore ? [sameAsBefore.message, ...sameAsBefore.alsoSeen].filter(m => m !== message) : [];
   const unlisted = sameAsBefore?.alsoSeenUnlisted ?? 0;
   const parts = [
+    retired && retired.suppressedCount > 0
+      ? `ends a ${retired.phase}-phase outage of ${retired.suppressedCount + 1} failure(s)` : '',
     suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
     others.length > 0
       // "N more" would read as N further *messages*; this counts occurrences of
@@ -339,10 +348,15 @@ function clearRecallFailure(phase: RecallPhase): void {
   // clear it — which is why no test pins this; it is a guard against that
   // invariant changing, not against anything observed.
   if (recallFailure?.phase !== phase) return;
+  // Carry the blast radius. An outage that self-heals otherwise leaves no
+  // record of its size anywhere — and "was memory dead during that run, and
+  // how badly" is the question an operator actually asks afterwards.
+  const after = recallFailure.suppressedCount > 0
+    ? ` after ${recallFailure.suppressedCount + 1} failure(s)` : '';
   // Deliberately stderr, matching the outage report. A daemon that captures the
   // two streams separately would otherwise show an outage in its error log that
   // never ends, which is the same unreadability this whole block exists to fix.
-  console.error(`${status.ok('[Memory] long-term recall restored')}`);
+  console.error(`${status.ok('[Memory] long-term recall restored')}${after}`);
   recallFailure = null;
 }
 

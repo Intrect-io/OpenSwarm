@@ -226,6 +226,10 @@ describe('memory recall status (AGT-4267)', () => {
     expect(embedReport).toContain('the query could not be embedded');
     expect(embedReport).not.toContain('39 further failure(s)');
     expect(embedReport).not.toContain('query is broken');
+    // But the outgoing phase's scale is not simply dropped: a phase's FIRST
+    // report always prints a count of zero, so without naming it here the 40
+    // failed queries would never be stated anywhere at all.
+    expect(embedReport).toContain('ends a query-phase outage of 40 failure(s)');
   });
 
   it('clears an embed-phase outage once the embedder works again', async () => {
@@ -295,14 +299,17 @@ describe('memory recall status (AGT-4267)', () => {
         },
       }),
     });
-    await core.searchMemorySafe('anything');
-    expect(core.memoryRecallStatus().phase).toBe('query');
+    for (let i = 0; i < 3; i += 1) await core.searchMemorySafe('anything');
+    expect(core.memoryRecallStatus().suppressedCount).toBe(2);
 
     broken = false;
     await core.searchMemorySafe('anything');
 
     expect(core.memoryRecallStatus().available).toBe(true);
-    expect(errors.some(e => e.includes('long-term recall restored'))).toBe(true);
+    // An outage that self-heals must still say how big it was: "was memory dead
+    // during that run, and how badly" is what an operator asks afterwards, and
+    // the count died with the record before this.
+    expect(errors.some(e => /long-term recall restored after 3 failure\(s\)/.test(e))).toBe(true);
   });
 
   it('makes a caller arriving mid-open wait rather than reading a table being rewritten', async () => {
