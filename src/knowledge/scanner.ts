@@ -45,7 +45,7 @@ const TEST_FILE_PATTERNS = [
 const MAX_FILE_SIZE = 512 * 1024; // 512KB — skip large generated files
 const MAX_DEPTH = 15;
 const SCAN_TIMEOUT_MS = 30_000;
-const MAX_NODES = 50_000; // Bounded node budget — prevents OOM on repos with generated code
+const MAX_GRAPH_NODES = 50_000; // Bounded node budget — prevents OOM on repos with generated code
 
 // Import Regex Patterns
 
@@ -78,7 +78,7 @@ export async function scanProject(
   const graph = new KnowledgeGraph(projectSlug, projectPath);
   const maxDepth = options.maxDepth ?? MAX_DEPTH;
   const timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
-  const maxNodes = options.maxNodes ?? MAX_NODES;
+  const maxNodes = options.maxNodes ?? MAX_GRAPH_NODES;
   const startTime = Date.now();
 
   // Project root node

@@ -363,7 +363,8 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(4, entries.length) }, () => worker()));
+  const MAX_TOOL_DISCOVERY_CONCURRENCY = 5;
+  await Promise.all(Array.from({ length: Math.min(MAX_TOOL_DISCOVERY_CONCURRENCY, entries.length) }, () => worker()));
   return { defs, routing, unreachable };
 }
 

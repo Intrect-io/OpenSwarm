@@ -18,8 +18,8 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { searchRepoMemoryText } from '../memory/repoKnowledge.js';
 import { z } from 'zod';
 
-const MAX_CONCURRENT_SEARCHES = 4;
-const SEARCH_DEADLINE_MS = 15_000;
+const MAX_CONCURRENT_SEARCHES = 3;
+const SEARCH_DEADLINE_MS = 10_000;
 
 // Simple semaphore to bound concurrent memory searches
 let activeSearches = 0;
