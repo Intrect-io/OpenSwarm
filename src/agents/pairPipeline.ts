@@ -935,11 +935,13 @@ export class PairPipeline extends EventEmitter {
         }
       }
 
-      // CodeQL is a post-edit gate, not a tester-stage feature. Run it after a
-      // successful worker pass so every pipeline shape — including
-      // worker/reviewer-only configurations — must clear the same baseline-diff
-      // check before an approval is possible.
-      const introducedSecurityFindings = await collectIntroducedSecurityFindings(context);
+      // CodeQL is a post-edit gate, not a tester-stage feature. It is opt-in
+      // (securityAudit.enabled, default OFF) because it is too slow to gate PRs
+      // (AGT-4160). When disabled we do not even invoke the gate, so the default
+      // autonomous path never runs CodeQL.
+      const introducedSecurityFindings = this.config.securityAudit?.enabled
+        ? await collectIntroducedSecurityFindings(context)
+        : [];
       if (introducedSecurityFindings.length > 0) {
         const failures = introducedSecurityFindings.map(formatSecurityFinding);
         safeConsole.log(
