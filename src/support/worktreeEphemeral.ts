@@ -16,7 +16,11 @@ const VENV_ENTRY = /^\.?venv(?:[\w-]*|\.bak)$/;
 export function isEphemeralWorktreeArtifact(file: string): boolean {
   return VENV_DIR.test(file)
     || VENV_ENTRY.test(file)
-    || file === 'pytest-local'
+    // Some verification harnesses write their basetemp under the repository
+    // root as `pytest-local/<case>`. Keep the whole tree out of preserved WIP
+    // and publication-scope checks; only the directory itself was ignored
+    // before, so its committed children could trigger a false scope park.
+    || /^pytest-local(?:\/|$)/.test(file)
     // pytest's basetemp (`pytest-of-<user>/…`) anywhere in the tree, and the
     // whole worktree-local `.trash/` quarantine (cgf-portal ships secrets under
     // `.trash/<issue>/pytest-a3/…` which is not named pytest-of-*).
@@ -69,4 +73,3 @@ export function ephemeralPathspecRoots(files: string[]): string[] {
   }
   return roots;
 }
-
