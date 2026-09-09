@@ -4,17 +4,19 @@ import { constants } from 'node:fs';
 import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { describeLinuxSandbox, formatSandboxUnavailable, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
+import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import type { VerifyCommand } from './manifest.js';
+import { rebasePythonEnvironment } from './pythonEnvironment.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -63,15 +65,52 @@ async function verificationSharedPaths(projectPath: string, commands: VerifyComm
   const paths = new Set(resolveSharedPaths(projectPath, metadata));
   for (const command of commands) {
     const directory = command.cwd ?? '';
-    const nodeModules = join(directory, 'node_modules');
-    try {
-      await access(join(projectPath, nodeModules));
-      paths.add(nodeModules);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const localDirectory = relative(resolve(projectPath), resolve(projectPath, directory));
+    if (localDirectory === '..' || localDirectory.startsWith(`..${sep}`) || isAbsolute(localDirectory)) {
+      throw new Error(`[security] verify cwd escapes project root: ${directory}`);
+    }
+    for (const name of ['node_modules', '.venv-verify', '.venv', 'venv']) {
+      const dependency = join(localDirectory, name);
+      try {
+        await access(join(projectPath, dependency));
+        paths.add(dependency);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
     }
   }
-  return [...paths];
+  return [...paths].filter((path) => !isPrivateEnvironmentPath(path))
+    .filter((path, _, all) => !all.some((parent) => parent !== path && pathCoveredBy(path, [parent])));
+}
+
+function isPrivateEnvironmentPath(path: string): boolean {
+  return path.split(sep).some(isPrivateWorkspaceFile);
+}
+
+function sharedPathSecretFilter(sharedPath: string): (path: string) => boolean {
+  // Like the companion's secret scan, dependency payloads retain packaged
+  // certificates (e.g. certifi/cacert.pem). Local configuration stays excluded.
+  return ['node_modules', '.venv', '.venv-verify', 'venv'].includes(basename(sharedPath))
+    ? (path) => path.split(sep).some(isPrivateConfigurationFile)
+    : isPrivateEnvironmentPath;
+}
+
+/** Use one policy before validation and copying: omitted paths cannot escape. */
+function omitVerificationSource(path: string, sharedPaths: string[]): boolean {
+  return path.split(sep).some((segment) =>
+    ['.git', 'node_modules', '.venv', '.venv-verify', '.venv.bak', 'venv'].includes(segment))
+    || isPrivateEnvironmentPath(path)
+    || isEphemeralVerificationArtifact(path)
+    || pathCoveredBy(path, sharedPaths);
+}
+
+async function removePrivateEnvironmentFiles(directory: string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.name === '.git') continue;
+    const path = join(directory, entry.name);
+    if (isPrivateWorkspaceFile(entry.name)) await rm(path, { recursive: true, force: true });
+    else if (entry.isDirectory()) await removePrivateEnvironmentFiles(path);
+  }
 }
 
 function pathCoveredBy(path: string, roots: string[]): boolean {
@@ -529,27 +568,39 @@ async function runTrustedCommand(
   return await runCommand(command, root, env, sandboxExecutorSessionFactory);
 }
 
-async function validateSandboxSymlinks(projectPath: string, sharedPaths: string[]): Promise<void> {
+async function validateSandboxSymlinks(
+  projectPath: string, sharedPaths: string[], omitIgnoredLinks = false,
+): Promise<Set<string>> {
   const projectRoot = await realpath(projectPath);
+  const ignoredLinks = new Set<string>();
+  const rejectOrOmit = async (path: string): Promise<void> => {
+    if (omitIgnoredLinks) {
+      try {
+        await execFileAsync('git', ['-C', projectPath, 'check-ignore', '-q', '--', path], { timeout: GIT_TIMEOUT_MS });
+        ignoredLinks.add(path);
+        return;
+      } catch (error) {
+        if ((error as { code?: number }).code !== 1) throw error;
+      }
+    }
+    throw new Error(`[security] verify sandbox rejects escaping symlink: ${path}`);
+  };
   const visit = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const source = join(directory, entry.name);
       const path = relative(projectRoot, source);
-      if (
-        path.split(sep).some((segment) => segment === '.git' || segment === 'node_modules')
-        || isEphemeralVerificationArtifact(path)
-        || pathCoveredBy(path, sharedPaths)
-      ) continue;
+      if (omitVerificationSource(path, sharedPaths)) continue;
       if (entry.isSymbolicLink()) {
         const target = await readlink(source);
         const resolvedTarget = resolve(dirname(source), target);
         if (isAbsolute(target) || (resolvedTarget !== projectRoot && !resolvedTarget.startsWith(`${projectRoot}${sep}`))) {
-          throw new Error(`[security] verify sandbox rejects escaping symlink: ${path}`);
+          await rejectOrOmit(path);
+          continue;
         }
         try {
           const realTarget = await realpath(source);
           if (realTarget !== projectRoot && !realTarget.startsWith(`${projectRoot}${sep}`)) {
-            throw new Error(`[security] verify sandbox rejects escaping symlink: ${path}`);
+            await rejectOrOmit(path);
           }
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -569,6 +620,7 @@ async function validateSandboxSymlinks(projectPath: string, sharedPaths: string[
     }
   };
   await visit(projectRoot);
+  return ignoredLinks;
 }
 
 async function createVerifySandboxRoot(prefix: string, scratchRoot?: string): Promise<string> {
@@ -587,7 +639,7 @@ async function createHeadSandbox(
     await git(projectPath, ['clone', '--quiet', '--no-hardlinks', '--no-checkout', projectPath, project]);
     await git(project, ['checkout', '--quiet', '--detach', headCommit]);
     const sharedPaths = await verificationSharedPaths(projectPath, commands);
-    await validateSandboxSymlinks(projectPath, sharedPaths);
+    const ignoredLinks = await validateSandboxSymlinks(projectPath, sharedPaths, true);
     // Mirror the source working tree exactly, including deletions and renames,
     // while retaining only the sandbox's independent Git metadata.
     for (const entry of await readdir(project)) {
@@ -601,16 +653,7 @@ async function createHeadSandbox(
       verbatimSymlinks: true,
       filter: (source) => {
         const path = relative(projectPath, source);
-        return path === '' || (
-          !path.split(sep).some((segment) =>
-            segment === '.git'
-            || segment === 'node_modules'
-            ||             segment === '.venv'
-            || segment === '.venv-verify'
-            || segment === '.venv.bak')
-          && !isEphemeralVerificationArtifact(path)
-          && !pathCoveredBy(path, sharedPaths)
-        );
+        return path === '' || (!omitVerificationSource(path, sharedPaths) && !ignoredLinks.has(path));
       },
     });
     for (const sharedPath of sharedPaths) {
@@ -619,7 +662,9 @@ async function createHeadSandbox(
         join(project, sharedPath),
         project,
         sharedPath,
+        sharedPathSecretFilter(sharedPath),
       );
+      await rebasePythonEnvironment(projectPath, project, sharedPath);
     }
     // Validate what was actually copied, closing the source validation/copy
     // race before any repository-controlled command can execute.
@@ -634,7 +679,9 @@ async function createHeadSandbox(
 async function git(projectPath: string, args: string[]): Promise<string> {
   return await new Promise((resolveResult, reject) => {
     const maxOutputBytes = 4 * 1024 * 1024;
-    const child = spawn('git', ['-C', projectPath, ...args], {
+    // Checkout hooks belong to the live developer environment. Running them in
+    // a verification worktree can restore external data/secrets after filtering.
+    const child = spawn('git', ['-C', projectPath, '-c', 'core.hooksPath=/dev/null', ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
@@ -696,6 +743,7 @@ async function runAtBase(
     worktreePath = join(root, 'worktree');
     await git(projectPath, ['worktree', 'add', '--detach', worktreePath, baseCommit]);
     worktreeAdded = true;
+    await removePrivateEnvironmentFiles(worktreePath);
     // A detached worktree intentionally has no ignored dependencies/data. Copy
     // them into the base sandbox so failed-check comparison cannot mutate the
     // HEAD checkout through a shared symlink.
@@ -708,7 +756,8 @@ async function runAtBase(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
-      await copyIsolatedPath(join(projectPath, sharedPath), target, worktreePath, sharedPath);
+      await copyIsolatedPath(join(projectPath, sharedPath), target, worktreePath, sharedPath, sharedPathSecretFilter(sharedPath));
+      await rebasePythonEnvironment(projectPath, worktreePath, sharedPath);
     }
     const baseBin = join(worktreePath, 'node_modules', '.bin');
     const env = { ...process.env, PATH: `${baseBin}${delimiter}${process.env.PATH ?? ''}` };
