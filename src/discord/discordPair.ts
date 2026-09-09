@@ -24,9 +24,6 @@ import {
 import { t, getDateLocale } from '../locale/index.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
-// Maximum size of a worker report in characters before truncation
-const MAX_REPORT_SIZE = 4000;
-
 /**
  * !pair command handler
  */
@@ -384,18 +381,10 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
         agentPair.updateSessionStatus(sessionId, 'failed');
         await thread.send(t('discord.pair.maxAttemptsExceeded'));
 
-        // Truncate and sanitize feedback before posting to Discord
-        const feedback = session.reviewResult?.feedback;
-        if (feedback) {
-          const safeFeedback = sanitizeTerminalText(feedback).slice(0, MAX_FEEDBACK_LENGTH);
-          postToThread(safeFeedback);
-        }
-        const message = `Worker failed after max attempts (${session.worker.maxAttempts}) exceeded`;
-        const truncated = message.length > 4000 ? message.slice(0, 4000) : message;
-        
         // Log failure in Linear
         try {
-          await linear.logPairFailed(session.taskId, sessionId, 'max_attempts', truncated);
+          await linear.logPairFailed(session.taskId, sessionId, 'max_attempts',
+            `Worker failed after max attempts (${session.worker.maxAttempts}) exceeded`);
         } catch (err) {
           console.error('[Pair] Linear logPairFailed failed:', err);
         }
@@ -489,14 +478,10 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       return;
     }
 
-    // Truncate and sanitize feedback before logging
-    const feedback = sanitizeTerminalText(reviewResult.feedback || '');
-    const truncatedFeedback = feedback.slice(0, MAX_REPORT_SIZE);
-    
     // Log revision request in Linear
     try {
       await linear.logPairRevision(session.taskId, sessionId,
-        truncatedFeedback, reviewResult.issues || []);
+        reviewResult.feedback, reviewResult.issues || []);
     } catch (err) {
       console.error('[Pair] Linear logPairRevision failed:', err);
     }

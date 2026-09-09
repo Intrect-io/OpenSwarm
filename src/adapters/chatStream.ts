@@ -32,32 +32,8 @@ interface StreamChunk {
     };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } |
-         { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
 }
-
-export interface ChatUsage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-}
-
-export interface RawChatUsage {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-}
-
-export function normalizeChatUsage(raw: RawChatUsage): ChatUsage {
-  return {
-    prompt_tokens: raw.prompt_tokens ?? 0,
-    completion_tokens: raw.completion_tokens ?? 0,
-    total_tokens: raw.total_tokens ?? 0,
-  };
-}
-
-// Maximum accumulated content bytes before truncation in reduceChatChunks
-const MAX_ACCUMULATED_CONTENT = 64 * 1024; // 64 KiB
 
 /**
  * Reduce parsed SSE chunks → a chat-completions response. Exported so the
@@ -72,44 +48,36 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
   // Tool calls accumulate by their streaming index (id/name arrive once, arguments stream).
   const calls = new Map<number, { id: string; name: string; args: string }>();
 
-  for (const c of chunks) {
-    const delta = c.choices?.[0]?.delta;
-    if (!delta) {
-      if (c.usage) usage = c.usage as ChatCompletionLike['usage'];
-      if (c.choices?.[0]?.finish_reason) finishReason = c.choices[0].finish_reason;
-      continue;
+  for (const chunk of chunks) {
+    if (chunk.usage) {
+      const pt = chunk.usage.prompt_tokens ?? 0;
+      const ct = chunk.usage.completion_tokens ?? 0;
+      usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: chunk.usage.total_tokens ?? pt + ct };
     }
-    if (delta.content) {
-      // Truncate accumulated content at MAX_ACCUMULATED_CONTENT to prevent OOM
-      if (content.length < MAX_ACCUMULATED_CONTENT) {
-        const remaining = MAX_ACCUMULATED_CONTENT - content.length;
-        const portion = delta.content.slice(0, remaining);
-        content += portion;
-        sawContent = true;
-        if (onToken) onToken(portion);
-      }
-      // else: silently drop excess content beyond the cap
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    const delta = choice.delta ?? {};
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      sawContent = true;
+      onToken?.(delta.content);
     }
-    if (delta.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const idx = tc.index ?? 0;
-        let entry = calls.get(idx);
-        if (!entry) {
-          entry = { id: tc.id ?? '', name: tc.function?.name ?? '', args: '' };
-          calls.set(idx, entry);
-        }
-        if (tc.id) entry.id = tc.id;
-        if (tc.function?.name) entry.name = tc.function.name;
-        if (tc.function?.arguments) entry.args += tc.function.arguments;
-      }
+    for (const tc of delta.tool_calls ?? []) {
+      const idx = tc.index ?? 0;
+      const cur = calls.get(idx) ?? { id: '', name: '', args: '' };
+      if (tc.id) cur.id = tc.id;
+      if (tc.function?.name) cur.name = tc.function.name;
+      if (tc.function?.arguments) cur.args += tc.function.arguments;
+      calls.set(idx, cur);
     }
-    if (c.choices?.[0]?.finish_reason) finishReason = c.choices[0].finish_reason;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
   }
 
-  const toolCalls: StreamToolCall[] = [];
-  for (const [, v] of calls) {
-    toolCalls.push({ id: v.id, type: 'function', function: { name: v.name, arguments: v.args } });
-  }
+  const toolCalls: StreamToolCall[] = [...calls.values()].map((c) => ({
+    id: c.id,
+    type: 'function',
+    function: { name: c.name, arguments: c.args },
+  }));
 
   return {
     choices: [
@@ -119,15 +87,15 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
           content: sawContent ? content : null,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
         },
-        finish_reason: finishReason,
+        finish_reason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
       },
     ],
     usage,
   };
 }
 
-/** Parse a single SSE `data: …` line into a StreamChunk, or null for keep-alives/[DONE]. */
-export function parseChunkLine(line: string): StreamChunk | null {
+/** Parse one `data: {json}` SSE line into a chunk, or null for [DONE]/keep-alives. */
+function parseChunkLine(line: string): StreamChunk | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith('data:')) return null;
   const data = trimmed.slice(5).trim();
@@ -139,42 +107,27 @@ export function parseChunkLine(line: string): StreamChunk | null {
   }
 }
 
-/** Hard cap on the SSE partial-frame buffer to prevent memory exhaustion. */
-const MAX_FRAME_SIZE = 512 * 1024; // 512 KiB
-
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
   res: Response,
   onToken?: (delta: string) => void,
 ): Promise<ChatCompletionLike> {
-  const chunks: StreamChunk[] = [];
   const reader = res.body?.getReader();
-  if (!reader) throw new Error('chat completions: empty stream body');
+  if (!reader) throw new Error('chat stream: empty response body');
 
+  const chunks: StreamChunk[] = [];
   const decoder = new TextDecoder();
   let buffer = '';
-
-  const handle = (chunk: StreamChunk | null) => {
-    if (chunk) chunks.push(chunk);
+  const handle = (c: StreamChunk | null) => {
+    if (!c) return;
+    const delta = c.choices?.[0]?.delta?.content;
+    if (onToken && typeof delta === 'string' && delta) onToken(delta);
+    chunks.push(c);
   };
-
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    const decoded = decoder.decode(value, { stream: true });
-    // If the partial-frame buffer would exceed the cap, flush what we have
-    // and discard the rest of this frame.
-    if (buffer.length + decoded.length > MAX_FRAME_SIZE) {
-      const remainingSpace = MAX_FRAME_SIZE - buffer.length;
-      const truncated = decoded.slice(0, remainingSpace);
-      buffer += truncated;
-      // Process and flush the buffer immediately
-      const lines = buffer.split('\n');
-      buffer = '';
-      for (const line of lines) handle(parseChunkLine(line));
-      continue;
-    }
-    buffer += decoded;
+    buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) handle(parseChunkLine(line));
