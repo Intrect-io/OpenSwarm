@@ -23,35 +23,20 @@ const SKIP_DIRS = new Set([
   'trash', '.openswarm', 'htmlcov', '.ruff_cache', 'worktree',
   // INT-2320: vendored third-party trees are not the repo's own code. Thousands of
   // short generic filenames (a.py, run.py, api.py) poisoned issue-impact matching,
-  // so the conflict detector deferred every same-project task pair as "conflicting".
-  'google-cloud-sdk', 'third_party', 'vendor', 'vendors',
+  // so the conflict detector deferred every same-project task pair as "conflict".
+  'vendor', 'vendors', 'third_party', 'third-party',
 ]);
 
-// Prefix-based skip: any directory name starting with these prefixes
-const SKIP_DIR_PREFIXES = ['.venv'];
+const SKIP_DIR_PREFIXES = ['.'];
 
 const SOURCE_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.pyw',
 ]);
 
-async function readBoundedRegularFile(filePath: string, maxBytes: number): Promise<string> {
-  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW, 0o600);
-  try {
-    const info = await handle.stat();
-    if (!info.isFile()) throw new Error('source must be a regular file');
-    if (info.size > maxBytes) throw new Error(`Source file exceeds ${maxBytes} bytes: ${filePath}`);
-    return await handle.readFile('utf-8');
-  } finally {
-    await handle.close();
-  }
-}
-const MAX_INCREMENTAL_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_INCREMENTAL_UPDATE_MS = 15_000;
-
-const TEST_PATTERNS = [
-  /\.test\.[tj]sx?$/,
-  /\.spec\.[tj]sx?$/,
+const TEST_FILE_PATTERNS = [
+  /\.test\.tsx?$/,
+  /\.spec\.tsx?$/,
   /_test\.py$/,
   /test_.*\.py$/,
   /\.test\.py$/,
@@ -60,6 +45,7 @@ const TEST_PATTERNS = [
 const MAX_FILE_SIZE = 512 * 1024; // 512KB — skip large generated files
 const MAX_DEPTH = 15;
 const SCAN_TIMEOUT_MS = 30_000;
+const MAX_NODES = 50_000; // Bounded node budget — prevents OOM on repos with generated code
 
 // Import Regex Patterns
 
@@ -77,6 +63,8 @@ const PY_IMPORT = /^import\s+([\w.]+)/gm;
 export interface ScanOptions {
   maxDepth?: number;
   timeoutMs?: number;
+  /** Maximum number of file/module nodes to collect before stopping. */
+  maxNodes?: number;
 }
 
 /**
@@ -90,6 +78,7 @@ export async function scanProject(
   const graph = new KnowledgeGraph(projectSlug, projectPath);
   const maxDepth = options.maxDepth ?? MAX_DEPTH;
   const timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
+  const maxNodes = options.maxNodes ?? MAX_NODES;
   const startTime = Date.now();
 
   // Project root node
@@ -101,7 +90,7 @@ export async function scanProject(
   });
 
   // Phase 1: Directory walking — collect nodes
-  await walkDirectory(graph, projectPath, '.', 0, maxDepth, startTime, timeoutMs);
+  await walkDirectory(graph, projectPath, '.', 0, maxDepth, startTime, timeoutMs, maxNodes);
 
   // Phase 2: Import parsing — create edges
   const modules = [...graph.getNodesByType('module'), ...graph.getNodesByType('test_file')];
@@ -154,49 +143,40 @@ export async function incrementalUpdate(
 
     // If node exists, re-parse edges only
     if (graph.hasNode(relPath)) {
-      // Remove existing parsed edges (with adjacency sync)
-      graph.removeOutgoingEdges(relPath, ['imports', 'depends_on', 'tests']);
-      const node = graph.getNode(relPath)!;
-
-      // Recalculate metrics
+      // Re-parse imports for this file
+      const node = graph.getNode(relPath);
+      if (node) {
+        // Remove old edges from this node
+        const oldEdges = graph.getEdges(node.id);
+        for (const edge of oldEdges) {
+          if (edge.source === node.id) {
+            graph.removeEdge(edge.source, edge.target, edge.type);
+          }
+        }
+        await parseImports(graph, projectPath, node);
+      }
+    } else {
+      // New file — add node and parse
+      const isTest = isTestFile(basename(relPath));
+      const language = detectLanguage(ext);
+      const fullPath = join(projectPath, relPath);
+      let content: string;
       try {
-        const fullPath = join(projectPath, relPath);
-        const content = await readBoundedRegularFile(fullPath, MAX_INCREMENTAL_FILE_BYTES);
-        const metrics = computeMetrics(content, detectLanguage(ext));
-        node.metrics = metrics;
+        content = await readBoundedRegularFile(fullPath, MAX_FILE_SIZE);
       } catch {
-        // File was deleted
-        graph.removeNode(relPath);
         continue;
       }
-
-      await parseImports(graph, projectPath, node);
-    } else {
-      // New file: add node
-      try {
-        const fullPath = join(projectPath, relPath);
-        const content = await readBoundedRegularFile(fullPath, MAX_INCREMENTAL_FILE_BYTES);
-        const language = detectLanguage(ext);
-        const isTest = isTestFile(relPath);
-
-        const node: GraphNode = {
-          id: relPath,
-          type: isTest ? 'test_file' : 'module',
-          name: basename(relPath),
-          path: relPath,
-          metrics: computeMetrics(content, language),
-        };
-        graph.addNode(node);
-
-        // Contains edge with parent directory
-        const parentDir = dirname(relPath);
-        if (graph.hasNode(parentDir) || parentDir === '.') {
-          graph.addEdge({ source: parentDir === '.' ? '.' : parentDir, target: relPath, type: 'contains' });
-        }
-
+      const metrics = computeMetrics(content, language);
+      graph.addNode({
+        id: relPath,
+        type: isTest ? 'test_file' : 'module',
+        name: basename(relPath),
+        path: relPath,
+        metrics,
+      });
+      const node = graph.getNode(relPath);
+      if (node) {
         await parseImports(graph, projectPath, node);
-      } catch {
-        // File read failed — skip
       }
     }
   }
@@ -216,10 +196,15 @@ async function walkDirectory(
   maxDepth: number,
   startTime: number,
   timeoutMs: number,
+  maxNodes: number,
 ): Promise<void> {
   if (depth > maxDepth) return;
   if (Date.now() - startTime > timeoutMs) {
     console.warn(`[Scanner] Directory walking timed out after ${timeoutMs}ms`);
+    return;
+  }
+  if (graph.nodeCount >= maxNodes) {
+    console.warn(`[Scanner] Reached node budget of ${maxNodes} — stopping directory walk`);
     return;
   }
 
@@ -231,6 +216,11 @@ async function walkDirectory(
   }
 
   for (const entry of entries) {
+    if (graph.nodeCount >= maxNodes) {
+      console.warn(`[Scanner] Reached node budget of ${maxNodes} — stopping directory walk`);
+      return;
+    }
+
     const entryPath = join(currentPath, entry.name);
     const entryRelPath = relPath === '.' ? entry.name : `${relPath}/${entry.name}`;
 
@@ -245,21 +235,19 @@ async function walkDirectory(
       });
       graph.addEdge({ source: relPath === '.' ? '.' : relPath, target: entryRelPath, type: 'contains' });
 
-      await walkDirectory(graph, entryPath, entryRelPath, depth + 1, maxDepth, startTime, timeoutMs);
-    } else if (entry.isFile()) {
+      await walkDirectory(graph, entryPath, entryRelPath, depth + 1, maxDepth, startTime, timeoutMs, maxNodes);
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
       const ext = extname(entry.name);
       if (!SOURCE_EXTENSIONS.has(ext)) continue;
 
-      const language = detectLanguage(ext);
       const isTest = isTestFile(entry.name);
-
+      const language = detectLanguage(ext);
       let content: string;
       try {
         content = await readBoundedRegularFile(entryPath, MAX_FILE_SIZE);
       } catch {
         continue;
       }
-
       const metrics = computeMetrics(content, language);
 
       graph.addNode({
@@ -299,94 +287,46 @@ async function parseImports(
       let match;
       while ((match = regex.exec(content)) !== null) {
         const raw = match[1];
-        importPaths.push({ raw, isRelative: raw.startsWith('.') });
+        if (raw.startsWith('.')) {
+          importPaths.push({ raw, isRelative: true });
+        }
       }
     }
   } else if (language === 'python') {
-    PY_FROM_IMPORT.lastIndex = 0;
-    PY_IMPORT.lastIndex = 0;
-
-    let match;
-    while ((match = PY_FROM_IMPORT.exec(content)) !== null) {
-      const raw = match[1];
-      if (raw.startsWith('.') && /^\.+$/.test(raw)) {
-        const importedNames = match[2]
-          .split(',')
-          .map(name => name.trim().split(/\s+as\s+/)[0]?.trim())
-          .filter(name => name && name !== '*');
-        for (const importedName of importedNames) {
-          importPaths.push({ raw: `${raw}${importedName}`, isRelative: true });
+    for (const regex of [PY_FROM_IMPORT, PY_IMPORT]) {
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(content)) !== null) {
+        const raw = match[1];
+        if (raw.startsWith('.')) {
+          importPaths.push({ raw, isRelative: true });
         }
-      } else {
-        importPaths.push({ raw, isRelative: raw.startsWith('.') });
       }
-    }
-    while ((match = PY_IMPORT.exec(content)) !== null) {
-      const raw = match[1];
-      importPaths.push({ raw, isRelative: false });
     }
   }
 
-  for (const { raw, isRelative } of importPaths) {
-    if (isRelative) {
-      // Resolve relative path
-      const base = resolveRelativeImport(node.path, raw, language);
-      if (base) {
-        // Try matching with extension candidates
-        const candidates = language === 'typescript'
-          ? [base + '.ts', base + '.tsx', base + '.js', base + '.jsx', base + '/index.ts', base + '/index.tsx', base + '/index.js']
-          : [base + '.py', base + '/__init__.py'];
-        const resolved = candidates.find(c => graph.hasNode(c));
-        if (resolved) {
-          graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
-        }
-      }
-    } else {
-      // External package: depends_on edge (no virtual node needed, recorded as metadata)
-      graph.addEdge({
-        source: node.id,
-        target: `pkg:${raw.split('/')[0]}`,
-        type: 'depends_on',
-        metadata: { package: raw },
-      });
+  for (const { raw } of importPaths) {
+    const resolved = resolveRelativeImport(node.path, raw);
+    if (resolved && graph.hasNode(resolved)) {
+      graph.addEdge({ source: node.id, target: resolved, type: 'imports' });
     }
   }
 }
 
-/**
- * Resolve relative import path to in-project node ID
- */
-function resolveRelativeImport(
-  fromPath: string,
-  importPath: string,
-  language: Language,
-): string | null {
+function resolveRelativeImport(fromPath: string, importPath: string): string | null {
   const dir = dirname(fromPath);
+  const resolved = resolve('/', dir, importPath);
 
-  if (language === 'typescript') {
-    // Remove .js/.ts extension and try
-    const cleaned = importPath.replace(/\.[jt]sx?$/, '');
-    const base = join(dir, cleaned).replace(/\\/g, '/').replace(/^\.\//, '');
-
-    // Return candidate list — caller checks with graph.hasNode()
-    // Most common patterns first
-    return base;
-  }
-
-  if (language === 'python') {
-    const leadingDots = importPath.match(/^\.+/)?.[0].length ?? 0;
-    if (leadingDots === 0) {
-      return importPath.replace(/\./g, '/');
+  // Try with extensions
+  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw', '/index.ts', '/index.tsx', '/index.js', '/index.jsx']) {
+    const candidate = resolved + ext;
+    if (candidate.startsWith('/')) {
+      const relative = candidate.slice(1);
+      if (!relative.includes('..')) {
+        return relative;
+      }
     }
-
-    const modulePath = importPath.slice(leadingDots).replace(/\./g, '/');
-    const dirParts = dir.split('/').filter(Boolean);
-    const upLevels = Math.max(leadingDots - 1, 0);
-    const baseParts = dirParts.slice(0, Math.max(0, dirParts.length - upLevels));
-    const moduleParts = modulePath ? modulePath.split('/').filter(Boolean) : [];
-    return [...baseParts, ...moduleParts].join('/');
   }
-
   return null;
 }
 
@@ -394,65 +334,38 @@ function resolveRelativeImport(
 
 function mapTestsToModules(graph: KnowledgeGraph): void {
   const testFiles = graph.getNodesByType('test_file');
-
-  for (const testNode of testFiles) {
-    graph.removeOutgoingEdges(testNode.id, ['tests']);
-
-    // Add tests edges to modules already connected via import edges
-    const imports = graph.getImports(testNode.id);
-    for (const imported of imports) {
-      if (imported.type === 'module') {
-        graph.addEdge({ source: testNode.id, target: imported.id, type: 'tests' });
+  for (const testFile of testFiles) {
+    const candidates = guessSourceFromTestName(testFile.name, testFile.path);
+    for (const candidate of candidates) {
+      if (graph.hasNode(candidate)) {
+        graph.addEdge({ source: testFile.id, target: candidate, type: 'tests' });
       }
-    }
-
-    // Naming convention based mapping: foo.test.ts → foo.ts
-    const possibleSources = guessSourceFromTestName(testNode.name, testNode.path);
-    const source = possibleSources.find(candidate => graph.hasNode(candidate));
-    if (source) {
-      graph.addEdge({ source: testNode.id, target: source, type: 'tests' });
     }
   }
 }
 
 function guessSourceFromTestName(testName: string, testPath: string): string[] {
-  const dir = dirname(testPath);
-  const ext = extname(testName);
-  const baseName = basename(testName, ext);
-
-  const stripped = baseName
-    .replace(/\.(test|spec)$/, '')
-    .replace(/_test$/, '')
-    .replace(/^test_/, '');
-
-  if (!stripped || stripped === baseName) return [];
-
-  const sourceDirs = new Set<string>([dir]);
-  if (dir === 'tests' || dir === 'test') {
-    sourceDirs.add('src');
-  } else if (dir.startsWith('tests/') || dir.startsWith('test/')) {
-    sourceDirs.add(`src/${dir.replace(/^tests?\//, '')}`);
-  }
-  if (dir === '__tests__') {
-    sourceDirs.add('.');
-  } else if (dir.includes('/__tests__')) {
-    sourceDirs.add(dir.replace(/\/__tests__(?=\/|$)/, ''));
-  }
-  if (dir.includes('/tests')) {
-    sourceDirs.add(dir.replace(/\/tests(?=\/|$)/, ''));
-  }
-
-  const extensions = ext === '.py'
-    ? ['.py']
-    : ['.ts', '.tsx', '.js', '.jsx'];
-
   const candidates: string[] = [];
-  for (const sourceDir of sourceDirs) {
-    for (const sourceExt of extensions) {
-      const candidate = sourceDir === '.'
-        ? `${stripped}${sourceExt}`
-        : `${sourceDir}/${stripped}${sourceExt}`;
-      candidates.push(candidate.replace(/\\/g, '/').replace(/^\.\//, ''));
+
+  // Remove test suffix
+  let base = testName
+    .replace(/\.test\.(ts|tsx|js|jsx|mjs|cjs)$/, '')
+    .replace(/\.spec\.(ts|tsx|js|jsx|mjs|cjs)$/, '')
+    .replace(/_test\.py$/, '')
+    .replace(/^test_/, '')
+    .replace(/\.test\.py$/, '');
+
+  // Try same directory
+  const dir = dirname(testPath);
+  for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw']) {
+    candidates.push(join(dir, `${base}${ext}`));
+  }
+
+  // Try parent directory (common for __tests__/foo.test.ts → foo.ts)
+  const parentDir = dirname(dir);
+  if (parentDir !== '.') {
+    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.pyw']) {
+      candidates.push(join(parentDir, `${base}${ext}`));
     }
   }
 
@@ -462,18 +375,29 @@ function guessSourceFromTestName(testName: string, testPath: string): string[] {
 // Internal: Helpers
 
 function detectLanguage(ext: string): Language {
-  if (['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(ext)) return 'typescript';
-  if (['.py', '.pyw'].includes(ext)) return 'python';
-  return 'other';
+  switch (ext) {
+    case '.ts':
+    case '.tsx':
+    case '.js':
+    case '.jsx':
+    case '.mjs':
+    case '.cjs':
+      return 'typescript';
+    case '.py':
+    case '.pyw':
+      return 'python';
+    default:
+      return 'other';
+  }
 }
 
 function isTestFile(name: string): boolean {
-  return TEST_PATTERNS.some(p => p.test(name));
+  return TEST_FILE_PATTERNS.some(p => p.test(name));
 }
 
 function computeMetrics(content: string, language: Language): ModuleMetrics {
   const lines = content.split('\n');
-  const loc = lines.filter(l => l.trim().length > 0).length;
+  const loc = lines.filter((l: string) => l.trim().length > 0).length;
 
   let exportCount = 0;
   let importCount = 0;

@@ -18,6 +18,34 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { searchRepoMemoryText } from '../memory/repoKnowledge.js';
 import { z } from 'zod';
 
+const MAX_CONCURRENT_SEARCHES = 4;
+const SEARCH_DEADLINE_MS = 15_000;
+
+// Simple semaphore to bound concurrent memory searches
+let activeSearches = 0;
+const searchQueue: Array<() => void> = [];
+
+async function acquireSearchSlot(): Promise<void> {
+  if (activeSearches < MAX_CONCURRENT_SEARCHES) {
+    activeSearches++;
+    return;
+  }
+  return new Promise<void>((resolve) => {
+    searchQueue.push(() => {
+      activeSearches++;
+      resolve();
+    });
+  });
+}
+
+function releaseSearchSlot(): void {
+  activeSearches--;
+  if (searchQueue.length > 0) {
+    const next = searchQueue.shift();
+    next?.();
+  }
+}
+
 const SearchArgumentsSchema = z.object({
   query: z.string().trim().min(1).max(2_000),
   limit: z.number().int().min(1).max(10).default(5),
@@ -57,7 +85,17 @@ async function main(): Promise<void> {
     }
     try {
       const args = SearchArgumentsSchema.parse(req.params.arguments ?? {});
-      const text = await searchRepoMemoryText(process.cwd(), args.query, args.limit);
+      await acquireSearchSlot();
+      let text: string;
+      try {
+        const searchPromise = searchRepoMemoryText(process.cwd(), args.query, args.limit);
+        const deadlinePromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Memory search timed out')), SEARCH_DEADLINE_MS)
+        );
+        text = await Promise.race([searchPromise, deadlinePromise]);
+      } finally {
+        releaseSearchSlot();
+      }
       return { content: [{ type: 'text', text }] };
     } catch (err) {
       return {

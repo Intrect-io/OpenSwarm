@@ -299,6 +299,9 @@ interface DiscoveryResult {
  * agent see "MCP tool not registered" for tools that were working a moment
  * earlier, for as long as rediscovery took.
  */
+const MAX_TOOLS_PER_SERVER = 200;
+const MAX_TOTAL_TOOLS = 2_000;
+
 async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise<DiscoveryResult> {
   const defs: ToolDefinition[] = [];
   const routing: Record<string, McpToolRoute> = {};
@@ -310,8 +313,20 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
       const [server, cfg] = entries[next++];
       try {
         const listed = (await withClient(cfg, (c) => c.listTools())) as { tools?: McpTool[] };
+        const seenNames = new Set<string>();
+        let serverToolCount = 0;
         for (const tool of listed.tools ?? []) {
           if (typeof tool.name !== 'string') continue;
+          if (seenNames.has(tool.name)) continue;
+          seenNames.add(tool.name);
+          if (serverToolCount >= MAX_TOOLS_PER_SERVER) {
+            console.warn(`[MCP] server "${server}" exceeded ${MAX_TOOLS_PER_SERVER} tools — truncating`);
+            break;
+          }
+          if (defs.length >= MAX_TOTAL_TOOLS) {
+            console.warn(`[MCP] total tools exceeded ${MAX_TOTAL_TOOLS} — stopping discovery`);
+            break;
+          }
           const qualified = `${server}${SEP}${tool.name}`;
           if (!isMcpTool(qualified)) {
             console.warn(`[MCP] server "${server}" returned invalid tool name "${tool.name}" — skipped`);
@@ -340,6 +355,7 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
             inputSchema: definition.function.parameters,
           };
           defs.push(definition);
+          serverToolCount++;
         }
       } catch (err) {
         unreachable.push(server);
