@@ -185,6 +185,8 @@ export { coordinationFilePath, coordinationStateDir };
 export class CoordinationStore {
   private readonly path: string;
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Human-answer lane: jumps the machine FIFO so an operator reply is never the slowest write under load. */
+  private priorityWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(path = coordinationFilePath()) {
     this.path = resolve(path);
@@ -264,6 +266,9 @@ export class CoordinationStore {
       ? legacyFingerprint(normalized)
       : undefined;
     let isNew = true;
+    // A human answer must not queue behind machine chatter (AGT-4027): route
+    // it through the priority lane. Deduplication still runs inside the same
+    // locked mutate, so a replayed answer cannot double-publish.
     const event = await this.mutate((state) => {
       const existing = state.events.find((candidate) => candidate.fingerprint === digest
         || (legacyDigest !== undefined
@@ -312,7 +317,7 @@ export class CoordinationStore {
         state.consumed[consumer] = ids.filter((id) => liveIds.has(id));
       }
       return created;
-    });
+    }, input.kind === 'human-answer');
     // Announce only genuinely new events. A deduplicated publish is not news:
     // it would add a second dashboard row for one message, and — because the
     // Linear board mirror listens on 'coordination:published' — echo an event
