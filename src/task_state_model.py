@@ -50,7 +50,7 @@ class ExecutionState(AliasModel):
     status: TaskExecutionStatus = "backlog"
     blocked_reason: str | None = Field(default=None, alias="blockedReason")
     retry_count: int = Field(default=0, alias="retryCount")
-    confidence: int | None = Field(default=None, ge=0, le=1)
+    confidence: int | None = Field(default=None, ge=0, le=100)
     last_session_id: str | None = Field(default=None, alias="lastSessionId")
 
 
