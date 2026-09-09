@@ -228,7 +228,7 @@ export function openQuestionFor(events, actorAddress, scope = {}) {
 export function latestAddressable(events) {
   const spoken = events.filter(isAgentMessage).sort((a, b) => a.seq - b.seq);
   for (let i = spoken.length - 1; i >= 0; i -= 1) {
-    if (spoken[i].actorRole !== 'human') return spoken[i];
+    if (spoken[i].actorRole !== 'human' && spoken[i].actorRole !== 'daemon') return spoken[i];
   }
   return null;
 }
