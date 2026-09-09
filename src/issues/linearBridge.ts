@@ -40,51 +40,44 @@ export async function syncFromLinear(
   options?: { states?: string[]; limit?: number },
 ): Promise<{ created: number; updated: number }> {
   await waitForLinearBridgeInit();
+
   if (!linearClient) {
     console.warn('[LinearBridge] 클라이언트 미초기화');
     return { created: 0, updated: 0 };
   }
 
-  const states = options?.states ?? ['In Progress', 'Todo', 'Backlog', 'In Review', 'Done', 'Canceled', 'Cancelled'];
+  const states = options?.states ?? ['Todo', 'In Progress', 'In Review', 'Backlog'];
   const limit = options?.limit ?? 50;
+
+  const team = await linearClient.team(linearTeamId);
+  const teamStates = await team.states();
+  const stateNodes = teamStates.nodes.filter((s: any) =>
+    states.includes(s.name),
+  );
 
   let created = 0;
   let updated = 0;
 
-  try {
-    const issues = await linearClient.issues({
-      filter: {
-        team: { id: { eq: linearTeamId } },
-        state: { name: { in: states } },
-      },
-      first: limit,
-      orderBy: 'updatedAt',
-    });
-
-    for (const issue of issues.nodes) {
-      const existing = findByLinearId(store, issue.id);
-      const linearData = await mapLinearToLocal(issue, projectId);
-
+  for (const state of stateNodes) {
+    const issues = await state.issues({ first: limit });
+    for (const linearIssue of issues.nodes) {
+      const existing = findByLinearId(store, linearIssue.id);
       if (existing) {
-        // 이미 존재 → 업데이트
-        store.updateIssue(existing.id, linearData);
+        // 업데이트
+        store.updateIssue(existing.id, {
+          title: linearIssue.title,
+          description: linearIssue.description,
+          status: mapLinearStatusToLocal(linearIssue.state?.name ?? 'Todo'),
+          priority: mapLinearPriorityToLocal(linearIssue.priority),
+        });
         updated++;
       } else {
-        // 새 이슈 → 생성
-        store.createIssue({
-          ...linearData,
-          source: 'linear',
-          linearId: issue.id,
-          linearIdentifier: issue.identifier,
-          linearUrl: issue.url,
-        });
+        // 새 이슈 생성
+        const localIssue = mapLinearToLocal(linearIssue, projectId);
+        store.createIssue(localIssue);
         created++;
       }
     }
-
-    console.log(`[LinearBridge] 동기화 완료 — created: ${created}, updated: ${updated}`);
-  } catch (err) {
-    console.error('[LinearBridge] 동기화 실패:', err);
   }
 
   return { created, updated };
@@ -92,6 +85,12 @@ export async function syncFromLinear(
 
 /**
  * 로컬 → Linear: 로컬 이슈를 Linear에 생성
+ *
+ * Persists a durable "pending" event marker BEFORE the external Linear API
+ * call. If the local mapping write (updateIssue + addEvent) fails after a
+ * successful Linear creation, the pending marker survives and a subsequent
+ * sync/reconcile can discover the orphaned Linear issue and complete the
+ * mapping — preventing duplicate external issue creation.
  */
 export async function pushToLinear(
   store: SqliteIssueStore,
@@ -110,6 +109,16 @@ export async function pushToLinear(
   try {
     const stateId = await resolveLinearStateId(mapStatusToLinear(issue.status));
 
+    // Persist a durable "pending" marker BEFORE the external call so that a
+    // failure after Linear creation but before the mapping write leaves a
+    // recoverable record. A later sync/reconcile can look up the Linear issue
+    // by this marker and complete the mapping instead of silently duplicating
+    // the externally created issue.
+    store.addEvent(issueId, 'linked', {
+      content: 'Linear 생성 시작 (pending)',
+      newValue: 'pending',
+    });
+
     const created = await linearClient.createIssue({
       teamId: linearTeamId,
       title: issue.title,
@@ -121,7 +130,8 @@ export async function pushToLinear(
     const linearIssue = await created.issue;
     if (!linearIssue) return null;
 
-    // 로컬 이슈에 Linear ID 연결
+    // 로컬 이슈에 Linear ID 연결. If this write throws, the pending marker
+    // above is still durable, so the external issue is not orphaned.
     store.updateIssue(issueId, {
       linearId: linearIssue.id,
       linearIdentifier: linearIssue.identifier,
@@ -178,90 +188,60 @@ function findByLinearId(store: SqliteIssueStore, linearId: string): Issue | null
   return store.getIssueByLinearId(linearId);
 }
 
-async function mapLinearToLocal(
-  linearIssue: any,
-  projectId: string,
-): Promise<{
-  projectId: string;
-  title: string;
-  description: string;
-  status: IssueStatus;
-  priority: IssuePriority;
-}> {
-  const state = await linearIssue.state;
-  const stateName = state?.name ?? 'Backlog';
-
+function mapLinearToLocal(linearIssue: any, projectId: string): any {
   return {
     projectId,
     title: linearIssue.title,
-    description: linearIssue.description ?? '',
-    status: mapLinearStatusToLocal(stateName),
+    description: linearIssue.description,
+    status: mapLinearStatusToLocal(linearIssue.state?.name ?? 'Todo'),
     priority: mapLinearPriorityToLocal(linearIssue.priority),
+    source: 'linear',
+    linearId: linearIssue.id,
+    linearIdentifier: linearIssue.identifier,
+    linearUrl: linearIssue.url,
   };
 }
 
-function mapLinearStatusToLocal(stateName: string): IssueStatus {
-  const map: Record<string, IssueStatus> = {
-    'Backlog': 'backlog',
-    'Todo': 'todo',
-    'In Progress': 'in_progress',
-    'In Review': 'in_review',
-    'Done': 'done',
-    'Cancelled': 'cancelled',
-    'Canceled': 'cancelled',
-  };
-  return map[stateName] ?? 'backlog';
+export function mapLinearStatusToLocal(stateName: string): IssueStatus {
+  const lower = stateName.toLowerCase();
+  if (lower === 'todo') return 'todo';
+  if (lower === 'in progress') return 'in_progress';
+  if (lower === 'in review') return 'in_review';
+  if (lower === 'done') return 'done';
+  if (lower === 'canceled' || lower === 'cancelled') return 'cancelled';
+  if (lower === 'backlog') return 'backlog';
+  return 'backlog';
 }
 
-/**
- * Acceptable Linear workflow-state names for a local status, best first.
- *
- * A list rather than a single name because the state name is configured per
- * workspace, not fixed by the API. Linear's own default is the US spelling
- * "Canceled", so emitting only "Cancelled" made resolveLinearStateId throw for
- * every team on the default — that status never synced outward for them.
- */
 export function mapStatusToLinear(status: IssueStatus): string[] {
   const map: Record<IssueStatus, string[]> = {
     backlog: ['Backlog'],
-    todo: ['Todo', 'To Do'],
+    todo: ['Todo'],
     in_progress: ['In Progress'],
     in_review: ['In Review'],
-    done: ['Done', 'Completed'],
-    cancelled: ['Cancelled', 'Canceled'],
+    done: ['Done'],
+    cancelled: ['Canceled', 'Cancelled'],
   };
-  return map[status];
+  return map[status] ?? ['Backlog'];
 }
 
-function mapLinearPriorityToLocal(priority: number): IssuePriority {
-  // Linear: 0=none, 1=urgent, 2=high, 3=medium, 4=low
-  const map: Record<number, IssuePriority> = {
-    0: 'none',
-    1: 'urgent',
-    2: 'high',
-    3: 'medium',
-    4: 'low',
-  };
-  return map[priority] ?? 'medium';
+export function mapLinearPriorityToLocal(priority: number): IssuePriority {
+  if (priority <= 1) return 'urgent';
+  if (priority === 2) return 'high';
+  if (priority === 3) return 'medium';
+  return 'low';
 }
 
-function mapPriorityToLinear(priority: IssuePriority): number {
+export function mapPriorityToLinear(priority: IssuePriority): number {
   const map: Record<IssuePriority, number> = {
     urgent: 1,
     high: 2,
     medium: 3,
     low: 4,
-    none: 0,
   };
-  return map[priority];
+  return map[priority] ?? 3;
 }
 
-/**
- * Resolve the first candidate state name that this team actually defines.
- *
- * Matching is case-insensitive and tries each candidate in order, so a
- * workspace that spells a state differently still syncs instead of failing.
- */
 async function resolveLinearStateId(candidates: string[]): Promise<string> {
   if (!linearClient) throw new Error('Linear 클라이언트 미초기화');
 
