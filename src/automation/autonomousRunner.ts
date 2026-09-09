@@ -42,6 +42,7 @@ import {
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
+import { citedPathsAreEphemeral } from '../support/worktreeEphemeral.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler, normalizeProjectPath } from '../orchestration/taskScheduler.js';
@@ -1230,6 +1231,21 @@ export class AutonomousRunner {
             if (!isExactOperatorQuestionPark) {
               console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (${task.explicitDispatch === true ? 'explicit dispatch' : `tracker state ${task.linearState}`}), parked under ${durableRun.lastErrorCode ?? 'unknown'}`);
             }
+            durableRun = this.durableRuns.getRun(id);
+            if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+          }
+        }
+        // AGT-4256: a guard/publication park that only named ephemeral paths
+        // (.test_venv, pytest-local) is not a human decision. Resume even when
+        // Linear is still In Progress so the next heartbeat can pick the work.
+        if (
+          durableRun?.state === 'NEEDS_HUMAN'
+          && !isOperatorQuestionPark
+          && citedPathsAreEphemeral(durableRun.lastErrorMessage ?? '')
+        ) {
+          const resumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'unspecified');
+          if (resumed) {
+            console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (ephemeral-only guard park)`);
             durableRun = this.durableRuns.getRun(id);
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
           }

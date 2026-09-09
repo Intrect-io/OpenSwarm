@@ -3,15 +3,15 @@
 /** Test/runtime outputs are never task source, including on a resumed WIP branch. */
 /**
  * A Python virtualenv directory by name, at any depth: `.venv`, `venv`,
- * `.venv-verify`, `.venv.bak`, `.venv_test`, … The old list named the
+ * `.venv-verify`, `.venv.bak`, `.venv_test`, `.test_venv`, … The old list named the
  * worktree-level `.venv` link and two known siblings by exact string, so a
  * worker's `uv venv .venv_test` (cgf-portal AX-868, 2026-09-02) committed
  * 11,026 interpreter files that the purge then could not see, and the branch
  * failed the publication fence on every attempt after that.
  */
-const VENV_DIR = /(?:^|\/)\.?venv[\w.-]*\//;
-/** The worktree-level link/dir entry itself (`.venv`, `venv`, `.venv-verify`, `.venv.bak`) — never `venv_tools.py`. */
-const VENV_ENTRY = /^\.?venv(?:[\w-]*|\.bak)$/;
+const VENV_DIR = /(?:^|\/)(?:\.?venv[\w.-]*|\.?test_venv)\//;
+/** The worktree-level link/dir entry itself (`.venv`, `venv`, `.test_venv`, `.venv-verify`) — never `venv_tools.py`. */
+const VENV_ENTRY = /^(?:\.?venv(?:[\w-]*|\.bak)|\.?test_venv)$/;
 
 export function isEphemeralWorktreeArtifact(file: string): boolean {
   return VENV_DIR.test(file)
@@ -47,6 +47,26 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     || /(?:^|\/)(?:\.pytest_cache|\.hypothesis|\.mypy_cache|\.ruff_cache|__pycache__|htmlcov)(?:\/|$)/.test(file);
 }
 
+
+const GUARD_PATH_RE = /\[(?:WARNING|CRITICAL|MINOR)\]\s+([^:\s]+):/g;
+const SCOPE_LIST_RE = /outside reserved write scope:\s*(.+)$/m;
+
+/**
+ * True when a pipeline-guard / publication-scope failure only cites
+ * ephemeral paths (`.test_venv/...`, `pytest-local/...`). Those parks are
+ * false positives — the next heartbeat should resume the run.
+ */
+export function citedPathsAreEphemeral(detail: string): boolean {
+  if (!detail) return false;
+  const cited = [...detail.matchAll(GUARD_PATH_RE)].map((match) => match[1]);
+  const scope = detail.match(SCOPE_LIST_RE)?.[1] ?? '';
+  const published = scope
+    ? scope.split(/,\s*/).map((part) => part.trim()).filter(Boolean)
+    : [];
+  const paths = [...cited, ...published];
+  return paths.length > 0 && paths.every((path) => isEphemeralWorktreeArtifact(path));
+}
+
 /** Collapse file paths to the shallowest directory (or file) git can rm -r. */
 export function ephemeralPathspecRoots(files: string[]): string[] {
   const roots: string[] = [];
@@ -61,7 +81,7 @@ export function ephemeralPathspecRoots(files: string[]): string[] {
       pathspec = root;
     } else {
       // One `git rm -r` per virtualenv or pytest basetemp, not one per file.
-      const m = file.match(/^(.*(?:^|\/)pytest-of-[^/]+)/) ?? file.match(/^(.*?(?:^|\/)\.?venv[\w.-]*)\//);
+      const m = file.match(/^(.*(?:^|\/)pytest-of-[^/]+)/) ?? file.match(/^(.*?(?:^|\/)(?:\.?venv[\w.-]*|\.?test_venv))\//);
       if (m) pathspec = m[1];
     }
     if (roots.some((r) => pathspec === r || pathspec.startsWith(`${r}/`))) continue;
