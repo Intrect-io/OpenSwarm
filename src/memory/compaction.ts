@@ -51,52 +51,72 @@ function cosineSimilarity(a: number[], b: number[]): number {
 
 /**
  * Remove duplicate memories based on vector similarity.
- * Deduplicates across the entire batch — uses a stable metadata hash
- * so records from different pages are compared uniformly.
+ *
+ * Records are bucketed in a Map keyed by a stable hash of their non-vector
+ * fields (repo, type, derivedFrom, canonical metadata), so records read on
+ * different pagination pages still land in the same bucket and are compared.
+ * Within a bucket, near-identical vectors (cosine similarity >=
+ * CONSOLIDATION_SIMILARITY) collapse into the single best record (highest
+ * importance, then most recently updated).
  */
 export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
+  // 1. Bucket every record by stable hash BEFORE any merging, so duplicates
+  //    across page boundaries are guaranteed to meet.
+  const buckets = new Map<string, CognitiveMemoryRecord[]>();
+  for (const record of records) {
+    const key = stableHash([
+      record.repo,
+      record.type,
+      record.derivedFrom,
+      stableMetadata(record.metadata),
+    ]);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(record);
+    else buckets.set(key, [record]);
+  }
+
   const unique: CognitiveMemoryRecord[] = [];
   const seen = new Set<string>();
 
-  for (const record of records) {
-    // Skip if exact ID already seen
-    if (seen.has(record.id)) continue;
-
-    // Check similarity with existing unique records
-    let isDuplicate = false;
-    for (const existing of unique) {
+  // 2. Reduce each bucket to its best record, dropping near-duplicates of it.
+  for (const bucket of buckets.values()) {
+    let kept: CognitiveMemoryRecord | null = null;
+    for (const record of bucket) {
+      if (seen.has(record.id)) continue;
       if (
-        record.repo !== existing.repo ||
-        record.type !== existing.type ||
-        record.derivedFrom !== existing.derivedFrom ||
-        stableMetadata(record.metadata) !== stableMetadata(existing.metadata)
+        kept === null ||
+        record.importance > kept.importance ||
+        (record.importance === kept.importance && record.lastUpdated > kept.lastUpdated)
       ) {
-        continue;
-      }
-
-      const similarity = cosineSimilarity(record.vector, existing.vector);
-
-      if (similarity >= CONSOLIDATION_SIMILARITY) {
-        // Keep the one with higher importance or more recent
-        if (record.importance > existing.importance ||
-            record.lastUpdated > existing.lastUpdated) {
-          // Replace existing with current
-          const index = unique.indexOf(existing);
-          unique[index] = record;
-          seen.add(record.id);
-        }
-        isDuplicate = true;
-        break;
+        kept = record;
       }
     }
+    if (kept === null) continue;
+    seen.add(kept.id);
+    unique.push(kept);
 
-    if (!isDuplicate) {
-      unique.push(record);
-      seen.add(record.id);
+    for (const record of bucket) {
+      if (seen.has(record.id) || record.id === kept.id) continue;
+      if (cosineSimilarity(record.vector, kept.vector) >= CONSOLIDATION_SIMILARITY) {
+        seen.add(record.id);
+      }
     }
   }
 
   return unique;
+}
+
+/**
+ * Order-independent hash (FNV-1a over canonical JSON) used as the dedup key.
+ */
+function stableHash(value: unknown): string {
+  const json = stableJson(value);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < json.length; i++) {
+    hash ^= json.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${(hash >>> 0).toString(16)}:${json.length.toString(16)}`;
 }
 
 /**
