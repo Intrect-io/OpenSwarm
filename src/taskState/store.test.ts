@@ -393,6 +393,150 @@ describe('task state store', () => {
     expect(result.resolved).toBe(0);
     expect(result.released).toBe(0);
     expect(getTaskState('AGT-ERR-BLOCKER')?.linearState).toBe('In Review');
+    expect(getTaskState('AGT-ERR-BLOCKER')?.dependencyLookupFailed).toBe(true);
+
+    const retried: string[] = [];
+    const samePass = await reconcileDependencyBlockers({
+      source: { lookupIssueState: async (id) => { retried.push(id); return { ok: false as const, error: 'rate limited' }; } },
+      now: future,
+    });
+    expect(retried).toEqual([]);
+    expect(samePass.lookedUp).toBe(0);
+
+    const afterErrorWindow = await reconcileDependencyBlockers({
+      source: { lookupIssueState: async (id) => { retried.push(id); return { ok: false as const, error: 'rate limited' }; } },
+      now: future + 15 * 60_000,
+    });
+    expect(retried).toEqual(['AGT-ERR-BLOCKER']);
+    expect(afterErrorWindow.lookedUp).toBe(1);
+  });
+
+  it('treats a Canceled blocker as terminal so dependents are not waiting on dead work', () => {
+    // vela 2026-09-09: 20 locally-Canceled STO-* ids were the first
+    // reconcileDependencyBlockers candidates. isResolved ignored Canceled, so
+    // they never left the set and maxLookups never reached AGT-4207 (Done on
+    // Linear, 157th). DecisionEngine gates on getTaskReadiness, which must
+    // agree — otherwise even a perfect reconciler cannot unblock the queue.
+    upsertTaskState('STO-CANCELED', {
+      execution: { status: 'backlog', retryCount: 0 },
+      linearState: 'Canceled',
+    });
+    upsertTaskState('AGT-WAITING', {
+      dependencyIssueIds: ['STO-CANCELED'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const waiting = {
+      id: 'AGT-WAITING', source: 'linear' as const, title: 'waiting', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-WAITING',
+    };
+    expect(getTaskReadiness(waiting).ready).toBe(true);
+    expect(getTaskReadiness(waiting).blockedBy).toEqual([]);
+  });
+
+  it('reconcileDependencyBlockers skips locally-Canceled blockers and looks up a later Done one under maxLookups', async () => {
+    const future = Date.now() + 2 * 60 * 60_000;
+    for (let i = 0; i < 20; i++) {
+      const id = `STO-CANCELED-${String(i).padStart(2, '0')}`;
+      upsertTaskState(id, {
+        execution: { status: 'blocked', retryCount: 0 },
+        linearState: 'Canceled',
+      });
+      upsertTaskState(`DEP-ON-CANCELED-${i}`, {
+        dependencyIssueIds: [id],
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+    }
+    upsertTaskState('AGT-4207', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('AGT-4209', {
+      dependencyIssueIds: ['AGT-4207'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookedUp: string[] = [];
+    const lookupIssueState = async (id: string) => {
+      lookedUp.push(id);
+      if (id === 'AGT-4207') return { ok: true as const, issue: { state: 'Done', stateType: 'completed' } };
+      throw new Error(`should not look up ${id}`);
+    };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+    });
+
+    expect(lookedUp).toEqual(['AGT-4207']);
+    expect(result.eligible).toBe(1);
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect(result.released).toBe(1);
+    expect(getTaskReadiness({
+      id: 'AGT-4209', source: 'linear' as const, title: 'dependent', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4209',
+    }).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers rotates past recently-checked open blockers on the next pass', async () => {
+    const future = Date.now() + 2 * 60 * 60_000;
+    for (let i = 0; i < 20; i++) {
+      const id = `OPEN-${String(i).padStart(2, '0')}`;
+      upsertTaskState(id, {
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+      upsertTaskState(`DEP-ON-OPEN-${i}`, {
+        dependencyIssueIds: [id],
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+    }
+    upsertTaskState('DONE-BLOCKER-ZZZ', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('DEP-ON-DONE', {
+      dependencyIssueIds: ['DONE-BLOCKER-ZZZ'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookedUp: string[] = [];
+    const lookupIssueState = async (id: string) => {
+      lookedUp.push(id);
+      if (id === 'DONE-BLOCKER-ZZZ') return { ok: true as const, issue: { state: 'Done', stateType: 'completed' } };
+      return { ok: true as const, issue: { state: 'Todo', stateType: 'unstarted' } };
+    };
+
+    const first = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+    });
+    expect(first.lookedUp).toBe(20);
+    expect(first.resolved).toBe(0);
+    expect(lookedUp).not.toContain('DONE-BLOCKER-ZZZ');
+
+    lookedUp.length = 0;
+    const second = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+    });
+    expect(lookedUp).toEqual(['DONE-BLOCKER-ZZZ']);
+    expect(second.lookedUp).toBe(1);
+    expect(second.resolved).toBe(1);
+    expect(second.released).toBe(1);
+    expect(getTaskReadiness({
+      id: 'DEP-ON-DONE', source: 'linear' as const, title: 'dependent', priority: 2,
+      createdAt: Date.now(), issueId: 'DEP-ON-DONE',
+    }).ready).toBe(true);
   });
 
   it('reconciles stale in_progress against Linear state (R5)', () => {
@@ -480,6 +624,28 @@ describe('task state store', () => {
     expect(parent?.issueId).toBe('PARENT-1');
     expect(parent?.execution.status).toBe('done');
     expect(parent?.linearState).toBe('Done');
+  });
+
+  it('does not complete a parent when a child is Canceled — that is not Done', () => {
+    upsertTaskState('PARENT-CANCELED-CHILD', {
+      childIssueIds: ['CHILD-DONE', 'CHILD-CANCELED'],
+      execution: { status: 'decomposed', retryCount: 0 },
+      linearState: 'In Progress',
+    });
+    upsertTaskState('CHILD-DONE', {
+      parentIssueId: 'PARENT-CANCELED-CHILD',
+      execution: { status: 'done', retryCount: 0 },
+      linearState: 'Done',
+    });
+    upsertTaskState('CHILD-CANCELED', {
+      parentIssueId: 'PARENT-CANCELED-CHILD',
+      execution: { status: 'backlog', retryCount: 0 },
+      linearState: 'Canceled',
+    });
+
+    expect(completeParentIfChildrenDone('CHILD-DONE')).toBeNull();
+    expect(completeParentIfChildrenDone('CHILD-CANCELED')).toBeNull();
+    expect(getTaskState('PARENT-CANCELED-CHILD')?.execution.status).toBe('decomposed');
   });
 
   it('hydrates canonical state from the latest Linear sync comment', () => {
