@@ -134,8 +134,11 @@ export function calculateOperationCost(document: DocumentNode, options: QueryCos
 }
 
 /**
- * envelop 플러그인: parse 직후 비용을 산정해 상한 초과 쿼리를 validation/execution 전에 거부한다.
- * yoga는 extensions.http.status를 확인해 HTTP 상태 코드를 결정하므로 400을 명시한다.
+ * envelop plugin: computes the cost right after parse and rejects queries over the limit before
+ * validation/execution. The error is injected via `replaceParseResult` instead of thrown: yoga's
+ * catch path (handleRequest -> handleError) re-wraps a thrown GraphQLError and serializes it as 500,
+ * dropping `extensions.http.status`. A parse-result error is a request error, which yoga answers
+ * with 400 while preserving message and extensions.
  */
 export function useQueryCostAnalysis(options: QueryCostOptions = {}): Plugin {
   const maximumCost = options.maximumCost ?? readMaximumCostFromEnv() ?? DEFAULT_QUERY_COST_LIMIT;
@@ -143,20 +146,22 @@ export function useQueryCostAnalysis(options: QueryCostOptions = {}): Plugin {
 
   return {
     onParse() {
-      return ({ result }) => {
+      return ({ result, replaceParseResult }) => {
         if (!result || result instanceof Error) return;
         const cost = calculateOperationCost(result, { fieldCosts });
         if (cost > maximumCost) {
-          throw new GraphQLError(
-            `Query cost ${cost} exceeds the maximum allowed cost of ${maximumCost}.`,
-            {
-              extensions: {
-                code: 'GRAPHQL_COST_LIMIT_EXCEEDED',
-                cost,
-                maximumCost,
-                http: { status: 400 },
+          replaceParseResult(
+            new GraphQLError(
+              `Query cost ${cost} exceeds the maximum allowed cost of ${maximumCost}.`,
+              {
+                extensions: {
+                  code: 'GRAPHQL_COST_LIMIT_EXCEEDED',
+                  cost,
+                  maximumCost,
+                  http: { status: 400 },
+                },
               },
-            },
+            ),
           );
         }
       };
