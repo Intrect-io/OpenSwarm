@@ -37,7 +37,8 @@ export type HubEvent =
   | { type: 'stats'; data: SwarmStats }
   | { type: 'task:queued'; data: { taskId: string; title: string; projectPath: string; issueIdentifier?: string } }
   | { type: 'task:started'; data: { taskId: string; title: string; issueIdentifier?: string } }
-  | { type: 'task:completed'; data: { taskId: string; success: boolean; duration: number } }
+  | { type: 'task:completed'; data: { taskId: string; success: boolean; duration: number }
+      & Record<string, unknown> }
   | { type: 'pipeline:stage'; data: {
       taskId: string;
       stage: string;
@@ -146,6 +147,58 @@ const logBuffer: HubEvent[] = [];
 const stageBuffer: HubEvent[] = [];
 const chatBuffer: HubEvent[] = [];
 
+// --- Retention bounds (AGT-3429) -------------------------------------------
+// A single retained event must never be able to dominate process memory: a
+// worker report, a monitor dump, or a chat transcript can each carry megabytes
+// of attacker- or workload-controlled text. Cap the serialized form of every
+// event BEFORE it is retained in any ring buffer or written to any SSE client.
+
+/** Hard cap on the serialized JSON size of a single retained event (64 KB). */
+const MAX_EVENT_JSON_LENGTH = 64 * 1024;
+/** Marker appended when an event's serialized payload was truncated. */
+const TRUNCATION_MARKER = '…[truncated]';
+
+/**
+ * Return `event` with any oversized string fields shortened so its serialized
+ * JSON form stays under `MAX_EVENT_JSON_LENGTH`. Mutates and returns the same
+ * object: broadcastEvent owns the event at this point (buffers hold the same
+ * reference the SSE write serializes), so one pass bounds replay, snapshot,
+ * and live delivery together.
+ */
+function boundEventPayload(event: HubEvent): HubEvent {
+  if (event.type === 'heartbeat') return event;
+  const data = event.data as Record<string, unknown>;
+  if (!data || typeof data !== 'object') return event;
+
+  const measure = (): number => JSON.stringify(event).length;
+  if (measure() <= MAX_EVENT_JSON_LENGTH) return event;
+
+  // Longest string fields first: truncating the biggest offender is the
+  // cheapest way back under the cap, and repeated passes converge because
+  // each pass removes at least half of one oversized field.
+  const stringFields = Object.entries(data)
+    .filter(([, v]) => typeof v === 'string')
+    .sort((a, b) => (b[1] as string).length - (a[1] as string).length);
+
+  for (const [key, value] of stringFields) {
+    const s = value as string;
+    if (s.length <= TRUNCATION_MARKER.length + 1) continue;
+    data[key] = s.slice(0, Math.max(1, Math.floor(s.length / 2))) + TRUNCATION_MARKER;
+    if (measure() <= MAX_EVENT_JSON_LENGTH) return event;
+  }
+
+  // Still over (many medium strings or huge arrays): drop the bulky
+  // non-scalar collections entirely rather than retain them.
+  for (const key of Object.keys(data)) {
+    const v = data[key];
+    if (Array.isArray(v) || (v !== null && typeof v === 'object')) {
+      delete data[key];
+      if (measure() <= MAX_EVENT_JSON_LENGTH) return event;
+    }
+  }
+  return event;
+}
+
 function pushReplay(event: HubEvent): void {
   if (event.type === 'log') {
     // Keep only recent log lines in replay buffer to avoid bloat
@@ -168,6 +221,8 @@ export function getEventHub(): EventEmitter {
 }
 
 export function broadcastEvent(event: HubEvent): void {
+  // Bound the serialized payload BEFORE retention or delivery (AGT-3429).
+  boundEventPayload(event);
   // Skip replaying heartbeat/stats to avoid noise on reconnect
   if (event.type !== 'heartbeat') {
     pushReplay(event);
@@ -177,7 +232,7 @@ export function broadcastEvent(event: HubEvent): void {
   // changes. task:started/completed drive the retention lifecycle.
   if (event.type === 'log') {
     // The ring and the SSE copy of this line carry the SAME ts AND sequence,
-    // which is what lets a client merge a REST transcript snapshot with lines
+    // which is what lets a client merge a REST snapshot with lines
     // that streamed in while the request was in flight. The sequence — not the
     // millisecond — is the join key: an agent emits several lines per ms.
     // (INT-3402)
@@ -234,6 +289,29 @@ export function broadcastEvent(event: HubEvent): void {
   }
 }
 
+// --- SSE backpressure (AGT-3429) --------------------------------------------
+// res.write() returning false means the socket buffer is full. A consumer that
+// never drains (dead dashboard tab, stalled reader) would otherwise make the
+// hub queue megabytes per client. Track consecutive full writes and evict the
+// client once it exceeds the threshold.
+
+/** Consecutive full-buffer writes tolerated before a client is disconnected. */
+const SSE_BACKPRESSURE_LIMIT = 64;
+/** Hard cap on bytes queued for one client before it is disconnected. */
+const SSE_MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+
+const backpressureCounts = new WeakMap<ServerResponse, number>();
+
+function disconnectClient(res: ServerResponse): void {
+  sseClients.delete(res);
+  backpressureCounts.delete(res);
+  try {
+    res.destroy();
+  } catch {
+    // Already gone.
+  }
+}
+
 export function addSSEClient(res: ServerResponse, skipReplay = false): () => void {
   // Replay buffered events to new client so they see current state
   if (!skipReplay && replayBuffer.length > 0) {
@@ -248,10 +326,12 @@ export function addSSEClient(res: ServerResponse, skipReplay = false): () => voi
     }
   }
   sseClients.add(res);
+  backpressureCounts.set(res, 0);
 
   // Cleanup function that removes client from set
   const cleanup = () => {
     sseClients.delete(res);
+    backpressureCounts.delete(res);
     // Remove the close listener after cleanup to prevent memory leak
     res.removeListener('close', cleanup);
   };

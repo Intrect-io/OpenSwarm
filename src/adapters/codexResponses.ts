@@ -212,6 +212,11 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
   };
 }
 
+/** Hard cap for retained partial-frame data in the SSE buffer (64 KB). */
+const MAX_FRAME_LENGTH = 64 * 1024;
+/** Hard cap on retained parsed SSE events before reduceResponsesEvents (4096). */
+const MAX_RETAINED_EVENTS = 4096;
+
 /** Parse a `data: {json}` SSE line into an event, or null for keep-alives/[DONE]. */
 function parseSseLine(line: string): SseEvent | null {
   const trimmed = line.trim();
@@ -257,6 +262,10 @@ async function consumeResponsesStream(
   const handle = (ev: SseEvent | null) => {
     if (!ev) return;
     events.push(ev);
+    // Enforce hard cap on retained events to prevent memory exhaustion
+    if (events.length > MAX_RETAINED_EVENTS) {
+      events.shift();
+    }
     if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
     if (onReasoning && ev.type === 'response.reasoning_summary_text.delta' && ev.delta) {
       reasoningBuf += ev.delta;
@@ -271,6 +280,10 @@ async function consumeResponsesStream(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    // Enforce hard cap on partial-frame buffer to prevent memory exhaustion
+    if (buffer.length > MAX_FRAME_LENGTH) {
+      buffer = buffer.slice(-MAX_FRAME_LENGTH);
+    }
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) handle(parseSseLine(line));
