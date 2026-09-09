@@ -6,12 +6,11 @@ from datetime import datetime
 from typing import Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field, model_validator, validator
+    from pydantic import BaseModel, ConfigDict, Field
 except ImportError:  # Pydantic v1 compatibility
-    from pydantic import BaseModel, Field, validator
+    from pydantic import BaseModel, Field
 
     ConfigDict = None  # type: ignore[assignment]
-    model_validator = None  # type: ignore[assignment]
 
 
 TaskExecutionStatus = Literal[
@@ -51,26 +50,8 @@ class ExecutionState(AliasModel):
     status: TaskExecutionStatus = "backlog"
     blocked_reason: str | None = Field(default=None, alias="blockedReason")
     retry_count: int = Field(default=0, alias="retryCount")
-    confidence: int | None = Field(default=None, ge=0, le=100)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     last_session_id: str | None = Field(default=None, alias="lastSessionId")
-
-    if model_validator is not None:
-
-        @model_validator(mode="before")
-        @classmethod
-        def _validate_confidence_integer(cls, values: dict) -> dict:
-            conf = values.get("confidence")
-            # Reject bools (subclass of int) and non-integral numbers.
-            if conf is not None and type(conf) is not int:
-                raise ValueError(f"confidence must be an integer, got {type(conf).__name__}")
-            return values
-    else:
-
-        @validator("confidence", pre=True)
-        def _validate_confidence_integer_v1(cls, v):
-            if v is not None and type(v) is not int:
-                raise ValueError(f"confidence must be an integer, got {type(v).__name__}")
-            return v
 
 
 class OpenSwarmTaskState(AliasModel):
@@ -90,3 +71,13 @@ class OpenSwarmTaskState(AliasModel):
     execution: ExecutionState = Field(default_factory=ExecutionState)
     worktree: WorktreeState = Field(default_factory=WorktreeState)
     updated_at: datetime = Field(alias="updatedAt")
+
+    def model_dump(self, **kwargs):
+        """Omit absent optional fields from serialization."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs):
+        """Omit absent optional fields from JSON serialization."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump_json(**kwargs)

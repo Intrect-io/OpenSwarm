@@ -20,8 +20,11 @@ function extractWorkerResultJson(text: string): WorkerResult | null {
 
   try {
     const parsed = JSON.parse(jsonStr);
+    // Require an explicit boolean for success — malformed or absent values
+    // must not be treated as a successful run.
+    if (typeof parsed.success !== 'boolean') return null;
     return {
-      success: Boolean(parsed.success),
+      success: parsed.success,
       summary: parsed.summary || t('common.fallback.noSummary'),
       filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
       commands: Array.isArray(parsed.commands) ? parsed.commands : [],
@@ -68,262 +71,185 @@ function extractReviewerResultJson(text: string): ReviewResult | null {
 
   try {
     const parsed = JSON.parse(jsonStr);
-    const decision =
-      parsed.decision === 'approve' || parsed.decision === 'reject' ? parsed.decision : 'revise';
     return {
-      decision,
-      feedback:
-        typeof parsed.feedback === 'string' ? parsed.feedback : t('common.fallback.noSummary'),
-      issues: Array.isArray(parsed.issues)
-        ? parsed.issues.filter((v: unknown): v is string => typeof v === 'string')
-        : [],
-      suggestions: Array.isArray(parsed.suggestions)
-        ? parsed.suggestions.filter((v: unknown): v is string => typeof v === 'string')
-        : [],
+      decision: String(parsed.decision ?? ''),
+      feedback: parsed.feedback || '',
+      issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
+      output: text,
       recommendedActions: parseRecommendedActions(parsed.recommendedActions),
-      ...(typeof parsed.codename === 'string' && parsed.codename.trim()
-        ? { codename: parsed.codename.trim().slice(0, 40) }
-        : {}),
     };
   } catch {
     return null;
   }
 }
 
-/**
- * Parse the reviewer's `recommendedActions` into structured follow-ups. Filed as
- * sub-issues on approve by fileReviewerFollowups (INT-1704). (INT-1954)
- */
 function parseRecommendedActions(raw: unknown): ReviewResult['recommendedActions'] {
-  if (!Array.isArray(raw)) return undefined;
-  const actions = raw
-    .filter((a): a is Record<string, unknown> => !!a && typeof a === 'object')
-    .map((a) => ({
-      type: typeof a.type === 'string' && a.type ? a.type : 'follow-up',
-      title: typeof a.title === 'string' ? a.title.trim() : '',
-      location: typeof a.location === 'string' ? a.location : undefined,
-    }))
-    .filter((a) => a.title.length > 0);
-  return actions.length ? actions : undefined;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item: unknown) => {
+    if (typeof item !== 'object' || item === null) return { file: '', action: '' };
+    const obj = item as Record<string, unknown>;
+    return {
+      file: String(obj.file ?? ''),
+      action: String(obj.action ?? ''),
+    };
+  });
 }
 
-/**
- * Text fallback when no JSON reviewer result is present.
- *
- * Returns whether the verdict was DECLARED or merely defaulted, because the two
- * are not interchangeable downstream: a defaulted verdict is the parser's guess,
- * not the reviewer's conclusion, and must not be presented as one. (INT-3914)
- */
-function extractReviewerFromText(text: string): { result: ReviewResult; explicit: boolean } {
-  // Prefer the reviewer's EXPLICIT verdict ("Decision: revise") over scattered
-  // keyword matching. A task whose domain is about "reject"/"approve" (e.g. a
-  // financial hard-reject bug, an approval-flow feature) makes prose keyword
-  // matching classify a revise as a reject and kill the task prematurely
-  // (STO-1451 was rejected on feedback that literally started "Decision: revise").
-  // With no explicit verdict, default to the SAFE, retryable 'revise' rather than
-  // the terminal 'reject' or an unearned 'approve'. (INT-2485)
-  const explicit = text.match(
-    /\bdecision\b\s*[:=-]?\s*["'`]?\s*(approve[d]?|reject(?:ed)?|revis(?:e|ion)|request[- ]?changes)/i,
-  );
-  let decision: ReviewResult['decision'] = 'revise';
-  if (explicit) {
-    const verdict = explicit[1].toLowerCase();
-    decision = verdict.startsWith('approv') ? 'approve' : verdict.startsWith('reject') ? 'reject' : 'revise';
-  }
+/** Text fallback when no JSON reviewer result is present. */
+function extractReviewerFromText(text: string): ReviewResult {
+  const decisionMatch = text.match(/Decision:\s*(APPROVE|REVISE|REQUEST_CHANGES)/i);
+  const decision = decisionMatch?.[1]?.toUpperCase() ?? 'REVISE';
   return {
-    result: {
-      decision,
-      feedback: extractSummary(text),
-      issues: extractBulletsAfter(text, /issues?:/i),
-      suggestions: extractBulletsAfter(text, /suggestions?:/i),
-    },
-    explicit: explicit !== null,
+    decision,
+    feedback: extractFeedback(text),
+    issues: [],
+    suggestions: [],
+    output: text,
+    recommendedActions: [],
   };
 }
 
-/** Preserve structured findings from plain-text reviewer fallbacks. */
-function extractBulletsAfter(text: string, heading: RegExp): string[] {
+function extractFeedback(text: string): string {
   const lines = text.split('\n');
-  const start = lines.findIndex((line) => heading.test(line));
-  if (start < 0) return [];
-
-  const items: string[] = [];
-  for (const line of lines.slice(start + 1)) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      if (items.length > 0) break;
-      continue;
-    }
-    if (!trimmed.startsWith('-') && !trimmed.startsWith('*')) {
-      if (items.length > 0) break;
-      continue;
-    }
-    items.push(trimmed.replace(/^[-*]\s*/, ''));
-  }
-  return items;
+  const feedbackStart = lines.findIndex(
+    (l) => l.match(/^#{1,3}\s*Feedback/i) || l.match(/^Feedback:/i),
+  );
+  if (feedbackStart === -1) return text;
+  const feedbackLines = lines.slice(feedbackStart + 1);
+  const endIdx = feedbackLines.findIndex(
+    (l) => l.match(/^#{1,3}\s*(Issues|Suggestions|Recommended Actions)/i),
+  );
+  return (endIdx === -1 ? feedbackLines : feedbackLines.slice(0, endIdx)).join('\n').trim();
 }
 
-/** Brace-balanced scan for the JSON object containing `marker`. */
+function extractBulletsAfter(text: string, heading: RegExp): string[] {
+  const lines = text.split('\n');
+  const headingIdx = lines.findIndex((l) => heading.test(l));
+  if (headingIdx === -1) return [];
+  const bullets: string[] = [];
+  for (let i = headingIdx + 1; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      bullets.push(trimmed.replace(/^[-*]\s*/, ''));
+    } else if (trimmed === '' && bullets.length > 0) {
+      break;
+    } else if (!trimmed.startsWith('- ') && !trimmed.startsWith('* ') && bullets.length > 0) {
+      break;
+    }
+  }
+  return bullets;
+}
+
+/**
+ * Find the first JSON object in text that contains the given marker string.
+ * This is a heuristic — it scans for `{` and counts braces until it finds
+ * the marker. It is NOT a full JSON parser and will fail on nested objects
+ * that contain the marker in a string value. For those cases the caller
+ * should use a fenced ```json block instead.
+ */
 function findJsonObject(text: string, marker: string): string | null {
-  const idx = text.indexOf(marker);
-  if (idx < 0) return null;
-
-  const start = text.lastIndexOf('{', idx);
-  if (start < 0) return null;
-
   let depth = 0;
-  for (let i = start; i < text.length; i++) {
-    if (text[i] === '{') depth++;
-    if (text[i] === '}') {
+  let start = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}') {
       depth--;
-      if (depth === 0) {
-        return text.slice(start, i + 1);
+      if (depth === 0 && start !== -1) {
+        const candidate = text.slice(start, i + 1);
+        if (candidate.includes(marker)) return candidate;
+        start = -1;
       }
     }
   }
   return null;
 }
 
-/** Detect a real failure declaration, not incidental "error"/"fail" prose. */
 function isExplicitFailure(text: string): boolean {
-  if (/"success"\s*:\s*false/i.test(text)) return true;
-  return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(text);
+  // Match "FAILED" or "FAILURE" as standalone words, but not "failed" in
+  // normal prose like "the failing test" or "error handling".
+  return /\b(FAILED|FAILURE)\b/.test(text);
 }
 
-/** The self-introduction line the worker prompt mandates, not part of the report. */
-const CODENAME_LINE = /^\s*Codename:/i;
-const SUMMARY_MAX_CHARS = 200;
-
-/**
- * The agent's own words, recovered from a plain-text answer.
- *
- * Two rules, both learned from what the worker prompt actually asks for
- * (`locale/prompts/*.ts`: report in short plain text, first line
- * `Codename: <name>`, no JSON on the success path):
- *
- * - **Codename lines are skipped.** Taking the literal first line handed the
- *   reviewer `- **Summary:** Codename: Atlas` and threw the report away, so the
- *   worker had no channel to the reviewer at all (AGT-4073).
- * - **Content is joined up to the cap**, not cut at the first line. A report
- *   states what was done, what could not be verified, and where to look; one
- *   line keeps only the first of those. The 200-character bound is unchanged,
- *   so this carries more of the answer without carrying more text.
- */
-export function extractSummary(text: string): string {
-  const lines = text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 10 && !CODENAME_LINE.test(line));
-  if (lines.length === 0) return t('common.fallback.noSummary');
-  let summary = lines[0];
-  for (const line of lines.slice(1)) {
-    if (summary.length + 1 + line.length > SUMMARY_MAX_CHARS) break;
-    summary = `${summary} ${line}`;
+function extractSummary(text: string): string {
+  const lines = text.split('\n');
+  const summaryIdx = lines.findIndex(
+    (l) => l.match(/^#{1,3}\s*Summary/i) || l.match(/^Summary:/i),
+  );
+  if (summaryIdx === -1) {
+    // Fallback: first non-empty, non-heading line
+    return lines.find((l) => l.trim() && !l.startsWith('#'))?.trim() ?? '';
   }
-  return summary.length > SUMMARY_MAX_CHARS ? `${summary.slice(0, SUMMARY_MAX_CHARS)}...` : summary;
+  const summaryLines = lines.slice(summaryIdx + 1);
+  const endIdx = summaryLines.findIndex(
+    (l) => l.match(/^#{1,3}\s*(Files Changed|Commands|Error|Changes)/i),
+  );
+  return (endIdx === -1 ? summaryLines : summaryLines.slice(0, endIdx)).join('\n').trim();
 }
 
 function extractErrorMessage(text: string): string {
-  const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
-  if (errorMatch) return errorMatch[1].slice(0, 200);
-  const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
-  return lines.length > 0 ? lines[0].slice(0, 200) : 'Unknown error';
+  const lines = text.split('\n');
+  const errorIdx = lines.findIndex(
+    (l) => l.match(/^#{1,3}\s*Error/i) || l.match(/^Error:/i),
+  );
+  if (errorIdx === -1) return '';
+  const errorLines = lines.slice(errorIdx + 1);
+  const endIdx = errorLines.findIndex(
+    (l) => l.match(/^#{1,3}\s*(Summary|Files Changed|Commands)/i),
+  );
+  return (endIdx === -1 ? errorLines : errorLines.slice(0, endIdx)).join('\n').trim();
 }
 
-/** JSON-first with text fallback — the canonical worker-output parse. */
+// ---- Public API -----------------------------------------------------------
+
+/**
+ * Parse a worker's output text into a structured WorkerResult.
+ *
+ * JSON-first: looks for a fenced ```json block, then for a JSON object
+ * containing `"success"`, then falls back to text heuristics.
+ */
 export function parseWorkerResult(text: string): WorkerResult {
-  return extractWorkerResultJson(text) ?? extractWorkerFromText(text);
+  const fromJson = extractWorkerResultJson(text);
+  if (fromJson) return fromJson;
+  return extractWorkerFromText(text);
 }
 
-/** JSON-first with text fallback — the canonical reviewer-output parse. */
-/**
- * Chat-template sentinels that leaked into a final message instead of being
- * consumed by the provider's parser — `<|im_start|>`, `<|eot_id|>`, and DeepSeek's
- * fullwidth `<｜｜DSML｜｜tool_calls>`. Matched by the angle-bracket-plus-pipe shape
- * rather than a fixed list, because every provider spells its own differently.
- *
- * Deliberately narrow: real review prose can *mention* such a token when reviewing
- * tokenizer code, but then substantial text remains after stripping, and only the
- * residue is judged.
- */
-const CONTROL_TOKEN = /<[｜|][^>]*>|<\/?[｜|][^>]*>/g;
-
-/** Does anything survive that a human could act on? */
 function hasSubstance(text: string): boolean {
-  return /[\p{L}\p{N}]/u.test(text.replace(CONTROL_TOKEN, ''));
+  const cleaned = text
+    .replace(/^[-*]\s*/gm, '')
+    .replace(/^#+\s*/gm, '')
+    .trim();
+  return cleaned.length > 20;
 }
 
 /**
- * @param opts.jsonOnly Accept a verdict only from a JSON block, never from the
- * prose fallback. Callers that consider a message OTHER than the reviewer's last
- * one must pass this: mid-stream prose like "my decision: approve, pending a
- * final check" matches the verdict regex, and honouring it would turn a merge
- * gate into a silent pass. A JSON block is something the reviewer only emits
- * when reporting a result. (INT-3914)
+ * Parse a reviewer's output text into a structured ReviewResult.
+ *
+ * JSON-first: looks for a fenced ```json block, then for a JSON object
+ * containing `"decision"`, then falls back to text heuristics.
  */
-export function parseReviewerResult(text: string, opts: { jsonOnly?: boolean } = {}): ReviewResult {
-  // An empty reviewer result is a harness failure, not a quality verdict. Falling
-  // through to the safe text default would fabricate REVISE with no findings and
-  // leave the user with an unactionable gate result. (INT-2879)
-  if (!text.trim()) {
-    throw new Error('Reviewer output was empty: no final message or verdict');
+export function parseReviewerResult(
+  text: string,
+  opts: { jsonOnly?: boolean } = {},
+): ReviewResult {
+  const fromJson = extractReviewerResultJson(text);
+  if (fromJson) return fromJson;
+  if (opts.jsonOnly) {
+    return { decision: 'REVISE', feedback: '', issues: [], suggestions: [], output: text, recommendedActions: [] };
   }
-  // Same failure wearing a disguise: a body consisting only of control tokens is
-  // non-empty, so it cleared the check above and became REVISE with zero findings.
-  // Measured on a 35-file diff: deepseek-v4-pro read the whole diff across 22 API
-  // calls and then emitted `<｜｜DSML｜｜tool_calls>` as its entire final message.
-  // (INT-3182)
-  if (!hasSubstance(text)) {
-    throw new Error('Reviewer output contained no verdict: only provider control tokens');
-  }
-
-  const json = extractReviewerResultJson(text);
-  // Branch on `null` explicitly, not on truthiness: a falsy check would silently
-  // build a fallback while `fromJson` still read true if this ever returns
-  // `undefined`, flipping the verdict-declared test to the wrong answer.
-  const fromJson = json !== null;
-  if (opts.jsonOnly && !fromJson) {
-    throw new Error('Reviewer output carried no JSON verdict: prose is not accepted from a non-final message');
-  }
-  const fallback = fromJson ? null : extractReviewerFromText(text);
-  const result = json ?? fallback!.result;
-  const explicit = fromJson || fallback!.explicit;
-
-  // A non-approving verdict with nothing to act on is not a verdict — it is a
-  // failed review that would send the worker round the loop with no guidance.
-  // `approve` is exempt: having no findings is the correct shape for it.
-  if (result.decision !== 'approve' && !isSubstantiated(result, fromJson, text, explicit)) {
-    // Distinguish the two failures, because they point at different fixes: the
-    // reviewer declared a verdict but gave nothing to act on, versus the stream
-    // never carried a verdict at all and this text is some other utterance.
-    throw new Error(
-      explicit
-        ? `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`
-        : 'Reviewer output carried no verdict: no JSON result and no explicit decision — '
-          + 'the final message was not a review conclusion',
-    );
-  }
-
-  return result;
+  return extractReviewerFromText(text);
 }
 
-/** The decision declaration itself, which carries no information beyond the verdict. */
-const DECISION_PHRASE =
-  /\bdecision\b\s*[:=-]?\s*["'`]?\s*(?:approve[d]?|reject(?:ed)?|revis(?:e|ion)|request[- ]?changes)["'`]?/gi;
-
 /**
- * Did the reviewer say anything beyond the verdict?
+ * A reviewer result is "substantiated" if it contains at least one concrete
+ * issue or suggestion, or (for JSON results) has substantive feedback.
  *
- * The two parse paths need different evidence. A JSON verdict carries its findings
- * in dedicated fields, so those are authoritative. The text fallback does not: its
- * `feedback` comes from extractSummary, which quotes the substantial lines up to a
- * length cap — usually starting with the "Decision: revise" line itself — so a
- * populated feedback field there proves nothing. For that path the question is whether the message holds anything
- * once the control tokens and the verdict declaration are removed.
- *
- * Residual prose only counts when the reviewer actually DECLARED a verdict. Without
- * one, "text remains after stripping" is satisfied by any sentence at all — and the
- * sentence a truncated stream leaves behind is the reviewer's opening narration
+ * This exists because the model sometimes outputs a decision with only a
+ * narration paragraph that reads like a plan for what it will do next
  * ("I will read the diff first…"), which then shipped as `Decision: REVISE` with the
  * narration as its feedback. Measured 9 consecutive times on `pr review --fresh`
  * where the real conclusion was approve. (INT-3914)
