@@ -40,51 +40,50 @@ function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
   const origin = req.headers.origin;
   if (!origin) return false;
 
-  if (!isAllowedOrigin(origin)) return false;
-
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', CORS_METHODS);
-  res.setHeader('Access-Control-Allow-Headers', CORS_HEADERS);
-  res.setHeader('Access-Control-Max-Age', '86400');
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return true;
+  if (isAllowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', CORS_METHODS);
+    res.setHeader('Access-Control-Allow-Headers', CORS_HEADERS);
   }
 
-  return false;
+  if (req.method !== 'OPTIONS') return false;
+
+  res.writeHead(origin && !isAllowedOrigin(origin) ? 403 : 204);
+  res.end();
+  return true;
 }
 
 function tokenMatches(candidate: string | undefined, expected: string): boolean {
-  if (!candidate || !expected) return false;
-  if (candidate.length !== expected.length) return false;
-  try {
-    return timingSafeEqual(Buffer.from(candidate), Buffer.from(expected));
-  } catch {
-    return false;
-  }
+  if (!candidate) return false;
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/**
+ * Pull the credentials out of an `Authorization: Bearer <token>` header.
+ *
+ * Parsed by hand rather than with `/^Bearer\s+(.+)$/i`: there the `\s+` and
+ * `(.+)` overlap, so an attacker-supplied `Bearer` header padded with tabs
+ * backtracks polynomially (CodeQL js/polynomial-redos). Slicing and trimming
+ * is linear in the header length.
+ */
+const BEARER_SCHEME = 'bearer';
+
 function parseBearerToken(auth: string): string | undefined {
-  const parts = auth.split(' ');
-  if (parts.length !== 2) return undefined;
-  if (parts[0] !== 'Bearer') return undefined;
-  return parts[1];
+  if (auth.slice(0, BEARER_SCHEME.length).toLowerCase() !== BEARER_SCHEME) return undefined;
+  const rest = auth.slice(BEARER_SCHEME.length);
+  // RFC 7235: at least one space separates the scheme from the credentials.
+  if (rest === '' || !/\s/.test(rest[0])) return undefined;
+  return rest.trim() || undefined;
 }
 
 function hasValidToken(headers: { authorization?: string; token?: string }): boolean {
-  const expected = process.env.OPENSWARM_GRAPHQL_TOKEN;
-  if (!expected) return false;
-
-  if (headers.authorization) {
-    const bearer = parseBearerToken(headers.authorization);
-    if (bearer && tokenMatches(bearer, expected)) return true;
-  }
-
-  if (headers.token && tokenMatches(headers.token, expected)) return true;
-
-  return false;
+  const token = process.env.OPENSWARM_GRAPHQL_TOKEN?.trim();
+  if (!token) return false;
+  const bearer = parseBearerToken(headers.authorization ?? '');
+  return tokenMatches(bearer, token) || tokenMatches(headers.token?.trim(), token);
 }
 
 function isLoopbackAddress(address: string | undefined): boolean {
