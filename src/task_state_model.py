@@ -6,11 +6,15 @@ from datetime import datetime
 from typing import Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field
+    from pydantic import BaseModel, ConfigDict, Field, field_validator
 except ImportError:  # Pydantic v1 compatibility
     from pydantic import BaseModel, Field
 
     ConfigDict = None  # type: ignore[assignment]
+
+    def field_validator(*args, **kwargs):  # type: ignore[no-redef]
+        """No-op shim for Pydantic v1 (validators are not applied)."""
+        return lambda fn: fn
 
 
 TaskExecutionStatus = Literal[
@@ -32,11 +36,23 @@ if ConfigDict is not None:
     class AliasModel(BaseModel):
         model_config = ConfigDict(populate_by_name=True)
 
+        def dump_excluding_absent(self) -> dict:
+            """Serialize with absent (None) optional fields omitted.
+
+            Mirrors the canonical JSON shape where unset optional fields are not
+            emitted, so a round-trip through the default serializer does not
+            introduce spurious nulls that downstream consumers treat as present.
+            """
+            return self.model_dump(exclude_none=True, by_alias=True)
+
 else:
 
     class AliasModel(BaseModel):
         class Config:
             allow_population_by_field_name = True
+
+        def dump_excluding_absent(self) -> dict:
+            return self.dict(exclude_none=True, by_alias=True)
 
 
 class WorktreeState(AliasModel):
@@ -49,9 +65,16 @@ class WorktreeState(AliasModel):
 class ExecutionState(AliasModel):
     status: TaskExecutionStatus = "backlog"
     blocked_reason: str | None = Field(default=None, alias="blockedReason")
-    retry_count: int = Field(default=0, alias="retryCount")
+    retry_count: int = Field(default=0, alias="retryCount", ge=0)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     last_session_id: str | None = Field(default=None, alias="lastSessionId")
+
+    @field_validator("retry_count")
+    @classmethod
+    def _retry_count_nonnegative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("retry_count must be nonnegative")
+        return value
 
 
 class OpenSwarmTaskState(AliasModel):
@@ -66,8 +89,15 @@ class OpenSwarmTaskState(AliasModel):
     dependency_issue_ids: list[str] = Field(default_factory=list, alias="dependencyIssueIds")
     dependency_titles: list[str] = Field(default_factory=list, alias="dependencyTitles")
     file_scope: list[str] = Field(default_factory=list, alias="fileScope")
-    topo_rank: int | None = Field(default=None, alias="topoRank")
+    topo_rank: int | None = Field(default=None, alias="topoRank", ge=0)
     linear_state: str | None = Field(default=None, alias="linearState")
     execution: ExecutionState = Field(default_factory=ExecutionState)
     worktree: WorktreeState = Field(default_factory=WorktreeState)
     updated_at: datetime = Field(alias="updatedAt")
+
+    @field_validator("topo_rank")
+    @classmethod
+    def _topo_rank_nonnegative(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("topo_rank must be nonnegative")
+        return value
