@@ -26,25 +26,24 @@ const CLAUDE_ALIASES = new Set(['sonnet', 'opus', 'haiku']);
 const ADAPTER_DEFAULT_MODEL: Partial<Record<AdapterName, string>> = {
   'codex-responses': 'gpt-5.6-terra',
   codex: 'gpt-5-codex',
-  openrouter: 'deepseek/deepseek-v4-flash',
-  gpt: 'gpt-5.6-terra',
-  local: 'gemma3:4b',
+  openrouter: 'openai/gpt-5',
   claude: 'sonnet',
-  'cc-router': 'gpt-5.6-terra',
+  gpt: 'gpt-5',
+  cursor: 'gpt-5',
+  local: 'gpt-5',
+  lmstudio: 'gpt-5',
+  atlascloud: 'atlascloud/default',
 };
 
-/**
- * Atlas Cloud and OpenRouter both name models "vendor/model", but the vendor
- * slugs are different catalogs (OpenRouter's `z-ai/glm-5.2` vs Atlas's own
- * `zai-org/GLM-4.6`) — so the generic "keep any namespaced id" rule below
- * silently let an OpenRouter-configured model through to Atlas's API, which
- * 400s on every call because the id doesn't exist there. Checked against the
- * curated list first (no I/O), then the on-disk catalog cache `openswarm
- * provider`/listModels() already populates from Atlas's live `/v1/models`.
- */
 function isAtlasCloudModel(id: string): boolean {
+  // Fast path: atlascloud models always start with 'atlascloud/'
+  if (id.startsWith('atlascloud/')) return true;
+  // Fallback: check against the curated model list (may be stale if catalog
+  // has been refreshed, but good enough for a compatibility guard).
   if (ATLASCLOUD_CURATED_MODELS.includes(id)) return true;
-  return readCachedCatalog('atlascloud')?.models.includes(id) ?? false;
+  // Expensive path: consult the live catalog if available.
+  const catalog = readCachedCatalog('atlascloud');
+  return catalog?.models?.some((m: { id: string }) => m.id === id) ?? false;
 }
 
 /**
@@ -90,10 +89,10 @@ export function mapModelForProvider(
   })();
 
   if (accepted === undefined) {
-    const tag = role ? `Role '${role}' ` : '';
+    const tag = role ? `Role ${role} ` : '';
     const replacement = ADAPTER_DEFAULT_MODEL[adapter] ?? 'adapter default';
-    console.warn(
-      `[modelCompat] ${tag}rejected model '${current}' for adapter '${adapter}', falling back to '${replacement}'`,
+    console.log(
+      `[modelCompat] ${tag}model ${current} rejected for ${adapter}, using default ${replacement}`,
     );
   }
 
