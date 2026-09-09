@@ -40,8 +40,8 @@ export async function spawnCli(
   const options: CliRunOptions = strictHumanSurfaceBoundary
     ? { ...requestedOptions, diagnosticsTool: false }
     : requestedOptions;
-  const maxBuffer = options.maxBuffer ?? 10 * 1024 * 1024;
-  const timeout = options.timeoutMs ?? 300000; // 5 minutes default
+  const maxBuffer = options.maxBuffer ?? 32 * 1024 * 1024;
+  const timeout = options.timeoutMs ?? 30000; // 30 seconds default
   // Fail closed before anything runs. `readOnly` is asked for when the input is
   // untrusted, so an adapter that ignores it would hand a full toolset to an
   // agent reading attacker-authored files. Refusing is loud; ignoring is not.
