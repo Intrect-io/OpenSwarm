@@ -7,7 +7,7 @@
 // not deleted because they broke — and three mutations of planCommand.ts that
 // main's suite kills survive without them.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { collectTestCaseDeltas, countTestCases, deletedTestNotice, findDeletedTests } from './deletedTestGuard.js';
 
 const FOUR_CASES = `
@@ -115,9 +115,14 @@ describe('deleted test guard (AGT-4277)', () => {
     expect(finding.files.map(f => f.file)).toEqual(['src/a.test.ts', 'src/gone.test.ts']);
   });
 
-  it('says nothing when the branch shares no history to compare against', async () => {
+  it('says nothing when the branch shares no history — but says THAT, out loud', async () => {
+    // A check that quietly never fires is the failure it exists to catch.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const run = async () => { throw new Error('fatal: no merge base'); };
 
     await expect(collectTestCaseDeltas('origin/HEAD', run)).resolves.toEqual({ files: [], removed: 0 });
+
+    expect(warn.mock.calls.some(c => String(c[0]).includes('skipping the check'))).toBe(true);
+    warn.mockRestore();
   });
 });

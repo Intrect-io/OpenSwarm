@@ -162,6 +162,36 @@ describe('publication review hook (AGT-4278)', () => {
     expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(2);
   });
 
+  it('collapses concurrent reviews of the same draft into one', async () => {
+    // The key goes in before the review, not after, so two callers arriving in
+    // the same tick do not both pay for it.
+    let release: (v: unknown) => void = () => {};
+    reviewPublishedPullRequest.mockImplementation(() => new Promise(r => { release = r; }));
+
+    const h = hook(false);
+    const both = Promise.all([h(ctx), h(ctx)]);
+    // Both callers must actually REACH the mock before it resolves, or the
+    // test would pass on ordering rather than on the dedup.
+    await vi.waitFor(() => expect(reviewPublishedPullRequest).toHaveBeenCalled());
+    release({ success: true, gateRan: true, changesRequested: false });
+    await both;
+
+    expect(reviewPublishedPullRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the next park say what this one could not', async () => {
+    // The notice failing to post is the mirror of the review throwing: a sha
+    // marked done over a PR nobody told anything.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'timeout' });
+    commentOnPR.mockRejectedValueOnce(new Error('403'));
+
+    await hook(false)(ctx);
+    await hook(false)(ctx);
+
+    expect(commentOnPR).toHaveBeenCalledTimes(2);
+  });
+
   it('reviews again when the branch moved on', async () => {
     reviewPublishedPullRequest.mockResolvedValue({ success: false, gateRan: false, error: 'timeout' });
 

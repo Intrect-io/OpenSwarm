@@ -68,7 +68,12 @@ async function noteDeletedTests(prUrl: string, worktreePath: string | undefined)
     const { promisify } = await import('node:util');
     const exec = promisify(execFile);
     const run = async (args: string[]) => (await exec('git', ['-C', worktreePath, ...args])).stdout;
-    const finding = await collectTestCaseDeltas('origin/HEAD', run);
+    // Resolved, not hardcoded (INT-2545): `origin/HEAD` is unset on a repo
+    // added without a clone and stale after a default-branch rename, and this
+    // check failing quietly is this change's own thesis failure.
+    const { resolveBaseRef } = await import('../support/worktreeManager.js');
+    const base = await resolveBaseRef(worktreePath);
+    const finding = await collectTestCaseDeltas(base.ref, run);
     if (finding.removed > 0) await commentOnPR(pr.repo, pr.number, deletedTestNotice(finding));
   } catch (err) {
     console.warn('[Runner] Could not check the change for deleted tests:', err);
@@ -101,6 +106,12 @@ export function buildPublicationReviewHook(
     // and republishes the same PR at the same sha; a cache hit would then
     // finish it `approved` with the objection unaddressed. That is AGT-4270's
     // failure — a verdict nobody acts on — reintroduced.
+    // Before the review, and outside its try, because it depends on nothing the
+    // reviewer produces and must survive a reviewer that times out OR throws.
+    // A timeout is exactly the state PR #580 shipped in. Deterministic: "the
+    // diff removes test cases" is a property of the text.
+    await noteDeletedTests(prUrl, worktreeInfo.worktreePath);
+
     const dedupKey = rollbackOnRejection ? null : `${prUrl}@${headSha}`;
     if (dedupKey) {
       if (reviewedPublications.has(dedupKey)) return;
@@ -120,11 +131,6 @@ export function buildPublicationReviewHook(
       if (dedupKey) reviewedPublications.delete(dedupKey);
       throw err;
     }
-    // Before the verdict, because it does not depend on one and must survive a
-    // reviewer that times out — which is exactly the state PR #580 shipped in.
-    // Deterministic: "the diff removes test cases" is a property of the text.
-    await noteDeletedTests(prUrl, worktreeInfo.worktreePath);
-
     const status = review.success ? 'approved' : review.gateRan ? 'changes requested' : 'did not run';
     broadcastEvent({
       type: 'log',
@@ -150,6 +156,9 @@ export function buildPublicationReviewHook(
         try {
           await commentOnPR(pr.repo, pr.number, couldNotRunNotice(review.error));
         } catch (err) {
+          // Mirror of the throw case: a sha left marked done over a PR nobody
+          // told anything means the next park says nothing either.
+          if (dedupKey) reviewedPublications.delete(dedupKey);
           console.warn('[Runner] Could not post the "review did not run" notice:', err);
         }
       }

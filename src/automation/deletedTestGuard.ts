@@ -99,11 +99,17 @@ export async function collectTestCaseDeltas(
   let base: string;
   try {
     base = (await run(['merge-base', baseRef, 'HEAD'])).trim();
-  } catch {
-    // No shared history to compare against says nothing about deleted tests.
+  } catch (err) {
+    // No shared history says nothing about deleted tests — but say that it did
+    // not run. A check that quietly never fires is the failure it exists to
+    // catch, wearing the check's own badge.
+    console.warn(`[DeletedTests] No merge base with ${baseRef}; skipping the check:`, err);
     return { files: [], removed: 0 };
   }
-  if (!base) return { files: [], removed: 0 };
+  if (!base) {
+    console.warn(`[DeletedTests] Empty merge base with ${baseRef}; skipping the check`);
+    return { files: [], removed: 0 };
+  }
 
   const names = (await run(['diff', '--name-only', `${base}..HEAD`])).split('\n')
     .map(n => n.trim())
