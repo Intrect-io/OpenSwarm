@@ -48,22 +48,28 @@ function readMaximumCostFromEnv(): number | undefined {
 /**
  * 필드 1개의 기본 비용. 뮤테이션 루트의 최상위 필드 중 등록된 비싼 뮤테이션은
  * 실행 대표 비용으로 대체한다. alias는 별개 Field 노드이므로 각각 비용이 부과된다.
+ *
+ * 반환값: { cost, isExpensiveMutation } — isExpensiveMutation이 true면
+ * 하위 selectionSet 비용을 별도로 가산하지 않는다 (대표 비용에 이미 포함).
  */
 function fieldCost(
   node: FieldNode,
   fieldCosts: Record<string, number>,
   inMutationRoot: boolean,
-): number {
+): { cost: number; isExpensiveMutation: boolean } {
   if (inMutationRoot) {
     const mutationCost = fieldCosts[node.name.value];
-    if (mutationCost !== undefined) return mutationCost;
+    if (mutationCost !== undefined) return { cost: mutationCost, isExpensiveMutation: true };
   }
-  return 1;
+  return { cost: 1, isExpensiveMutation: false };
 }
 
 /**
  * selection set의 총비용. FragmentSpread/InlineFragment는 사용 지점에서 확산한다 —
  * 같은 파편을 N번 spread하면 그 안의 리졸버가 N번 실행되므로 비용도 N배로 곱해진다.
+ *
+ * 비싼 뮤테이션(bulkRegisterEntities 등)의 하위 selectionSet({ id } 등)은
+ * 대표 비용에 이미 포함되었으므로 별도로 가산하지 않는다.
  */
 function costOfSelectionSet(
   selectionSet: SelectionSetNode,
@@ -78,9 +84,10 @@ function costOfSelectionSet(
   for (const selection of selectionSet.selections) {
     switch (selection.kind) {
       case 'Field': {
-        cost += fieldCost(selection, fieldCosts, inMutationRoot);
-        if (selection.selectionSet) {
-          // 뮤테이션 루트의 중첩 필드는 CodeEntity 등 하위 타입이므로 루트 가산 대상이 아니다.
+        const { cost: fc, isExpensiveMutation } = fieldCost(selection, fieldCosts, inMutationRoot);
+        cost += fc;
+        // 비싼 뮤테이션의 하위 selectionSet({ id } 등)은 대표 비용에 포함 — 별도 가산 안 함
+        if (!isExpensiveMutation && selection.selectionSet) {
           cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, false, depth + 1);
         }
         break;
@@ -128,6 +135,7 @@ export function calculateOperationCost(document: DocumentNode, options: QueryCos
 
 /**
  * envelop 플러그인: parse 직후 비용을 산정해 상한 초과 쿼리를 validation/execution 전에 거부한다.
+ * yoga는 extensions.http.status를 확인해 HTTP 상태 코드를 결정하므로 400을 명시한다.
  */
 export function useQueryCostAnalysis(options: QueryCostOptions = {}): Plugin {
   const maximumCost = options.maximumCost ?? readMaximumCostFromEnv() ?? DEFAULT_QUERY_COST_LIMIT;
@@ -141,7 +149,14 @@ export function useQueryCostAnalysis(options: QueryCostOptions = {}): Plugin {
         if (cost > maximumCost) {
           throw new GraphQLError(
             `Query cost ${cost} exceeds the maximum allowed cost of ${maximumCost}.`,
-            { extensions: { code: 'GRAPHQL_COST_LIMIT_EXCEEDED', cost, maximumCost } },
+            {
+              extensions: {
+                code: 'GRAPHQL_COST_LIMIT_EXCEEDED',
+                cost,
+                maximumCost,
+                http: { status: 400 },
+              },
+            },
           );
         }
       };
