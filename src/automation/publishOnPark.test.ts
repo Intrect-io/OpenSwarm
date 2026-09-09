@@ -109,6 +109,88 @@ describe('afterPublication hook (per-repository fresh review)', () => {
   });
 });
 
+// Measured 2026-09-10 (AGT-4278): 5 of 5 draft publications carried no reviewer
+// verdict, because this path took no hook at all. Drafts are what runs that
+// STOPPED emit — the least finished work the daemon produces.
+describe('parked publication is reviewed too (AGT-4278)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-1', issueId: 'AGT-1' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-1', title: 'Parked' };
+  const parked = { operatorPark: { code: 'ask_human', reason: 'needs a decision' } };
+
+  it('hands the reviewer the published draft, with the sha it can dedup on', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/42', headSha: 'head-42' });
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    const published = await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(published).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(hook.mock.calls[0][0]).toMatchObject({
+      prUrl: 'https://github.com/o/r/pull/42', headSha: 'head-42',
+    });
+  });
+
+  it('does not review what the lease fence refused to publish', async () => {
+    const durability = {
+      beforePublish: vi.fn(async () => false),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('does not review a publication the durable attach rejected', async () => {
+    // A stale executor's PR exists but is not ours to speak for.
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/43', headSha: 'head-43' });
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => false),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('does not review a publication that never happened', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from'));
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('reports a throwing reviewer as a review failure, not as a failed publication', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/44', headSha: 'head-44' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => { throw new Error('reviewer exploded'); });
+
+    await expect(publishParkedIfNeeded(info, publishable, parked, durability, hook)).resolves.toBe(true);
+
+    const lines = warn.mock.calls.map(c => String(c[0]));
+    expect(lines.some(l => l.includes('Post-publication review failed'))).toBe(true);
+    expect(lines.some(l => l.includes('Could not publish parked work'))).toBe(false);
+  });
+});
+
 describe('approved publish, lease fence rejection (cgf-portal AX-1020, 2026-08-31)', () => {
   // Losing beforePublish did not set failureDetail. pickPipelineFailureDetail
   // then fell back to lastReviewFeedback — a reviewer's APPROVAL text recorded

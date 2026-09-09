@@ -34,7 +34,7 @@ import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishApprovedWork, publishParkedIfNeeded } from './publishOnPark.js';
-import { rollBackReviewedPublication } from './prReviewRollback.js';
+import { buildPublicationReviewHook } from './publicationReviewHook.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
 import { prepareAttemptBranch } from '../support/branchLineage.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
@@ -1201,41 +1201,25 @@ export async function executePipeline(
       result.failureDetail = lifecycleFailure.message;
     }
 
-    const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);
-
     // On by default; a repository turns it off with `publication.freshReview:
     // false` in openswarm.json.
     const freshReview = worktreeInfo ? await loadPublicationFreshReview(worktreeInfo.originalPath) : false;
-    await publishApprovedWork(worktreeInfo, task, result, ctx.durability,
-      freshReview ? async ({ prUrl, worktreeInfo: publishedWorktree }) => {
-        // Loaded on demand: the review pulls in the whole PR processor.
-        const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
-        const review = await reviewPublishedPullRequest({
-          prUrl,
-          projectPath: publishedWorktree.originalPath,
-          roles,
-          securityAudit: ctx.securityAudit,
-        });
-        const status = review.success ? 'approved' : review.gateRan ? 'changes requested' : 'did not run';
-        broadcastEvent({
-          type: 'log',
-          data: { taskId: task.issueId || task.id, stage: 'pr-review', line: `PR-time fresh review ${status}${review.error ? `: ${review.error}` : ''}` },
-        });
-        // A verdict nobody acts on is not a gate. Until AGT-4270 this hook
-        // logged the line above and returned, so a PR the reviewer had just
-        // asked for changes on still finished the run as 'approved' — the
-        // issue closed, the worktree deleted, the PR left sitting there
-        // looking ready to merge.
-        //
-        // Only the reviewer's own objection rolls anything back. `success`
-        // is also false when the review merely broke — no diff, a crashed
-        // processor, or a failure posting the comment AFTER an approval —
-        // and none of those say anything about the code.
-        if (!review.changesRequested) return;
-        await rollBackReviewedPublication({ prUrl, task, result, error: review.error });
-      } : undefined,
-    );
-    if (!parkedPublished) await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability);
+    // A verdict nobody acts on is not a gate (AGT-4270), and a gate that only
+    // half the publications reach is not one either (AGT-4278): drafts get the
+    // same reviewer, minus the rollback they have no use for. Built before the
+    // pre-approve park publish so BOTH park sides are covered — a run parks
+    // either before the approved publish or during it, and the earlier side is
+    // the one that carries the 42-commit outcomes.
+    const reviewHook = (rollbackOnRejection: boolean) => freshReview
+      ? buildPublicationReviewHook({ task, result, roles, securityAudit: ctx.securityAudit, rollbackOnRejection })
+      : undefined;
+
+    const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
+
+    await publishApprovedWork(worktreeInfo, task, result, ctx.durability, reviewHook(true));
+    if (!parkedPublished) {
+      await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
+    }
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');
     return result;
