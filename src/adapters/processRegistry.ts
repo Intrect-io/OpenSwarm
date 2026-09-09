@@ -50,13 +50,13 @@ export function registerProcess(info: ProcessInfo, proc: ChildProcess): void {
     },
   });
 
-  // Track activity from stdout/stderr
-  const updateActivity = () => {
+  // Activity tracking
+  const updateActivity = (): void => {
     const entry = registry.get(info.pid);
-    if (!entry) return;
-    entry.lastActivityAt = Date.now();
+    // Ownership check: only update if this exact identity still owns the PID
+    if (!entry || entry.taskId !== info.taskId || entry.spawnedAt !== info.spawnedAt) return;
 
-    // Throttled broadcast
+    entry.lastActivityAt = Date.now();
     const lastBroadcast = activityThrottle.get(info.pid) ?? 0;
     if (Date.now() - lastBroadcast >= ACTIVITY_THROTTLE_MS) {
       activityThrottle.set(info.pid, Date.now());
@@ -114,19 +114,26 @@ export function getAllProcesses(): ProcessInfo[] {
 }
 
 /**
- * Kill a tracked process.
- * Returns true if the process was found and signalled.
- * When force=true, uses SIGKILL instead of SIGTERM.
+ * Kill a tracked process by PID.
+ * Uses process tree utilities for clean shutdown.
+ * Returns false if the PID is not tracked or the process is already dead.
  */
 export async function killProcess(pid: number, force = false): Promise<boolean> {
-  const proc = processHandles.get(pid);
-  if (!proc) return false;
+  const info = registry.get(pid);
+  if (!info) return false;
+
+  // Ownership check: confirm the entry still belongs to the same identity
+  // before killing. A reused PID would have a different spawnedAt.
+  const current = registry.get(pid);
+  if (!current || current.taskId !== info.taskId || current.spawnedAt !== info.spawnedAt) {
+    return false;
+  }
 
   try {
     if (force) {
-      await terminateCliProcessTree(proc, pid);
+      await terminateCliProcessTree(pid);
     } else {
-      await signalCliProcessTree(proc, pid);
+      await signalCliProcessTree(pid);
     }
     return true;
   } catch {
@@ -137,6 +144,9 @@ export async function killProcess(pid: number, force = false): Promise<boolean> 
 /**
  * Start periodic health checker that removes stale entries
  * where the process handle has already exited.
+ *
+ * Identity-safe: re-reads the registry entry before acting so a reused PID
+ * does not cause this handler to clean up a newer process.
  */
 export function startHealthChecker(intervalMs = 30000): void {
   if (healthCheckTimer) return;
@@ -146,7 +156,12 @@ export function startHealthChecker(intervalMs = 30000): void {
     for (const [pid, info] of registry) {
       const proc = processHandles.get(pid);
       if (!proc) {
-        // Handle missing but no process — treat as stale
+        // Ownership check: re-read the entry to confirm it hasn't been replaced
+        // by a reused PID with a different identity (taskId + spawnedAt).
+        const current = registry.get(pid);
+        if (!current || current.taskId !== info.taskId || current.spawnedAt !== info.spawnedAt) {
+          continue;
+        }
         const durationMs = now - info.spawnedAt;
         registry.delete(pid);
         activityThrottle.delete(pid);
