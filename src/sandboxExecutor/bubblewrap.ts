@@ -14,6 +14,7 @@ import {
   untrackCliProcessTree,
 } from '../adapters/processTree.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
+import { isPrivateWorkspaceFile } from '../support/environmentFiles.js';
 import type { SandboxExecutionResult } from './protocol.js';
 
 export interface WorkspaceIdentity {
@@ -246,16 +247,6 @@ interface FixedSecretMask {
 const SECRET_DIRECTORIES = new Set(['.aws', '.ssh', '.gnupg', '.kube', '.docker']);
 const SKIP_SCAN_DIRECTORIES = new Set(['.git', 'node_modules', '.venv', '.venv-verify', 'venv', 'target', 'dist', 'build']);
 
-function looksSensitiveFile(name: string): boolean {
-  const lower = name.toLowerCase();
-  if (lower === '.env' || (lower.startsWith('.env.')
-      && !['.env.example', '.env.sample', '.env.template'].includes(lower))) return true;
-  if (['.dev.vars', '.envrc', '.npmrc', '.pypirc', '.netrc', 'credentials', 'credentials.json', 'service-account.json',
-    'id_rsa', 'id_ed25519'].includes(lower)) return true;
-  return /\.(?:pem|key|p12|pfx)$/.test(lower)
-    || /(?:credential|service-account|private-key).+\.json$/.test(lower);
-}
-
 export async function discoverWorkspaceSecretMasks(workspace: string, roots: string[]): Promise<SecretMask[]> {
   const masks: SecretMask[] = [];
   const pending = [workspace];
@@ -274,7 +265,7 @@ export async function discoverWorkspaceSecretMasks(workspace: string, roots: str
         continue;
       }
       const sensitiveDirectoryLink = entry.isSymbolicLink() && SECRET_DIRECTORIES.has(entry.name);
-      if (!sensitiveDirectoryLink && !looksSensitiveFile(entry.name)) continue;
+      if (!sensitiveDirectoryLink && !isPrivateWorkspaceFile(entry.name)) continue;
       if (entry.isSymbolicLink()) {
         let target: string;
         try {
