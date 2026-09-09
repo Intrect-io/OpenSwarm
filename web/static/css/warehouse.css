@@ -29,7 +29,8 @@ body.page-warehouse { min-height: 100vh; }
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--border);
 }
-.breadcrumbs { display: flex; align-items: center; gap: var(--space-1); flex: 1; overflow-x: auto; }
+.breadcrumbs { display: flex; align-items: center; gap: var(--space-1); flex: 1; min-width: 0; overflow-x: auto; }
+.breadcrumbs > * { flex-shrink: 0; }
 .breadcrumbs span { color: var(--fg-muted); }
 
 .table-wrap { overflow: auto; min-height: 520px; }
@@ -102,7 +103,10 @@ td.empty { padding: var(--space-12); text-align: center; white-space: normal; }
 .rules strong { color: var(--fg-primary); }
 
 @media (max-width: 860px) {
-  .warehouse-main { grid-template-columns: 1fr; }
-  .upload { order: -1; }
+  .warehouse-main { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); padding: var(--space-3); padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+  .table-wrap { min-height: 240px; }
+  th, td { padding: var(--space-2); }
+  .file-name, .download, .text-button, .breadcrumbs button { min-height: 44px; }
+  .overwrite { min-height: 44px; }
   th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4) { display: none; }
 }

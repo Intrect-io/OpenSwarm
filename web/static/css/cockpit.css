@@ -4,6 +4,7 @@
 
 body.page-cockpit {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: grid;
   grid-template:
@@ -272,5 +273,4 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   body[data-view="issues"] .view-issues { grid-template-columns: minmax(0, 1fr); }
   /* Off-canvas needs a way back on-canvas — the toggle lives in the topbar. */
   .sidebar-toggle { display: inline-flex; }
-  .topbar-nav { display: none; }
 }
