@@ -80,9 +80,9 @@ jobs:
       # runner image does not ship, so without this every verify test reports
       # "OS verification sandbox is unavailable". macOS uses built-in
       # sandbox-exec and needs no install.
-      - name: Install the Linux verification sandbox
+      - uses: ./.github/actions/install-bubblewrap
+      - name: Lift the AppArmor user-namespace restriction
         run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
           # ubuntu-24.04 images restrict unprivileged user namespaces through
           # AppArmor; without lifting it bwrap cannot set up the network
           # namespace and every sandboxed command dies with
@@ -142,10 +142,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-bubblewrap
       - name: Bubblewrap alone must not be assumed sufficient
         run: |
           set -uo pipefail
-          sudo apt-get update && sudo apt-get install -y bubblewrap
           if bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
             echo "::warning::The sandbox now works without lifting the AppArmor restriction — the README's sysctl step may be obsolete on this image"
           else

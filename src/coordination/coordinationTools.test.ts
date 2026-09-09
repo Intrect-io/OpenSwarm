@@ -560,10 +560,20 @@ describe('a wait keeps its process alive until it settles', () => {
     ].join('\n'), 'utf-8');
 
     try {
+      // CI captures the child's stdout through a pipe (no TTY), so chalk leaves
+      // `true` bare; on a developer terminal the same line arrives wrapped in
+      // ANSI colour (e.g. \x1B[33mtrue\x1B[39m) and the bare-substring match
+      // fails. Force colour off in the child so the captured text is identical
+      // in both environments and the assertion tests the behaviour (the wait
+      // settled) rather than how the child rendered it.
       const { stdout } = await run(
         process.execPath,
         [join(process.cwd(), 'node_modules/tsx/dist/cli.mjs'), script],
-        { cwd: process.cwd(), timeout: 60_000 },
+        {
+          cwd: process.cwd(),
+          timeout: 60_000,
+          env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+        },
       );
       // Without the fix the child exits silently and this never appears.
       expect(stdout).toContain('SETTLED [] true');

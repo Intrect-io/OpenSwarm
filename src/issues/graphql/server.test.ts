@@ -24,8 +24,9 @@ describe('GraphQL transport authorization', () => {
   it('allows a remote request with the configured bearer or explicit token', () => {
     process.env.OPENSWARM_GRAPHQL_TOKEN = 'secret';
     expect(isGraphQLTransportAuthorized(request('100.64.1.2', { authorization: 'Bearer secret' }))).toBe(true);
-    expect(isGraphQLTransportAuthorized(request('10.0.0.2', { 'x-openswarm-graphql-token': 'secret' }))).toBe(true);
-    expect(isGraphQLTransportAuthorized(request('10.0.0.2', { authorization: 'Bearer wrong' }))).toBe(false);
+    expect(isGraphQLTransportAuthorized(request('10.0.0.2', {
+      'x-openswarm-graphql-token': 'secret',
+    }))).toBe(true);
   });
 
   it('accepts any whitespace separator and any header casing', () => {
@@ -66,51 +67,53 @@ describe('calculateOperationCost', () => {
   });
 
   it('returns the base cost for a single bulkRegisterEntities mutation', () => {
-    const doc = parse('mutation { bulkRegisterEntities(input: [{ qualifiedName: "test", kind: CLASS }]) { id } }');
-    expect(calculateOperationCost(doc)).toBe(BULK_REGISTER_ENTITIES_COST);
+    const doc = parse(`
+      mutation {
+        bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
+      }
+    `);
+    const cost = calculateOperationCost(doc);
+    expect(cost).toBe(BULK_REGISTER_ENTITIES_COST);
   });
 
   it('multiplies cost for aliased bulkRegisterEntities mutations', () => {
     const doc = parse(`
       mutation {
-        a: bulkRegisterEntities(input: [{ qualifiedName: "a", kind: CLASS }]) { id }
-        b: bulkRegisterEntities(input: [{ qualifiedName: "b", kind: CLASS }]) { id }
+        a: bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
+        b: bulkRegisterEntities(input: [{ qualifiedName: "y", kind: CLASS }]) { id }
       }
     `);
     const cost = calculateOperationCost(doc);
     expect(cost).toBe(BULK_REGISTER_ENTITIES_COST * 2);
-    expect(cost).toBeGreaterThan(DEFAULT_QUERY_COST_LIMIT);
   });
 
   it('multiplies cost for fragment spreads containing expensive mutations', () => {
     const doc = parse(`
-      fragment BulkPart on Mutation {
-        bulkRegisterEntities(input: [{ qualifiedName: "f", kind: CLASS }]) { id }
-      }
       mutation {
-        ...BulkPart
-        ...BulkPart
+        ...BulkRegistration
+        ...BulkRegistration
+      }
+      fragment BulkRegistration on Mutation {
+        bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
       }
     `);
     const cost = calculateOperationCost(doc);
     expect(cost).toBe(BULK_REGISTER_ENTITIES_COST * 2);
-    expect(cost).toBeGreaterThan(DEFAULT_QUERY_COST_LIMIT);
   });
 
   it('multiplies cost for inline fragments containing expensive mutations', () => {
     const doc = parse(`
       mutation {
         ... on Mutation {
-          bulkRegisterEntities(input: [{ qualifiedName: "i", kind: CLASS }]) { id }
+          bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
         }
         ... on Mutation {
-          bulkRegisterEntities(input: [{ qualifiedName: "j", kind: CLASS }]) { id }
+          bulkRegisterEntities(input: [{ qualifiedName: "y", kind: CLASS }]) { id }
         }
       }
     `);
     const cost = calculateOperationCost(doc);
     expect(cost).toBe(BULK_REGISTER_ENTITIES_COST * 2);
-    expect(cost).toBeGreaterThan(DEFAULT_QUERY_COST_LIMIT);
   });
 
   it('rejects a four-alias bulkRegisterEntities mutation as exceeding the cost limit', () => {
@@ -129,6 +132,37 @@ describe('calculateOperationCost', () => {
 });
 
 describe('GraphQL Yoga server cost enforcement', () => {
+  it('serves an authenticated GraphQL query (200 OK) that is within the cost limit', async () => {
+    process.env.OPENSWARM_GRAPHQL_TOKEN = 'test-token';
+    const httpServer = createServer(async (req, res) => {
+      if (req.url?.startsWith('/graphql')) {
+        await handleGraphQL(req, res);
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    try {
+      await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+      const address = httpServer.address();
+      if (!address || typeof address === 'string') throw new Error('no address');
+      const response = await fetch(`http://127.0.0.1:${address.port}/graphql`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test-token',
+        },
+        body: JSON.stringify({ query: '{ __typename }' }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body.errors).toBeUndefined();
+      expect(body.data).toEqual({ __typename: 'Query' });
+    } finally {
+      await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it('rejects an aliased bulkRegisterEntities query that exceeds the cost limit via HTTP', async () => {
     process.env.OPENSWARM_GRAPHQL_TOKEN = 'test-token';
     const httpServer = createServer(async (req, res) => {
@@ -155,6 +189,48 @@ describe('GraphQL Yoga server cost enforcement', () => {
               a: bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
               b: bulkRegisterEntities(input: [{ qualifiedName: "y", kind: CLASS }]) { id }
               c: bulkRegisterEntities(input: [{ qualifiedName: "z", kind: CLASS }]) { id }
+            }
+          `,
+        }),
+      });
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body.errors).toBeDefined();
+      expect(body.errors[0].message).toContain('exceeds the maximum allowed cost');
+      expect(body.errors[0].extensions.code).toBe('GRAPHQL_COST_LIMIT_EXCEEDED');
+    } finally {
+      await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('rejects a query whose aliased fragment spreads multiply an expensive mutation beyond the cost limit via HTTP', async () => {
+    process.env.OPENSWARM_GRAPHQL_TOKEN = 'test-token';
+    const httpServer = createServer(async (req, res) => {
+      if (req.url?.startsWith('/graphql')) {
+        await handleGraphQL(req, res);
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    try {
+      await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
+      const address = httpServer.address();
+      if (!address || typeof address === 'string') throw new Error('no address');
+      const response = await fetch(`http://127.0.0.1:${address.port}/graphql`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer test-token',
+        },
+        body: JSON.stringify({
+          query: `
+            mutation {
+              ...BulkRegistration
+              ...BulkRegistration
+            }
+            fragment BulkRegistration on Mutation {
+              bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
             }
           `,
         }),

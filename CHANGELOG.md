@@ -2,15 +2,42 @@
 
 ## [Unreleased]
 
+
+## 0.24.0 — 2026-09-10
+
+Everything the loop published still had to get past a gate, and three of them
+were not looking. CI failed every pull request for a reason none of them
+caused, the reviewer saw 22% of what shipped, and a store that had been broken
+for nine days was reported once per recall instead of once.
+
+### Fixed
+
+- **One dead apt repository no longer fails every pull request (AGT-4274).** `apt-get update && apt-get install -y bubblewrap` let *any* configured repository gate the sandbox install. The google-chrome repo the runner image ships served a mismatched index, `update` exited non-zero, the `&&` short-circuited, and bubblewrap was never installed — every open PR died seven lines later at `bwrap: command not found`, `Tests` and `Verify sandbox` red on all four while `main` was green. `set -e` does not fire on a non-final command of an AND-OR list, so the step ran past the real cause instead of stopping at it and nothing in the error named apt. `update` failing is now a warning; the **install** is the gate and still fails closed, with `bwrap --version` catching an unpacked-but-unusable binary. The line existed in three places — `ci.yml` Tests, `ci.yml` verify-sandbox, and `release.yml`, so the release publish path carried the same mine — and is now one composite action.
+- **Every publication is reviewed, not 22% of them (AGT-4278).** Of nine published pull requests, two carried a reviewer verdict. Draft publications never reached the gate at all: `publishParkedIfNeeded` opens a draft PR and took no review hook, so the output of runs that *stopped* — the least finished work the daemon emits — was the only thing nobody reviewed. Both park sides now get the same reviewer, without the rollback a draft has no use for. And a review that dies no longer fails open silently: two PRs ended at `openrouter timeout after 300000ms` and were published anyway, leaving an unreviewed PR indistinguishable from a reviewed one. A publication with no verdict now says so on the PR, with the reason. Reviews are deduplicated per PR **and head sha** on the park path only — never on the approved path, where skipping one would disarm the rollback for exactly the changes a reviewer had already rejected.
+- **A change that removes test cases says so on the pull request (AGT-4277).** A loop-authored PR green on all eight checks deleted four passing tests; three mutations of the file they covered survive without them, one of which would dispatch a sub-task the user had explicitly dropped. No gate could see it — the coverage threshold is a repository-wide ratio, so four tests in one file move it by nothing, and the reviewer reads added code. The check is deterministic, notes rather than blocks (renames, merges and genuinely obsolete coverage are legitimate; a gate that refused them would be routed around), and runs before the review so it survives a reviewer that times out or throws.
+- **An unopenable memory store is reported once, not on every recall (AGT-4267).** Seven zero-byte manifests from a single interrupted write made every long-term recall throw; `initDatabase` logged the stack and rethrew, `searchMemorySafe` logged it again, and callers swallowed it — 95 identical stacks in five minutes, none of which said that recall was off. Failures are now tracked by phase (`open` / `embed` / `query`) through one rate limiter, so suppressing one kind cannot hide another; opening the store is memoized, which also removes the racing `createTable` calls a first run made under concurrency; and `searchMemorySafe` returns `DB_INIT_FAILED` rather than `QUERY_FAILED` for a store that never opened, which `repoKnowledge` renders straight into the agent's prompt. Not a latch: the outage was repaired externally and recall returned on the next call. Measured after deployment: 34 init errors per three minutes → 0, and 192 successful recalls in four minutes.
+- **`coordinationTools` test asserts through chalk's colouring (AGT-4153).** Green in CI, red on every developer machine.
+
+
+## 0.23.0 — 2026-09-10
+
+The autonomous loop was shipping pull requests that no LLM had read, and its
+heartbeat was leaving slots idle next to work it was willing to do. This
+release closes both, and puts a bound on the second so the first cannot be
+paid for with churn.
+
 ### Changed
 
-- **Heartbeat fills free slots instead of idling (AGT-4257).** Linear Backlog is a work queue by default (`autonomous.includeBacklog: true`). Parks (`NEEDS_HUMAN`, including unanswered `ask_human`), `RETRY_AT`, and legacy backoff are lifted via `idle_fill` when an enabled project still wants the card. Predicted file-scope overlap no longer `Decision: defer` under `unknownScopeAdmission: admit` (vela default) — worktrees isolate; `serialize` keeps the Codex-era hold.
+- **The published PR gets reviewed, and the verdict counts (AGT-4270).** `publication.freshReview` is now opt-**out** — only an explicit `false` disables it. It had been opt-in while the per-attempt reviewer was switched off in its favour, and no repository ever opted in, so between the two decisions the loop published work no reviewer had seen. When the reviewer asks for changes the publication is undone: the PR returns to draft, the run drops out of `approved`, the worktree is preserved and the task returns to the queue — the commits and the durable record stay, so the next attempt continues rather than starting over. A review that merely *failed* (no diff against the merge base, a crashed processor, a comment that could not be posted after an approval) says nothing about the code and undoes nothing.
+- **A draft pull request is no longer read as delivery (AGT-4270).** `gh pr list` reports a draft's state as `OPEN`, so the reconciler used to recover one as `approved` and close its issue. It now returns the run to the queue instead — provided the tracker card is still live, since re-running work needs a card the heartbeat can see (AGT-4094).
+- **Heartbeat fills free slots instead of idling (AGT-4257).** Linear Backlog is a work queue by default (`autonomous.includeBacklog: true`). Parks (`NEEDS_HUMAN`, including unanswered `ask_human`), `RETRY_AT`, and legacy backoff are lifted via `idle_fill` when an enabled project still wants the card — **bounded by the number of free slots**, so a saturated pool cannot churn its parks the way AGT-4155 did (re-claim, re-execute, re-park, once per cycle, observed at attempt 20). An answered `ask_human` is exempt from that budget: the operator's reply must not queue behind capacity. A terminal run reopens on `Todo` or an explicit dispatch, and on `Backlog` as idle fill — never on `In Progress` or `In Review`, which a human may own or a merge gate may be holding. Predicted file-scope overlap no longer `Decision: defer` under `unknownScopeAdmission: admit` (vela default) — worktrees isolate; `serialize` keeps the Codex-era hold.
 - **Codex-era spawn caps removed (AGT-4255).** `unknownScopeAdmission` defaults to `admit`, per-repo `maxConcurrent` no longer injects 1 or hard-caps at 10, and worker fan-out follows the candidate list.
 
 ### Fixed
 
+- **Concurrent `codex-responses` reviewers no longer queue inside undici (AGT-4220).** `chatgpt.com` negotiates h2, so Node's global `fetch` carried concurrent requests as streams over a couple of connections and the Nth reviewer waited for a stream slot before it was ever written to a socket — `review --max` failed every area at 300 s. A dedicated HTTP/1.1 dispatcher for Codex traffic buys back what a process boundary used to: queue time fell from a 17.30 s median to 0.01 s, and 16 areas at concurrency 16 returned verdicts with no timeouts.
 - **`.test_venv` is ephemeral (AGT-4256).** The venv regex missed dotted test venvs, so a publication/BS guard park idled the pool (AGT-3827). Resume treats those paths as non-human parks.
-
+- **Mobile dashboard navigation and panels (AGT-4238).** Threads no longer forces a 599 px layout viewport, the new-thread form stays inside its container, navigation is reachable on small screens, and the Orchestration panel can be scrolled to its end. Verified across 6 pages × 5 widths × 2 themes in a real browser.
 
 ## 0.22.1 — 2026-09-04
 

@@ -70,10 +70,11 @@ jobs:
       # through AppArmor, which bwrap needs for its network namespace. Same setup
       # as the Tests job in ci.yml — without it the release gate fails on every
       # src/verify test.
-      - name: Install the Linux verification sandbox
+      - uses: ./.github/actions/install-bubblewrap
+        if: steps.ver.outputs.exists == 'false'
+      - name: Lift the AppArmor user-namespace restriction
         if: steps.ver.outputs.exists == 'false'
         run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
 

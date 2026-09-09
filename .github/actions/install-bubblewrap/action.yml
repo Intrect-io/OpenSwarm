@@ -1,0 +1,31 @@
+name: Install bubblewrap
+description: >
+  Install the bubblewrap OS sandbox on an Ubuntu runner, tolerating index
+  failures from apt repositories that have nothing to do with the package.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        # `apt-get update` exits non-zero when ANY configured repository fails,
+        # including third-party ones the runner image ships and we never use.
+        # On 2026-09-09 the google-chrome repository served an index whose hash
+        # did not match, and because the install was chained as
+        # `apt-get update && apt-get install`, bubblewrap was simply never
+        # installed. Every open PR then died seven lines later at
+        # `bwrap: command not found`, with nothing in the error naming apt —
+        # and `set -e` does not fire on a failed AND-OR list, so the step ran on
+        # instead of stopping at the real cause (AGT-4274).
+        #
+        # bubblewrap comes from the Ubuntu archive, whose indexes fetched fine
+        # throughout that outage, so an unrelated repository must not gate it.
+        # The install below is the real gate and still fails closed.
+        if ! sudo apt-get update; then
+          echo "::warning::apt-get update reported an error (usually a third-party repository index); continuing, since the bubblewrap install below is the real gate"
+        fi
+        sudo apt-get install -y bubblewrap
+        # Prove the binary is actually usable rather than merely unpacked, so a
+        # broken install is reported here instead of at the first sandboxed test.
+        bwrap --version
