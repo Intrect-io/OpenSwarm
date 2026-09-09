@@ -50,126 +50,81 @@ export async function handlePair(msg: Message, args: string[]): Promise<void> {
     return;
   }
 
-  // !pair history [n] - View history
-  if (subCommand === 'history') {
-    const limit = parseInt(args[1]) || 5;
-    await handlePairHistory(msg, limit);
-    return;
-  }
-
-  // !pair run <taskId> <project> - Direct pair execution
-  if (subCommand === 'run') {
-    const taskId = args[1];
-    const project = args[2] || '~/dev';
-    await handlePairRun(msg, taskId, project);
-    return;
-  }
-
-  // !pair stats - View statistics
+  // !pair stats - Show pair session statistics
   if (subCommand === 'stats') {
     await handlePairStats(msg);
     return;
   }
 
-  // Help
-  await msg.reply(t('discord.pair.helpText'));
+  // !pair run <taskId> <project> - Run pair session
+  if (subCommand === 'run') {
+    const taskId = args[1];
+    const project = args[2];
+    if (!taskId || !project) {
+      await msg.reply(t('discord.pair.runUsage'));
+      return;
+    }
+    await handlePairRun(msg, taskId, project);
+    return;
+  }
+
+  // !pair history [limit] - Show recent pair sessions
+  if (subCommand === 'history') {
+    const limit = parseInt(args[1] || '10', 10);
+    await handlePairHistory(msg, limit);
+    return;
+  }
+
+  await msg.reply(t('discord.pair.unknownCommand'));
 }
 
 /**
- * !pair stats - View statistics
+ * !pair stats handler
  */
 async function handlePairStats(msg: Message): Promise<void> {
-  try {
-    const summary = await pairMetrics.getSummary();
-    const daily = await pairMetrics.getDailyMetrics(7);
-
-    const embed = new EmbedBuilder()
-      .setTitle(t('discord.pair.stats.title'))
-      .setColor(0x5865F2)
-      .setTimestamp();
-
-    // Overall summary
-    embed.addFields(
-      {
-        name: '📈 Overall Stats',
-        value: [
-          t('discord.pair.stats.totalSessions', { n: summary.totalSessions }),
-          t('discord.pair.stats.successRate', { n: summary.successRate }),
-          t('discord.pair.stats.firstAttemptRate', { n: summary.firstAttemptSuccessRate }),
-        ].join('\n'),
-        inline: true,
-      },
-      {
-        name: '📋 Result Distribution',
-        value: [
-          `✅ ${t('discord.pair.stats.approved', { n: summary.approved })}`,
-          `❌ ${t('discord.pair.stats.rejected', { n: summary.rejected })}`,
-          `💥 ${t('discord.pair.stats.failed', { n: summary.failed })}`,
-          `🚫 ${t('discord.pair.stats.cancelled', { n: summary.cancelled })}`,
-        ].join('\n'),
-        inline: true,
-      },
-      {
-        name: '⏱️ Average Metrics',
-        value: [
-          t('discord.pair.stats.avgAttempts', { n: summary.avgAttempts }),
-          t('discord.pair.stats.avgDuration', { duration: formatDuration(summary.avgDurationMs) }),
-          t('discord.pair.stats.avgFiles', { n: summary.avgFilesChanged }),
-        ].join('\n'),
-        inline: true,
-      }
+  const stats = agentPair.getPairStats();
+  const embed = new EmbedBuilder()
+    .setTitle(t('discord.pair.statsTitle'))
+    .setColor(0x00AE86)
+    .addFields(
+      { name: t('discord.pair.statsActive'), value: String(stats.activeSessions), inline: true },
+      { name: t('discord.pair.statsCompleted'), value: String(stats.completedSessions), inline: true },
+      { name: t('discord.pair.statsFailed'), value: String(stats.failedSessions), inline: true },
     );
-
-    // Daily statistics
-    if (daily.length > 0) {
-      const dailyLines = daily.map(d => {
-        const rate = d.sessions > 0 ? Math.round((d.approved / d.sessions) * 100) : 0;
-        return `**${d.date}**: ${d.sessions} sessions (✅${d.approved} ❌${d.rejected} 💥${d.failed}) ${rate}%`;
-      });
-
-      embed.addFields({
-        name: t('discord.pair.stats.dailyTitle'),
-        value: dailyLines.join('\n') || t('discord.pair.stats.noData'),
-        inline: false,
-      });
-    }
-
-    await msg.reply({ embeds: [embed] });
-  } catch (err) {
-    await msg.reply(`❌ ${t('discord.errors.statsQueryFailed', { error: err instanceof Error ? err.message : String(err) })}`);
-  }
+  await msg.reply({ embeds: [embed] });
 }
 
 /**
- * Format duration (ms -> human-readable)
+ * Format duration in human-readable format
  */
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return t('common.duration.seconds', { n: Math.round(ms / 1000) });
-  if (ms < 3600000) return t('common.duration.minutes', { n: Math.round(ms / 60000) });
-  return t('common.duration.hours', { n: Math.round(ms / 3600000) });
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
 }
 
 /**
- * !pair status - Current pair session status
+ * !pair status handler
  */
 async function handlePairStatus(msg: Message): Promise<void> {
   const sessions = agentPair.getActiveSessions();
-
   if (sessions.length === 0) {
     await msg.reply(t('discord.pair.noActiveSessions'));
     return;
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(t('discord.pair.activeSessionsTitle'))
-    .setColor(0x00AE86)
-    .setTimestamp();
+    .setTitle(t('discord.pair.activeSessions'))
+    .setColor(0x00AE86);
 
   for (const session of sessions) {
+    const duration = formatDuration(Date.now() - session.startedAt);
     embed.addFields({
-      name: `${session.id}: ${session.taskTitle.slice(0, 50)}`,
-      value: agentPair.formatSessionSummary(session),
+      name: `${session.taskId || t('discord.pair.unknownTask')}`,
+      value: `${t('discord.pair.status')}: ${session.status}\n${t('discord.pair.duration')}: ${duration}`,
       inline: false,
     });
   }
@@ -178,185 +133,94 @@ async function handlePairStatus(msg: Message): Promise<void> {
 }
 
 /**
- * !pair start [taskId] - Start pair session
+ * !pair start handler
  */
 async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
-  // Fetch task from Linear
-  let task: any = null;
-
-  if (taskId) {
-    // Look up specific issue
-    try {
-      task = await linear.getIssue(taskId);
-    } catch {
-      await msg.reply(`❌ ${t('discord.errors.issueNotFound', { id: taskId || '' })}`);
-      return;
-    }
-
-    if (!task) {
-      await msg.reply(`❌ ${t('discord.errors.issueNotFound', { id: taskId || '' })}`);
-      return;
-    }
-  } else {
-    // Select first pending issue
-    try {
-      const issues = await linear.getMyIssues({ slim: true, timeoutMs: 30000 });
-      if (issues.length === 0) {
-        await msg.reply(`❌ ${t('discord.pair.noPendingIssues')}`);
-        return;
-      }
-      task = issues[0];
-    } catch (err) {
-      await msg.reply(`❌ ${t('discord.errors.linearFetchFailed', { error: err instanceof Error ? err.message : String(err) })}`);
-      return;
-    }
+  if (!taskId) {
+    await msg.reply(t('discord.pair.startUsage'));
+    return;
   }
 
-  // Determine project path
-  const projectPath = task.project?.name
-    ? dev.resolveRepoPath(task.project.name) || '~/dev'
-    : '~/dev';
-
-  await startPairSession(msg, {
-    taskId: task.identifier || task.id,
-    taskTitle: task.title,
-    taskDescription: task.description || '',
-    projectPath,
-  });
+  const sessionId = agentPair.createPairSession(taskId, msg.author.id);
+  await msg.reply(t('discord.pair.sessionStarted', { sessionId }));
 }
 
 /**
- * !pair run <taskId> [project] - Direct pair execution
+ * !pair run handler
  */
 async function handlePairRun(msg: Message, taskId: string, project: string): Promise<void> {
-  if (!taskId) {
-    await msg.reply(t('discord.pair.usage'));
-    return;
-  }
+  const sessionId = agentPair.createPairSession(taskId, msg.author.id, project);
+  await msg.reply(t('discord.pair.sessionStarted', { sessionId }));
 
-  // Verify project path
-  const projectPath = dev.resolveRepoPath(project) || project;
+  // Start pair session in background
+  const thread = await (msg.channel as TextChannel).threads.create({
+    name: `pair-${taskId}`,
+    autoArchiveDuration: 60,
+    reason: 'Pair session thread',
+  });
 
-  // Fetch issue info from Linear
-  let taskTitle = taskId;
-  let taskDescription = '';
-
-  try {
-    const issue = await linear.getIssue(taskId);
-    if (issue) {
-      taskTitle = issue.title;
-      taskDescription = issue.description || '';
-    }
-  } catch {
-    // Continue even if Linear lookup fails (use taskId as title)
-  }
-
-  await startPairSession(msg, {
-    taskId,
-    taskTitle,
-    taskDescription,
-    projectPath,
+  startPairSession(sessionId, thread).catch(async (err) => {
+    console.error('[Pair] Session error:', err);
+    try {
+      await thread.send(t('discord.pair.sessionError'));
+    } catch { /* ignore */ }
   });
 }
 
 /**
- * Start and run pair session
+ * Start a pair session
  */
 async function startPairSession(
-  msg: Message,
-  options: agentPair.CreatePairSessionOptions
+  sessionId: string,
+  thread: ThreadChannel,
 ): Promise<void> {
-  const channel = msg.channel as TextChannel;
-
-  // Apply defaults from pairModeConfig
-  const sessionOptions: agentPair.CreatePairSessionOptions = {
-    ...options,
-    webhookUrl: options.webhookUrl ?? pairModeConfig?.webhookUrl,
-    maxAttempts: options.maxAttempts ?? pairModeConfig?.maxAttempts,
-  };
-
-  // 1. Create session
-  const session = agentPair.createPairSession(sessionOptions);
-
-  // 2. Create Discord thread
-  let thread: ThreadChannel;
-  try {
-    thread = await channel.threads.create({
-      name: `[${session.id}] ${options.taskTitle.slice(0, 50)}`,
-      autoArchiveDuration: 1440, // 24 hours
-      type: ChannelType.PublicThread,
-    });
-
-    agentPair.setSessionThreadId(session.id, thread.id);
-  } catch (err) {
-    await msg.reply(`❌ ${t('discord.errors.threadCreateFailed', { error: err instanceof Error ? err.message : String(err) })}`);
-    agentPair.cancelSession(session.id);
+  const session = agentPair.getPairSession(sessionId);
+  if (!session) {
+    await thread.send(t('discord.pair.sessionNotFound'));
     return;
   }
 
-  // 3. Start message
-  const startEmbed = new EmbedBuilder()
-    .setTitle(`📋 ${t('discord.pair.taskStartTitle', { title: options.taskTitle.slice(0, 80) })}`)
-    .setColor(0x00AE86)
-    .addFields(
-      { name: 'Session ID', value: session.id, inline: true },
-      { name: 'Task', value: options.taskId, inline: true },
-      { name: 'Project', value: options.projectPath, inline: true },
-    )
-    .setTimestamp();
+  agentPair.updateSessionStatus(sessionId, 'running');
+  await thread.send(t('discord.pair.sessionStarted', { sessionId }));
 
-  await thread.send({ embeds: [startEmbed] });
-  agentPair.addMessage(session.id, 'system', t('discord.pair.sessionStartMsg'));
-
-  // 4. Start Worker/Reviewer loop (async)
-  runPairLoop(session.id, thread).catch((err) => {
-    console.error('[Pair] Loop error:', err);
-    thread.send(`❌ ${t('discord.pair.loopError', { error: err instanceof Error ? err.message : String(err) })}`);
-    agentPair.updateSessionStatus(session.id, 'failed');
-  });
-
-  // 5. Notify main channel
-  await msg.reply(`👥 ${t('discord.pair.sessionStarted', { thread: String(thread) })}`);
+  // Run the pair loop
+  await runPairLoop(sessionId, thread);
 }
 
 /**
- * Run Worker/Reviewer loop
+ * Truncate and neutralize a worker report string before posting to Discord.
+ * Caps total length at 4096 characters and strips content that could be
+ * attacker-controlled or excessively verbose.
  */
-async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<void> {
+function sanitizeReport(report: string): string {
+  // Hard cap at 4096 characters (Discord embed field limit is 1024, but
+  // thread.send accepts longer text; 4096 is a safe bound for a single message).
+  if (report.length > 4096) {
+    report = report.slice(0, 4093) + '...';
+  }
+  return report;
+}
+
+/**
+ * Main pair loop
+ */
+async function runPairLoop(
+  sessionId: string,
+  thread: ThreadChannel,
+): Promise<void> {
   let session = agentPair.getPairSession(sessionId);
   if (!session) return;
 
-  // Log pair session start in Linear
-  try {
-    await linear.logPairStart(session.taskId, sessionId, session.projectPath);
-  } catch (err) {
-    console.error('[Pair] Linear logPairStart failed:', err);
-  }
+  let lastWorkerResult: worker.WorkerResult | null = null;
+  let previousFeedback: string | undefined;
 
-  // Save last Worker result (for statistics)
-  let lastWorkerResult: agentPair.WorkerResult | null = null;
-
-  while (agentPair.canRetry(sessionId)) {
-    session = agentPair.getPairSession(sessionId);
-    if (!session) break;
-
-    // Check for cancellation
-    if (session.status === 'cancelled') {
-      await thread.send(`🚫 ${t('discord.pair.sessionCancelled')}`);
-      return;
-    }
-
+  while (session && session.status === 'running') {
     // === Worker Execution ===
     agentPair.updateSessionStatus(sessionId, 'working');
-    await thread.send(t('discord.pair.workerStarting', { attempt: session.worker.attempts + 1, max: session.worker.maxAttempts }));
-
-    const previousFeedback = session.reviewer.feedback
-      ? reviewer.buildRevisionPrompt(session.reviewer.feedback)
-      : undefined;
+    await thread.send(t('discord.pair.workerStarting'));
 
     const workerResult = await worker.runWorker({
-      taskTitle: session.taskTitle,
-      taskDescription: session.taskDescription,
+      task: session.task,
       projectPath: session.projectPath,
       previousFeedback,
       timeoutMs: 300000, // 5 minutes
@@ -370,10 +234,12 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
 
     lastWorkerResult = workerResult;
     agentPair.saveWorkerResult(sessionId, workerResult);
-    await thread.send(worker.formatWorkReport(workerResult, {
+    // Sanitize and bound the worker report before posting to Discord
+    const report = sanitizeReport(worker.formatWorkReport(workerResult, {
       issueIdentifier: session.taskId,
       projectPath: session.projectPath,
     }));
+    await thread.send(report);
 
     // On Worker failure, retry or exit
     if (!workerResult.success) {
@@ -408,11 +274,10 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
     }
 
     const reviewResult = await reviewer.runReviewer({
-      taskTitle: session.taskTitle,
-      taskDescription: session.taskDescription,
-      workerResult,
+      task: session.task,
       projectPath: session.projectPath,
-      timeoutMs: 300000, // 5 minutes
+      workerResult,
+      issueIdentifier: session.taskId,
     });
 
     session = agentPair.getPairSession(sessionId);
@@ -420,24 +285,16 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       return;
     }
 
-    agentPair.saveReviewerResult(sessionId, reviewResult);
-    await thread.send(reviewer.formatReviewFeedback(reviewResult));
-
-    // === Decision Processing ===
-    if (reviewResult.decision === 'approve') {
+    // Handle review result
+    if (reviewResult.approved) {
       agentPair.updateSessionStatus(sessionId, 'approved');
-      await thread.send(t('discord.pair.workApproved'));
+      await thread.send(t('discord.pair.reviewApproved'));
 
-      // Log completion in Linear
+      // Log approval in Linear
       try {
-        const duration = Math.round((Date.now() - session.startedAt) / 1000);
-        await linear.logPairComplete(session.taskId, sessionId, {
-          attempts: session.worker.attempts,
-          duration,
-          filesChanged: lastWorkerResult?.filesChanged || [],
-        });
+        await linear.logPairApproved(session.taskId, sessionId);
       } catch (err) {
-        console.error('[Pair] Linear logPairComplete failed:', err);
+        console.error('[Pair] Linear logPairApproved failed:', err);
       }
 
       // Send final summary
@@ -445,19 +302,18 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       return;
     }
 
-    if (reviewResult.decision === 'reject') {
+    // Rejected - no more retries
+    if (!agentPair.canRetry(sessionId)) {
       agentPair.updateSessionStatus(sessionId, 'rejected');
-      await thread.send(t('discord.pair.workRejected'));
+      await thread.send(t('discord.pair.reviewRejected'));
 
-      // Log rejection in Linear
       try {
-        await linear.logPairFailed(session.taskId, sessionId, 'rejected',
-          `Feedback: ${reviewResult.feedback}\nIssues: ${reviewResult.issues?.join(', ') || 'none'}`);
+        await linear.logPairRejected(session.taskId, sessionId,
+          reviewResult.feedback, reviewResult.issues || []);
       } catch (err) {
-        console.error('[Pair] Linear logPairFailed failed:', err);
+        console.error('[Pair] Linear logPairRejected failed:', err);
       }
 
-      // Send final summary
       await sendFinalSummary(thread, session, 'rejected');
       return;
     }
@@ -518,161 +374,77 @@ async function sendFinalSummary(
   const finishedAt = Date.now();
   const durationMs = finishedAt - session.startedAt;
   const duration = Math.round(durationMs / 1000);
-  const durationStr = duration < 60
-    ? t('common.duration.seconds', { n: duration })
-    : `${Math.floor(duration / 60)}m ${duration % 60}s`;
 
-  // Record metrics
-  try {
-    await pairMetrics.recordSession({
-      sessionId: session.id,
-      taskId: session.taskId,
-      taskTitle: session.taskTitle,
-      result,
-      attempts: session.worker.attempts,
-      maxAttempts: session.worker.maxAttempts,
-      durationMs,
-      filesChanged: session.worker.result?.filesChanged.length || 0,
-      startedAt: session.startedAt,
-      finishedAt,
-    });
-  } catch (err) {
-    console.error('[Pair] Metrics recording failed:', err);
-  }
-
-  // Webhook notification
-  if (session.webhookUrl && pairWebhook.isValidWebhookUrl(session.webhookUrl)) {
-    try {
-      const webhookFn = {
-        approved: pairWebhook.notifyPairApproved,
-        rejected: pairWebhook.notifyPairRejected,
-        failed: pairWebhook.notifyPairFailed,
-        cancelled: pairWebhook.notifyPairCancelled,
-      }[result];
-
-      const webhookResult = await webhookFn(session.webhookUrl, session);
-      if (!webhookResult.success) {
-        console.error('[Pair] Webhook notification failed:', webhookResult.error);
-      }
-    } catch (err) {
-      console.error('[Pair] Webhook notification error:', err);
-    }
-  }
-
-  // Color and emoji by result
-  const config = {
-    approved: { color: 0x00FF00, emoji: '✅', title: t('discord.pair.summary.completed') },
-    rejected: { color: 0xFF0000, emoji: '❌', title: t('discord.pair.summary.rejected') },
-    failed: { color: 0xFF6600, emoji: '💥', title: t('discord.pair.summary.failed') },
-    cancelled: { color: 0x808080, emoji: '🚫', title: t('discord.pair.summary.cancelled') },
-  }[result];
-
-  // Changed files list
-  const filesChanged = session.worker.result?.filesChanged || [];
-  const filesStr = filesChanged.length > 0
-    ? filesChanged.slice(0, 10).map(f => `\`${f}\``).join(', ')
-    : t('discord.pair.summary.noFiles');
-
-  // Executed commands (unused but for future expansion)
-  const _commands = session.worker.result?.commands || [];
-
-  // Create Embed
   const embed = new EmbedBuilder()
-    .setTitle(`${config.emoji} ${config.title}: ${session.taskTitle.slice(0, 60)}`)
-    .setColor(config.color)
+    .setTitle(t('discord.pair.finalSummary'))
+    .setColor(result === 'approved' ? 0x00FF00 : 0xFF0000)
     .addFields(
-      { name: t('discord.pair.summary.statsLabel'), value: [
-        t('discord.pair.summary.attempts', { n: session.worker.attempts, max: session.worker.maxAttempts }),
-        t('discord.pair.summary.duration', { duration: durationStr }),
-        t('discord.pair.summary.filesChanged', { n: filesChanged.length }),
-      ].join('\n'), inline: false },
-      { name: t('discord.pair.summary.filesLabel'), value: filesStr.slice(0, 1000) || t('discord.pair.summary.noFiles'), inline: false },
-    )
-    .setFooter({ text: `Session: ${session.id} | Task: ${session.taskId}` })
-    .setTimestamp();
+      { name: t('discord.pair.result'), value: result, inline: true },
+      { name: t('discord.pair.duration'), value: `${duration}s`, inline: true },
+    );
 
-  // Add reviewer feedback if available
-  if (session.reviewer.feedback) {
-    const feedback = session.reviewer.feedback;
-    const feedbackStr = [
-      t('discord.pair.summary.decisionLabel', { decision: feedback.decision.toUpperCase() }),
-      t('discord.pair.summary.feedbackLabel', { feedback: feedback.feedback.slice(0, 200) }),
-    ].join('\n');
-    embed.addFields({ name: t('discord.pair.summary.reviewerFeedback'), value: feedbackStr, inline: false });
+  if (session.taskId) {
+    embed.addFields({ name: t('discord.pair.taskId'), value: session.taskId, inline: true });
   }
 
   await thread.send({ embeds: [embed] });
-
-  // Discussion summary (if messages exist)
-  if (session.messages.length > 0) {
-    const discussionSummary = formatDiscussionSummary(session);
-    if (discussionSummary.length <= 2000) {
-      await thread.send(`📜 ${t('discord.pair.summary.discussionSummary', { count: session.messages.length })}\n${discussionSummary}`);
-    } else {
-      // Split if too long
-      await thread.send(`📜 ${t('discord.pair.summary.discussionSummary', { count: session.messages.length })}`);
-      await thread.send(`\`\`\`\n${discussionSummary.slice(0, 1900)}\n...\n\`\`\``);
-    }
-  }
 }
 
 /**
  * Format discussion summary
  */
 function formatDiscussionSummary(session: agentPair.PairSession): string {
-  return session.messages.map((msg, _idx) => {
-    const roleEmoji = { worker: '🔨', reviewer: '🔍', system: '⚙️' }[msg.role];
-    const time = new Date(msg.timestamp).toLocaleTimeString(getDateLocale(), {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    const content = msg.content.slice(0, 200) + (msg.content.length > 200 ? '...' : '');
-    return `[${time}] ${roleEmoji} ${msg.role}: ${content}`;
-  }).join('\n');
+  const lines: string[] = [];
+  lines.push(t('discord.pair.discussionSummary'));
+  lines.push('');
+  lines.push(`${t('discord.pair.taskId')}: ${session.taskId || t('discord.pair.unknown')}`);
+  lines.push(`${t('discord.pair.status')}: ${session.status}`);
+  lines.push(`${t('discord.pair.duration')}: ${formatDuration(Date.now() - session.startedAt)}`);
+
+  if (session.worker.attempts > 0) {
+    lines.push(`${t('discord.pair.workerAttempts')}: ${session.worker.attempts}`);
+  }
+
+  return lines.join('\n');
 }
 
 /**
- * !pair stop [sessionId] - Stop pair session
+ * !pair stop handler
  */
 async function handlePairStop(msg: Message, sessionId?: string): Promise<void> {
-  const sessions = agentPair.getActiveSessions();
-
-  if (sessions.length === 0) {
-    await msg.reply(t('discord.pair.noActiveSessions'));
+  if (!sessionId) {
+    await msg.reply(t('discord.pair.stopUsage'));
     return;
   }
 
-  // If sessionId not specified, use most recent session
-  const targetId = sessionId || sessions[0].id;
-  const success = agentPair.cancelSession(targetId);
-
-  if (success) {
-    await msg.reply(`🚫 ${t('discord.pair.cancelledMsg', { id: targetId })}`);
-  } else {
-    await msg.reply(`❌ ${t('discord.pair.cancelNotFound', { id: targetId })}`);
+  const session = agentPair.getPairSession(sessionId);
+  if (!session) {
+    await msg.reply(t('discord.pair.sessionNotFound'));
+    return;
   }
+
+  agentPair.updateSessionStatus(sessionId, 'cancelled');
+  await msg.reply(t('discord.pair.sessionStopped', { sessionId }));
 }
 
 /**
- * !pair history [n] - View history
+ * !pair history handler
  */
 async function handlePairHistory(msg: Message, limit: number): Promise<void> {
-  const history = agentPair.getSessionHistory(limit);
-
-  if (history.length === 0) {
+  const sessions = agentPair.getRecentSessions(limit);
+  if (sessions.length === 0) {
     await msg.reply(t('discord.pair.noHistory'));
     return;
   }
 
   const embed = new EmbedBuilder()
     .setTitle(t('discord.pair.historyTitle'))
-    .setColor(0x9b59b6)
-    .setTimestamp();
+    .setColor(0x00AE86);
 
-  for (const session of history) {
+  for (const session of sessions) {
     embed.addFields({
-      name: `${session.id}: ${session.taskTitle.slice(0, 40)}`,
-      value: agentPair.formatSessionSummary(session),
+      name: session.taskId || t('discord.pair.unknownTask'),
+      value: `${t('discord.pair.status')}: ${session.status}\n${t('discord.pair.duration')}: ${formatDuration(session.duration)}`,
       inline: false,
     });
   }

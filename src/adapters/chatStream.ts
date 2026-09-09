@@ -73,23 +73,16 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
     if (choice.finish_reason) finishReason = choice.finish_reason;
   }
 
-  const toolCalls: StreamToolCall[] = [...calls.values()].map((c) => ({
-    id: c.id,
-    type: 'function',
-    function: { name: c.name, arguments: c.args },
-  }));
+  const toolCalls: StreamToolCall[] = [];
+  for (const [, c] of calls) {
+    if (c.id && c.name) toolCalls.push({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } });
+  }
 
   return {
-    choices: [
-      {
-        message: {
-          role: 'assistant',
-          content: sawContent ? content : null,
-          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-        },
-        finish_reason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
-      },
-    ],
+    choices: [{
+      message: { role: 'assistant', content: sawContent ? content : null, tool_calls: toolCalls.length > 0 ? toolCalls : undefined },
+      finish_reason: finishReason,
+    }],
     usage,
   };
 }
@@ -109,6 +102,8 @@ function parseChunkLine(line: string): StreamChunk | null {
 
 /** Hard cap for retained partial-frame data in the SSE buffer (64 KB). */
 const MAX_CONTENT_LENGTH = 64 * 1024;
+/** Hard cap on accumulated parsed chunks (1024). */
+const MAX_CHAT_CHUNKS = 1024;
 
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
@@ -125,6 +120,10 @@ export async function consumeChatCompletionsStream(
     if (!c) return;
     const delta = c.choices?.[0]?.delta?.content;
     if (onToken && typeof delta === 'string' && delta) onToken(delta);
+    // Enforce hard cap on retained chunks to prevent memory exhaustion
+    if (chunks.length >= MAX_CHAT_CHUNKS) {
+      chunks.shift();
+    }
     chunks.push(c);
   };
   for (;;) {
