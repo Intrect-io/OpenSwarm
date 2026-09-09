@@ -251,7 +251,7 @@ function generateDetail(session: CodexSession, rawLog?: string): string {
 }
 
 /**
- * Save session to disk
+ * Save session to disk — cross-process atomic via withFileLock
  */
 export async function saveSession(
   session: CodexSession,
@@ -275,18 +275,23 @@ export async function saveSession(
   const summaryPath = join(monthPath, summaryFilename);
   const detailPath = join(CODEX_DIR, '.sessions', detailFilename);
 
-  // Save detailed record first
-  const detailContent = generateDetail(session, rawLog);
-  await atomicWriteFile(detailPath, detailContent);
-  console.log(`[Codex] Saved detail: ${detailPath}`);
+  // Serialize the full save (detail + summary + index) under a cross-process lock
+  // so concurrent saveSession calls from different runners never interleave.
+  const lockPath = join(CODEX_DIR, '.sessions', '.save.lock');
+  await withFileLock(lockPath, async () => {
+    // Save detailed record first
+    const detailContent = generateDetail(session, rawLog);
+    await atomicWriteFile(detailPath, detailContent);
+    console.log(`[Codex] Saved detail: ${detailPath}`);
 
-  // Save summary
-  const summaryContent = generateSummary(session, detailPath);
-  await atomicWriteFile(summaryPath, summaryContent);
-  console.log(`[Codex] Saved summary: ${summaryPath}`);
+    // Save summary
+    const summaryContent = generateSummary(session, detailPath);
+    await atomicWriteFile(summaryPath, summaryContent);
+    console.log(`[Codex] Saved summary: ${summaryPath}`);
 
-  // Update index.md
-  await updateIndex(session, summaryPath);
+    // Update index.md
+    await updateIndex(session, summaryPath);
+  });
 
   return { summaryPath, detailPath };
 }
