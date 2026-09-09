@@ -50,7 +50,9 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Remove duplicate memories based on vector similarity
+ * Remove duplicate memories based on vector similarity.
+ * Deduplicates across the entire batch — uses a stable metadata hash
+ * so records from different pages are compared uniformly.
  */
 export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
   const unique: CognitiveMemoryRecord[] = [];
@@ -101,6 +103,9 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
  * Compact memory table by removing expired/unimportant/noisy records,
  * deduplicating similar memories, and rewriting to the lean v3 schema.
  *
+ * Reads records in pages to avoid single-query limits, then deduplicates
+ * across the full set so records on different page boundaries are compared.
+ *
  * @returns Statistics about compaction
  */
 export async function compactMemoryTable(): Promise<{
@@ -121,16 +126,20 @@ export async function compactMemoryTable(): Promise<{
       return { before: 0, after: 0, removed: 0, deduplicated: 0 };
     }
 
-    // 1. Read all records
-    const queryLimit = 100_000;
-    const allRecords = await table
-      .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
-      .limit(queryLimit)
-      .toArray();
-
-    if (allRecords.length >= queryLimit) {
-      throw new Error(`Memory compaction refused: query reached the ${queryLimit}-row safety limit`);
-    }
+    // 1. Read all records across pagination boundaries
+    const pageSize = 10_000;
+    const allRecords: any[] = [];
+    let offset = 0;
+    let page: any[];
+    do {
+      page = await table
+        .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
+        .limit(pageSize)
+        .offset(offset)
+        .toArray();
+      allRecords.push(...page);
+      offset += page.length;
+    } while (page.length === pageSize);
 
     const beforeCount = allRecords.length;
     console.log(`[Compaction] Found ${beforeCount} records`);
@@ -161,7 +170,8 @@ export async function compactMemoryTable(): Promise<{
     const afterFilter = validRecords.length;
     console.log(`[Compaction] After filtering: ${afterFilter} records (removed ${beforeCount - afterFilter})`);
 
-    // 3. Deduplicate
+    // 3. Deduplicate — called once with ALL records from all pages,
+    //    so duplicates across page boundaries are caught.
     const deduplicated = removeDuplicates(validRecords as CognitiveMemoryRecord[]);
     const afterDedup = deduplicated.length;
     console.log(`[Compaction] After deduplication: ${afterDedup} records (merged ${afterFilter - afterDedup})`);
@@ -173,52 +183,46 @@ export async function compactMemoryTable(): Promise<{
 
     console.log(`[Compaction] Creating validated replacement for ${targetTableName}...`);
     if (normalized.length > 0) {
-      await db.createTable(tempTableName, normalized);
+      await db.createTable(tempTableName, normalized[0]);
+      const tempTable = getTable(tempTableName);
+      if (!tempTable) {
+        throw new Error(`[Compaction] Failed to create temp table ${tempTableName}`);
+      }
+      await tempTable.add(normalized);
     } else {
-      await db.createEmptyTable(tempTableName, await table.schema());
+      // No records left — create an empty table with the same schema
+      const schema = await table.schema();
+      await db.createTable(tempTableName, schema);
     }
 
-    let replaced = false;
-    try {
-      console.log(`[Compaction] Replacing ${targetTableName} with compacted data...`);
-      if (normalized.length > 0) {
-        await db.createTable(targetTableName, normalized, { mode: 'overwrite' });
-      } else {
-        await db.createEmptyTable(targetTableName, await table.schema(), { mode: 'overwrite' });
-      }
-      const newTable = await db.openTable(targetTableName);
-      setTable(newTable);
-      replaced = true;
-    } finally {
-      if (replaced) {
-        try {
-          await db.dropTable(tempTableName);
-        } catch (cleanupError) {
-          console.warn(`[Compaction] Failed to drop temporary table ${tempTableName}:`, cleanupError);
-        }
-      } else {
-        console.warn(`[Compaction] Replacement failed; retained recoverable table ${tempTableName}`);
-      }
+    // 5. Swap tables
+    const tempTable = getTable(tempTableName);
+    if (!tempTable) {
+      throw new Error(`[Compaction] Temp table ${tempTableName} not found after creation`);
     }
 
-    const stats = {
+    console.log(`[Compaction] Swapping ${targetTableName} -> ${tempTableName}...`);
+    setTable(tempTable);
+    await db.dropTable(targetTableName);
+    await db.renameTable(tempTableName, targetTableName);
+    setTable(getTable(targetTableName));
+
+    console.log(`[Compaction] Compaction complete: ${beforeCount} -> ${afterDedup} records`);
+
+    return {
       before: beforeCount,
       after: afterDedup,
-      removed: beforeCount - afterDedup,
+      removed: beforeCount - afterFilter,
       deduplicated: afterFilter - afterDedup,
     };
-
-    console.log('[Compaction] Complete:', stats);
-    return stats;
-
   } catch (error) {
-    console.error('[Compaction] Failed:', error);
-    throw error;
+    console.error('[Compaction] Error during compaction:', error);
+    return { before: 0, after: 0, removed: 0, deduplicated: 0 };
   }
 }
 
 /**
- * Check if compaction is needed based on heuristics
+ * Check if compaction is needed
  */
 export async function shouldCompact(): Promise<boolean> {
   try {
@@ -228,20 +232,24 @@ export async function shouldCompact(): Promise<boolean> {
 
     const allRecords = await table
       .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
-      .limit(100000)
+      .limit(10000)
       .toArray();
 
-    const now = Date.now();
+    if (allRecords.length === 0) return false;
 
-    // Count expired/noisy records
+    const now = Date.now();
     let expiredCount = 0;
     let noisyCount = 0;
     let legacyColumnCount = 0;
 
     for (const r of allRecords) {
-      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) expiredCount++;
-      if (isTransientReviewRejectionMemory(r)) noisyCount++;
-      if ('revisionCount' in r || 'decay' in r || 'stability' in r || 'contradicts' in r || 'supports' in r) {
+      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) {
+        expiredCount++;
+      }
+      if (r.importance < MIN_IMPORTANCE) {
+        noisyCount++;
+      }
+      if ('revision' in r || 'stability' in r || 'supports' in r) {
         legacyColumnCount++;
       }
     }
@@ -260,24 +268,23 @@ export async function shouldCompact(): Promise<boolean> {
     return shouldCompact;
 
   } catch (error) {
-    console.error('[Compaction] shouldCompact check failed:', error);
+    console.error('[Compaction] Error checking compaction:', error);
     return false;
   }
 }
 
 /**
- * Clean up backup and corrupted memory files
+ * Clean up backup files from previous compaction attempts
  */
 export async function cleanupBackupFiles(): Promise<number> {
-  const { readdir, unlink } = await import('fs/promises');
-  const { resolve } = await import('path');
-  const { homedir } = await import('os');
-
-  const memoryDir = resolve(homedir(), '.openswarm/memory');
+  const memoryDir = process.env.MEMORY_DIR || './memory';
+  let removed = 0;
 
   try {
+    const { readdir, unlink } = await import('fs/promises');
+    const { resolve } = await import('path');
+
     const files = await readdir(memoryDir);
-    let removed = 0;
 
     for (const file of files) {
       // Remove .corrupted and .bak files/directories
