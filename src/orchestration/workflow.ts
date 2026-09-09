@@ -7,7 +7,6 @@ import { basename, isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import * as yaml from 'yaml';
-import { z } from 'zod';
 
 // Types & Interfaces
 
@@ -276,9 +275,6 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
  * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
-  // Validate the definition before persisting so an invalid durable record is
-  // never written.
-  validateWorkflow(workflow);
   const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
   await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');
@@ -286,65 +282,13 @@ export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
 }
 
 /**
- * Zod schema for a persisted workflow definition. Validated before write and
- * after load so malformed durable records are never written or resumed.
+ * Load workflow
  */
-const WorkflowConfigSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().optional(),
-  projectPath: z.string().min(1),
-  steps: z.array(z.object({
-    id: z.string().min(1),
-    name: z.string().min(1),
-    prompt: z.string().min(1),
-    dependsOn: z.array(z.string()).optional(),
-    onFailure: z.enum(['rollback', 'retry', 'skip', 'abort', 'notify']).optional(),
-    retryCount: z.number().int().nonnegative().optional(),
-    timeout: z.number().positive().optional(),
-    condition: z.string().optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  })).min(1),
-  onFailure: z.enum(['rollback', 'retry', 'skip', 'abort', 'notify']).optional(),
-  trigger: z.object({
-    schedule: z.string().optional(),
-    onIssueStatus: z.array(z.string()).optional(),
-    manual: z.boolean().optional(),
-  }).optional(),
-  linearIssue: z.string().optional(),
-});
-
-/**
- * Zod schema for persisted workflow execution state. Validated on load so a
- * malformed durable execution record is never resumed.
- */
-const WorkflowExecutionSchema = z.object({
-  workflowId: z.string().min(1),
-  executionId: z.string().min(1),
-  status: z.enum(['running', 'completed', 'failed', 'aborted']),
-  startedAt: z.number(),
-  completedAt: z.number().optional(),
-  stepResults: z.record(z.string(), z.object({
-    stepId: z.string(),
-    status: z.enum(['pending', 'running', 'completed', 'failed', 'skipped']),
-    startedAt: z.number(),
-    completedAt: z.number().optional(),
-    output: z.string().optional(),
-    error: z.string().optional(),
-    changedFiles: z.array(z.string()).optional(),
-  })),
-  checkpoint: z.string().optional(),
-});
-
 export async function loadWorkflow(workflowId: string): Promise<WorkflowConfig | null> {
   try {
     const filePath = storageFilePath(WORKFLOW_DIR, workflowId, '.yaml');
     const content = await fs.readFile(filePath, 'utf-8');
-    const parsed = yaml.parse(content) as WorkflowConfig;
-    // Schema-validate the persisted definition before returning it so a
-    // malformed durable record is never resumed.
-    WorkflowConfigSchema.parse(parsed);
-    return parsed;
+    return yaml.parse(content) as WorkflowConfig;
   } catch {
     return null;
   }
@@ -382,9 +326,6 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
  * Save execution state
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
-  // Validate the execution state before persisting so an invalid durable
-  // record is never written.
-  WorkflowExecutionSchema.parse(execution);
   const filePath = storageFilePath(EXECUTION_DIR, execution.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(execution, null, 2), 'utf-8');
@@ -397,11 +338,7 @@ export async function loadExecution(executionId: string): Promise<WorkflowExecut
   try {
     const filePath = storageFilePath(EXECUTION_DIR, executionId, '.json');
     const content = await fs.readFile(filePath, 'utf-8');
-    const parsed = JSON.parse(content) as WorkflowExecution;
-    // Schema-validate the persisted execution state before returning it so a
-    // malformed durable record is never resumed.
-    WorkflowExecutionSchema.parse(parsed);
-    return parsed;
+    return JSON.parse(content);
   } catch {
     return null;
   }
@@ -495,12 +432,6 @@ export function createReviewPipelineTemplate(projectPath: string, prNumber: stri
  */
 export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-
-  // Schema validation of the persisted record shape (DoD: validate before write).
-  const schemaCheck = WorkflowConfigSchema.safeParse(workflow);
-  if (!schemaCheck.success) {
-    errors.push(...schemaCheck.error.issues.map(i => `${i.path.join('.')}: ${i.message}`));
-  }
 
   // Basic field validation
   if (!workflow.id) errors.push('Workflow ID is required');
