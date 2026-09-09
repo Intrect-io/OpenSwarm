@@ -40,3 +40,30 @@ export function safeIsoDate(value: string | number | Date | undefined): string |
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
+
+/**
+ * Neutralize Discord mention syntax and strip control characters from
+ * externally supplied text. Prevents @everyone, @here, <@id> mention
+ * injection and non-printing control characters.
+ */
+export function sanitizeAndNeutralize(value: string): string {
+  // Strip Discord mention markers: <@id>, <@!id>, <#id>, <@&role>, @everyone, @here
+  let result = value
+    .replace(/@everyone/g, '@\u200Beveryone')
+    .replace(/@here/g, '@\u200Bhere')
+    .replace(/<@!?(\d+)>/g, '<@\u200B$1>')
+    .replace(/<#(\d+)>/g, '<#\u200B$1>')
+    .replace(/<@&(\d+)>/g, '<@&\u200B$1>');
+  // Strip control characters except newline and tab
+  result = result.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+  return result;
+}
+
+/**
+ * Clamp text to a maximum length with an ellipsis suffix, then sanitize.
+ * Suitable for Discord embed fields derived from external input.
+ */
+export function clampAndSanitize(value: string, limit: number): string {
+  const clamped = value.length <= limit ? value : value.slice(0, Math.max(0, limit - 1)) + '\u2026';
+  return sanitizeAndNeutralize(clamped);
+}
