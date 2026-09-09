@@ -9,6 +9,10 @@ import { saveMemory, searchMemorySafe, saveCognitiveMemory, getMemoriesByIds, ha
 import type { SqliteIssueStore } from './sqliteStore.js';
 import type { Issue } from './schema.js';
 import { createHash } from 'node:crypto';
+import { withDeadline } from '../mcp/mcpClient.js';
+
+/** auto-link 메모리 검색 상한(ms) — 검색이 AbortSignal을 무시해도 기한에 정산된다. */
+export const AUTO_LINK_SEARCH_DEADLINE_MS = 10_000;
 
 function digestSource(kind: string, values: string[]): string {
   return `issue-event-digest:${kind}:${createHash('sha256').update(values.join('\0')).digest('hex')}`;
@@ -26,11 +30,22 @@ export async function autoLinkMemories(
   const query = `${issue.title} ${issue.description}`.trim();
   if (query.length < 10) return [];
 
-  const result = await searchMemorySafe(query, {
-    limit: 5,
-    minSimilarity: 0.6,
-    types: ['belief', 'strategy', 'system_pattern', 'constraint', 'decision'],
-  });
+  let result: Awaited<ReturnType<typeof searchMemorySafe>>;
+  try {
+    result = await withDeadline(
+      searchMemorySafe(query, {
+        limit: 5,
+        minSimilarity: 0.6,
+        types: ['belief', 'strategy', 'system_pattern', 'constraint', 'decision'],
+      }),
+      AUTO_LINK_SEARCH_DEADLINE_MS,
+      'autoLinkMemories search',
+    );
+  } catch (err) {
+    // 기한 초과: 검색 결과 없음으로 정산 — 호출자와 스케줄 슬롯이 pending 검색에 묶이지 않는다.
+    if (err instanceof Error && err.message.startsWith('autoLinkMemories search timed out')) return [];
+    throw err;
+  }
 
   if (!result.success || result.memories.length === 0) return [];
 
