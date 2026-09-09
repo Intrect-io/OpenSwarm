@@ -53,12 +53,21 @@ export async function runPlanCommand(
   io.print(`🧭 Planning: ${trimmed}`);
   io.print('   (running the Planner — may take up to ~2 min; requires the claude CLI)');
 
-  const result = await runPlanner({
-    taskTitle: trimmed,
-    taskDescription: trimmed,
-    projectPath,
-    model: opts.model,
-  });
+  let result: Awaited<ReturnType<typeof runPlanner>>;
+  try {
+    result = await runPlanner({
+      taskTitle: trimmed,
+      taskDescription: trimmed,
+      projectPath,
+      model: opts.model,
+    });
+  } catch (err) {
+    // The planner can reject (e.g. RateLimitError, CLI missing) — contain it so
+    // the command surface never surfaces an unhandled promise rejection.
+    const message = err instanceof Error ? err.message : String(err);
+    io.print(`✖ Planner failed: ${message}`);
+    return;
+  }
 
   if (!result.success) {
     io.print(`✖ Planner failed: ${result.error ?? 'unknown error'}`);
