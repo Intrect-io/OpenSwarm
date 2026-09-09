@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Heartbeat fills free slots instead of idling (AGT-4257).** Linear Backlog is a work queue by default (`autonomous.includeBacklog: true`). Parks (`NEEDS_HUMAN`, including unanswered `ask_human`), `RETRY_AT`, and legacy backoff are lifted via `idle_fill` when an enabled project still wants the card. Predicted file-scope overlap no longer `Decision: defer` under `unknownScopeAdmission: admit` (vela default) — worktrees isolate; `serialize` keeps the Codex-era hold.
+- **Codex-era spawn caps removed (AGT-4255).** `unknownScopeAdmission` defaults to `admit`, per-repo `maxConcurrent` no longer injects 1 or hard-caps at 10, and worker fan-out follows the candidate list.
+
+### Fixed
+
+- **`.test_venv` is ephemeral (AGT-4256).** The venv regex missed dotted test venvs, so a publication/BS guard park idled the pool (AGT-3827). Resume treats those paths as non-human parks.
+
+
 ## 0.22.1 — 2026-09-04
 
 ### Changed
