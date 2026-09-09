@@ -32,8 +32,32 @@ interface StreamChunk {
     };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } |
+         { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
+
+export interface ChatUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface RawChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+export function normalizeChatUsage(raw: RawChatUsage): ChatUsage {
+  return {
+    prompt_tokens: raw.prompt_tokens ?? 0,
+    completion_tokens: raw.completion_tokens ?? 0,
+    total_tokens: raw.total_tokens ?? 0,
+  };
+}
+
+// Maximum accumulated content bytes before truncation in reduceChatChunks
+const MAX_ACCUMULATED_CONTENT = 64 * 1024; // 64 KiB
 
 /**
  * Reduce parsed SSE chunks → a chat-completions response. Exported so the
@@ -56,9 +80,15 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
       continue;
     }
     if (delta.content) {
-      content += delta.content;
-      sawContent = true;
-      if (onToken) onToken(delta.content);
+      // Truncate accumulated content at MAX_ACCUMULATED_CONTENT to prevent OOM
+      if (content.length < MAX_ACCUMULATED_CONTENT) {
+        const remaining = MAX_ACCUMULATED_CONTENT - content.length;
+        const portion = delta.content.slice(0, remaining);
+        content += portion;
+        sawContent = true;
+        if (onToken) onToken(portion);
+      }
+      // else: silently drop excess content beyond the cap
     }
     if (delta.tool_calls) {
       for (const tc of delta.tool_calls) {
@@ -89,15 +119,15 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
           content: sawContent ? content : null,
           tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
         },
-        finish_reason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
+        finish_reason: finishReason,
       },
     ],
     usage,
   };
 }
 
-/** Parse one `data: {json}` SSE line into a chunk, or null for [DONE]/keep-alives. */
-function parseChunkLine(line: string): StreamChunk | null {
+/** Parse a single SSE `data: …` line into a StreamChunk, or null for keep-alives/[DONE]. */
+export function parseChunkLine(line: string): StreamChunk | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith('data:')) return null;
   const data = trimmed.slice(5).trim();
@@ -117,26 +147,24 @@ export async function consumeChatCompletionsStream(
   res: Response,
   onToken?: (delta: string) => void,
 ): Promise<ChatCompletionLike> {
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error('chat stream: empty response body');
-
   const chunks: StreamChunk[] = [];
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('chat completions: empty stream body');
+
   const decoder = new TextDecoder();
   let buffer = '';
-  const handle = (c: StreamChunk | null) => {
-    if (!c) return;
-    const delta = c.choices?.[0]?.delta?.content;
-    if (onToken && typeof delta === 'string' && delta) onToken(delta);
-    chunks.push(c);
+
+  const handle = (chunk: StreamChunk | null) => {
+    if (chunk) chunks.push(chunk);
   };
+
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     const decoded = decoder.decode(value, { stream: true });
-    // Guard: if the accumulated buffer already exceeds the limit, discard the
-    // incoming chunk to avoid unbounded growth from a single oversized frame.
+    // If the partial-frame buffer would exceed the cap, flush what we have
+    // and discard the rest of this frame.
     if (buffer.length + decoded.length > MAX_FRAME_SIZE) {
-      // Truncate decoded to fit within MAX_FRAME_SIZE
       const remainingSpace = MAX_FRAME_SIZE - buffer.length;
       const truncated = decoded.slice(0, remainingSpace);
       buffer += truncated;
@@ -146,21 +174,10 @@ export async function consumeChatCompletionsStream(
       for (const line of lines) handle(parseChunkLine(line));
       continue;
     }
-          // Enforce frame size limit
-      if (buffer.length + decoded.length > MAX_FRAME_SIZE) {
-        const remainingSpace = MAX_FRAME_SIZE - buffer.length;
-        const truncated = decoded.slice(0, remainingSpace);
-        buffer += truncated;
-        // Process and flush the buffer immediately
-        const lines = buffer.split('\n');
-        buffer = '';
-        for (const line of lines) handle(parseChunkLine(line));
-        continue;
-      }
-      buffer += decoded;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) handle(parseChunkLine(line));
+    buffer += decoded;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) handle(parseChunkLine(line));
   }
   handle(parseChunkLine(buffer));
 
