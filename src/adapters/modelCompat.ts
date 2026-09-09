@@ -17,6 +17,23 @@ import { readCachedCatalog } from './modelCatalog.js';
 const CLAUDE_ALIASES = new Set(['sonnet', 'opus', 'haiku']);
 
 /**
+ * Synchronous default-model lookup for the discard warning. The real default is
+ * resolved async via the adapter's getDefaultModel() (which may consult a live
+ * catalog), so this is only the static fallback constant each adapter ships
+ * with — enough to tell the operator what a rejected model is being replaced
+ * by. Kept in sync with the adapter modules' exported DEFAULT_MODEL constants.
+ */
+const ADAPTER_DEFAULT_MODEL: Partial<Record<AdapterName, string>> = {
+  'codex-responses': 'gpt-5.6-terra',
+  codex: 'gpt-5-codex',
+  openrouter: 'deepseek/deepseek-v4-flash',
+  gpt: 'gpt-5.6-terra',
+  local: 'gemma3:4b',
+  claude: 'sonnet',
+  'cc-router': 'gpt-5.6-terra',
+};
+
+/**
  * Atlas Cloud and OpenRouter both name models "vendor/model", but the vendor
  * slugs are different catalogs (OpenRouter's `z-ai/glm-5.2` vs Atlas's own
  * `zai-org/GLM-4.6`) — so the generic "keep any namespaced id" rule below
@@ -37,8 +54,8 @@ function isAtlasCloudModel(id: string): boolean {
  * prefixes/aliases.
  *
  * When a model is rejected, logs a warning with the role (if provided),
- * the rejected model id, and the adapter name so the operator can see
- * what happened instead of discovering it silently at runtime.
+ * the rejected model id, the adapter name, and the replacement default so the
+ * operator can see what happened instead of discovering it silently at runtime.
  */
 export function mapModelForProvider(
   adapter: AdapterName,
@@ -74,8 +91,9 @@ export function mapModelForProvider(
 
   if (accepted === undefined) {
     const tag = role ? `Role '${role}' ` : '';
+    const replacement = ADAPTER_DEFAULT_MODEL[adapter] ?? 'adapter default';
     console.warn(
-      `[modelCompat] ${tag}rejected model '${current}' for adapter '${adapter}', falling back to adapter default`,
+      `[modelCompat] ${tag}rejected model '${current}' for adapter '${adapter}', falling back to '${replacement}'`,
     );
   }
 

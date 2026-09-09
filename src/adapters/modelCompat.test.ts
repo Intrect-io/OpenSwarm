@@ -25,7 +25,7 @@ describe('mapModelForProvider', () => {
     expect(mapModelForProvider('claude', 'opus')).toBe('opus');
     expect(mapModelForProvider('claude', 'claude-sonnet-5')).toBe('claude-sonnet-5');
     expect(mapModelForProvider('claude', 'gpt-5.5')).toBeUndefined(); // the INT-2510 leak
-    expect(mapModelForProvider('claude', 'openai/gpt-5')).toBeUndefined(); // config schema default
+    expect(mapModelForProvider('claude', 'openai/gpt-5')).toBeUndefined();
     expect(mapModelForProvider('claude', 'z-ai/glm-5.2')).toBeUndefined(); // OpenRouter escalation
   });
 
@@ -42,7 +42,7 @@ describe('mapModelForProvider', () => {
     expect(mapModelForProvider('cursor', '')).toBeUndefined();
   });
 
- ​it('gpt passes namespaced ids and drops bare ids', () => {
+  it('gpt passes namespaced ids and drops bare ids', () => {
     expect(mapModelForProvider('gpt', 'openai/gpt-5')).toBe('openai/gpt-5');
     expect(mapModelForProvider('gpt', 'gpt-5.5')).toBeUndefined();
   });
@@ -82,6 +82,11 @@ describe('mapModelForProvider', () => {
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("Role 'worker' rejected model 'deepseek/deepseek-v4-flash' for adapter 'codex-responses'"),
       );
+      // The replacement default must be visible so the operator sees what the
+      // rejected model is being replaced by (AGT-4232).
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("falling back to 'gpt-5.6-terra'"),
+      );
       warn.mockRestore();
     });
 
@@ -91,6 +96,9 @@ describe('mapModelForProvider', () => {
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("Role 'decompose' rejected model 'gpt-5.6-terra' for adapter 'openrouter'"),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("falling back to 'deepseek/deepseek-v4-flash'"),
       );
       warn.mockRestore();
     });
