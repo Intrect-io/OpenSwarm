@@ -18,6 +18,7 @@ import {
   hydrateTaskStateFromComments,
   markTaskBacklog,
   planLinearStateReconciliation,
+  reconcileDependencyBlockers,
   resetTaskStateStoreForTests,
   buildLockPayload,
   type OpenSwarmTaskState,
@@ -245,6 +246,153 @@ describe('task state store', () => {
     const ready = getTaskReadiness(task);
     expect(ready.ready).toBe(true);
     expect(ready.blockedBy).toEqual([]);
+  });
+
+  it('reconcileDependencyBlockers releases a task whose blocker finished outside this daemon', async () => {
+    // AGT-4241-class bug (measured live on vela 2026-09-09): a blocker completed
+    // via a path that never called releaseDependentTasks (PR merged, Linear moved
+    // to Done by something other than this daemon's own pipeline). Its local
+    // taskState is stuck at a stale non-terminal status. The blocker also never
+    // appears in a future slim fetch again (Done issues are excluded from it), so
+    // task.blockedBy comes back empty and getTaskReadiness falls back to the
+    // stale dependencyIssueIds forever — this is the only path that can unstick it.
+    // upsertTaskState always stamps updatedAt to the real current time, so
+    // staleness is simulated by advancing the reconciler's `now` instead of
+    // trying to backdate the stored timestamp.
+    upsertTaskState('AGT-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    // Live vela data (AGT-4209/AGT-4208, 2026-09-09): the stuck dependents' own
+    // execution.status was 'todo', not 'blocked' — getTaskReadiness gates on
+    // dependencyIssueIds at read time regardless of the stored status, and only
+    // releaseDependentTasks itself ever writes 'blocked'. The eligibility filter
+    // must therefore cover 'todo' too, not just 'blocked'.
+    upsertTaskState('AGT-DEPENDENT', {
+      dependencyIssueIds: ['AGT-BLOCKER'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async (id: string) => id === 'AGT-BLOCKER'
+      ? { ok: true as const, issue: { state: 'Done', stateType: 'completed' } }
+      : { ok: false as const, error: 'unexpected id' };
+
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState }, now: future });
+
+    expect(result.eligible).toBe(1);
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect(result.released).toBe(1);
+    expect(getTaskState('AGT-BLOCKER')?.linearState).toBe('Done');
+    expect(getTaskState('AGT-DEPENDENT')?.execution.status).toBe('todo');
+
+    const dependentTask = {
+      id: 'AGT-DEPENDENT', source: 'linear' as const, title: 'dependent', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-DEPENDENT',
+    };
+    expect(getTaskReadiness(dependentTask).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers does not touch a task that already moved past todo/ready/blocked', async () => {
+    // Regression for a real finding from independent review: dependencyIssueIds
+    // is never cleared once a task moves on. A task that's already 'done' (or
+    // in_progress/decomposed/...) can still carry a stale, unresolved dependency
+    // entry from long before it finished. Without the execution.status filter,
+    // resolving that leftover dependency would call releaseDependentTasks and
+    // incorrectly reset the already-finished task back to 'todo'.
+    upsertTaskState('AGT-OLD-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('AGT-ALREADY-DONE', {
+      dependencyIssueIds: ['AGT-OLD-BLOCKER'],
+      execution: { status: 'done', retryCount: 0 },
+      linearState: 'Done',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async () => ({ ok: true as const, issue: { state: 'Done', stateType: 'completed' } });
+
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState }, now: future });
+
+    expect(result.eligible).toBe(0);
+    expect(result.lookedUp).toBe(0);
+    expect(result.released).toBe(0);
+    expect(getTaskState('AGT-ALREADY-DONE')?.execution.status).toBe('done');
+    expect(getTaskState('AGT-ALREADY-DONE')?.linearState).toBe('Done');
+  });
+
+  it('reconcileDependencyBlockers skips a dependency still present in the fresh fetch', async () => {
+    upsertTaskState('AGT-STILL-OPEN', {
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    upsertTaskState('AGT-DEPENDENT-2', {
+      dependencyIssueIds: ['AGT-STILL-OPEN'],
+      execution: { status: 'blocked', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async () => {
+      throw new Error('should not be called — dependency is in knownTaskIds');
+    };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      knownTaskIds: new Set(['AGT-STILL-OPEN']),
+      now: future,
+    });
+
+    expect(result.eligible).toBe(0);
+    expect(result.lookedUp).toBe(0);
+    expect(result.released).toBe(0);
+  });
+
+  it('reconcileDependencyBlockers leaves a task blocked when the blocker is not yet stale', async () => {
+    upsertTaskState('AGT-FRESH-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Progress',
+      updatedAt: new Date().toISOString(),
+    });
+    upsertTaskState('AGT-FRESH-DEPENDENT', {
+      dependencyIssueIds: ['AGT-FRESH-BLOCKER'],
+      execution: { status: 'blocked', retryCount: 0 },
+      linearState: 'Todo',
+      updatedAt: new Date().toISOString(),
+    });
+
+    const lookupIssueState = async () => {
+      throw new Error('should not be called — dependent was updated too recently to be stale');
+    };
+
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState } });
+
+    expect(result.eligible).toBe(0);
+    expect(result.lookedUp).toBe(0);
+  });
+
+  it('reconcileDependencyBlockers fails closed when the lookup errors', async () => {
+    upsertTaskState('AGT-ERR-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('AGT-ERR-DEPENDENT', {
+      dependencyIssueIds: ['AGT-ERR-BLOCKER'],
+      execution: { status: 'blocked', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async () => ({ ok: false as const, error: 'rate limited' });
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState }, now: future });
+
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(0);
+    expect(result.released).toBe(0);
+    expect(getTaskState('AGT-ERR-BLOCKER')?.linearState).toBe('In Review');
   });
 
   it('reconciles stale in_progress against Linear state (R5)', () => {

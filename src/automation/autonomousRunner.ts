@@ -58,7 +58,7 @@ import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol
 import { decideExplicitReadmission } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
-import { getTaskState, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
+import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { setAutomationDbPath } from './automationDbPath.js';
 import {
   findPullRequestForBranch,
@@ -2406,6 +2406,18 @@ export class AutonomousRunner {
       });
       if (trackerReconcile.lookedUp > 0 || trackerReconcile.fromFetch > 0) {
         this.syslog(`✓ Tracker cache: ${trackerReconcile.fromFetch} bulk hit(s), ${trackerReconcile.lookedUp} explicit lookup(s), ${trackerReconcile.terminal} terminal ledger row(s) reconciled`);
+      }
+      const knownTaskIds = new Set<string>();
+      for (const t of tasks) {
+        if (t.issueId) knownTaskIds.add(t.issueId);
+        if (t.id) knownTaskIds.add(t.id);
+      }
+      const depReconcile = await reconcileDependencyBlockers({
+        source: getTaskSource(),
+        knownTaskIds,
+      });
+      if (depReconcile.lookedUp > 0) {
+        this.syslog(`✓ Dependency cache: ${depReconcile.lookedUp} explicit lookup(s), ${depReconcile.resolved} blocker(s) confirmed done, ${depReconcile.released} dependent task(s) released`);
       }
       if (this.stopping) return;
       if (tasks.length === 0) {
