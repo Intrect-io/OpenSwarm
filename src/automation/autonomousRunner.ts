@@ -1586,14 +1586,25 @@ export class AutonomousRunner {
             this.durableRuns.markNeedsHuman(run.issueId, `Published PR was closed without merge: ${pr.url}`);
             continue;
           }
-          // A draft is the branch saying it is not finished — either the run
-          // parked and published for visibility, or the PR-time review
-          // rejected it and moved it back (AGT-4270). Recovering it as
-          // 'approved' would close the issue on work nobody accepted, and the
-          // draft flag means no human is prompted to look either. Send it back
-          // to be worked; the commits stay on the branch, so the next attempt
-          // continues instead of starting over.
+          // A draft is the branch saying it is not finished — the run parked
+          // and published for visibility, a sibling PR already closes the
+          // issue (INT-2544), or the PR-time review rejected it and moved it
+          // back (AGT-4270). Recovering any of those as 'approved' would
+          // close the issue on work nobody accepted, and the draft flag means
+          // no human is prompted to look either. Send it back to be worked;
+          // the commits stay on the branch, so the next attempt continues
+          // instead of starting over.
+          //
+          // Unlike the recovery below, this RE-RUNS work, so it needs the
+          // live tracker card the note at the top of this loop describes: an
+          // issue that already reached Done is invisible to the heartbeat
+          // fetch, and re-queueing one would pay a whole worker attempt for a
+          // card nobody can see. (AGT-4094)
           if (pr.isDraft) {
+            if (!task) {
+              console.warn(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) but no live tracker card — leaving it for the terminal-run reconciler`);
+              continue;
+            }
             if (this.durableRuns.markReady(run.issueId)) {
               console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) — returned to the queue rather than completed`);
             }

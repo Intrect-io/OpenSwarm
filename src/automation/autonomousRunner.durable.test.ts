@@ -437,10 +437,21 @@ esac
     });
     internal.executePipeline = vi.fn(async () => resultFixture());
 
+    const draftedTask: TaskItem = {
+      id: 'drafted', issueId: 'drafted', issueIdentifier: 'INT-92', source: 'linear',
+      title: 'rejected at PR time', priority: 2, createdAt: Date.now(), linearState: 'In Progress',
+      linearProject: { id: 'project', name: 'Repo' },
+    };
     const previousPath = process.env.PATH;
     process.env.PATH = `${bin}:${previousPath}`;
     try {
+      // No live card: re-queueing would pay a worker attempt for an issue the
+      // heartbeat fetch cannot even see (it asks only for the non-terminal
+      // states), so this path leaves the row alone. (AGT-4094)
       await internal.reconcileDurableArtifacts([]);
+      expect(internal.durableRuns.getRun('drafted')).toMatchObject({ state: 'NEEDS_RECONCILE' });
+
+      await internal.reconcileDurableArtifacts([draftedTask]);
     } finally {
       process.env.PATH = previousPath;
     }
