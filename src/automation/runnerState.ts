@@ -23,32 +23,31 @@ import { withFileLock } from '../support/fileLock.js';
 export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
   for (const enabled of enabledProjects) {
     const rel = relative(enabled, resolvedPath);
-    if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) return true;
+    if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`)
+      && !rel.startsWith(`..${sep}`))) {
+      return true;
+    }
   }
   return false;
 }
 
-// ── Paths ────────────────────────────────────
+// ── Paths ──────────────────────────────────
 
-const DATA_DIR = resolveDataDir();
+const OPENSWARM_DIR = join(homedir(), '.openswarm');
 
-function resolveDataDir(): string {
-  const env = process.env.OPENSWARM_DATA_DIR;
-  if (env && isAbsolute(env)) return env;
-  return join(homedir(), '.openswarm');
-}
+export const TASK_STATE_FILE = join(OPENSWARM_DIR, 'task-state.json');
+export const PIPELINE_HISTORY_FILE = join(OPENSWARM_DIR, 'pipeline-history.json');
+export const REJECTION_STATE_FILE = join(OPENSWARM_DIR, 'rejection-state.json');
+export const DECOMPOSITION_STATE_FILE = join(OPENSWARM_DIR, 'decomposition-state.json');
+export const DAILY_PACE_FILE = join(OPENSWARM_DIR, 'daily-pace.json');
+export const PROJECT_SELECTION_FILE = join(OPENSWARM_DIR, 'project-selection.json');
 
-export const TASK_STATE_FILE = join(DATA_DIR, 'runner-task-state.json');
-export const PIPELINE_HISTORY_FILE = join(DATA_DIR, 'pipeline-history.json');
-export const REJECTION_STATE_FILE = join(DATA_DIR, 'rejection-state.json');
-export const DECOMPOSITION_STATE_FILE = join(DATA_DIR, 'decomposition-state.json');
-export const DAILY_PACE_FILE = join(DATA_DIR, 'daily-pace.json');
-export const PROJECT_SELECTION_FILE = join(DATA_DIR, 'project-selection.json');
-
-// ── Pace / Window Tracking ───────────────────
+// ── Daily Pace ─────────────────────────────
 
 interface ProjectPaceEntry {
-  timestamps: number[];
+  projectName: string;
+  windowCount: number;
+  windowStart: string;
 }
 
 interface PaceState {
@@ -56,12 +55,12 @@ interface PaceState {
 }
 
 interface DailyPaceState {
-  date: string; // YYYY-MM-DD
+  date: string;
   completedCount: number;
 }
 
 function ensurePaceDir(): void {
-  mkdirSync(DATA_DIR, { recursive: true });
+  mkdirSync(OPENSWARM_DIR, { recursive: true });
 }
 
 function ensureParentDir(file: string): void {
@@ -85,39 +84,29 @@ function ensurePaceLoaded(): PaceState {
   return paceState;
 }
 
-/**
- * Get the number of tasks completed by a project in the last 5 hours.
- */
 export function getProjectWindowCount(projectName: string): number {
   const state = ensurePaceLoaded();
-  const entries = state.projects[projectName]?.timestamps ?? [];
-  const cutoff = Date.now() - 5 * 60 * 60 * 1000;
-  return entries.filter(t => t > cutoff).length;
+  const entry = state.projects[projectName];
+  if (!entry) return 0;
+  const windowStart = new Date(entry.windowStart);
+  const now = new Date();
+  const hoursDiff = (now.getTime() - windowStart.getTime()) / (1000 * 60 * 60);
+  if (hoursDiff > 24) return 0;
+  return entry.windowCount;
 }
 
-/**
- * Check if a project can accept a new task based on its concurrency cap.
- */
 export function canProjectAcceptTask(projectName: string, cap: number): boolean {
   return getProjectWindowCount(projectName) < cap;
 }
 
-/**
- * Get the total number of tasks completed across all projects in the last 5 hours.
- */
 export function getTotalWindowCount(): number {
-  const state = ensurePaceLoaded();
   let total = 0;
-  const cutoff = Date.now() - 5 * 60 * 60 * 1000;
-  for (const project of Object.values(state.projects)) {
-    total += project.timestamps.filter(t => t > cutoff).length;
+  for (const projectName of Object.keys(ensurePaceLoaded().projects)) {
+    total += getProjectWindowCount(projectName);
   }
   return total;
 }
 
-/**
- * Get the number of tasks completed today.
- */
 export function getDailyCompletedCount(): number {
   try {
     if (existsSync(DAILY_PACE_FILE)) {
@@ -166,13 +155,13 @@ export function canAcceptMoreTasks(dailyLimit: number): boolean {
   return getDailyCompletedCount() < dailyLimit;
 }
 
-// ── Pipeline History ─────────────────────────
+// ── Pipeline History ───────────────────────
 
 export interface PipelineHistoryEntry {
   issueId: string;
   pipelineId: string;
   startedAt: string;
-  completedAt?: string;
+  completedAt: string;
   result: PipelineResult;
   failureCause?: string;
 }
@@ -199,18 +188,20 @@ function ensurePipelineHistoryLoaded(): PipelineHistory {
 }
 
 export function addPipelineHistory(entry: PipelineHistoryEntry): void {
-  const history = ensurePipelineHistoryLoaded();
-  history.entries.push(entry);
-  // Keep last 100 entries
-  if (history.entries.length > 100) {
-    history.entries = history.entries.slice(-100);
-  }
-  try {
-    ensureParentDir(PIPELINE_HISTORY_FILE);
-    atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
-  } catch (err) {
-    console.warn('[PipelineHistory] Failed to save:', err);
-  }
+  void withFileLock(PIPELINE_HISTORY_FILE + '.lock', async () => {
+    const history = ensurePipelineHistoryLoaded();
+    history.entries.push(entry);
+    // Keep last 100 entries
+    if (history.entries.length > 100) {
+      history.entries = history.entries.slice(-100);
+    }
+    try {
+      ensureParentDir(PIPELINE_HISTORY_FILE);
+      atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
+    } catch (err) {
+      console.warn('[PipelineHistory] Failed to save:', err);
+    }
+  });
 }
 
 export function getPipelineHistory(): PipelineHistoryEntry[] {
@@ -254,7 +245,7 @@ export interface RejectionEntry {
   issueId: string;
   count: number;
   lastRejection: string; // ISO-8601
-  reasons: string[]; // Last N rejection reasons
+  reasons: string[];
 }
 
 export interface RejectionState {
@@ -262,7 +253,6 @@ export interface RejectionState {
   updatedAt: string;
 }
 
-// In-memory cache
 let rejectionState: RejectionState | null = null;
 
 function ensureRejectionStateLoaded(): RejectionState {
@@ -282,17 +272,21 @@ function ensureRejectionStateLoaded(): RejectionState {
 
 export function getRejectionCount(issueId: string): number {
   const state = ensureRejectionStateLoaded();
-  return state.rejections[issueId]?.count || 0;
+  return state.rejections[issueId]?.count ?? 0;
 }
 
-export async function incrementRejection(issueId: string, reason: string): Promise<number> {
+export async function recordRejection(issueId: string, reason: string): Promise<number> {
   const state = ensureRejectionStateLoaded();
-  const entry = state.rejections[issueId] || {
-    issueId,
-    count: 0,
-    lastRejection: new Date().toISOString(),
-    reasons: [],
-  };
+
+  let entry = state.rejections[issueId];
+  if (!entry) {
+    entry = {
+      issueId,
+      count: 0,
+      lastRejection: new Date().toISOString(),
+      reasons: [],
+    };
+  }
 
   entry.count++;
   entry.lastRejection = new Date().toISOString();
@@ -319,38 +313,24 @@ export async function incrementRejection(issueId: string, reason: string): Promi
   return entry.count;
 }
 
-export async function clearRejection(issueId: string): Promise<void> {
+export function getRejectionReasons(issueId: string): string[] {
   const state = ensureRejectionStateLoaded();
-  delete state.rejections[issueId];
-  state.updatedAt = new Date().toISOString();
-
-  try {
-    ensureParentDir(REJECTION_STATE_FILE);
-    await withFileLock(REJECTION_STATE_FILE + '.lock', async () => {
-      atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
-    });
-  } catch (err) {
-    console.warn('[RejectionState] Failed to save:', err);
-  }
+  return state.rejections[issueId]?.reasons ?? [];
 }
 
-export function isRejectionLimitReached(issueId: string): boolean {
-  const state = ensureRejectionStateLoaded();
-  const entry = state.rejections[issueId];
-  if (!entry) return false;
-  // After 3 rejections, the issue is considered blocked
-  return entry.count >= 3;
+export function getRejectionState(): RejectionState {
+  return ensureRejectionStateLoaded();
 }
 
 // ── Decomposition State ──────────────────────
 
-interface DecompositionEntry {
+export interface DecompositionEntry {
   issueId: string;
   decomposedAt: string;
   subtaskCount: number;
 }
 
-interface DecompositionState {
+export interface DecompositionState {
   decompositions: Record<string, DecompositionEntry>;
   dailyCreationCount: number;
   dailyCreationDate: string;
@@ -364,7 +344,6 @@ function ensureDecompositionStateLoaded(): DecompositionState {
     if (existsSync(DECOMPOSITION_STATE_FILE)) {
       const raw = readFileSync(DECOMPOSITION_STATE_FILE, 'utf8');
       decompositionState = JSON.parse(raw) as DecompositionState;
-      // Reset daily counter if date changed
       const today = new Date().toLocaleDateString('en-CA');
       if (decompositionState.dailyCreationDate !== today) {
         decompositionState.dailyCreationCount = 0;
@@ -415,11 +394,11 @@ export function getDecomposition(issueId: string): DecompositionEntry | undefine
   return ensureDecompositionStateLoaded().decompositions[issueId];
 }
 
-// ── Project Selection State ──────────────────
+// ── Project Selection ────────────────────────
 
 export interface ProjectSelectionEntry {
   projectName: string;
-  lastSelected: string; // ISO-8601
+  lastSelected: string;
   selectionCount: number;
 }
 
@@ -469,12 +448,14 @@ export function loadProjectSelection(): ProjectSelectionState {
 }
 
 export function saveProjectSelection(state: ProjectSelectionState): void {
-  try {
-    ensureParentDir(PROJECT_SELECTION_FILE);
-    atomicWriteFileSync(PROJECT_SELECTION_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[ProjectSelection] Failed to save:', err);
-  }
+  void withFileLock(PROJECT_SELECTION_FILE + '.lock', async () => {
+    try {
+      ensureParentDir(PROJECT_SELECTION_FILE);
+      atomicWriteFileSync(PROJECT_SELECTION_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[ProjectSelection] Failed to save:', err);
+    }
+  });
 }
 
 // ── Task State ───────────────────────────────

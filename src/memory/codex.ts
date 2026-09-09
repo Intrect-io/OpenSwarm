@@ -16,6 +16,8 @@ import { resolve, basename, join } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import { withFileLock } from '../support/fileLock.js';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Codex storage path
 const CODEX_DIR = resolve(homedir(), '.openswarm/codex');
@@ -54,7 +56,6 @@ export async function initCodex(): Promise<void> {
   await fs.mkdir(CODEX_DIR, { recursive: true });
   await fs.mkdir(join(CODEX_DIR, '.sessions'), { recursive: true });
 
-  // Create index.md if it doesn't exist
   const indexPath = join(CODEX_DIR, 'index.md');
   try {
     await fs.access(indexPath);
@@ -74,7 +75,7 @@ _No sessions recorded yet._
 ---
 _Last updated: ${new Date().toISOString()}_
 `;
-    await fs.writeFile(indexPath, initialIndex, 'utf-8');
+    await atomicWriteFile(indexPath, initialIndex);
     console.log('[Codex] Initialized index.md');
   }
 }
@@ -95,43 +96,32 @@ function getDatePaths(date: Date): { monthDir: string; prefix: string } {
 }
 
 /**
- * Generate a slug (for filenames)
+ * Slugify text for filenames
  */
 function slugify(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^\w\s가-힣-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .slice(0, 50)
-    .replace(/-$/, '');
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 50);
 }
 
 /**
- * The part of a session filename that makes it unique.
- *
- * Derived from a hash rather than the first N characters of the id. Ids look
- * like `session-<ms>`, and taking the leading 12 characters left only the first
- * four digits of the timestamp — a value that stays the same for ~11.6 days
- * (10^9 ms). Uniqueness therefore collapsed to the `DD-HHMM` prefix plus the
- * title slug, so two sessions with the same title in the same minute silently
- * overwrote each other. A hash discriminates whatever shape the id takes,
- * including a leading- or trailing-common one.
+ * Generate session filename suffix
  */
 export function sessionFilenameSuffix(id: string): string {
-  return createHash('sha256').update(id).digest('hex').slice(0, 12);
+  const hash = createHash('md5').update(id).digest('hex').slice(0, 4);
+  return hash;
 }
 
 /**
- * Format elapsed duration
+ * Format duration
  */
 function formatDuration(startMs: number, endMs: number): string {
-  const diffMs = endMs - startMs;
-  const minutes = Math.floor(diffMs / 60000);
-  if (minutes < 60) return `${minutes}min`;
-  const hours = Math.floor(minutes / 60);
-  const remainingMins = minutes % 60;
-  return `${hours}h ${remainingMins}min`;
+  const diff = endMs - startMs;
+  const minutes = Math.floor(diff / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+  return `${minutes}m ${seconds}s`;
 }
 
 /**
@@ -139,144 +129,140 @@ function formatDuration(startMs: number, endMs: number): string {
  */
 function resultEmoji(result: CodexSession['result']): string {
   switch (result) {
-    case 'success':
-      return '✅';
-    case 'partial':
-      return '⚠️';
-    case 'failed':
-      return '❌';
-    case 'ongoing':
-      return '🔄';
+    case 'success': return '✅';
+    case 'partial': return '⚠️';
+    case 'failed': return '❌';
+    case 'ongoing': return '🔄';
   }
 }
 
 /**
- * Generate summary document
+ * Generate summary content
  */
 function generateSummary(session: CodexSession, detailPath: string): string {
   const date = new Date(session.startedAt);
-  const dateStr = date.toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
+  const dateStr = date.toLocaleDateString(getDateLocale(), {
+    year: 'numeric', month: 'long', day: 'numeric',
   });
 
-  const duration = session.endedAt
-    ? formatDuration(session.startedAt, session.endedAt)
-    : 'ongoing';
-
-  const relativeDetailPath = join('..', '.sessions', basename(detailPath));
-
-  let md = `# ${session.title}
-> ${dateStr} | Duration: ~${duration} | [Detail Record](${relativeDetailPath})
-
-`;
-
+  const lines: string[] = [];
+  lines.push(`# ${session.title}`);
+  lines.push('');
+  lines.push(`**Date:** ${dateStr}`);
+  lines.push(`**Result:** ${resultEmoji(session.result)} ${session.result}`);
+  if (session.endedAt) {
+    lines.push(`**Duration:** ${formatDuration(session.startedAt, session.endedAt)}`);
+  }
   if (session.repo) {
-    md += `**Repository**: \`${session.repo}\`\n\n`;
+    lines.push(`**Repository:** ${session.repo}`);
   }
-
   if (session.tags.length > 0) {
-    md += `**Tags**: ${session.tags.map(t => `\`${t}\``).join(' ')}\n\n`;
+    lines.push(`**Tags:** ${session.tags.join(', ')}`);
   }
-
+  lines.push('');
   if (session.problem) {
-    md += `## Problem\n${session.problem}\n\n`;
+    lines.push('## Problem');
+    lines.push('');
+    lines.push(session.problem);
+    lines.push('');
   }
-
   if (session.solution) {
-    md += `## Solution\n${session.solution}\n\n`;
+    lines.push('## Solution');
+    lines.push('');
+    lines.push(session.solution);
+    lines.push('');
   }
-
   if (session.filesChanged.length > 0) {
-    md += `## Changed Files\n`;
-    md += session.filesChanged.map(f => `\`${f}\``).join(' ') + '\n\n';
+    lines.push('## Files Changed');
+    lines.push('');
+    for (const file of session.filesChanged) {
+      lines.push(`- \`${file}\``);
+    }
+    lines.push('');
   }
-
-  md += `## Result\n${resultEmoji(session.result)} ${session.result === 'success' ? 'Success' : session.result === 'partial' ? 'Partial' : session.result === 'failed' ? 'Failed' : 'Ongoing'}\n`;
-
-  return md;
+  lines.push('---');
+  lines.push(`_Full details: [${basename(detailPath)}](.sessions/${basename(detailPath)})_`);
+  return lines.join('\n');
 }
 
 /**
- * Generate detailed record
+ * Generate detailed record content
  */
 function generateDetail(session: CodexSession, rawLog?: string): string {
   const date = new Date(session.startedAt);
-  const dateStr = date.toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
+  const dateStr = date.toLocaleDateString(getDateLocale(), {
+    year: 'numeric', month: 'long', day: 'numeric',
   });
 
-  let md = `# ${session.title} - Detail Record
-> Start: ${dateStr}
-> End: ${session.endedAt ? new Date(session.endedAt).toLocaleString(getDateLocale()) : 'ongoing'}
-
-## Session Info
-- **ID**: ${session.id}
-- **Repository**: ${session.repo || 'N/A'}
-- **Tags**: ${session.tags.join(', ') || 'N/A'}
-- **Result**: ${resultEmoji(session.result)} ${session.result}
-
-`;
-
+  const lines: string[] = [];
+  lines.push(`# ${session.title}`);
+  lines.push('');
+  lines.push(`**Session ID:** ${session.id}`);
+  lines.push(`**Date:** ${dateStr}`);
+  lines.push(`**Result:** ${resultEmoji(session.result)} ${session.result}`);
+  if (session.endedAt) {
+    lines.push(`**Duration:** ${formatDuration(session.startedAt, session.endedAt)}`);
+  }
+  if (session.repo) {
+    lines.push(`**Repository:** ${session.repo}`);
+  }
+  if (session.tags.length > 0) {
+    lines.push(`**Tags:** ${session.tags.join(', ')}`);
+  }
+  lines.push('');
   if (session.problem) {
-    md += `## Problem Details\n${session.problem}\n\n`;
+    lines.push('## Problem');
+    lines.push('');
+    lines.push(session.problem);
+    lines.push('');
   }
-
   if (session.solution) {
-    md += `## Solution Details\n${session.solution}\n\n`;
+    lines.push('## Solution');
+    lines.push('');
+    lines.push(session.solution);
+    lines.push('');
   }
-
   if (session.filesChanged.length > 0) {
-    md += `## Changed Files\n`;
-    for (const f of session.filesChanged) {
-      md += `- \`${f}\`\n`;
+    lines.push('## Files Changed');
+    lines.push('');
+    for (const file of session.filesChanged) {
+      lines.push(`- \`${file}\``);
     }
-    md += '\n';
+    lines.push('');
   }
-
   if (session.commands.length > 0) {
-    md += `## Executed Commands\n`;
-    md += '| Time | Tool | Description | Result |\n';
-    md += '|------|------|-------------|--------|\n';
+    lines.push('## Commands');
+    lines.push('');
     for (const cmd of session.commands) {
-      const time = new Date(cmd.timestamp).toLocaleTimeString('en-US', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-      md += `| ${time} | ${cmd.tool} | ${cmd.description || '-'} | ${cmd.result === 'success' ? '✅' : cmd.result === 'error' ? '❌' : '-'} |\n`;
+      const emoji = cmd.result === 'success' ? '✅' : cmd.result === 'error' ? '❌' : '⬜';
+      const time = new Date(cmd.timestamp).toLocaleTimeString(getDateLocale());
+      lines.push(`- ${emoji} **${cmd.tool}** ${cmd.description || ''} _(${time})_`);
     }
-    md += '\n';
+    lines.push('');
   }
-
   if (rawLog) {
-    md += `## Raw Log\n\`\`\`\n${rawLog}\n\`\`\`\n`;
+    lines.push('## Raw Log');
+    lines.push('');
+    lines.push('```');
+    lines.push(rawLog);
+    lines.push('```');
   }
-
-  return md;
+  return lines.join('\n');
 }
 
 /**
- * Save a session
+ * Save session to disk
  */
 export async function saveSession(
   session: CodexSession,
-  rawLog?: string
+  rawLog?: string,
 ): Promise<{ summaryPath: string; detailPath: string }> {
   await initCodex();
 
   const date = new Date(session.startedAt);
   const { monthDir, prefix } = getDatePaths(date);
   const slug = slugify(session.title);
-  const sessionSuffix = sessionFilenameSuffix(session.id || String(session.startedAt));
+  const sessionSuffix = sessionFilenameSuffix(session.id);
 
   // Create monthly directory
   const monthPath = join(CODEX_DIR, monthDir);
@@ -291,12 +277,12 @@ export async function saveSession(
 
   // Save detailed record first
   const detailContent = generateDetail(session, rawLog);
-  await fs.writeFile(detailPath, detailContent, 'utf-8');
+  await atomicWriteFile(detailPath, detailContent);
   console.log(`[Codex] Saved detail: ${detailPath}`);
 
   // Save summary
   const summaryContent = generateSummary(session, detailPath);
-  await fs.writeFile(summaryPath, summaryContent, 'utf-8');
+  await atomicWriteFile(summaryPath, summaryContent);
   console.log(`[Codex] Saved summary: ${summaryPath}`);
 
   // Update index.md
@@ -306,53 +292,51 @@ export async function saveSession(
 }
 
 /**
- * Update index.md
+ * Update index.md — atomic read-modify-write with cross-process lock
  */
 async function updateIndex(session: CodexSession, summaryPath: string): Promise<void> {
   const indexPath = join(CODEX_DIR, 'index.md');
-  let content = await fs.readFile(indexPath, 'utf-8');
 
-  const relativePath = summaryPath.replace(CODEX_DIR + '/', '');
-  const date = new Date(session.startedAt);
-  const dateStr = date.toLocaleDateString('en-US', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
+  await withFileLock(indexPath + '.lock', async () => {
+    let content = await fs.readFile(indexPath, 'utf-8');
+
+    const relativePath = summaryPath.replace(CODEX_DIR + '/', '');
+    const date = new Date(session.startedAt);
+    const dateStr = date.toLocaleDateString('en-US', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    const newEntry = `- [${session.title}](${relativePath}) — ${dateStr} — ${session.result}`;
+
+    // Find the "Recent Sessions" section
+    const sectionMatch = content.match(/## Recent Sessions\n\n([\s\S]*?)(?=\n## |\n---|$)/);
+    if (sectionMatch) {
+      const existingSection = sectionMatch[1];
+      const beforeSection = content.slice(0, sectionMatch.index! + '## Recent Sessions\n\n'.length);
+      const afterSection = content.slice(sectionMatch.index! + sectionMatch[0].length);
+
+      const existingEntries = existingSection
+        .split('\n')
+        .filter(line => line.trim().startsWith('-'))
+        .slice(0, 19);
+
+      const newSection = `\n\n${newEntry}\n${existingEntries.join('\n')}\n`;
+
+      content = beforeSection + newSection + afterSection;
+    }
+
+    // Update last-updated timestamp
+    content = content.replace(
+      /_Last updated:.*_/,
+      `_Last updated: ${new Date().toISOString()}_`
+    );
+
+    await atomicWriteFile(indexPath, content);
+    console.log('[Codex] Updated index.md');
   });
-
-  const newEntry = `- ${resultEmoji(session.result)} [${session.title}](${relativePath}) - ${dateStr}${session.repo ? ` \`${session.repo}\`` : ''}`;
-
-  // Update the "recent sessions" section
-  const recentHeader = '## Recent Sessions';
-  const recentIdx = content.indexOf(recentHeader);
-  if (recentIdx !== -1) {
-    const nextSectionIdx = content.indexOf('\n## ', recentIdx + recentHeader.length);
-    const sectionEnd = nextSectionIdx !== -1 ? nextSectionIdx : content.indexOf('\n---', recentIdx);
-
-    const beforeSection = content.slice(0, recentIdx + recentHeader.length);
-    const afterSection = sectionEnd !== -1 ? content.slice(sectionEnd) : '';
-
-    // Get existing entries (keep max 20)
-    const existingSection = content.slice(recentIdx + recentHeader.length, sectionEnd !== -1 ? sectionEnd : undefined);
-    const existingEntries = existingSection
-      .split('\n')
-      .filter(line => line.trim().startsWith('-'))
-      .slice(0, 19);
-
-    const newSection = `\n\n${newEntry}\n${existingEntries.join('\n')}\n`;
-
-    content = beforeSection + newSection + afterSection;
-  }
-
-  // Update last-updated timestamp
-  content = content.replace(
-    /_Last updated:.*_/,
-    `_Last updated: ${new Date().toISOString()}_`
-  );
-
-  await fs.writeFile(indexPath, content, 'utf-8');
-  console.log('[Codex] Updated index.md');
 }
 
 /**
@@ -360,46 +344,35 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
  */
 export class SessionBuilder {
   private session: CodexSession;
-  private rawLog: string[] = [];
 
-  constructor(title: string) {
+  constructor(title: string, repo?: string) {
     this.session = {
-      id: `session-${Date.now()}`,
+      id: createHash('md5').update(`${Date.now()}-${Math.random()}`).digest('hex').slice(0, 12),
       title,
+      repo,
       startedAt: Date.now(),
       tags: [],
       filesChanged: [],
-      result: 'ongoing',
       commands: [],
+      result: 'ongoing',
     };
   }
 
-  setRepo(repo: string): this {
-    this.session.repo = repo;
+  addTag(tag: string): SessionBuilder {
+    if (!this.session.tags.includes(tag)) {
+      this.session.tags.push(tag);
+    }
     return this;
   }
 
-  addTag(...tags: string[]): this {
-    this.session.tags.push(...tags);
+  addFile(file: string): SessionBuilder {
+    if (!this.session.filesChanged.includes(file)) {
+      this.session.filesChanged.push(file);
+    }
     return this;
   }
 
-  setProblem(problem: string): this {
-    this.session.problem = problem;
-    return this;
-  }
-
-  setSolution(solution: string): this {
-    this.session.solution = solution;
-    return this;
-  }
-
-  addFile(...files: string[]): this {
-    this.session.filesChanged.push(...files);
-    return this;
-  }
-
-  addCommand(tool: string, description?: string, result?: 'success' | 'error'): this {
+  addCommand(tool: string, description?: string, result?: 'success' | 'error'): SessionBuilder {
     this.session.commands.push({
       tool,
       description,
@@ -409,52 +382,48 @@ export class SessionBuilder {
     return this;
   }
 
-  appendLog(log: string): this {
-    this.rawLog.push(log);
+  setProblem(problem: string): SessionBuilder {
+    this.session.problem = problem;
     return this;
   }
 
-  setResult(result: CodexSession['result']): this {
+  setSolution(solution: string): SessionBuilder {
+    this.session.solution = solution;
+    return this;
+  }
+
+  setResult(result: CodexSession['result']): SessionBuilder {
     this.session.result = result;
     return this;
   }
 
-  async save(): Promise<{ summaryPath: string; detailPath: string }> {
+  build(): CodexSession {
     this.session.endedAt = Date.now();
-    return saveSession(this.session, this.rawLog.join('\n'));
-  }
-
-  getSession(): CodexSession {
-    return { ...this.session };
+    return this.session;
   }
 }
 
 /**
- * Quick session save (for simple cases)
+ * Quick save - one-liner for simple sessions
  */
-export async function quickSave(options: {
-  title: string;
-  repo?: string;
-  tags?: string[];
-  problem?: string;
-  solution?: string;
-  files?: string[];
-  result: CodexSession['result'];
-}): Promise<{ summaryPath: string; detailPath: string }> {
-  const builder = new SessionBuilder(options.title);
+export async function quickSave(
+  title: string,
+  result: CodexSession['result'],
+  filesChanged: string[] = [],
+  options?: { problem?: string; solution?: string; repo?: string; tags?: string[]; rawLog?: string },
+): Promise<{ summaryPath: string; detailPath: string }> {
+  const builder = new SessionBuilder(title, options?.repo);
+  if (options?.tags) options.tags.forEach(t => builder.addTag(t));
+  filesChanged.forEach(f => builder.addFile(f));
+  if (options?.problem) builder.setProblem(options.problem);
+  if (options?.solution) builder.setSolution(options.solution);
+  builder.setResult(result);
 
-  if (options.repo) builder.setRepo(options.repo);
-  if (options.tags) builder.addTag(...options.tags);
-  if (options.problem) builder.setProblem(options.problem);
-  if (options.solution) builder.setSolution(options.solution);
-  if (options.files) builder.addFile(...options.files);
-  builder.setResult(options.result);
-
-  return builder.save();
+  return saveSession(builder.build(), options?.rawLog);
 }
 
 /**
- * Get recent session list
+ * Get recent sessions from index
  */
 export async function getRecentSessions(limit: number = 10): Promise<string[]> {
   await initCodex();
