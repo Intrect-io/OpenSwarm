@@ -249,13 +249,23 @@ let initInFlight: Promise<void> | null = null;
  * no restart. A latch would have kept it dark until someone noticed.
  */
 const RECALL_REPORT_WINDOW_MS = 10 * 60_000;
-type RecallPhase = 'open' | 'query';
+/**
+ * How many distinct messages one report may name. Errors that embed a varying
+ * detail — a byte range, a timestamped predicate — produce a new string every
+ * call, and an uncapped list turned one window's report into a single 131 KB
+ * line (measured, 2000 failures). Ninety-five stacks were at least greppable
+ * line by line; that is not.
+ */
+const RECALL_ALSO_SEEN_CAP = 5;
+type RecallPhase = 'open' | 'embed' | 'query';
 type RecallFailure = {
   phase: RecallPhase;
   message: string;
   reportedAt: number;
   suppressedCount: number;
   alsoSeen: Set<string>;
+  /** Occurrences of a differing message the cap kept out of `alsoSeen`. */
+  alsoSeenUnlisted: number;
 };
 let recallFailure: RecallFailure | null = null;
 
@@ -286,19 +296,30 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
   const previous = recallFailure;
   if (previous && previous.phase === phase && now - previous.reportedAt < RECALL_REPORT_WINDOW_MS) {
     previous.suppressedCount += 1;
-    if (message !== previous.message) previous.alsoSeen.add(message);
+    if (message !== previous.message && !previous.alsoSeen.has(message)) {
+      if (previous.alsoSeen.size < RECALL_ALSO_SEEN_CAP) previous.alsoSeen.add(message);
+      else previous.alsoSeenUnlisted += 1;
+    }
     return;
   }
   const suppressed = previous?.suppressedCount ?? 0;
   const others = previous ? [...previous.alsoSeen, previous.message].filter(m => m !== message) : [];
+  const unlisted = previous?.alsoSeenUnlisted ?? 0;
   const parts = [
     suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
-    others.length > 0 ? `also seen: ${others.join('; ')}` : '',
+    others.length > 0
+      ? `also seen: ${others.join('; ')}${unlisted > 0 ? `, and ${unlisted} more not listed` : ''}`
+      : '',
   ].filter(Boolean);
   const tail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-  const what = phase === 'open' ? 'the store could not be opened' : 'the store opened but recall failed';
+  const what = phase === 'open' ? 'the store could not be opened'
+    : phase === 'embed' ? 'the query could not be embedded'
+    : 'the store opened but recall failed';
   console.error(`[Memory] Long-term recall is UNAVAILABLE — ${what}${tail}: ${message}`);
-  recallFailure = { phase, message, reportedAt: now, suppressedCount: 0, alsoSeen: new Set() };
+  recallFailure = {
+    phase, message, reportedAt: now,
+    suppressedCount: 0, alsoSeen: new Set(), alsoSeenUnlisted: 0,
+  };
 }
 
 function clearRecallFailure(phase: RecallPhase): void {
@@ -1107,12 +1128,14 @@ export async function searchMemorySafe(
 
   try {
     if (!table) {
-      return {
-        success: false,
-        memories: [],
-        error: 'Database table not initialized',
-        errorCode: 'DB_INIT_FAILED',
-      };
+      // Unreachable today — a null handle throws inside the schema migration
+      // and is caught as an open failure — but if that ever changes, returning
+      // without reporting gives back a silent dead store while
+      // memoryRecallStatus() answers "available", which is the exact outcome
+      // this change exists to prevent.
+      const notInitialized = 'Database table not initialized';
+      reportRecallFailure(new Error(notInitialized), 'open');
+      return { success: false, memories: [], error: notInitialized, errorCode: 'DB_INIT_FAILED' };
     }
 
     const {
@@ -1128,7 +1151,14 @@ export async function searchMemorySafe(
     let queryVector: number[];
     try {
       queryVector = await embedQuery(query);
+      clearRecallFailure('embed');
     } catch (embeddingError) {
+      // The third way recall dies, and until now the only one left uncovered:
+      // a healthy store with a dead embedder returned early before either
+      // reporter, so 40 recalls printed 40 stacks (initEmbeddingPipeline nulls
+      // its promise on failure, so every call retries and re-logs) while
+      // memoryRecallStatus() still answered "available".
+      reportRecallFailure(embeddingError, 'embed');
       return {
         success: false,
         memories: [],

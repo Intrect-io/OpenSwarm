@@ -12,12 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const connect = vi.hoisted(() => vi.fn());
 vi.mock('@lancedb/lancedb', () => ({ connect, Table: class {}, Connection: class {} }));
-// A usable extractor, so a search that gets past the store reaches the query
-// rather than stopping at EMBEDDING_FAILED.
-vi.mock('@huggingface/transformers', () => ({
-  pipeline: vi.fn(async () => async () => ({ data: Float32Array.from([1, 0, 0, 0]) })),
-  env: {},
-}));
+const pipelineMock = vi.hoisted(() => vi.fn());
+vi.mock('@huggingface/transformers', () => ({ pipeline: pipelineMock, env: {} }));
 // vitest.setup.ts redirects four home-dir paths but not this one. MEMORY_DIR is
 // `resolve(homedir(), '.openswarm/memory')`, evaluated at module load, and the
 // operator's real store lives there — opening it reads their own embedding
@@ -39,6 +35,12 @@ describe('memory recall status (AGT-4267)', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     connect.mockReset();
+    // Reset rather than rely on restoreAllMocks: a mockRejectedValue set by one
+    // test outlives it and turns every later search into EMBEDDING_FAILED.
+    pipelineMock.mockReset();
+    // A usable extractor, so a search that gets past the store reaches the
+    // query rather than stopping at EMBEDDING_FAILED.
+    pipelineMock.mockImplementation(async () => async () => ({ data: Float32Array.from([1, 0, 0, 0]) }));
   });
 
   afterEach(() => {
@@ -142,6 +144,77 @@ describe('memory recall status (AGT-4267)', () => {
     // The suppressed window held a different error; dropping it loses the only
     // record that the store failed two distinct ways.
     expect(reports[1]).toContain('Invalid range 0..0');
+  });
+
+  it('caps how many distinct messages one report names', async () => {
+    // Errors that embed a varying detail — a byte range, a timestamped
+    // predicate — produce a new string every call. Uncapped, one window's
+    // report measured 131 KB on a single line. Ninety-five stacks were at
+    // least greppable line by line; that is not.
+    vi.useFakeTimers();
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    let n = 0;
+    connect.mockImplementation(async () => {
+      n += 1;
+      throw new Error(`lance error: Invalid range ${n}..${n} for object of size 0 bytes`);
+    });
+
+    for (let i = 0; i < 400; i += 1) await expect(core.initDatabase()).rejects.toThrow();
+    vi.advanceTimersByTime(11 * 60_000);
+    await expect(core.initDatabase()).rejects.toThrow();
+
+    const reports = reportsIn(errors);
+    expect(reports).toHaveLength(2);
+    expect(reports[1].length).toBeLessThan(1500);
+    // The ones it could not list are still counted, so the scale survives.
+    expect(reports[1]).toMatch(/and \d+ more not listed/);
+    expect(reports[1]).toContain('399 further failure(s)');
+  });
+
+  it('rate-limits a dead embedder too, instead of leaving it the one uncovered path', async () => {
+    // A healthy store with a broken embedder returned early before either
+    // reporter: 40 recalls, 40 stacks, and memoryRecallStatus() answering
+    // available:true while every recall failed.
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    connect.mockResolvedValue(openable());
+    pipelineMock.mockRejectedValue(new Error('model weights are corrupt'));
+
+    for (let i = 0; i < 40; i += 1) {
+      const res = await core.searchMemorySafe('anything');
+      expect(res.errorCode).toBe('EMBEDDING_FAILED');
+    }
+
+    expect(reportsIn(errors)).toHaveLength(1);
+    expect(reportsIn(errors)[0]).toContain('the query could not be embedded');
+    const st = core.memoryRecallStatus();
+    expect(st.available).toBe(false);
+    expect(st.phase).toBe('embed');
+  });
+
+  it('clears an embed-phase outage once the embedder works again', async () => {
+    // Without this the outage sticks forever: the clear at the end of a
+    // successful search is phase-scoped to 'query', so it would never match an
+    // 'embed' failure and recall would report dead for the process lifetime.
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    connect.mockResolvedValue({
+      ...openable(),
+      openTable: async () => ({
+        schema: async () => ({ fields: [] }),
+        vectorSearch: () => ({ where: () => ({ limit: () => ({ toArray: async () => [] }) }) }),
+      }),
+    });
+    pipelineMock.mockRejectedValueOnce(new Error('model weights are corrupt'));
+
+    expect((await core.searchMemorySafe('anything')).errorCode).toBe('EMBEDDING_FAILED');
+    expect(core.memoryRecallStatus().phase).toBe('embed');
+
+    expect((await core.searchMemorySafe('anything')).success).toBe(true);
+
+    expect(core.memoryRecallStatus().available).toBe(true);
+    expect(errors.some(e => e.includes('long-term recall restored'))).toBe(true);
   });
 
   it('rate-limits a store that breaks AFTER it opened, and stops claiming it is available', async () => {
