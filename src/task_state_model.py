@@ -49,7 +49,7 @@ class WorktreeState(AliasModel):
 class ExecutionState(AliasModel):
     status: TaskExecutionStatus = "backlog"
     blocked_reason: str | None = Field(default=None, alias="blockedReason")
-    retry_count: int = Field(default=0, alias="retryCount")
+    retry_count: int = Field(default=0, alias="retryCount", ge=0)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     last_session_id: str | None = Field(default=None, alias="lastSessionId")
 
@@ -66,7 +66,7 @@ class OpenSwarmTaskState(AliasModel):
     dependency_issue_ids: list[str] = Field(default_factory=list, alias="dependencyIssueIds")
     dependency_titles: list[str] = Field(default_factory=list, alias="dependencyTitles")
     file_scope: list[str] = Field(default_factory=list, alias="fileScope")
-    topo_rank: int | None = Field(default=None, alias="topoRank")
+    topo_rank: int | None = Field(default=None, alias="topoRank", ge=0)
     linear_state: str | None = Field(default=None, alias="linearState")
     execution: ExecutionState = Field(default_factory=ExecutionState)
     worktree: WorktreeState = Field(default_factory=WorktreeState)
