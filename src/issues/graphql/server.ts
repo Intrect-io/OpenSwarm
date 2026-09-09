@@ -9,6 +9,7 @@ import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
 import { registryTypeDefs } from '../../registry/graphql/typeDefs.js';
 import { registryResolvers } from '../../registry/graphql/resolvers.js';
+import { useQueryCostAnalysis } from './costAnalysis.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
@@ -103,6 +104,7 @@ const yoga = createYoga({
     typeDefs: [typeDefs, registryTypeDefs],
     resolvers: [resolvers, registryResolvers],
   }),
+  plugins: [useQueryCostAnalysis()],
   graphqlEndpoint: '/graphql',
   cors: false,
   logging: {
