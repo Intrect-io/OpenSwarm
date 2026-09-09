@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **`openswarm review` keeps more wall-clock for OpenRouter (AGT-4258).** Default budget is 15 minutes (20 on `openrouter`), scaling to 30 / 45. `--max` areas inherit the same scale instead of falling back to a 5-minute reviewer default.
+
+- **OpenRouter routes for speed per dollar (AGT-4258).** Completions keep the model id (no `:nitro` suffix) and send `provider.sort: throughput` plus `preferred_max_latency` (default 2s). A `/endpoints` probe sets `max_price` to the cheapest listed backend × 3 so a Cerebras-class 10× markup cannot win on throughput alone. `OPENROUTER_PROVIDER_ONLY` still replaces the object. OpenAI-routed models stay off ZDR.
+
 ## 0.22.1 — 2026-09-04
 
 ### Changed

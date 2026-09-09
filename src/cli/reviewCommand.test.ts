@@ -59,15 +59,17 @@ describe('scaledReviewMaxTurns / scaledReviewTimeoutMs', () => {
   it('leaves small diffs at the original defaults', () => {
     expect(scaledReviewMaxTurns(1)).toBe(20);
     expect(scaledReviewMaxTurns(10)).toBe(20);
-    expect(scaledReviewTimeoutMs(1)).toBe(300_000);
-    expect(scaledReviewTimeoutMs(10)).toBe(300_000);
+    expect(scaledReviewTimeoutMs(1)).toBe(900_000);
+    expect(scaledReviewTimeoutMs(10)).toBe(900_000);
+    expect(scaledReviewTimeoutMs(1, undefined, 'openrouter')).toBe(1_200_000);
   });
 
   it('scales up past the free-file threshold, capped', () => {
     expect(scaledReviewMaxTurns(29)).toBe(30); // the diff that triggered this fix
     expect(scaledReviewMaxTurns(200)).toBe(60); // cap
-    expect(scaledReviewTimeoutMs(29)).toBe(585_000);
-    expect(scaledReviewTimeoutMs(200)).toBe(900_000); // cap
+    expect(scaledReviewTimeoutMs(29)).toBe(1_280_000);
+    expect(scaledReviewTimeoutMs(200)).toBe(1_800_000); // cap
+    expect(scaledReviewTimeoutMs(200, undefined, 'openrouter')).toBe(2_700_000);
   });
 
   it('is monotonically non-decreasing', () => {

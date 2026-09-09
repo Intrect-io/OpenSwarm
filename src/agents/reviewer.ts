@@ -330,7 +330,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
     const raw = await spawnCli(adapter, {
       prompt,
       cwd,
-      timeoutMs: options.timeoutMs ?? 300000, // 5 min default
+      timeoutMs: options.timeoutMs ?? 900000, // 15 min — OpenRouter reviews were dying at 5
       model: options.model,
       maxTurns: options.maxTurns,
       processContext: options.processContext,
