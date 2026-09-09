@@ -49,9 +49,9 @@ export interface AutonomousConfig {
   allowSameProjectConcurrent?: boolean;
   /**
    * Durable admission for a task whose write scope could not be resolved
-   * while another run in the same repository is live. 'serialize' (default)
-   * fails closed; 'admit' relies on isolated worktrees plus post-merge
-   * integration requeue to surface any branch conflict at PR time instead.
+   * while another run in the same repository is live. 'admit' (default)
+   * relies on isolated worktrees plus post-merge integration requeue;
+   * 'serialize' is the Codex-era fail-closed hold.
    */
   unknownScopeAdmission?: 'serialize' | 'admit';
   /** Identical-fingerprint infra_error attempts that park a run for the operator (0 disables, default 6). */

@@ -353,7 +353,7 @@ export type RoleConfig = {
     mode?: 'report' | 'execute';
     /** Minimum signal score required to recommend fan-out (default 2). */
     minScore?: number;
-    /** Max candidate workers in flight (default candidates length, capped at 3). */
+    /** Max candidate workers in flight (default: all candidates). */
     concurrency?: number;
     /** Keep temporary candidate repos for debugging. */
     keepSandboxes?: boolean;

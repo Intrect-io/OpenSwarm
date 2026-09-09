@@ -148,7 +148,7 @@ export interface ClaimOptions {
   maxActiveForProject?: number;
   /** Normalized predicted write set. Unknown scope serializes against live same-repo claims. */
   conflictScope?: string[];
-  /** How an unknown scope (empty on either side) is admitted. Default 'serialize'. */
+  /** How an unknown scope (empty on either side) is admitted. Default 'admit'. */
   unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;

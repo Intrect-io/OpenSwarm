@@ -181,6 +181,7 @@ describe('runWorkerWithOptionalFanout — candidate building and no-winner fallb
     expect(runWorkerFanout).toHaveBeenCalledTimes(1);
     const passedCandidates = runWorkerFanout.mock.calls[0][0].candidates;
     expect(passedCandidates.map((c: { id: string }) => c.id)).toEqual(['custom-a', 'custom-b']);
+    expect(runWorkerFanout.mock.calls[0][0].concurrency).toBe(2);
     // The single-worker fallback must not run when fan-out already found a winner.
     expect(runWorker).not.toHaveBeenCalled();
   });

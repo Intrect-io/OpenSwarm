@@ -278,7 +278,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
       expect(safe).toEqual(new Set(['alias-first', 'alias-second']));
       expect(detectFileConflictsMock).toHaveBeenCalledTimes(1);
-      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
+      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo', {
+        unknownScopeAdmission: 'admit',
+      });
     });
 
     it('defers overlapping scopes even when each issue runs in its own worktree', async () => {
@@ -305,7 +307,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       // Third argument is the admission policy the durable gate also reads;
       // passing it is the fix for AGT-4233.
       expect(describeScopeConflictMock)
-        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'serialize');
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'admit');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 
@@ -324,7 +326,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       ]);
 
       expect(safe).toEqual(new Set(['first', 'second']));
-      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
+      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo', {
+        unknownScopeAdmission: 'admit',
+      });
     });
 
     it('repays a known-first deferred unknown as the next exclusive idle wave', async () => {
@@ -351,6 +355,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(detectFileConflictsMock).toHaveBeenLastCalledWith([known, unknown], '/repo', {
         preferUnknownExclusive: true,
         preferredUnknownTaskId: 'unknown',
+        unknownScopeAdmission: 'admit',
       });
     });
 
@@ -407,7 +412,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       // Third argument is the admission policy the durable gate also reads;
       // passing it is the fix for AGT-4233.
       expect(describeScopeConflictMock)
-        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'serialize');
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'admit');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 

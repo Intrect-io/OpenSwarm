@@ -57,10 +57,10 @@ const RepoMetadataSchema = z.object({
   automation: z.object({
     /** Explicit kill switch for issue-driven execution in this repository. */
     enabled: z.boolean().default(true),
-    /** Same-repository active leases. Default one; raise only with isolated worktrees. */
-    maxConcurrent: z.number().int().min(1).max(10).default(1),
-    /** Rolling attempt budget. */
-    maxAttemptsPerHour: z.number().int().min(1).max(100).default(12),
+    /** Same-repository active leases. Omit to inherit the daemon global cap. */
+    maxConcurrent: z.number().int().min(1).max(256).optional(),
+    /** Rolling attempt budget. Omit to skip the attempts-per-hour circuit. */
+    maxAttemptsPerHour: z.number().int().min(1).max(1000).optional(),
     /**
      * Rolling circuit breaker threshold: how many attempts in the last hour may
      * end unsuccessfully before this repository is taken out of admission until
@@ -79,7 +79,7 @@ const RepoMetadataSchema = z.object({
   /**
    * What happens to a pull request the swarm publishes from this repository.
    * Kept outside `automation` so opting in does not pull that block's
-   * admission defaults (maxConcurrent 1, …) in with it.
+   * admission defaults (legacy maxConcurrent 1, …) in with it.
    */
   publication: z.object({
     /**
