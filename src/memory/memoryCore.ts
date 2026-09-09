@@ -302,13 +302,23 @@ function reportRecallFailure(error: unknown, phase: RecallPhase): void {
     }
     return;
   }
-  const suppressed = previous?.suppressedCount ?? 0;
-  const others = previous ? [...previous.alsoSeen, previous.message].filter(m => m !== message) : [];
-  const unlisted = previous?.alsoSeenUnlisted ?? 0;
+  // Only carry the tally when the phase is unchanged. A `query` outage followed
+  // by an embedding failure otherwise credits 39 broken queries to a report
+  // headed "the query could not be embedded", and names a lance error as
+  // something the embedder also saw. That transition skips a clear — the
+  // query-phase clear lives at the end of a successful search, which does not
+  // run here — so it is the one direction where a stale tally survives.
+  const sameAsBefore = previous?.phase === phase ? previous : null;
+  const suppressed = sameAsBefore?.suppressedCount ?? 0;
+  const others = sameAsBefore ? [sameAsBefore.message, ...sameAsBefore.alsoSeen].filter(m => m !== message) : [];
+  const unlisted = sameAsBefore?.alsoSeenUnlisted ?? 0;
   const parts = [
     suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
     others.length > 0
-      ? `also seen: ${others.join('; ')}${unlisted > 0 ? `, and ${unlisted} more not listed` : ''}`
+      // "N more" would read as N further *messages*; this counts occurrences of
+      // messages the cap kept off the list, and `suppressedCount` above already
+      // carries the total.
+      ? `also seen: ${others.join('; ')}${unlisted > 0 ? `, and ${unlisted} further occurrence(s) of unlisted messages` : ''}`
       : '',
   ].filter(Boolean);
   const tail = parts.length > 0 ? ` (${parts.join(', ')})` : '';

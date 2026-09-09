@@ -168,7 +168,7 @@ describe('memory recall status (AGT-4267)', () => {
     expect(reports).toHaveLength(2);
     expect(reports[1].length).toBeLessThan(1500);
     // The ones it could not list are still counted, so the scale survives.
-    expect(reports[1]).toMatch(/and \d+ more not listed/);
+    expect(reports[1]).toMatch(/and \d+ further occurrence\(s\) of unlisted messages/);
     expect(reports[1]).toContain('399 further failure(s)');
   });
 
@@ -191,6 +191,41 @@ describe('memory recall status (AGT-4267)', () => {
     const st = core.memoryRecallStatus();
     expect(st.available).toBe(false);
     expect(st.phase).toBe('embed');
+  });
+
+  it('does not credit one phase\'s failures to another phase\'s report', async () => {
+    // query → embed is the one transition with no clear in between: the
+    // query-phase clear lives at the end of a successful search, which does not
+    // run when the embedder throws. Carrying the tally there tells an operator
+    // the embedder failed 40 times when it failed once and the store's query
+    // path failed 39.
+    const core = await import('./memoryCore.js');
+    core.resetMemoryRecallStatusForTests();
+    connect.mockResolvedValue({
+      ...openable(),
+      openTable: async () => ({
+        schema: async () => ({ fields: [] }),
+        vectorSearch: () => { throw new Error('lance: query is broken'); },
+      }),
+    });
+    // The extractor is cached after its first load, so a post-warm-up embed
+    // failure comes from the extractor throwing — tensor allocation under
+    // memory pressure — not from the pipeline failing to load.
+    let embedderBroken = false;
+    pipelineMock.mockImplementation(async () => async () => {
+      if (embedderBroken) throw new Error('failed to allocate tensor');
+      return { data: Float32Array.from([1, 0, 0, 0]) };
+    });
+    for (let i = 0; i < 40; i += 1) await core.searchMemorySafe('anything');
+    expect(core.memoryRecallStatus().suppressedCount).toBe(39);
+
+    embedderBroken = true;
+    expect((await core.searchMemorySafe('anything')).errorCode).toBe('EMBEDDING_FAILED');
+
+    const embedReport = reportsIn(errors).at(-1)!;
+    expect(embedReport).toContain('the query could not be embedded');
+    expect(embedReport).not.toContain('39 further failure(s)');
+    expect(embedReport).not.toContain('query is broken');
   });
 
   it('clears an embed-phase outage once the embedder works again', async () => {
