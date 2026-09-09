@@ -1,4 +1,5 @@
-import { isTailscaleAddress } from './tailscaleNetwork';
+import { describe, expect, it } from 'vitest';
+import { isAuthorizedTailscalePeer, isTailscaleAddress } from './tailscaleNetwork.js';
 
 describe('isTailscaleAddress', () => {
   it('should reject CGNAT addresses without explicit identity proof', () => {
@@ -37,5 +38,32 @@ describe('isTailscaleAddress', () => {
     expect(isTailscaleAddress('100.80.0.1')).toBe(false);
     expect(isTailscaleAddress('100.100.0.1')).toBe(false);
     expect(isTailscaleAddress('100.127.255.254')).toBe(false);
+  });
+});
+describe('isAuthorizedTailscalePeer', () => {
+  const PEER = 'fd7a:115c:a1e0::b601:f469';
+
+  it('rejects a Tailscale-shaped address that is not explicitly allowlisted', () => {
+    delete process.env.OPENSWARM_TAILSCALE_PEERS;
+    expect(isAuthorizedTailscalePeer(PEER)).toBe(false);
+  });
+
+  it('accepts only the exact peer named in OPENSWARM_TAILSCALE_PEERS', () => {
+    process.env.OPENSWARM_TAILSCALE_PEERS = `${PEER}, 100.101.1.5`;
+    expect(isAuthorizedTailscalePeer(PEER)).toBe(true);
+    expect(isAuthorizedTailscalePeer(`::ffff:${PEER}`)).toBe(true);
+    expect(isAuthorizedTailscalePeer('fd7a:115c:a1e0::other-peer')).toBe(false);
+    delete process.env.OPENSWARM_TAILSCALE_PEERS;
+  });
+
+  it('never authorizes CGNAT addresses, even when allowlisted', () => {
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.64.0.1';
+    expect(isAuthorizedTailscalePeer('100.64.0.1')).toBe(false);
+    delete process.env.OPENSWARM_TAILSCALE_PEERS;
+  });
+
+  it('rejects empty and undefined addresses', () => {
+    expect(isAuthorizedTailscalePeer(undefined)).toBe(false);
+    expect(isAuthorizedTailscalePeer('')).toBe(false);
   });
 });

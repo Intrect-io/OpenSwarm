@@ -22,6 +22,10 @@ import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
  * - 172.16.0.0/12     — Private (Class B)
  * - 192.168.0.0/16    — Private (Class C)
  * - 100.64.0.0/10     — Carrier-grade NAT (CGNAT, RFC 6598)
+ * - 192.0.0.0/24      — IETF Protocol Assignments / DS-Lite (RFC 6333)
+ * - 198.18.0.0/15     — Benchmarking (RFC 2544)
+ * - 198.51.100.0/24   — TEST-NET-2 (RFC 5737)
+ * - 203.0.113.0/24    — TEST-NET-3 (RFC 5737)
  */
 const NON_GLOBAL_IPV4_RANGES: ReadonlyArray<{
   prefix: number;
@@ -34,6 +38,10 @@ const NON_GLOBAL_IPV4_RANGES: ReadonlyArray<{
   { prefix: 0xac100000, mask: 0xfff00000, maskBits: 12 },   // 172.16.0.0/12
   { prefix: 0xc0a80000, mask: 0xffff0000, maskBits: 16 },   // 192.168.0.0/16
   { prefix: 0x64400000, mask: 0xffc00000, maskBits: 10 },   // 100.64.0.0/10 (CGNAT)
+  { prefix: 0xc0000000, mask: 0xffffff00, maskBits: 24 },   // 192.0.0.0/24 (IETF Protocol Assignments)
+  { prefix: 0xc6120000, mask: 0xfffe0000, maskBits: 15 },   // 198.18.0.0/15 (Benchmarking)
+  { prefix: 0xc6336400, mask: 0xffffff00, maskBits: 24 },   // 198.51.100.0/24 (TEST-NET-2)
+  { prefix: 0xcb007100, mask: 0xffffff00, maskBits: 24 },   // 203.0.113.0/24 (TEST-NET-3)
 ];
 
 function octetsToInt(a: number, b: number, c: number, d: number): number {
@@ -47,7 +55,7 @@ function octetsToInt(a: number, b: number, c: number, d: number): number {
  * Returns `false` if the URL resolves to a non-global special-use IPv4 address
  * or is malformed.
  */
-function validateWebhookUrl(url: string): boolean {
+export function validateWebhookUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
@@ -65,7 +73,15 @@ function validateWebhookUrl(url: string): boolean {
 
     // Check all non-global IPv4 ranges including CGNAT (100.64.0.0/10)
     for (const range of NON_GLOBAL_IPV4_RANGES) {
-      if ((addr & range.mask) === range.prefix) return false;
+      // `>>> 0` on the RESULT, not just on `addr`. JavaScript's `&` coerces both
+      // operands to int32, so for any address with the high bit set — every
+      // 169.254/16, 172.16/12, 192.168/16, 198.18/15, 198.51.100/24 and
+      // 203.0.113/24 range here — the AND produced a NEGATIVE number while
+      // `prefix` is a positive literal, and the comparison could never match.
+      // Measured: `validateWebhookUrl('http://192.168.1.1')` returned true.
+      // Only 10/8, 127/8 and 100.64/10 worked, and only because their high bit
+      // is clear. (AGT-3492)
+      if (((addr & range.mask) >>> 0) === range.prefix) return false;
     }
 
     return true;
@@ -102,12 +118,14 @@ export function truncateNotificationText(text: string): string {
 
 export function messageToText(message: string | EmbedBuilder): string {
   if (typeof message === 'string') return message;
-  const embed = message;
+  const embed = message as EmbedBuilder;
+  const data = embed.data;
+  if (!data) return '';
   const parts: string[] = [];
-  if (embed.data.title) parts.push(embed.data.title);
-  if (embed.data.description) parts.push(embed.data.description);
-  if (embed.data.fields) {
-    for (const field of embed.data.fields) {
+  if (data.title) parts.push(data.title);
+  if (data.description) parts.push(data.description);
+  if (data.fields) {
+    for (const field of data.fields) {
       parts.push(`${field.name}: ${field.value}`);
     }
   }
@@ -115,6 +133,10 @@ export function messageToText(message: string | EmbedBuilder): string {
 }
 
 async function postJson(url: string, body: unknown): Promise<void> {
+  // Restored: this branch dropped both fail-close guards. A change whose stated
+  // purpose is restricting notification boundaries must not remove the boundary
+  // that already exists — strict human-surface policy means no outbound send.
+  if (isHumanSurfaceReadOnlyEnabled()) return;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10_000);
   try {
@@ -143,18 +165,32 @@ class NoopNotifier implements Notifier {
 /** Discord bot channel. Owns the string→Embed wrapping (moved here from reportToDiscord). */
 class DiscordNotifier implements Notifier {
   constructor(private readonly send: DiscordSend) {}
+
   async notify(message: string | EmbedBuilder): Promise<void> {
+    if (isHumanSurfaceReadOnlyEnabled()) return;
     try {
-      await this.send(message);
+      // Restored: this branch sent the raw message, but sendToChannel's contract
+      // is Discord's content shape — a bare string arrives without `embeds` and
+      // an EmbedBuilder arrives unwrapped. The string->Embed wrapping lives here
+      // on purpose (moved from reportToDiscord).
+      if (typeof message === 'string') {
+        // Lazy import keeps discord.js out of the load path for non-Discord users.
+        const { EmbedBuilder } = await import('discord.js');
+        const embed = new EmbedBuilder().setDescription(messageToText(message)).setColor(0x00ff41).setTimestamp();
+        await this.send({ embeds: [embed] });
+      } else {
+        await this.send({ embeds: [message] });
+      }
     } catch (err) {
       console.error('[Notify] Discord send failed:', sanitizeNotificationError(err));
     }
   }
 }
 
-/** Slack webhook. */
+/** Slack webhook channel. */
 class SlackNotifier implements Notifier {
   constructor(private readonly url: string) {}
+
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
       await postJson(this.url, { text: messageToText(message) });
@@ -164,16 +200,20 @@ class SlackNotifier implements Notifier {
   }
 }
 
-/** Telegram bot. */
+/** Telegram bot channel. */
 class TelegramNotifier implements Notifier {
   constructor(
-    private readonly token: string,
+    private readonly botToken: string,
     private readonly chatId: string,
   ) {}
+
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
-      const url = `https://api.telegram.org/bot${this.token}/sendMessage`;
-      await postJson(url, { chat_id: this.chatId, text: messageToText(message) });
+      const url = `https://api.telegram.org/bot${this.botToken}/sendMessage`;
+      await postJson(url, {
+        chat_id: this.chatId,
+        text: messageToText(message),
+      });
     } catch (err) {
       console.error('[Notify] Telegram send failed:', sanitizeNotificationError(err));
     }
@@ -195,7 +235,8 @@ class WebhookNotifier implements Notifier {
   }
 }
 
-type DiscordSend = (message: string | EmbedBuilder) => Promise<void>;
+/** Discord's content shape (string or embeds) — the existing sendToChannel signature. */
+type DiscordSend = (content: string | { embeds: EmbedBuilder[] }) => Promise<void>;
 
 /**
  * Build the notifier for the configured channel. `discordSend` is injected (not
