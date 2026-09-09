@@ -122,14 +122,20 @@ describe('memory recall status (AGT-4267)', () => {
     for (let i = 0; i < 5; i += 1) await expect(core.initDatabase()).rejects.toThrow();
     vi.advanceTimersByTime(11 * 60_000);
     for (let i = 0; i < 3; i += 1) await expect(core.initDatabase()).rejects.toThrow();
-    // Three reports, and the last one has only 2 failures behind it.
     expect(reportsIn(errors)).toHaveLength(3);
-    expect(core.memoryRecallStatus().suppressedCount).toBe(2);
+    // One more window holding a single failure, so the window count is 0 at the
+    // moment of recovery. Guarding the annotation on that count instead of the
+    // outage total drops the number entirely here — a long outage that happens
+    // to recover just after a window boundary reports nothing, which is the
+    // defect this pair of commits is about.
+    vi.advanceTimersByTime(11 * 60_000);
+    await expect(core.initDatabase()).rejects.toThrow();
+    expect(core.memoryRecallStatus().suppressedCount).toBe(0);
 
     connect.mockResolvedValue(openable());
     await core.initDatabase();
 
-    expect(errors.some(e => /long-term recall restored after 13 failure\(s\)/.test(e))).toBe(true);
+    expect(errors.some(e => /long-term recall restored after 14 failure\(s\)/.test(e))).toBe(true);
   });
 
   it('bounds reports even when the store alternates between two errors', async () => {
@@ -242,14 +248,17 @@ describe('memory recall status (AGT-4267)', () => {
       if (embedderBroken) throw new Error('failed to allocate tensor');
       return { data: Float32Array.from([1, 0, 0, 0]) };
     });
-    // Spans two windows on purpose: the suppressed count resets on the
-    // re-report, so it and the outage total diverge (19 vs 40) and the report
-    // has to name the second.
+    // Spans three windows on purpose, the last holding a single failure. The
+    // suppressed count resets on every re-report, so at the moment of the phase
+    // change it is 0 while the outage total is 40 — the report has to name the
+    // second, and must not gate itself on the first.
     vi.useFakeTimers();
     for (let i = 0; i < 20; i += 1) await core.searchMemorySafe('anything');
     vi.advanceTimersByTime(11 * 60_000);
-    for (let i = 0; i < 20; i += 1) await core.searchMemorySafe('anything');
-    expect(core.memoryRecallStatus().suppressedCount).toBe(19);
+    for (let i = 0; i < 19; i += 1) await core.searchMemorySafe('anything');
+    vi.advanceTimersByTime(11 * 60_000);
+    await core.searchMemorySafe('anything');
+    expect(core.memoryRecallStatus().suppressedCount).toBe(0);
 
     embedderBroken = true;
     expect((await core.searchMemorySafe('anything')).errorCode).toBe('EMBEDDING_FAILED');
@@ -285,7 +294,11 @@ describe('memory recall status (AGT-4267)', () => {
     expect((await core.searchMemorySafe('anything')).success).toBe(true);
 
     expect(core.memoryRecallStatus().available).toBe(true);
-    expect(errors.some(e => e.includes('long-term recall restored'))).toBe(true);
+    const restored = errors.filter(e => e.includes('long-term recall restored'));
+    expect(restored).toHaveLength(1);
+    // A single blip carries no count — annotating it is the noise the guard
+    // exists to prevent.
+    expect(restored[0]).not.toMatch(/after \d+ failure\(s\)/);
   });
 
   it('rate-limits a store that breaks AFTER it opened, and stops claiming it is available', async () => {
