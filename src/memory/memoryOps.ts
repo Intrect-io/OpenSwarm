@@ -59,9 +59,6 @@ async function deleteMemoryIds(table: MemoryTable, ids: string[]): Promise<void>
 /**
  * Revise existing memory content. v3 keeps revision history in metadata rather
  * than maintaining unused top-level revision/stability columns.
- *
- * The full read-modify-write is serialised under withMemoryWriteRetry so that
- * concurrent revisions do not silently overwrite each other's changes.
  */
 export async function reviseMemory(
   memoryId: string,
@@ -76,50 +73,47 @@ export async function reviseMemory(
     const table = getTable();
     if (!table) return false;
 
-    // Serialise the full read-modify-write under withMemoryWriteRetry so that
-    // concurrent revisions re-read the latest record before writing.
-    return await withMemoryWriteRetry(async () => {
-      // Re-read inside the retry loop so a contended write re-fetches the latest
-      const existing = await loadMemoryById(table!, memoryId);
+    // Find existing memory
+    const existing = await loadMemoryById(table, memoryId);
 
-      if (!existing) {
-        console.log(`[Memory] Revision failed: memory ${memoryId} not found`);
-        return false;
-      }
+    if (!existing) {
+      console.log(`[Memory] Revision failed: memory ${memoryId} not found`);
+      return false;
+    }
 
-      const now = Date.now();
-      const meta = safeParseMetadata(existing.metadata);
-      const revisions = Array.isArray(meta.revisions) ? meta.revisions : [];
+    const now = Date.now();
+    const meta = safeParseMetadata(existing.metadata);
+    const revisions = Array.isArray(meta.revisions) ? meta.revisions : [];
 
-      // Create revised record
-      const revised: CognitiveMemoryRecord = {
-        ...existing,
-        content: newContent,
-        vector: await embedPassage(embeddingTextFor(String(existing.title ?? ''), newContent)),
-        lastUpdated: now,
-        confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
-        metadata: JSON.stringify({
-          ...meta,
-          revisions: [
-            ...revisions,
-            {
-              timestamp: now,
-              reason: options?.reason || 'manual revision',
-              previousContent: existing.content.slice(0, 200),
-            },
-          ].slice(-MAX_MEMORY_REVISIONS),
-          lastRevision: {
+    // Create revised record
+    const revised: CognitiveMemoryRecord = {
+      ...existing,
+      content: newContent,
+      vector: await embedPassage(embeddingTextFor(String(existing.title ?? ''), newContent)),
+      lastUpdated: now,
+      confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
+      metadata: JSON.stringify({
+        ...meta,
+        revisions: [
+          ...revisions,
+          {
             timestamp: now,
             reason: options?.reason || 'manual revision',
             previousContent: existing.content.slice(0, 200),
           },
-        }),
-      };
+        ].slice(-MAX_MEMORY_REVISIONS),
+        lastRevision: {
+          timestamp: now,
+          reason: options?.reason || 'manual revision',
+          previousContent: existing.content.slice(0, 200),
+        },
+      }),
+    };
 
-      await updateMemoryRecord(table!, revised);
-      console.log(`[Memory] Revised ${memoryId}`);
-      return true;
-    }, 'reviseMemory');
+    await updateMemoryRecord(table, revised);
+
+    console.log(`[Memory] Revised ${memoryId}`);
+    return true;
   } catch (error) {
     console.error('[Memory] Revision error:', error);
     return false;
@@ -149,25 +143,32 @@ export async function findContradictions(content: string): Promise<MemorySearchR
     for (const memory of similar) {
       // Check for opposite sentiment patterns
       for (const { positive, negative } of contradictionKeywords) {
-        const hasPositive = positive.test(content) && negative.test(memory.content);
-        const hasNegative = negative.test(content) && positive.test(memory.content);
+        const contentHasPositive = positive.test(content);
+        const contentHasNegative = negative.test(content);
+        const memoryHasPositive = positive.test(memory.content);
+        const memoryHasNegative = negative.test(memory.content);
 
-        if (hasPositive || hasNegative) {
+        // Contradiction: one has positive, other has negative
+        if ((contentHasPositive && memoryHasNegative) || (contentHasNegative && memoryHasPositive)) {
           contradictions.push(memory);
           break;
         }
       }
     }
 
+    if (contradictions.length > 0) {
+      console.log(`[Memory] Found ${contradictions.length} potential contradictions`);
+    }
+
     return contradictions;
   } catch (error) {
-    console.error('[Memory] Contradiction search error:', error);
+    console.error('[Memory] Contradiction detection error:', error);
     return [];
   }
 }
 
 /**
- * Mark two memories as contradicting each other
+ * Mark memories as contradicting each other
  */
 export async function markContradiction(memoryId1: string, memoryId2: string): Promise<boolean> {
   try {
@@ -178,11 +179,13 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
     const memory1 = await loadMemoryById(table, memoryId1);
     const memory2 = await loadMemoryById(table, memoryId2);
 
-    if (!memory1 || !memory2) return false;
+    if (!memory1 || !memory2) {
+      console.log('[Memory] Cannot mark contradiction: one or both memories not found');
+      return false;
+    }
 
     const meta1 = safeParseMetadata(memory1.metadata);
     const meta2 = safeParseMetadata(memory2.metadata);
-
     const contradicts1 = Array.isArray(meta1.contradicts) ? meta1.contradicts : [];
     const contradicts2 = Array.isArray(meta2.contradicts) ? meta2.contradicts : [];
 
@@ -198,6 +201,7 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
     await updateMemoryRecord(table, memory1);
     await updateMemoryRecord(table, memory2);
 
+    console.log(`[Memory] Marked contradiction between ${memoryId1} and ${memoryId2}`);
     return true;
   } catch (error) {
     console.error('[Memory] Mark contradiction error:', error);
@@ -206,89 +210,159 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
 }
 
 /**
- * Reconcile contradiction by updating one memory and removing the other
+ * Reconcile contradicting beliefs (choose one, archive other)
  */
 export async function reconcileContradiction(
   keepId: string,
-  removeId: string,
-  resolution: string
+  archiveId: string,
+  reason: string
 ): Promise<boolean> {
   try {
     await initDatabase();
     const table = getTable();
     if (!table) return false;
 
-    // Serialise the full read-modify-write under withMemoryWriteRetry so that
-    // concurrent reconcileContradiction calls re-read the latest records before
-    // writing and do not silently overwrite each other's changes.
-    return await withMemoryWriteRetry(async () => {
-      const keep = await loadMemoryById(table!, keepId);
-      const remove = await loadMemoryById(table!, removeId);
+    const keepMemory = await loadMemoryById(table, keepId);
+    const archiveMemory = await loadMemoryById(table, archiveId);
 
-      if (!keep || !remove) return false;
+    if (!keepMemory || !archiveMemory) {
+      console.log('[Memory] Cannot reconcile: one or both memories not found');
+      return false;
+    }
 
-      // Update kept memory with resolution
-      const meta = safeParseMetadata(keep.metadata);
-      const contradictions = Array.isArray(meta.contradictions) ? meta.contradictions : [];
-      contradictions.push({
-        resolvedWith: removeId,
-        resolution,
+    // Boost kept memory
+    keepMemory.confidence = Math.min(1, (keepMemory.confidence ?? 0.7) + 0.1);
+
+    // Archive the other via metadata + low importance. v3 does not maintain a
+    // top-level decay field.
+    archiveMemory.importance = 0.1;
+    archiveMemory.metadata = JSON.stringify({
+      ...safeParseMetadata(archiveMemory.metadata),
+      archived: {
         timestamp: Date.now(),
-      });
+        reason,
+        supersededBy: keepId,
+      },
+    });
 
-      keep.metadata = JSON.stringify({
-        ...meta,
-        contradictions,
-        resolvedContradictions: [
-          ...(Array.isArray(meta.resolvedContradictions) ? meta.resolvedContradictions : []),
-          removeId,
-        ],
-      });
+    await updateMemoryRecord(table, keepMemory);
+    await updateMemoryRecord(table, archiveMemory);
 
-      await updateMemoryRecord(table!, keep);
-      await deleteMemoryIds(table!, [removeId]);
-
-      return true;
-    }, 'reconcileContradiction');
+    console.log(`[Memory] Reconciled: kept ${keepId}, archived ${archiveId}`);
+    return true;
   } catch (error) {
-    console.error('[Memory] Reconcile contradiction error:', error);
+    console.error('[Memory] Reconciliation error:', error);
     return false;
   }
 }
 
 /**
- * Format memory context for LLM prompt
+ * Format memories as prompt context.
  */
 export function formatMemoryContext(memories: MemorySearchResult[]): string {
   if (memories.length === 0) return '';
 
-  const sections: string[] = ['<memory_context>'];
+  // Cognitive + Legacy types
+  const grouped: Record<string, MemorySearchResult[]> = {
+    // Cognitive
+    constraint: [],
+    user_model: [],
+    strategy: [],
+    belief: [],
+    system_pattern: [],
+    // Legacy
+    decision: [],
+    repomap: [],
+    journal: [],
+    fact: [],
+  };
 
-  for (const memory of memories) {
-    const type = memory.type ?? 'unknown';
-    const title = memory.title ?? 'Untitled';
-    const content = memory.content ?? '';
-    const importance = memory.importance ?? 0.5;
-    const confidence = memory.confidence ?? 0.5;
-    const freshness = memory.freshness ?? 0;
-
-    sections.push(
-      `  <memory type="${type}" importance="${importance.toFixed(2)}" confidence="${confidence.toFixed(2)}" freshness="${freshness.toFixed(2)}">`
-    );
-    sections.push(`    <title>${title}</title>`);
-    sections.push(`    <content>${content}</content>`);
-    sections.push('  </memory>');
+  for (const m of memories) {
+    if (grouped[m.type]) {
+      grouped[m.type].push(m);
+    }
   }
 
-  sections.push('</memory_context>');
-  return sections.join('\n');
+  const sections: string[] = [];
+
+  // Cognitive types (ordered by importance, highest first)
+  if (grouped.constraint.length > 0) {
+    const items = grouped.constraint.map(m =>
+      `- ⚠️ **${m.content.slice(0, 100)}** (importance: ${(m.importance * 100).toFixed(0)}%, confidence: ${(m.confidence * 100).toFixed(0)}%)`
+    ).join('\n');
+    sections.push(`### 🚫 Constraints (CRITICAL)\n${items}`);
+  }
+
+  if (grouped.user_model.length > 0) {
+    const items = grouped.user_model.map(m =>
+      `- **${m.content.slice(0, 100)}** (confidence: ${(m.confidence * 100).toFixed(0)}%)`
+    ).join('\n');
+    sections.push(`### 👤 User Preferences\n${items}`);
+  }
+
+  if (grouped.strategy.length > 0) {
+    const items = grouped.strategy.map(m =>
+      `- **${m.content.slice(0, 100)}** (confidence: ${(m.confidence * 100).toFixed(0)}%)`
+    ).join('\n');
+    sections.push(`### 🎯 Verified Strategies\n${items}`);
+  }
+
+  if (grouped.belief.length > 0) {
+    const items = grouped.belief.map(m =>
+      `- ${m.content.slice(0, 100)} (importance: ${(m.importance * 100).toFixed(0)}%)`
+    ).join('\n');
+    sections.push(`### 💡 Beliefs\n${items}`);
+  }
+
+  if (grouped.system_pattern.length > 0) {
+    const items = grouped.system_pattern.map(m =>
+      `- **${m.content.slice(0, 100)}**`
+    ).join('\n');
+    sections.push(`### 🏗️ System Patterns\n${items}`);
+  }
+
+  // Legacy Types
+  if (grouped.decision.length > 0) {
+    const items = grouped.decision.map(m =>
+      `- **${m.title}** (${formatDate(m.createdAt)}, trust: ${(m.trust * 100).toFixed(0)}%)\n  ${m.content.slice(0, 150)}...`
+    ).join('\n');
+    sections.push(`### 📋 Related Design Decisions (reference)\n${items}`);
+  }
+
+  if (grouped.fact.length > 0) {
+    const items = grouped.fact.map(m =>
+      `- **${m.title}**: ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}`
+    ).join('\n');
+    sections.push(`### 📌 Related Facts (reference)\n${items}`);
+  }
+
+  if (grouped.repomap.length > 0) {
+    const items = grouped.repomap.map(m =>
+      `- **${m.repo}**: ${m.title}`
+    ).join('\n');
+    sections.push(`### 🗂️ Repository Structure (reference)\n${items}`);
+  }
+
+  if (grouped.journal.length > 0) {
+    const items = grouped.journal.map(m =>
+      `- [${formatDate(m.createdAt)}] **${m.title}** (freshness: ${(m.freshness * 100).toFixed(0)}%)`
+    ).join('\n');
+    sections.push(`### 📝 Recent Work Log (reference)\n${items}`);
+  }
+
+  if (sections.length === 0) return '';
+
+  return `## 🧠 Repository Memory\n\n${sections.join('\n\n')}\n\n---\n⚠️ The above information is for reference only. It may differ from the current state; verify directly if needed.`;
 }
 
 /**
- * Format date for display
+ * Format date
  */
 function formatDate(timestamp: number): string {
-  return new Date(timestamp).toISOString().split('T')[0];
+  return new Date(timestamp).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+  });
 }
 
 /**
@@ -301,83 +375,30 @@ export async function cleanupExpired(): Promise<number> {
     if (!table) return 0;
 
     const now = Date.now();
-    const rows = await table.query().limit(100_000).toArray();
-    const expired = rows.filter((r: any) => {
-      if (r.type === 'system_pattern') return false;
-      const expiry = r.metadata?.expiresAt;
-      return expiry && expiry < now;
-    });
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
 
-    if (expired.length === 0) return 0;
+    const expiredIds = results
+      .filter((r: any) => r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now)
+      .map((r: any) => r.id);
 
-    const ids = expired.map((r: any) => r.id);
-    await deleteMemoryIds(table, ids);
-    console.log(`[Memory] Cleaned up ${expired.length} expired memories`);
-    return expired.length;
+    if (expiredIds.length > 0) {
+      await deleteMemoryIds(table, expiredIds);
+      console.log(`[Memory] Deleted ${expiredIds.length} expired records`);
+    }
+
+    return expiredIds.length;
   } catch (error) {
     console.error('[Memory] Cleanup error:', error);
     return 0;
   }
 }
 
-/**
- * Apply memory decay to reduce importance over time
- */
-export async function applyMemoryDecay(daysSinceLastRun = 7): Promise<{
-  decayed: number;
-  archived: number;
-}> {
-  try {
-    await initDatabase();
-    const table = getTable();
-    if (!table) return { decayed: 0, archived: 0 };
-
-    const now = Date.now();
-    const decayThreshold = now - daysSinceLastRun * 24 * 60 * 60 * 1000;
-    const archiveThreshold = now - daysSinceLastRun * 30 * 24 * 60 * 60 * 1000;
-
-    const rows = await table.query().limit(100_000).toArray();
-    let decayed = 0;
-    let archived = 0;
-
-    for (const row of rows) {
-      if (row.type === 'system_pattern') continue;
-
-      const lastAccessed = row.lastAccessed ?? row.createdAt ?? 0;
-      if (lastAccessed < archiveThreshold) {
-        // Archive: reduce importance significantly
-        row.importance = Math.max(0.1, (row.importance ?? 0.5) * 0.5);
-        row.metadata = JSON.stringify({
-          ...safeParseMetadata(row.metadata),
-          archived: true,
-          archivedAt: now,
-        });
-        await updateMemoryRecord(table, row);
-        archived++;
-      } else if (lastAccessed < decayThreshold) {
-        // Decay: reduce importance slightly
-        row.importance = Math.max(0.2, (row.importance ?? 0.5) * 0.9);
-        await updateMemoryRecord(table, row);
-        decayed++;
-      }
-    }
-
-    console.log(`[Memory] Decay applied: ${decayed} decayed, ${archived} archived`);
-    return { decayed, archived };
-  } catch (error) {
-    console.error('[Memory] Decay error:', error);
-    return { decayed: 0, archived: 0 };
-  }
-}
+// Maintenance
+const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
 /**
- * Consolidate duplicate memories by merging similar entries.
- *
- * The full read-merge-write is serialised under withMemoryWriteRetry so that
- * concurrent consolidation runs do not race on the same records.
+ * Consolidate duplicate/similar memories
  */
-const CONSOLIDATION_SIMILARITY = 0.92;
-
 export async function consolidateMemories(): Promise<{
   merged: number;
   groups: Array<{ kept: string; merged: string[] }>;
@@ -387,80 +408,76 @@ export async function consolidateMemories(): Promise<{
     const table = getTable();
     if (!table) return { merged: 0, groups: [] };
 
-    // Serialise the full read-merge-write under withMemoryWriteRetry so that
-    // concurrent consolidation runs re-read the latest state before writing.
-    return await withMemoryWriteRetry(async () => {
-      const results = await table!.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-      const validMemories = results.filter((r: any) => r.id !== 'init');
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
+    const validMemories = results.filter((r: any) => r.id !== 'init');
 
-      const merged: string[] = [];
-      const groups: Array<{ kept: string; merged: string[] }> = [];
-      const updatedKept: any[] = [];
+    const merged: string[] = [];
+    const groups: Array<{ kept: string; merged: string[] }> = [];
+    const updatedKept: any[] = [];
 
-      // Find similar memory groups
-      for (let i = 0; i < validMemories.length; i++) {
-        const m1 = validMemories[i];
-        if (merged.includes(m1.id)) continue;
+    // Find similar memory groups
+    for (let i = 0; i < validMemories.length; i++) {
+      const m1 = validMemories[i];
+      if (merged.includes(m1.id)) continue;
 
-        const similarGroup: any[] = [m1];
+      const similarGroup: any[] = [m1];
 
-        for (let j = i + 1; j < validMemories.length; j++) {
-          const m2 = validMemories[j];
-          if (merged.includes(m2.id)) continue;
-          if (m1.type !== m2.type || m1.repo !== m2.repo) continue;
+      for (let j = i + 1; j < validMemories.length; j++) {
+        const m2 = validMemories[j];
+        if (merged.includes(m2.id)) continue;
+        if (m1.type !== m2.type || m1.repo !== m2.repo) continue;
 
-          // Calculate cosine similarity
-          const similarity = cosineSimilarity(m1.vector, m2.vector);
+        // Calculate cosine similarity
+        const similarity = cosineSimilarity(m1.vector, m2.vector);
 
-          if (similarity >= CONSOLIDATION_SIMILARITY) {
-            similarGroup.push(m2);
-            merged.push(m2.id);
-          }
-        }
-
-        // Merge if group has duplicates
-        if (similarGroup.length > 1) {
-          // Keep the one with highest importance * confidence
-          similarGroup.sort((a, b) =>
-            (b.importance ?? 0.5) * (b.confidence ?? 0.5) -
-            (a.importance ?? 0.5) * (a.confidence ?? 0.5)
-          );
-
-          const kept = similarGroup[0];
-          const toMerge = similarGroup.slice(1);
-
-          // Boost kept memory
-          kept.confidence = Math.min(1, (kept.confidence ?? 0.7) + 0.05 * toMerge.length);
-          const meta = safeParseMetadata(kept.metadata);
-          kept.metadata = JSON.stringify({
-            ...meta,
-            consolidatedFrom: [
-              ...(Array.isArray(meta.consolidatedFrom) ? meta.consolidatedFrom : []),
-              ...toMerge.map((m: any) => m.id),
-            ].slice(-MAX_MEMORY_REVISIONS),
-          });
-          updatedKept.push(kept);
-
-          groups.push({
-            kept: kept.id,
-            merged: toMerge.map((m: any) => m.id),
-          });
-
-          console.log(`[Memory] Consolidated ${toMerge.length} duplicates into ${kept.id}`);
+        if (similarity >= CONSOLIDATION_SIMILARITY) {
+          similarGroup.push(m2);
+          merged.push(m2.id);
         }
       }
 
-      if (merged.length > 0) {
-        for (const record of updatedKept) {
-          await updateMemoryRecord(table!, record);
-        }
-        await deleteMemoryIds(table!, merged);
+      // Merge if group has duplicates
+      if (similarGroup.length > 1) {
+        // Keep the one with highest importance * confidence
+        similarGroup.sort((a, b) =>
+          (b.importance ?? 0.5) * (b.confidence ?? 0.5) -
+          (a.importance ?? 0.5) * (a.confidence ?? 0.5)
+        );
 
-        console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
+        const kept = similarGroup[0];
+        const toMerge = similarGroup.slice(1);
+
+        // Boost kept memory
+        kept.confidence = Math.min(1, (kept.confidence ?? 0.7) + 0.05 * toMerge.length);
+        const meta = safeParseMetadata(kept.metadata);
+        kept.metadata = JSON.stringify({
+          ...meta,
+          consolidatedFrom: [
+            ...(Array.isArray(meta.consolidatedFrom) ? meta.consolidatedFrom : []),
+            ...toMerge.map((m: any) => m.id),
+          ].slice(-MAX_MEMORY_REVISIONS),
+        });
+        updatedKept.push(kept);
+
+        groups.push({
+          kept: kept.id,
+          merged: toMerge.map((m: any) => m.id),
+        });
+
+        console.log(`[Memory] Consolidated ${toMerge.length} duplicates into ${kept.id}`);
       }
+    }
 
-      return { merged: merged.length, groups };
-    }, 'consolidateMemories');
+    if (merged.length > 0) {
+      for (const record of updatedKept) {
+        await updateMemoryRecord(table, record);
+      }
+      await deleteMemoryIds(table, merged);
+
+      console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
+    }
+
+    return { merged: merged.length, groups };
   } catch (error) {
     console.error('[Memory] Consolidation error:', error);
     return { merged: 0, groups: [] };
@@ -528,69 +545,122 @@ export async function runBackgroundCognition(): Promise<{
   };
 }
 
+// Default stats object with all memory types
+const DEFAULT_BY_TYPE: Record<MemoryType, number> = {
+  // Cognitive types
+  belief: 0,
+  strategy: 0,
+  user_model: 0,
+  system_pattern: 0,
+  constraint: 0,
+  // Legacy types
+  decision: 0,
+  repomap: 0,
+  journal: 0,
+  fact: 0,
+};
+
 /**
- * Get memory statistics
+ * Memory statistics.
  */
 export async function getMemoryStats(): Promise<{
   total: number;
-  byType: Record<string, number>;
+  byType: Record<MemoryType, number>;
+  byRepo: Record<string, number>;
   avgImportance: number;
-  avgConfidence: number;
-  oldest: number;
-  newest: number;
 }> {
   try {
     await initDatabase();
     const table = getTable();
-    if (!table) {
-      return { total: 0, byType: {}, avgImportance: 0, avgConfidence: 0, oldest: 0, newest: 0 };
-    }
+    if (!table) return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0 };
 
-    const rows = await table.query().limit(100_000).toArray();
-    const total = rows.length;
-    const byType: Record<string, number> = {};
+    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
+
+    const byType: Record<MemoryType, number> = { ...DEFAULT_BY_TYPE };
+    const byRepo: Record<string, number> = {};
     let totalImportance = 0;
-    let totalConfidence = 0;
-    let oldest = Infinity;
-    let newest = 0;
+    let count = 0;
 
-    for (const row of rows) {
-      byType[row.type] = (byType[row.type] ?? 0) + 1;
-      totalImportance += row.importance ?? 0.5;
-      totalConfidence += row.confidence ?? 0.5;
-      if (row.createdAt < oldest) oldest = row.createdAt;
-      if (row.createdAt > newest) newest = row.createdAt;
+    for (const r of results) {
+      if (r.id === 'init') continue;
+      if (byType[r.type as MemoryType] !== undefined) {
+        byType[r.type as MemoryType]++;
+      }
+      byRepo[r.repo] = (byRepo[r.repo] || 0) + 1;
+      totalImportance += r.importance ?? 0.5;
+      count++;
     }
 
     return {
-      total,
+      total: count,
       byType,
-      avgImportance: total / totalImportance,
-      avgConfidence: total / totalConfidence,
-      oldest: oldest === Infinity ? 0 : oldest,
-      newest,
+      byRepo,
+      avgImportance: count > 0 ? totalImportance / count : 0,
     };
   } catch (error) {
     console.error('[Memory] Stats error:', error);
-    return { total: 0, byType: {}, avgImportance: 0, avgConfidence: 0, oldest: 0, newest: 0 };
+    return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0 };
   }
 }
 
+// Legacy compatibility functions (existing code support)
+
 /**
- * Get recent conversations (for context window)
+ * Save conversation (legacy compatible)
  */
-export async function getRecentConversations(limit = 10): Promise<MemorySearchResult[]> {
+export async function saveConversation(
+  channelId: string,
+  userId: string,
+  userName: string,
+  content: string,
+  response: string,
+): Promise<void> {
+  await logWork(
+    'chat',  // Unified repo for both Discord and Dashboard
+    `Chat with ${userName}`,
+    `Q: ${content}\n\nA: ${response}`,
+    undefined,
+    channelId
+  );
+}
+
+/**
+ * Get recent conversations (sorted by createdAt)
+ * - Chronological lookup, not semantic search
+ * - channelId is stored in the derivedFrom field (legacy: metadata.issueRef)
+ */
+export async function getRecentConversations(
+  channelId: string,
+  limit: number = 10,
+): Promise<MemorySearchResult[]> {
   try {
     await initDatabase();
     const table = getTable();
     if (!table) return [];
 
-    const rows = await table.query().limit(limit).toArray();
-    const filtered = rows
-      .filter((r: any) => r.type === 'conversation' || r.type === 'decision')
-      .sort((a: any, b: any) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    // Scalar scan is intentional: vector similarity must not decide which
+    // messages count as recent. The final ordering uses the source timestamp.
+    const results = await table.query().limit(100_000).toArray();
+
+    // Filter: journal + chat (channelId matching is loose for legacy data compat)
+    const filtered = results
+      .filter((r: any) => {
+        if (r.type !== 'journal' || (r.repo !== 'chat' && r.repo !== 'discord')) return false;  // Support legacy 'discord' repo
+
+        // channelId matching: derivedFrom or metadata.issueRef
+        if (!channelId) return true;  // All
+        if (r.derivedFrom === channelId) return true;
+
+        // metadata.issueRef fallback
+        const meta = safeParseMetadata(r.metadata);
+        if (meta.issueRef === channelId) return true;
+
+        return false;
+      })
+      .sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0))  // Newest first
       .slice(0, limit);
 
+    // Convert to MemorySearchResult format
     return filtered.map((r: any) => ({
       id: r.id,
       type: r.type,

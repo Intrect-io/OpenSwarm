@@ -303,7 +303,7 @@ const WorkflowConfigSchema = z.object({
     retryCount: z.number().int().nonnegative().optional(),
     timeout: z.number().positive().optional(),
     condition: z.string().optional(),
-    env: z.record(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
   })).min(1),
   onFailure: z.enum(['rollback', 'retry', 'skip', 'abort', 'notify']).optional(),
   trigger: z.object({
@@ -324,7 +324,7 @@ const WorkflowExecutionSchema = z.object({
   status: z.enum(['running', 'completed', 'failed', 'aborted']),
   startedAt: z.number(),
   completedAt: z.number().optional(),
-  stepResults: z.record(z.object({
+  stepResults: z.record(z.string(), z.object({
     stepId: z.string(),
     status: z.enum(['pending', 'running', 'completed', 'failed', 'skipped']),
     startedAt: z.number(),
@@ -335,13 +335,6 @@ const WorkflowExecutionSchema = z.object({
   })),
   checkpoint: z.string().optional(),
 });
-
-/**
- * Validate a workflow definition against the persisted schema.
- */
-export function validateWorkflow(workflow: WorkflowConfig): void {
-  WorkflowConfigSchema.parse(workflow);
-}
 
 export async function loadWorkflow(workflowId: string): Promise<WorkflowConfig | null> {
   try {
@@ -503,6 +496,12 @@ export function createReviewPipelineTemplate(projectPath: string, prNumber: stri
 export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
+  // Schema validation of the persisted record shape (DoD: validate before write).
+  const schemaCheck = WorkflowConfigSchema.safeParse(workflow);
+  if (!schemaCheck.success) {
+    errors.push(...schemaCheck.error.issues.map(i => `${i.path.join('.')}: ${i.message}`));
+  }
+
   // Basic field validation
   if (!workflow.id) errors.push('Workflow ID is required');
   if (!workflow.name) errors.push('Workflow name is required');
@@ -543,32 +542,6 @@ export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; er
       topologicalSort(workflow.steps);
     } catch (e) {
       errors.push((e as Error).message);
-    }
-  }
-
-  return { valid: errors.length === 0, errors };
-}
-
-// Exports
-
-export {
-  WORKFLOW_DIR,
-  EXECUTION_DIR,
-};
-age);
-    }
-  }
-
-  return { valid: errors.length === 0, errors };
-}
-
-// Exports
-
-export {
-  WORKFLOW_DIR,
-  EXECUTION_DIR,
-};
-age);
     }
   }
 
