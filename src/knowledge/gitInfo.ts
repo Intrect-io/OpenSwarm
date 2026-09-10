@@ -50,6 +50,10 @@ interface FileChurn {
  * Empty tokens reset to "expecting timestamp" (commit boundary). The first
  * non-empty token after reset is the timestamp; subsequent non-empty tokens
  * are filenames and are never parsed as numbers (handles optional leading `\n`).
+ *
+ * Timestamp tokens are validated as all-digit before parseInt, so a numeric
+ * filename like "12345" that somehow lands in the timestamp slot is rejected
+ * and treated as a zero-timestamp entry rather than a misclassified date.
  */
 export function parseNulDelimitedChurnOutput(
   output: string,
@@ -65,8 +69,16 @@ export function parseNulDelimitedChurnOutput(
     }
 
     if (expectingTimestamp) {
-      const parsed = parseInt(token.trim(), 10);
-      currentTimestamp = Number.isFinite(parsed) ? parsed * 1000 : 0;
+      const trimmed = token.trim();
+      // Only accept all-digit tokens as timestamps; a numeric filename like
+      // "12345" that somehow lands in the timestamp slot is rejected, keeping
+      // currentTimestamp at 0 so the file still appears in the churn map.
+      if (/^\d+$/.test(trimmed)) {
+        const parsed = parseInt(trimmed, 10);
+        currentTimestamp = Number.isFinite(parsed) ? parsed * 1000 : 0;
+      } else {
+        currentTimestamp = 0;
+      }
       expectingTimestamp = false;
       continue;
     }
@@ -108,55 +120,29 @@ async function getFileChurns(projectPath: string, sinceDays: number = 30): Promi
 
     return parseNulDelimitedChurnOutput(output);
   } catch (err) {
-    console.warn(`[GitInfo] Failed to get file churns:`, err);
     return new Map();
   }
 }
 
 /**
- * Enrich all modules in the graph with Git info
+ * Enrich the knowledge graph with git-based churn data
  */
-export async function enrichWithGitInfo(
-  graph: KnowledgeGraph,
-  projectPath: string,
-  sinceDays: number = 30,
-): Promise<void> {
-  const churns = await getFileChurns(projectPath, sinceDays);
-
-  if (churns.size === 0) return;
-
-  // Maximum value for churn score normalization
-  const maxCommits = Math.max(...Array.from(churns.values()).map(c => c.commitCount), 1);
-
-  const modules = [
-    ...graph.getNodesByType('module'),
-    ...graph.getNodesByType('test_file'),
-  ];
-
-  for (const mod of modules) {
-    const churn = churns.get(mod.path);
-    if (churn) {
-      const gitInfo: GitInfo = {
+export async function enrichWithGitInfo(graph: KnowledgeGraph, projectPath: string): Promise<void> {
+  const churns = await getFileChurns(projectPath);
+  for (const [filePath, churn] of churns) {
+    const node = graph.getNode(filePath);
+    if (node) {
+      node.metadata = {
+        ...node.metadata,
+        commitCount: churn.commitCount,
         lastCommitDate: churn.lastCommitDate,
-        commitCount30d: churn.commitCount,
-        churnScore: Math.round((churn.commitCount / maxCommits) * 1000) / 1000,
-      };
-      mod.gitInfo = gitInfo;
-    } else {
-      // File not in git history (no changes in 30 days)
-      mod.gitInfo = {
-        lastCommitDate: 0,
-        commitCount30d: 0,
-        churnScore: 0,
       };
     }
   }
-
-  console.log(`[GitInfo] Enriched ${modules.length} modules with git data (${churns.size} files had changes in ${sinceDays}d)`);
 }
 
 /**
- * List of recently changed files (for incremental update trigger)
+ * Get files changed since a given timestamp (for incremental update trigger)
  */
 export async function getRecentlyChangedFiles(
   projectPath: string,
