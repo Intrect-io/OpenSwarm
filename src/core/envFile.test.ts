@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, statSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir, platform, homedir as realHomedir } from 'node:os';
 import { join } from 'node:path';
-import { writeEnvVars } from './envFile.js';
+import { formatShadowWarning, writeEnvVars } from './envFile.js';
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -64,6 +64,22 @@ describe('writeEnvVars', () => {
     const p = freshEnvPath();
     writeEnvVars(p, { SECRET: 'x' });
     expect(statSync(p).mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses to write through a symlinked .env instead of reading it and severing the link (AGT-3424)', () => {
+    if (platform() === 'win32') return; // symlinkSync requires elevated perms on Windows CI
+    const p = freshEnvPath();
+    const outsideDir = mkdtempSync(join(tmpdir(), 'env-outside-'));
+    const outside = join(outsideDir, 'not-an-env-file.txt');
+    writeFileSync(outside, 'sensitive-content\n');
+    try {
+      symlinkSync(outside, p);
+      expect(() => writeEnvVars(p, { SECRET: 'x' })).toThrow(/symlink/);
+      // Neither the symlink itself nor the file it points to changed.
+      expect(readFileSync(outside, 'utf8')).toBe('sensitive-content\n');
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -127,5 +143,63 @@ describe('loadEnvFile', () => {
     loadEnvFile();
 
     expect(process.env.SHELL_WINS).toBe('from-shell');
+  });
+
+  it('reports a shadowed key when the ambient value differs from the file (AGT-4154)', () => {
+    projectDir = mkdtempSync(join(tmpdir(), 'env-project-'));
+    mockedHome = mkdtempSync(join(tmpdir(), 'env-home-'));
+    const envPath = join(projectDir, '.env');
+    writeFileSync(envPath, 'DIVERGES=file-value\n');
+
+    stashEnv('DIVERGES', 'OPENSWARM_ENV', 'OPENSWARM_CONFIG');
+    delete process.env.OPENSWARM_ENV;
+    delete process.env.OPENSWARM_CONFIG;
+    process.env.DIVERGES = 'ambient-value';
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir);
+
+    const result = loadEnvFile();
+
+    expect(result.shadowedKeys).toHaveLength(1);
+    expect(result.shadowedKeys[0]).toMatchObject({ key: 'DIVERGES', sourcePath: envPath });
+    expect(result.shadowedKeys[0].fileFingerprint).not.toBe(result.shadowedKeys[0].ambientFingerprint);
+
+    const warning = formatShadowWarning(result.shadowedKeys[0]);
+    expect(warning).not.toContain('file-value');
+    expect(warning).not.toContain('ambient-value');
+    expect(warning).toContain('DIVERGES');
+    expect(warning).toContain(envPath);
+  });
+
+  it('stays silent when the ambient value is identical to the file', () => {
+    projectDir = mkdtempSync(join(tmpdir(), 'env-project-'));
+    mockedHome = mkdtempSync(join(tmpdir(), 'env-home-'));
+    writeFileSync(join(projectDir, '.env'), 'SAME=matching\n');
+
+    stashEnv('SAME', 'OPENSWARM_ENV', 'OPENSWARM_CONFIG');
+    delete process.env.OPENSWARM_ENV;
+    delete process.env.OPENSWARM_CONFIG;
+    process.env.SAME = 'matching';
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir);
+
+    const result = loadEnvFile();
+
+    expect(result.shadowedKeys).toEqual([]);
+  });
+
+  it('reports no shadow when the ambient value is unset (the key is simply loaded)', () => {
+    projectDir = mkdtempSync(join(tmpdir(), 'env-project-'));
+    mockedHome = mkdtempSync(join(tmpdir(), 'env-home-'));
+    writeFileSync(join(projectDir, '.env'), 'FRESH=from-file\n');
+
+    stashEnv('FRESH', 'OPENSWARM_ENV', 'OPENSWARM_CONFIG');
+    delete process.env.OPENSWARM_ENV;
+    delete process.env.OPENSWARM_CONFIG;
+    delete process.env.FRESH;
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir);
+
+    const result = loadEnvFile();
+
+    expect(result.shadowedKeys).toEqual([]);
+    expect(process.env.FRESH).toBe('from-file');
   });
 });

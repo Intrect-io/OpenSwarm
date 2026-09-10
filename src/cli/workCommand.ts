@@ -37,12 +37,13 @@ import {
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
 } from '../automation/durableRunCoordinator.js';
+import { planCoordinatorResolution } from '../automation/coordinatorResolution.js';
 import type { EffectClaim } from '../automation/runLedger.js';
 import { setAutomationDbPath } from '../automation/automationDbPath.js';
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
 import { hasRecoverableWorktree } from '../support/worktreeManager.js';
 import { runPool } from '../support/concurrencyPool.js';
-import { fileScopesConflict, resolveTaskFileScope } from '../orchestration/conflictDetector.js';
+import { describeScopeConflict, resolveTaskFileScope } from '../orchestration/conflictDetector.js';
 import { buildConflictFreeWaves as partitionConflictFreeWaves } from '../orchestration/conflictAdmission.js';
 import { resolveTaskSource, describeTaskSourceFailure, type TaskSourceResult } from './reviewCommand.js';
 import { filterRepoIssues, selectIssuesInteractive, WORK_SKIP_STATES } from './workSelect.js';
@@ -84,7 +85,7 @@ export interface WorkCommandOptions {
   issueIds?: string[];
   /** Repository path (default: cwd). */
   path?: string;
-  /** Max issues in flight (default: min(selected, autonomous.maxConcurrentTasks ?? 4)). */
+  /** Max issues in flight (default: min(selected, autonomous.maxConcurrentTasks ?? 64)). */
   concurrency?: number;
   /** Print the execution plan and exit. */
   dryRun?: boolean;
@@ -154,15 +155,13 @@ interface PlanRow {
 
 /**
  * Partition a priority-ordered plan into pairwise-disjoint execution waves.
- * Unknown scopes conflict with everything, so they each get a serial wave.
- * The durable ledger repeats the same check atomically across processes; this
- * local partition prevents siblings from merely losing a claim and being
- * reported as superseded instead of running in the next safe wave.
+ * Known overlapping write sets still serialize. Unknown scope is not a
+ * conflict under the default admit policy (worktrees isolate live edits).
  */
 export function buildConflictFreeWaves<T extends { task: TaskItem }>(rows: readonly T[]): T[][] {
   return partitionConflictFreeWaves(
     rows,
-    (left, right) => fileScopesConflict(left.task.fileScope, right.task.fileScope),
+    (left, right) => describeScopeConflict(left.task.fileScope, right.task.fileScope) !== null,
   );
 }
 
@@ -473,7 +472,7 @@ async function runWorkCommandInner(
   });
 
   const concurrency = opts.concurrency
-    ?? Math.min(tasks.length, config.autonomous?.maxConcurrentTasks ?? 4);
+    ?? Math.min(tasks.length, config.autonomous?.maxConcurrentTasks ?? 64);
 
   // ---- Plan ----------------------------------------------------------------
   const recoverable = deps.hasRecoverableWorktree ?? hasRecoverableWorktree;
@@ -612,6 +611,11 @@ async function runWorkCommandInner(
             cancelEffect: (_result, claim) => buildWorkCancellationEffect(row.task, claim.attemptNo),
             // Interruptions are resumable — never turn Ctrl-C into a tracker cancel.
             retryCancellation: () => true,
+            resolveOperatorPark: (parkedTask, parkedResult, attemptNo) => planCoordinatorResolution({
+              task: parkedTask,
+              result: parkedResult,
+              attemptNo,
+            }),
           },
         );
       }, (settled) => {

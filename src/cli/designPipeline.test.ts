@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { analyzePackageJson, detectStack, generateWorkflow, runDesignPipeline } from './designPipeline.js';
@@ -64,6 +64,30 @@ describe('runDesignPipeline (INT-1956)', () => {
       expect(runDesignPipeline({ path: dir, force: true }).wrote).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not write through a symlinked ci.yml with --force (AGT-3424)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dp-'));
+    const outsideDir = mkdtempSync(join(tmpdir(), 'dp-outside-'));
+    const outsideFile = join(outsideDir, 'sensitive.yml');
+    writeFileSync(outsideFile, 'do-not-touch\n');
+    try {
+      writeFileSync(join(dir, 'go.mod'), 'module x\n');
+      mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+      const outPath = join(dir, '.github', 'workflows', 'ci.yml');
+      symlinkSync(outsideFile, outPath);
+
+      const r = runDesignPipeline({ path: dir, force: true });
+
+      expect(r.wrote).toBe(true);
+      // The outside file's content must be untouched — the symlink itself
+      // was replaced by a fresh regular file, not written through.
+      expect(readFileSync(outsideFile, 'utf8')).toBe('do-not-touch\n');
+      expect(readFileSync(outPath, 'utf8')).toContain('go test ./...');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
     }
   });
 });

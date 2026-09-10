@@ -34,12 +34,35 @@ import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
+import { refuseForChildCap } from '../automation/decompositionLimits.js';
 import { projectInfoForRepository } from '../automation/runnerState.js';
+import { loadConfig } from '../core/config.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import type { SubTask } from './planner.js';
 import { buildHealthPayload } from './healthEndpoint.js';
 import { HttpError, readBody } from './httpBody.js';
 import { tryHandleAppRoutes } from './webAppRoutes.js';
+
+/**
+ * Decomposition knobs for human `/plan` dispatch (AGT-4123 Option 2).
+ *
+ * Shares `maxChildrenPerTask` with the runner — a structural limit on any one
+ * parent — but deliberately does **not** consult `reserveDailyCreations`.
+ * `dailyLimit` is returned only so `createSubIssuesWithDependencies` can log
+ * the counter; `/plan` never reserves against it. An explicitly approved plan
+ * must not be refused because the daemon already spent today's slots.
+ */
+function resolvePlanDecompositionLimits(): { maxChildrenPerTask: number; dailyLimit: number } {
+  try {
+    const decomposition = loadConfig().autonomous?.decomposition;
+    return {
+      maxChildrenPerTask: decomposition?.maxChildrenPerTask ?? 5,
+      dailyLimit: decomposition?.dailyLimit ?? 20,
+    };
+  } catch {
+    return { maxChildrenPerTask: 5, dailyLimit: 20 };
+  }
+}
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
@@ -68,6 +91,11 @@ function isAllowedOrigin(origin: string): boolean {
   }
   return false;
 }
+
+// `systemctl` talking to a wedged user service manager can hang past any
+// caller's patience; bound it so a stuck call surfaces as a controlled error
+// instead of leaving the HTTP request open indefinitely.
+const SYSTEMCTL_TIMEOUT_MS = 10_000;
 
 // Never leak raw Error objects (which include stack traces in many runtimes)
 // or arbitrary thrown values to HTTP responses.
@@ -343,6 +371,39 @@ function pathDenylistVariants(p: string): string[] {
   return [...variants];
 }
 
+/** One destination policy for GitHub discovery and cloning. */
+function getWorkspaceRoot(): string {
+  const configured = process.env.OPENSWARM_WORKSPACE_ROOT?.trim();
+  if (configured) return resolvePath(configured);
+  if (existsSync('/work')) return resolvePath('/work');
+  return resolvePath(homedir(), 'dev');
+}
+
+function getCloneDestination(fullName: string): string | null {
+  const root = getWorkspaceRoot();
+  const destination = resolvePath(root, fullName.split('/')[1]!);
+  const rootPrefix = root.endsWith('/') ? root : `${root}/`;
+  return destination !== root && destination.startsWith(rootPrefix) ? destination : null;
+}
+
+function registerPinnedProject(projectPath: string): void {
+  pinnedProjects.add(projectPath);
+  // An explicit registration is a deliberate re-enable (both path forms — INT-2799).
+  for (const v of pathDenylistVariants(projectPath)) removedConfigPaths.delete(v);
+  saveReposConfig();
+  const name = basename(projectPath);
+  if (name && runnerRef) runnerRef.registerProjectPath(name, projectPath);
+}
+
+function runGitClone(fullName: string, destination: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['clone', `https://github.com/${fullName}.git`, destination], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 /**
  * Re-read ~/.claude/openswarm-repos.json and apply it to the in-memory registry
  * + runner. The file is the source of truth: the in-memory pinned/basePaths/
@@ -506,6 +567,16 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.write(':connected\n\n');
         addSSEClient(res, skipReplay);
 
+      // ---- Usage ledger (AGT-4178) ----
+      } else if (url === '/api/usage' && req.method === 'GET') {
+        const { queryUsage } = await import('./usageLedger.js');
+        const result = queryUsage({
+          since: requestUrl.searchParams.get('since') ?? '24h',
+          by: requestUrl.searchParams.get('by') ?? 'model',
+        });
+        if (!result.ok) { writeJson(res, 400, { error: result.error }); return; }
+        writeJson(res, 200, { since: new Date(result.since).toISOString(), until: new Date(result.until).toISOString(), ...result.aggregate });
+
       // ---- Stats ----
       } else if (url === '/api/stats') {
         const stats = runnerRef?.getStats();
@@ -603,6 +674,110 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
 
+      // ---- GitHub repository discovery ----
+      } else if (url === '/api/github/repos' && req.method === 'GET') {
+        const token = process.env.GH_TOKEN?.trim();
+        if (!token) {
+          writeJson(res, 503, { error: 'GH_TOKEN not configured' });
+          return;
+        }
+        try {
+          const upstream = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+          });
+          if (!upstream.ok) {
+            writeJson(res, upstream.status === 401 || upstream.status === 403 ? 502 : 503, {
+              error: 'GitHub repository request failed',
+            });
+            return;
+          }
+          const repositories: unknown = await upstream.json();
+          if (!Array.isArray(repositories)) {
+            writeJson(res, 502, { error: 'Invalid GitHub repository response' });
+            return;
+          }
+          const normalized = [] as Array<{
+            fullName: string;
+            private: boolean;
+            defaultBranch: string;
+            updatedAt: string;
+            cloned: boolean;
+          }>;
+          for (const repo of repositories) {
+            if (!repo || typeof repo !== 'object') {
+              writeJson(res, 502, { error: 'Invalid GitHub repository response' });
+              return;
+            }
+            const data = repo as Record<string, unknown>;
+            // Validate every field emitted by this endpoint before touching the
+            // filesystem. A partial upstream response is not safe to normalize.
+            if (typeof data.full_name !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(data.full_name)
+              || typeof data.private !== 'boolean' || typeof data.default_branch !== 'string'
+              || typeof data.updated_at !== 'string') {
+              writeJson(res, 502, { error: 'Invalid GitHub repository response' });
+              return;
+            }
+            const destination = getCloneDestination(data.full_name);
+            normalized.push({
+              fullName: data.full_name,
+              private: data.private,
+              defaultBranch: data.default_branch,
+              updatedAt: data.updated_at,
+              cloned: destination !== null && existsSync(destination),
+            });
+          }
+          const query = requestUrl.searchParams.get('q');
+          const filtered = query === null
+            ? normalized
+            : normalized.filter(repo => repo.fullName.toLowerCase().includes(query.toLowerCase()));
+          writeJson(res, 200, filtered);
+        } catch {
+          writeJson(res, 502, { error: 'GitHub repository request failed' });
+        }
+
+      // ---- Clone and register a GitHub repository ----
+      } else if (url === '/api/repos/clone' && req.method === 'POST') {
+        const token = process.env.GH_TOKEN?.trim();
+        if (!token) {
+          writeJson(res, 503, { error: 'GH_TOKEN not configured' });
+          return;
+        }
+        let parsed: { fullName?: unknown };
+        try {
+          parsed = JSON.parse(await readBody(req)) as { fullName?: unknown };
+        } catch {
+          writeJson(res, 400, { error: 'Invalid JSON' });
+          return;
+        }
+        const fullName = parsed.fullName;
+        const segments = typeof fullName === 'string' ? fullName.split('/') : [];
+        if (typeof fullName !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(fullName)
+          || segments.includes('.') || segments.includes('..')) {
+          writeJson(res, 400, { error: 'Invalid repository name' });
+          return;
+        }
+        const destination = getCloneDestination(fullName);
+        if (!destination) {
+          writeJson(res, 400, { error: 'Invalid repository destination' });
+          return;
+        }
+        if (existsSync(destination)) {
+          writeJson(res, 409, { error: 'Repository destination already exists' });
+          return;
+        }
+        try {
+          await runGitClone(fullName, destination);
+        } catch {
+          writeJson(res, 502, { error: 'Git clone failed' });
+          return;
+        }
+        try {
+          registerPinnedProject(destination);
+          writeJson(res, 201, { fullName, destination });
+        } catch {
+          writeJson(res, 500, { error: 'Repository registration failed' });
+        }
+
       // ---- Local projects for picker ----
       } else if (url === '/api/local-projects' && req.method === 'GET') {
         const configPaths = runnerRef?.getAllowedProjects() ?? [];
@@ -624,14 +799,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         try {
           const { projectPath } = JSON.parse(body) as { projectPath: string };
           if (typeof projectPath === 'string' && projectPath) {
-            pinnedProjects.add(projectPath);
-            // R6: an explicit pin is a deliberate re-enable — clear the denylist (both path
-            // forms — INT-2799) so it isn't skipped again by setWebRunner on the next restart.
-            for (const v of pathDenylistVariants(projectPath)) removedConfigPaths.delete(v);
-            saveReposConfig();
-            // Seed path cache so Linear project name matches immediately
-            const name = projectPath.split('/').pop();
-            if (name && runnerRef) runnerRef.registerProjectPath(name, projectPath);
+            registerPinnedProject(projectPath);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
@@ -959,8 +1127,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/status' && req.method === 'GET') {
         try {
           const result = await new Promise<string>((resolve) => {
-            execFile('systemctl', ['--user', 'is-active', 'openswarm'], (_err, stdout) => {
-              resolve(stdout.trim());
+            execFile('systemctl', ['--user', 'is-active', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err, stdout) => {
+              resolve(err ? 'unknown' : stdout.trim());
             });
           });
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -974,7 +1142,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/stop' && req.method === 'POST') {
         try {
           await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'stop', 'openswarm'], (err) => {
+            execFile('systemctl', ['--user', 'stop', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
               if (err) reject(err); else resolve();
             });
           });
@@ -989,7 +1157,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/service/restart' && req.method === 'POST') {
         try {
           await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'restart', 'openswarm'], (err) => {
+            execFile('systemctl', ['--user', 'restart', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
               if (err) reject(err); else resolve();
             });
           });
@@ -1316,6 +1484,25 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           // engine, which routes through the same source), then heartbeat.
           const source = getTaskSource();
           if (source) {
+            const { maxChildrenPerTask: maxChildren, dailyLimit } = resolvePlanDecompositionLimits();
+            // Cap before creating the parent so an oversize plan does not leave
+            // an orphan issue. dailyLimit is intentionally not reserved here —
+            // see resolvePlanDecompositionLimits (AGT-4123 Option 2).
+            if (tasks.length > 0) {
+              const capRefusal = refuseForChildCap(
+                { existingChildren: 0, recovering: false, plannedChildren: tasks.length },
+                maxChildren,
+              );
+              if (capRefusal) {
+                writeJson(res, 400, {
+                  error: `Plan refused: ${capRefusal}`,
+                  code: 'decomposition_child_cap',
+                  maxChildrenPerTask: maxChildren,
+                });
+                return;
+              }
+            }
+
             const parent = await source.createTask(
               goal,
               `Planned via the \`/plan\` cockpit.\n\n${tasks.length} sub-task(s) dispatched.`,
@@ -1340,6 +1527,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             }
 
             const totalMinutes = tasks.reduce((sum, t) => sum + (t.estimatedMinutes || 0), 0);
+            // dailyLimit is logging-only here; /plan does not call reserveDailyCreations (AGT-4123).
             await createSubIssuesWithDependencies(
               parent.id,
               { title: goal },
@@ -1347,7 +1535,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
               totalMinutes,
               { reportToDiscord: () => {}, scheduleNextHeartbeat: triggerHeartbeat },
               parent.id,
-              20,
+              dailyLimit,
             );
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({

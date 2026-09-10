@@ -2,6 +2,7 @@ import { analyzeIssue } from '../knowledge/index.js';
 import { recallRepoKnowledge } from '../memory/repoKnowledge.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import type { WorkerContext } from '../locale/types.js';
+import { enforcedFileScope } from '../orchestration/writeScope.js';
 import { safeConsole } from '../support/safeLog.js';
 import { collectSiblingWork } from './siblingWork.js';
 import type { PipelineContext } from './pairPipelineTypes.js';
@@ -12,6 +13,16 @@ export async function collectWorkerContext(
 ): Promise<WorkerContext | undefined> {
   try {
     const wc: WorkerContext = {};
+    // The runner enforces this boundary after the worker finishes. Exposing it
+    // before planning prevents otherwise-valid edits being discovered only by
+    // the post-run scope guard. Announce exactly what will be enforced: an
+    // advisory scope presented as binding makes the worker refuse edits that
+    // would have passed.
+    const enforcedScope = enforcedFileScope(context.task);
+    if (enforcedScope) wc.fileScope = enforcedScope;
+    // cgf-portal#211 (2026-09-02): an issue whose PR had merged came back, the
+    // worker found nothing left to do and "improved" an unrelated dev script.
+    if (context.task.priorDeliveries?.length) wc.priorDeliveries = [...context.task.priorDeliveries];
     if (draft) {
       wc.draftAnalysis = { taskType: draft.taskType, intentSummary: draft.intentSummary, relevantFiles: draft.relevantFiles,
         suggestedApproach: draft.suggestedApproach, projectStats: draft.projectStats, completionCriteria: draft.completionCriteria, sufficient: draft.sufficient };
@@ -46,6 +57,6 @@ export async function collectWorkerContext(
     // it changes what the worker knows, not what it is allowed to do. (AGT-4088)
     const siblingWork = await collectSiblingWork(context.projectPath);
     if (siblingWork.length) { wc.siblingWork = siblingWork; safeConsole.log(`[Pipeline] ${siblingWork.length} sibling worktree(s) have uncommitted changes`); }
-    return wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
+    return wc.fileScope || wc.priorDeliveries || wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
   } catch (error) { safeConsole.warn('[Pipeline] Worker context collection failed (non-blocking):', error); return undefined; }
 }

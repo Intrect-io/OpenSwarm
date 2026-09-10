@@ -219,7 +219,7 @@ agents:
         maxCommands: 4,
       });
       expect(config.autonomous?.securityAudit).toEqual({
-        enabled: true,
+        enabled: false,
         maxThreads: 2,
         maxRamMb: 4096,
       });
@@ -255,6 +255,43 @@ agents:
         maxThreads: 1,
         maxRamMb: 4096,
       });
+    });
+
+    it('defaults includeBacklog to true so free slots chew parked work (AGT-4257)', () => {
+      const base = {
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
+      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(true);
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base, autonomous: { enabled: true, includeBacklog: false },
+      }));
+      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(false);
+    });
+
+    it('defaults unknownScopeAdmission to admit and carries an explicit serialize through', () => {
+      const base = {
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
+      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('admit');
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base, autonomous: { enabled: true, unknownScopeAdmission: 'serialize' },
+      }));
+      expect(loadConfig('/tmp/config.json').autonomous?.unknownScopeAdmission).toBe('serialize');
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base, autonomous: { enabled: true, unknownScopeAdmission: 'yolo' },
+      }));
+      expect(() => loadConfig('/tmp/config.json')).toThrow();
     });
 
     it('should accept jobProfiles with partial role overrides', () => {

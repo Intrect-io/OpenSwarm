@@ -307,7 +307,9 @@ DISCORD_CHANNEL_ID=your-channel-id
 | `linear` | API key, team ID |
 | `github` | Repos list for CI monitoring |
 | `agents` | Agent definitions (name, projectPath, heartbeat interval) |
-| `autonomous` | Schedule, pair mode, role models, decomposition settings |
+| `autonomous` | Schedule, pair mode, role models, decomposition settings (`maxChildrenPerTask` applies to both the runner and human `/plan`; `dailyLimit` paces the unsupervised runner only — AGT-4123) |
+| `autonomous.includeBacklog` | Treat Linear Backlog as a work queue (default `true`) |
+| `autonomous.unknownScopeAdmission` | `admit` (default): worktrees isolate — predicted file overlap does not defer. `serialize`: Codex-era fail-closed |
 | `prProcessor` | PR auto-improvement schedule, retry limits, conflict resolver config |
 
 ### CLI Adapter (Provider)
@@ -613,7 +615,13 @@ openswarm start --foreground  # run attached (logs stream to the terminal)
 openswarm status              # pid, uptime, log path
 openswarm stop                # stop the daemon
 openswarm dash                # open the web dashboard (:3847)
+openswarm cost --since 24h    # LLM spend by model (--by stage|task|project|adapter|day, --json)
 ```
+
+Every model API call is appended to `~/.openswarm/usage/<UTC date>.jsonl` with the
+provider's own metered price when it reports one (OpenRouter prices every response;
+subscription and local providers are recorded as unmetered). The same aggregate is
+served at `GET /api/usage?since=24h&by=model`.
 
 > **From source / development** (contributors): clone the repo and use the `npm run …` scripts (`npm run dev`, `npm start`, `npm run service:install` for a macOS launchd service, `docker compose up -d`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -680,6 +688,8 @@ Notes:
 ---
 
 ## Architecture
+
+Agent-oriented module map, admission gates, and landmines: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ```
                          ┌──────────────────────────┐
@@ -750,9 +760,11 @@ Notes:
 ## How It Works
 
 ```
-Linear (Todo/In Progress)
+Linear (Todo / In Progress / In Review / Backlog)
   → Fetch assigned issues
-  → DecisionEngine filters & prioritizes
+  → filterAlreadyProcessed (idle_fill parks/backoff when slots are free)
+  → DecisionEngine filters & prioritizes (still skips Done/Canceled, parent/EPIC, unresolved deps)
+  → detectSafeCandidateIds (`admit` does not defer on predicted file overlap)
   → Resolve project path via projectMapper
   → PairPipeline.run()
     → Worker generates code (via the configured adapter)
@@ -874,6 +886,8 @@ and the harness defects the benchmark uncovered.
 
 ## Project Structure
 
+Full module responsibilities and data flow: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
 ```
 src/
 ├── index.ts                 # Entry point
@@ -977,11 +991,9 @@ the CLI (fire-and-forget with a short timeout, and failures are silently ignored
 Full version history lives in **[CHANGELOG.md](CHANGELOG.md)** and the
 [GitHub Releases](https://github.com/unohee/OpenSwarm/releases) page.
 
-Latest — **v0.17.7**: `openswarm stop` now actually stops a launchd-managed
-daemon, a dashboard project disable survives a daemon restart, failed-session
-partial work is committed to its branch before the worktree is preserved, and
-Lance memory writes retry instead of colliding under `review --max`. Adds the
-Atlas Cloud provider adapter. See CHANGELOG.md for the rest.
+Latest shipping line is **v0.22.1**. Unreleased work (AGT-4257) fills free
+heartbeat slots instead of skipping enabled Backlog / parked / overlapping
+cards. See CHANGELOG.md for the rest.
 
 ---
 

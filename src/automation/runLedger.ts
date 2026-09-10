@@ -14,6 +14,8 @@ import {
 import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
+import { listClaimOwnersInDb } from './runLedgerOwners.js';
+import { consecutiveIdenticalInfraFailuresInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
 import {
   markNeedsHumanForQuestionsInDb,
   resumeNeedsHumanForQuestionsInDb,
@@ -41,6 +43,7 @@ import type {
   IntegrationReservationClaim,
   IntegrationReservationOptions,
   LedgerMetrics,
+  ParkResumeTrigger,
   RegisterRunInput,
   RunClaim,
   RunLedgerOptions,
@@ -63,6 +66,7 @@ export type {
   IntegrationReservationClaim,
   IntegrationReservationOptions,
   LedgerMetrics,
+  ParkResumeTrigger,
   RegisterRunInput,
   RunClaim,
   RunLedgerMode,
@@ -258,6 +262,21 @@ export class RunLedger {
     return this.unfencedTransition(issueId, eligible, 'READY', {}, now);
   }
 
+  /** Every executor that ever claimed this run, newest first. */
+  listClaimOwners(issueId: string): string[] {
+    return listClaimOwnersInDb(this.db, issueId);
+  }
+
+  /** Finished attempts, newest first, that ended as infra_error with this fingerprint before anything else. */
+  consecutiveIdenticalInfraFailures(issueId: string, fingerprint: string): number {
+    return consecutiveIdenticalInfraFailuresInDb(this.db, issueId, fingerprint);
+  }
+
+  /** Finished attempts, newest first, that ended superseded before anything else. */
+  consecutiveSupersessions(issueId: string): number {
+    return consecutiveSupersessionsInDb(this.db, issueId);
+  }
+
   queueIntegrationRequeue(issueId: string, expectedStateVersion: number, effect: EffectInput, now = Date.now()): boolean {
     return queueIntegrationRequeueInDb(this.db, issueId, expectedStateVersion, effect, now);
   }
@@ -360,13 +379,16 @@ export class RunLedger {
 
   /** Explicit operator recovery from NEEDS_HUMAN. A dead external effect resumes
    * synchronization; only implementation failures return to READY. */
-  resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
+  /** @param trigger What re-admitted the run; see ParkResumeTrigger. */
+  resumeNeedsHuman(issueId: string, now = Date.now(), trigger: ParkResumeTrigger = 'unspecified'): RunState | null {
     const resume = this.db.transaction((): RunState | null => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
       // An ask_human park carries its own exact-correlation resume contract.
       // Linear state changes and generic operator recovery must not bypass it.
-      if (row.last_error_code === OPERATOR_QUESTION_PARK_REASON) return null;
+      // idle_fill is the exception: empty slots + in-scope work beat the wait
+      // (AGT-4257). The cheap-model pool should keep chewing, not sit parked.
+      if (row.last_error_code === OPERATOR_QUESTION_PARK_REASON && trigger !== 'idle_fill') return null;
       const deadEffects = (this.db.prepare(`
         SELECT COUNT(*) AS count FROM automation_effects
         WHERE issue_id = ? AND status = 'dead'
@@ -392,6 +414,8 @@ export class RunLedger {
       if (updated.changes !== 1) return null;
       this.insertEvent(issueId, row.attempt_no, 'operator_resumed', 'NEEDS_HUMAN', to, {
         deadEffectsReset: deadEffects,
+        trigger,
+        parkedUnder: row.last_error_code ?? undefined,
       }, now);
       return to;
     });
@@ -524,7 +548,7 @@ export class RunLedger {
         const activeScopes = activeRows
           .filter(active => ACTIVE_LEASE_STATES.includes(active.state as RunState))
           .map(active => parseJson(active.metadata_json));
-        if (!admitsConflictScope(options.conflictScope, activeScopes)) return null;
+        if (!admitsConflictScope(options.conflictScope, activeScopes, options.unknownScopeAdmission)) return null;
       }
 
       const epoch = row.lease_epoch + 1;

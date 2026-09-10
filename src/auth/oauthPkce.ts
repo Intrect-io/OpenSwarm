@@ -30,22 +30,11 @@ const OAUTH_ORIGINATOR = 'openswarm';
 
 function generateCodeVerifier(): string {
   // 43-128자 base64url-safe 랜덤 문자열
-  const bytes = randomBytes(64);
-  return bytes
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '')
-    .slice(0, 128);
+  return randomBytes(96).toString('base64url');
 }
 
 function generateCodeChallenge(verifier: string): string {
-  return createHash('sha256')
-    .update(verifier)
-    .digest('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '');
+  return createHash('sha256').update(verifier).digest('base64url');
 }
 
 function generateState(): string {
@@ -56,8 +45,8 @@ function generateState(): string {
 
 export interface OAuthFlowResult {
   accessToken: string;
-  refreshToken?: string;
-  expiresIn?: number;
+  refreshToken: string;
+  expiresIn: number;
   accountId?: string;
 }
 
@@ -65,55 +54,53 @@ export interface OAuthFlowOptions {
   clientId?: string;
   port?: number;
   scopes?: string;
-  authEndpoint?: string;
-  tokenEndpoint?: string;
-  redirectUri?: string;
 }
 
 /**
- * Run the full OAuth PKCE flow:
- * 1. Generate PKCE challenge + state
- * 2. Start local callback server
- * 3. Open browser for user login
- * 4. Exchange authorization code for tokens
- * 5. Return tokens
+ * OAuth 2.1 PKCE 흐름 실행.
+ * 로컬 HTTP 서버에서 callback을 받고, token을 교환하여 저장한다.
  */
-export async function runOAuthPkceFlow(
-  options: OAuthFlowOptions = {},
-): Promise<OAuthFlowResult> {
-  const clientId = options.clientId ?? DEFAULT_OPENAI_CLIENT_ID;
-  const port = options.port ?? DEFAULT_CALLBACK_PORT;
-  const scopes = options.scopes ?? DEFAULT_SCOPES;
-  const authEndpoint = options.authEndpoint ?? OPENAI_AUTH_ENDPOINT;
-  const tokenEndpoint = options.tokenEndpoint ?? OPENAI_TOKEN_ENDPOINT;
-  const redirectUri = options.redirectUri ?? `http://127.0.0.1:${port}/auth/callback`;
+export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<OAuthFlowResult> {
+  const {
+    clientId = DEFAULT_OPENAI_CLIENT_ID,
+    port = DEFAULT_CALLBACK_PORT,
+    scopes = DEFAULT_SCOPES,
+  } = options;
+  // Must be exactly "http://localhost:1455/auth/callback" — this is the value
+  // registered on the public Codex OAuth client. Using 127.0.0.1 instead
+  // triggers Hydra's authorize_hydra_invalid_request error.
+  const redirectUri = `http://localhost:${port}/auth/callback`;
 
+  // 1. PKCE 생성
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = generateCodeChallenge(codeVerifier);
   const state = generateState();
 
-  const authUrl = `${authEndpoint}?${new URLSearchParams({
+  // 2. Authorization URL 구성.
+  // The simplified_flow + id_token_add_organizations params mirror the official
+  // codex CLI so the ChatGPT side recognises this as a first-party desktop login.
+  const authParams = new URLSearchParams({
     response_type: 'code',
     client_id: clientId,
     redirect_uri: redirectUri,
-    scope: scopes,
-    state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
+    scope: scopes,
+    state,
+    id_token_add_organizations: 'true',
+    codex_cli_simplified_flow: 'true',
     originator: OAUTH_ORIGINATOR,
-  })}`;
+  });
+  const authUrl = `${OPENAI_AUTH_ENDPOINT}?${authParams.toString()}`;
 
+  // 3. 로컬 HTTP 서버 시작 + callback 대기
   return new Promise<OAuthFlowResult>((resolve, reject) => {
     const settlement = new PkceSettlement();
     const exchangeAbort = new AbortController();
-    // Track the currently claimed response so cancellation can terminate it.
-    let claimedResponse: ServerResponse | null = null;
 
     const timeout = setTimeout(() => {
       if (settlement.finish()) {
         exchangeAbort.abort(new Error('OAuth login timed out'));
-        claimedResponse?.destroy();
-        claimedResponse = null;
         server.close();
         reject(new Error('OAuth login timed out (120s). 다시 시도하세요.'));
       }
@@ -143,7 +130,6 @@ export async function runOAuthPkceFlow(
         res.end('OAuth callback already being processed');
         return;
       }
-      claimedResponse = res;
 
       if (error) {
         settlement.finish();
@@ -187,6 +173,11 @@ export async function runOAuthPkceFlow(
           throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
         }
 
+        // Validated before any of it reaches an AuthProfile: a 200 carrying an
+        // error body would otherwise be stored with an undefined access token
+        // and a NaN expiry, which fails the store's load-time check and used to
+        // take every other provider's credentials with it. An exchange is the
+        // only point a refresh token is issued, so it is required here.
         const raw: unknown = await tokenRes.json();
         const parsed = parseTokenResponse(raw, { provider: 'ChatGPT', requireRefreshToken: true });
         const tokens = {
@@ -196,6 +187,11 @@ export async function runOAuthPkceFlow(
           id_token: (raw as { id_token?: unknown }).id_token as string | undefined,
         };
 
+        // Codex 백엔드(/responses, /models)는 `chatgpt-account-id` 헤더를 요구한다.
+        // 그 값은 access_token JWT의 `https://api.openai.com/auth` claim 안의
+        // `chatgpt_account_id`다. (과거엔 id_token.sub를 저장했는데, 그건 IdP
+        // subject — 예: `google-oauth2|...` — 라서 codex account_id가 아니다.)
+        // access_token 우선, 없으면 id_token으로 폴백.
         let accountId: string | undefined;
         for (const jwt of [tokens.access_token, tokens.id_token]) {
           if (!jwt) continue;
@@ -224,26 +220,14 @@ export async function runOAuthPkceFlow(
           accountId,
         };
 
-        if (!settlement.finish()) {
-          // Cancellation won — terminate the claimed response so the browser
-          // doesn't hang on a socket whose flow we just abandoned.
-          claimedResponse?.destroy();
-          claimedResponse = null;
-          server.close();
-          return;
-        }
+        if (!settlement.finish()) return;
         clearTimeout(timeout);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(successHtml());
         server.close();
         resolve(result);
       } catch (err) {
-        if (!settlement.finish()) {
-          claimedResponse?.destroy();
-          claimedResponse = null;
-          server.close();
-          return;
-        }
+        if (!settlement.finish()) return;
         clearTimeout(timeout);
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(errorHtml(String(err)));
@@ -261,8 +245,6 @@ export async function runOAuthPkceFlow(
     server.on('error', (err) => {
       if (settlement.finish()) {
         exchangeAbort.abort(err);
-        claimedResponse?.destroy();
-        claimedResponse = null;
         clearTimeout(timeout);
         reject(new Error(`Callback server error: ${err.message}`));
       }
@@ -274,31 +256,44 @@ export async function runOAuthPkceFlow(
  * OAuth 로그인 → 토큰 저장 (온보딩 전체 흐름)
  */
 export async function loginAndSaveProfile(
-  clientId: string,
+  clientId: string = DEFAULT_OPENAI_CLIENT_ID,
   port?: number,
 ): Promise<void> {
   const result = await runOAuthPkceFlow({ clientId, port });
-  const store = new AuthProfileStore();
+
   const profile: AuthProfile = {
-    accessToken: result.accessToken,
-    refreshToken: result.refreshToken,
-    expiresAt: result.expiresIn ? Date.now() + result.expiresIn * 1000 : undefined,
+    type: 'oauth',
+    provider: 'openai-gpt',
+    access: result.accessToken,
+    refresh: result.refreshToken,
+    expires: Date.now() + result.expiresIn * 1000,
+    clientId,
     accountId: result.accountId,
   };
-  store.save(PROFILE_KEY, profile);
-  console.log(`[Auth] Profile saved as '${PROFILE_KEY}'`);
+
+  const store = new AuthProfileStore();
+  store.setProfile(PROFILE_KEY, profile);
+
+  console.log(`[Auth] GPT OAuth 인증 완료. 프로필 저장됨: ${PROFILE_KEY}`);
+  if (result.accountId) {
+    console.log(`[Auth] Account ID: ${result.accountId}`);
+  }
 }
 
+// HTML templates
+
 function successHtml(): string {
-  return `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>인증 완료</title>
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OpenSwarm Auth</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f0fdf4}
 .card{text-align:center;padding:2rem;border-radius:12px;background:white;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
 h1{color:#16a34a;margin-bottom:0.5rem}p{color:#666}</style></head>
-<body><div class="card"><h1>✓ 인증 완료</h1><p>OpenSwarm CLI로 돌아가세요.</p></div></body></html>`;
+<body><div class="card"><h1>✓ 인증 완료</h1><p>OpenSwarm에 GPT OAuth 인증이 완료되었습니다.<br>이 창을 닫아도 됩니다.</p></div></body></html>`;
 }
 
 function errorHtml(error: string): string {
-  return `<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><title>인증 실패</title>
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OpenSwarm Auth Error</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#fef2f2}
 .card{text-align:center;padding:2rem;border-radius:12px;background:white;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
 h1{color:#dc2626;margin-bottom:0.5rem}p{color:#666}code{background:#f3f4f6;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.9rem}</style></head>

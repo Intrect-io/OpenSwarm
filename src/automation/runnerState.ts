@@ -3,13 +3,29 @@
 // Task state persistence + project info query
 // ============================================
 
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  writeFileSync,
+  unlinkSync,
+  fsyncSync,
+  statSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
-import { withFileLock } from '../support/fileLock.js';
+import {
+  isProofCapableSpace,
+  processAppearsAlive,
+  processNamespaceId,
+  sameProcessNamespace,
+} from '../support/processLiveness.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -19,6 +35,101 @@ import { withFileLock } from '../support/fileLock.js';
  * (service.ts, INT-2570) is the primary defense against concurrent writers on
  * these specific files; this is the cheap defense-in-depth for the crash case.
  */
+
+type RunnerLockOwner = { pid: number; token: string; ns?: string | null };
+
+function readRunnerLockOwner(lockPath: string): RunnerLockOwner | null {
+  try {
+    const value = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<RunnerLockOwner>;
+    return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.token === 'string'
+      ? {
+        pid: value.pid!,
+        token: value.token,
+        ns: value.ns === null ? null : typeof value.ns === 'string' ? value.ns : undefined,
+      }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Release a runner-state lock only when we can prove its owner is gone in OUR
+ * pid namespace. A lock from another namespace (or with no namespace recorded)
+ * is left alone — reclaiming it would free a live remote owner's lock.
+ *
+ * Returns true when the lock file was removed.
+ */
+export function releaseStaleLock(lockPath: string): boolean {
+  if (!existsSync(lockPath)) return false;
+  const owner = readRunnerLockOwner(lockPath);
+  if (!owner) {
+    // Malformed lock: only reclaim when aged past a short stale window.
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs > 30_000) {
+        unlinkSync(lockPath);
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+  // Namespace proof required: never release a lock we cannot judge.
+  if (!isProofCapableSpace(owner.ns ?? undefined) || !sameProcessNamespace(owner.ns ?? undefined)) {
+    return false;
+  }
+  if (processAppearsAlive(owner.pid)) return false;
+  try {
+    unlinkSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exclusive file lock around a runner-state mutation. Uses the same
+ * owner-safe stale recovery as `releaseStaleLock`.
+ */
+export function withRunnerStateLock<T>(stateFile: string, operation: () => T): T {
+  const lockPath = `${stateFile}.lock`;
+  ensureParentDir(stateFile);
+  const deadline = Date.now() + 5_000;
+  const token = randomUUID();
+  let lockFd: number | undefined;
+
+  while (lockFd === undefined) {
+    try {
+      lockFd = openSync(lockPath, 'wx', 0o600);
+      writeFileSync(lockFd, JSON.stringify({
+        pid: process.pid,
+        token,
+        ns: processNamespaceId() ?? null,
+      }), 'utf8');
+      fsyncSync(lockFd);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw error;
+      releaseStaleLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for runner state lock: ${lockPath}`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+
+  try {
+    return operation();
+  } finally {
+    closeSync(lockFd);
+    try {
+      if (readRunnerLockOwner(lockPath)?.token === token) unlinkSync(lockPath);
+    } catch {
+      // Best-effort unlock.
+    }
+  }
+}
 /** Check if a resolved path matches or is under any enabled project path */
 export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
   for (const enabled of enabledProjects) {
@@ -42,7 +153,6 @@ export const PIPELINE_HISTORY_FILE = process.env.OPENSWARM_RUNNER_PIPELINE_HISTO
 export const REJECTION_STATE_FILE = process.env.OPENSWARM_RUNNER_REJECTION_STATE_FILE || join(homedir(), '.claude', 'openswarm-rejection-state.json');
 export const DECOMPOSITION_STATE_FILE = process.env.OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE || join(homedir(), '.claude', 'openswarm-decomposition-state.json');
 export const DAILY_PACE_FILE = join(homedir(), '.openswarm', 'daily-pace.json');
-const DAILY_PACE_LOCK = `${DAILY_PACE_FILE}.lock`;
 export const PROJECT_SELECTION_FILE = join(homedir(), '.openswarm', 'project-selection.json');
 const MAX_PIPELINE_HISTORY = 100;
 const MAX_REJECTION_ATTEMPTS = 3;
@@ -82,24 +192,29 @@ function ensureParentDir(file: string): void {
   mkdirSync(dirname(file), { recursive: true });
 }
 
-function loadPaceFromDisk(): PaceState {
+function ensurePaceLoaded(): PaceState {
+  if (paceState) return paceState;
   try {
     if (existsSync(DAILY_PACE_FILE)) {
       const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
-      const parsed = JSON.parse(raw) as PaceState;
-      if (!parsed.projects) parsed.projects = {};
-      return parsed;
+      paceState = JSON.parse(raw) as PaceState;
+      if (!paceState!.projects) paceState!.projects = {};
+    } else {
+      paceState = { projects: {}, updatedAt: new Date().toISOString() };
     }
   } catch {
-    /* corrupt/unreadable → empty */
+    paceState = { projects: {}, updatedAt: new Date().toISOString() };
   }
-  return { projects: {}, updatedAt: new Date().toISOString() };
+  return paceState!;
 }
 
-function ensurePaceLoaded(): PaceState {
-  if (paceState) return paceState;
-  paceState = loadPaceFromDisk();
-  return paceState;
+function savePace(): void {
+  try {
+    ensurePaceDir();
+    atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(paceState, null, 2));
+  } catch (err) {
+    console.warn('[Pace] Failed to save:', err);
+  }
 }
 
 // Persisted dashboard/CLI project selection so "disable all" survives a daemon
@@ -140,26 +255,14 @@ function pruneOldEntries(entries: ProjectPaceEntry[]): ProjectPaceEntry[] {
 // were removed with the per-project 5h cap (INT-2317). Completion recording stays
 // below — daily-pace.json remains useful as a cost/throughput telemetry trail.
 
-/**
- * Record a project completion into the shared daily-pace file.
- * Cross-process locked so concurrent daemon writers cannot lose updates.
- */
-export async function recordProjectCompletion(projectName: string, costUsd?: number): Promise<void> {
-  try {
-    await withFileLock(DAILY_PACE_LOCK, async () => {
-      const state = loadPaceFromDisk();
-      if (!state.projects[projectName]) state.projects[projectName] = [];
-      state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
-      state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
-      state.updatedAt = new Date().toISOString();
-      ensurePaceDir();
-      atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(state, null, 2));
-      paceState = state;
-      console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
-    });
-  } catch (err) {
-    console.warn('[Pace] Failed to record completion:', err);
-  }
+export function recordProjectCompletion(projectName: string, costUsd?: number): void {
+  const state = ensurePaceLoaded();
+  if (!state.projects[projectName]) state.projects[projectName] = [];
+  state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
+  state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
+  state.updatedAt = new Date().toISOString();
+  savePace();
+  console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
 }
 
 export function getDailyPaceInfo(): DailyPaceState {
@@ -228,6 +331,14 @@ export function pickFailureDetail(candidates: Array<string | undefined>): string
 
 /** Prefer the stage that actually failed over earlier successful feedback. */
 export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
+  const workerFailure = result.workerResult?.success === false
+    ? pickFailureDetail([
+      result.workerResult.error,
+      result.workerResult.haltReason,
+      result.workerResult.noChangesReason,
+      result.workerResult.summary,
+    ])
+    : undefined;
   const testerFailure = result.testerResult?.success === false
     ? pickFailureDetail([
       result.testerResult.error,
@@ -236,11 +347,25 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     ])
     : undefined;
 
+  // Guards, security audit, verification, worktree setup and publication
+  // report through `stages[]` rather than a typed sub-result. Without this
+  // fallback the ledger recorded 57% of one day's failures with no message
+  // at all (vela, 2026-09-01), and the reason was unrecoverable once the
+  // container's log was gone.
+  const failedStage = [...result.stages].reverse().find((stage) => !stage.success);
+  const stageError = failedStage && 'error' in failedStage.result && typeof failedStage.result.error === 'string'
+    ? `${failedStage.stage}: ${failedStage.result.error}`
+    : undefined;
+
   return pickFailureDetail([
+    // Publication failed after every stage passed: nothing below describes it.
+    result.failureDetail,
     testerFailure,
     result.lastReviewFeedback,
     result.reviewResult?.feedback,
-    result.workerResult?.error,
+    workerFailure,
+    stageError,
+    result.stuckReason,
   ]);
 }
 
@@ -289,15 +414,17 @@ export function loadTaskState(state: TaskState): void {
 
 export function saveTaskState(state: TaskState): void {
   try {
-    const data = {
-      completed: Array.from(state.completedTaskIds),
-      failed: Object.fromEntries(state.failedTaskCounts),
-      retryTimes: Object.fromEntries(state.failedTaskRetryTimes),
-      lastFailures: Object.fromEntries(state.lastFailureDetails),
-      updatedAt: new Date().toISOString(),
-    };
-    ensureParentDir(TASK_STATE_FILE);
-    atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2));
+    withRunnerStateLock(TASK_STATE_FILE, () => {
+      const data = {
+        completed: Array.from(state.completedTaskIds),
+        failed: Object.fromEntries(state.failedTaskCounts),
+        retryTimes: Object.fromEntries(state.failedTaskRetryTimes),
+        lastFailures: Object.fromEntries(state.lastFailureDetails),
+        updatedAt: new Date().toISOString(),
+      };
+      ensureParentDir(TASK_STATE_FILE);
+      atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2));
+    });
   } catch (err) {
     console.warn('[AutonomousRunner] Failed to save task state:', err);
   }

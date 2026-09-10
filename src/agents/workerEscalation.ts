@@ -13,12 +13,22 @@
 import type { RoleConfig } from '../core/types.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { safeConsole } from '../support/safeLog.js';
+import type { ModelRole } from '../adapters/modelCompat.js';
 
 export type WorkerReasoningEffort = 'low' | 'medium' | 'high';
 
 export interface WorkerStageOverrides {
   model?: string;
   reasoningEffort?: WorkerReasoningEffort;
+  /**
+   * The role to resolve `model` AS, when it is not the stage's own role.
+   *
+   * An escalation runs in the worker stage but must not resolve to the worker's
+   * model. Without this the override resolved through `worker` on an adapter
+   * that routes per role, so the model never changed while the log line below
+   * and the `pipeline:escalation` event both announced that it had. (AGT-4273)
+   */
+  modelRole?: ModelRole;
 }
 
 /**
@@ -41,7 +51,7 @@ export function resolveWorkerStageOverrides(input: {
   const shouldEscalate = iteration >= escalateThreshold && !!escalateModel;
 
   let overrides: WorkerStageOverrides | undefined = shouldEscalate
-    ? { model: escalateModel }
+    ? { model: escalateModel, modelRole: 'escalate' }
     : (baseModel ? { model: baseModel } : undefined);
 
   if (shouldEscalate && escalateModel) {
@@ -88,5 +98,16 @@ export function buildRepeatEscalation(input: {
     : undefined;
   const reasoningEffort = currentEffort !== 'high' ? 'high' as const : undefined;
   if (!model && !reasoningEffort) return undefined;
-  return { model, reasoningEffort };
+  // When this carries a model it is an escalation too, and it reaches the stage
+  // through the same spread merge above — so it needs the same role, or the
+  // signal path (INT-2475) resolves through `worker` and escalates to the
+  // worker's own model. An effort-only bump carries no model and needs none.
+  // The effort-only branch omits `model` rather than setting it to undefined.
+  // These overrides reach the stage through the spread merge above, and an
+  // own property carrying `undefined` OVERWRITES — so an effort bump used to
+  // wipe an escalated model, de-escalating the worker back to its base model at
+  // the exact moment it escalated its effort. That combination is the common
+  // one: this branch returns effort-only precisely when the iteration-count
+  // escalation is already in effect. (AGT-4273)
+  return model ? { model, reasoningEffort, modelRole: 'escalate' } : { reasoningEffort };
 }

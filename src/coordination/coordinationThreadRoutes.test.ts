@@ -85,9 +85,17 @@ describe('durable coordination thread HTTP API', () => {
   });
 
   it('returns bounded errors and leaves unrelated paths alone', async () => {
-    expect(await call('GET', '/api/coordination/threads')).toMatchObject({
-      handled: true, status: 400, body: { error: 'Invalid coordination thread request' },
+    const first = await call('POST', '/api/coordination/threads', {
+      repository: '/repo-a', taskId: 'task-a', subject: 'First', idempotencyKey: 'first',
     });
+    const second = await call('POST', '/api/coordination/threads', {
+      repository: '/repo-b', taskId: 'task-b', subject: 'Second', idempotencyKey: 'second',
+    });
+    const all = await call('GET', '/api/coordination/threads?limit=200');
+    expect(all).toMatchObject({ handled: true, status: 200 });
+    expect(all.body.items.map((thread: { id: string }) => thread.id)).toEqual(expect.arrayContaining([
+      first.body.thread.id, second.body.thread.id,
+    ]));
     expect(await call('POST', '/api/coordination/threads', { repository: '/repo' }))
       .toMatchObject({ handled: true, status: 400, body: { error: 'Invalid coordination thread request' } });
     expect((await call('GET', '/api/not-coordination')).handled).toBe(false);

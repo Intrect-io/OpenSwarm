@@ -13,6 +13,8 @@ import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
 import type { CliRunResult } from './types.js';
+import type { ChatUsage } from './chatStream.js';
+import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
@@ -54,6 +56,19 @@ function truncateToolResult(content: string, maxLen = 2500): string {
   return `${head}\n...[${content.length - 2200} chars truncated]...\n${tail}`;
 }
 
+/**
+ * One LIVE LOG line for a failed tool call. The previous `slice(0, 100)` cut an
+ * ENOENT path off inside `/work/.../worktree/<uuid-prefix>`, which read as a
+ * missing worktree rather than a missing file. Keep the error kind (head) and
+ * the path/filename that identifies it (tail).
+ */
+export function formatToolErrorLog(content: string, maxLen = 240): string {
+  if (content.length <= maxLen) return content;
+  const head = 90;
+  const tail = Math.max(40, maxLen - head - 1);
+  return `${content.slice(0, head)}…${content.slice(-tail)}`;
+}
+
 // ============ 타입 ============
 
 /** OpenAI Chat Completions API 메시지 포맷 */
@@ -81,13 +96,7 @@ interface ChatCompletionResponse {
     };
     finish_reason: string;
   }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-    /** Cached input tokens (prompt-cache hits). Subset of prompt_tokens. */
-    cached_tokens?: number;
-  };
+  usage?: ChatUsage;
 }
 
 /** 에이전틱 루프 설정 */
@@ -164,6 +173,12 @@ export interface AgenticLoopOptions {
    * - 'whole-file': hide edit_file / apply_patch; the model rewrites via write_file.
    */
   editFormat?: EditFormat;
+  /**
+   * Who is spending: stamped on the usage-ledger record written for EVERY
+   * API response, before any of the loop's throw paths. Adapter name is the
+   * minimum; task/stage come from CliRunOptions.processContext. (AGT-4178)
+   */
+  usageAttribution?: UsageAttribution;
 }
 
 /** 루프 실행 결과 */
@@ -182,6 +197,10 @@ export interface AgenticLoopResult {
   outputTokens: number;
   /** 캐시 적중 입력 토큰 누적 (totalTokens의 부분집합) — prompt-cache 효율 측정용 */
   cachedTokens: number;
+  /** Sum of the provider's metered charges (USD) across calls that reported one. */
+  costUsd: number;
+  /** Calls that carried a metered price; 0 means the provider is unmetered. */
+  meteredCalls: number;
   /** A blocking ask_human ended the run; the operator now owns the next step. */
   blockedOnOperator?: boolean;
   /** Exact correlation IDs returned by the blocking ask_human tool call. */
@@ -236,6 +255,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     coordinationContext,
     signal,
     editFormat = 'json',
+    usageAttribution,
   } = options;
 
   // Strict mode exposes bash only after a separate companion has attested its
@@ -359,7 +379,42 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens = 0;
+  let costUsd = 0;
+  let meteredCalls = 0;
   let finalText = '';
+
+  // Account for one response: accumulate the run totals AND write the ledger
+  // line immediately. The ledger write comes first because everything after a
+  // response — rate-limit re-throw, infra re-throw, the empty-final-answer
+  // throw, or the process being killed — would otherwise erase the spend of
+  // every call that already completed. (AGT-4178)
+  const accountUsage = (usage: ChatUsage | undefined, callStartedAt: number): void => {
+    if (!usage) return;
+    const metered = typeof usage.cost === 'number';
+    recordUsage({
+      ts: new Date().toISOString(),
+      adapter: usageAttribution?.adapter ?? 'unknown',
+      model: options.model,
+      taskId: usageAttribution?.taskId,
+      stage: usageAttribution?.stage,
+      cwd,
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+      cachedTokens: usage.cached_tokens ?? 0,
+      reasoningTokens: usage.reasoning_tokens ?? 0,
+      costUsd: metered ? usage.cost! : null,
+      ...(typeof usage.upstream_cost === 'number' ? { upstreamCostUsd: usage.upstream_cost } : {}),
+      durationMs: Date.now() - callStartedAt,
+    });
+    totalTokens += usage.prompt_tokens + usage.completion_tokens;
+    inputTokens += usage.prompt_tokens;
+    outputTokens += usage.completion_tokens;
+    cachedTokens += usage.cached_tokens ?? 0;
+    if (metered) {
+      costUsd += usage.cost!;
+      meteredCalls += 1;
+    }
+  };
 
   for (let turn = 0; turn < maxTurns + 1; turn++) {
     // 사용자 중단 (Esc/Ctrl+C) — 현재 텍스트가 있으면 유지, 없으면 표시만.
@@ -399,6 +454,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     onLog?.(`▸ API call #${apiCallCount}${turn > 0 ? ` (tool turn ${turn})` : ''}`);
 
     let response: ChatCompletionResponse;
+    const callStartedAt = Date.now();
     try {
       response = await callApi(messages, tools);
     } catch (err) {
@@ -441,16 +497,37 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         throw err;
       }
       onLog?.(`✖ API error: ${msg}`);
+      // Swallowing an API error hands the caller a "result" whose entire body is an
+      // error string. Downstream, parseReviewerResult finds no verdict in it and
+      // reports "no parseable verdict", so the CLI blames the adapter and tells the
+      // operator to check `codex exec`. The case that surfaced this was a 402
+      // billing failure from an upstream BYOK provider: a payment problem presented
+      // as a parser bug, across 14/14 audit areas.
+      //
+      // Swallow ONLY when this run has already caused a side effect worth keeping.
+      // That is the property INT-2520 protects — a worker may have edited files or
+      // run commands that throwing would discard — and `editToolCount` /
+      // `executedCommands` state it directly. A turn counter does not: a read-only
+      // run (reviewer, auditor, `openswarm review`) has no edit or bash tool at all,
+      // so it can never acquire progress, yet a turn-based test would start
+      // swallowing from its second call and reproduce the very misdiagnosis above
+      // one turn later.
+      //
+      // The 'agentic-loop:' prefix is what makes propagation work. Returning a
+      // plain error here would be re-swallowed by each in-process adapter's own
+      // catch into `{exitCode: 1, stdout: ''}`, and spawnCli does not inspect
+      // exitCode for adapters that implement run() — the empty stdout would reach
+      // the parser and produce the same wrong message. The prefix matches
+      // INFRA_ERROR_PATTERNS, so isInfraError re-throws it at every layer and the
+      // real cause reaches the operator. (AGT-4215)
+      if (editToolCount === 0 && executedCommands.length === 0) {
+        throw new Error(`agentic-loop: API call failed with no work to preserve: ${msg}`, { cause: err });
+      }
       finalText = `API error: ${msg}`;
       break;
     }
 
-    if (response.usage) {
-      totalTokens += response.usage.prompt_tokens + response.usage.completion_tokens;
-      inputTokens += response.usage.prompt_tokens;
-      outputTokens += response.usage.completion_tokens;
-      cachedTokens += response.usage.cached_tokens ?? 0;
-    }
+    accountUsage(response.usage, callStartedAt);
 
     const choice = response.choices?.[0];
     if (!choice) {
@@ -630,7 +707,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         content,
       });
       if (result.is_error) {
-        onLog?.(`  ✖ ${content.slice(0, 100)}`);
+        onLog?.(`  ✖ ${formatToolErrorLog(content)}`);
       }
     }
 
@@ -739,13 +816,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       }
 
       try {
+        const salvageStartedAt = Date.now();
         const response = await callApi(messages, []);
-        if (response.usage) {
-          totalTokens += response.usage.prompt_tokens + response.usage.completion_tokens;
-          inputTokens += response.usage.prompt_tokens;
-          outputTokens += response.usage.completion_tokens;
-          cachedTokens += response.usage.cached_tokens ?? 0;
-        }
+        accountUsage(response.usage, salvageStartedAt);
         apiCallCount++;
         const content = response.choices?.[0]?.message?.content;
         finalText = typeof content === 'string' && content.trim() ? content : '';
@@ -777,6 +850,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     inputTokens,
     outputTokens,
     cachedTokens,
+    costUsd,
+    meteredCalls,
     durationMs: Date.now() - startTime,
     executedCommands,
     blockedOnOperator,
@@ -790,10 +865,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 /**
  * AgenticLoopResult → CliRunResult 변환
  *
- * costUsd is 0 by design: the loop cannot price tokens itself — codex-responses
- * bills through a ChatGPT subscription (no per-token marginal cost) and a
- * hardcoded price table would go stale. Adapters with real metering (openrouter)
- * can overwrite costUsd downstream. Tokens and duration are real measurements. (INT-2508)
+ * costUsd is the provider's own metered charge summed over the run (OpenRouter
+ * prices every response); it stays 0 for unmetered providers — codex-responses
+ * bills through a ChatGPT subscription and local models have no marginal cost —
+ * because the loop keeps no price table (it would go stale). Tokens and
+ * duration are real measurements either way. (INT-2508, AGT-4178)
  */
 export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
   return {
@@ -806,7 +882,7 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     executionOutcomeUnknown: result.executionOutcomeUnknown,
     operatorQuestionCorrelationIds: result.operatorQuestionCorrelationIds,
     costInfo: {
-      costUsd: 0,
+      costUsd: result.costUsd,
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       cacheReadTokens: result.cachedTokens,

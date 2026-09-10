@@ -398,6 +398,41 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     expect(result.content).not.toContain('BLOCKED');
   });
 
+  // AGT-3436: a lexical check cannot evaluate shell expansion, so these three
+  // execute a blocked command while never containing its literal substring —
+  // quote-splitting, backslash-escaping, and mid-word command/variable
+  // substitution all reconstruct `rm -rf` (or `chmod 777`) at shell-eval time.
+  const expansionBypassCommands = [
+    "r'm' -rf /foo",
+    'r\\m -rf /foo',
+    'r$(true)m -rf /foo',
+    'r`true`m -rf /foo',
+    'chmod 7"7"7 somefile',
+    'r${empty}m -rf /foo',
+    'r"$(true)"m -rf /foo', // mid-word splice hidden from the raw text by quotes, exposed once they are stripped
+  ];
+
+  it.each(expansionBypassCommands)('blocks expansion-based bypass: %s', async (cmd) => {
+    const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
+    expect(result.is_error).toBe(true);
+    expect(result.content).toContain('BLOCKED');
+  });
+
+  // Whitespace-delimited substitution (the overwhelmingly common real-world
+  // shape) must keep working — only mid-word gluing is rejected.
+  const legitimateExpansionCommands = [
+    'echo "hello world"',
+    'VERSION=$(cat package.json)',
+    'for f in $(ls); do echo "$f"; done',
+    'git commit -m "fix: rename variable"',
+    'echo `date`',
+  ];
+
+  it.each(legitimateExpansionCommands)('allows legitimate expansion: %s', async (cmd) => {
+    const result = await executeTool(makeCall('bash', { command: cmd }), TMP_DIR);
+    expect(result.content).not.toContain('BLOCKED');
+  });
+
   it.each([
     'curl --config ./request.conf',
     'bash ./send-message.sh',

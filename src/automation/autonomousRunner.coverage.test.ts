@@ -26,19 +26,35 @@ import type { DecisionResult, TaskItem } from '../orchestration/decisionEngine.j
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { ITaskSource } from './taskSource.js';
 
-const { detectFileConflictsMock, resolveTaskFileScopeMock, fileScopesConflictMock } = vi.hoisted(() => ({
+const { detectFileConflictsMock, resolveTaskFileScopeMock, describeScopeConflictMock } = vi.hoisted(() => ({
   detectFileConflictsMock: vi.fn(),
   resolveTaskFileScopeMock: vi.fn(async (task: TaskItem) => {
     task.fileScope ??= [`scope/${task.id}`];
     return task.fileScope;
   }),
-  fileScopesConflictMock: vi.fn(() => false),
+  // null = no conflict. The runner now reads a reason object so it can log WHY
+  // a candidate was deferred, not just that it was (AGT-4233).
+  describeScopeConflictMock: vi.fn((): unknown => null),
 }));
 
+vi.mock('../adapters/modelCatalog.js', () => ({
+  // Never read the developer's real ~/.openswarm state from a unit test: an
+  // ambient catalogue silently decided this suite's verdict once already.
+  readCachedCatalog: () => null,
+  writeCachedCatalog: () => {},
+}));
 vi.mock('../orchestration/conflictDetector.js', () => ({
   detectFileConflicts: detectFileConflictsMock,
   resolveTaskFileScope: resolveTaskFileScopeMock,
-  fileScopesConflict: fileScopesConflictMock,
+  describeScopeConflict: describeScopeConflictMock,
+}));
+
+const { runLedgerRetrospectiveMock } = vi.hoisted(() => ({
+  runLedgerRetrospectiveMock: vi.fn(async () => ({ filed: false, reason: 'no failures in window' })),
+}));
+
+vi.mock('./ledgerRetrospective.js', () => ({
+  runLedgerRetrospective: runLedgerRetrospectiveMock,
 }));
 
 // writeProviderOverride writes unconditionally to ~/.config/openswarm/ (no dryRun
@@ -137,7 +153,9 @@ type Internal = {
     listRuns(states?: readonly string[]): Array<{ issueId: string; lastErrorCode?: string }>;
     getRun(issueId: string): { state: string; leaseExpiresAt?: number; prUrl?: string } | null;
     markReady(issueId: string): boolean;
+    isPrimary: boolean;
   };
+  maybeRunLedgerRetrospective(): Promise<void>;
   rateLimitUntil: number;
   scheduleNextHeartbeat(): void;
   executeTaskPairMode: ReturnType<typeof vi.fn>;
@@ -164,8 +182,8 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       candidate.fileScope ??= [`scope/${candidate.id}`];
       return candidate.fileScope;
     });
-    fileScopesConflictMock.mockReset();
-    fileScopesConflictMock.mockReturnValue(false);
+    describeScopeConflictMock.mockReset();
+    describeScopeConflictMock.mockReturnValue(null);
   }, 30000);
 
   afterEach(() => {
@@ -266,7 +284,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
       expect(safe).toEqual(new Set(['alias-first', 'alias-second']));
       expect(detectFileConflictsMock).toHaveBeenCalledTimes(1);
-      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
+      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo', {
+        unknownScopeAdmission: 'admit',
+      });
     });
 
     it('defers overlapping scopes even when each issue runs in its own worktree', async () => {
@@ -276,7 +296,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
       const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
-      fileScopesConflictMock.mockReturnValueOnce(true);
+      describeScopeConflictMock.mockReturnValueOnce({ kind: 'overlap', shared: ['src/shared.ts'] });
       internal.scheduler.getRunningTasks = () => [{
         runId: 'active-run',
         task: activeTask,
@@ -290,7 +310,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
       expect(safe).toEqual(new Set());
-      expect(fileScopesConflictMock).toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope);
+      // Third argument is the admission policy the durable gate also reads;
+      // passing it is the fix for AGT-4233.
+      expect(describeScopeConflictMock)
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'admit');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 
@@ -309,7 +332,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       ]);
 
       expect(safe).toEqual(new Set(['first', 'second']));
-      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo');
+      expect(detectFileConflictsMock).toHaveBeenCalledWith([first, second], '/repo', {
+        unknownScopeAdmission: 'admit',
+      });
     });
 
     it('repays a known-first deferred unknown as the next exclusive idle wave', async () => {
@@ -336,6 +361,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(detectFileConflictsMock).toHaveBeenLastCalledWith([known, unknown], '/repo', {
         preferUnknownExclusive: true,
         preferredUnknownTaskId: 'unknown',
+        unknownScopeAdmission: 'admit',
       });
     });
 
@@ -375,7 +401,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const internal = r as unknown as Internal;
       const candidate = task({ id: 'candidate', fileScope: ['src/shared.ts'] });
       const activeTask = task({ id: 'active', fileScope: ['src/shared.ts'] });
-      fileScopesConflictMock.mockReturnValueOnce(true);
+      describeScopeConflictMock.mockReturnValueOnce({ kind: 'overlap', shared: ['src/shared.ts'] });
       internal.scheduler.getRunningTasks = () => [{
         runId: 'active-run',
         task: activeTask,
@@ -389,7 +415,10 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
       expect(safe).toEqual(new Set());
-      expect(fileScopesConflictMock).toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope);
+      // Third argument is the admission policy the durable gate also reads;
+      // passing it is the fix for AGT-4233.
+      expect(describeScopeConflictMock)
+        .toHaveBeenCalledWith(candidate.fileScope, activeTask.fileScope, 'admit');
       expect(detectFileConflictsMock).not.toHaveBeenCalled();
     });
 
@@ -583,6 +612,34 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
         },
       }));
       expect(() => r.switchProvider('claude')).not.toThrow();
+    });
+
+    // The tests above assert `not.toThrow()` and nothing else, so relabelling
+    // worker as reviewer left all 102 of them green. The role NAME is the whole
+    // mechanism by which the split survives a switch, and it was unpinned.
+    // (AGT-4273)
+    it('keeps worker and reviewer on DIFFERENT models when switching to cursor', () => {
+      const r = new AutonomousRunner(cfg({
+        defaultAdapter: 'openrouter',
+        workerModel: 'deepseek/deepseek-v4-flash',
+        reviewerModel: 'deepseek/deepseek-v4-flash',
+        defaultRoles: {
+          worker: { enabled: true, model: 'deepseek/deepseek-v4-flash' },
+          reviewer: { enabled: true, model: 'deepseek/deepseek-v4-flash' },
+        },
+      }));
+
+      r.switchProvider('cursor');
+
+      const after = (r as unknown as { config: AutonomousConfig }).config;
+      // Bulk implementation is cheap and concurrent; the role that judges it is
+      // not the same model, which is the entire point of having a reviewer.
+      expect(after.defaultRoles?.worker.model).toBe('auto');
+      expect(after.defaultRoles?.reviewer.model).toBe('cursor-grok-4.6-high');
+      expect(after.defaultRoles?.worker.model).not.toBe(after.defaultRoles?.reviewer.model);
+      expect(after.workerModel).toBe('auto');
+      expect(after.reviewerModel).toBe('cursor-grok-4.6-high');
+      expect(after.plannerModel === undefined || after.plannerModel === 'cursor-grok-4.6-high').toBe(true);
     });
 
     it('remaps jobProfiles roles, dropping incompatible models', () => {
@@ -802,6 +859,33 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
     });
   });
 
+  // vela 2026-09-02 13:09–13:35: the coordinator parked a publication-scope
+  // rejection, the failure budget below returned the card to Todo, the next
+  // heartbeat read Todo as an operator reopen and resumed it — a park/resume
+  // cycle every ~4 minutes, each waking the orchestrator sweep.
+  describe('scheduler "failed" event — operatorPark branch', () => {
+    it('parks the card in Backlog like STUCK and never returns it to Todo', async () => {
+      const source = mockTaskSource();
+      runnerExecution.setTaskSource(source);
+      const r = new AutonomousRunner(cfg());
+      const internal = r as unknown as Internal & { completedTaskIds: Set<string>; failedTaskCounts: Map<string, number> };
+      const scheduler = internal.scheduler as unknown as TaskScheduler;
+
+      const reason = 'publication-scope: branch contains files outside reserved write scope: uv.lock';
+      scheduler.startTask(task(), '/repo', async () => pipelineResult('failed', {
+        failureDetail: `publication: ${reason}`,
+        operatorPark: { code: 'publication_scope_mismatch', reason },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 15));
+
+      expect(source.logStuck).toHaveBeenCalledWith('ISSUE-1', 'autonomous-runner', expect.stringContaining('publication_scope_mismatch'));
+      expect(source.updateState).not.toHaveBeenCalledWith('ISSUE-1', 'Todo');
+      expect(source.logBlocked).not.toHaveBeenCalled();
+      expect(internal.completedTaskIds.has('ISSUE-1')).toBe(true);
+      expect(internal.failedTaskCounts.get('ISSUE-1') ?? 0).toBe(0);
+    });
+  });
+
   describe('pickPipelineFailureDetail', () => {
     it('prefers deterministic verification output over an earlier reviewer approval', () => {
       const result = pipelineResult('failed', {
@@ -850,6 +934,64 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       const [, , note] = source.logStuck.mock.calls[0];
       expect(String(note)).toContain('Needs human');
       expect(source.updateState).not.toHaveBeenCalled(); // early-stuck bypasses the normal rejection tally
+    });
+  });
+
+
+  // vela deploys with maxConcurrentTasks 12 + pairMode true and never took any
+  // other branch — the lane sat behind a `return` that only serial-mode
+  // heartbeats reached, so it never ran a single time in production (AGT-4181
+  // follow-up, 2026-09-03). These exercise the extracted gate directly.
+  describe('maybeRunLedgerRetrospective (AGT-4181 follow-up)', () => {
+    beforeEach(() => {
+      runLedgerRetrospectiveMock.mockClear();
+      runLedgerRetrospectiveMock.mockResolvedValue({ filed: false, reason: 'no failures in window' });
+    });
+
+    function primaryRunner(over: Partial<AutonomousConfig> = {}) {
+      const r = new AutonomousRunner(cfg({ retrospectiveProjectId: 'proj-1', ...over }));
+      const internal = r as unknown as Internal;
+      Object.defineProperty(internal.durableRuns, 'isPrimary', { value: true, configurable: true });
+      return internal;
+    }
+
+    it('calls the lane when configured, primary, and a task source is registered', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const internal = primaryRunner();
+
+      await internal.maybeRunLedgerRetrospective();
+
+      expect(runLedgerRetrospectiveMock).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1' }));
+    });
+
+    it('does nothing without retrospectiveProjectId configured', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const r = new AutonomousRunner(cfg());
+      const internal = r as unknown as Internal;
+      Object.defineProperty(internal.durableRuns, 'isPrimary', { value: true, configurable: true });
+
+      await internal.maybeRunLedgerRetrospective();
+
+      expect(runLedgerRetrospectiveMock).not.toHaveBeenCalled();
+    });
+
+    it('does nothing on a non-primary (shadow/replica) coordinator', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const r = new AutonomousRunner(cfg({ retrospectiveProjectId: 'proj-1' }));
+      const internal = r as unknown as Internal;
+      Object.defineProperty(internal.durableRuns, 'isPrimary', { value: false, configurable: true });
+
+      await internal.maybeRunLedgerRetrospective();
+
+      expect(runLedgerRetrospectiveMock).not.toHaveBeenCalled();
+    });
+
+    it('swallows a lane failure without throwing', async () => {
+      runnerExecution.setTaskSource(mockTaskSource());
+      const internal = primaryRunner();
+      runLedgerRetrospectiveMock.mockRejectedValueOnce(new Error('ledger unreachable'));
+
+      await expect(internal.maybeRunLedgerRetrospective()).resolves.toBeUndefined();
     });
   });
 });

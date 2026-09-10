@@ -11,7 +11,7 @@ import { runCli } from './runners/cliRunner.js';
 import { setDefaultAdapter } from './adapters/index.js';
 import { readProviderOverride } from './core/providerOverride.js';
 import { loadConfig, validateConfig, generateSampleConfig } from './core/config.js';
-import { loadEnvFile } from './core/envFile.js';
+import { formatShadowWarning, loadEnvFile } from './core/envFile.js';
 import { initTelemetry, track } from './telemetry/telemetry.js';
 import { maybeAutoUpdate } from './support/updateNotifier.js';
 import { safeConsole } from './support/safeLog.js';
@@ -21,7 +21,8 @@ import { parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionPars
 // Load .env so CLI commands (e.g. `auth login --provider linear` reading
 // LINEAR_OAUTH_CLIENT_ID) see the same env the daemon does. Idempotent; never
 // overrides an already-set shell var.
-loadEnvFile();
+const cliEnvLoad = loadEnvFile();
+for (const shadowed of cliEnvLoad.shadowedKeys) console.warn(formatShadowWarning(shadowed));
 
 // Read version from package.json so it stays in sync with the published package.
 // cli.js lives at <pkg>/dist/cli.js, so package.json is one directory up.
@@ -537,7 +538,7 @@ program
   .description('Pick Linear issues and deploy an agent pipeline per issue into isolated git worktrees')
   .argument('[issueIds...]', 'Issue ids/identifiers (e.g. INT-123); omit for the interactive picker')
   .option('--path <path>', 'Repository path (default: cwd)')
-  .option('--concurrency <n>', 'Max issues in flight (default: min(selected, config autonomous.maxConcurrentTasks ?? 4))', parsePositiveIntegerOption)
+  .option('--concurrency <n>', 'Max issues in flight (default: min(selected, config autonomous.maxConcurrentTasks ?? 64))', parsePositiveIntegerOption)
   .option('--dry-run', 'Print the execution plan (issue → branch/worktree/resume) and exit')
   .option('--yes', 'Skip the confirmation prompt')
   .option('--adapter <name>', 'Adapter override for the worker/reviewer')
@@ -711,6 +712,19 @@ program
     console.log(`  logs:   ${status.logFile}`);
   });
 
+// openswarm cost
+
+program
+  .command('cost')
+  .description('Show LLM spend from the usage ledger (per API call, metered by the provider)')
+  .option('--since <window>', 'Duration back from now (90m, 24h, 7d) or an ISO date', '24h')
+  .option('--by <key>', 'Group by model | stage | task | project | adapter | day', 'model')
+  .option('--json', 'Print the aggregate as JSON')
+  .action(async (opts: { since: string; by: string; json?: boolean }) => {
+    const { runCostCommand } = await import('./cli/costCommand.js');
+    await runCostCommand(opts);
+  });
+
 // openswarm provider
 
 program
@@ -774,33 +788,21 @@ program
   .option('-p, --port <port>', 'Port number', parseTcpPortOption, 3847)
   .option('--no-open', 'Start server without opening browser')
   .action(async (opts: { port: number; open: boolean }) => {
-    const port = opts.port;
     const { startWebServer, stopWebServer } = await import('./support/web.js');
-    await startWebServer(port);
-    console.log(`Dashboard running at http://localhost:${port}`);
-
-    if (opts.open) {
-      const { exec } = await import('node:child_process');
-      const url = `http://localhost:${port}`;
-      const cmd = process.platform === 'darwin' ? `open "${url}"`
-        : process.platform === 'win32' ? `start "${url}"`
-        : `xdg-open "${url}"`;
-      exec(cmd, (err) => {
-        if (err) console.log(`Open ${url} in your browser`);
-      });
-    }
-
-    // Keep process alive
-    let stopping = false;
-    process.once('SIGINT', () => {
-      if (stopping) return;
-      stopping = true;
-      void stopWebServer()
-        .catch((error) => console.error('[Dashboard] graceful shutdown failed:', error))
-        .finally(() => {
-          console.log('\nDashboard stopped.');
-          process.exitCode = 0;
-        });
+    const { spawn } = await import('node:child_process');
+    const { getOpenCommand } = await import('./auth/openBrowser.js');
+    const { runDashCommand } = await import('./cli/dashHandler.js');
+    await runDashCommand(opts.port, opts.open, {
+      startWebServer,
+      stopWebServer,
+      spawnBrowser: (url) => {
+        const { command, args } = getOpenCommand(url);
+        return spawn(command, args, { stdio: 'ignore', windowsHide: true });
+      },
+      onSignal: (signal, handler) => { process.once(signal, handler); },
+      log: (message) => console.log(message),
+      logError: (message, error) => console.error(message, error),
+      setExitCode: (code) => { process.exitCode = code; },
     });
   });
 
@@ -993,7 +995,7 @@ async function launchChatTui(sessionId?: string): Promise<void> {
   let branch: string | undefined;
   try {
     const { execFileSync } = await import('node:child_process');
-    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'ignore'] })
+    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 3_000 })
       .toString()
       .trim() || undefined;
   } catch {

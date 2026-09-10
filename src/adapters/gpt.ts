@@ -28,6 +28,7 @@ import {
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
+import { adapterFetch } from './httpDispatcher.js';
 
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
 // Was pinned to `gpt-4o` long after the GPT-5 line shipped — the exact staleness
@@ -57,7 +58,7 @@ function catalogSpec(): CatalogSpec {
     fetchLive: async () => {
       const apiKey = process.env.OPENAI_API_KEY?.trim();
       if (!apiKey) return [];
-      const res = await fetch(`${OPENAI_API_BASE}/models`, {
+      const res = await adapterFetch(`${OPENAI_API_BASE}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
@@ -164,6 +165,7 @@ export class GptCliAdapter implements CliAdapter {
       coordinationContext: options.coordinationContext,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'gpt', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -171,7 +173,9 @@ export class GptCliAdapter implements CliAdapter {
       if (options.onLog) {
         options.onLog(`[GPT] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens`);
       }
-      return loopResultToCliResult(result);
+      const cli = loopResultToCliResult(result);
+      if (cli.costInfo) cli.costInfo.model = model;
+      return cli;
     } catch (err) {
       // Rate-limit AND infra/capacity errors must propagate so the pipeline
       // classifies them (pause / infra_error backoff) instead of burying them in a
@@ -217,7 +221,7 @@ export class GptCliAdapter implements CliAdapter {
       }
       const doCall = async (accessToken: string) => {
         const request = prepareApprovedModelRequest(`${OPENAI_API_BASE}/chat/completions`, body);
-        const res = await fetch(request.url, {
+        const res = await adapterFetch(request.url, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${accessToken}`,

@@ -274,8 +274,63 @@ async function searchWithGitGrep(
   }
 }
 
+/**
+ * A lexical guard cannot evaluate shell expansion, so `BLOCKED_COMMANDS` is
+ * matched against both the raw command and this normalized form, and one
+ * further shape is rejected outright. Two bypass classes, both real ways a
+ * command can execute `rm -rf /` while never containing that literal
+ * substring: (AGT-3436)
+ *
+ *  1. Quote/backslash splitting — bash strips quote delimiters and escaping
+ *     backslashes before running a command, so `r'm' -rf /` and `r\m -rf /`
+ *     both execute as `rm -rf /`. Stripping them here before matching makes
+ *     the check see what the shell will actually see.
+ *  2. Mid-word substitution — `$(...)`, `` `...` ``, or `${...}` glued
+ *     directly onto adjacent letters/digits with no separating whitespace
+ *     (e.g. `r$(true)m -rf /`) can splice a blocked verb together from
+ *     pieces whose output cannot be known without running them. This shape
+ *     is vanishingly rare in legitimate scripts — substitution is almost
+ *     always its own whitespace-delimited word (`X=$(cmd)`, `for f in
+ *     $(ls)`) — so `isCommandBlocked` rejects it unconditionally rather than
+ *     guessing at what it might evaluate to.
+ */
+function normalizeForGuard(command: string): string {
+  return command
+    .replace(/\\(.)/g, '$1')
+    .replace(/['"]/g, '');
+}
+
+/** Command/parameter-substitution spans; open and close pair unambiguously (unlike bare backticks alone). */
+const SUBSTITUTION_SPAN_PATTERNS = [/\$\([^()]*\)/g, /\$\{[^{}]*\}/g, /`[^`]*`/g];
+
+/**
+ * True if any substitution span is glued directly onto an adjacent word
+ * character with no separating whitespace — the shape a blocked verb gets
+ * spliced together through (`r$(true)m`, `` r`true`m ``, `r${empty}m`).
+ * Only the true boundary characters matter: `` `date` `` on its own is
+ * ordinary, whitespace-delimited usage and must not trip this — it is the
+ * word character immediately touching the span's open or close delimiter
+ * that makes the output impossible to verify lexically.
+ */
+function hasMidWordSubstitution(command: string): boolean {
+  for (const spanPattern of SUBSTITUTION_SPAN_PATTERNS) {
+    for (const match of command.matchAll(spanPattern)) {
+      const start = match.index ?? 0;
+      const end = start + match[0].length;
+      const before = command[start - 1];
+      const after = command[end];
+      if ((before && /[A-Za-z0-9_]/.test(before)) || (after && /[A-Za-z0-9_]/.test(after))) return true;
+    }
+  }
+  return false;
+}
+
 function isCommandBlocked(command: string): boolean {
-  return BLOCKED_COMMANDS.some(pattern => pattern.test(command));
+  const normalized = normalizeForGuard(command);
+  // Checked against both forms: quoting can hide a mid-word splice from the
+  // raw text (`r"$(true)"m`) until the quotes are stripped away.
+  if (hasMidWordSubstitution(command) || hasMidWordSubstitution(normalized)) return true;
+  return BLOCKED_COMMANDS.some(pattern => pattern.test(command) || pattern.test(normalized));
 }
 
 // ============ 도구 실행기 ============

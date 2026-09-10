@@ -39,6 +39,30 @@ describe('systemPrompt', () => {
 describe('buildWorkerPrompt', () => {
   const base = { taskTitle: 'Fix login bug', taskDescription: 'Session expires too fast' };
 
+  it('shows the binding file scope before the worker edits', () => {
+    const result = enPrompts.buildWorkerPrompt({
+      ...base,
+      context: { fileScope: ['src/router.ts', 'tests/router.test.ts'] },
+    });
+    expect(result).toContain('Allowed Edit Boundary (binding)');
+    expect(result).toContain('src/router.ts');
+    expect(result).toContain('tests/router.test.ts');
+  });
+
+  // cgf-portal#211 (2026-09-02): the issue's PR #179 had merged, the card came
+  // back, and the worker "improved" an unrelated dev script for lack of work.
+  it('names prior deliveries and tells the worker to stop when nothing remains', () => {
+    for (const [prompts, heading] of [[enPrompts, 'Prior Deliveries (binding)'], [koPrompts, '이전 납품 (구속력 있음)']] as const) {
+      const result = prompts.buildWorkerPrompt({
+        ...base,
+        context: { priorDeliveries: ['https://github.com/o/r/pull/179'] },
+      });
+      expect(result).toContain(heading);
+      expect(result).toContain('https://github.com/o/r/pull/179');
+      expect(result).toContain('noChangesReason');
+    }
+  });
+
   it('returns string containing task title and description', () => {
     const result = enPrompts.buildWorkerPrompt(base);
     expect(result).toContain('Fix login bug');
@@ -423,6 +447,31 @@ describe('buildReviewerPrompt', () => {
     const ko = koPrompts.buildReviewerPrompt(opts);
     expect(ko).toContain('위치 기반 재매핑');
     expect(ko).toContain('경계 입력');
+  });
+
+  it('contains source-string invariant test checklist item (weak guard detection)', () => {
+    // Default (change) mode — the main worker→reviewer gate.
+    const en = enPrompts.buildReviewerPrompt(opts);
+    expect(en).toContain('Source-string invariant tests');
+    expect(en).toContain('inspect.getsource');
+    expect(en).toContain('weak guard');
+    // Verdict-limitation instruction must be present, not just the detection signal.
+    expect(en).toContain('approve only with that limitation stated');
+    // ko mirror
+    const ko = koPrompts.buildReviewerPrompt(opts);
+    expect(ko).toContain('소스 문자열 불변식 테스트');
+    expect(ko).toContain('inspect.getsource');
+    expect(ko).toContain('약한 가드');
+    expect(ko).toContain('판정에 그 한계가 적힌 경우에만 승인');
+  });
+
+  it('contains source-string invariant test checklist item in direct mode too', () => {
+    const en = enPrompts.buildReviewerPrompt({ ...opts, mode: 'direct' });
+    expect(en).toContain('Source-string invariant tests');
+    expect(en).toContain('approve only with that limitation stated');
+    const ko = koPrompts.buildReviewerPrompt({ ...opts, mode: 'direct' });
+    expect(ko).toContain('소스 문자열 불변식 테스트');
+    expect(ko).toContain('판정에 그 한계가 적힌 경우에만 승인');
   });
 
   it('adds deterministic-evidence instructions symmetrically when evidence exists', () => {

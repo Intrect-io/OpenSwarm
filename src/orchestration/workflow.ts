@@ -7,6 +7,7 @@ import { basename, isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import * as yaml from 'yaml';
+import { z } from 'zod';
 
 // Types & Interfaces
 
@@ -124,6 +125,56 @@ export interface ExecutorResult {
   rollbackPerformed?: boolean;
   duration: number;
 }
+
+const FailureStrategySchema = z.enum(['rollback', 'retry', 'skip', 'abort', 'notify']);
+const StepStatusSchema = z.enum(['pending', 'running', 'completed', 'failed', 'skipped']);
+
+export const WorkflowStepSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  prompt: z.string().min(1),
+  dependsOn: z.array(z.string()).optional(),
+  onFailure: FailureStrategySchema.optional(),
+  retryCount: z.number().int().nonnegative().optional(),
+  timeout: z.number().positive().optional(),
+  condition: z.string().optional(),
+  env: z.record(z.string(), z.string()).optional(),
+});
+
+export const WorkflowConfigSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  projectPath: z.string().min(1),
+  steps: z.array(WorkflowStepSchema).min(1),
+  onFailure: FailureStrategySchema.optional(),
+  trigger: z.object({
+    schedule: z.string().optional(),
+    onIssueStatus: z.array(z.string()).optional(),
+    manual: z.boolean().optional(),
+  }).optional(),
+  linearIssue: z.string().optional(),
+});
+
+export const StepResultSchema = z.object({
+  stepId: z.string().min(1),
+  status: StepStatusSchema,
+  startedAt: z.number(),
+  completedAt: z.number().optional(),
+  output: z.string().optional(),
+  error: z.string().optional(),
+  changedFiles: z.array(z.string()).optional(),
+});
+
+export const WorkflowExecutionSchema = z.object({
+  workflowId: z.string().min(1),
+  executionId: z.string().min(1),
+  status: z.enum(['running', 'completed', 'failed', 'aborted']),
+  startedAt: z.number(),
+  completedAt: z.number().optional(),
+  stepResults: z.record(z.string(), StepResultSchema),
+  checkpoint: z.string().optional(),
+});
 
 // DAG Utilities
 
@@ -275,10 +326,19 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
  * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
-  const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
+  const parsed = WorkflowConfigSchema.safeParse(workflow);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`);
+    throw new Error(`Invalid workflow: ${details.join(', ')}`);
+  }
+  const validation = validateWorkflow(parsed.data);
+  if (!validation.valid) {
+    throw new Error(`Invalid workflow: ${validation.errors.join(', ')}`);
+  }
+  const filePath = storageFilePath(WORKFLOW_DIR, parsed.data.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
-  await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');
-  console.log(`[Workflow] Saved: ${workflow.name} (${workflow.id})`);
+  await fs.writeFile(filePath, yaml.stringify(parsed.data), 'utf-8');
+  console.log(`[Workflow] Saved: ${parsed.data.name} (${parsed.data.id})`);
 }
 
 /**
@@ -288,7 +348,12 @@ export async function loadWorkflow(workflowId: string): Promise<WorkflowConfig |
   try {
     const filePath = storageFilePath(WORKFLOW_DIR, workflowId, '.yaml');
     const content = await fs.readFile(filePath, 'utf-8');
-    return yaml.parse(content) as WorkflowConfig;
+    const parsed = WorkflowConfigSchema.safeParse(yaml.parse(content));
+    if (!parsed.success) {
+      console.warn(`[Workflow] Rejecting invalid workflow ${workflowId}: ${parsed.error.message}`);
+      return null;
+    }
+    return parsed.data;
   } catch {
     return null;
   }
@@ -307,9 +372,9 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
       if (file.endsWith('.yaml')) {
         try {
           const content = await fs.readFile(resolve(WORKFLOW_DIR, file), 'utf-8');
-          const parsed = yaml.parse(content);
-          if (!parsed || typeof parsed !== 'object') throw new Error('workflow root must be an object');
-          workflows.push(parsed as WorkflowConfig);
+          const parsed = WorkflowConfigSchema.safeParse(yaml.parse(content));
+          if (!parsed.success) throw new Error(parsed.error.message);
+          workflows.push(parsed.data);
         } catch (error) {
           console.warn(`[Workflow] Skipping invalid workflow ${file}: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -323,12 +388,58 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 }
 
 /**
- * Save execution state
+ * Save execution state — validated against the workflow definition when present.
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
-  const filePath = storageFilePath(EXECUTION_DIR, execution.executionId, '.json');
+  const parsed = WorkflowExecutionSchema.safeParse(execution);
+  if (!parsed.success) {
+    const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`);
+    throw new Error(`Invalid workflow execution: ${details.join(', ')}`);
+  }
+  // Both checks, because they see different things: the schema is structural and
+  // cannot know whether a step id exists in the workflow DEFINITION, which is
+  // what this one reads from disk to compare against. (AGT-3457 + AGT-4288)
+  await assertExecutionPersistable(parsed.data);
+  const filePath = storageFilePath(EXECUTION_DIR, parsed.data.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(execution, null, 2), 'utf-8');
+  await fs.writeFile(filePath, JSON.stringify(parsed.data, null, 2), 'utf-8');
+}
+
+/**
+ * Reject execution snapshots that are structurally invalid or incompatible with
+ * their workflow definition (unknown step ids, failed definition validation).
+ */
+export async function assertExecutionPersistable(execution: WorkflowExecution): Promise<void> {
+  const allowedStatuses = new Set(['running', 'completed', 'failed', 'aborted']);
+  if (!execution.workflowId) throw new Error('Execution workflowId is required');
+  if (!execution.executionId) throw new Error('Execution executionId is required');
+  if (!allowedStatuses.has(execution.status)) {
+    throw new Error(`Invalid execution status: ${execution.status}`);
+  }
+  if (!execution.stepResults || typeof execution.stepResults !== 'object') {
+    throw new Error('Execution stepResults must be an object');
+  }
+
+  const workflow = await loadWorkflow(execution.workflowId);
+  if (!workflow) {
+    // Definition not on disk yet (common in unit tests that only exercise
+    // execution storage IDs). Structural checks above still apply.
+    return;
+  }
+
+  const definitionCheck = validateWorkflow(workflow);
+  if (!definitionCheck.valid) {
+    throw new Error(`Cannot persist execution for invalid workflow: ${definitionCheck.errors.join('; ')}`);
+  }
+
+  const definedSteps = new Set(workflow.steps.map((s) => s.id));
+  for (const [key, result] of Object.entries(execution.stepResults)) {
+    if (!definedSteps.has(key) || !definedSteps.has(result.stepId)) {
+      throw new Error(
+        `Execution step "${key}" / "${result.stepId}" is not in workflow "${workflow.id}" definition`,
+      );
+    }
+  }
 }
 
 /**
@@ -338,7 +449,12 @@ export async function loadExecution(executionId: string): Promise<WorkflowExecut
   try {
     const filePath = storageFilePath(EXECUTION_DIR, executionId, '.json');
     const content = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(content);
+    const parsed = WorkflowExecutionSchema.safeParse(JSON.parse(content));
+    if (!parsed.success) {
+      console.warn(`[Workflow] Rejecting invalid execution ${executionId}: ${parsed.error.message}`);
+      return null;
+    }
+    return parsed.data;
   } catch {
     return null;
   }
@@ -432,6 +548,13 @@ export function createReviewPipelineTemplate(projectPath: string, prNumber: stri
  */
 export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
+
+  const schema = WorkflowConfigSchema.safeParse(workflow);
+  if (!schema.success) {
+    for (const issue of schema.error.issues) {
+      errors.push(`${issue.path.join('.') || 'root'}: ${issue.message}`);
+    }
+  }
 
   // Basic field validation
   if (!workflow.id) errors.push('Workflow ID is required');

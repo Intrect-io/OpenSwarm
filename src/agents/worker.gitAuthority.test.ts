@@ -37,6 +37,27 @@ describe('runWorker Git authority (INT-2609)', () => {
     expect(result.success).toBe(false);
     expect(result.filesChanged).toEqual([]);
     expect(result.error).toContain('no changed files');
+    // The pipeline parks a session that repeats this outcome; it needs to tell
+    // it apart from every other worker failure.
+    expect(result.zeroDiffWithoutReason).toBe(true);
+  });
+
+  it('keeps a zero-diff success that carries a noChangesReason, and says so in the log', async () => {
+    getChangedFilesSinceSnapshot.mockResolvedValue([]);
+    parseWorkerOutput.mockReturnValue({
+      success: true, summary: 'Nothing to do', filesChanged: [], commands: [], output: 'looked',
+      noChangesReason: 'ledger.py already splits settlement tags',
+    });
+    const lines: string[] = [];
+
+    const result = await runWorker({
+      taskTitle: 'split settlement tags', taskDescription: 'AX-874',
+      projectPath: '/repo', adapterName: 'gpt', onLog: (line) => { lines.push(line); },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.noChangesReason).toBe('ledger.py already splits settlement tags');
+    expect(lines).toContain('[Worker] Finished without edits: ledger.py already splits settlement tags');
   });
 
   it('fails when the Git diff escapes planner fileScope', async () => {

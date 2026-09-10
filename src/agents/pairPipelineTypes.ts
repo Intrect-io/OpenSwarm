@@ -117,7 +117,34 @@ export interface PipelineResult {
   };
   prUrl?: string;
   totalCost?: CostInfo;
+  /**
+   * Operation/stage and original cause of the terminal failure, including
+   * thrown pipeline errors, worktree setup, durable fences and publication.
+   * Takes precedence over prior stage feedback in the failure ledger.
+   */
+  failureDetail?: string;
+  /**
+   * A deterministic failure that an operator has to resolve. The coordinator
+   * parks the run as NEEDS_HUMAN under `code` instead of scheduling a retry:
+   * the publication-scope fence rejecting files already committed on the
+   * branch cannot be retried into success, and vela spent 23/48/15 attempts
+   * on three such runs on 2026-09-02 before anyone looked.
+   */
+  operatorPark?: { code: string; reason: string };
+  /** Deterministic coordinator action applied before durable park/complete. */
+  coordinatorResolution?: { action: 'complete' | 'retry'; reason: string };
 }
+
+/**
+ * NEEDS_HUMAN code for a worker that delivered no edits — either with an
+ * explicit `noChangesReason` (publication then has nothing to open a PR from)
+ * or by repeating the empty-result contract violation until the session gave
+ * up. Both mean the same thing to an operator: the agent will not produce a
+ * diff for this issue as written.
+ */
+export const WORKER_NO_CHANGES_PARK_REASON = 'worker_no_changes';
+/** Publication-path park: the worker stated why no source edit was required. */
+export const WORKER_NO_CHANGES_STATEMENT_PREFIX = 'Worker finished without edits:';
 
 export interface PipelineContext {
   task: TaskItem;

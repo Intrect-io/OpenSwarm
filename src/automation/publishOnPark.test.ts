@@ -5,7 +5,8 @@ const commitAndCreatePRWithHead = vi.hoisted(() => vi.fn());
 vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
-import { publishApprovedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
+import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -75,6 +76,248 @@ describe('publication identity (AGT-4145)', () => {
   });
 });
 
+// vela 2026-09-02: AGT-3844 (48 attempts), AX-868 (23), AGT-4158 (15) — every
+// one a publication-scope rejection of files an EARLIER attempt had already
+// committed, turned into a 15-minute infra retry with a blank ledger message.
+describe('afterPublication hook (per-repository fresh review)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-1', issueId: 'AGT-1' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-1', title: 'Hooked' };
+
+  it('runs once, after the publication is durably recorded, with the PR identity', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'head-9' });
+    const calls: string[] = [];
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => { calls.push('recorded'); return true; }),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async (p: { prUrl: string; headSha: string }) => { calls.push(`hook:${p.prUrl}:${p.headSha}`); });
+    const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, durability, hook);
+
+    expect(calls).toEqual(['recorded', 'hook:https://github.com/o/r/pull/9:head-9']);
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved', prUrl: 'https://github.com/o/r/pull/9' });
+  });
+
+  it('keeps the publication a success when the review itself fails', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/10', headSha: 'head-10' });
+    const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined, async () => { throw new Error('reviewer adapter down'); });
+
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved', prUrl: 'https://github.com/o/r/pull/10' });
+  });
+});
+
+// Measured 2026-09-10 (AGT-4278): 5 of 5 draft publications carried no reviewer
+// verdict, because this path took no hook at all. Drafts are what runs that
+// STOPPED emit — the least finished work the daemon produces.
+describe('parked publication is reviewed too (AGT-4278)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-1', issueId: 'AGT-1' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-1', title: 'Parked' };
+  const parked = { operatorPark: { code: 'ask_human', reason: 'needs a decision' } };
+
+  it('hands the reviewer the published draft, with the sha it can dedup on', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/42', headSha: 'head-42' });
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    const published = await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(published).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(hook.mock.calls[0][0]).toMatchObject({
+      prUrl: 'https://github.com/o/r/pull/42', headSha: 'head-42',
+    });
+  });
+
+  it('does not review what the lease fence refused to publish', async () => {
+    const durability = {
+      beforePublish: vi.fn(async () => false),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('does not review a publication the durable attach rejected', async () => {
+    // A stale executor's PR exists but is not ours to speak for.
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/43', headSha: 'head-43' });
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => false),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('does not review a publication that never happened', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from'));
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => {});
+
+    await publishParkedIfNeeded(info, publishable, parked, durability, hook);
+
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('reports a throwing reviewer as a review failure, not as a failed publication', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/44', headSha: 'head-44' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const durability = {
+      beforePublish: vi.fn(async () => true),
+      onPublication: vi.fn(async () => true),
+    } as unknown as ExecutionDurabilityHooks;
+    const hook = vi.fn(async () => { throw new Error('reviewer exploded'); });
+
+    await expect(publishParkedIfNeeded(info, publishable, parked, durability, hook)).resolves.toBe(true);
+
+    const lines = warn.mock.calls.map(c => String(c[0]));
+    expect(lines.some(l => l.includes('Post-publication review failed'))).toBe(true);
+    expect(lines.some(l => l.includes('Could not publish parked work'))).toBe(false);
+  });
+});
+
+describe('approved publish, lease fence rejection (cgf-portal AX-1020, 2026-08-31)', () => {
+  // Losing beforePublish did not set failureDetail. pickPipelineFailureDetail
+  // then fell back to lastReviewFeedback — a reviewer's APPROVAL text recorded
+  // as if it were the failure, twice, on a run that was actually blocked by
+  // the lease fence for reasons the ledger never captured.
+  it('records the fence, not the reviewer\'s last word, as the failure cause', async () => {
+    const durability = { beforePublish: vi.fn(async () => false), onPublication: vi.fn() } as unknown as ExecutionDurabilityHooks;
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; lastReviewFeedback?: string } = {
+      success: true,
+      finalStatus: 'approved',
+      lastReviewFeedback: '검증 근거를 확인했습니다... 리뷰 결론은 승인입니다.',
+    };
+
+    await publishApprovedWork(
+      { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AX-1020', issueId: 'AX-1020' },
+      { id: 'task-1', issueIdentifier: 'AX-1020', title: 'Verify' },
+      result,
+      durability,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('infra_error');
+    expect(result.failureDetail).toMatch(/^publication: lease fence rejected/);
+    expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+  });
+});
+
+describe('parked-work draft publication', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-3844-ci-1', issueId: 'AGT-3844' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-3844', title: 'CI suite reserve', fileScope: ['tests/'], fileScopeSource: 'drafted' as const };
+
+  // The draft exists so the operator can see the branch. Enforcing the write
+  // scope here only hides it: AGT-3844 parked on that fence (2026-09-02)
+  // holding 42 commits whose net diff is four files, and published nothing.
+  it('publishes the branch without the write-scope fence', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/21', headSha: 'abc' });
+
+    await publishParkedWork(info, publishable, undefined);
+
+    expect(commitAndCreatePRWithHead).toHaveBeenCalledWith(
+      info, publishable.title, 'AGT-3844', expect.any(String),
+      { draft: true, committedOnly: true },
+    );
+  });
+
+  it('publishes a park once, whichever side of the approved publish it happened on', async () => {
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/22', headSha: 'abc' });
+    const parked = { finalStatus: 'failed', operatorPark: { code: 'publication_scope_mismatch', reason: 'r' } };
+
+    expect(await publishParkedIfNeeded(info, publishable, parked, undefined)).toBe(true);
+    expect(await publishParkedIfNeeded(info, publishable, { finalStatus: 'failed' }, undefined)).toBe(false);
+    expect(await publishParkedIfNeeded(null, publishable, parked, undefined)).toBe(false);
+    expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats an operator park as a run that stopped for a person', () => {
+    expect(shouldPublishParkedWork(true, { finalStatus: 'failed', operatorPark: { code: 'worker_no_changes', reason: 'r' } })).toBe(true);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator' })).toBe(true);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'failed' })).toBe(false);
+    // A published run and a quarantined sandbox outcome still never publish.
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', prUrl: 'https://x/1' })).toBe(false);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', workerResult: { executionOutcomeUnknown: true } })).toBe(false);
+  });
+});
+
+describe('publication failure classification', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-4158', issueId: 'AGT-4158' };
+  const publishable = { id: 'task-1', issueIdentifier: 'AGT-4158', title: 'Artifact cohort producer', fileScope: ['src/vega_plugins/eval/'], fileScopeSource: 'drafted' as const };
+
+  it('parks a publication-scope rejection for the operator instead of retrying it', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new PublicationScopeMismatchError(['benchmarks/artifact_cohort.py', 'uv.lock']));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: { code: string; reason: string } } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('failed');
+    expect(result.operatorPark).toEqual({
+      code: PUBLICATION_SCOPE_PARK_REASON,
+      reason: expect.stringContaining('benchmarks/artifact_cohort.py, uv.lock'),
+    });
+    expect(result.failureDetail).toMatch(/^publication: publication-scope: /);
+  });
+
+  it('counts a branch with nothing to publish as the attempt failing, not the infrastructure', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from - branch has no changes compared to main'));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: unknown } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'failed', failureDetail: expect.stringContaining('No commits to create PR from') });
+    expect(result.operatorPark).toBeUndefined();
+  });
+
+  // cgf-portal AX-874, 2026-09-02: four consecutive attempts ended "No commits"
+  // and were counted as failures; the worker's own noChangesReason never
+  // reached the ledger, the Linear comment, or the operator.
+  it('parks a worker that finished with an explicit noChangesReason and nothing to publish', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('No commits to create PR from - branch has no changes compared to main'));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: { code: string; reason: string }; workerResult?: { noChangesReason?: string } } = {
+      success: true,
+      finalStatus: 'approved',
+      workerResult: { noChangesReason: 'settlement tags are already split in ledger.py' },
+    };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('failed');
+    expect(result.operatorPark).toEqual({
+      code: WORKER_NO_CHANGES_PARK_REASON,
+      reason: 'Worker finished without edits: settlement tags are already split in ledger.py',
+    });
+    expect(result.failureDetail).toBe('publication: No commits to create PR from - branch has no changes compared to main — worker: settlement tags are already split in ledger.py');
+  });
+
+  it('keeps every other publication failure a retryable infra error, with the cause recorded', async () => {
+    commitAndCreatePRWithHead.mockRejectedValue(new Error('gh: HTTP 502 Bad Gateway'));
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: unknown } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'infra_error', failureDetail: 'publication: gh: HTTP 502 Bad Gateway' });
+    expect(result.operatorPark).toBeUndefined();
+  });
+});
+
 describe('publishStuckWork — terminal parks publish instead of holding', () => {
   const ctx = { worktreePath: '/tmp/w', repoRoot: '/tmp/r', branchName: 'swarm/AGT-1' };
   const task = { id: 'task-1', issueId: 'issue-1', issueIdentifier: 'AGT-1', title: 'Do the thing' };
@@ -117,19 +360,17 @@ describe('publishStuckWork — terminal parks publish instead of holding', () =>
     await expect(publishStuckWork(ctx, task, 'stuck')).resolves.toBeUndefined();
   });
 
-  it('drops an inferred file scope, which is advisory and would block publication', async () => {
-    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
+  // This used to enforce a declared scope and drop an inferred one. Both now
+  // publish: the worktree is deleted moments after this call, so a fenced
+  // refusal does not protect the operator's instruction — it destroys the work
+  // that would have shown them it was broken. A draft PR merges nothing.
+  it('publishes the branch as a draft without a write-scope fence, whatever the scope source', async () => {
+    for (const fileScopeSource of ['declared', 'drafted', 'inferred'] as const) {
+      commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
 
-    await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource: 'inferred' }, 'stuck');
+      await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource }, 'stuck');
 
-    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ fileScope: undefined });
-  });
-
-  it('enforces a declared file scope', async () => {
-    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/9', headSha: 'sha' });
-
-    await publishStuckWork(ctx, { ...task, fileScope: ['src/a.ts'], fileScopeSource: 'declared' }, 'stuck');
-
-    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ fileScope: ['src/a.ts'] });
+      expect(commitAndCreatePRWithHead.mock.calls.at(-1)?.[4]).toEqual({ draft: true });
+    }
   });
 });

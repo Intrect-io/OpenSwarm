@@ -221,7 +221,174 @@ export interface SearchResult {
 // Singleton connection
 let db: Connection | null = null;
 let table: Table | null = null;
+/** The one open in progress, shared by every caller that arrives while it runs. */
+let initInFlight: Promise<void> | null = null;
+
+/**
+ * Recall fails on *every* call once the store is broken, and each caller
+ * swallows the throw — so the same stack traced 95 times in five minutes on
+ * vela (AGT-4267), burying every other diagnostic line while the one fact that
+ * mattered ("recall is off") was never stated. Report the first occurrence,
+ * then suppress until the window passes, carrying the count and any other
+ * messages seen so the scale is still visible.
+ *
+ * Tracked by phase, because the two failures are genuinely different: `open`
+ * means the store could not be opened at all, `query` means it opened and then
+ * broke under us. A store can break either way — vela's corruption came from a
+ * single interrupted write, so whether the daemon met it at open time or
+ * mid-run was purely a matter of when it last restarted. Suppressing an open
+ * failure must not hide a query failure, or the second kind stays invisible
+ * exactly the way the first one used to be.
+ *
+ * Suppression is by phase and NOT by message. Keying it on the message means a
+ * store alternating between two error strings matches neither and reports on
+ * every single recall, which is the original unbounded logging wearing a hat.
+ *
+ * Deliberately not a permanent disable: the vela outage was repaired by moving
+ * seven zero-byte manifests aside, and recall came back on the next call with
+ * no restart. A latch would have kept it dark until someone noticed.
+ */
+const RECALL_REPORT_WINDOW_MS = 10 * 60_000;
+/**
+ * How many distinct messages one report may name. Errors that embed a varying
+ * detail — a byte range, a timestamped predicate — produce a new string every
+ * call, and an uncapped list turned one window's report into a single 131 KB
+ * line (measured, 2000 failures). Ninety-five stacks were at least greppable
+ * line by line; that is not.
+ */
+const RECALL_ALSO_SEEN_CAP = 5;
+type RecallPhase = 'open' | 'embed' | 'query';
+type RecallFailure = {
+  phase: RecallPhase;
+  message: string;
+  reportedAt: number;
+  /** Failures since the last report — reset every time one is emitted. */
+  suppressedCount: number;
+  /**
+   * Failures in this outage, across every report the window forced. The two
+   * differ the moment an outage outlives one window, and vela's store was
+   * broken for nine days: `restored after N failure(s)` built on the
+   * window-scoped count would have answered with the last ten minutes.
+   */
+  totalCount: number;
+  alsoSeen: Set<string>;
+  /** Occurrences of a differing message the cap kept out of `alsoSeen`. */
+  alsoSeenUnlisted: number;
+};
+let recallFailure: RecallFailure | null = null;
+
+/**
+ * Whether long-term recall is currently working, and if not, why.
+ *
+ * `available: false` is the answer to a question callers could not previously
+ * ask: an empty result meant "nothing matched" and "the store is dead" alike.
+ */
+export function memoryRecallStatus(): {
+  available: boolean;
+  phase?: RecallPhase;
+  error?: string;
+  suppressedCount?: number;
+} {
+  if (!recallFailure) return { available: true };
+  return {
+    available: false,
+    phase: recallFailure.phase,
+    error: recallFailure.message,
+    suppressedCount: recallFailure.suppressedCount,
+  };
+}
+
+function reportRecallFailure(error: unknown, phase: RecallPhase): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const now = Date.now();
+  const previous = recallFailure;
+  if (previous && previous.phase === phase && now - previous.reportedAt < RECALL_REPORT_WINDOW_MS) {
+    previous.suppressedCount += 1;
+    previous.totalCount += 1;
+    if (message !== previous.message && !previous.alsoSeen.has(message)) {
+      if (previous.alsoSeen.size < RECALL_ALSO_SEEN_CAP) previous.alsoSeen.add(message);
+      else previous.alsoSeenUnlisted += 1;
+    }
+    return;
+  }
+  // Only carry the tally when the phase is unchanged. A `query` outage followed
+  // by an embedding failure otherwise credits 39 broken queries to a report
+  // headed "the query could not be embedded", and names a lance error as
+  // something the embedder also saw. That transition skips a clear — the
+  // query-phase clear lives at the end of a successful search, which does not
+  // run here — so it is the one direction where a stale tally survives.
+  const sameAsBefore = previous?.phase === phase ? previous : null;
+  // A phase's first report always prints a count of zero — the record is fresh
+  // — and the tally is only ever printed by a LATER report of the same phase.
+  // A phase change destroys the record before that can happen, so without this
+  // the outgoing phase's scale is never stated anywhere: 40 failed queries
+  // followed by one embedding failure emitted two lines, neither of which said
+  // "forty". Name it, attributed to the phase it belongs to.
+  const retired = previous && previous.phase !== phase ? previous : null;
+  const suppressed = sameAsBefore?.suppressedCount ?? 0;
+  const others = sameAsBefore ? [sameAsBefore.message, ...sameAsBefore.alsoSeen].filter(m => m !== message) : [];
+  const unlisted = sameAsBefore?.alsoSeenUnlisted ?? 0;
+  const parts = [
+    retired && retired.totalCount > 1
+      ? `ends a ${retired.phase}-phase outage of ${retired.totalCount} failure(s)` : '',
+    suppressed > 0 ? `${suppressed} further failure(s) since the last report` : '',
+    others.length > 0
+      // "N more" would read as N further *messages*; this counts occurrences of
+      // messages the cap kept off the list, and `suppressedCount` above already
+      // carries the total.
+      ? `also seen: ${others.join('; ')}${unlisted > 0 ? `, and ${unlisted} further occurrence(s) of unlisted messages` : ''}`
+      : '',
+  ].filter(Boolean);
+  const tail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+  const what = phase === 'open' ? 'the store could not be opened'
+    : phase === 'embed' ? 'the query could not be embedded'
+    : 'the store opened but recall failed';
+  console.error(`[Memory] Long-term recall is UNAVAILABLE — ${what}${tail}: ${message}`);
+  recallFailure = {
+    phase, message, reportedAt: now,
+    suppressedCount: 0, totalCount: (sameAsBefore?.totalCount ?? 0) + 1,
+    alsoSeen: new Set(), alsoSeenUnlisted: 0,
+  };
+}
+
+function clearRecallFailure(phase: RecallPhase): void {
+  // Phase-scoped because an open that succeeds proves nothing about whether
+  // queries against that handle work. The two cannot cross today — a query
+  // failure leaves `db`/`table` set, so `openDatabase` never runs again to
+  // clear it — which is why no test pins this; it is a guard against that
+  // invariant changing, not against anything observed.
+  if (recallFailure?.phase !== phase) return;
+  // Carry the blast radius. An outage that self-heals otherwise leaves no
+  // record of its size anywhere — and "was memory dead during that run, and
+  // how badly" is the question an operator actually asks afterwards.
+  const after = recallFailure.totalCount > 1
+    ? ` after ${recallFailure.totalCount} failure(s)` : '';
+  // Deliberately stderr, matching the outage report. A daemon that captures the
+  // two streams separately would otherwise show an outage in its error log that
+  // never ends, which is the same unreadability this whole block exists to fix.
+  console.error(`${status.ok('[Memory] long-term recall restored')}${after}`);
+  recallFailure = null;
+}
+
+/** Tests need the module's failure memory back at its initial state. */
+export function resetMemoryRecallStatusForTests(): void {
+  recallFailure = null;
+  initInFlight = null;
+}
 const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
+
+/**
+ * Shared lock chaining all memory writers and legacy-schema migration.
+ * Without this, a writer can race a migrateLeanSchemaIfNeeded rewrite and
+ * commit into a table mid-drop/overwrite.
+ */
+let memoryWriteChain: Promise<unknown> = Promise.resolve();
+
+export async function withMemoryWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+  const run = memoryWriteChain.then(operation, operation);
+  memoryWriteChain = run.then(() => undefined, () => undefined);
+  return run;
+}
 
 // Singleton accessors (for memoryOps)
 export function getDb(): Connection | null { return db; }
@@ -264,25 +431,27 @@ export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100
  * each attempt, so a retry is not a double-apply.
  */
 export async function withMemoryWriteRetry<T>(op: () => Promise<T>, label = 'write'): Promise<T> {
-  const MAX_ATTEMPTS = 8;
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await op();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too
-      // many concurrent writers" is already covered by "concurrent writers"; a bare
-      // "too many" would wrongly retry unrelated validation/cardinality errors.
-      const retryable = /concurrent writers|commit conflict|version conflict|retry_timeout/i.test(msg);
-      if (!retryable || attempt >= MAX_ATTEMPTS) throw err;
-      // Full jitter over an exponentially growing (capped) window so 16 racing
-      // writers don't back off in lockstep and immediately re-collide.
-      const cap = Math.min(2000, 50 * 2 ** attempt);
-      const delay = 25 + Math.floor(Math.random() * cap);
-      console.warn(`[Memory] ${label} contended (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying in ${delay}ms`);
-      await new Promise((r) => setTimeout(r, delay));
+  return withMemoryWriteLock(async () => {
+    const MAX_ATTEMPTS = 8;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await op();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too
+        // many concurrent writers" is already covered by "concurrent writers"; a bare
+        // "too many" would wrongly retry unrelated validation/cardinality errors.
+        const retryable = /concurrent writers|commit conflict|version conflict|retry_timeout/i.test(msg);
+        if (!retryable || attempt >= MAX_ATTEMPTS) throw err;
+        // Full jitter over an exponentially growing (capped) window so 16 racing
+        // writers don't back off in lockstep and immediately re-collide.
+        const cap = Math.min(2000, 50 * 2 ** attempt);
+        const delay = 25 + Math.floor(Math.random() * cap);
+        console.warn(`[Memory] ${label} contended (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying in ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
-  }
+  });
 }
 
 async function hasLegacySchemaColumns(t: Table): Promise<boolean> {
@@ -290,12 +459,40 @@ async function hasLegacySchemaColumns(t: Table): Promise<boolean> {
   return schema.fields.some(field => LEGACY_SCHEMA_COLUMNS.has(field.name));
 }
 
+/** Page size for full-table Lance scans (legacy migration, etc.). */
+export const LEGACY_MIGRATION_PAGE_SIZE = 10_000;
+
+type OffsetLimitQuery = {
+  offset: (n: number) => { limit: (n: number) => { toArray: () => Promise<any[]> } };
+};
+
+/**
+ * Read every row from a Lance table via offset/limit pages.
+ * A single `.limit(100_000)` truncates larger stores; this loops until a short page.
+ */
+export async function fetchAllTableRows(
+  table: { query: () => OffsetLimitQuery },
+  pageSize: number = LEGACY_MIGRATION_PAGE_SIZE,
+): Promise<any[]> {
+  const size = Math.max(1, Math.floor(pageSize));
+  const rows: any[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await table.query().offset(offset).limit(size).toArray();
+    if (page.length === 0) break;
+    rows.push(...page);
+    offset += page.length;
+    if (page.length < size) break;
+  }
+  return rows;
+}
+
 async function migrateLeanSchemaIfNeeded(database: Connection, current: Table): Promise<Table> {
   if (!(await hasLegacySchemaColumns(current))) return current;
 
   const tableName = current.name;
   console.log(`${status.info('[Memory]')} ${c.dim('migrating')} ${c.cyan(tableName)} ${c.dim('to v3 lean schema')}`);
-  const rows = await current.query().limit(100_000).toArray();
+  const rows = await fetchAllTableRows(current);
   let normalized = normalizeRecords(rows);
   if (normalized.length === 0) {
     const now = Date.now();
@@ -596,11 +793,30 @@ export function calculateImportance(
 }
 
 /**
- * Initialize database
+ * Open the store, at most once at a time.
+ *
+ * Sixteen concurrent reviewers each search memory (see the concurrency note in
+ * `searchMemorySafe`), and without this every one of them ran the whole open
+ * sequence: N connects, and on a first run N racing `createTable` calls. Once
+ * the catch below began nulling the handles on failure that stopped being mere
+ * duplicated work — a loser's failure destroyed the winner's live connection,
+ * and the next search died on `null.vectorSearch` while the freshly-set failure
+ * flag suppressed the log line that would have shown it. Sharing one in-flight
+ * open makes the call that nulls the handles the same call that assigned them.
  */
-export async function initDatabase(): Promise<void> {
-  if (db && table) return;
+export function initDatabase(): Promise<void> {
+  // The in-flight check comes FIRST. `openDatabase` assigns `table` and only
+  // then runs the schema migration, which rewrites that table with
+  // `mode: 'overwrite'` — so during the migration `db && table` are both
+  // truthy and a fast-pathing caller would query a handle whose storage is
+  // being replaced underneath it.
+  if (initInFlight) return initInFlight;
+  if (db && table) return Promise.resolve();
+  initInFlight ??= openDatabase().finally(() => { initInFlight = null; });
+  return initInFlight;
+}
 
+async function openDatabase(): Promise<void> {
   try {
     const fs = await import('fs/promises');
     await fs.mkdir(MEMORY_DIR, { recursive: true });
@@ -610,46 +826,66 @@ export async function initDatabase(): Promise<void> {
 
     // v3.0: lean cognitive memory table. Existing v2 tables are read
     // compatibly and rewritten by compaction.
-    if (tableNames.includes('cognitive_memory')) {
-      table = await db.openTable('cognitive_memory');
-      table = await migrateLeanSchemaIfNeeded(db, table);
-      console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
-    } else if (tableNames.includes('devmemory')) {
-      // Legacy table - will migrate later
-      table = await db.openTable('devmemory');
-      console.log(`${status.warn('[Memory] loaded legacy table')} ${c.cyan('devmemory')}`);
-    } else {
-      // Create new table (v3.0 schema)
-      const now = Date.now();
-      const initialRecord: CognitiveMemoryRecord = {
-        id: 'init',
-        type: 'system_pattern',
-        content: 'Cognitive memory system initialized with v3 lean schema',
-        vector: await embedPassage('Cognitive memory system initialized'),
+    // Migration is serialized with all memory writers via withMemoryWriteLock
+    // so a concurrent add/update cannot race the table overwrite.
+    await withMemoryWriteLock(async () => {
+      // Another waiter may have finished init while we were queued.
+      if (table) return;
 
-        importance: 0.5,
-        confidence: 1.0,
-        createdAt: now,
-        lastUpdated: now,
-        lastAccessed: now,
-        derivedFrom: 'system_init',
+      if (tableNames.includes('cognitive_memory')) {
+        table = await db!.openTable('cognitive_memory');
+        table = await migrateLeanSchemaIfNeeded(db!, table);
+        console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
+      } else if (tableNames.includes('devmemory')) {
+        // Legacy table - will migrate later
+        table = await db!.openTable('devmemory');
+        console.log(`${status.warn('[Memory] loaded legacy table')} ${c.cyan('devmemory')}`);
+      } else {
+        // Re-check table names under the lock — a concurrent init may have created it.
+        const namesNow = await db!.tableNames();
+        if (namesNow.includes('cognitive_memory')) {
+          table = await db!.openTable('cognitive_memory');
+          table = await migrateLeanSchemaIfNeeded(db!, table);
+          console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
+          return;
+        }
+        // Create new table (v3.0 schema)
+        const now = Date.now();
+        const initialRecord: CognitiveMemoryRecord = {
+          id: 'init',
+          type: 'system_pattern',
+          content: 'Cognitive memory system initialized with v3 lean schema',
+          vector: await embedPassage('Cognitive memory system initialized'),
 
-        repo: 'system',
-        title: 'Memory system initialized',
-        metadata: '{}',
-        trust: 1.0,
-        expiresAt: PERMANENT_EXPIRY,
-      };
+          importance: 0.5,
+          confidence: 1.0,
+          createdAt: now,
+          lastUpdated: now,
+          lastAccessed: now,
+          derivedFrom: 'system_init',
 
-      table = await db.createTable('cognitive_memory', [initialRecord]);
-      // Freshly built by the current encoder, so the signature is true by construction.
-      writeStoredSignature(MEMORY_DIR, embeddingSignature(EMBEDDING_SPEC));
-      console.log(`${status.ok('[Memory] created table')} ${c.cyan('cognitive_memory v3.0')}`);
-    }
+          repo: 'system',
+          title: 'Memory system initialized',
+          metadata: '{}',
+          trust: 1.0,
+          expiresAt: PERMANENT_EXPIRY,
+        };
+
+        table = await db!.createTable('cognitive_memory', [initialRecord]);
+        // Freshly built by the current encoder, so the signature is true by construction.
+        writeStoredSignature(MEMORY_DIR, embeddingSignature(EMBEDDING_SPEC));
+        console.log(`${status.ok('[Memory] created table')} ${c.cyan('cognitive_memory v3.0')}`);
+      }
+    });
 
     warnOnEmbeddingDrift();
+    clearRecallFailure('open');
   } catch (error) {
-    console.error('[Memory] Database init error:', error);
+    // A half-open connection would make the next call report success and then
+    // fail on the table instead, which is how this looked like a query bug.
+    db = null;
+    table = null;
+    reportRecallFailure(error, 'open');
     throw error;
   }
 }
@@ -849,7 +1085,8 @@ export async function deleteMemoriesByDerivedFrom(derivedFrom: string): Promise<
   // Resolve matching ids in JS, then delete by the lowercase `id` column. A direct
   // predicate on the camelCase `derivedFrom` column is unreliable — datafusion
   // lowercases unquoted identifiers and the quoted form matched nothing here.
-  const rows = (await table.query().limit(100_000).toArray()) as unknown as CognitiveMemoryRecord[];
+  // Paginate: a single `.limit(100_000)` truncates larger stores.
+  const rows = (await fetchAllTableRows(table)) as unknown as CognitiveMemoryRecord[];
   const ids = rows.filter((r) => r.derivedFrom === derivedFrom).map((r) => String(r.id));
   if (ids.length === 0) return 0;
   const list = ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
@@ -964,15 +1201,34 @@ export async function searchMemorySafe(
   query: string,
   options: SearchOptions = {}
 ): Promise<SearchResult> {
+  // Opening is its own phase. Folding it into the outer try reported a dead
+  // store as QUERY_FAILED — `await initDatabase()` throws, so the branch below
+  // written for exactly this case was unreachable — and made the outer catch
+  // guess which kind of failure it was holding. repoKnowledge renders this code
+  // straight into the agent's prompt, so the guess was visible to the model.
   try {
     await initDatabase();
+  } catch (error) {
+    // openDatabase already reported this under the rate limit; a second line
+    // per recall is what buried the log (AGT-4267).
+    return {
+      success: false,
+      memories: [],
+      error: error instanceof Error ? error.message : String(error),
+      errorCode: 'DB_INIT_FAILED',
+    };
+  }
+
+  try {
     if (!table) {
-      return {
-        success: false,
-        memories: [],
-        error: 'Database table not initialized',
-        errorCode: 'DB_INIT_FAILED',
-      };
+      // Unreachable today — a null handle throws inside the schema migration
+      // and is caught as an open failure — but if that ever changes, returning
+      // without reporting gives back a silent dead store while
+      // memoryRecallStatus() answers "available", which is the exact outcome
+      // this change exists to prevent.
+      const notInitialized = 'Database table not initialized';
+      reportRecallFailure(new Error(notInitialized), 'open');
+      return { success: false, memories: [], error: notInitialized, errorCode: 'DB_INIT_FAILED' };
     }
 
     const {
@@ -988,7 +1244,14 @@ export async function searchMemorySafe(
     let queryVector: number[];
     try {
       queryVector = await embedQuery(query);
+      clearRecallFailure('embed');
     } catch (embeddingError) {
+      // The third way recall dies, and until now the only one left uncovered:
+      // a healthy store with a dead embedder returned early before either
+      // reporter, so 40 recalls printed 40 stacks (initEmbeddingPipeline nulls
+      // its promise on failure, so every call retries and re-logs) while
+      // memoryRecallStatus() still answered "available".
+      reportRecallFailure(embeddingError, 'embed');
       return {
         success: false,
         memories: [],
@@ -1078,16 +1341,20 @@ export async function searchMemorySafe(
       similarityScore: similarity,
     }));
 
+    clearRecallFailure('query');
     console.log(`${status.info(`[Memory] found ${formatted.length} memories`)} ${c.dim('hybrid retrieval')} ${c.dim(`query: "${query.slice(0, 30)}..."`)}`);
     return { success: true, memories: formatted };
 
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error('[Memory] Search error:', error);
+    // A store that breaks AFTER a successful open never reaches openDatabase
+    // again — the `db && table` fast path holds forever — so before this every
+    // such recall printed a full stack, unbounded, while memoryRecallStatus()
+    // still answered "available". Same rate limit, own phase.
+    reportRecallFailure(error, 'query');
     return {
       success: false,
       memories: [],
-      error: errorMsg,
+      error: error instanceof Error ? error.message : String(error),
       errorCode: 'QUERY_FAILED',
     };
   }

@@ -204,16 +204,21 @@ describe('maybeAutoUpdate - real install/reexec + stale-fetch branch', () => {
       write,
       install,
       reexec,
+      resolvedVersion: () => '0.13.0',
     });
 
-    expect(writeCache).toHaveBeenCalledWith({ latest: '0.12.0', checkedAt: 1_000 });
+    expect(writeCache).toHaveBeenCalledWith({ latest: '0.12.0', checkedAt: 1_000, failedInstallVersion: undefined });
     expect(install).toHaveBeenCalledWith('@intrect/openswarm');
     expect(reexec).toHaveBeenCalledOnce();
   });
 
   it('installs via the real defaultInstall (execFileSync succeeds) and re-execs via defaultReexec', async () => {
     mockedExecFileSync.mockReturnValue(Buffer.from(''));
-    mockedSpawnSync.mockReturnValue({ status: 0 } as ReturnType<typeof spawnSync>);
+    // First spawnSync call is the real resolvedVersion() check (AGT-3183) —
+    // report the new version so verification passes; second is defaultReexec.
+    mockedSpawnSync
+      .mockReturnValueOnce({ stdout: '0.13.0', status: 0 } as unknown as ReturnType<typeof spawnSync>)
+      .mockReturnValueOnce({ status: 0 } as ReturnType<typeof spawnSync>);
     const write = vi.fn();
 
     await maybeAutoUpdate('0.12.0', {
@@ -229,7 +234,7 @@ describe('maybeAutoUpdate - real install/reexec + stale-fetch branch', () => {
       ['install', '-g', '@intrect/openswarm@latest'],
       expect.objectContaining({ stdio: 'inherit' })
     );
-    expect(mockedSpawnSync).toHaveBeenCalledOnce();
+    expect(mockedSpawnSync).toHaveBeenCalledTimes(2);
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
@@ -254,7 +259,9 @@ describe('maybeAutoUpdate - real install/reexec + stale-fetch branch', () => {
 
   it('defaultReexec falls back to exit code 0 when spawnSync reports no status', async () => {
     mockedExecFileSync.mockReturnValue(Buffer.from(''));
-    mockedSpawnSync.mockReturnValue({ status: null } as unknown as ReturnType<typeof spawnSync>);
+    mockedSpawnSync
+      .mockReturnValueOnce({ stdout: '0.13.0', status: 0 } as unknown as ReturnType<typeof spawnSync>) // resolvedVersion()
+      .mockReturnValueOnce({ status: null } as unknown as ReturnType<typeof spawnSync>); // defaultReexec()
 
     await maybeAutoUpdate('0.12.0', {
       ...base,

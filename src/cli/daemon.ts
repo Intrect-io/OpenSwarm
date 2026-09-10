@@ -13,11 +13,13 @@ import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, re
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withFileLock } from '../support/fileLock.js';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const LOG_DIR = join(STATE_DIR, 'logs');
 const PID_FILE = join(STATE_DIR, 'openswarm.pid');
 const LOG_FILE = join(LOG_DIR, 'openswarm.log');
+const START_LOCK_FILE = join(STATE_DIR, 'openswarm.start.lock');
 const DAEMON_PORT = 3847;
 /** launchd service label the install script (scripts/install-service.sh) bootstraps. */
 const LAUNCHD_LABEL = 'com.intrect.openswarm';
@@ -107,10 +109,20 @@ function closeFdQuietly(fd: number): void {
  * Start the service as a detached background process.
  * Returns the child PID on success.
  * Throws if a daemon is already running (PID file OR port 3847 responding).
+ *
+ * The existing-pid check, port probe, spawn, and pidfile write are a single
+ * critical section: two `openswarm start` invocations racing through it
+ * unlocked can both pass the "nothing running yet" checks and each spawn a
+ * daemon on the same task queue. A short-lived file lock serializes them —
+ * the second invocation sees the first one's fresh PID file/port and fails
+ * with the normal "already running" error instead of racing it.
  */
 export async function startDaemon(): Promise<{ pid: number; logFile: string }> {
   ensureStateDirs();
+  return withFileLock(START_LOCK_FILE, startDaemonLocked, { timeoutMs: 5_000 });
+}
 
+async function startDaemonLocked(): Promise<{ pid: number; logFile: string }> {
   const existing = readPidFile();
   if (existing !== null && isOwnedDaemonProcess(existing)) {
     throw new Error(

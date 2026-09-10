@@ -103,6 +103,49 @@ describe('runDiagnosticsTool (INT-3105)', () => {
     const text = await runDiagnosticsTool(['src/main.rs'], '/tmp');
     expect(text).toContain('bash tool');
   });
+
+  it('refuses a Python path outside the project root (AGT-3424) instead of handing it to ruff', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'osw-diag-escape-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'osw-diag-outside-'));
+    const outsideFile = path.join(outside, 'secret.py');
+    await writeFile(outsideFile, 'password = "hunter2"\n', 'utf8');
+    try {
+      const text = await runDiagnosticsTool([outsideFile], dir);
+      expect(text).toContain('refused 1 path(s) outside the project root');
+      expect(text).toContain(outsideFile);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a `../`-escaping Python path relative to cwd', async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), 'osw-diag-parent-'));
+    const dir = path.join(parent, 'project');
+    await mkdir(dir);
+    await writeFile(path.join(parent, 'sibling.py'), 'x = 1\n', 'utf8');
+    try {
+      const text = await runDiagnosticsTool(['../sibling.py'], dir);
+      expect(text).toContain('refused 1 path(s) outside the project root');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('still runs tsc on in-root files while refusing an escaping .py sibling', async () => {
+    const dir = await tsProject({ 'src/a.ts': 'export const a: number = 1;\n' });
+    const outside = await mkdtemp(path.join(tmpdir(), 'osw-diag-outside-'));
+    const outsideFile = path.join(outside, 'secret.py');
+    await writeFile(outsideFile, 'x = 1\n', 'utf8');
+    try {
+      const text = await runDiagnosticsTool(['src/a.ts', outsideFile], dir);
+      expect(text).toContain('[tsc] clean');
+      expect(text).toContain('[ruff] refused 1 path(s) outside the project root');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe('agenticLoop diagnostics exposure (INT-3105)', () => {

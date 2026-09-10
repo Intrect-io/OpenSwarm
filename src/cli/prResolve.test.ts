@@ -4,13 +4,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // destructures {stdout}, so the mock must control that exact shape rather
 // than rely on generic callback-to-promise conversion.
 const { execImpl } = vi.hoisted(() => ({
-  execImpl: vi.fn(async (_cmd: string, _args: string[]) => ({ stdout: '', stderr: '' })),
+  execImpl: vi.fn(async (_cmd: string, _args: string[], _opts?: Record<string, unknown>) => ({ stdout: '', stderr: '' })),
 }));
 
 vi.mock('node:child_process', () => {
   const CUSTOM = Symbol.for('nodejs.util.promisify.custom');
   function execFile() { throw new Error('execFile called without promisify in test'); }
-  (execFile as unknown as Record<symbol, unknown>)[CUSTOM] = (cmd: string, args: string[]) => execImpl(cmd, args);
+  (execFile as unknown as Record<symbol, unknown>)[CUSTOM] = (cmd: string, args: string[], opts?: Record<string, unknown>) => execImpl(cmd, args, opts);
   return { execFile };
 });
 
@@ -44,7 +44,7 @@ describe('resolveRepoName (INT-3282)', () => {
     execImpl.mockResolvedValueOnce({ stdout: 'o/r\n', stderr: '' });
     const result = await resolveRepoName('/tmp/proj');
     expect(result).toBe('o/r');
-    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['repo', 'view']));
+    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['repo', 'view']), expect.objectContaining({ timeout: expect.any(Number) }));
   });
 
   it('throws when gh returns something without a slash', async () => {
@@ -60,8 +60,8 @@ describe('resolveOriginRepo (INT-3282)', () => {
       .mockResolvedValueOnce({ stdout: 'o/r\n', stderr: '' }); // gh repo view <url>
     const result = await resolveOriginRepo('/tmp/proj');
     expect(result).toBe('o/r');
-    expect(execImpl).toHaveBeenCalledWith('git', ['remote', 'get-url', 'origin']);
-    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['repo', 'view', 'https://github.com/o/r.git']));
+    expect(execImpl).toHaveBeenCalledWith('git', ['remote', 'get-url', 'origin'], expect.objectContaining({ timeout: expect.any(Number) }));
+    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['repo', 'view', 'https://github.com/o/r.git']), expect.objectContaining({ timeout: expect.any(Number) }));
   });
 
   it('throws when gh returns something without a slash for the origin URL', async () => {
@@ -94,7 +94,19 @@ describe('resolvePR (INT-3282)', () => {
       .mockResolvedValueOnce({ stdout: JSON.stringify(ghView), stderr: '' });
     const result = await resolvePR({ path: '/tmp/proj' });
     expect(result.number).toBe(9);
-    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['pr', 'view']));
+    expect(execImpl).toHaveBeenCalledWith('gh', expect.arrayContaining(['pr', 'view']), expect.objectContaining({ timeout: expect.any(Number) }));
+  });
+
+  it('bounds gh/git subprocess lifetime so a hung CLI cannot hang the command (AGT-3408)', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'o/r\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify(ghView), stderr: '' });
+    await resolvePR({ path: '/tmp/proj' });
+    for (const call of execImpl.mock.calls) {
+      const opts = call[2] as Record<string, unknown> | undefined;
+      expect(opts?.timeout).toBeTypeOf('number');
+      expect(opts?.timeout).toBeGreaterThan(0);
+    }
   });
 
   it('reports the branch name and a create hint when there is no open PR', async () => {

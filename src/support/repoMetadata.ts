@@ -57,10 +57,10 @@ const RepoMetadataSchema = z.object({
   automation: z.object({
     /** Explicit kill switch for issue-driven execution in this repository. */
     enabled: z.boolean().default(true),
-    /** Same-repository active leases. Default one; raise only with isolated worktrees. */
-    maxConcurrent: z.number().int().min(1).max(10).default(1),
-    /** Rolling attempt budget. */
-    maxAttemptsPerHour: z.number().int().min(1).max(100).default(12),
+    /** Same-repository active leases. Omit to inherit the daemon global cap. */
+    maxConcurrent: z.number().int().min(1).max(256).optional(),
+    /** Rolling attempt budget. Omit to skip the attempts-per-hour circuit. */
+    maxAttemptsPerHour: z.number().int().min(1).max(1000).optional(),
     /**
      * Rolling circuit breaker threshold: how many attempts in the last hour may
      * end unsuccessfully before this repository is taken out of admission until
@@ -75,6 +75,24 @@ const RepoMetadataSchema = z.object({
     maxCostUsdPerDay: z.number().positive().optional(),
     /** How long an admission circuit remains open before reevaluation. */
     circuitCooldownMinutes: z.number().int().min(1).max(24 * 60).default(60),
+  }).optional(),
+  /**
+   * What happens to a pull request the swarm publishes from this repository.
+   * Kept outside `automation` so opting in does not pull that block's
+   * admission defaults (legacy maxConcurrent 1, …) in with it.
+   */
+  publication: z.object({
+    /**
+     * Run the agentic fresh review (`openswarm pr review --fresh`) once, right
+     * after the PR is published.
+     *
+     * Opt-OUT since AGT-4270. It was opt-in, and the per-attempt reviewer had
+     * been switched off in favour of it — but no repository ever opted in, so
+     * between the two decisions the loop shipped pull requests that no LLM had
+     * read at all. Measured on 2026-09-09: 2 of 28 published PRs were mergeable
+     * as they stood (AGT-4263).
+     */
+    freshReview: z.boolean().default(true),
   }).optional(),
   /** Free-form notes the swarm should keep in mind. */
   notes: z.string().optional(),
@@ -155,6 +173,21 @@ export async function saveRepoMetadata(repoPath: string, meta: RepoMetadata): Pr
  * a missing/malformed file yields `undefined` (the caller then falls back to an
  * effort-derived or default timeout). Never throws. (INT-2415)
  */
+/**
+ * Whether published PRs from this repository get the fresh review. On by
+ * default; a repository turns it off with `publication.freshReview: false`.
+ */
+export async function loadPublicationFreshReview(repoPath: string): Promise<boolean> {
+  try {
+    return (await loadRepoMetadata(repoPath))?.publication?.freshReview !== false;
+  } catch {
+    // An unreadable openswarm.json already warns elsewhere. Reviewing anyway
+    // costs one review; skipping publishes an unread PR, which is the failure
+    // this default exists to prevent.
+    return true;
+  }
+}
+
 export async function loadSandboxBashTimeoutMs(repoPath: string): Promise<number | undefined> {
   try {
     const meta = await loadRepoMetadata(repoPath);

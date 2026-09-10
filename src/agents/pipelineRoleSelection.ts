@@ -1,5 +1,6 @@
 import type { AdapterName } from '../adapters/types.js';
 import { mapModelForProvider } from '../adapters/modelCompat.js';
+import type { ModelRole } from '../adapters/modelCompat.js';
 import type { JobProfile, PipelineStage } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineConfig } from './pairPipelineTypes.js';
@@ -21,9 +22,22 @@ export function compatibleStageModel(
   config: PipelineConfig,
   stage: PipelineStage,
   model: string | undefined,
+  /**
+   * The role to resolve AS, when it differs from the stage. Only the reviewer
+   * escalation uses this: it runs in the reviewer stage but must not resolve to
+   * the reviewer's model, or the escalation is a log line about work that did
+   * not happen.
+   */
+  role: ModelRole = stage,
 ): string | undefined {
   const adapter = config.roles?.[stage]?.adapter;
-  return adapter ? mapModelForProvider(adapter as AdapterName, model) : model;
+  // The stage IS the role, and it was sitting right here unpassed. An adapter
+  // that resolves per role — cursor, whose catalogue shares no id with any
+  // other provider — saw `undefined` at every stage boundary and gave the
+  // reviewer the same model as the worker. `PipelineStage` and the role names
+  // modelCompat routes on are the same vocabulary, so this needs no mapping.
+  // (AGT-4273)
+  return adapter ? mapModelForProvider(adapter as AdapterName, model, role) : model;
 }
 
 export function modelForTask(config: PipelineConfig, stage: PipelineStage, task: TaskItem): string | undefined {

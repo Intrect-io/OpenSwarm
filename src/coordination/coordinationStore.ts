@@ -185,6 +185,8 @@ export { coordinationFilePath, coordinationStateDir };
 export class CoordinationStore {
   private readonly path: string;
   private writeQueue: Promise<void> = Promise.resolve();
+  /** Human-answer lane: jumps the machine FIFO so an operator reply is never the slowest write under load. */
+  private priorityWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(path = coordinationFilePath()) {
     this.path = resolve(path);
@@ -208,10 +210,11 @@ export class CoordinationStore {
    * seq=N and both write seq=N+1, which silently drops one event and duplicates
    * a sequence the dashboard uses to reconcile its stream.
    */
-  private async mutate<T>(operation: (state: CoordinationState) => T): Promise<T> {
+  private async mutate<T>(operation: (state: CoordinationState) => T, priority = false): Promise<T> {
     let result!: T;
     let failure: unknown;
-    this.writeQueue = this.writeQueue.then(async () => {
+    const queue = priority ? this.priorityWriteQueue : this.writeQueue;
+    const settled = queue.then(async () => {
       try {
         result = await withFileLock(`${this.path}.lock`, async () => {
           const state = this.load();
@@ -223,7 +226,17 @@ export class CoordinationStore {
         failure = error;
       }
     });
-    await this.writeQueue;
+    if (priority) {
+      // The priority lane must not absorb a failed machine write's rejection:
+      // chain the settled promise so the lane itself never rejects, and keep
+      // the machine lane's tail pointing at this write so a later machine
+      // write cannot read the board before this one lands.
+      this.priorityWriteQueue = settled.then(() => undefined);
+      this.writeQueue = this.writeQueue.then(() => settled).then(() => undefined);
+    } else {
+      this.writeQueue = settled.then(() => undefined);
+    }
+    await settled;
     if (failure) throw failure;
     return result;
   }
@@ -253,6 +266,9 @@ export class CoordinationStore {
       ? legacyFingerprint(normalized)
       : undefined;
     let isNew = true;
+    // A human answer must not queue behind machine chatter (AGT-4027): route
+    // it through the priority lane. Deduplication still runs inside the same
+    // locked mutate, so a replayed answer cannot double-publish.
     const event = await this.mutate((state) => {
       const existing = state.events.find((candidate) => candidate.fingerprint === digest
         || (legacyDigest !== undefined
@@ -301,7 +317,7 @@ export class CoordinationStore {
         state.consumed[consumer] = ids.filter((id) => liveIds.has(id));
       }
       return created;
-    });
+    }, input.kind === 'human-answer');
     // Announce only genuinely new events. A deduplicated publish is not news:
     // it would add a second dashboard row for one message, and — because the
     // Linear board mirror listens on 'coordination:published' — echo an event

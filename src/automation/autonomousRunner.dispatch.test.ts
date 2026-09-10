@@ -60,6 +60,64 @@ describe('AutonomousRunner.enqueueIssues (INT-3388)', () => {
     expect(runSpy).toHaveBeenCalledTimes(2); // nothing new queued → no kick
   });
 
+  // vela 2026-09-02: six runs parked "until explicit operator redispatch" were
+  // redispatched through POST /api/work and every one came back "superseded":
+  // the explicit path skipped the heartbeat filter that reopens the ledger
+  // row, so the coordinator found NEEDS_HUMAN and fenced the task.
+  it('reopens a sandbox-outcome quarantine in the ledger when the operator redispatches it', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'osw-dispatch-readmit-'));
+    try {
+      const dbPath = join(dbDir, 'automation.db');
+      const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath }));
+      const runSpy = vi.fn(async () => {});
+      (runner as unknown as Internal).runAvailableTasks = runSpy;
+      const internal = runner as unknown as { durableRuns: DurableRunCoordinator };
+
+      internal.durableRuns.observeTask(task('q'), '/x/a');
+      expect(internal.durableRuns.markNeedsHuman('q', 'Sandbox command outcome unknown; inspect the preserved worktree and explicitly redispatch to resume')).toBe(true);
+      // markNeedsHuman records its own code; the quarantine is recognised by
+      // state, so any non-question park must reopen the same way.
+      expect(internal.durableRuns.getRun('q')?.state).toBe('NEEDS_HUMAN');
+
+      const result = await runner.enqueueIssues([{ ...task('q'), explicitDispatch: true }], '/x/a');
+      expect(result.queued).toEqual(['q']);
+      expect(internal.durableRuns.getRun('q')?.state).toBe('READY');
+      expect(runSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a redispatch bypass an unanswered operator question', async () => {
+    const dbDir = mkdtempSync(join(tmpdir(), 'osw-dispatch-question-'));
+    try {
+      const dbPath = join(dbDir, 'automation.db');
+      const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath }));
+      const runSpy = vi.fn(async () => {});
+      (runner as unknown as Internal).runAvailableTasks = runSpy;
+      const internal = runner as unknown as { durableRuns: DurableRunCoordinator };
+
+      internal.durableRuns.observeTask(task('ask'), '/x/a');
+      expect(internal.durableRuns.markNeedsHuman('ask', 'parked')).toBe(true);
+      // An exact question park needs a published question and a RETRY_AT row
+      // to create; the decision only reads the row, so present that row.
+      const real = internal.durableRuns.getRun('ask')!;
+      const getRun = vi.spyOn(internal.durableRuns, 'getRun')
+        .mockReturnValue({ ...real, lastErrorCode: 'operator_question' });
+      const resume = vi.spyOn(internal.durableRuns, 'resumeNeedsHuman');
+
+      const result = await runner.enqueueIssues([{ ...task('ask'), explicitDispatch: true }], '/x/a');
+      expect(result.queued).toEqual([]);
+      expect(result.rejected).toEqual([{ id: 'ask', reason: 'duplicate' }]);
+      expect(resume).not.toHaveBeenCalled();
+      expect(runSpy).not.toHaveBeenCalled();
+      getRun.mockRestore();
+      resume.mockRestore();
+    } finally {
+      rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it('throws loudly on a config whose scheduler never executes (solo mode) instead of stranding the queue (review finding)', async () => {
     const noPair = new AutonomousRunner(cfg({ pairMode: false }));
     await expect(noPair.enqueueIssues([task('1')], '/x/a')).rejects.toThrow(/pairMode/);

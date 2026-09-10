@@ -34,6 +34,41 @@ describe('SqliteIssueStore durable semantics', () => {
     store.close();
   });
 
+  it('keeps a single local mapping when concurrent creates share a Linear id', () => {
+    const store = new SqliteIssueStore(path());
+    const first = store.createIssue({
+      projectId: 'p',
+      title: 'first',
+      linearId: 'lin-1',
+      linearIdentifier: 'AGT-1',
+      source: 'linear',
+    });
+    const second = store.createIssue({
+      projectId: 'p',
+      title: 'second-wins-title',
+      linearId: 'lin-1',
+      linearIdentifier: 'AGT-1',
+      source: 'linear',
+    });
+    expect(second.id).toBe(first.id);
+    expect(store.getIssueByLinearId('lin-1')?.title).toBe('second-wins-title');
+    const rows = (store as any).db.prepare('SELECT COUNT(*) AS n FROM issues WHERE linear_id = ?').get('lin-1');
+    expect(rows.n).toBe(1);
+    store.close();
+  });
+
+  it('rejects a second distinct row for the same linear_id via the unique index', () => {
+    const store = new SqliteIssueStore(path());
+    store.createIssue({ projectId: 'p', title: 'a', linearId: 'lin-dup' });
+    expect(() => {
+      (store as any).db.prepare(
+        `INSERT INTO issues (id, project_id, title, description, status, priority, source, created_at, updated_at, linear_id)
+         VALUES ('other', 'p', 'b', '', 'backlog', 'medium', 'linear', datetime('now'), datetime('now'), 'lin-dup')`
+      ).run();
+    }).toThrow(/UNIQUE/);
+    store.close();
+  });
+
   it('clamps malformed pagination before executing SQLite', () => {
     const store = new SqliteIssueStore(path());
     store.createIssue({ projectId: 'p', title: 'one' });

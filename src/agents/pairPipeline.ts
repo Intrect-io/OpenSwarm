@@ -4,11 +4,13 @@
 // ============================================
 import { EventEmitter } from 'node:events';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
+import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
 import type { DocumenterResult } from './documenter.js';
 import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
+import { summarizeStageResult } from './stageSummary.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
 import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -38,6 +40,7 @@ import type {
   PipelineRunMetadata,
   StageResult,
 } from './pairPipelineTypes.js';
+import { WORKER_NO_CHANGES_PARK_REASON } from './pairPipelineTypes.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
 import * as documenterAgent from './documenter.js';
@@ -49,6 +52,7 @@ import { safeConsole } from '../support/safeLog.js';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
+import type { ModelRole } from '../adapters/modelCompat.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
@@ -238,6 +242,7 @@ export class PairPipeline extends EventEmitter {
         sessionId: session.id,
         stages,
         finalStatus: cancelled ? 'cancelled' : rateLimited ? 'rate_limited' : infra ? 'infra_error' : 'failed',
+        failureDetail: `${classifiedStage?.stage ?? 'pipeline'}: ${error instanceof Error ? error.message : String(error)}`,
         failureSignal: isTimeoutError(error) ? 'timeout' : undefined,
         rateLimitResetsAt: rateLimited && (error as RateLimitError).resetsAt
           ? (error as RateLimitError).resetsAt! * 1000
@@ -288,7 +293,7 @@ export class PairPipeline extends EventEmitter {
         taskTitle: context.task.title, taskDescription: context.task.description || '',
         workerResult: context.workerResult!, projectPath: context.projectPath,
         timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-        model: this.config.roles?.tester?.model, maxTurns: this.config.roles?.tester?.maxTurns,
+        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model), maxTurns: this.config.roles?.tester?.maxTurns,
         adapterName: this.config.roles?.tester?.adapter,
       }),
     });
@@ -299,12 +304,12 @@ export class PairPipeline extends EventEmitter {
   private async runStage(
     stage: PipelineStage,
     context: PipelineContext,
-    overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high' }
+    overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high'; modelRole?: ModelRole }
   ): Promise<StageResult> {
     const startTime = Date.now();
     // Display model: explicit override → configured (jobProfile/role) → adapter
     // default (so the TUI/dashboard aren't blank when config omits it). (INT-2393)
-    const stageModel = compatibleStageModel(this.config, stage, overrides?.model)
+    const stageModel = compatibleStageModel(this.config, stage, overrides?.model, overrides?.modelRole ?? stage)
       ?? modelForTask(this.config, stage, context.task)
       ?? await resolveAdapterDefaultModel(this.config.roles?.[stage]?.adapter, this.defaultModelCache);
     const prefix = context.taskPrefix;
@@ -390,7 +395,10 @@ export class PairPipeline extends EventEmitter {
             // light/heavy → gpt-5.5/5.4), falling back to roles.worker.model. Reading
             // roles.worker.model directly here silently dropped the jobProfile model, so a
             // codex worker fell through to the CLI's config.toml default (Codex-Spark). (INT-1599)
-            model: compatibleStageModel(this.config, 'worker', overrides?.model)
+            // `overrides.modelRole` (not the stage) so an escalation resolves as
+            // an escalation. This call — not the `stageModel` above, which is the
+            // display value — is the one that reaches the agent. (AGT-4273)
+            model: compatibleStageModel(this.config, 'worker', overrides?.model, overrides?.modelRole ?? 'worker')
               ?? modelForTask(this.config, 'worker', context.task),
             maxTurns: this.config.roles?.worker?.maxTurns,
             adapterName: this.config.roles?.worker?.adapter,
@@ -402,12 +410,9 @@ export class PairPipeline extends EventEmitter {
             // codex spark AND gpt-5.5 both read 30-37× and shipped 0 edits. Push the
             // worker to actually edit before concluding.
             nudgeMaxOnNoEdit: 3,
-            // Legacy raw KG inference is advisory. Declared, existing-direct,
-            // and sufficient-draft scopes are trusted reservations and enforce
-            // the same boundary the scheduler/ledger admitted.
-            fileScope: context.task.fileScopeSource === 'inferred'
-              ? undefined
-              : context.task.fileScope,
+            // Only a scope meant as the edit target is enforced; see
+            // enforcedFileScope for which provenances qualify and why.
+            fileScope: enforcedFileScope(context.task),
             resumedTaskFiles: this.config.resumedTaskFiles,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
@@ -490,7 +495,10 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
             // jobProfile model precedence (see worker stage above). (INT-1599)
-            model: compatibleStageModel(this.config, 'reviewer', overrides?.model)
+            // `overrides.modelRole` (not the stage) so an escalation resolves as
+            // an escalation. This call — not the `stageModel` above, which is the
+            // display value — is the one that reaches the agent. (AGT-4273)
+            model: compatibleStageModel(this.config, 'reviewer', overrides?.model, overrides?.modelRole ?? 'reviewer')
               ?? modelForTask(this.config, 'reviewer', context.task),
             maxTurns: reviewerMaxTurns,
             adapterName: this.config.roles?.reviewer?.adapter,
@@ -558,7 +566,7 @@ export class PairPipeline extends EventEmitter {
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('documenter', this.config.roles?.documenter?.timeoutMs),
-            model: this.config.roles?.documenter?.model,
+            model: compatibleStageModel(this.config, 'documenter', this.config.roles?.documenter?.model),
             maxTurns: this.config.roles?.documenter?.maxTurns,
             adapterName: this.config.roles?.documenter?.adapter,
           });
@@ -575,7 +583,7 @@ export class PairPipeline extends EventEmitter {
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('auditor', this.config.roles?.auditor?.timeoutMs),
-            model: this.config.roles?.auditor?.model,
+            model: compatibleStageModel(this.config, 'auditor', this.config.roles?.auditor?.model),
             maxTurns: this.config.roles?.auditor?.maxTurns,
             adapterName: this.config.roles?.auditor?.adapter,
           });
@@ -592,7 +600,7 @@ export class PairPipeline extends EventEmitter {
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('skill-documenter', this.config.roles?.['skill-documenter']?.timeoutMs),
-            model: this.config.roles?.['skill-documenter']?.model,
+            model: compatibleStageModel(this.config, 'skill-documenter', this.config.roles?.['skill-documenter']?.model),
             maxTurns: this.config.roles?.['skill-documenter']?.maxTurns,
             adapterName: this.config.roles?.['skill-documenter']?.adapter,
           });
@@ -934,11 +942,13 @@ export class PairPipeline extends EventEmitter {
         }
       }
 
-      // CodeQL is a post-edit gate, not a tester-stage feature. Run it after a
-      // successful worker pass so every pipeline shape — including
-      // worker/reviewer-only configurations — must clear the same baseline-diff
-      // check before an approval is possible.
-      const introducedSecurityFindings = await collectIntroducedSecurityFindings(context);
+      // CodeQL is a post-edit gate, not a tester-stage feature. It is opt-in
+      // (securityAudit.enabled, default OFF) because it is too slow to gate PRs
+      // (AGT-4160). When disabled we do not even invoke the gate, so the default
+      // autonomous path never runs CodeQL.
+      const introducedSecurityFindings = this.config.securityAudit?.enabled
+        ? await collectIntroducedSecurityFindings(context)
+        : [];
       if (introducedSecurityFindings.length > 0) {
         const failures = introducedSecurityFindings.map(formatSecurityFinding);
         safeConsole.log(
@@ -1125,8 +1135,13 @@ export class PairPipeline extends EventEmitter {
         const reviewerEscalateThreshold = reviewerCfg?.escalateAfterIteration ?? 3;
         const shouldEscalateReviewer = context.currentIteration >= reviewerEscalateThreshold && !!reviewerEscalateModel;
 
+        // `modelRole: 'escalate'` so the escalation resolves as an escalation.
+        // Without it the override runs through the reviewer's own role, and on
+        // an adapter that routes per role — cursor — it produced the reviewer's
+        // model verbatim while the line below announced a spot check on a
+        // different one. (AGT-4273)
         const reviewerOverrides = shouldEscalateReviewer
-          ? { model: reviewerEscalateModel }
+          ? { model: reviewerEscalateModel, modelRole: 'escalate' as const }
           : undefined;
 
         if (shouldEscalateReviewer && reviewerEscalateModel) {
@@ -1288,6 +1303,18 @@ export class PairPipeline extends EventEmitter {
       failureSignal: context.stuckReason ? 'stuck'
         : context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
       stuckReason: context.stuckReason,
+      // The session stopped because the worker claimed success, changed
+      // nothing and gave no reason — three times, across a model escalation
+      // and a fresh context. A new attempt runs the same prompt into the same
+      // silence: cgf-portal AX-868 reached attempt 27 and AGT-3844 attempt 53
+      // that way on 2026-09-02, each attempt ~900k tokens, and the operator
+      // was never told the agent had produced nothing at all.
+      operatorPark: context.stuckReason && context.workerResult?.zeroDiffWithoutReason
+        ? {
+          code: WORKER_NO_CHANGES_PARK_REASON,
+          reason: `Worker claimed success without changing a file and without a noChangesReason (${context.stuckReason.toLowerCase()}). The issue needs a human: either it asks for something the agent cannot express as a diff, or its description does not say what to change.`,
+        }
+        : undefined,
       totalDuration: Date.now() - startTime,
       iterations: context.currentIteration,
       workerResult: context.workerResult,
@@ -1398,106 +1425,6 @@ export function createPipelineFromConfig(
     roleMcpTools,
     adapterRouting,
   });
-}
-
-// Helpers
-
-/**
- * Extract a worker-readable summary of what the agent did during a stage so
- * the dashboard can display "wrote 4 files / approved / reviewed N issues"
- * instead of just "stage=worker status=complete".
- *
- * Returns a plain object suitable for inclusion in the SSE `pipeline:stage`
- * broadcast payload. Fields are optional — missing ones are simply omitted.
- */
-function summarizeStageResult(
-  stage: PipelineStage,
-  result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult,
-): Record<string, unknown> {
-  // Cap arrays/strings before broadcasting so a chatty agent cannot blow up
-  // the SSE channel with a 10MB stage event.
-  const MAX_FILES = 12;
-  const MAX_COMMANDS = 8;
-  const SUMMARY_CAP = 240;
-  const FEEDBACK_CAP = 480;
-  const cap = (s: string | undefined, n: number): string | undefined =>
-    s == null ? undefined : (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-
-  switch (stage) {
-    case 'worker': {
-      const r = result as WorkerResult;
-      return {
-        summary: cap(r.summary, SUMMARY_CAP),
-        filesChanged: Array.isArray(r.filesChanged) ? r.filesChanged.slice(0, MAX_FILES) : undefined,
-        filesChangedCount: r.filesChanged?.length ?? 0,
-        commands: Array.isArray(r.commands) ? r.commands.slice(0, MAX_COMMANDS) : undefined,
-        commandsCount: r.commands?.length ?? 0,
-        confidencePercent: r.confidencePercent,
-        haltReason: r.haltReason,
-        error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
-      };
-    }
-
-    case 'reviewer': {
-      const r = result as ReviewResult;
-      return {
-        decision: r.decision,
-        feedback: cap(r.feedback, FEEDBACK_CAP),
-        issuesCount: r.issues?.length ?? 0,
-        issues: Array.isArray(r.issues) ? r.issues.slice(0, MAX_COMMANDS) : undefined,
-        suggestionsCount: r.suggestions?.length ?? 0,
-      };
-    }
-
-    case 'tester': {
-      const r = result as TesterResult;
-      return {
-        passed: r.testsPassed,
-        failed: r.testsFailed,
-        coverage: r.coverage,
-        failedTests: Array.isArray(r.failedTests) ? r.failedTests.slice(0, MAX_FILES) : undefined,
-        deterministic: r.deterministic,
-        error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
-      };
-    }
-
-    case 'documenter': {
-      const r = result as DocumenterResult;
-      return {
-        summary: cap(r.summary, SUMMARY_CAP),
-        filesChanged: Array.isArray(r.updatedFiles) ? r.updatedFiles.slice(0, MAX_FILES) : undefined,
-        filesChangedCount: r.updatedFiles?.length ?? 0,
-        changelogEntry: cap(r.changelogEntry, SUMMARY_CAP),
-        error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
-      };
-    }
-
-    case 'auditor': {
-      const r = result as AuditorResult;
-      return {
-        summary: cap(r.summary, SUMMARY_CAP),
-        bsScore: r.bsScore,
-        criticalCount: r.criticalCount,
-        warningCount: r.warningCount,
-        issues: Array.isArray(r.issues) ? r.issues.slice(0, MAX_COMMANDS) : undefined,
-        issuesCount: r.issues?.length ?? 0,
-        error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
-      };
-    }
-
-    case 'skill-documenter': {
-      const r = result as SkillDocumenterResult;
-      return {
-        summary: cap(r.summary, SUMMARY_CAP),
-        filesChanged: Array.isArray(r.updatedFiles) ? r.updatedFiles.slice(0, MAX_FILES) : undefined,
-        filesChangedCount: r.updatedFiles?.length ?? 0,
-        error: r.error ? cap(r.error, FEEDBACK_CAP) : undefined,
-      };
-    }
-
-    default:
-      return {};
-  }
 }
 
 // Re-export formatting functions (extracted to pipelineFormat.ts)

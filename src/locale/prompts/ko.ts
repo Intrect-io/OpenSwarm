@@ -5,6 +5,7 @@
 
 import type { PromptTemplates } from '../types.js';
 import { formatSiblingWork } from '../../agents/siblingWorkFormat.js';
+import { sourceStringChecklistItemKo } from './ko_reviewer_checklist_addon.js';
 
 const DATA_BLOCK_OPEN = '<openswarm-untrusted-data>';
 const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
@@ -104,8 +105,20 @@ ${promptDataBlock(previousFeedback)}
 
     // Code context section (repository + draftAnalysis + impactAnalysis + registryBriefs + repoMemories)
     let contextSection = '';
-    if (context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
+    if (context?.fileScope?.length || context?.priorDeliveries?.length || context?.repository || context?.draftAnalysis || context?.impactAnalysis || context?.registryBriefs?.length || context?.repoMemories?.length || context?.siblingWork?.length) {
       const parts: string[] = ['## 코드 컨텍스트 (자동 생성)'];
+
+      if (context.priorDeliveries?.length) {
+        parts.push('', '### 이전 납품 (구속력 있음)');
+        parts.push('이 이슈에 대한 아래 PR은 이번 시도 전에 이미 머지되거나 닫혔다. 이번 시도는 이슈가 다시 열렸기 때문에 존재한다. 이슈의 최신 설명과 코멘트가 아직 요구하는 것만 하고, 이미 납품된 작업을 다시 구현하거나 고쳐 쓰거나 "개선"하지 마라. 남은 것이 없으면 아무것도 편집하지 말고 status done과 그 납품을 지목하는 noChangesReason으로 끝내라.');
+        parts.push(promptDataBlock(context.priorDeliveries.join('\n')));
+      }
+
+      if (context.fileScope?.length) {
+        parts.push('', '### 허용 편집 경계 (구속력 있음)');
+        parts.push('아래 저장소 상대 경로만 생성·수정하라. 목록에 있는 소스 파일 옆의 동반 테스트(`foo.ts` -> `foo.test.ts`)는 목록에 없어도 허용되며, 그 밖의 테스트 파일은 목록에 있어야 한다. 작업에 다른 파일이 필요하면 편집하지 말고 구체적인 불일치를 보고하라.');
+        parts.push(promptDataBlock(context.fileScope.join('\n')));
+      }
 
       if (context.repository) {
         const repo = context.repository;
@@ -348,6 +361,7 @@ diff와 저장소 배선을 검사하라. 필요하면 안전하고 관련 있�
 5. 새 모듈과 export에 실제 production 호출자가 있는지
 6. 숫자나 지표 주장에 추적 가능한 근거가 있는지
 7. 부재 vs 접근불가: 이 checkout에서 안 보인다는 것(gitignored 자료, 로컬 전용 경로, 불통 서비스)만을 근거로 한 Blocked/누락/미전달 판정은 발견이 아니라 비관측이다 — 판정을 보류하고 명시적 "확인하지 못한 것" 목록에 운영자에게 필요한 것과 함께 보고해야 한다
+8. ${sourceStringChecklistItemKo}
 
 ## 결정 옵션
 - **approve**: 변경 코드에서 중대한 문제가 발견되지 않음
@@ -478,6 +492,7 @@ ${verificationSection}
 10. Invariant·자기회귀: 변경이 프로젝트가 문서화한 invariant(CLAUDE.md "Critical"/규칙 섹션을 읽어라)를 위반하는가? diff가 새로 도입한 것(sweep/cleanup/삭제/TTL)이 자기 입력이나 다른 in-flight 흐름을 깨는가 — diff 스스로 만드는 회귀?
 11. 필터링 후 위치 기반 재매핑: diff가 값을 고정 key/column이 아니라 위치·순서(배열 인덱스, enumerate, zip, "다음 비어있지 않은 값")로 배정하고, 상류 단계가 빈 셀/옵션 컬럼을 드롭·스킵할 수 있다면, 경계 입력(선행/중간 필드 누락)으로 검증했는가? 위치 배정 전에 빈 슬롯을 드롭하면 그 뒤 모든 필드가 조용히 한 자리씩 밀려 잘못된 역할로 배정된다 — 테이블/행 파서에서 흔하지만 눈에 잘 안 띄는 회귀 패턴이다.
 12. 부재 vs 접근불가: 보고가 워커의 격리 워크트리에서 안 보였다는 것(gitignored 자료, 로컬 전용 경로, 불통 서비스)만을 근거로 Blocked/누락/미전달 판정을 내렸다면 그것은 발견이 아니라 비관측이다 — 판정 보류, 측정과 비관측을 분리한 "확인하지 못한 것" 절, 그리고 blocker의 운영자 에스컬레이션(worker에게 \`ask_human\`이 있었으면 그것으로, 없었으면 명시적으로 보고된 열린 결정으로)을 요구하라.
+13. ${sourceStringChecklistItemKo}
 
 ## Decision Options
 - **approve**: 작업 완료, 승인. 모든 완료 정의 항목이 증거로 검증됨, 품질 적절

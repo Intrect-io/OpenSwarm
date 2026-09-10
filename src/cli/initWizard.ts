@@ -203,29 +203,48 @@ async function setupLinear(envVars: Record<string, string>, cwd: string): Promis
   if (result.teamId) envVars.LINEAR_TEAM_ID = result.teamId;
 }
 
+/** Absolute realpath of `path` if it's a symlink; null if it's not a symlink (or doesn't exist). */
+function symlinkTargetOf(path: string): string | null {
+  try {
+    if (lstatSync(path).isSymbolicLink()) return realpathSync(path);
+  } catch {
+    // cxt-ignore: error_swallow — stat failure → treat as not a symlink
+  }
+  return null;
+}
+
 export async function runInitWizard(opts: InitWizardOptions = {}): Promise<void> {
   const cwd = process.cwd();
   const configPath = join(cwd, 'config.yaml');
   const envPath = join(cwd, '.env');
 
   if (existsSync(configPath)) {
-    // Guard: if cwd/config.yaml is a symlink into the daemon's global config
-    // (~/.config/openswarm), `init` here would clobber the running daemon's
-    // settings (agents, allowedProjects, …). Refuse even with --force.
-    let symlinkTarget: string | null = null;
-    try {
-      if (lstatSync(configPath).isSymbolicLink()) symlinkTarget = realpathSync(configPath);
-    } catch {
-      symlinkTarget = null; // cxt-ignore: error_swallow — stat failure → treat as a plain file
-    }
-    if (symlinkTarget && symlinkTarget.startsWith(join(homedir(), '.config', 'openswarm'))) {
+    const symlinkTarget = symlinkTargetOf(configPath);
+    if (symlinkTarget?.startsWith(join(homedir(), '.config', 'openswarm'))) {
+      // Specifically the daemon's global config: `init` here would clobber
+      // the running daemon's settings (agents, allowedProjects, …).
       console.error(`config.yaml is a symlink to the daemon's global config:\n    ${symlinkTarget}`);
       console.error('Running `init` here would overwrite your running daemon configuration.');
       console.error('Run init in a different repo, or edit the daemon config directly.');
       process.exit(1);
     }
+    if (symlinkTarget) {
+      // Any other symlink target: writing through it (even with --force)
+      // silently replaces whatever the user linked config.yaml to.
+      console.error(`config.yaml is a symlink to:\n    ${symlinkTarget}`);
+      console.error('Refusing to overwrite a symlinked config target — remove the symlink first if you really want to replace it, or edit it directly.');
+      process.exit(1);
+    }
     if (!opts.force) {
       console.error('config.yaml already exists. Use --force to overwrite, or edit it directly.');
+      process.exit(1);
+    }
+  }
+  if (existsSync(envPath)) {
+    const symlinkTarget = symlinkTargetOf(envPath);
+    if (symlinkTarget) {
+      console.error(`.env is a symlink to:\n    ${symlinkTarget}`);
+      console.error('Refusing to write secrets through a symlinked .env — remove the symlink first if you really want to replace it, or edit it directly.');
       process.exit(1);
     }
   }

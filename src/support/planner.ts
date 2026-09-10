@@ -22,6 +22,8 @@ export interface PlannerOptions {
   authoritativeOperatorFeedback?: string;
   projectPath: string;
   projectName?: string;
+  /** Task identity stamped on the usage ledger (issue identifier or scheduler id). */
+  taskId?: string;
   timeoutMs?: number;
   model?: string;
   adapterName?: AdapterName;  // CLI adapter (default: configured default)
@@ -153,7 +155,7 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
     // let a provider-pinned config id sail through — decomposition.plannerModel
     // 'gpt-5.5' reached `claude -p --model gpt-5.5` and 404'd every
     // decomposition. Incompatible → undefined → adapter default. (INT-2510)
-    const model = mapModelForProvider(adapter.name as AdapterName, options.model);
+    const model = mapModelForProvider(adapter.name as AdapterName, options.model, 'planner');
 
     const raw = await spawnCli(adapter, {
       prompt,
@@ -165,6 +167,7 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
       systemPrompt: getPrompts().systemPrompt,
       readOnly: true,
       // Planner is a judgment role — keep reasoning ON (unlike the worker).
+      processContext: { taskId: options.taskId ?? options.taskTitle, stage: 'decompose' },
     });
 
     if (raw.exitCode !== 0 && !raw.stdout.trim()) {

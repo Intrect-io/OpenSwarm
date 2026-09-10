@@ -12,10 +12,12 @@
 // once, so scratch cwd alone is not a security boundary.
 
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { adapterCanRunUnderHumanSurfaceBoundary, getAdapter, spawnCli } from '../adapters/index.js';
+import { mapModelForProvider } from '../adapters/modelCompat.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 import { getMcpTools } from '../mcp/mcpClient.js';
 import { filterMcpToolsForRole, type RoleMcpPolicy } from './mcpPolicy.js';
@@ -111,7 +113,13 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     );
   }
 
-  const model = options.model ?? await adapter.getDefaultModel();
+  // This path reached spawnCli without ever consulting the compat layer, so a
+  // config id from another provider went verbatim to the CLI and the
+  // `orchestrator` role was unreachable in every per-role table. Measured
+  // 2026-09-10: that is how an id cursor-agent rejects outright would arrive
+  // here. (AGT-4273)
+  const model = mapModelForProvider(adapter.name as AdapterName, options.model, 'orchestrator')
+    ?? await adapter.getDefaultModel();
   options.signal?.throwIfAborted();
   await store.publish({
     repository: options.repository,
@@ -245,6 +253,9 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
       shellTools: false,
       filesystemTools: false,
       signal: options.signal,
+      // cwd is a scratch dir, so the ledger's project column would be noise;
+      // the repository is carried by the task id instead. (AGT-4178)
+      processContext: { taskId: `${basename(options.repository)}:${options.taskId}`, stage: 'orchestrator' },
     });
     await store.publish({
       repository: options.repository,

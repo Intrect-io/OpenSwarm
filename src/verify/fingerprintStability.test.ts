@@ -45,6 +45,28 @@ describe('normalizeFailureOutput', () => {
     );
   });
 
+  // vega-agent AGT-4118, 2026-09-02: base and head both failed collection with
+  // the same ModuleNotFoundError, but the discovered command is `pytest -q`,
+  // whose summary line has no `=` decoration, so the timing survived into the
+  // fingerprint and the pre-existing failure was reported as a new regression.
+  it('normalizes the duration on a quiet-mode pytest summary line', () => {
+    const out = (secs: string) => [
+      '==================================== ERRORS ====================================',
+      '______________ ERROR collecting tests/test_codeql_audit_scope.py _______________',
+      'E   ModuleNotFoundError: No module named \'yaml\'',
+      '=========================== short test summary info ============================',
+      'ERROR tests/test_codeql_audit_scope.py',
+      '!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!',
+      `3 skipped, 1 error in ${secs}s`,
+      '',
+    ].join('\n');
+    const a = normalizeFailureOutput(out('1.93'), paths(SANDBOX_A));
+    expect(a).toBe(normalizeFailureOutput(out('1.54'), paths(SANDBOX_B)));
+    expect(a).toContain('3 skipped, 1 error in <DURATION>');
+    // A different count is still a different failure.
+    expect(a).not.toBe(normalizeFailureOutput(out('1.93').replace('1 error', '2 errors'), paths(SANDBOX_A)));
+  });
+
   it('normalizes paths outside the command cwd — the subdirectory-cwd bug', () => {
     // A command with `cwd: packages/api` fails, but the traceback points at a
     // sibling package. Normalizing only the cwd left this line sandbox-specific.

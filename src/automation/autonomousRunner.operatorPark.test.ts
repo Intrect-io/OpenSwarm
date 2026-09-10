@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { DurableRunCoordinator } from './durableRunCoordinator.js';
+import type { TaskScheduler } from '../orchestration/taskScheduler.js';
 
 vi.mock('../core/providerOverride.js', () => ({ writeProviderOverride: vi.fn() }));
 vi.mock('../agents/stageModelResolver.js', () => ({ resolveAdapterDefaultModel: vi.fn(async () => 'model') }));
@@ -16,6 +17,7 @@ vi.mock('../coordination/coordinationStore.js', () => ({
 }));
 
 type InternalRunner = {
+  scheduler: TaskScheduler;
   filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[];
   failedTaskRetryTimes: Map<string, number>;
   resolveProjectPath(task: TaskItem): Promise<string | null>;
@@ -49,14 +51,14 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     vi.resetModules();
   });
 
-  async function makeRunner(): Promise<{
+  async function makeRunner(opts: { completed?: string[] } = {}): Promise<{
     internal: InternalRunner;
     park: (parked: boolean) => void;
     parkReason: () => string | undefined;
   }> {
     // A backoff already running, as an `ask_human` park leaves one.
     writeFileSync(join(root, 'runner-state.json'), JSON.stringify({
-      completed: [], failed: {}, retryTimes: { 'AGT-1': Date.now() + 3_600_000 }, lastFailures: {},
+      completed: opts.completed ?? [], failed: {}, retryTimes: { 'AGT-1': Date.now() + 3_600_000 }, lastFailures: {},
     }));
     const [{ AutonomousRunner }, store] = await Promise.all([
       import('./autonomousRunner.js'),
@@ -99,11 +101,47 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
     expect(defaultAutomationDbPath()).toBe(configured);
   });
 
-  it('holds a parked task on its backoff until the answer is there', async () => {
+  it('idle-fills a parked backoff so free slots do not sit empty (AGT-4257)', async () => {
     const { internal, park } = await makeRunner();
     park(true);
 
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+  });
+
+  it('holds the backoff while the pool is saturated (AGT-4257 idle gate)', async () => {
+    // Nothing to fill: with no free slot the backoff keeps its meaning.
+    const { internal, park, parkReason } = await makeRunner();
+    park(true);
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+
     expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(parkReason()).toBe('waiting_on_operator');
+  });
+
+  it('idle-fills a locally completed issue whose card reopened, on the same budget (AGT-4257)', async () => {
+    // Ledger-off: `completed` is this runner's own memory that the card was
+    // finished. The card still being open is idle fill, not an operator act —
+    // so it waits for a free slot like every other lift.
+    const { internal } = await makeRunner({ completed: ['AGT-1'] });
+    const reopened: TaskItem = { ...TASK, linearState: 'Backlog' };
+
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+    expect(internal.filterAlreadyProcessed([reopened])).toEqual([]);
+
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(1);
+    expect(internal.filterAlreadyProcessed([reopened])).toEqual([reopened]);
+  });
+
+  it('still cuts the backoff short on an answer when the pool is saturated', async () => {
+    // The answer is the one thing the park was waiting for; it must not queue
+    // behind idle capacity the way an ordinary backoff does.
+    const { internal, park, parkReason } = await makeRunner();
+    park(true);
+    answered = true;
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(parkReason()).toBeUndefined();
   });
 
   it('cuts the backoff short once the operator answers, and spends the park doing it', async () => {
@@ -131,7 +169,7 @@ describe('operator park without an authoritative ledger (AGT-4033)', () => {
 
     // Now it fails for its own reasons and backs off again.
     internal.failedTaskRetryTimes.set('AGT-1', Date.now() + 3_600_000);
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
   });
 });
 
@@ -161,7 +199,7 @@ describe('operator park on the run ledger (AGT-4033)', () => {
    * to reach a claim from here — and it is the same file the runner reads, which
    * is the point: what the heartbeat sees is the row, not anything beside it.
    */
-  async function parkedRunner(errorCode: string): Promise<InternalRunner> {
+  async function parkedRunner(errorCode: string, retryAt = Date.now() + 3_600_000): Promise<InternalRunner> {
     const dbPath = join(root, 'runs.db');
     const [{ AutonomousRunner }, { RunLedger }] = await Promise.all([
       import('./autonomousRunner.js'),
@@ -177,7 +215,7 @@ describe('operator park on the run ledger (AGT-4033)', () => {
     });
     expect(claim).not.toBeNull();
     expect(ledger.transition(claim!, 'RETRY_AT', {
-      retryAt: Date.now() + 3_600_000, errorCode,
+      retryAt, errorCode,
     }, 2_100)).toBe(true);
     ledger.close();
 
@@ -225,16 +263,44 @@ describe('operator park on the run ledger (AGT-4033)', () => {
     internal.durableRuns.close();
   });
 
-  it('leaves an ordinary failure on its backoff, answered question or not', async () => {
-    // The park has to expire with the attempt that caused it. Here the run backed
-    // off for its own reasons, so the answer still on the board says nothing about
-    // it — and the ledger, which overwrites the code on every transition, is what
-    // makes that distinction without anyone maintaining a flag.
+  it('idle-fills an ordinary RETRY_AT failure so free slots chew the backoff (AGT-4257)', async () => {
     const internal = await parkedRunner('failed');
     answered = true;
 
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
+    internal.durableRuns.close();
+  });
+
+  it('leaves an ordinary RETRY_AT failure on its backoff while the pool is saturated (AGT-4257 idle gate)', async () => {
+    const internal = await parkedRunner('failed');
+    answered = true;
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+
     expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('RETRY_AT');
+    internal.durableRuns.close();
+  });
+
+  it('passes an elapsed RETRY_AT without spending the idle budget (AGT-4257)', async () => {
+    // The backoff ran out on its own and claimRun takes it as it stands.
+    // Lifting it would burn the one free slot's budget on a row that needed
+    // nothing, and leave a genuinely parked row behind it still parked.
+    const internal = await parkedRunner('failed', Date.now() - 1_000);
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(1);
+
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('RETRY_AT');
+    internal.durableRuns.close();
+  });
+
+  it('brings an answered operator park forward even when the pool is saturated', async () => {
+    const internal = await parkedRunner('waiting_on_operator');
+    answered = true;
+    vi.spyOn(internal.scheduler, 'getAvailableSlots').mockReturnValue(0);
+
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
 });

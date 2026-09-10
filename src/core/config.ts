@@ -11,7 +11,7 @@ import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResol
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 import { c, status } from '../support/colors.js';
 import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
-import { configureSandboxExecutor } from '../sandboxExecutor/runtime.js';
+import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
 
 // Constants
 
@@ -132,7 +132,7 @@ const RoleConfigSchema = z.object({
     enabled: z.boolean().optional(),
     mode: z.enum(['report', 'execute']).optional(),
     minScore: z.number().min(1).max(10).optional(),
-    concurrency: z.number().int().min(1).max(3).optional(),
+    concurrency: z.number().int().min(1).max(256).optional(),
     keepSandboxes: z.boolean().optional(),
     linkSharedPaths: z.boolean().optional(),
     candidates: z.array(z.object({
@@ -207,9 +207,16 @@ const DecompositionConfigSchema = z.object({
   thresholdMinutes: z.number().min(10).max(120).default(30),
   /** Max decomposition depth (default: 2) - prevents infinite nesting */
   maxDepth: z.number().min(1).max(5).default(2).optional(),
-  /** Max children per task (default: 5) - prevents issue explosion */
+  /** Max children per task (default: 5) - prevents issue explosion.
+   * Shared by the autonomous runner and human `/plan` dispatch (AGT-4123). */
   maxChildrenPerTask: z.number().min(1).max(20).default(5).optional(),
-  /** Daily issue creation limit (default: 20) - prevents runaway creation */
+  /**
+   * Daily issue creation limit (default: 20) - paces unsupervised automation.
+   * Applies to the autonomous runner only; human `/plan` dispatch
+   * (`POST /api/plan/dispatch`) enforces `maxChildrenPerTask` but is exempt
+   * from this budget so an approved plan is not refused when the daemon
+   * already spent today's slots (AGT-4123 Option 2).
+   */
   dailyLimit: z.number().min(1).max(100).default(20).optional(),
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog: z.boolean().default(true).optional(),
@@ -285,10 +292,10 @@ const VerifyConfigSchema = z.object({
 }).default({ enabled: true, blockOnNewFailures: true, maxCommands: 4 });
 
 const SecurityAuditConfigSchema = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
   maxThreads: z.number().int().min(1).max(16).default(2),
   maxRamMb: z.number().int().min(512).max(65536).default(4096),
-}).default({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
+}).default({ enabled: false, maxThreads: 2, maxRamMb: 4096 });
 
 const AutonomousConfigSchema = z.object({
   /** Auto-enable on service start */
@@ -301,8 +308,8 @@ const AutonomousConfigSchema = z.object({
   maxAttempts: z.number().min(1).max(10).default(3),
   /** Allowed project paths */
   allowedProjects: z.array(z.string()).default(['~/dev']),
-  /** Treat Linear Backlog as a work queue (legacy). Default false = Backlog parked. */
-  includeBacklog: z.boolean().optional(),
+  /** Treat Linear Backlog as a work queue. Default true so free slots chew parked work (AGT-4257). */
+  includeBacklog: z.boolean().optional().default(true),
   /** Model configuration (legacy) */
   models: ModelConfigSchema,
   /** Worker timeout (ms). 0/unset = use the pipeline's per-stage ceiling
@@ -320,6 +327,8 @@ const AutonomousConfigSchema = z.object({
   /** SQLite execution-truth rollout. primary is fail-closed; shadow only observes. */
   automationLedgerMode: z.enum(['off', 'shadow', 'primary']).default('primary'),
   automationDbPath: z.string().min(1).optional(),
+  /** Linear project the daemon files its own retrospective issues into; unset = lane off. */
+  retrospectiveProjectId: z.string().min(1).optional(),
   automationLeaseMs: z.number().int().min(60_000).max(24 * 60 * 60_000).default(10 * 60_000),
   shutdownGraceMs: z.number().int().min(0).max(5 * 60_000).default(30_000),
   /** Default role configuration */
@@ -334,13 +343,24 @@ const AutonomousConfigSchema = z.object({
   worktreeMode: z.boolean().default(false),
   /** Allow concurrent tasks on the same repo (requires worktreeMode). (INT-1975) */
   allowSameProjectConcurrent: z.boolean().default(true),
+  /**
+   * 'admit' (default) lets a claim with no resolvable write scope join other
+   * same-repo runs; worktrees isolate live edits and known file-scope overlap
+   * still refuses. 'serialize' is the Codex-era fail-closed holdover.
+   */
+  unknownScopeAdmission: z.enum(['serialize', 'admit']).default('admit'),
+  /**
+   * Consecutive infra_error attempts with one failure fingerprint after which a
+   * run parks for the operator instead of backing off again. 0 disables.
+   */
+  infraFailureCircuit: z.number().int().min(0).max(100).default(6),
   /** Dynamic job profiles for model selection */
   jobProfiles: z.array(JobProfileSchema).optional(),
   /** Pipeline quality guards (bad-edit lint gate, BS detector, etc.) */
   guards: PipelineGuardsConfigSchema,
   /** Deterministic baseline-diff verification (default ON). */
   verify: VerifyConfigSchema,
-  /** CodeQL baseline-diff gate for autonomous code edits (default ON). */
+  /** CodeQL baseline-diff gate for autonomous code edits (default OFF — too slow to gate PRs). */
   securityAudit: SecurityAuditConfigSchema,
   /** Max objective self-repair attempts (lint/bs/test) before giving up */
   maxReflections: z.number().min(1).max(10).default(3),
@@ -708,6 +728,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
       automationLedgerMode: raw.autonomous.automationLedgerMode,
       automationDbPath: raw.autonomous.automationDbPath ? expandPath(raw.autonomous.automationDbPath) : undefined,
+      retrospectiveProjectId: raw.autonomous.retrospectiveProjectId,
       automationLeaseMs: raw.autonomous.automationLeaseMs,
       shutdownGraceMs: raw.autonomous.shutdownGraceMs,
       defaultRoles: raw.autonomous.defaultRoles,
@@ -735,6 +756,8 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       } : undefined,
       worktreeMode: raw.autonomous.worktreeMode,
       allowSameProjectConcurrent: raw.autonomous.allowSameProjectConcurrent,
+      unknownScopeAdmission: raw.autonomous.unknownScopeAdmission,
+      infraFailureCircuit: raw.autonomous.infraFailureCircuit,
       guards: raw.autonomous.guards,
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,
@@ -831,10 +854,7 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // different/default file must never silently downgrade an active boundary.
   // Disabling therefore requires a process restart with enabled:false.
   if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
-  if (config.humanSurfaceReadOnly?.enabled === true
-      && config.humanSurfaceReadOnly.sandboxExecutor?.enabled === true) {
-    configureSandboxExecutor(config.humanSurfaceReadOnly.sandboxExecutor);
-  }
+  wireSandboxExecutorIfEnabled(config.humanSurfaceReadOnly?.sandboxExecutor);
 
   // 6. Apply time window config
   if (config.timeWindow) {
@@ -930,7 +950,8 @@ notifications:
 # Fail closed on writes to human-facing collaboration surfaces. Delegated CLIs
 # and diagnostics remain disabled. Native bash requires the separately deployed
 # network-none companion and exact health/contract attestation; any failure
-# leaves bash hidden. Approved typed DevOps/data MCP writes remain available.
+# leaves bash hidden. Verify-security uses the same companion whenever
+# sandboxExecutor.enabled is true, even if this flag is off. (AGT-4172)
 humanSurfaceReadOnly:
   enabled: false
   sandboxExecutor:

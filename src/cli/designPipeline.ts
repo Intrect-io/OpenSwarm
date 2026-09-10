@@ -9,6 +9,7 @@
 
 import { closeSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { atomicWriteFileSync } from '../support/atomicFile.js';
 
 export type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'generic';
 
@@ -120,7 +121,11 @@ export function runDesignPipeline(opts: DesignPipelineOptions = {}): { wrote: bo
   if (opts.dryRun) return { wrote: false, path: outPath, yaml };
   mkdirSync(dirname(outPath), { recursive: true });
   if (opts.force) {
-    writeFileSync(outPath, yaml);
+    // A plain writeFileSync follows a symlink at outPath and writes through
+    // it to whatever it points at; atomicWriteFileSync's rename-based swap
+    // replaces the destination itself instead, closing that race regardless
+    // of what got planted there between the mkdir above and this write.
+    atomicWriteFileSync(outPath, yaml);
   } else {
     let fd: number | undefined;
     try {

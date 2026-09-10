@@ -18,6 +18,7 @@ import {
   hydrateTaskStateFromComments,
   markTaskBacklog,
   planLinearStateReconciliation,
+  reconcileDependencyBlockers,
   resetTaskStateStoreForTests,
   buildLockPayload,
   type OpenSwarmTaskState,
@@ -183,6 +184,34 @@ describe('task state store', () => {
     expect(getTaskState('PROCESS-B')?.title).toBe('PROCESS-B');
   });
 
+  it('keeps concurrent execution upsert and Linear reconciliation consistent under the store lock', async () => {
+    // Seed an in_progress row, then race a local execution bump against a Linear
+    // Done reconciliation. Both paths take withStoreLock; the store must remain
+    // parseable and retain both writers' intents without corruption.
+    upsertTaskState('RACE-1', {
+      title: 'race',
+      linearState: 'In Progress',
+      execution: { status: 'in_progress', retryCount: 0 },
+    });
+
+    await Promise.all([
+      Promise.resolve().then(() => upsertTaskState('RACE-1', {
+        execution: { status: 'in_progress', retryCount: 1 },
+      })),
+      Promise.resolve().then(() => updateTaskLinearState('RACE-1', 'Done')),
+    ]);
+
+    const final = getTaskState('RACE-1');
+    expect(final?.title).toBe('race');
+    expect(final?.linearState).toBe('Done');
+    // Whichever writer lands last: either Done reconciliation (status done) or
+    // the retryCount bump on the still-in_progress row. Never a half-written state.
+    expect(['in_progress', 'done']).toContain(final?.execution.status);
+    if (final?.execution.status === 'in_progress') {
+      expect(final.execution.retryCount).toBe(1);
+    }
+  });
+
   it('keeps tasks blocked until dependencies are done, then releases them', () => {
     upsertTaskState('ISSUE-1', {
       execution: { status: 'in_progress', retryCount: 0 },
@@ -245,6 +274,387 @@ describe('task state store', () => {
     const ready = getTaskReadiness(task);
     expect(ready.ready).toBe(true);
     expect(ready.blockedBy).toEqual([]);
+  });
+
+  it('reconcileDependencyBlockers releases a task whose blocker finished outside this daemon', async () => {
+    // AGT-4241-class bug (measured live on vela 2026-09-09): a blocker completed
+    // via a path that never called releaseDependentTasks (PR merged, Linear moved
+    // to Done by something other than this daemon's own pipeline). Its local
+    // taskState is stuck at a stale non-terminal status. The blocker also never
+    // appears in a future slim fetch again (Done issues are excluded from it), so
+    // task.blockedBy comes back empty and getTaskReadiness falls back to the
+    // stale dependencyIssueIds forever — this is the only path that can unstick it.
+    // upsertTaskState always stamps updatedAt to the real current time, so
+    // staleness is simulated by advancing the reconciler's `now` instead of
+    // trying to backdate the stored timestamp.
+    upsertTaskState('AGT-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    // Live vela data (AGT-4209/AGT-4208, 2026-09-09): the stuck dependents' own
+    // execution.status was 'todo', not 'blocked' — getTaskReadiness gates on
+    // dependencyIssueIds at read time regardless of the stored status, and only
+    // releaseDependentTasks itself ever writes 'blocked'. The eligibility filter
+    // must therefore cover 'todo' too, not just 'blocked'.
+    upsertTaskState('AGT-DEPENDENT', {
+      dependencyIssueIds: ['AGT-BLOCKER'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async (id: string) => id === 'AGT-BLOCKER'
+      ? { ok: true as const, issue: { state: 'Done', stateType: 'completed' } }
+      : { ok: false as const, error: 'unexpected id' };
+
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState }, now: future });
+
+    expect(result.eligible).toBe(1);
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect(result.released).toBe(1);
+    expect(getTaskState('AGT-BLOCKER')?.linearState).toBe('Done');
+    expect(getTaskState('AGT-DEPENDENT')?.execution.status).toBe('todo');
+
+    const dependentTask = {
+      id: 'AGT-DEPENDENT', source: 'linear' as const, title: 'dependent', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-DEPENDENT',
+    };
+    expect(getTaskReadiness(dependentTask).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers does not touch a task that already moved past todo/ready/blocked', async () => {
+    // Regression for a real finding from independent review: dependencyIssueIds
+    // is never cleared once a task moves on. A task that's already 'done' (or
+    // in_progress/decomposed/...) can still carry a stale, unresolved dependency
+    // entry from long before it finished. Without the execution.status filter,
+    // resolving that leftover dependency would call releaseDependentTasks and
+    // incorrectly reset the already-finished task back to 'todo'.
+    upsertTaskState('AGT-OLD-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('AGT-ALREADY-DONE', {
+      dependencyIssueIds: ['AGT-OLD-BLOCKER'],
+      execution: { status: 'done', retryCount: 0 },
+      linearState: 'Done',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async () => ({ ok: true as const, issue: { state: 'Done', stateType: 'completed' } });
+
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState }, now: future });
+
+    expect(result.eligible).toBe(0);
+    expect(result.lookedUp).toBe(0);
+    expect(result.released).toBe(0);
+    expect(getTaskState('AGT-ALREADY-DONE')?.execution.status).toBe('done');
+    expect(getTaskState('AGT-ALREADY-DONE')?.linearState).toBe('Done');
+  });
+
+  it('reconcileDependencyBlockers skips a dependency still present in the fresh fetch', async () => {
+    upsertTaskState('AGT-STILL-OPEN', {
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    upsertTaskState('AGT-DEPENDENT-2', {
+      dependencyIssueIds: ['AGT-STILL-OPEN'],
+      execution: { status: 'blocked', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async () => {
+      throw new Error('should not be called — dependency is in knownTaskIds');
+    };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      knownTaskIds: new Set(['AGT-STILL-OPEN']),
+      now: future,
+    });
+
+    expect(result.eligible).toBe(0);
+    expect(result.lookedUp).toBe(0);
+    expect(result.released).toBe(0);
+  });
+
+  it('reconcileDependencyBlockers leaves a task blocked when the blocker is not yet stale', async () => {
+    upsertTaskState('AGT-FRESH-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Progress',
+      updatedAt: new Date().toISOString(),
+    });
+    upsertTaskState('AGT-FRESH-DEPENDENT', {
+      dependencyIssueIds: ['AGT-FRESH-BLOCKER'],
+      execution: { status: 'blocked', retryCount: 0 },
+      linearState: 'Todo',
+      updatedAt: new Date().toISOString(),
+    });
+
+    const lookupIssueState = async () => {
+      throw new Error('should not be called — dependent was updated too recently to be stale');
+    };
+
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState } });
+
+    expect(result.eligible).toBe(0);
+    expect(result.lookedUp).toBe(0);
+  });
+
+  it('reconcileDependencyBlockers still looks up blockers of a current-fetch dependent that was just upserted', async () => {
+    upsertTaskState('AGT-4114', {
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Backlog',
+    });
+    upsertTaskState('AGT-4121', {
+      dependencyIssueIds: ['AGT-4114'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookupIssueState = async (id: string) => id === 'AGT-4114'
+      ? { ok: true as const, issue: { state: 'Done', stateType: 'completed' } }
+      : { ok: false as const, error: 'unexpected id' };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      knownTaskIds: new Set(['AGT-4121']),
+    });
+
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect(getTaskReadiness({
+      id: 'AGT-4121', source: 'linear' as const, title: 'waiting', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4121',
+    }).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers fails closed when the lookup errors', async () => {
+    upsertTaskState('AGT-ERR-BLOCKER', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('AGT-ERR-DEPENDENT', {
+      dependencyIssueIds: ['AGT-ERR-BLOCKER'],
+      execution: { status: 'blocked', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    const future = Date.now() + 2 * 60 * 60_000;
+
+    const lookupIssueState = async () => ({ ok: false as const, error: 'rate limited' });
+    const result = await reconcileDependencyBlockers({ source: { lookupIssueState }, now: future });
+
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(0);
+    expect(result.released).toBe(0);
+    expect(getTaskState('AGT-ERR-BLOCKER')?.linearState).toBe('In Review');
+    expect(getTaskState('AGT-ERR-BLOCKER')?.dependencyLookupFailed).toBe(true);
+
+    const retried: string[] = [];
+    const samePass = await reconcileDependencyBlockers({
+      source: { lookupIssueState: async (id) => { retried.push(id); return { ok: false as const, error: 'rate limited' }; } },
+      now: future,
+    });
+    expect(retried).toEqual([]);
+    expect(samePass.lookedUp).toBe(0);
+
+    const afterErrorWindow = await reconcileDependencyBlockers({
+      source: { lookupIssueState: async (id) => { retried.push(id); return { ok: false as const, error: 'rate limited' }; } },
+      now: future + 15 * 60_000,
+    });
+    expect(retried).toEqual(['AGT-ERR-BLOCKER']);
+    expect(afterErrorWindow.lookedUp).toBe(1);
+  });
+
+  it('treats a Canceled blocker as terminal so dependents are not waiting on dead work', () => {
+    // vela 2026-09-09: 20 locally-Canceled STO-* ids were the first
+    // reconcileDependencyBlockers candidates. isResolved ignored Canceled, so
+    // they never left the set and maxLookups never reached AGT-4207 (Done on
+    // Linear, 157th). DecisionEngine gates on getTaskReadiness, which must
+    // agree — otherwise even a perfect reconciler cannot unblock the queue.
+    upsertTaskState('STO-CANCELED', {
+      execution: { status: 'backlog', retryCount: 0 },
+      linearState: 'Canceled',
+    });
+    upsertTaskState('AGT-WAITING', {
+      dependencyIssueIds: ['STO-CANCELED'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const waiting = {
+      id: 'AGT-WAITING', source: 'linear' as const, title: 'waiting', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-WAITING',
+    };
+    expect(getTaskReadiness(waiting).ready).toBe(true);
+    expect(getTaskReadiness(waiting).blockedBy).toEqual([]);
+  });
+
+  it('reconcileDependencyBlockers skips locally-Canceled blockers and looks up a later Done one under maxLookups', async () => {
+    const future = Date.now() + 2 * 60 * 60_000;
+    for (let i = 0; i < 20; i++) {
+      const id = `STO-CANCELED-${String(i).padStart(2, '0')}`;
+      upsertTaskState(id, {
+        execution: { status: 'blocked', retryCount: 0 },
+        linearState: 'Canceled',
+      });
+      upsertTaskState(`DEP-ON-CANCELED-${i}`, {
+        dependencyIssueIds: [id],
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+    }
+    upsertTaskState('AGT-4207', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('AGT-4209', {
+      dependencyIssueIds: ['AGT-4207'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookedUp: string[] = [];
+    const lookupIssueState = async (id: string) => {
+      lookedUp.push(id);
+      if (id === 'AGT-4207') return { ok: true as const, issue: { state: 'Done', stateType: 'completed' } };
+      throw new Error(`should not look up ${id}`);
+    };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+    });
+
+    expect(lookedUp).toEqual(['AGT-4207']);
+    expect(result.eligible).toBe(1);
+    expect(result.lookedUp).toBe(1);
+    expect(result.resolved).toBe(1);
+    expect(result.released).toBe(1);
+    expect(getTaskReadiness({
+      id: 'AGT-4209', source: 'linear' as const, title: 'dependent', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4209',
+    }).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers rotates past recently-checked open blockers on the next pass', async () => {
+    const future = Date.now() + 2 * 60 * 60_000;
+    for (let i = 0; i < 20; i++) {
+      const id = `OPEN-${String(i).padStart(2, '0')}`;
+      upsertTaskState(id, {
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+      upsertTaskState(`DEP-ON-OPEN-${i}`, {
+        dependencyIssueIds: [id],
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+    }
+    upsertTaskState('DONE-BLOCKER-ZZZ', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'In Review',
+    });
+    upsertTaskState('DEP-ON-DONE', {
+      dependencyIssueIds: ['DONE-BLOCKER-ZZZ'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookedUp: string[] = [];
+    const lookupIssueState = async (id: string) => {
+      lookedUp.push(id);
+      if (id === 'DONE-BLOCKER-ZZZ') return { ok: true as const, issue: { state: 'Done', stateType: 'completed' } };
+      return { ok: true as const, issue: { state: 'Todo', stateType: 'unstarted' } };
+    };
+
+    const first = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+    });
+    expect(first.lookedUp).toBe(20);
+    expect(first.resolved).toBe(0);
+    expect(lookedUp).not.toContain('DONE-BLOCKER-ZZZ');
+
+    lookedUp.length = 0;
+    const second = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+    });
+    expect(lookedUp).toEqual(['DONE-BLOCKER-ZZZ']);
+    expect(second.lookedUp).toBe(1);
+    expect(second.resolved).toBe(1);
+    expect(second.released).toBe(1);
+    expect(getTaskReadiness({
+      id: 'DEP-ON-DONE', source: 'linear' as const, title: 'dependent', priority: 2,
+      createdAt: Date.now(), issueId: 'DEP-ON-DONE',
+    }).ready).toBe(true);
+  });
+
+  it('treats a Duplicate blocker as terminal so dependents are not waiting on it', () => {
+    upsertTaskState('AGT-4115', {
+      execution: { status: 'in_progress', retryCount: 0 },
+      linearState: 'Duplicate',
+    });
+    upsertTaskState('AGT-4121', {
+      dependencyIssueIds: ['AGT-4115'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+    expect(getTaskReadiness({
+      id: 'AGT-4121', source: 'linear' as const, title: 'waiting', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4121',
+    }).ready).toBe(true);
+  });
+
+  it('reconcileDependencyBlockers looks up heartbeat-priority deps before older out-of-scope ones', async () => {
+    const future = Date.now() + 2 * 60 * 60_000;
+    for (let i = 0; i < 20; i++) {
+      const id = `OLD-${String(i).padStart(2, '0')}`;
+      upsertTaskState(id, {
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+      upsertTaskState(`DEP-ON-OLD-${i}`, {
+        dependencyIssueIds: [id],
+        execution: { status: 'todo', retryCount: 0 },
+        linearState: 'Todo',
+      });
+    }
+    upsertTaskState('AGT-4114', {
+      execution: { status: 'backlog', retryCount: 0 },
+      linearState: 'Backlog',
+    });
+    upsertTaskState('AGT-4121-LIVE', {
+      dependencyIssueIds: ['AGT-4114'],
+      execution: { status: 'todo', retryCount: 0 },
+      linearState: 'Todo',
+    });
+
+    const lookedUp: string[] = [];
+    const lookupIssueState = async (id: string) => {
+      lookedUp.push(id);
+      if (id === 'AGT-4114') return { ok: true as const, issue: { state: 'Done', stateType: 'completed' } };
+      return { ok: true as const, issue: { state: 'Todo', stateType: 'unstarted' } };
+    };
+
+    const result = await reconcileDependencyBlockers({
+      source: { lookupIssueState },
+      now: future,
+      maxLookups: 20,
+      priorityDepIds: new Set(['AGT-4114']),
+    });
+
+    expect(lookedUp[0]).toBe('AGT-4114');
+    expect(result.resolved).toBe(1);
+    expect(getTaskReadiness({
+      id: 'AGT-4121-LIVE', source: 'linear' as const, title: 'live', priority: 2,
+      createdAt: Date.now(), issueId: 'AGT-4121-LIVE',
+    }).ready).toBe(true);
   });
 
   it('reconciles stale in_progress against Linear state (R5)', () => {
@@ -332,6 +742,28 @@ describe('task state store', () => {
     expect(parent?.issueId).toBe('PARENT-1');
     expect(parent?.execution.status).toBe('done');
     expect(parent?.linearState).toBe('Done');
+  });
+
+  it('does not complete a parent when a child is Canceled — that is not Done', () => {
+    upsertTaskState('PARENT-CANCELED-CHILD', {
+      childIssueIds: ['CHILD-DONE', 'CHILD-CANCELED'],
+      execution: { status: 'decomposed', retryCount: 0 },
+      linearState: 'In Progress',
+    });
+    upsertTaskState('CHILD-DONE', {
+      parentIssueId: 'PARENT-CANCELED-CHILD',
+      execution: { status: 'done', retryCount: 0 },
+      linearState: 'Done',
+    });
+    upsertTaskState('CHILD-CANCELED', {
+      parentIssueId: 'PARENT-CANCELED-CHILD',
+      execution: { status: 'backlog', retryCount: 0 },
+      linearState: 'Canceled',
+    });
+
+    expect(completeParentIfChildrenDone('CHILD-DONE')).toBeNull();
+    expect(completeParentIfChildrenDone('CHILD-CANCELED')).toBeNull();
+    expect(getTaskState('PARENT-CANCELED-CHILD')?.execution.status).toBe('decomposed');
   });
 
   it('hydrates canonical state from the latest Linear sync comment', () => {

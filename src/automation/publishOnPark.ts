@@ -13,19 +13,40 @@
 // Split out of runnerExecution.ts, which sits on the 1500-line pre-commit cap.
 
 import { broadcastEvent } from '../core/eventHub.js';
+import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
+import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
+import type { PipelineResult } from '../agents/pairPipelineTypes.js';
+import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
+
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
+/** Runs once after a reviewed publication succeeded and was durably recorded. */
+export type ApprovedPublicationHook = (publication: {
+  prUrl: string;
+  headSha: string;
+  worktreeInfo: WorktreeInfo;
+}) => Promise<void>;
+
+/** worktreeManager's refusal to open a PR from a branch with nothing on it. */
+const NO_COMMITS_TO_PUBLISH = /No commits to create PR from/;
+
+/** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
+export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
+
+export { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
+
 /** The fields these paths read; narrower than the full pipeline result. */
-interface PublishableResult {
+export interface PublishableResult {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
-  workerResult?: { executionOutcomeUnknown?: boolean };
+  workerResult?: { executionOutcomeUnknown?: boolean; noChangesReason?: string };
+  operatorPark?: { code: string; reason: string };
 }
 
 /** The fields these paths read off the task. */
-interface PublishableTask {
+export interface PublishableTask {
   /** Required: the broadcast events key on `issueId || id`. */
   id: string;
   issueId?: string;
@@ -33,7 +54,7 @@ interface PublishableTask {
   description?: string;
   issueIdentifier?: string;
   fileScope?: string[];
-  fileScopeSource?: 'declared' | 'validated-direct' | 'drafted' | 'inferred';
+  fileScopeSource?: FileScopeSource;
 }
 
 /**
@@ -47,9 +68,13 @@ export function shouldPublishParkedWork(
   hasWorktree: boolean,
   result: PublishableResult,
 ): boolean {
-  return hasWorktree && result.finalStatus === 'waiting_on_operator'
-    && result.workerResult?.executionOutcomeUnknown !== true
-    && !result.prUrl;
+  if (!hasWorktree || result.workerResult?.executionOutcomeUnknown === true || result.prUrl) return false;
+  // `waiting_on_operator` is one way a run stops for a person; an
+  // `operatorPark` — the publication-scope fence, a worker that delivered
+  // nothing — is another, and it was added without this. vega-agent AGT-3844
+  // parked that way on 2026-09-02 holding 42 commits whose net diff is four
+  // files, and published nothing at all.
+  return result.finalStatus === 'waiting_on_operator' || Boolean(result.operatorPark);
 }
 
 /**
@@ -71,6 +96,7 @@ export async function publishParkedWork(
   worktreeInfo: WorktreeInfo,
   task: PublishableTask,
   durability: ExecutionDurabilityHooks | undefined,
+  afterPublication?: ApprovedPublicationHook,
 ): Promise<void> {
   // The same lease fence the approved path uses. Without it an executor that
   // already lost its claim — expired lease, a newer generation now owning the
@@ -81,6 +107,7 @@ export async function publishParkedWork(
     console.warn(`[Runner] Parked publication fenced for ${task.issueIdentifier}; leaving the branch unpublished`);
     return;
   }
+  let published: { prUrl: string; headSha: string } | null = null;
   try {
     const publication = await commitAndCreatePRWithHead(
       worktreeInfo,
@@ -91,8 +118,13 @@ export async function publishParkedWork(
         + ' reviewed — this PR is a draft on purpose.',
       // Draft, and committed work only: nothing reviewed this, and the tree
       // must stay exactly as the worker left it so the resume continues.
-      { draft: true, committedOnly: true,
-        fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+      //
+      // No write-scope fence. The fence stops an unreviewed run from
+      // *delivering* files it never reserved; this PR delivers nothing — it is
+      // how the person the run is waiting on sees what it built. Enforcing it
+      // here only hides the branch, which is the exact failure this function
+      // exists to fix (AGT-3844 parked on that fence holding 42 commits).
+      { draft: true, committedOnly: true },
     );
     // The ledger records the PR; the pipeline result deliberately does NOT.
     //
@@ -106,6 +138,7 @@ export async function publishParkedWork(
     const attached = await durability?.onPublication(prUrl, headSha) ?? true;
     if (attached) {
       console.log(`[Runner] Parked run published as draft for ${task.issueIdentifier}: ${prUrl}`);
+      published = { prUrl, headSha };
     } else {
       console.warn(`[Runner] Parked publication for ${task.issueIdentifier} was not durably attached (lease fence); the PR exists at ${prUrl} and will be reused by branch name`);
     }
@@ -118,6 +151,42 @@ export async function publishParkedWork(
       console.warn(`[Runner] Could not publish parked work for ${task.issueIdentifier}: ${detail}`);
     }
   }
+
+  // A draft is the *least* reviewed thing this daemon emits — the run stopped
+  // because it could not finish — and until AGT-4278 it was also the only
+  // publication no reviewer ever looked at. The verdict cannot roll anything
+  // back here (it is already a draft), but it is the starting point for
+  // whoever picks the draft up.
+  //
+  // Outside the try above on purpose: a hook that throws must not be reported
+  // as "could not publish parked work" when the PR exists and was attached.
+  if (published && afterPublication) {
+    try {
+      await afterPublication({ ...published, worktreeInfo });
+    } catch (err) {
+      console.warn(`[Runner] Post-publication review failed for ${task.issueIdentifier}:`, err);
+    }
+  }
+}
+
+/**
+ * Publish a parked run's branch as a draft, once, if this outcome is a park.
+ *
+ * Called on both sides of the approved publish because a run parks either
+ * before it (the pipeline sets `operatorPark`) or during it (the scope fence
+ * refuses the push). vega-agent AGT-3844 parked the second way on 2026-09-02
+ * holding 42 commits — a four-file CI fix — and published nothing at all.
+ */
+export async function publishParkedIfNeeded(
+  worktreeInfo: WorktreeInfo | null | undefined,
+  task: PublishableTask,
+  result: PublishableResult,
+  durability: ExecutionDurabilityHooks | undefined,
+  afterPublication?: ApprovedPublicationHook,
+): Promise<boolean> {
+  if (!worktreeInfo || !shouldPublishParkedWork(true, result)) return false;
+  await publishParkedWork(worktreeInfo, task, durability, afterPublication);
+  return true;
 }
 
 /**
@@ -182,8 +251,10 @@ export async function publishStuckWork(
       // pre-cleanup WIP commit normally captures it first and makes this a
       // no-op (a clean tree skips the whole commit phase) — but that commit
       // swallows its own failures, and this is the second chance.
-      { draft: true,
-        fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+      // No write-scope fence, for the reason publishParkedWork documents: a
+      // draft PR nobody merged is how the operator sees the work, and this
+      // tree is about to be deleted.
+      { draft: true },
     );
     broadcastEvent({
       type: 'log',
@@ -207,13 +278,16 @@ export async function publishStuckWork(
  *
  * A publication failure is fatal here, unlike the parked path: a worktree-mode
  * run is not deliverable until its branch is remotely reviewable, so the result
- * is turned back into a retryable `infra_error` with the worktree preserved.
+ * is turned back into a retryable `infra_error` with the worktree preserved —
+ * except a publication-scope rejection, which no retry can change and which
+ * therefore parks for the operator (`operatorPark`).
  */
 export async function publishApprovedWork(
   worktreeInfo: WorktreeInfo | null | undefined,
   task: PublishableTask,
-  result: PublishableResult & { success?: boolean; finalStatus?: string; prUrl?: string },
+  result: PublishableResult & Pick<PipelineResult, 'failureDetail' | 'operatorPark'> & { success?: boolean; finalStatus?: string; prUrl?: string },
   durability: ExecutionDurabilityHooks | undefined,
+  afterPublication?: ApprovedPublicationHook,
 ): Promise<void> {
   // Create PR (worktree mode + pipeline success = finalStatus 'approved')
   if (worktreeInfo && result.success && result.finalStatus === 'approved') {
@@ -221,6 +295,13 @@ export async function publishApprovedWork(
     if (!publishAllowed) {
       result.success = false;
       result.finalStatus = 'infra_error';
+      // Without this the ledger fell back to `lastReviewFeedback` — an
+      // approved run's fence rejection then recorded the REVIEWER'S APPROVAL
+      // TEXT as if it were the failure. cgf-portal AX-1020 hit this twice
+      // (2026-08-31): both attempts read as SentryAudits sign-off, and the
+      // actual cause — the fence, and why it fired — was unrecoverable once
+      // the container's log was gone.
+      result.failureDetail = 'publication: lease fence rejected the approved publish (a newer generation now owns this run, or the lease expired)';
       console.warn(`[Worktree] Publication fenced for ${task.issueIdentifier}; preserving worktree`);
     } else {
       try {
@@ -229,7 +310,7 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
-          { fileScope: task.fileScopeSource === 'inferred' ? undefined : task.fileScope },
+          { fileScope: enforcedFileScope(task) },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
@@ -246,19 +327,65 @@ export async function publishApprovedWork(
           },
         });
         console.log(`[Runner] PR created for ${task.issueIdentifier}: ${prUrl}`);
+        if (afterPublication) {
+          try {
+            await afterPublication({ prUrl, headSha, worktreeInfo });
+          } catch (reviewError) {
+            // The PR and durable publication record are already real. A review
+            // infrastructure failure must be visible but cannot pretend the
+            // publication never happened or trigger a duplicate PR on retry.
+            const detail = reviewError instanceof Error ? reviewError.message : String(reviewError);
+            console.error(`[Runner] PR-time review failed for ${task.issueIdentifier}:`, reviewError);
+            broadcastEvent({
+              type: 'log',
+              data: { taskId: task.issueId || task.id, stage: 'pr-review', line: `PR-time review failed: ${detail}` },
+            });
+          }
+        }
       } catch (err) {
         console.error('[Worktree] PR creation failed:', err);
+        const message = err instanceof Error ? err.message : String(err);
         // A worktree-mode run is not deliverable until the branch is published.
-        // Keep it retryable and preserved instead of marking the issue Done with
-        // no remotely reviewable artifact.
+        // Keep it preserved instead of marking the issue Done with no remotely
+        // reviewable artifact — and record WHY, or the ledger row is blank.
         result.success = false;
-        result.finalStatus = 'infra_error';
+        result.failureDetail = `publication: ${message}`;
+        if (err instanceof PublicationScopeMismatchError) {
+          // The branch already holds commits outside the reserved write scope.
+          // No retry changes that history; the worker just re-runs, finds the
+          // work done, and the fence rejects the same files again — 15-min
+          // backoff forever. Park it for the operator with the file list.
+          result.finalStatus = 'failed';
+          result.operatorPark = { code: PUBLICATION_SCOPE_PARK_REASON, reason: message };
+        } else if (NO_COMMITS_TO_PUBLISH.test(message)) {
+          result.finalStatus = 'failed';
+          const noChangesReason = result.workerResult?.noChangesReason?.trim();
+          if (noChangesReason) {
+            // The worker looked and said, in so many words, that the issue
+            // needs no edit. Re-running the same question is not a retry, it
+            // is the same answer at the same price (cgf-portal AX-874 gave it
+            // four times in a row on 2026-09-02, 921k tokens each, and the
+            // operator never saw a word of it: the ledger only said "No
+            // commits"). Park with the worker's statement so the operator can
+            // close the issue or send it back with what the worker missed.
+            result.failureDetail = `publication: ${message} — worker: ${noChangesReason}`;
+            result.operatorPark = { code: WORKER_NO_CHANGES_PARK_REASON, reason: `${WORKER_NO_CHANGES_STATEMENT_PREFIX} ${noChangesReason}` };
+          }
+          // Otherwise the worker claimed edits that were only runtime
+          // artifacts the stager drops. That is the attempt failing at its
+          // job, not the infrastructure failing the attempt: count it against
+          // the task's retry budget so a fresh attempt gets its chance and
+          // STUCK ends it — instead of the 15-minute infra backoff that
+          // cgf-portal AX-874 rode twice in an hour on 2026-09-02.
+        } else {
+          result.finalStatus = 'infra_error';
+        }
         broadcastEvent({
           type: 'log',
           data: {
             taskId: task.issueId || task.id,
             stage: 'pr',
-            line: `PR creation failed: ${err instanceof Error ? err.message : String(err)}`,
+            line: `PR creation failed: ${message}`,
           },
         });
       }

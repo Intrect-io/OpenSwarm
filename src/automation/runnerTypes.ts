@@ -47,6 +47,15 @@ export interface AutonomousConfig {
   worktreeMode?: boolean;
   /** Allow concurrent tasks on the same repo (requires worktreeMode). Default true. (INT-1975) */
   allowSameProjectConcurrent?: boolean;
+  /**
+   * Durable admission for a task whose write scope could not be resolved
+   * while another run in the same repository is live. 'admit' (default)
+   * relies on isolated worktrees plus post-merge integration requeue;
+   * 'serialize' is the Codex-era fail-closed hold.
+   */
+  unknownScopeAdmission?: 'serialize' | 'admit';
+  /** Identical-fingerprint infra_error attempts that park a run for the operator (0 disables, default 6). */
+  infraFailureCircuit?: number;
   guards?: Partial<import('../core/types.js').PipelineGuardsConfig>;
   verify?: VerifyConfig;
   securityAudit?: SecurityAuditConfig;
@@ -57,6 +66,8 @@ export interface AutonomousConfig {
   automationLedgerMode?: 'off' | 'shadow' | 'primary';
   /** Override ~/.openswarm/automation.db (primarily tests/operations). */
   automationDbPath?: string;
+  /** Linear project for the daemon's self-filed retrospective issues; unset disables the lane. */
+  retrospectiveProjectId?: string;
   /** Fenced execution lease duration; renewed at one third of this interval. */
   automationLeaseMs?: number;
   /** Grace period for real executor exit during service shutdown. */

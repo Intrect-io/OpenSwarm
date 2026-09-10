@@ -223,3 +223,10 @@ export function formatTaskDescription(input: TaskDescriptionInput): string {
   }
   return body;
 }
+
+/** Inverse of formatTaskDescription's "File scope:" fact line, for dedup comparisons (AGT-2908). */
+export function parseFileScopeFromDescription(description: string): string[] {
+  const match = description.match(/file scope:\s*(.+)/i);
+  if (!match) return [];
+  return match[1].split(',').map((f) => f.trim()).filter(Boolean);
+}

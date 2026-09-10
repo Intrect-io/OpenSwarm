@@ -72,6 +72,10 @@ export const OpenSwarmTaskStateSchema = z.object({
   execution: ExecutionStateSchema.default({ status: 'backlog', retryCount: 0 }),
   worktree: WorktreeStateSchema.default({}),
   updatedAt: z.string(),
+  /** Last time reconcileDependencyBlockers looked this id up. Distinct from
+   *  updatedAt so a worker touching the blocker does not look like a lookup. */
+  dependencyCheckedAt: z.string().optional(),
+  dependencyLookupFailed: z.boolean().optional(),
 });
 
 function createTaskMap(
@@ -397,31 +401,34 @@ export function listTaskStates(): OpenSwarmTaskState[] {
   return Object.values(ensureStoreLoaded().tasks);
 }
 
-export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
-  return withStoreLock(() => {
-    const store = ensureStoreLoaded();
-    const current = store.tasks[issueId] || createDefaultState(issueId);
-    const { execution, worktree, ...topLevelPatch } = patch;
-    const definedTopLevelPatch = Object.fromEntries(
-      Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
-    ) as Partial<OpenSwarmTaskState>;
-    const merged: OpenSwarmTaskState = {
-      ...current,
-      ...definedTopLevelPatch,
-      issueId,
-      childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
-      dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
-      dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
-      fileScope: patch.fileScope ?? current.fileScope ?? [],
-      execution: { ...current.execution, ...execution },
-      worktree: { ...current.worktree, ...worktree },
-      updatedAt: new Date().toISOString(),
-    };
+/** Mutate the in-memory store. Caller MUST hold `withStoreLock`. */
+function upsertTaskStateUnlocked(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
+  const store = ensureStoreLoaded();
+  const current = store.tasks[issueId] || createDefaultState(issueId);
+  const { execution, worktree, ...topLevelPatch } = patch;
+  const definedTopLevelPatch = Object.fromEntries(
+    Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
+  ) as Partial<OpenSwarmTaskState>;
+  const merged: OpenSwarmTaskState = {
+    ...current,
+    ...definedTopLevelPatch,
+    issueId,
+    childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
+    dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
+    dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
+    fileScope: patch.fileScope ?? current.fileScope ?? [],
+    execution: { ...current.execution, ...execution },
+    worktree: { ...current.worktree, ...worktree },
+    updatedAt: new Date().toISOString(),
+  };
 
-    store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
-    persistStore();
-    return store.tasks[issueId];
-  });
+  store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
+  persistStore();
+  return store.tasks[issueId];
+}
+
+export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
+  return withStoreLock(() => upsertTaskStateUnlocked(issueId, patch));
 }
 
 export function enrichTaskFromState(task: TaskItem): TaskItem {
@@ -504,10 +511,16 @@ export function updateTaskLinearState(issueId: string, linearState: string): Ope
   // stale, downgrade it so dependencies do not stay incorrectly resolved or
   // actively running. This is a local-only update; it never writes back to
   // Linear (preserves R7).
-  const current = getTaskState(issueId);
-  const patch = planLinearStateReconciliation(current, linearState);
-  if (patch === null && current) return current;
-  return upsertTaskState(issueId, patch ?? { linearState });
+  //
+  // Patch planning MUST happen under the write lock: a concurrent upsert can
+  // change execution status between an unlocked read and the write, and the
+  // reconciliation would then commit a stale downgrade (or miss one).
+  return withStoreLock(() => {
+    const current = ensureStoreLoaded().tasks[issueId];
+    const patch = planLinearStateReconciliation(current, linearState);
+    if (patch === null && current) return current;
+    return upsertTaskStateUnlocked(issueId, patch ?? { linearState });
+  });
 }
 
 export function markTaskInProgress(
@@ -648,6 +661,21 @@ function isResolved(state: OpenSwarmTaskState | undefined): boolean {
   return state.execution.status === 'done' || state.linearState === 'Done';
 }
 
+function isDependencyTerminalLinearState(linearState: string | undefined): boolean {
+  const name = linearState?.trim().toLowerCase();
+  return name === 'canceled' || name === 'cancelled' || name === 'duplicate';
+}
+
+/** A blocker that can no longer move work forward. Done is the historical
+ *  isResolved contract (parent-completion still uses that). Canceled/Duplicate
+ *  are terminal for dependencies — vela 2026-09-09: Canceled STO-* ids occupied
+ *  maxLookups, and AGT-4115 (Duplicate on Linear, In Progress locally) kept
+ *  AGT-4121 blocked after AGT-4253. Matches trackerTerminalReconciler. */
+function isDependencyTerminal(state: OpenSwarmTaskState | undefined): boolean {
+  if (isResolved(state)) return true;
+  return isDependencyTerminalLinearState(state?.linearState);
+}
+
 export function getTaskReadiness(task: TaskItem): {
   ready: boolean;
   blockedBy: string[];
@@ -667,7 +695,8 @@ export function getTaskReadiness(task: TaskItem): {
     const reactivated =
       linearState === 'Todo' ||
       linearState === 'In Progress' ||
-      linearState === 'In Review';
+      linearState === 'In Review' ||
+      linearState === 'Backlog';
     if (!reactivated) {
       return {
         ready: false,
@@ -683,7 +712,7 @@ export function getTaskReadiness(task: TaskItem): {
     return { ready: true, blockedBy: [] };
   }
 
-  const unresolved = dependencyIssueIds.filter((depId) => !isResolved(getTaskState(depId)));
+  const unresolved = dependencyIssueIds.filter((depId) => !isDependencyTerminal(getTaskState(depId)));
   if (unresolved.length > 0) {
     return {
       ready: false,
@@ -702,7 +731,7 @@ export function releaseDependentTasks(completedIssueId: string): OpenSwarmTaskSt
   for (const state of Object.values(store.tasks)) {
     if (!state.dependencyIssueIds.includes(completedIssueId)) continue;
 
-    const unresolved = state.dependencyIssueIds.filter((depId) => !isResolved(store.tasks[depId]));
+    const unresolved = state.dependencyIssueIds.filter((depId) => !isDependencyTerminal(store.tasks[depId]));
     if (unresolved.length > 0) {
       upsertTaskState(state.issueId, {
         execution: {
@@ -726,6 +755,168 @@ export function releaseDependentTasks(completedIssueId: string): OpenSwarmTaskSt
   }
 
   return released;
+}
+
+/** Structural subset of ITaskSource — avoids importing automation/taskSource.js, which
+ *  already imports enrichTaskFromState from this module. */
+interface DependencyLookupSource {
+  lookupIssueState(issueIdOrIdentifier: string): Promise<
+    | { ok: true; issue: { state: string; stateType?: string } | null }
+    | { ok: false; error: string }
+  >;
+}
+
+export interface DependencyBlockerReconcileOptions {
+  source: DependencyLookupSource | null;
+  /** Issue ids present in the current heartbeat's fresh fetch. A dependency id found
+   *  here is still Todo/In Progress/In Review/Backlog — genuinely open, skip the lookup. */
+  knownTaskIds?: ReadonlySet<string>;
+  now?: number;
+  /** Only reconsider a dependent task that has sat blocked at least this long —
+   *  a decomposition just created seconds ago is not yet stale. */
+  staleAfterMs?: number;
+  maxLookups?: number;
+  /** Skip a blocker looked up this recently — same role as
+   *  reconcileTrackerTerminalRuns' recheckAfterMs. Default 6h. */
+  recheckAfterMs?: number;
+  /** Failed lookups retry sooner than a confirmed-open skip. Default 15m. */
+  errorRecheckAfterMs?: number;
+  /** Dependency ids blocking tasks in this heartbeat's Linear fetch.
+   *  Looked up before the rest of the store so a live queue cannot starve
+   *  behind July KT-* Backlog from projects this daemon does not run. */
+  priorityDepIds?: ReadonlySet<string>;
+}
+
+export interface DependencyBlockerReconcileResult {
+  /** Distinct unresolved dependency ids that were candidates this pass. */
+  eligible: number;
+  lookedUp: number;
+  /** Dependencies confirmed terminal (Done/Cancelled) by a live lookup. */
+  resolved: number;
+  /** Dependent tasks released as a result. */
+  released: number;
+}
+
+/**
+ * Reconcile dependency ids that a Done Linear issue leaves behind.
+ *
+ * `releaseDependentTasks` only fires when the daemon's own pipeline observes a
+ * completion (runnerExecution.ts). A blocker finished through any other path —
+ * merged by a human, completed in a different session — never triggers it, and
+ * getTaskReadiness's fallback to the locally cached `dependencyIssueIds` (used
+ * whenever the fresh Linear fetch's `blockedBy` comes back empty, which it always
+ * does once the blocker is Done and drops out of the slim fetch) then blocks the
+ * dependent forever. Terminal issues are invisible to the regular slim fetch
+ * (Todo/In Progress/In Review/Backlog only), so this is the explicit per-issue
+ * read that can see them — same shape as reconcileTrackerTerminalRuns, applied to
+ * taskState instead of the durable ledger.
+ *
+ * Canceled/Cancelled blockers are terminal for dependents (isDependencyTerminal)
+ * even though isResolved stays Done-only for completeParentIfChildrenDone.
+ * Live vela 2026-09-09: 20 locally-Canceled STO-* ids occupied maxLookups
+ * every heartbeat, so AGT-4207 (157th, Linear already Done) was never reached.
+ *
+ * Lookups are capped. Candidates due for a check are sorted heartbeat-priority
+ * first (deps of tasks in this fetch), then never-checked, then oldest-checked.
+ * A lookup — success or fail-closed — stamps dependencyCheckedAt so the same
+ * 20 cannot consume the cap on the next heartbeat.
+ *
+ * Only tasks still in a not-yet-executed phase (todo/ready/blocked) are
+ * considered. dependencyIssueIds is never cleared once a task moves on (done,
+ * in_progress, decomposed, ...) — without this filter, an unrelated stale
+ * dependency entry left on an already-finished task would get resolved by this
+ * sweep and incorrectly reset that task's status back to 'todo' via
+ * releaseDependentTasks. A dependent isn't necessarily marked 'blocked' up
+ * front — getTaskReadiness gates on dependencyIssueIds at read time regardless
+ * of the stored execution.status, and only releaseDependentTasks itself writes
+ * 'blocked' when it finds a dependency still outstanding — so 'todo'/'ready'
+ * both need to stay in scope, not just 'blocked'.
+ */
+const DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES = new Set<TaskExecutionStatus>(['todo', 'ready', 'blocked']);
+
+function blockerCheckedAtMs(state: OpenSwarmTaskState | undefined): number {
+  if (!state?.dependencyCheckedAt) return 0;
+  const ms = Date.parse(state.dependencyCheckedAt);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function blockerUpdatedAtMs(state: OpenSwarmTaskState | undefined): number {
+  if (!state?.updatedAt) return 0;
+  const ms = Date.parse(state.updatedAt);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+export async function reconcileDependencyBlockers(
+  options: DependencyBlockerReconcileOptions,
+): Promise<DependencyBlockerReconcileResult> {
+  const result: DependencyBlockerReconcileResult = { eligible: 0, lookedUp: 0, resolved: 0, released: 0 };
+  const { source } = options;
+  if (!source) return result;
+
+  const now = options.now ?? Date.now();
+  const staleAfterMs = options.staleAfterMs ?? 60 * 60_000;
+  const recheckAfterMs = options.recheckAfterMs ?? 6 * 60 * 60_000;
+  const errorRecheckAfterMs = options.errorRecheckAfterMs ?? 15 * 60_000;
+  const maxLookups = Math.max(1, Math.floor(options.maxLookups ?? 20));
+  const knownTaskIds = options.knownTaskIds ?? new Set<string>();
+  const priorityDepIds = options.priorityDepIds ?? new Set<string>();
+
+  const byId = new Map<string, { depId: string; lastChecked: number; lastSeen: number; priority: number }>();
+  for (const state of listTaskStates()) {
+    if (!DEPENDENCY_RECONCILE_ELIGIBLE_STATUSES.has(state.execution.status)) continue;
+    if (state.dependencyIssueIds.length === 0) continue;
+    const updatedAtMs = Date.parse(state.updatedAt);
+    // Current-fetch dependents are upserted this heartbeat, so updatedAt is
+    // always fresh. Skipping them is why AGT-4121 stayed blocked after AGT-4254
+    // shipped: its six Linear-Done blockers were never eligible for lookup.
+    const fromCurrentFetch = knownTaskIds.has(state.issueId);
+    if (!fromCurrentFetch && Number.isFinite(updatedAtMs) && now - updatedAtMs < staleAfterMs) continue;
+    for (const depId of state.dependencyIssueIds) {
+      if (isDependencyTerminal(getTaskState(depId))) continue;
+      if (knownTaskIds.has(depId)) continue; // still open per this fetch — not stale
+      if (byId.has(depId)) continue;
+      const blocker = getTaskState(depId);
+      const lastChecked = blockerCheckedAtMs(blocker);
+      const skipFor = blocker?.dependencyLookupFailed ? errorRecheckAfterMs : recheckAfterMs;
+      if (lastChecked > 0 && now - lastChecked < skipFor) continue;
+      byId.set(depId, {
+        depId,
+        lastChecked,
+        lastSeen: blockerUpdatedAtMs(blocker),
+        priority: priorityDepIds.has(depId) ? 1 : 0,
+      });
+    }
+  }
+  const candidates = [...byId.values()].sort(
+    (a, b) => b.priority - a.priority || a.lastChecked - b.lastChecked || a.lastSeen - b.lastSeen || a.depId.localeCompare(b.depId),
+  );
+  result.eligible = candidates.length;
+
+  const checkedAt = new Date(now).toISOString();
+  for (const { depId } of candidates) {
+    if (result.lookedUp >= maxLookups) break;
+    let lookup: Awaited<ReturnType<DependencyLookupSource['lookupIssueState']>>;
+    try {
+      lookup = await source.lookupIssueState(depId);
+    } catch (error) {
+      lookup = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    result.lookedUp++;
+    if (lookup.ok && lookup.issue) {
+      updateTaskLinearState(depId, lookup.issue.state);
+      upsertTaskState(depId, { dependencyCheckedAt: checkedAt, dependencyLookupFailed: false });
+    } else {
+      // Stamp on fail-closed so a persistent lookup error cannot monopolize
+      // the cap. Retries after errorRecheckAfterMs (15m), not recheckAfterMs (6h).
+      upsertTaskState(depId, { dependencyCheckedAt: checkedAt, dependencyLookupFailed: true });
+    }
+    if (isDependencyTerminal(getTaskState(depId))) {
+      result.resolved++;
+      result.released += releaseDependentTasks(depId).length;
+    }
+  }
+
+  return result;
 }
 
 export function completeParentIfChildrenDone(childIssueId: string): OpenSwarmTaskState | null {

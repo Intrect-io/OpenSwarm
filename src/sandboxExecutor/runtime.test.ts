@@ -3,6 +3,7 @@ import {
   configureSandboxExecutor,
   getSandboxExecutorConfig,
   resetSandboxExecutorForTests,
+  wireSandboxExecutorIfEnabled,
 } from './runtime.js';
 
 const config = {
@@ -36,5 +37,13 @@ describe('sandbox executor process capability', () => {
     expect(getSandboxExecutorConfig()?.allowedRoots).toEqual(['/work']);
     expect(() => getSandboxExecutorConfig()!.allowedRoots.push('/work/attacker')).toThrow();
     expect(getSandboxExecutorConfig()?.allowedRoots).toEqual(['/work']);
+  });
+
+  it('ignores a disabled executor block and wires an enabled one without humanSurfaceReadOnly', () => {
+    wireSandboxExecutorIfEnabled({ ...config, enabled: false });
+    expect(getSandboxExecutorConfig()).toBeUndefined();
+
+    wireSandboxExecutorIfEnabled({ ...config, enabled: true });
+    expect(getSandboxExecutorConfig()).toEqual(config);
   });
 });

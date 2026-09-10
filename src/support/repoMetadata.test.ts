@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadRepoMetadata, saveRepoMetadata, REPO_METADATA_FILENAME, RepoMetadataError } from './repoMetadata.js';
+import { loadPublicationFreshReview, loadRepoMetadata, saveRepoMetadata, REPO_METADATA_FILENAME, RepoMetadataError } from './repoMetadata.js';
 
 describe('loadRepoMetadata', () => {
   let dir: string;
@@ -66,11 +66,59 @@ describe('loadRepoMetadata', () => {
     expect(meta?.automation).toEqual({
       enabled: true,
       maxConcurrent: 2,
-      maxAttemptsPerHour: 12,
       maxFailuresPerHour: 6,
       maxCostUsdPerDay: 5,
       circuitCooldownMinutes: 60,
     });
+  });
+
+  it('does not inject a hidden maxConcurrent of 1 when the key is omitted', async () => {
+    writeFileSync(
+      join(dir, REPO_METADATA_FILENAME),
+      JSON.stringify({ schemaVersion: 1, automation: { enabled: true } }),
+    );
+    const meta = await loadRepoMetadata(dir);
+    expect(meta?.automation?.maxConcurrent).toBeUndefined();
+    expect(meta?.automation?.maxAttemptsPerHour).toBeUndefined();
+  });
+
+  it('accepts a per-repo cap up to the daemon global maximum', async () => {
+    writeFileSync(
+      join(dir, REPO_METADATA_FILENAME),
+      JSON.stringify({ schemaVersion: 1, automation: { maxConcurrent: 64 } }),
+    );
+    await expect(loadRepoMetadata(dir)).resolves.toMatchObject({
+      automation: { maxConcurrent: 64 },
+    });
+  });
+
+  // AGT-4270: opt-OUT, not opt-in. It was opt-in while the per-attempt reviewer
+  // was switched off in its favour, and no repository ever opted in — so the
+  // loop published pull requests no LLM had read (2 of 28 mergeable as they
+  // stood, 2026-09-09). Only an explicit `false` turns it off now. Reading it
+  // must still not drag the `automation` block's admission defaults along.
+  it('runs the publication fresh review unless a repository opts out', async () => {
+    // No openswarm.json at all — the common case, and the one that was silent.
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
+
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: { freshReview: true } }));
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
+    const meta = await loadRepoMetadata(dir);
+    expect(meta?.publication).toEqual({ freshReview: true });
+    expect(meta?.automation).toBeUndefined();
+
+    // A publication block that says nothing about reviews still gets one.
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: {} }));
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
+
+    // Only this turns it off.
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, publication: { freshReview: false } }));
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(false);
+
+    // An unreadable file must not be read as an opt-out: reviewing anyway
+    // costs one review, skipping publishes an unread PR.
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), '{ not json');
+    await expect(loadPublicationFreshReview(dir)).resolves.toBe(true);
   });
 
   it('throws RepoMetadataError on invalid JSON', async () => {

@@ -34,6 +34,7 @@ import {
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
+import { adapterFetch } from './httpDispatcher.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 // Picked from the Atlas pool benchmark (benchmarks/, INT-3106): v4-flash passed
@@ -77,7 +78,7 @@ function catalogSpec(): CatalogSpec {
         }
       }
       if (!apiKey) return [];
-      const res = await fetch(`${OPENROUTER_API_BASE}/models`, {
+      const res = await adapterFetch(`${OPENROUTER_API_BASE}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
@@ -193,6 +194,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
       coordinationContext: options.coordinationContext,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'openrouter', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -200,7 +202,9 @@ export class OpenRouterCliAdapter implements CliAdapter {
       options.onLog?.(
         `[OpenRouter] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens`,
       );
-      return loopResultToCliResult(result);
+      const cli = loopResultToCliResult(result);
+      if (cli.costInfo) cli.costInfo.model = model;
+      return cli;
     } catch (err) {
       // Rate-limit AND infra/capacity errors must propagate (pause / infra_error),
       // not be buried in a fake failed result the worker reads as an empty success. (INT-1906, INT-2520)
@@ -268,7 +272,15 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
       // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
       // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
-      body.provider = { data_collection: 'deny' };
+      //
+      // sort: 'throughput' picks the fastest ZDR-eligible endpoint instead of
+      // OpenRouter's default (load-balanced / cheapest-first) order. The
+      // 2026-06-09 worker benchmark found the same model 5x slower on one
+      // provider than another (qwen3-coder: 2759 tok/s on DeepInfra vs 160 on
+      // Novita) — provider, not model choice, was the dominant speed factor.
+      // A slow provider burns a stage's turn/timeout budget for no quality
+      // gain, so throughput is worth more here than shaving cents off price.
+      body.provider = { data_collection: 'deny', sort: 'throughput' };
     }
     // 추론 불필요 역할은 reasoning 토큰을 끈다. glm-4.7-flash처럼 non-thinking
     // 모델엔 무영향, 추론형 모델(glm-5 등)을 worker로 바꿔도 토큰 낭비를 막는다.
@@ -283,7 +295,7 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     }
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
       const request = prepareApprovedModelRequest(`${OPENROUTER_API_BASE}/chat/completions`, body);
-      const res = await fetch(request.url, {
+      const res = await adapterFetch(request.url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,

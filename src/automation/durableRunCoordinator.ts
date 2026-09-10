@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { getInstanceId } from '../support/healthEndpoint.js';
+import { DEFAULT_INFRA_FAILURE_CIRCUIT, INFRA_CIRCUIT_PARK_REASON, infraFailureFingerprint } from './infraFailureCircuit.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
@@ -13,6 +14,7 @@ import {
   type RunClaim,
   type RunLedgerMode,
   type RunRecord,
+  type ParkResumeTrigger,
   type RunState,
   type TrackerStateObservation,
 } from './runLedger.js';
@@ -23,6 +25,7 @@ import {
   OPERATOR_QUESTION_PARK_REASON,
 } from '../coordination/operatorAnswers.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
+import type { CoordinatorResolution } from './coordinatorResolution.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -41,6 +44,12 @@ export interface DurableRunCoordinatorConfig {
    * already fully expired once, so this is a second, independent wait.
    */
   reconcileAbandonMs?: number;
+  /**
+   * Consecutive infra_error attempts with one failure fingerprint after which
+   * the run parks for the operator instead of backing off again. 0 disables.
+   * Default 6.
+   */
+  infraFailureCircuit?: number;
 }
 
 export interface ExecutionDurabilityHooks {
@@ -56,12 +65,24 @@ export interface DurableExecuteOptions {
   /** Service shutdown is a resumable interruption, unlike an operator cancel. */
   retryCancellation?: (result: PipelineResult, claim: RunClaim) => boolean;
   admission?: RepositoryAdmissionPolicy;
+  /**
+   * Resolve a deterministic operator park before it is committed to
+   * NEEDS_HUMAN. The callback is pure policy; tracker/ledger side effects stay
+   * in this coordinator so a completion or bounded retry cannot split state.
+   */
+  resolveOperatorPark?: (
+    task: TaskItem,
+    result: PipelineResult,
+    attemptNo: number,
+  ) => CoordinatorResolution | undefined;
 }
 
 export interface RepositoryAdmissionPolicy {
   maxConcurrent?: number;
   /** Predicted repository-relative write set used for atomic conflict admission. */
   conflictScope?: string[];
+  /** Whether an unknown scope serializes against live same-repo runs or is admitted (default admit). */
+  unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;
   maxCostUsdPerDay?: number;
@@ -104,6 +125,7 @@ function fencedResult(result: PipelineResult): PipelineResult {
     ...result,
     success: false,
     finalStatus: 'infra_error',
+    failureDetail: 'durable completion: lease fence rejected result from an expired or replaced owner',
     failureSignal: result.failureSignal ?? 'timeout',
   };
 }
@@ -215,6 +237,7 @@ export class DurableRunCoordinator {
   private readonly ownsLedger: boolean;
   private readonly leaseMs: number;
   private readonly maxActiveForProject: number;
+  private readonly infraFailureCircuit: number;
   private readonly processIsAlive: (pid: number) => boolean;
   private readonly reconcileAbandonMs: number;
   private readonly exitedClaims = new Map<string, RunClaim>();
@@ -222,9 +245,12 @@ export class DurableRunCoordinator {
 
   constructor(config: DurableRunCoordinatorConfig) {
     this.mode = config.mode;
-    this.instanceId = config.instanceId ?? `${process.pid}-${randomUUID()}`;
+    // Share the per-process id the worktree markers are stamped with, so a
+    // ledger owner id names the same generation as the marker it wrote.
+    this.instanceId = config.instanceId ?? `${process.pid}-${getInstanceId()}`;
     this.leaseMs = config.leaseMs ?? 10 * 60_000;
     this.maxActiveForProject = Math.max(1, Math.floor(config.maxActiveForProject ?? 1));
+    this.infraFailureCircuit = Math.max(0, Math.floor(config.infraFailureCircuit ?? DEFAULT_INFRA_FAILURE_CIRCUIT));
     this.processIsAlive = config.processIsAlive ?? processIsAlive;
     this.reconcileAbandonMs = config.reconcileAbandonMs ?? this.leaseMs;
     if (this.leaseMs < 3_000) throw new Error('Durable run lease must be at least 3000ms');
@@ -409,8 +435,8 @@ export class DurableRunCoordinator {
     return this.ledger?.markNeedsHumanForQuestions(issueId, correlationIds, reason, now) ?? false;
   }
 
-  resumeNeedsHuman(issueId: string, now = Date.now()): RunState | null {
-    return this.ledger?.resumeNeedsHuman(issueId, now) ?? null;
+  resumeNeedsHuman(issueId: string, now = Date.now(), trigger: ParkResumeTrigger = 'unspecified'): RunState | null {
+    return this.ledger?.resumeNeedsHuman(issueId, now, trigger) ?? null;
   }
 
   resumeNeedsHumanForQuestions(issueId: string, now = Date.now()): RunState | null {
@@ -477,6 +503,7 @@ export class DurableRunCoordinator {
       leaseMs: this.leaseMs,
       maxActiveForProject: options.admission?.maxConcurrent ?? this.maxActiveForProject,
       conflictScope: options.admission?.conflictScope,
+      unknownScopeAdmission: options.admission?.unknownScopeAdmission,
       maxAttemptsPerHour: options.admission?.maxAttemptsPerHour,
       maxFailuresPerHour: options.admission?.maxFailuresPerHour,
       maxCostUsdPerDay: options.admission?.maxCostUsdPerDay,
@@ -610,6 +637,35 @@ export class DurableRunCoordinator {
     }
 
     if (leaseLost) return fencedResult(result);
+    // A deterministic park is normally terminal. A repository-authored DoD
+    // contract may, however, make two narrow outcomes coordinator-owned:
+    // explicitly accepted no-change work can complete through the normal
+    // outbox, and an ephemeral-only publication fence may receive one bounded
+    // retry. Resolve before recording the attempt so the durable row records
+    // the outcome that actually governs the next state.
+    if (result.operatorPark && options.resolveOperatorPark) {
+      const resolution = options.resolveOperatorPark(task, result, claim.attemptNo);
+      if (resolution?.action === 'complete') {
+        result = {
+          ...result,
+          success: true,
+          finalStatus: 'approved',
+          operatorPark: undefined,
+          coordinatorResolution: { action: 'complete', reason: resolution.reason },
+        };
+      } else if (resolution?.action === 'retry') {
+        result = {
+          ...result,
+          success: false,
+          finalStatus: 'deferred',
+          retryAt: resolution.retryAt,
+          operatorPark: undefined,
+          coordinatorResolution: { action: 'retry', reason: resolution.reason },
+          failureDetail: `coordinator: ${resolution.reason}`,
+        };
+      }
+    }
+
     // GitHub publication is an external side effect. If it succeeded but the
     // pipeline could not durably attach/finalize it, execution must stop here:
     // a normal RETRY_AT would allow another worker to mutate the published
@@ -677,8 +733,10 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'superseded') {
+      // Back off on how many times in a row a sibling has claimed the files,
+      // not on how many attempts of any kind the run has behind it.
       return this.ledger.transition(claim, 'RETRY_AT', {
-        retryAt: retryAtFor(result, now, claim.attemptNo),
+        retryAt: retryAtFor(result, now, this.ledger.consecutiveSupersessions(issueId) + 1),
         errorCode: result.finalStatus,
         eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
       }, now) ? result : fencedResult(result);
@@ -723,6 +781,42 @@ export class DurableRunCoordinator {
       // default RETRY_AT below is the fail-closed compatibility path.
     }
 
+    const detail = pickPipelineFailureDetail(result);
+
+    // A deterministic failure the pipeline has already attributed to the
+    // operator (publication-scope fence, …): retrying reproduces it exactly.
+    if (result.operatorPark) {
+      const { code, reason } = result.operatorPark;
+      return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+        errorCode: code,
+        errorMessage: reason,
+        eventKind: 'operator_parked',
+        eventData: { sessionId: result.sessionId, code, reason },
+      }, now) ? result : fencedResult(result);
+    }
+
+    // An infrastructure failure is not counted toward STUCK, and rightly so:
+    // a provider blip is not the task's fault. But the same infrastructure
+    // failure on every attempt is not a blip, and retrying it forever is how
+    // vela spent 140 attempts on 2026-09-01 — CodeQL extractor missing, a
+    // sandbox socket not mounted — and produced nothing. Once the identical
+    // fingerprint has repeated across the configured number of attempts, the
+    // cause is durable and an operator has to change something; park with
+    // the cause named, where `openswarm work` can redispatch it afterwards.
+    if (result.finalStatus === 'infra_error' && this.infraFailureCircuit > 0) {
+      const fingerprint = infraFailureFingerprint(detail);
+      const prior = fingerprint ? this.ledger.consecutiveIdenticalInfraFailures(issueId, fingerprint) : 0;
+      if (prior + 1 >= this.infraFailureCircuit) {
+        const reason = `Identical infrastructure failure on ${prior + 1} consecutive attempts: ${detail ?? 'no detail'}`;
+        return this.ledger.transition(claim, 'NEEDS_HUMAN', {
+          errorCode: INFRA_CIRCUIT_PARK_REASON,
+          errorMessage: reason,
+          eventKind: 'infra_circuit_parked',
+          eventData: { sessionId: result.sessionId, fingerprint, attempts: prior + 1 },
+        }, now) ? result : fencedResult(result);
+      }
+    }
+
     let target: RunState;
     switch (result.finalStatus) {
       case 'rate_limited':
@@ -734,7 +828,7 @@ export class DurableRunCoordinator {
     const transitioned = this.ledger.transition(claim, target, {
       retryAt: target === 'RETRY_AT' ? retryAtFor(result, now) : null,
       errorCode: result.finalStatus,
-      errorMessage: pickPipelineFailureDetail(result),
+      errorMessage: detail,
       eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
     }, now);
     return transitioned ? result : fencedResult(result);
@@ -748,7 +842,13 @@ export class DurableRunCoordinator {
     for (const run of this.ledger.listRuns(['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING'])) {
       if (!run.ownerInstanceId || !run.leaseToken) continue;
       const pid = ownerProcessId(run.ownerInstanceId);
-      if (pid == null || this.processIsAlive(pid)) continue;
+      // Docker commonly gives a replacement daemon the same container PID.
+      // The PID probe then finds *this* process even though the persisted UUID
+      // belongs to the daemon generation that was just stopped. A PID cannot
+      // belong to two generations, so this exact mismatch proves the recorded
+      // executor exited and avoids idling the repository for a full lease.
+      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
+      if (pid != null && this.processIsAlive(pid) && !samePidDifferentGeneration) continue;
       const ownership = {
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -802,7 +902,8 @@ export class DurableRunCoordinator {
       // renewal (multiple consecutive misses, not one) before this frees the
       // row, purely as a fallback for when the pid probe can't be trusted.
       const abandonedByAge = now - run.updatedAt >= this.reconcileAbandonMs;
-      if (!abandonedByAge && (pid == null || this.processIsAlive(pid))) continue;
+      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
+      if (!abandonedByAge && !samePidDifferentGeneration && (pid == null || this.processIsAlive(pid))) continue;
       this.confirmExitedClaim({
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -813,6 +914,28 @@ export class DurableRunCoordinator {
       }, now);
     }
     return reconciled;
+  }
+
+  /**
+   * Marker owner ids (`getInstanceId()` values) of every executor that once
+   * claimed this run and no longer holds its lease.
+   *
+   * A worktree marker from another pid namespace cannot be judged by pid, so
+   * the marker code trusts it for a full day. But an owner our own ledger has
+   * already released is not "another container": it is a previous generation
+   * of this daemon, and the ledger has proven its claim dead by a full lease
+   * of silence. Naming those ids lets recovery release their markers now
+   * rather than after the 24h window — which otherwise parks every in-flight
+   * run for a day on each container recreate.
+   */
+  deadMarkerOwners(issueId: string): string[] {
+    if (!this.ledger) return [];
+    const run = this.ledger.getRun(issueId);
+    const live = run?.ownerInstanceId;
+    return this.ledger.listClaimOwners(issueId)
+      .filter((owner) => owner !== live && owner !== this.instanceId)
+      .map((owner) => owner.replace(/^\d+-/, ''))
+      .filter((owner) => owner !== getInstanceId());
   }
 
   getProtectedWorktreePaths(projectPath?: string): Set<string> {

@@ -1,15 +1,29 @@
 # Build and publish the OpenSwarm daemon image to GHCR.
 #
-# Triggered by the GitHub release that release.yml creates after an npm
-# publish, so the image version always matches a published npm version.
-# workflow_dispatch exists for rebuilding an image (base-image CVE, Dockerfile
-# fix) without cutting a new release.
+# `release: published` never actually fires here on its own: release.yml's
+# `gh release create` runs under the default GITHUB_TOKEN, and GitHub
+# deliberately does not let a GITHUB_TOKEN-authored event trigger another
+# workflow (loop prevention) — confirmed 2026-09-03 by zero runs of this
+# workflow ever, across every prior release. release.yml instead calls
+# `gh workflow run docker-publish.yml -f version=<x.y.z>` right after
+# creating the release; a `workflow_dispatch` triggered via the API this way
+# is exempt from that restriction. The `version` input lets that dispatch
+# produce the same semver + latest tags a native release event would
+# (docker/metadata-action's `value=` override below), instead of just a
+# `:main` branch tag. workflow_dispatch WITHOUT a version (e.g. a manual
+# rebuild for a base-image CVE, no new release) still works — it falls back
+# to the plain branch tag.
 name: Docker Publish
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to tag (e.g. 0.21.6) — set by release.yml. Leave empty for a plain branch-tag rebuild.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -36,17 +50,20 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/openswarm
-          # On a release event this yields the semver tags (0.21.1 / 0.21 / latest);
-          # a manual dispatch from a branch yields a branch tag instead of
-          # clobbering latest.
+          # On a release event, or a workflow_dispatch carrying `version`
+          # (release.yml's own trigger — see the file header), this yields
+          # the semver tags (0.21.1 / 0.21 / latest) via the explicit
+          # `value=` override on the dispatch path. A bare manual dispatch
+          # (no version input) yields a branch tag instead of clobbering
+          # latest.
           # latest=auto attaches `latest` to semver tags only — pinned here so
           # a future metadata-action default change cannot silently stop
           # updating `latest` on releases.
           flavor: |
             latest=auto
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=v${{ github.event.inputs.version }},enable=${{ github.event.inputs.version != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ github.event.inputs.version }},enable=${{ github.event.inputs.version != '' }}
             type=ref,event=branch
 
       - uses: docker/build-push-action@v6

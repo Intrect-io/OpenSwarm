@@ -107,6 +107,22 @@ describe('RunLedger state machine', () => {
   });
 });
 
+describe('RunLedger claim-owner history', () => {
+  it('lists every executor that ever claimed the run, newest first, without duplicates', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'OWNERS-1');
+    const first = claim(ledger, 'OWNERS-1', '7-first-generation', 2_000);
+    expect(ledger.transition(first, 'RETRY_AT', { retryAt: 2_500 }, 2_100)).toBe(true);
+    const second = claim(ledger, 'OWNERS-1', '7-second-generation', 3_000);
+    expect(ledger.transition(second, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
+    claim(ledger, 'OWNERS-1', '7-second-generation', 4_000);
+
+    expect(ledger.listClaimOwners('OWNERS-1')).toEqual(['7-second-generation', '7-first-generation']);
+    expect(ledger.listClaimOwners('never-registered')).toEqual([]);
+    ledger.close();
+  });
+});
+
 describe('RunLedger tracker observation cache (AGT-4127)', () => {
   it('preserves the row and recovery fields while closing a stale run from tracker truth', () => {
     const ledger = new RunLedger(createDbPath());
@@ -241,6 +257,28 @@ describe('RunLedger operator re-admission (AGT-4033)', () => {
     expect(ledger.claimRun('AGT-1', {
       ownerInstanceId: 'daemon', leaseMs: 1_000, maxActiveForProject: 1, now: 2_000,
     })).toBeNull();
+
+    ledger.close();
+  });
+
+  it('idle_fill is the only generic trigger that lifts an unanswered ask_human park (AGT-4257)', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'AX-4257');
+    const claimed = claim(ledger, 'AX-4257', 'daemon');
+    expect(ledger.transition(claimed, 'RETRY_AT', {
+      retryAt: 99_000,
+      errorCode: 'waiting_on_operator',
+    }, 1_100)).toBe(true);
+    expect(ledger.markNeedsHumanForQuestions(
+      'AX-4257', ['hq-idle'], 'waiting for operator', 1_200,
+    )).toBe(true);
+    expect(ledger.getRun('AX-4257')?.state).toBe('NEEDS_HUMAN');
+
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_300)).toBeNull();
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_300, 'tracker_todo')).toBeNull();
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_300, 'explicit_dispatch')).toBeNull();
+    expect(ledger.resumeNeedsHuman('AX-4257', 1_400, 'idle_fill')).toBe('READY');
+    expect(ledger.getRun('AX-4257')?.state).toBe('READY');
 
     ledger.close();
   });
@@ -432,7 +470,7 @@ describe('RunLedger claim and fencing races', () => {
     ledger.close();
   });
 
-  it('fails closed when a parallel claim explicitly supplies an unknown scope', () => {
+  it('fails closed when a parallel claim supplies an unknown scope under serialize', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'KNOWN', '/same-repo', ['src/known.ts']);
     register(ledger, 'UNKNOWN', '/same-repo');
@@ -442,8 +480,30 @@ describe('RunLedger claim and fencing races', () => {
     })).not.toBeNull();
     expect(ledger.claimRun('UNKNOWN', {
       ownerInstanceId: 'unknown', leaseMs: 1_000, now: 2_001,
-      maxActiveForProject: 2, conflictScope: [],
+      maxActiveForProject: 2, conflictScope: [], unknownScopeAdmission: 'serialize',
     })).toBeNull();
+    ledger.close();
+  });
+
+  // vela 2026-09-02: 9 of 12 slots idle because every repository serialized
+  // to one unscoped run. The operator can now choose to rely on isolated
+  // worktrees and post-merge integration requeue instead.
+  it('admits unknown scopes on either side under unknownScopeAdmission=admit, still refusing a known overlap', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'UNKNOWN-1', '/same-repo');
+    register(ledger, 'UNKNOWN-2', '/same-repo');
+    register(ledger, 'KNOWN-A', '/same-repo', ['src/a.ts']);
+    register(ledger, 'KNOWN-A2', '/same-repo', ['src/a.ts']);
+    const admit = { leaseMs: 1_000, maxActiveForProject: 4, unknownScopeAdmission: 'admit' as const };
+
+    expect(ledger.claimRun('UNKNOWN-1', { ...admit, ownerInstanceId: 'u1', now: 2_000, conflictScope: [] })).not.toBeNull();
+    // Unknown next to unknown.
+    expect(ledger.claimRun('UNKNOWN-2', { ...admit, ownerInstanceId: 'u2', now: 2_001, conflictScope: [] })).not.toBeNull();
+    // Known next to unknown actives.
+    expect(ledger.claimRun('KNOWN-A', { ...admit, ownerInstanceId: 'a', now: 2_002, conflictScope: ['src/a.ts'] })).not.toBeNull();
+    // Known overlap is still a conflict.
+    expect(ledger.claimRun('KNOWN-A2', { ...admit, ownerInstanceId: 'a2', now: 2_003, conflictScope: ['src/a.ts'] })).toBeNull();
+    expect(ledger.listRuns(['CLAIMED'])).toHaveLength(3);
     ledger.close();
   });
 

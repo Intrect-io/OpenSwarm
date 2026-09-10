@@ -4,7 +4,9 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { withoutBookkeeping } from '../agents/siblingWorkFormat.js';
 import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
+import { isEphemeralWorktreeArtifact } from './worktreeEphemeral.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 5 * 60_000;
@@ -35,7 +37,11 @@ export async function assertBranchWithinWriteScope(
     ['-C', worktreePath, 'diff', '--name-only', `${baseRef}...HEAD`],
     { timeout: GIT_TIMEOUT_MS },
   );
-  const changed = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  // The graph exporter writes these managed files into every worktree. They
+  // are not task-owned source edits and are already ignored by the sibling
+  // overlap advisory; apply the same rule before rejecting a branch publish.
+  const changed = withoutBookkeeping(stdout.split('\n').map((line) => line.trim()).filter(Boolean))
+    .filter((file) => !isEphemeralWorktreeArtifact(file));
   const outsideScope = filesOutsideWriteScope(changed, fileScope);
   if (outsideScope.length > 0) throw new PublicationScopeMismatchError(outsideScope);
 }

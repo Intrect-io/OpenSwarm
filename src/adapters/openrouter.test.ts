@@ -12,6 +12,20 @@ import { RateLimitError } from './rateLimitError.js';
 import { getAdapter } from './index.js';
 import type { ChatMessage } from './agenticLoop.js';
 
+// Adapters send HTTPS traffic through undici's own fetch with a shared HTTP/1.1
+// dispatcher (AGT-4220), so `vi.stubGlobal('fetch', ...)` alone no longer
+// intercepts it. Delegating the module's fetch to the global keeps every
+// existing stub in this file meaningful, and the init object — `dispatcher`
+// included — still reaches the stub, so it stays assertable.
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return {
+    ...actual,
+    fetch: (url: unknown, init: unknown) => (globalThis.fetch as unknown as (u: unknown, i: unknown) => unknown)(url, init),
+  };
+});
+
+
 describe('OpenRouterCliAdapter', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -123,7 +137,7 @@ describe('OpenRouterCliAdapter', () => {
     const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
     await callApi([{ role: 'user', content: 'hi' }], []);
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.provider).toEqual({ data_collection: 'deny' });
+    expect(body.provider).toEqual({ data_collection: 'deny', sort: 'throughput' });
     expect(body.reasoning).toBeUndefined(); // not disabled unless requested
   });
 

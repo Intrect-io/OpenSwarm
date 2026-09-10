@@ -95,4 +95,28 @@ describe('deterministic verification trust inputs', () => {
       [{ name: 'strict-check', run: 'printf host-fallback-would-pass', kind: 'test', timeoutMs: 1_000 }],
     )).rejects.toThrow(/verify-security:.*strict-check.*sandbox unavailable/);
   });
+
+  it('uses the companion for verify-security even when humanSurfaceReadOnly is off', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-companion-no-hsr-'));
+    const repo = join(root, 'repo');
+    await mkdir(repo);
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+    await writeFile(join(repo, 'README.md'), 'base\n');
+    execFileSync('git', ['-C', repo, 'add', 'README.md']);
+    execFileSync('git', ['-C', repo, 'commit', '-m', 'base'], { stdio: 'pipe' });
+    configureSandboxExecutor({
+      ...DEFAULT_SANDBOX_EXECUTOR_LIMITS,
+      socketPath: join(root, 'missing.sock'),
+      allowedRoots: [root],
+      connectTimeoutMs: 50,
+    });
+
+    await expect(runDeterministicTester(
+      repo,
+      { enabled: true, blockOnNewFailures: false, maxCommands: 1 },
+      [{ name: 'typecheck', run: 'printf host-bwrap-would-fail', kind: 'lint', timeoutMs: 1_000 }],
+    )).rejects.toThrow(/verify-security: typecheck could not run inside the attested companion/);
+  });
 });

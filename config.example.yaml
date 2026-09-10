@@ -74,6 +74,15 @@ autonomous:
   stalledInProgressHours: 6
   worktreeMode: true  # Required for same-project parallel tasks
   allowSameProjectConcurrent: true
+  # What durable admission does with a task whose write scope could not be
+  # resolved while another run in the same repository is live. admit (default)
+  # relies on isolated worktrees; serialize is the Codex-era fail-closed hold.
+  # unknownScopeAdmission: admit
+  # An infrastructure failure is not the task's fault and is never counted
+  # toward STUCK — but the same infrastructure failure on this many consecutive
+  # attempts is not a blip. Park the run for the operator with the cause named
+  # instead of backing off forever (`openswarm work` redispatches it). 0 disables.
+  # infraFailureCircuit: 6
   # maxConcurrentPerProject: 64  # Optional hard cap; omit for weighted, work-conserving project fairness
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
@@ -136,6 +145,12 @@ autonomous:
   decomposition:
     enabled: true                    # Enable decomposition
     thresholdMinutes: 30             # Decompose if estimated time exceeds this
+    # maxChildrenPerTask: structural cap on any one parent — shared by the
+    # autonomous runner and human `/plan` dispatch (AGT-4123 Option 2).
+    maxChildrenPerTask: 5
+    # dailyLimit: paces unsupervised automation only. `/plan` enforces the
+    # child cap above but does not reserve against this budget (AGT-4123).
+    dailyLimit: 20
     plannerModel: gpt-5.6-sol         # High-leverage decomposition stays on Sol
 
   # Backlog grooming (Planner compares fetched open queue states against the repo).
@@ -184,10 +199,12 @@ autonomous:
     blockOnNewFailures: true
     maxCommands: 4
 
-  # CodeQL security baseline-diff gate. This also applies to PR auto-remediation.
-  # CodeQL must be preinstalled on an absolute PATH; tool absence blocks an edit.
+  # CodeQL security baseline-diff gate. Off by default: a full audit is minutes
+  # to tens of minutes per language and parked autonomous PRs (AGT-4160).
+  # Set enabled: true only when CodeQL is installed and latency is acceptable.
+  # Tool absence still blocks an edit when this is on.
   securityAudit:
-    enabled: true
+    enabled: false
     maxThreads: 2
     # Memory target passed to each CodeQL run, in MB. Best-effort by CodeQL's
     # own account — a large database can still exceed it.

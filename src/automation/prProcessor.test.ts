@@ -227,11 +227,11 @@ describe('PRProcessor.fixOne (INT-3282)', () => {
     expect(args?.[9]).toBe(securityAudit);
   });
 
-  it('enables the default CodeQL policy when no autonomous configuration exists', async () => {
+  it('leaves CodeQL off when no autonomous configuration exists', async () => {
     await newProcessor().fixOne(pr, '/tmp/proj');
 
     const args = createPipelineFromConfigImpl.mock.calls.at(-1);
-    expect(args?.[9]).toEqual({ enabled: true, maxThreads: 2, maxRamMb: 4096 });
+    expect(args?.[9]).toEqual({ enabled: false, maxThreads: 2, maxRamMb: 4096 });
   });
 
   it('succeeds when there are no conflicts, the pipeline succeeds, and CI passes', async () => {
@@ -581,11 +581,13 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
   });
 
   it('reviews inside a scratch worktree at the merge-base, posts the reviewed SHA as a comment, and reports approve as success', async () => {
-    const processor = newProcessor();
+    const processor = newProcessor({ roles: { reviewer: { adapter: 'openrouter' } } } as never);
     const result = await processor.freshReview(pr, '/tmp/proj');
     // gateRan distinguishes a real verdict from a review that produced none, so
     // the caller can exit 2 rather than reporting a rejection. (INT-3914)
-    expect(result).toEqual({ success: true, error: undefined, iterations: 0, gateRan: true });
+    // changesRequested is the reviewer's own objection, separate from `success`
+    // — which is also false when the review merely broke. (AGT-4270)
+    expect(result).toEqual({ success: true, error: undefined, iterations: 0, gateRan: true, changesRequested: false });
 
     // Origin must match the PR's own repo before anything is fetched — a
     // `--repo`/`--number owner/repo#n` override could otherwise point this
@@ -632,6 +634,9 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
         path: expect.stringMatching(scratchDirPattern),
         base: 'mergebasesha123',
         readOnly: true,
+        // The scratch worktree is the reviewed repository, whose config
+        // discovery would otherwise pick that repository's (or no) adapter.
+        adapter: 'openrouter',
       }),
       expect.objectContaining({ saveHistory: expect.any(Function) }),
     );
@@ -708,6 +713,22 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     // gate-not-run here would send the caller to re-run a completed review.
     // (INT-3914 review finding)
     expect(result.gateRan).toBe(true);
+    // ...and the verdict was APPROVE. A caller that undoes the publication on
+    // a rejection must not read this failure as one — that would draft and
+    // roll back work the reviewer actually accepted. (AGT-4270)
+    expect(result.changesRequested).toBe(false);
+  });
+
+  it('separates the reviewer asking for changes from the review breaking (AGT-4270)', async () => {
+    runReviewCommandImpl.mockResolvedValue({ decision: 'revise', feedback: 'missing error handling' });
+    const processor = newProcessor();
+
+    const result = await processor.freshReview(pr, '/tmp/proj');
+
+    expect(result.success).toBe(false);
+    expect(result.gateRan).toBe(true);
+    expect(result.changesRequested).toBe(true);
+    expect(result.error).toMatch(/missing error handling/);
   });
 
   it('marks a thrown reviewer as gate-not-run rather than a change request (INT-3914)', async () => {

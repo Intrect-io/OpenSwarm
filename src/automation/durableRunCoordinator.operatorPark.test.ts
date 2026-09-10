@@ -1,0 +1,151 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { PipelineResult } from '../agents/pairPipeline.js';
+import type { TaskItem } from '../orchestration/decisionEngine.js';
+import { DurableRunCoordinator } from './durableRunCoordinator.js';
+import { RunLedger } from './runLedger.js';
+import { formatDoDContract } from './dodContract.js';
+import { planCoordinatorResolution } from './coordinatorResolution.js';
+
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function dbPath(): string {
+  const root = mkdtempSync(join(tmpdir(), 'openswarm-coordinator-park-'));
+  roots.push(root);
+  return join(root, 'automation.db');
+}
+
+function task(id: string): TaskItem {
+  return {
+    id,
+    issueId: id,
+    issueIdentifier: id,
+    source: 'linear',
+    title: `Task ${id}`,
+    priority: 2,
+    createdAt: Date.now(),
+    linearState: 'Todo',
+    linearProject: { id: 'project', name: 'Repo' },
+  };
+}
+
+// vela 2026-09-02: AGT-3844 / AX-868 / AGT-4158 retried a publication-scope
+// rejection 48 / 23 / 15 times. The pipeline now names the failure as the
+// operator's; the coordinator must park it rather than schedule it again.
+describe('DurableRunCoordinator operatorPark', () => {
+  it('parks immediately under the pipeline\'s own operator code, before any circuit', async () => {
+    const ledgerPath = dbPath();
+    const ledger = new RunLedger(ledgerPath);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 6 });
+    const reason = 'publication-scope: branch contains files outside reserved write scope: uv.lock';
+    const parked: PipelineResult = {
+      success: false,
+      sessionId: 's',
+      stages: [],
+      finalStatus: 'failed',
+      totalDuration: 1,
+      iterations: 1,
+      failureDetail: `publication: ${reason}`,
+      operatorPark: { code: 'publication_scope_mismatch', reason },
+    };
+
+    await coordinator.execute(task('scope'), '/repo', async () => parked);
+
+    expect(ledger.getRun('scope')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      lastErrorCode: 'publication_scope_mismatch',
+      lastErrorMessage: reason,
+    });
+    // An explicit redispatch after the operator widens the scope resumes it.
+    expect(ledger.resumeNeedsHuman('scope', Date.now(), 'tracker_todo')).toBe('READY');
+    // The trace has to name what re-admitted a park, or an unattended resume
+    // looks exactly like an operator (cgf-portal AX-874, 2026-09-02 18:25).
+    const resumed = new Database(ledgerPath)
+      .prepare("SELECT data_json FROM automation_events WHERE issue_id = 'scope' AND kind = 'operator_resumed' ORDER BY sequence DESC LIMIT 1")
+      .get() as { data_json: string } | undefined;
+    expect(JSON.parse(resumed?.data_json ?? '{}')).toMatchObject({ trigger: 'tracker_todo', parkedUnder: 'publication_scope_mismatch' });
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('lets an explicit no-change DoD complete through the durable success path', async () => {
+    const ledgerPath = dbPath();
+    const ledger = new RunLedger(ledgerPath);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const noChangeTask = {
+      ...task('no-change'),
+      description: formatDoDContract({
+        version: 1,
+        completion: { noChanges: 'complete' },
+        automation: { scopeMismatch: 'park', maxRepairs: 0 },
+      }),
+    };
+    const parked: PipelineResult = {
+      success: false,
+      sessionId: 's',
+      stages: [],
+      finalStatus: 'failed',
+      totalDuration: 1,
+      iterations: 1,
+      operatorPark: { code: 'worker_no_changes', reason: 'Worker finished without edits: already satisfied' },
+    };
+
+    const result = await coordinator.execute(noChangeTask, '/repo', async () => parked, {
+      resolveOperatorPark: (candidate, candidateResult, attemptNo) => planCoordinatorResolution({
+        task: candidate,
+        result: candidateResult,
+        attemptNo,
+      }),
+      successEffect: (_pipeline, claim) => ({
+        kind: 'tracker.complete',
+        dedupeKey: `no-change:${claim.attemptNo}`,
+        payload: { via: 'coordinator' },
+      }),
+    });
+
+    expect(result).toMatchObject({ success: true, finalStatus: 'approved', coordinatorResolution: { action: 'complete' } });
+    expect(ledger.getRun('no-change')).toMatchObject({ state: 'SYNC_PENDING' });
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('defers an ephemeral-only fence without entering NEEDS_HUMAN', async () => {
+    const ledgerPath = dbPath();
+    const ledger = new RunLedger(ledgerPath);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const parked: PipelineResult = {
+      success: false,
+      sessionId: 's',
+      stages: [],
+      finalStatus: 'failed',
+      totalDuration: 1,
+      iterations: 1,
+      operatorPark: {
+        code: 'publication_scope_mismatch',
+        reason: 'publication-scope: branch contains files outside reserved write scope: pytest-local/case/output.txt',
+      },
+    };
+
+    const result = await coordinator.execute(task('ephemeral'), '/repo', async () => parked, {
+      resolveOperatorPark: (candidate, candidateResult, attemptNo) => planCoordinatorResolution({
+        task: candidate,
+        result: candidateResult,
+        attemptNo,
+        now: 1000,
+      }),
+    });
+
+    expect(result).toMatchObject({ success: false, finalStatus: 'deferred', coordinatorResolution: { action: 'retry' } });
+    expect(ledger.getRun('ephemeral')).toMatchObject({ state: 'RETRY_AT' });
+    expect(ledger.getRun('ephemeral')?.retryAt).toBeGreaterThan(Date.now());
+    coordinator.close();
+    ledger.close();
+  });
+});

@@ -310,6 +310,70 @@ describe('pickFailureDetail (INT-2504)', () => {
   });
 });
 
+describe('pickPipelineFailureDetail stage fallback', () => {
+  const base = { success: false, sessionId: 's', iterations: 1, totalDuration: 10 } as const;
+
+  it.each(['haltReason', 'noChangesReason', 'summary'])('preserves a failed worker %s when error is absent', (field) => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'failed', stages: [],
+      workerResult: { success: false, error: 'Unknown error', [field]: 'pytest missing; prerequisite AGT-3961 remains open' },
+    } as never)).toBe('pytest missing; prerequisite AGT-3961 remains open');
+  });
+
+  it('does not treat a successful worker summary as a failure cause', () => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'failed', stages: [],
+      workerResult: { success: true, summary: 'Implementation complete' },
+    } as never)).toBeUndefined();
+  });
+
+  it('keeps the terminal exception ahead of earlier stage feedback', () => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'infra_error', stages: [],
+      failureDetail: 'worktree attachment: sqlite busy',
+      reviewResult: { decision: 'approve', feedback: 'approved' },
+    } as never)).toBe('worktree attachment: sqlite busy');
+  });
+
+  it('names the failed stage when no typed sub-result carries the error', () => {
+    // vela 2026-09-01: guards, security audit and publication all fail through
+    // stages[], and 57% of that day's ledger rows had no error message.
+    const detail = mod.pickPipelineFailureDetail({
+      ...base,
+      finalStatus: 'failed',
+      stages: [
+        { stage: 'worker', success: true, result: { success: true }, duration: 1, startedAt: 0, completedAt: 1 },
+        { stage: 'security-audit', success: false, result: { success: false, error: 'CodeQL extractor missing for go' }, duration: 1, startedAt: 1, completedAt: 2 },
+      ],
+    } as never);
+    expect(detail).toBe('security-audit: CodeQL extractor missing for go');
+  });
+
+  it('still prefers the typed tester/reviewer/worker detail over the stage error', () => {
+    const detail = mod.pickPipelineFailureDetail({
+      ...base,
+      finalStatus: 'failed',
+      workerResult: { success: false, summary: '', filesChanged: [], commands: [], output: '', error: 'worker-scope: outside fileScope' },
+      stages: [
+        { stage: 'worker', success: false, result: { success: false, error: 'stage copy' }, duration: 1, startedAt: 0, completedAt: 1 },
+      ],
+    } as never);
+    expect(detail).toBe('worker-scope: outside fileScope');
+  });
+
+  it('falls back to stuckReason when stages carry no error text', () => {
+    const detail = mod.pickPipelineFailureDetail({
+      ...base,
+      finalStatus: 'failed',
+      stuckReason: 'self-repair stagnated: identical test errors repeated',
+      stages: [
+        { stage: 'tester', success: false, result: { success: false }, duration: 1, startedAt: 0, completedAt: 1 },
+      ],
+    } as never);
+    expect(detail).toBe('self-repair stagnated: identical test errors repeated');
+  });
+});
+
 it('pickFailureDetail skips locale noSummary fallbacks (INT-2504 follow-up)', () => {
   expect(mod.pickFailureDetail(['(no summary)', 'real feedback here'])).toBe('real feedback here');
   expect(mod.pickFailureDetail(['(요약 없음)'])).toBeUndefined();

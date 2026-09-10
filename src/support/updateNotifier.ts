@@ -21,6 +21,8 @@ const CACHE_PATH = join(homedir(), '.openswarm', 'update-check.json');
 interface UpdateCache {
   latest: string;
   checkedAt: number;
+  /** A `latest` version we already installed-and-verified as NOT taking effect (AGT-3183) — skip reinstalling it. */
+  failedInstallVersion?: string;
 }
 
 /** Numeric semver compare (pre-release tags ignored). `latest` strictly newer? Pure. */
@@ -150,6 +152,60 @@ function defaultInstall(pkg: string): boolean {
 }
 
 /**
+ * What re-running the exact command `defaultReexec` is about to run would
+ * report as its own version — not what npm just installed. `npm install`
+ * exiting 0 only proves the package landed somewhere; when that somewhere is
+ * not on the resolution path this process's own entry point re-execs into
+ * (prefix/PATH mismatch — nvm/homebrew/asdf, a stray `npm link`, ...), the
+ * binary that actually runs next is unchanged. This asks the same question
+ * `reexec()` is about to answer, before claiming success. (AGT-3183)
+ */
+function resolvedVersion(): string | null {
+  try {
+    const entry = process.argv[1];
+    if (!entry) return null;
+    const result = spawnSync(process.execPath, [entry, '--version'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: { ...process.env, OPENSWARM_UPDATED: '1' },
+    });
+    const out = (result.stdout ?? '').trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort `npm prefix -g`, for the diagnostic warning only — never throws. */
+function installPrefix(): string | null {
+  try {
+    const result = spawnSync('npm', ['prefix', '-g'], { encoding: 'utf8', timeout: 5_000 });
+    const out = (result.stdout ?? '').trim();
+    return out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Explains a verified-unchanged install instead of silently claiming "Updated" and looping. */
+function formatInstallMismatchWarning(
+  latest: string,
+  resolved: string | null,
+  current: string,
+  getInstallPrefix: () => string | null,
+): string {
+  const lines = [
+    `\n  ${c.dim('npm installed')} ${c.green(latest)} ${c.dim('but the binary this process re-execs into still resolves to')} ${c.dim(resolved ?? current)}.`,
+    `  ${c.dim("npm's global install prefix likely does not match what actually runs `openswarm` — mixed nvm/homebrew/asdf, or a stray `npm link`.")}`,
+  ];
+  const prefix = getInstallPrefix();
+  if (prefix) lines.push(`  ${c.dim(`npm installed to: ${prefix}`)}`);
+  lines.push(`  ${c.dim(`Currently running from: ${process.argv[1] ?? 'unknown'}`)}`);
+  lines.push(`  ${c.dim(`Run npm i -g ${PKG} manually and check which one PATH resolves.`)}\n`);
+  return lines.join('\n');
+}
+
+/**
  * Re-run the current command with the freshly-installed binary. Marks the child
  * with OPENSWARM_UPDATED=1 so it won't try to update again (loop guard), waits
  * for it, and exits with its code. Does not return on success. (INT-2394)
@@ -165,6 +221,10 @@ function defaultReexec(): void {
 export interface AutoUpdateDeps extends NotifierDeps {
   install?: (pkg: string) => boolean;
   reexec?: () => void;
+  /** What re-execing would actually report as its version, post-install. Injectable for tests. (AGT-3183) */
+  resolvedVersion?: () => string | null;
+  /** Best-effort `npm prefix -g`, for the mismatch diagnostic only. Injectable for tests. (AGT-3183) */
+  installPrefix?: () => string | null;
 }
 
 /**
@@ -173,6 +233,14 @@ export interface AutoUpdateDeps extends NotifierDeps {
  * when opted out (OPENSWARM_NO_AUTO_UPDATE). Skips CI/non-TTY/meta invocations
  * (never installs unattended) and no-ops once re-executed (OPENSWARM_UPDATED).
  * Uses the same 24h cache as the notice. Never throws. (INT-2394)
+ *
+ * `npm install` exiting 0 only proves the package landed somewhere — not that
+ * the binary this process re-execs into changed (INT-2394 assumed it did and
+ * looped forever when npm's install prefix and PATH disagreed, AGT-3183). So a
+ * successful install is verified against `resolvedVersion()` before it is
+ * reported or re-exec'd into; a verified-unchanged version is remembered
+ * (`failedInstallVersion`) so the next run skips straight to a passive notice
+ * instead of paying for another `npm install` it already knows won't take.
  */
 export async function maybeAutoUpdate(current: string, deps: AutoUpdateDeps = {}): Promise<void> {
   try {
@@ -191,25 +259,46 @@ export async function maybeAutoUpdate(current: string, deps: AutoUpdateDeps = {}
     const out = deps.write ?? ((s: string) => process.stderr.write(s));
     const install = deps.install ?? defaultInstall;
     const reexec = deps.reexec ?? defaultReexec;
+    const getResolvedVersion = deps.resolvedVersion ?? resolvedVersion;
+    const getInstallPrefix = deps.installPrefix ?? installPrefix;
 
     const cache = read();
     let latest = cache?.latest ?? null;
+    const failedInstallVersion = cache?.failedInstallVersion;
     const fresh = cache != null && now() - cache.checkedAt < DAY_MS;
     if (!fresh) {
       const fetched = await fetchFn();
       // Keep the downloaded version in memory for this re-exec decision, but
-      // do not persist remote registry data to the local cache.
-      write({ latest: current, checkedAt: now() });
+      // do not persist remote registry data to the local cache. Carry the
+      // failure marker forward — a routine daily refresh must not forget it.
+      write({ latest: current, checkedAt: now(), failedInstallVersion });
       if (fetched) latest = fetched;
     }
 
     if (!latest || !isNewer(latest, current)) return;
 
+    if (failedInstallVersion === latest) {
+      // Already installed-and-verified this exact version as a no-op once —
+      // reinstalling every run is the actual cost the bug report measured
+      // ("모든 명령이 수 초씩 느려지고"). Fall back to the passive notice.
+      out(formatUpdateNotice(current, latest));
+      return;
+    }
+
     out(`\n  ${c.dim('Updating')} ${c.dim(current)} ${c.dim('→')} ${c.green(latest)}…\n`);
     if (!install(PKG)) {
       out(`  ${c.dim(`Auto-update failed; continuing on ${current}. Run npm i -g ${PKG} manually.`)}\n`);
+      write({ latest: current, checkedAt: now(), failedInstallVersion: latest });
       return;
     }
+
+    const resolved = getResolvedVersion();
+    if (resolved == null || isNewer(latest, resolved)) {
+      out(formatInstallMismatchWarning(latest, resolved, current, getInstallPrefix));
+      write({ latest: current, checkedAt: now(), failedInstallVersion: latest });
+      return;
+    }
+
     out(`  ${c.green('Updated')} ${c.dim('→')} ${c.green(latest)}. ${c.dim('Restarting…')}\n`);
     reexec(); // replaces/exits the process on success
   } catch {

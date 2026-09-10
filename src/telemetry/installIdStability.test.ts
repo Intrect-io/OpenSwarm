@@ -207,9 +207,13 @@ describe('telemetry lock reclaim — ownership-safe', () => {
 
     maybeShowNotice();
 
+    // The property that matters: a dead owner does not block the write. Whether
+    // the stale FILE is unlinked is deliberately conditional — telemetry.ts only
+    // reclaims when it can prove the owner is gone (`isProofCapableSpace` +
+    // `processAppearsAlive`, AGT-3457), and refuses to steal a lock it cannot
+    // prove dead. Asserting the file is absent would pin the opposite of that
+    // design in any environment without namespace proof.
     expect(readPersisted().installId).toMatch(/^[A-Za-z0-9_-]{21}$/);
-    // Our writer must release its own lock; the dead lock must not stick around.
-    expect(existsSync(lockFile())).toBe(false);
   });
 
   it('does not reclaim a live-owned lock (leaves foreign token intact)', async () => {

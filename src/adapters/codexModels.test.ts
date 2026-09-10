@@ -4,6 +4,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { addForwardCompatModels, getCodexModelIds, DEFAULT_CODEX_MODELS } from './codexModels.js';
 
+// Adapters send HTTPS traffic through undici's own fetch with a shared HTTP/1.1
+// dispatcher (AGT-4220), so `vi.stubGlobal('fetch', ...)` alone no longer
+// intercepts it. Delegating the module's fetch to the global keeps every
+// existing stub in this file meaningful, and the init object — `dispatcher`
+// included — still reaches the stub, so it stays assertable.
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return {
+    ...actual,
+    fetch: (url: unknown, init: unknown) => (globalThis.fetch as unknown as (u: unknown, i: unknown) => unknown)(url, init),
+  };
+});
+
+
 describe('addForwardCompatModels', () => {
   it('de-dupes while preserving order', () => {
     expect(addForwardCompatModels(['a', 'b', 'a', 'c', 'b'])).toEqual(['a', 'b', 'c']);

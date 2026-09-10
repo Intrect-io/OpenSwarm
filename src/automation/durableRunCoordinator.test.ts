@@ -992,7 +992,7 @@ describe('DurableRunCoordinator', () => {
     ledger.close();
   });
 
-  it('uses the default PID probe to retain live owners and release dead owners', () => {
+  it('uses the default PID probe to reclaim a prior daemon generation and release dead owners', () => {
     const livePath = dbPath();
     const liveLedger = new RunLedger(livePath);
     liveLedger.registerRun({ issueId: 'LIVE-PID', source: 'linear', projectPath: '/live-repo' }, 1_000);
@@ -1007,7 +1007,8 @@ describe('DurableRunCoordinator', () => {
     expect(liveReplacement.reconcile(4_001)).toHaveLength(1);
     expect(liveLedger.getRun('LIVE-PID')).toMatchObject({
       state: 'NEEDS_RECONCILE',
-      ownerInstanceId: `${process.pid}-live-owner`,
+      ownerInstanceId: undefined,
+      leaseToken: undefined,
     });
     liveReplacement.close();
     liveLedger.close();
@@ -1211,6 +1212,95 @@ describe('DurableRunCoordinator', () => {
     expect(ledger.getRun('ORPHAN-WITH-BRANCH')).toMatchObject({ state: 'NEEDS_RECONCILE' });
 
     coordinator.close();
+    ledger.close();
+  });
+});
+
+describe('DurableRunCoordinator dead marker owners', () => {
+  it('derives its instance id from the per-process id the worktree markers carry', async () => {
+    const { getInstanceId } = await import('../support/healthEndpoint.js');
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger: new RunLedger(dbPath()) });
+    expect(coordinator.instanceId).toBe(`${process.pid}-${getInstanceId()}`);
+    coordinator.close();
+  });
+
+  it('names released prior-generation owners by marker id and never itself or the live owner', async () => {
+    const { getInstanceId } = await import('../support/healthEndpoint.js');
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    ledger.registerRun({ issueId: 'GEN-1', source: 'linear', projectPath: '/repo' }, 1_000);
+
+    // A prior generation claimed, went silent, and the ledger released it.
+    const prior = ledger.claimRun('GEN-1', { ownerInstanceId: '7-prior-generation-uuid', leaseMs: 1_000, now: 2_000 })!;
+    expect(ledger.transition(prior, 'RETRY_AT', { retryAt: 2_500 }, 2_100)).toBe(true);
+    // Our own generation claimed it afterwards.
+    const ours = ledger.claimRun('GEN-1', { ownerInstanceId: coordinator.instanceId, leaseMs: 1_000, now: 3_000 })!;
+
+    // Our own id is filtered by both the live-owner rule and the self rule.
+    expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
+    expect(coordinator.deadMarkerOwners('GEN-1')).not.toContain(getInstanceId());
+
+    // Once ours is released too, it is still never reported as dead to itself.
+    expect(ledger.transition(ours, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
+    expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
+    expect(coordinator.deadMarkerOwners('unknown')).toEqual([]);
+    coordinator.close();
+    ledger.close();
+  });
+});
+
+describe('DurableRunCoordinator infra failure circuit', () => {
+  function infraResult(detail: string): PipelineResult {
+    return {
+      success: false, sessionId: 's', stages: [
+        { stage: 'tester', success: false, result: { success: false, error: detail }, duration: 1, startedAt: 0, completedAt: 1 },
+      ], finalStatus: 'infra_error', totalDuration: 1, iterations: 1,
+    } as PipelineResult;
+  }
+
+  // vela 2026-09-01: 140 infra_error attempts, none counted toward STUCK,
+  // the same CodeQL / socket failure on every one of them.
+  it('parks a run once the identical infrastructure failure has repeated across the circuit', async () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 3 });
+    const t = task('infra');
+    const detail = (n: number) => `verify-security: pytest could not run: ENOENT lstat '/run/openswarm-sandbox' (took ${n}.${n}s)`;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await coordinator.execute(t, '/repo', async () => infraResult(detail(attempt)));
+      expect(ledger.getRun('infra')).toMatchObject({ state: 'RETRY_AT', lastErrorCode: 'infra_error' });
+      // Bring the backoff forward so the next execute can claim it.
+      expect(ledger.markReady('infra')).toBe(true);
+    }
+    await coordinator.execute(t, '/repo', async () => infraResult(detail(3)));
+    expect(ledger.getRun('infra')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      lastErrorCode: 'infra_circuit_open',
+      lastErrorMessage: expect.stringContaining('3 consecutive attempts'),
+    });
+    // The park is an operator park: an explicit redispatch may end it.
+    expect(ledger.resumeNeedsHuman('infra')).toBe('READY');
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('resets on a different failure, and never parks when disabled', async () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 2 });
+    const t = task('mixed');
+    await coordinator.execute(t, '/repo', async () => infraResult('tester: openrouter timeout after 360000ms'));
+    ledger.markReady('mixed');
+    await coordinator.execute(t, '/repo', async () => infraResult('security-audit: CodeQL extractor missing'));
+    expect(ledger.getRun('mixed')?.state).toBe('RETRY_AT');
+    coordinator.close();
+
+    const off = new DurableRunCoordinator({ mode: 'primary', ledger, infraFailureCircuit: 0 });
+    for (let i = 0; i < 4; i += 1) {
+      ledger.markReady('mixed');
+      await off.execute(t, '/repo', async () => infraResult('tester: openrouter timeout after 360000ms'));
+    }
+    expect(ledger.getRun('mixed')?.state).toBe('RETRY_AT');
+    off.close();
     ledger.close();
   });
 });

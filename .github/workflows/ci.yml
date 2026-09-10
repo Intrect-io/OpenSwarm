@@ -21,28 +21,28 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run lint
 
   typecheck:
     name: Type Check
     runs-on: ubuntu-latest
     needs: lint
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run typecheck
 
   build:
@@ -56,7 +56,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm run build
       - uses: actions/upload-artifact@v7
         with:
@@ -80,16 +80,16 @@ jobs:
       # runner image does not ship, so without this every verify test reports
       # "OS verification sandbox is unavailable". macOS uses built-in
       # sandbox-exec and needs no install.
-      - name: Install the Linux verification sandbox
+      - uses: ./.github/actions/install-bubblewrap
+      - name: Lift the AppArmor user-namespace restriction
         run: |
-          sudo apt-get update && sudo apt-get install -y bubblewrap
           # ubuntu-24.04 images restrict unprivileged user namespaces through
           # AppArmor; without lifting it bwrap cannot set up the network
           # namespace and every sandboxed command dies with
           # "loopback: Failed RTM_NEWADDR: Operation not permitted".
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       # Coverage thresholds live in vitest.config.ts (ratcheted floor below the
       # measured baseline — see that file's comment). Previously `npm test` had
       # no --coverage flag anywhere in CI, so the threshold was configured but
@@ -109,7 +109,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - run: npm ci
+      - run: npm ci --prefer-offline --no-audit --no-fund
       - run: npm test -- --run src/adapters/processTree.windows.test.ts
 
   loc-gate:
@@ -142,10 +142,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-bubblewrap
       - name: Bubblewrap alone must not be assumed sufficient
         run: |
           set -uo pipefail
-          sudo apt-get update && sudo apt-get install -y bubblewrap
           if bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
             echo "::warning::The sandbox now works without lifting the AppArmor restriction — the README's sysctl step may be obsolete on this image"
           else

@@ -27,14 +27,19 @@ async function strictVerifySandbox(projectPath: string): Promise<{
   sessionFactory?: (workspace: string) => Promise<SandboxExecutorSession>;
   scratchRoot?: string;
 }> {
-  if (!isHumanSurfaceReadOnlyEnabled()) return {};
   const config = getSandboxExecutorConfig();
   if (!config) {
-    return {
-      sessionFactory: async () => {
-        throw new Error('strict sandbox executor is not configured');
-      },
-    };
+    // Companion is optional unless humanSurfaceReadOnly demanded it.
+    // Cursor-on-vela keeps HSR off but still ships sandboxExecutor.enabled
+    // so verify can leave the credentialed daemon. (AGT-4172)
+    if (isHumanSurfaceReadOnlyEnabled()) {
+      return {
+        sessionFactory: async () => {
+          throw new Error('strict sandbox executor is not configured');
+        },
+      };
+    }
+    return {};
   }
   let project: string;
   let roots: string[];
@@ -137,7 +142,10 @@ export async function runDeterministicTester(
   });
   const security = evidence.find((item) => item.securityFailure);
   if (security) {
-    throw new VerifySecurityError(`${security.command.name} could not run inside the attested companion: ${security.rawOutputTail}`);
+    const where = strictSandbox.sessionFactory
+      ? 'inside the attested companion'
+      : 'in the OS verification sandbox';
+    throw new VerifySecurityError(`${security.command.name} could not run ${where}: ${security.rawOutputTail}`);
   }
   const infra = evidence.find((item) => item.headStatus === 'infra'
     || (item.headStatus === 'fail' && item.baseStatus === 'infra'));

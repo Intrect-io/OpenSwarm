@@ -14,6 +14,19 @@ import { runAgenticLoop, type ChatMessage } from './agenticLoop.js';
 import { RateLimitError } from './rateLimitError.js';
 import type { ToolDefinition } from './tools.js';
 
+// The adapter sends Codex traffic through undici's own fetch with a dedicated
+// HTTP/1.1 dispatcher (AGT-4220), so `vi.stubGlobal('fetch', ...)` alone no
+// longer intercepts it. Delegating the module's fetch to the global keeps every
+// existing stub in this file meaningful, and the init object — `dispatcher`
+// included — still reaches the stub, so it stays assertable.
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return {
+    ...actual,
+    fetch: (url: unknown, init: unknown) => (globalThis.fetch as unknown as (u: unknown, i: unknown) => unknown)(url, init),
+  };
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -135,6 +148,33 @@ describe('unsupported-model fallback', () => {
     await callApi([{ role: 'user', content: 'second' }], []);
 
     expect(requestedModels).toEqual(['unsupported-model', 'gpt-5.6-terra', 'gpt-5.6-terra']);
+  });
+});
+
+describe('Responses stream terminal events', () => {
+  it('propagates an incomplete 200 stream instead of returning an empty successful response', async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      [
+        'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    type CreateApiCaller = (
+      initialToken: string,
+      accountId: string,
+      store: unknown,
+      model: string,
+    ) => (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<unknown>;
+    const adapter = new CodexResponsesAdapter() as unknown as { createApiCaller: CreateApiCaller };
+
+    await expect(adapter.createApiCaller('token', 'account', {}, 'gpt-5.6-terra')(
+      [{ role: 'user', content: 'Return a short answer.' }],
+      [],
+    )).rejects.toThrow('incomplete');
   });
 });
 
@@ -425,6 +465,22 @@ describe('429 throttle vs spent quota (INT-2907)', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('sends Codex traffic on a dedicated HTTP/1.1 dispatcher, not the global pool (AGT-4220)', async () => {
+    // chatgpt.com negotiates h2, and Node's global fetch then carries every
+    // concurrent request as a stream over a couple of connections. The server
+    // admits few concurrent streams per connection, so N reviewers in one
+    // process queued INSIDE undici: measured at concurrency 4, create ->
+    // sendHeaders was 17.30s median while the server answered in 1.07s. Losing
+    // this dispatcher silently reintroduces that, and nothing else in the suite
+    // would notice — the requests still succeed, just serialised.
+    const fetchMock = vi.fn(async () => okStream());
+    const callApi = callerWith(fetchMock);
+    await callApi([{ role: 'user', content: 'hi' }], []);
+
+    const init = fetchMock.mock.calls[0]?.[1] as { dispatcher?: unknown } | undefined;
+    expect(init?.dispatcher).toBeDefined();
   });
 
   it('waits out a concurrency throttle and retries instead of reporting a usage limit', async () => {

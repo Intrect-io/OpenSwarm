@@ -184,6 +184,8 @@ export interface DraftAnalyzerOptions {
   authoritativeOperatorFeedback?: string;
   projectPath: string;
   projectId?: string;
+  /** Task identity stamped on the usage ledger (issue identifier or scheduler id). */
+  taskId?: string;
   /** Fast model for draft analysis (default: gpt-5-codex) */
   model?: string;
   /** 타임아웃 (기본: 30초 — drafter는 빠름) */
@@ -687,6 +689,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
           timeoutMs: draftTimeoutMs, // size-adaptive: 30s timed out on large repos → type=unknown (INT-2485)
           model: resolvedModel,
           maxTurns: budget.maxTurns, // size-adaptive: 3 ran out reading a real repo before emitting the brief (INT-2485)
+          processContext: { taskId: options.taskId ?? options.taskTitle, stage: 'draft' },
         });
 
         haikuResult = parseDraftResponse(raw.stdout);

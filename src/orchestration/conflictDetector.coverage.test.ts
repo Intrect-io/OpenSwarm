@@ -157,20 +157,27 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
     expect(draftTask).toHaveBeenCalledTimes(1);
   });
 
-  it('serializes KG scopes that reduce to unknown after volatile paths are removed', async () => {
+  it('admits KG scopes that reduce to unknown after volatile paths are removed', async () => {
     // Both tasks resolve to a non-null impact, but every module normalizes
     // away (node_modules / dist are filtered as volatile), so `modules.size`
     // is 0 and the code falls through to unknownScopeIndices instead of
-    // recording a real scope.
+    // recording a real scope. Default admit does not serialize that uncertainty.
     mockAnalyzeIssue.mockResolvedValue(impact(['node_modules/pkg/index.js'], ['dist/bundle.js']));
 
-    const result = await detectFileConflicts(
+    const admitted = await detectFileConflicts(
       [task('A', 2), task('B', 2)],
       project,
     );
+    expect(new Set(admitted.safe.map((candidate) => candidate.id))).toEqual(new Set(['A', 'B']));
+    expect(admitted.conflictGroups).toHaveLength(0);
 
-    expect(result.conflictGroups).toHaveLength(1);
-    expect(result.safe).toHaveLength(1);
+    const serialized = await detectFileConflicts(
+      [task('A', 2), task('B', 2)],
+      project,
+      { unknownScopeAdmission: 'serialize' },
+    );
+    expect(serialized.conflictGroups).toHaveLength(1);
+    expect(serialized.safe).toHaveLength(1);
   });
 
   it('treats a failed KG lookup as unknown scope and logs a warning instead of throwing', async () => {
@@ -187,14 +194,21 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
         project,
       );
 
-      // Task A's failure makes its scope unknown, so admission fails closed
-      // against B until a later heartbeat can prove the write sets disjoint.
-      expect(result.conflictGroups).toHaveLength(1);
-      expect(result.safe).toHaveLength(1);
+      // Unknown from a failed lookup is not evidence of overlap under admit.
+      expect(new Set(result.safe.map((candidate) => candidate.id))).toEqual(new Set(['A', 'B']));
+      expect(result.conflictGroups).toHaveLength(0);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('[ConflictDetector] Impact analysis failed for A:'),
         expect.any(Error),
       );
+
+      const serialized = await detectFileConflicts(
+        [task('A', 2), task('B', 2)],
+        project,
+        { unknownScopeAdmission: 'serialize' },
+      );
+      expect(serialized.conflictGroups).toHaveLength(1);
+      expect(serialized.safe).toHaveLength(1);
     } finally {
       warnSpy.mockRestore();
     }

@@ -20,6 +20,10 @@ import { publishCoordinationThreadUpdate } from './coordinationThreadTools.js';
 type BodyReader = (req: IncomingMessage) => Promise<string>;
 
 function threadRepository(path: string): string {
+  // The all-repositories board returns the durable opaque cell key.  Accept it
+  // on subsequent detail reads so the operator can open that thread without
+  // first selecting its original filesystem path.
+  if (/^(?:git|path):[a-f0-9]{32}$/.test(path)) return path;
   return repositoryKey(undefined, path);
 }
 
@@ -103,7 +107,6 @@ export async function tryHandleCoordinationThreadRoutes(
   try {
     if (url === '/api/coordination/threads' && req.method === 'GET') {
       const repository = requestUrl.searchParams.get('repository');
-      if (!repository) throw new Error('repository query parameter is required');
       const statusRaw = requestUrl.searchParams.get('status') ?? undefined;
       if (statusRaw && statusRaw !== 'open' && statusRaw !== 'resolved') {
         throw new Error('status must be open or resolved');
@@ -115,7 +118,7 @@ export async function tryHandleCoordinationThreadRoutes(
       }
       const limit = Number.parseInt(requestUrl.searchParams.get('limit') ?? '', 10);
       writeJson(res, 200, listCoordinationThreads({
-        repository: threadRepository(repository),
+        ...(repository ? { repository: threadRepository(repository) } : {}),
         status: statusRaw as CoordinationThreadStatus | undefined,
         relatedTaskId: requestUrl.searchParams.get('taskId') ?? undefined,
         ...(actor && participantTaskId ? { participant: { actor, taskId: participantTaskId } } : {}),

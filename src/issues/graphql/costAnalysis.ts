@@ -137,26 +137,27 @@ export function useQueryCostAnalysis(options: QueryCostOptions = {}): Plugin {
   const fieldCosts = options.fieldCosts ?? FIELD_COSTS;
 
   return {
-    onParse() {
-      return ({ result, replaceParseResult }) => {
-        if (!result || result instanceof Error) return;
-        const cost = calculateOperationCost(result, { fieldCosts });
-        if (cost > maximumCost) {
-          replaceParseResult(
-            new GraphQLError(
-              `Query cost ${cost} exceeds the maximum allowed cost of ${maximumCost}.`,
-              {
-                extensions: {
-                  code: 'GRAPHQL_COST_LIMIT_EXCEEDED',
-                  cost,
-                  maximumCost,
-                  http: { status: 400 },
-                },
-              },
-            ),
-          );
-        }
-      };
+    // Validate, not parse. A parse-phase replacement is treated as an internal
+    // failure by graphql-yoga and masked into a 500 — the `http: { status: 400 }`
+    // extension never reaches the response. Validation errors are client errors
+    // by definition, so the same GraphQLError arrives as the 400 it declares.
+    // Measured: parse phase returned 500 while logging `http: { status: 400 }`.
+    onValidate({ params, setResult }) {
+      const cost = calculateOperationCost(params.documentAST, { fieldCosts });
+      if (cost <= maximumCost) return;
+      setResult([
+        new GraphQLError(
+          `Query cost ${cost} exceeds the maximum allowed cost of ${maximumCost}.`,
+          {
+            extensions: {
+              code: 'GRAPHQL_COST_LIMIT_EXCEEDED',
+              cost,
+              maximumCost,
+              http: { status: 400 },
+            },
+          },
+        ),
+      ]);
     },
   };
 }

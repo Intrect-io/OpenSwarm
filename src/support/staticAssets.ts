@@ -8,8 +8,8 @@
 // so the source directory is the fallback. Resolution happens once per lookup
 // rather than at module load so a build finishing mid-session is picked up.
 
-import { existsSync, realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { constants, existsSync, realpathSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -53,12 +53,59 @@ export class StaticAssetError extends Error {
   }
 }
 
+type ContainedReadResult =
+  | { ok: true; body: Buffer }
+  | { ok: false; reason: 'escaped' | 'not-found' };
+
+/**
+ * Resolve `relative` under `root` and read it — one race-safe strategy
+ * shared by every caller below instead of a bespoke check per call site.
+ * `realpathSync` resolves symlinked path segments (including a symlinked
+ * directory further up the chain, or the leaf itself) up front so an escape
+ * can be told apart from a plain miss; the actual read then opens that
+ * resolved path with `O_NOFOLLOW`, so a same-instant swap into a symlink in
+ * the window between the check and the read fails the open instead of
+ * following it out of root.
+ */
+async function readContainedFile(root: string, relative: string): Promise<ContainedReadResult> {
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    return { ok: false, reason: 'not-found' };
+  }
+  const candidate = resolve(rootReal, relative);
+  if (candidate !== rootReal && !candidate.startsWith(rootReal + sep)) {
+    return { ok: false, reason: 'escaped' };
+  }
+  let real: string;
+  try {
+    real = realpathSync(candidate);
+  } catch {
+    return { ok: false, reason: 'not-found' };
+  }
+  if (real !== rootReal && !real.startsWith(rootReal + sep)) {
+    return { ok: false, reason: 'escaped' };
+  }
+  let handle;
+  try {
+    handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    // Genuinely missing, or a same-instant swap into a symlink — both are a
+    // read-step failure; the escape class was already handled above.
+    return { ok: false, reason: 'not-found' };
+  }
+  try {
+    return { ok: true, body: await handle.readFile() };
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Read a static asset by its URL path under /static/. Throws StaticAssetError
  * 404 when the file (or the whole static root) is missing, and 403 when the
- * requested path escapes the static root — `resolve()` collapses `..`
- * segments, and the realpath check keeps a symlink planted inside the root
- * from serving files outside it.
+ * requested path escapes the static root.
  */
 export async function readStaticAsset(urlPath: string): Promise<{ body: Buffer; contentType: string }> {
   const root = resolveStaticRoot();
@@ -67,81 +114,42 @@ export async function readStaticAsset(urlPath: string): Promise<{ body: Buffer; 
   const relative = decodeURIComponent(urlPath.replace(/^\/static\/?/, ''));
   if (!relative || relative.includes('\0')) throw new StaticAssetError(404, 'Not found');
 
-  const rootReal = realpathSync(root);
-  const candidate = resolve(rootReal, relative);
-  if (candidate !== rootReal && !candidate.startsWith(rootReal + sep)) {
-    throw new StaticAssetError(403, 'Forbidden');
+  const result = await readContainedFile(root, relative);
+  if (!result.ok) {
+    throw result.reason === 'escaped' ? new StaticAssetError(403, 'Forbidden') : new StaticAssetError(404, 'Not found');
   }
-
-  let fileReal: string;
-  try {
-    fileReal = realpathSync(candidate);
-  } catch {
-    throw new StaticAssetError(404, 'Not found');
-  }
-  if (fileReal !== rootReal && !fileReal.startsWith(rootReal + sep)) {
-    throw new StaticAssetError(403, 'Forbidden');
-  }
-
-  try {
-    const body = await readFile(fileReal);
-    return { body, contentType: contentTypeFor(candidate) };
-  } catch {
-    throw new StaticAssetError(404, 'Not found');
-  }
+  return { body: result.body, contentType: contentTypeFor(relative) };
 }
 
-/** The /app entry document, or null when assets are not present. */
-/** The /orchestration page shell, from the same static root as /app. */
-export async function readOrchestrationShell(): Promise<Buffer | null> {
+/** A fixed page-shell file at the static root — null when assets aren't built, missing, or unsafe to read. */
+async function readShellFile(filename: string): Promise<Buffer | null> {
   const root = resolveStaticRoot();
   if (!root) return null;
-  try {
-    return await readFile(join(root, 'orchestration.html'));
-  } catch {
-    return null;
-  }
+  const result = await readContainedFile(root, filename);
+  return result.ok ? result.body : null;
+}
+
+/** The /orchestration page shell, from the same static root as /app. */
+export async function readOrchestrationShell(): Promise<Buffer | null> {
+  return readShellFile('orchestration.html');
 }
 
 /** The /chat room shell (AGT-4019), from the same static root as /app. */
 export async function readChatShell(): Promise<Buffer | null> {
-  const root = resolveStaticRoot();
-  if (!root) return null;
-  try {
-    return await readFile(join(root, 'chat.html'));
-  } catch {
-    return null;
-  }
+  return readShellFile('chat.html');
 }
 
 /** The operator warehouse shell (AGT-4128). */
 export async function readWarehouseShell(): Promise<Buffer | null> {
-  const root = resolveStaticRoot();
-  if (!root) return null;
-  try {
-    return await readFile(join(root, 'warehouse.html'));
-  } catch {
-    return null;
-  }
+  return readShellFile('warehouse.html');
 }
 
 /** Durable repository thread board (AGT-4130). */
 export async function readThreadBoardShell(): Promise<Buffer | null> {
-  const root = resolveStaticRoot();
-  if (!root) return null;
-  try {
-    return await readFile(join(root, 'threads.html'));
-  } catch {
-    return null;
-  }
+  return readShellFile('threads.html');
 }
 
+/** The /app entry document, or null when assets are not present. */
 export async function readAppShell(): Promise<Buffer | null> {
-  const root = resolveStaticRoot();
-  if (!root) return null;
-  try {
-    return await readFile(join(root, 'app.html'));
-  } catch {
-    return null;
-  }
+  return readShellFile('app.html');
 }

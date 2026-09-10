@@ -33,3 +33,9 @@ process.env.OPENSWARM_COORDINATION_FILE = join(tmpdir(), 'openswarm-test-coordin
 // per worker for the same reason as the board: sharing it would reintroduce
 // the contention the line above removes.
 process.env.OPENSWARM_AUTOMATION_DB = join(tmpdir(), 'openswarm-test-automation', workerScope, 'automation.db');
+
+// The agentic loop appends a usage-ledger line for every model response it
+// sees, including the fake responses loop tests feed it. Keep those out of the
+// operator's live ~/.openswarm/usage/. Per worker: ledger tests read the whole
+// directory back. (AGT-4178)
+process.env.OPENSWARM_USAGE_DIR = join(tmpdir(), 'openswarm-test-usage', workerScope);

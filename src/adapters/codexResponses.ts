@@ -5,6 +5,8 @@
 // (unlike the codex `exec` CLI, which is a black box). INT-1586.
 // ============================================
 
+import { adapterFetch } from './httpDispatcher.js';
+
 import type {
   CliAdapter,
   CliRunOptions,
@@ -48,6 +50,10 @@ type ResponsesInputItem =
   | { role: 'user' | 'assistant'; content: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string };
+
+// The dispatcher rationale now lives in httpDispatcher.ts, shared with every
+// other HTTPS adapter: they run in the same process at the same concurrency and
+// hit the same stall. (AGT-4220)
 
 /**
  * Resolve the reasoning effort for a Responses API request. An explicit effort
@@ -133,6 +139,8 @@ interface SseEvent {
   arguments?: string;
   response?: {
     model?: string;
+    incomplete_details?: { reason?: string };
+    error?: { message?: string };
     usage?: { input_tokens?: number; output_tokens?: number; input_tokens_details?: { cached_tokens?: number } };
   };
 }
@@ -241,6 +249,7 @@ async function consumeResponsesStream(
 
   const decoder = new TextDecoder();
   let buffer = '';
+  let terminalError: string | undefined;
   // Reasoning summary streams token-by-token; buffer and emit whole lines so the
   // live log shows readable thoughts instead of one-word-per-line spam.
   let reasoningBuf = '';
@@ -257,6 +266,11 @@ async function consumeResponsesStream(
   const handle = (ev: SseEvent | null) => {
     if (!ev) return;
     events.push(ev);
+    if (ev.type === 'response.incomplete') {
+      terminalError = `Responses stream incomplete${ev.response?.incomplete_details?.reason ? `: ${ev.response.incomplete_details.reason}` : ''}`;
+    } else if (ev.type === 'response.failed') {
+      terminalError = `Responses stream failed${ev.response?.error?.message ? `: ${ev.response.error.message}` : ''}`;
+    }
     if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
     if (onReasoning && ev.type === 'response.reasoning_summary_text.delta' && ev.delta) {
       reasoningBuf += ev.delta;
@@ -277,6 +291,8 @@ async function consumeResponsesStream(
   }
   handle(parseSseLine(buffer));
   flushReasoning(true);
+
+  if (terminalError) throw new Error(terminalError);
 
   return reduceResponsesEvents(events);
 }
@@ -408,6 +424,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       applyPatch: true,
       signal: options.signal,
       editFormat: options.editFormat,
+      usageAttribution: { adapter: 'codex-responses', taskId: options.processContext?.taskId, stage: options.processContext?.stage },
     };
 
     try {
@@ -488,7 +505,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       // NOTE: never set max_output_tokens — the Codex backend rejects it with HTTP 400.
       const doCall = async (accessToken: string): Promise<ChatLikeResponse> => {
         const request = this.prepareRequest(body);
-        const res = await fetch(request.url, {
+        const res = await adapterFetch(request.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -501,7 +518,7 @@ export class CodexResponsesAdapter implements CliAdapter {
           body: request.body,
           // The caller's signal AND this call's own deadline. Either aborts.
           signal: abortSignalWithDeadline(signal, timeoutMs),
-        });
+        } as never);
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');

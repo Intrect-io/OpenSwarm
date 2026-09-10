@@ -3,6 +3,7 @@
 // ============================================
 
 import { execFile } from 'node:child_process';
+import { constants } from 'node:fs';
 import { cp, lstat, mkdir, readdir, readlink, realpath, rm, symlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -10,7 +11,18 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const COPY_TIMEOUT_MS = 5 * 60_000;
 
-async function copyWithCloneFallback(source: string, target: string): Promise<void> {
+async function copyWithCloneFallback(
+  source: string, target: string, exclude?: (path: string) => boolean, label = '',
+): Promise<void> {
+  if (exclude) {
+    // Filter before reading files or following dependency links. Reflinks still
+    // give independent writes where the filesystem supports them.
+    await cp(source, target, {
+      recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE,
+      filter: (path) => !exclude(join(label, relative(source, path))),
+    });
+    return;
+  }
   try {
     if (process.platform === 'darwin') {
       // APFS clonefile: independent writes with near-constant-time/space copies.
@@ -47,14 +59,16 @@ export async function copyIsolatedPath(
   target: string,
   sandboxRoot: string,
   label: string,
+  exclude?: (path: string) => boolean,
 ): Promise<void> {
+  if (exclude?.(label)) return;
   const physicalSource = await realpath(source);
   await mkdir(dirname(target), { recursive: true });
-  await copyWithCloneFallback(physicalSource, target);
+  await copyWithCloneFallback(physicalSource, target, exclude, label);
   // Always validate the destination tree. Even a previously sanitized snapshot
   // is mutable filesystem state; trusting it here would turn an intermediate
   // symlink change into a sandbox escape or unexpected dereference.
-  await isolateCopiedTreeSymlinks(sandboxRoot, target, physicalSource, label);
+  await isolateCopiedTreeSymlinks(sandboxRoot, target, physicalSource, label, exclude);
 }
 
 async function isolateCopiedTreeSymlinks(
@@ -62,6 +76,7 @@ async function isolateCopiedTreeSymlinks(
   current: string,
   sourceCurrent: string,
   label: string,
+  exclude?: (path: string) => boolean,
 ): Promise<void> {
   const info = await lstat(current);
   if (info.isSymbolicLink()) {
@@ -99,8 +114,8 @@ async function isolateCopiedTreeSymlinks(
       return;
     }
     await rm(current, { force: true });
-    await copyWithCloneFallback(physicalTarget, current);
-    await isolateCopiedTreeSymlinks(sandboxRoot, current, physicalTarget, label);
+    await copyWithCloneFallback(physicalTarget, current, exclude, label);
+    await isolateCopiedTreeSymlinks(sandboxRoot, current, physicalTarget, label, exclude);
     return;
   }
   if (!info.isDirectory()) return;
@@ -113,6 +128,7 @@ async function isolateCopiedTreeSymlinks(
       join(current, entry.name),
       join(sourceCurrent, entry.name),
       `${label}/${entry.name}`,
+      exclude,
     );
   }
 }

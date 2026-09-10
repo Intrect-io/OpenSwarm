@@ -353,7 +353,7 @@ export type RoleConfig = {
     mode?: 'report' | 'execute';
     /** Minimum signal score required to recommend fan-out (default 2). */
     minScore?: number;
-    /** Max candidate workers in flight (default candidates length, capped at 3). */
+    /** Max candidate workers in flight (default: all candidates). */
     concurrency?: number;
     /** Keep temporary candidate repos for debugging. */
     keepSandboxes?: boolean;
@@ -446,9 +446,13 @@ export type DecompositionConfig = {
   thresholdMinutes: number;
   /** Max decomposition depth (default: 2) - prevents infinite nesting */
   maxDepth?: number;
-  /** Max children per task (default: 5) - prevents issue explosion */
+  /** Max children per task (default: 5) - prevents issue explosion.
+   * Shared by the autonomous runner and human `/plan` dispatch. */
   maxChildrenPerTask?: number;
-  /** Daily issue creation limit (default: 20) - prevents runaway creation */
+  /**
+   * Daily issue creation limit (default: 20) - paces unsupervised automation.
+   * Autonomous runner only; `/plan` is exempt (AGT-4123 Option 2).
+   */
   dailyLimit?: number;
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog?: boolean;
@@ -586,6 +590,8 @@ export type AutonomousStartupConfig = {
   /** Durable execution ledger rollout mode. */
   automationLedgerMode?: 'off' | 'shadow' | 'primary';
   automationDbPath?: string;
+  /** Linear project for the daemon's self-filed retrospective issues; unset disables the lane. */
+  retrospectiveProjectId?: string;
   automationLeaseMs?: number;
   shutdownGraceMs?: number;
   /** Default role configuration */
@@ -605,11 +611,15 @@ export type AutonomousStartupConfig = {
    * blockedBy dependency graph. Default: true. (INT-1975)
    */
   allowSameProjectConcurrent?: boolean;
+  /** Admission for a task with no resolvable write scope next to a live same-repo run. */
+  unknownScopeAdmission?: 'serialize' | 'admit';
+  /** Identical-fingerprint infra_error attempts that park a run (0 disables, default 6). */
+  infraFailureCircuit?: number;
   /** Pipeline guards configuration */
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */
   verify?: VerifyConfig;
-  /** CodeQL baseline-diff gate for autonomous worker edits, enabled by default. */
+  /** CodeQL baseline-diff gate for autonomous worker edits, disabled by default (AGT-4160). */
   securityAudit?: SecurityAuditConfig;
   /**
    * Max objective self-repair attempts (lint/bs/test failures) tolerated before
