@@ -9,9 +9,12 @@ export interface ServiceInstanceLock {
 }
 
 /**
- * Acquire the daemon's lifetime lock before any external client or scheduler is
- * initialized. Port probing alone is a check-then-bind TOCTOU: two processes can
- * both observe a free port and connect side-effecting services before one loses
+ * Acquire a process-lifetime SQLite writer lock (`BEGIN IMMEDIATE`).
+ * Used for the daemon instance lock and, during AGT-4024, the task-state
+ * store mutex at `~/.openswarm/task-state-lock.db`.
+ *
+ * Port probing alone is a check-then-bind TOCTOU: two processes can both
+ * observe a free port and connect side-effecting services before one loses
  * the later listen(2). SQLite's writer lock is kernel-owned and is released on
  * crash, so it does not need unsafe stale-PID deletion.
  */

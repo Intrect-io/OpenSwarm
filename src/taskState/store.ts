@@ -20,9 +20,9 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
-import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
+import { processNamespaceId } from '../support/processLiveness.js';
 import { getInstanceId } from '../support/healthEndpoint.js';
-import { acquireServiceInstanceLock } from '../support/serviceInstanceLock.js';
+import { acquireServiceInstanceLock, type ServiceInstanceLock } from '../support/serviceInstanceLock.js';
 
 const TASK_STATE_MARKER = '<!-- openswarm:task-state:v1 -->';
 
@@ -111,10 +111,8 @@ type TaskStateStore = z.infer<typeof TaskStateStoreSchema>;
 
 let cache: TaskStateStore | null = null;
 let cacheStamp: string | null = null;
-const LOCK_STALE_MS = 30_000;
-const LOCK_ABANDON_MS = 600_000;
 const LOCK_WAIT_MS = 10;
-const LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 
 /** `ns`: the writer's pid space. A string identifies it; `null` records that
@@ -136,22 +134,11 @@ function lockNamespaceOf(raw: unknown): string | null | undefined {
  * `finally`, so there is no way to observe the real thing after the fact — a
  * mutation dropping `instance` passed the whole suite until this existed.
  *
- * `instance` is what lets a successor decide ownership without a clock;
- * `ns` scopes the pid; `?? null` on the namespace is deliberate — an omitted
- * key would be indistinguishable from a lock written before the field existed.
+ * `instance` / `ns` remain on the compatibility dot-lock payload for observability;
+ * mutual exclusion no longer depends on probing them (AGT-4024).
  */
 export function buildLockPayload(token: string): StoreLockOwner {
   return { pid: process.pid, token, ns: processNamespaceId() ?? null, instance: getInstanceId() };
-}
-
-/** Whether this lock's pid can be probed from here at all. */
-function lockPidIsJudgeable(owner: StoreLockOwner): boolean {
-  // Absent keeps the original probe; null fails closed (the writer could name
-  // no space, so our pid table is not its pid table); a string must be ours.
-  // See the matching note in worktreeManager, including its AGT-4069 caveat.
-  if (owner.ns === undefined) return true;
-  if (owner.ns === null) return false;
-  return sameProcessNamespace(owner.ns);
 }
 
 function readStoreLockOwner(lockPath: string): StoreLockOwner | null {
@@ -172,6 +159,12 @@ function readStoreLockOwner(lockPath: string): StoreLockOwner | null {
 
 function getStorePath(): string {
   return process.env.OPENSWARM_TASK_STATE_FILE || join(homedir(), '.openswarm', 'task-state.json');
+}
+
+/** Kernel-owned mutex for task-state writers (BEGIN IMMEDIATE). */
+function taskStateLockDbPath(): string {
+  return process.env.OPENSWARM_TASK_STATE_LOCK_DB
+    || join(homedir(), '.openswarm', 'task-state-lock.db');
 }
 
 function ensureStoreLoaded(): TaskStateStore {
@@ -214,127 +207,96 @@ export function resetTaskStateStoreForTests(): void {
   cacheStamp = null;
 }
 
+/**
+ * Serialize mutations of task-state.json.
+ *
+ * Transition (AGT-4024): acquire BOTH the kernel-owned SQLite writer lock at
+ * `~/.openswarm/task-state-lock.db` (`BEGIN IMMEDIATE` via
+ * {@link acquireServiceInstanceLock}) and the legacy advisory dot-lock.
+ * Order is SQLite first, then the dot-lock, so a new binary (both locks) and
+ * an old CLI (dot-lock only) still exclude each other during version skew —
+ * the new binary holds the compatibility lock while the old waits for it, and
+ * vice versa. Release in reverse: drop the dot-lock, then ROLLBACK/close the
+ * SQLite transaction.
+ *
+ * SQLite's writer lock is kernel-owned and released on crash, so it needs no
+ * PID / age staleness heuristic. The dot-lock remains only for mixed-version
+ * mutual exclusion; a follow-up can drop it once the CLI floor has moved.
+ * While we hold the SQLite mutex, an abandoned compatibility lock (crash of a
+ * dual-lock holder, or an old CLI that exited without unlinking) is reclaimed
+ * after the wait deadline — no other new writer can be in the critical section.
+ */
 function withStoreLock<T>(operation: () => T): T {
   const path = getStorePath();
   const directory = dirname(path);
-  const lockPath = ;
+  const lockPath = `${path}.lock`;
   mkdirSync(directory, { recursive: true });
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  const lockTimeoutMs = Number(process.env.OPENSWARM_TASK_STATE_LOCK_TIMEOUT_MS) || DEFAULT_LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + lockTimeoutMs;
   let lockFd: number | undefined;
   const lockToken = randomUUID();
-
-  // --- Transition dual-lock: SQLite first, then dot-lock ---
-  // Acquire the kernel-owned SQLite writer lock BEFORE the dot-lock so that
-  // a new binary (which takes both) and an old binary (which only takes the
-  // dot-lock) still exclude each other: the new binary holds the dot-lock
-  // while the old binary waits for it, and vice versa.
-  // The SQLite lock is released in the finally block below, after the dot-lock.
   const sqliteLockPath = taskStateLockDbPath();
+
   let sqliteLock: ServiceInstanceLock | undefined;
-  try {
-    sqliteLock = acquireServiceInstanceLock(sqliteLockPath);
-  } catch (error) {
-    // If the SQLite lock is busy, wait and retry up to the deadline.
-    while (Date.now() < deadline) {
-      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
-      try {
-        sqliteLock = acquireServiceInstanceLock(sqliteLockPath);
-        break;
-      } catch {
-        // still busy
+  while (sqliteLock === undefined) {
+    try {
+      // Kernel-owned writer lock at ~/.openswarm/task-state-lock.db (or OPENSWARM_TASK_STATE_LOCK_DB).
+      sqliteLock = acquireServiceInstanceLock(sqliteLockPath);
+    } catch (error) {
+      const busy = error instanceof Error && /owns the instance lock/i.test(error.message);
+      if (!busy) throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for task state SQLite lock: ${sqliteLockPath}`, { cause: error });
       }
-    }
-    if (!sqliteLock) {
-      throw new Error(\);
+      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
     }
   }
 
-  while (lockFd === undefined) {
-    try {
-      lockFd = openSync(lockPath, 'wx', 0o600);
-      // \ deliberately: an omitted key would be indistinguishable from
-      // a pre-field lock, which readers are entitled to probe locally.
-      writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
-      fsyncSync(lockFd);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') throw error;
+  try {
+    while (lockFd === undefined) {
       try {
-        const owner = readStoreLockOwner(lockPath);
-        const judgedMtimeMs = statSync(lockPath).mtimeMs;
-        const lockAgeMs = Date.now() - judgedMtimeMs;
-        const staleMalformedLock = !owner && lockAgeMs > LOCK_STALE_MS;
-        // A pid only means something inside the space it was issued in. This
-        // file can be a projection two containers share, so probing a lock
-        // that names a different space answers about whatever holds that
-        // number locally — and an ESRCH there would reclaim a lock a live
-        // writer still holds. Such a lock gets the age rule and nothing else.
-        // A lock whose writer did not record a namespace (pre-AGT-4068) is
-        // also not probed — it gets the age rule, which is the pre-existing
-        // original probe behaviour. (Caught by the commit-gate review.)
-        const ownerPidIsJudgeable = owner !== null && lockPidIsJudgeable(owner);
-        const abandonedLock = owner !== null && ownerPidIsJudgeable && !processAppearsAlive(owner.pid);
-        // The pid probe above cannot see a generation change, so a lock the
-        // previous container left behind reads as held against the new daemon
-        // that inherited its pid. Settling that case outright, instead of
-        // waiting out LOCK_ABANDON_MS, is worth a full ten minutes of dead
-        // heartbeats after every restart. (AGT-4068)
-        //
-        // Gated on the recorded pid namespace, because that is the scope in
-        // which a pid is unique — and this file may be a mounted projection
-        // two containers share, each with its own pid 1. A lock from a
-        // different namespace, or one written before this field existed, is
-        // NOT reasoned about by pid: it falls through to the age rule below,
-        // which is exactly what the AGT-4023 policy test pins.
-        const priorGenerationLock = owner !== null
-          && isProofCapableSpace(owner.ns ?? undefined) && sameProcessNamespace(owner.ns ?? undefined)
-          && writerProvablyGone({
-            pid: owner.pid,
-            ownerId: owner.instance,
-            ourOwnerId: getInstanceId(),
-            writtenAtMs: judgedMtimeMs,
-          });
-
-        if (staleMalformedLock || abandonedLock || priorGenerationLock) {
-          // The lock is stale — reclaim it.
-          unlinkSync(lockPath);
-          continue;
-        }
-
-        // The lock is held by a live writer. Wait for it to be released.
+        lockFd = openSync(lockPath, 'wx', 0o600);
+        // `?? null` deliberately: an omitted key would be indistinguishable from
+        // a pre-field lock. Payload is observational; exclusion is SQLite-owned.
+        writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
+        fsyncSync(lockFd);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'EEXIST') throw error;
+        // Wait for an old CLI (or a peer finishing unlink). After the deadline,
+        // reclaim the compatibility lock: we already hold the kernel SQLite
+        // mutex, so no other new binary is in the critical section.
         if (Date.now() >= deadline) {
-          throw new Error(\);
+          try {
+            unlinkSync(lockPath);
+          } catch (unlinkError) {
+            if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+          }
+          continue;
         }
         Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
-      } catch (innerError) {
-        if ((innerError as NodeJS.ErrnoException).code === 'ENOENT') {
-          // The lock was removed between our stat and our decision — retry.
-          continue;
-        }
-        throw innerError;
       }
     }
-  }
 
-  try {
-    // Another process may have committed since this process populated cache.
-    cache = null;
-    return operation();
-  } finally {
-    closeSync(lockFd);
     try {
-      // Only the process/token that created the current path may unlink it. If
-      // an operator or recovery path replaced the lock, leave the replacement.
-      if (readStoreLockOwner(lockPath)?.token === lockToken) unlinkSync(lockPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.warn(\);
+      // Another process may have committed since this process populated cache.
+      cache = null;
+      return operation();
+    } finally {
+      closeSync(lockFd);
+      try {
+        // Only the process/token that created the current path may unlink it. If
+        // an operator or recovery path replaced the lock, leave the replacement.
+        if (readStoreLockOwner(lockPath)?.token === lockToken) unlinkSync(lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn(`[TaskState] Failed to remove lock ${lockPath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
-    // Release the SQLite lock after the dot-lock is gone.
-    if (sqliteLock) {
-      sqliteLock.release();
-    }
+  } finally {
+    // Reverse of acquisition: dot-lock already dropped above; release SQLite last.
+    sqliteLock.release();
   }
 }
 
