@@ -28,6 +28,7 @@ import {
   listWorkflows,
   loadExecution,
   loadWorkflow,
+  assertExecutionPersistable,
   saveExecution,
   saveWorkflow,
   topologicalSort,
@@ -380,5 +381,56 @@ describe('validateWorkflow', () => {
     const result = validateWorkflow(config);
     expect(result.valid).toBe(false);
     expect(result.errors).toContain('Workflow contains circular dependencies');
+  });
+});
+
+describe('assertExecutionPersistable', () => {
+  const cleanupWorkflowIds: string[] = [];
+
+  afterEach(async () => {
+    for (const id of cleanupWorkflowIds.splice(0)) {
+      await rm(resolve(WORKFLOW_DIR, `${id}.yaml`), { force: true });
+    }
+  });
+
+  it('rejects invalid execution status before persistence', async () => {
+    await expect(assertExecutionPersistable({
+      workflowId: 'wf-1',
+      executionId: uniqueId('bad-status'),
+      status: 'paused' as WorkflowExecution['status'],
+      startedAt: Date.now(),
+      stepResults: {},
+    })).rejects.toThrow(/Invalid execution status/);
+  });
+
+  it('rejects step results that are not in the workflow definition', async () => {
+    const workflowId = uniqueId('wf-assert');
+    cleanupWorkflowIds.push(workflowId);
+    await saveWorkflow({
+      id: workflowId,
+      name: 'Assertable',
+      projectPath: '/tmp/project',
+      steps: [{ id: 'only', name: 'Only', prompt: 'run' }],
+    });
+
+    await expect(assertExecutionPersistable({
+      workflowId,
+      executionId: uniqueId('bad-step'),
+      status: 'running',
+      startedAt: Date.now(),
+      stepResults: {
+        ghost: { stepId: 'ghost', status: 'completed', startedAt: 0, completedAt: 1 },
+      },
+    })).rejects.toThrow(/not in workflow/);
+  });
+
+  it('allows structurally valid executions when the definition is absent', async () => {
+    await expect(assertExecutionPersistable({
+      workflowId: uniqueId('missing-def'),
+      executionId: uniqueId('ok-exec'),
+      status: 'completed',
+      startedAt: Date.now(),
+      stepResults: {},
+    })).resolves.toBeUndefined();
   });
 });

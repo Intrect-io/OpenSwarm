@@ -1,7 +1,16 @@
 """Tests for task_state_model.py — confidence integer validation."""
 
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 import pytest
-from src.task_state_model import ExecutionState
+
+# Allow `python -m pytest src/task_state_model_test.py` without installing a package.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from task_state_model import ExecutionState  # noqa: E402
 
 
 class TestConfidenceValidation:
@@ -40,3 +49,7 @@ class TestConfidenceValidation:
     def test_rejects_string(self):
         with pytest.raises(ValueError):
             ExecutionState(status="done", confidence="high")
+
+    def test_rejects_bool(self):
+        with pytest.raises(ValueError, match="confidence must be an integer"):
+            ExecutionState(status="done", confidence=True)

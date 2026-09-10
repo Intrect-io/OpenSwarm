@@ -3,12 +3,29 @@
 // Task state persistence + project info query
 // ============================================
 
-import { existsSync, readFileSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  writeFileSync,
+  unlinkSync,
+  fsyncSync,
+  statSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import {
+  isProofCapableSpace,
+  processAppearsAlive,
+  processNamespaceId,
+  sameProcessNamespace,
+} from '../support/processLiveness.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -18,6 +35,101 @@ import { atomicWriteFileSync } from '../support/atomicFile.js';
  * (service.ts, INT-2570) is the primary defense against concurrent writers on
  * these specific files; this is the cheap defense-in-depth for the crash case.
  */
+
+type RunnerLockOwner = { pid: number; token: string; ns?: string | null };
+
+function readRunnerLockOwner(lockPath: string): RunnerLockOwner | null {
+  try {
+    const value = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<RunnerLockOwner>;
+    return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.token === 'string'
+      ? {
+        pid: value.pid!,
+        token: value.token,
+        ns: value.ns === null ? null : typeof value.ns === 'string' ? value.ns : undefined,
+      }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Release a runner-state lock only when we can prove its owner is gone in OUR
+ * pid namespace. A lock from another namespace (or with no namespace recorded)
+ * is left alone — reclaiming it would free a live remote owner's lock.
+ *
+ * Returns true when the lock file was removed.
+ */
+export function releaseStaleLock(lockPath: string): boolean {
+  if (!existsSync(lockPath)) return false;
+  const owner = readRunnerLockOwner(lockPath);
+  if (!owner) {
+    // Malformed lock: only reclaim when aged past a short stale window.
+    try {
+      if (Date.now() - statSync(lockPath).mtimeMs > 30_000) {
+        unlinkSync(lockPath);
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+  // Namespace proof required: never release a lock we cannot judge.
+  if (!isProofCapableSpace(owner.ns ?? undefined) || !sameProcessNamespace(owner.ns ?? undefined)) {
+    return false;
+  }
+  if (processAppearsAlive(owner.pid)) return false;
+  try {
+    unlinkSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exclusive file lock around a runner-state mutation. Uses the same
+ * owner-safe stale recovery as `releaseStaleLock`.
+ */
+export function withRunnerStateLock<T>(stateFile: string, operation: () => T): T {
+  const lockPath = `${stateFile}.lock`;
+  ensureParentDir(stateFile);
+  const deadline = Date.now() + 5_000;
+  const token = randomUUID();
+  let lockFd: number | undefined;
+
+  while (lockFd === undefined) {
+    try {
+      lockFd = openSync(lockPath, 'wx', 0o600);
+      writeFileSync(lockFd, JSON.stringify({
+        pid: process.pid,
+        token,
+        ns: processNamespaceId() ?? null,
+      }), 'utf8');
+      fsyncSync(lockFd);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw error;
+      releaseStaleLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for runner state lock: ${lockPath}`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+
+  try {
+    return operation();
+  } finally {
+    closeSync(lockFd);
+    try {
+      if (readRunnerLockOwner(lockPath)?.token === token) unlinkSync(lockPath);
+    } catch {
+      // Best-effort unlock.
+    }
+  }
+}
 /** Check if a resolved path matches or is under any enabled project path */
 export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
   for (const enabled of enabledProjects) {
@@ -302,15 +414,17 @@ export function loadTaskState(state: TaskState): void {
 
 export function saveTaskState(state: TaskState): void {
   try {
-    const data = {
-      completed: Array.from(state.completedTaskIds),
-      failed: Object.fromEntries(state.failedTaskCounts),
-      retryTimes: Object.fromEntries(state.failedTaskRetryTimes),
-      lastFailures: Object.fromEntries(state.lastFailureDetails),
-      updatedAt: new Date().toISOString(),
-    };
-    ensureParentDir(TASK_STATE_FILE);
-    atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2));
+    withRunnerStateLock(TASK_STATE_FILE, () => {
+      const data = {
+        completed: Array.from(state.completedTaskIds),
+        failed: Object.fromEntries(state.failedTaskCounts),
+        retryTimes: Object.fromEntries(state.failedTaskRetryTimes),
+        lastFailures: Object.fromEntries(state.lastFailureDetails),
+        updatedAt: new Date().toISOString(),
+      };
+      ensureParentDir(TASK_STATE_FILE);
+      atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2));
+    });
   } catch (err) {
     console.warn('[AutonomousRunner] Failed to save task state:', err);
   }

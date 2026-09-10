@@ -16,15 +16,34 @@ vi.mock('node:fs', () => ({
   mkdirSync: (...args: unknown[]) => mkdirSyncMock(...args),
   // atomicWriteFileSync (used by writeState) opens a temp file, fsyncs and
   // renames it into place; the payload still reaches writeFileSync as arg[1].
+  // withTelemetryLock also writeFileSyncs a lock payload first — tests below
+  // select the installId-bearing write, not calls[0].
   openSync: () => 1,
   fsyncSync: () => undefined,
   closeSync: () => undefined,
   renameSync: () => undefined,
   existsSync: () => false,
   unlinkSync: () => undefined,
+  statSync: () => ({ mtimeMs: Date.now() }),
 }));
 
 import { initTelemetry, maybeShowNotice, track } from './telemetry.js';
+
+/** Prefer the telemetry state payload over the preceding lock-owner JSON. */
+function lastInstallIdWrite(): { installId: string; noticeShown?: boolean } {
+  const payloads = writeFileSyncMock.mock.calls
+    .map((call) => {
+      try {
+        return JSON.parse(String(call[1])) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((p): p is { installId: string; noticeShown?: boolean } =>
+      !!p && typeof p.installId === 'string');
+  if (payloads.length === 0) throw new Error('no installId write observed');
+  return payloads[payloads.length - 1];
+}
 
 const ENV_KEYS = ['OPENSWARM_TELEMETRY', 'DO_NOT_TRACK', 'CI', 'GITHUB_ACTIONS', 'OPENSWARM_TELEMETRY_URL'];
 let savedEnv: Record<string, string | undefined>;
@@ -63,14 +82,14 @@ describe('readState / getInstallId regenerate branches', () => {
     await track({ command: 'run' });
     expect(mkdirSyncMock).toHaveBeenCalled();
     expect(writeFileSyncMock).toHaveBeenCalled();
-    const written = JSON.parse(writeFileSyncMock.mock.calls[0][1] as string) as { installId: string };
+    const written = lastInstallIdWrite();
     expect(written.installId).toMatch(/^[A-Za-z0-9_-]{21}$/);
   });
 
   it('regenerates the install id when the stored value fails validation', async () => {
     readFileSyncMock.mockReturnValue(JSON.stringify({ installId: 'too-short', noticeShown: true }));
     await track({ command: 'run' });
-    const written = JSON.parse(writeFileSyncMock.mock.calls[0][1] as string) as { installId: string };
+    const written = lastInstallIdWrite();
     expect(written.installId).toMatch(/^[A-Za-z0-9_-]{21}$/);
     expect(written.installId).not.toBe('too-short');
   });
@@ -94,7 +113,7 @@ describe('maybeShowNotice branches', () => {
     maybeShowNotice();
     expect(writeSpy).toHaveBeenCalledTimes(1);
     expect(writeSpy.mock.calls[0][0]).toContain('OpenSwarm collects anonymous usage data');
-    const written = JSON.parse(writeFileSyncMock.mock.calls[0][1] as string) as { installId: string; noticeShown: boolean };
+    const written = lastInstallIdWrite();
     expect(written.installId).toBe('testinstall0123456789');
     expect(written.noticeShown).toBe(true);
     writeSpy.mockRestore();
@@ -106,7 +125,7 @@ describe('maybeShowNotice branches', () => {
     });
     const writeSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     maybeShowNotice();
-    const written = JSON.parse(writeFileSyncMock.mock.calls[0][1] as string) as { installId: string };
+    const written = lastInstallIdWrite();
     expect(written.installId).toMatch(/^[A-Za-z0-9_-]{21}$/);
     writeSpy.mockRestore();
   });

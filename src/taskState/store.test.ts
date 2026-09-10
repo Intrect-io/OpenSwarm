@@ -184,6 +184,34 @@ describe('task state store', () => {
     expect(getTaskState('PROCESS-B')?.title).toBe('PROCESS-B');
   });
 
+  it('keeps concurrent execution upsert and Linear reconciliation consistent under the store lock', async () => {
+    // Seed an in_progress row, then race a local execution bump against a Linear
+    // Done reconciliation. Both paths take withStoreLock; the store must remain
+    // parseable and retain both writers' intents without corruption.
+    upsertTaskState('RACE-1', {
+      title: 'race',
+      linearState: 'In Progress',
+      execution: { status: 'in_progress', retryCount: 0 },
+    });
+
+    await Promise.all([
+      Promise.resolve().then(() => upsertTaskState('RACE-1', {
+        execution: { status: 'in_progress', retryCount: 1 },
+      })),
+      Promise.resolve().then(() => updateTaskLinearState('RACE-1', 'Done')),
+    ]);
+
+    const final = getTaskState('RACE-1');
+    expect(final?.title).toBe('race');
+    expect(final?.linearState).toBe('Done');
+    // Whichever writer lands last: either Done reconciliation (status done) or
+    // the retryCount bump on the still-in_progress row. Never a half-written state.
+    expect(['in_progress', 'done']).toContain(final?.execution.status);
+    if (final?.execution.status === 'in_progress') {
+      expect(final.execution.retryCount).toBe(1);
+    }
+  });
+
   it('keeps tasks blocked until dependencies are done, then releases them', () => {
     upsertTaskState('ISSUE-1', {
       execution: { status: 'in_progress', retryCount: 0 },

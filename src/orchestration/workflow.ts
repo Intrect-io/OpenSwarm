@@ -388,7 +388,7 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 }
 
 /**
- * Save execution state
+ * Save execution state — validated against the workflow definition when present.
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
   const parsed = WorkflowExecutionSchema.safeParse(execution);
@@ -396,9 +396,50 @@ export async function saveExecution(execution: WorkflowExecution): Promise<void>
     const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`);
     throw new Error(`Invalid workflow execution: ${details.join(', ')}`);
   }
+  // Both checks, because they see different things: the schema is structural and
+  // cannot know whether a step id exists in the workflow DEFINITION, which is
+  // what this one reads from disk to compare against. (AGT-3457 + AGT-4288)
+  await assertExecutionPersistable(parsed.data);
   const filePath = storageFilePath(EXECUTION_DIR, parsed.data.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(parsed.data, null, 2), 'utf-8');
+}
+
+/**
+ * Reject execution snapshots that are structurally invalid or incompatible with
+ * their workflow definition (unknown step ids, failed definition validation).
+ */
+export async function assertExecutionPersistable(execution: WorkflowExecution): Promise<void> {
+  const allowedStatuses = new Set(['running', 'completed', 'failed', 'aborted']);
+  if (!execution.workflowId) throw new Error('Execution workflowId is required');
+  if (!execution.executionId) throw new Error('Execution executionId is required');
+  if (!allowedStatuses.has(execution.status)) {
+    throw new Error(`Invalid execution status: ${execution.status}`);
+  }
+  if (!execution.stepResults || typeof execution.stepResults !== 'object') {
+    throw new Error('Execution stepResults must be an object');
+  }
+
+  const workflow = await loadWorkflow(execution.workflowId);
+  if (!workflow) {
+    // Definition not on disk yet (common in unit tests that only exercise
+    // execution storage IDs). Structural checks above still apply.
+    return;
+  }
+
+  const definitionCheck = validateWorkflow(workflow);
+  if (!definitionCheck.valid) {
+    throw new Error(`Cannot persist execution for invalid workflow: ${definitionCheck.errors.join('; ')}`);
+  }
+
+  const definedSteps = new Set(workflow.steps.map((s) => s.id));
+  for (const [key, result] of Object.entries(execution.stepResults)) {
+    if (!definedSteps.has(key) || !definedSteps.has(result.stepId)) {
+      throw new Error(
+        `Execution step "${key}" / "${result.stepId}" is not in workflow "${workflow.id}" definition`,
+      );
+    }
+  }
 }
 
 /**

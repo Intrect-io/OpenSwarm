@@ -60,14 +60,15 @@ class ExecutionState(AliasModel):
         @classmethod
         def _validate_confidence_integer(cls, values: dict) -> dict:
             conf = values.get("confidence")
-            if conf is not None and not isinstance(conf, int):
+            # Reject bools (subclass of int) and non-integral numbers.
+            if conf is not None and type(conf) is not int:
                 raise ValueError(f"confidence must be an integer, got {type(conf).__name__}")
             return values
     else:
 
         @validator("confidence", pre=True)
         def _validate_confidence_integer_v1(cls, v):
-            if v is not None and not isinstance(v, int):
+            if v is not None and type(v) is not int:
                 raise ValueError(f"confidence must be an integer, got {type(v).__name__}")
             return v
 

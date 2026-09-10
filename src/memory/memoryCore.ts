@@ -377,6 +377,19 @@ export function resetMemoryRecallStatusForTests(): void {
 }
 const LEGACY_SCHEMA_COLUMNS = new Set(['revisionCount', 'decay', 'stability', 'contradicts', 'supports']);
 
+/**
+ * Shared lock chaining all memory writers and legacy-schema migration.
+ * Without this, a writer can race a migrateLeanSchemaIfNeeded rewrite and
+ * commit into a table mid-drop/overwrite.
+ */
+let memoryWriteChain: Promise<unknown> = Promise.resolve();
+
+export async function withMemoryWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+  const run = memoryWriteChain.then(operation, operation);
+  memoryWriteChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 // Singleton accessors (for memoryOps)
 export function getDb(): Connection | null { return db; }
 export function getTable(): Table | null { return table; }
@@ -418,25 +431,27 @@ export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100
  * each attempt, so a retry is not a double-apply.
  */
 export async function withMemoryWriteRetry<T>(op: () => Promise<T>, label = 'write'): Promise<T> {
-  const MAX_ATTEMPTS = 8;
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await op();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too
-      // many concurrent writers" is already covered by "concurrent writers"; a bare
-      // "too many" would wrongly retry unrelated validation/cardinality errors.
-      const retryable = /concurrent writers|commit conflict|version conflict|retry_timeout/i.test(msg);
-      if (!retryable || attempt >= MAX_ATTEMPTS) throw err;
-      // Full jitter over an exponentially growing (capped) window so 16 racing
-      // writers don't back off in lockstep and immediately re-collide.
-      const cap = Math.min(2000, 50 * 2 ** attempt);
-      const delay = 25 + Math.floor(Math.random() * cap);
-      console.warn(`[Memory] ${label} contended (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying in ${delay}ms`);
-      await new Promise((r) => setTimeout(r, delay));
+  return withMemoryWriteLock(async () => {
+    const MAX_ATTEMPTS = 8;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await op();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too
+        // many concurrent writers" is already covered by "concurrent writers"; a bare
+        // "too many" would wrongly retry unrelated validation/cardinality errors.
+        const retryable = /concurrent writers|commit conflict|version conflict|retry_timeout/i.test(msg);
+        if (!retryable || attempt >= MAX_ATTEMPTS) throw err;
+        // Full jitter over an exponentially growing (capped) window so 16 racing
+        // writers don't back off in lockstep and immediately re-collide.
+        const cap = Math.min(2000, 50 * 2 ** attempt);
+        const delay = 25 + Math.floor(Math.random() * cap);
+        console.warn(`[Memory] ${label} contended (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying in ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
-  }
+  });
 }
 
 async function hasLegacySchemaColumns(t: Table): Promise<boolean> {
@@ -811,42 +826,57 @@ async function openDatabase(): Promise<void> {
 
     // v3.0: lean cognitive memory table. Existing v2 tables are read
     // compatibly and rewritten by compaction.
-    if (tableNames.includes('cognitive_memory')) {
-      table = await db.openTable('cognitive_memory');
-      table = await migrateLeanSchemaIfNeeded(db, table);
-      console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
-    } else if (tableNames.includes('devmemory')) {
-      // Legacy table - will migrate later
-      table = await db.openTable('devmemory');
-      console.log(`${status.warn('[Memory] loaded legacy table')} ${c.cyan('devmemory')}`);
-    } else {
-      // Create new table (v3.0 schema)
-      const now = Date.now();
-      const initialRecord: CognitiveMemoryRecord = {
-        id: 'init',
-        type: 'system_pattern',
-        content: 'Cognitive memory system initialized with v3 lean schema',
-        vector: await embedPassage('Cognitive memory system initialized'),
+    // Migration is serialized with all memory writers via withMemoryWriteLock
+    // so a concurrent add/update cannot race the table overwrite.
+    await withMemoryWriteLock(async () => {
+      // Another waiter may have finished init while we were queued.
+      if (table) return;
 
-        importance: 0.5,
-        confidence: 1.0,
-        createdAt: now,
-        lastUpdated: now,
-        lastAccessed: now,
-        derivedFrom: 'system_init',
+      if (tableNames.includes('cognitive_memory')) {
+        table = await db!.openTable('cognitive_memory');
+        table = await migrateLeanSchemaIfNeeded(db!, table);
+        console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
+      } else if (tableNames.includes('devmemory')) {
+        // Legacy table - will migrate later
+        table = await db!.openTable('devmemory');
+        console.log(`${status.warn('[Memory] loaded legacy table')} ${c.cyan('devmemory')}`);
+      } else {
+        // Re-check table names under the lock — a concurrent init may have created it.
+        const namesNow = await db!.tableNames();
+        if (namesNow.includes('cognitive_memory')) {
+          table = await db!.openTable('cognitive_memory');
+          table = await migrateLeanSchemaIfNeeded(db!, table);
+          console.log(`${status.info('[Memory]')} ${c.dim('loaded table')} ${c.cyan('cognitive_memory v3.0')}`);
+          return;
+        }
+        // Create new table (v3.0 schema)
+        const now = Date.now();
+        const initialRecord: CognitiveMemoryRecord = {
+          id: 'init',
+          type: 'system_pattern',
+          content: 'Cognitive memory system initialized with v3 lean schema',
+          vector: await embedPassage('Cognitive memory system initialized'),
 
-        repo: 'system',
-        title: 'Memory system initialized',
-        metadata: '{}',
-        trust: 1.0,
-        expiresAt: PERMANENT_EXPIRY,
-      };
+          importance: 0.5,
+          confidence: 1.0,
+          createdAt: now,
+          lastUpdated: now,
+          lastAccessed: now,
+          derivedFrom: 'system_init',
 
-      table = await db.createTable('cognitive_memory', [initialRecord]);
-      // Freshly built by the current encoder, so the signature is true by construction.
-      writeStoredSignature(MEMORY_DIR, embeddingSignature(EMBEDDING_SPEC));
-      console.log(`${status.ok('[Memory] created table')} ${c.cyan('cognitive_memory v3.0')}`);
-    }
+          repo: 'system',
+          title: 'Memory system initialized',
+          metadata: '{}',
+          trust: 1.0,
+          expiresAt: PERMANENT_EXPIRY,
+        };
+
+        table = await db!.createTable('cognitive_memory', [initialRecord]);
+        // Freshly built by the current encoder, so the signature is true by construction.
+        writeStoredSignature(MEMORY_DIR, embeddingSignature(EMBEDDING_SPEC));
+        console.log(`${status.ok('[Memory] created table')} ${c.cyan('cognitive_memory v3.0')}`);
+      }
+    });
 
     warnOnEmbeddingDrift();
     clearRecallFailure('open');
