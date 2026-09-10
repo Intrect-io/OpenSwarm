@@ -44,7 +44,35 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     // reached the PR: cgf-portal#207 shipped `apps/pipelines/.coverage`.
     || /(?:^|\/)\.coverage(?:\.[^/]+)?$/.test(file)
     || /(?:^|\/)\.full-pytest\.status$/.test(file)
-    || /(?:^|\/)(?:\.pytest_cache|\.hypothesis|\.mypy_cache|\.ruff_cache|__pycache__|htmlcov)(?:\/|$)/.test(file);
+    || /(?:^|\/)(?:\.pytest_cache|\.hypothesis|\.mypy_cache|\.ruff_cache|__pycache__|htmlcov)(?:\/|$)/.test(file)
+    // The agent's own scratch, written INTO the worktree it was given. Seven
+    // shapes reached main or an open PR on 2026-09-10 before this existed:
+    //
+    //   node_modules              symlink to /work/<repo>/node_modules, created
+    //                             by worktreeManager to share one install. A
+    //                             checkout that receives it cannot `npm ci`.
+    //   cli.json, cursor/cli.json cursor-agent permission allow-lists granting
+    //                             `Shell(**)` and `Shell(rm*)` — a repository
+    //                             that ships one hands that to every checkout.
+    //                             One anchored `cli.json` rule covers both; a
+    //                             blanket `cursor/` rule would also swallow a
+    //                             project that legitimately tracks that name.
+    //   .run-tests.sh             generated runners that hardcode a container
+    //   .tmp-run-dod-tests.sh     worktree UUID and `rm -rf node_modules`.
+    //   .run-targeted-tests.mjs
+    //   .test-runner-tmp.sh
+    //   .cursor-review-git-dump.py
+    //
+    // `.gitignore` is the other half of this and was widened too (#601/#605/
+    // #606), but it only protects repositories that carry the pattern. This
+    // predicate is the daemon's own staging step, so it holds for every project
+    // the daemon touches, including ones it has never committed to before.
+    || file === 'node_modules'
+    || /(?:^|\/)cli\.json$/.test(file)
+    || /(?:^|\/)\.run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
+    || /(?:^|\/)\.tmp-run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
+    || /(?:^|\/)\.test-runner-tmp\.[^/]+$/.test(file)
+    || /(?:^|\/)\.cursor-review-[^/]+$/.test(file);
 }
 
 

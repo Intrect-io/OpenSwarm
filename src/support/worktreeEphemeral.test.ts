@@ -101,3 +101,36 @@ describe('citedPathsAreEphemeral', () => {
     expect(citedPathsAreEphemeral('[operator-question] asked 2 times with no answer — stopped retrying automatically')).toBe(false);
   });
 });
+
+describe('agent-runtime scratch (2026-09-10)', () => {
+  // Seven shapes reached main or an open PR before this existed. Each is
+  // something the AGENT wrote into the worktree it was handed, and each was
+  // swept in by a worker's `git add -A`.
+  it.each([
+    ['node_modules', 'symlink to the shared install; a checkout that gets it cannot npm ci'],
+    ['cli.json', 'cursor-agent permission allow-list granting Shell(**)'],
+    ['cursor/cli.json', 'the same, under its own directory'],
+    ['.run-tests.sh', 'generated runner with a hardcoded container worktree UUID'],
+    ['.tmp-run-dod-tests.sh', 'the same, different name'],
+    ['.run-targeted-tests.mjs', 'the same, different extension'],
+    ['.test-runner-tmp.sh', 'agent-written test runner'],
+    ['.cursor-review-git-dump.py', 'agent-written state dump'],
+  ])('treats %s as ephemeral (%s)', (file) => {
+    expect(isEphemeralWorktreeArtifact(file)).toBe(true);
+  });
+
+  it('does not swallow real source that merely resembles them', () => {
+    // The patterns are anchored on purpose: a repository may legitimately track
+    // a `src/cursor/` module, a `run-tests.sh` without the leading dot, or a
+    // `node_modules` path nested under a fixture directory.
+    for (const file of [
+      'run-tests.sh',
+      'scripts/run-deploy.sh',
+      'src/cursorTracker.ts',
+      'tests/fixtures/node_modules/pkg/index.js',
+      'src/cli.json.ts',
+    ]) {
+      expect(isEphemeralWorktreeArtifact(file)).toBe(false);
+    }
+  });
+});
