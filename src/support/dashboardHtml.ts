@@ -2350,19 +2350,6 @@ const PROVIDER_BUTTON_LABELS: Record<string, string> = {
   local: 'Local',
 };
 
-/**
- * Inject registry-backed provider buttons so the dashboard toggle cannot
- * drift from `isKnownAdapter` / POST /api/provider validation. (INT-3284)
- */
-function escapeHtml(unsafe: string): string {
-  return unsafe
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
 export function escapeHtml(text: string): string {
   if (!text) return '';
   return text
@@ -2373,10 +2360,14 @@ export function escapeHtml(text: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function buildDashboardHtml(providers: readonly string[]): string {
+/**
+ * Inject registry-backed provider buttons so the dashboard toggle cannot
+ * drift from `isKnownAdapter` / POST /api/provider validation. (INT-3284)
+ */
+export function buildDashboardHtml(providers: readonly string[]): string {
   const buttons = providers.map((name) => {
     const label = PROVIDER_BUTTON_LABELS[name] ?? name;
-    return `<button class="provider-btn" id="provider-${name}" onclick="switchProvider('${name}')">${label}</button>`;
+    return `<button class="provider-btn" id="provider-${name}" onclick="switchProvider('${escapeHtml(name)}')">${escapeHtml(label)}</button>`;
   }).join('\n          ');
   return DASHBOARD_HTML.replace('<!--PROVIDER_BUTTONS-->', buttons);
 }

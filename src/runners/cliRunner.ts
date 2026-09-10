@@ -14,7 +14,7 @@ import { initLocale } from '../locale/index.js';
 import { expandPath } from '../core/config.js';
 import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgress.js';
 import { status } from '../support/colors.js';
-import { sanitizeTerminalText } from '../tui/sanitize.js';
+import { sanitizeTerminalText, sanitizeAndBoundTerminalText, MAX_RENDERED_LINE_LENGTH } from '../tui/sanitize.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
 // Types
@@ -33,7 +33,15 @@ export interface CliRunOptions {
 
 // Helpers
 
-// expandPath imported from core/config.ts (with resolveRelative=true for CLI paths)
+function boundDiagnosticName(name: string): string {
+  const clean = sanitizeTerminalText(name).replace(/\s+/g, ' ').trim();
+  if (clean.length <= 80) return clean || '(unknown)';
+  return `${clean.slice(0, 77)}...`;
+}
+
+function boundVerboseLine(text: string): string {
+  return sanitizeAndBoundTerminalText(text.replace(/\r\n|\n|\r/g, ' ')).slice(0, MAX_RENDERED_LINE_LENGTH);
+}
 
 /** Check if the configured/default adapter can run before starting the pipeline */
 async function checkDefaultAdapter(): Promise<boolean> {
@@ -67,8 +75,8 @@ export async function runCli(options: CliRunOptions): Promise<void> {
 
   // 1. Check configured/default adapter
   if (!await checkDefaultAdapter()) {
-    const adapterName = getDefaultAdapterName();
-    const availableAdapters = await listAvailableAdapters();
+    const adapterName = boundDiagnosticName(getDefaultAdapterName());
+    const availableAdapters = (await listAvailableAdapters()).map(boundDiagnosticName);
     console.error(`Error: CLI adapter "${adapterName}" is not available.`);
     console.error(
       availableAdapters.length > 0
@@ -197,19 +205,19 @@ export async function runCli(options: CliRunOptions): Promise<void> {
   // 8.5. Verbose event listeners
   if (options.verbose) {
     pipeline.on('log', ({ line }: { line: string }) => {
-      console.log(`  ${sanitizeTerminalText(line)}`);
+      console.log(`  ${boundVerboseLine(line)}`);
     });
 
     pipeline.on('halt', ({ reason, sessionId }: { reason: string; sessionId: string }) => {
-      console.log(`  [verbose] HALT: ${sanitizeTerminalText(reason)} (session: ${sanitizeTerminalText(sessionId)})`);
+      console.log(`  [verbose] HALT: ${boundVerboseLine(reason)} (session: ${boundDiagnosticName(sessionId)})`);
     });
 
     pipeline.on('stuck', ({ sessionId, iteration }: { sessionId: string; iteration: number }) => {
-      console.log(`  [verbose] STUCK detected at iteration ${iteration} (session: ${sanitizeTerminalText(sessionId)})`);
+      console.log(`  [verbose] STUCK detected at iteration ${iteration} (session: ${boundDiagnosticName(sessionId)})`);
     });
 
     pipeline.on('iteration:fail', ({ iteration, reason }: { iteration: number; reason?: string }) => {
-      console.log(`  [verbose] Iteration ${iteration} failed${reason ? `: ${sanitizeTerminalText(reason)}` : ''}`);
+      console.log(`  [verbose] Iteration ${iteration} failed${reason ? `: ${boundVerboseLine(reason)}` : ''}`);
     });
 
     pipeline.on('iteration:complete', ({ iteration }: { iteration: number }) => {

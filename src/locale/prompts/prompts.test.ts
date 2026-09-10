@@ -543,6 +543,22 @@ describe('buildRevisionPromptFromReview', () => {
     expect(result).toContain('Suggestions');
     expect(result).toContain('Run prettier');
   });
+
+  it('caps aggregate feedback size for en and ko', () => {
+    const huge = 'x'.repeat(5_000);
+    const opts = {
+      decision: 'revise' as const,
+      feedback: huge,
+      issues: Array.from({ length: 10 }, (_, i) => `issue-${i}-${huge}`),
+      suggestions: Array.from({ length: 10 }, (_, i) => `sug-${i}-${huge}`),
+    };
+    const en = enPrompts.buildRevisionPromptFromReview(opts);
+    const ko = koPrompts.buildRevisionPromptFromReview(opts);
+    expect(en.length).toBeLessThanOrEqual(8_000);
+    expect(ko.length).toBeLessThanOrEqual(8_000);
+    expect(en.endsWith('[truncated]')).toBe(true);
+    expect(ko.endsWith('[truncated]')).toBe(true);
+  });
 });
 
 // ── 5. buildPlannerPrompt ──────────────────────────────────────

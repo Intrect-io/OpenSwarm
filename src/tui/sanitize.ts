@@ -4,6 +4,9 @@ const BEL = String.fromCharCode(7);
 /** Maximum rendered line length for terminal/TUI output. */
 export const MAX_RENDERED_LINE_LENGTH = 500;
 
+/** Maximum total sanitized content length for terminal/TUI output. */
+export const MAX_TOTAL_RENDERED_CONTENT = 20_000;
+
 /** Strip terminal escape sequences and non-printing controls before layout/render. */
 export function sanitizeTerminalText(value: string): string {
   let output = '';
@@ -39,15 +42,18 @@ export function sanitizeTerminalText(value: string): string {
 }
 
 /**
- * Sanitize and bound each rendered line to MAX_RENDERED_LINE_LENGTH.
- * Strips control sequences first, then truncates each line.
+ * Sanitize and bound each rendered line to MAX_RENDERED_LINE_LENGTH,
+ * then cap the aggregate payload to MAX_TOTAL_RENDERED_CONTENT.
+ * Strips control sequences first, then truncates each line / total body.
  */
 export function sanitizeAndBoundTerminalText(value: string): string {
   const clean = sanitizeTerminalText(value);
-  return clean
+  const lined = clean
     .split('\n')
     .map(line => line.length > MAX_RENDERED_LINE_LENGTH ? line.substring(0, MAX_RENDERED_LINE_LENGTH - 3) + '...' : line)
     .join('\n');
+  if (lined.length <= MAX_TOTAL_RENDERED_CONTENT) return lined;
+  return `${lined.slice(0, Math.max(0, MAX_TOTAL_RENDERED_CONTENT - 3))}...`;
 }
 
 /** HTML-escape a string for safe interpolation into HTML. */
@@ -64,4 +70,11 @@ export function safeIsoDate(value: string | number | Date | undefined): string |
   if (value === undefined) return undefined;
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+/** Sanitize and truncate monitor/fetch errors for TUI display. */
+export function formatMonitorError(error: unknown, maxLen = 200): string {
+  const safe = sanitizeTerminalText(String(error));
+  if (safe.length <= maxLen) return safe;
+  return `${safe.slice(0, Math.max(0, maxLen - 3))}...`;
 }

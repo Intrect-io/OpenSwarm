@@ -21,8 +21,24 @@ import * as pairWebhook from '../agents/pairWebhook.js';
 import {
   pairModeConfig,
 } from './discordCore.js';
+import {
+  EMBED_LIMITS,
+  enforceAggregateBudget,
+  safeAddField,
+  safeSetFooter,
+  safeSetTitle,
+  truncateField,
+} from './embedUtils.js';
 import { t, getDateLocale } from '../locale/index.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import { sanitizeAndBoundTerminalText, sanitizeTerminalText } from '../tui/sanitize.js';
+
+const DISCORD_CONTENT_LIMIT = 1900;
+
+/** Bound and neutralize untrusted text before Discord thread posting. */
+function neutralizeForDiscord(text: string, max = DISCORD_CONTENT_LIMIT): string {
+  return truncateField(sanitizeAndBoundTerminalText(text), max, true);
+}
 
 /**
  * !pair command handler
@@ -294,24 +310,32 @@ async function startPairSession(
     return;
   }
 
-  // 3. Start message
-  const startEmbed = new EmbedBuilder()
-    .setTitle(`📋 ${t('discord.pair.taskStartTitle', { title: options.taskTitle.slice(0, 80) })}`)
-    .setColor(0x00AE86)
-    .addFields(
-      { name: 'Session ID', value: session.id, inline: true },
-      { name: 'Task', value: options.taskId, inline: true },
-      { name: 'Project', value: options.projectPath, inline: true },
-    )
-    .setTimestamp();
+  // 3. Start message — validate fields and enforce Discord budgets
+  let startEmbed = new EmbedBuilder().setColor(0x00AE86).setTimestamp();
+  startEmbed = safeSetTitle(
+    startEmbed,
+    `📋 ${t('discord.pair.taskStartTitle', { title: options.taskTitle.slice(0, 80) })}`,
+  );
+  startEmbed = safeAddField(startEmbed, 'Session ID', session.id, true);
+  startEmbed = safeAddField(startEmbed, 'Task', options.taskId, true);
+  startEmbed = safeAddField(startEmbed, 'Project', options.projectPath, true);
+  startEmbed = enforceAggregateBudget(startEmbed);
 
   await thread.send({ embeds: [startEmbed] });
   agentPair.addMessage(session.id, 'system', t('discord.pair.sessionStartMsg'));
 
-  // 4. Start Worker/Reviewer loop (async)
+  // 4. Start Worker/Reviewer loop (async) — tolerate error-post failures
   runPairLoop(session.id, thread).catch((err) => {
     console.error('[Pair] Loop error:', err);
-    thread.send(`❌ ${t('discord.pair.loopError', { error: err instanceof Error ? err.message : String(err) })}`);
+    const safeError = neutralizeForDiscord(
+      err instanceof Error ? err.message : String(err),
+      EMBED_LIMITS.FIELD_VALUE,
+    );
+    void thread
+      .send(`❌ ${t('discord.pair.loopError', { error: safeError })}`)
+      .catch((sendErr) => {
+        console.error('[Pair] Failed to post loop error to thread:', sendErr);
+      });
     agentPair.updateSessionStatus(session.id, 'failed');
   });
 
@@ -421,7 +445,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
     }
 
     agentPair.saveReviewerResult(sessionId, reviewResult);
-    await thread.send(reviewer.formatReviewFeedback(reviewResult));
+    await thread.send(neutralizeForDiscord(reviewer.formatReviewFeedback(reviewResult)));
 
     // === Decision Processing ===
     if (reviewResult.decision === 'approve') {
@@ -449,10 +473,19 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       agentPair.updateSessionStatus(sessionId, 'rejected');
       await thread.send(t('discord.pair.workRejected'));
 
-      // Log rejection in Linear
+      // Log rejection in Linear — bound/neutralize untrusted reviewer text
       try {
-        await linear.logPairFailed(session.taskId, sessionId, 'rejected',
-          `Feedback: ${reviewResult.feedback}\nIssues: ${reviewResult.issues?.join(', ') || 'none'}`);
+        const safeFeedback = neutralizeForDiscord(reviewResult.feedback, 500);
+        const safeIssues = (reviewResult.issues ?? [])
+          .slice(0, 10)
+          .map((issue) => neutralizeForDiscord(issue, 200))
+          .join(', ') || 'none';
+        await linear.logPairFailed(
+          session.taskId,
+          sessionId,
+          'rejected',
+          `Feedback: ${safeFeedback}\nIssues: ${safeIssues}`,
+        );
       } catch (err) {
         console.error('[Pair] Linear logPairFailed failed:', err);
       }
@@ -480,8 +513,12 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
 
     // Log revision request in Linear
     try {
-      await linear.logPairRevision(session.taskId, sessionId,
-        reviewResult.feedback, reviewResult.issues || []);
+      await linear.logPairRevision(
+        session.taskId,
+        sessionId,
+        neutralizeForDiscord(reviewResult.feedback, 1000),
+        (reviewResult.issues || []).slice(0, 10).map((issue) => neutralizeForDiscord(issue, 200)),
+      );
     } catch (err) {
       console.error('[Pair] Linear logPairRevision failed:', err);
     }
@@ -576,36 +613,40 @@ async function sendFinalSummary(
   // Executed commands (unused but for future expansion)
   const _commands = session.worker.result?.commands || [];
 
-  // Create Embed
-  const embed = new EmbedBuilder()
-    .setTitle(`${config.emoji} ${config.title}: ${session.taskTitle.slice(0, 60)}`)
-    .setColor(config.color)
-    .addFields(
-      { name: t('discord.pair.summary.statsLabel'), value: [
-        t('discord.pair.summary.attempts', { n: session.worker.attempts, max: session.worker.maxAttempts }),
-        t('discord.pair.summary.duration', { duration: durationStr }),
-        t('discord.pair.summary.filesChanged', { n: filesChanged.length }),
-      ].join('\n'), inline: false },
-      { name: t('discord.pair.summary.filesLabel'), value: filesStr.slice(0, 1000) || t('discord.pair.summary.noFiles'), inline: false },
-    )
-    .setFooter({ text: `Session: ${session.id} | Task: ${session.taskId}` })
-    .setTimestamp();
+  // Create Embed with field/aggregate budgets
+  let embed = new EmbedBuilder().setColor(config.color).setTimestamp();
+  embed = safeSetTitle(embed, `${config.emoji} ${config.title}: ${session.taskTitle.slice(0, 60)}`);
+  embed = safeAddField(embed, t('discord.pair.summary.statsLabel'), [
+    t('discord.pair.summary.attempts', { n: session.worker.attempts, max: session.worker.maxAttempts }),
+    t('discord.pair.summary.duration', { duration: durationStr }),
+    t('discord.pair.summary.filesChanged', { n: filesChanged.length }),
+  ].join('\n'));
+  embed = safeAddField(
+    embed,
+    t('discord.pair.summary.filesLabel'),
+    filesStr.slice(0, 1000) || t('discord.pair.summary.noFiles'),
+  );
 
-  // Add reviewer feedback if available
+  // Add reviewer feedback if available — neutralize before embed
   if (session.reviewer.feedback) {
     const feedback = session.reviewer.feedback;
     const feedbackStr = [
       t('discord.pair.summary.decisionLabel', { decision: feedback.decision.toUpperCase() }),
-      t('discord.pair.summary.feedbackLabel', { feedback: feedback.feedback.slice(0, 200) }),
+      t('discord.pair.summary.feedbackLabel', {
+        feedback: neutralizeForDiscord(feedback.feedback, 200),
+      }),
     ].join('\n');
-    embed.addFields({ name: t('discord.pair.summary.reviewerFeedback'), value: feedbackStr, inline: false });
+    embed = safeAddField(embed, t('discord.pair.summary.reviewerFeedback'), feedbackStr);
   }
+
+  embed = safeSetFooter(embed, `Session: ${session.id} | Task: ${session.taskId}`);
+  embed = enforceAggregateBudget(embed);
 
   await thread.send({ embeds: [embed] });
 
   // Discussion summary (if messages exist)
   if (session.messages.length > 0) {
-    const discussionSummary = formatDiscussionSummary(session);
+    const discussionSummary = neutralizeForDiscord(formatDiscussionSummary(session), 1900);
     if (discussionSummary.length <= 2000) {
       await thread.send(`📜 ${t('discord.pair.summary.discussionSummary', { count: session.messages.length })}\n${discussionSummary}`);
     } else {
@@ -626,7 +667,8 @@ function formatDiscussionSummary(session: agentPair.PairSession): string {
       hour: '2-digit',
       minute: '2-digit',
     });
-    const content = msg.content.slice(0, 200) + (msg.content.length > 200 ? '...' : '');
+    const content = sanitizeTerminalText(msg.content).slice(0, 200)
+      + (msg.content.length > 200 ? '...' : '');
     return `[${time}] ${roleEmoji} ${msg.role}: ${content}`;
   }).join('\n');
 }

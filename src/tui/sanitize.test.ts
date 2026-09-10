@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { safeIsoDate, sanitizeTerminalText, sanitizeAndBoundTerminalText, escapeHtml, MAX_RENDERED_LINE_LENGTH } from './sanitize.js';
+import {
+  safeIsoDate,
+  sanitizeTerminalText,
+  sanitizeAndBoundTerminalText,
+  escapeHtml,
+  formatMonitorError,
+  MAX_RENDERED_LINE_LENGTH,
+  MAX_TOTAL_RENDERED_CONTENT,
+} from './sanitize.js';
 
 describe('terminal sanitization', () => {
   it('removes CSI, OSC, and control bytes while preserving layout whitespace', () => {
@@ -48,6 +56,13 @@ describe('sanitizeAndBoundTerminalText', () => {
     expect(lines[1].length).toBeLessThanOrEqual(MAX_RENDERED_LINE_LENGTH);
     expect(lines[2]).toBe('short again');
   });
+
+  it('enforces total content budget across many lines', () => {
+    const lines = Array.from({ length: 80 }, () => 'y'.repeat(MAX_RENDERED_LINE_LENGTH));
+    const result = sanitizeAndBoundTerminalText(lines.join('\n'));
+    expect(result.length).toBeLessThanOrEqual(MAX_TOTAL_RENDERED_CONTENT);
+    expect(result.endsWith('...')).toBe(true);
+  });
 });
 
 describe('escapeHtml', () => {
@@ -65,5 +80,22 @@ describe('escapeHtml', () => {
 
   it('handles ampersands first to avoid double-encoding', () => {
     expect(escapeHtml('a&b<c')).toBe('a&amp;b&lt;c');
+  });
+});
+
+describe('formatMonitorError', () => {
+  it('strips control characters from fetch errors', () => {
+    expect(formatMonitorError('\u001b[31mboom\u001b[0m\u0000')).toBe('boom');
+  });
+
+  it('truncates oversized monitor errors', () => {
+    const oversized = 'e'.repeat(500);
+    const result = formatMonitorError(oversized, 200);
+    expect(result.length).toBeLessThanOrEqual(200);
+    expect(result.endsWith('...')).toBe(true);
+  });
+
+  it('preserves short safe errors', () => {
+    expect(formatMonitorError('connection refused')).toBe('connection refused');
   });
 });
