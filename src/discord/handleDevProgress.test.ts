@@ -157,7 +157,9 @@ describe('handleDev progress timer', () => {
     onProgress('more leftover');
     await vi.advanceTimersByTimeAsync(30_000);
 
-    expect(msg.replies.some((r) => r.includes('A task is already running'))).toBe(true);
+    // DoD: user-facing error is bounded/generic; raw reject reason stays in logs.
+    expect(msg.replies.some((r) => r.includes('could not start'))).toBe(true);
+    expect(msg.replies.some((r) => r.includes('A task is already running'))).toBe(false);
     expect(msg.replies.some((r) => r.includes('leftover'))).toBe(false);
   });
 
@@ -168,9 +170,12 @@ describe('handleDev progress timer', () => {
     });
     const msg = makeMessage();
 
-    await expect(handleDev(msg as never, ['myrepo'])).rejects.toThrow('spawn failed');
+    // DoD: do not propagate raw spawn errors to Discord; reply with a bounded generic message.
+    await expect(handleDev(msg as never, ['myrepo'])).resolves.toBeUndefined();
     await vi.advanceTimersByTimeAsync(30_000);
 
+    expect(msg.replies.some((r) => r.includes('Development task failed'))).toBe(true);
+    expect(msg.replies.some((r) => r.includes('spawn failed'))).toBe(false);
     expect(msg.replies.some((r) => r.includes('partial'))).toBe(false);
   });
 });

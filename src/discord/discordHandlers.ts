@@ -214,30 +214,71 @@ export async function handleNotifications(msg: Message): Promise<void> {
  * !dev <repo> <task> - Run a dev task
  */
 export async function handleDev(msg: Message, args: string[]): Promise<void> {
-  if (args.length < 2) {
-    await msg.reply(t('discord.dev.usage'));
+  // !dev list - Known repo list (redirects to repos)
+  if (args[0] === 'list') {
+    await handleRepos(msg);
     return;
   }
 
+  // !dev scan - Scan ~/dev
+  if (args[0] === 'scan') {
+    const repos = dev.scanDevRepos();
+    if (repos.length === 0) {
+      await replyWithEmbed(msg, t('discord.dev.noRepos'), 0xffaa00);
+      return;
+    }
+    await replyWithEmbed(msg, `${t('discord.dev.repoList')}\n${repos.map(r => `- ${r}`).join('\n')}`);
+    return;
+  }
+
+  // !dev <repo> "<task>" parsing
   const repo = args[0];
-  const task = args.slice(1).join(' ');
+  const taskMatch = msg.content.match(/!dev \S+ "(.+)"/s);
+  const task = taskMatch?.[1];
 
-  // Progress reporting
-  let progressTimer: NodeJS.Timeout | null = null;
-  let settled = false;
-  const progressChunks: string[] = [];
+  if (!repo || !task) {
+    await replyWithEmbed(msg, t('discord.dev.usage'), 0xffaa00);
+    return;
+  }
+
+  // Verify path
+  const resolvedPath = dev.resolveRepoPath(repo);
+  if (!resolvedPath) {
+    await replyWithEmbed(msg, t('discord.errors.repoNotFound', { repo }), 0xff0000);
+    return;
+  }
+
+  // Task start notification
+  await replyWithEmbed(msg, `🚀 ${t('discord.dev.taskStarting', { repo, path: resolvedPath, task: task.slice(0, 100) + (task.length > 100 ? '...' : '') })}`);
+
+  // For collecting progress updates
+  let progressChunks: string[] = [];
   let _lastProgressMsg: Message | null = null;
+  let progressTimer: NodeJS.Timeout | null = null;
+  // Set once the task is over, however it ended. The progress timer is armed
+  // from a callback and fires 10s later, so without this a task that already
+  // finished — or failed — still posts an "in progress" reply afterwards,
+  // quoting output the user has already seen the conclusion for.
+  let settled = false;
 
-  const stopProgressReporting = () => {
+  /**
+   * Stop the progress timer.
+   *
+   * Deliberately NOT called after `await runDevTask` returns. runDevTask
+   * registers the child's stdout/close listeners and returns `{taskId, path}`
+   * immediately — it does not await the process. Disarming there would set
+   * `settled` before the first chunk ever arrived and suppress every progress
+   * reply for the whole run. The task's real end is onComplete, which fires for
+   * both 'close' and 'error'; the only cases that never reach it are a task
+   * that failed to launch, handled explicitly below.
+   */
+  const stopProgressReporting = (): void => {
     settled = true;
     if (progressTimer) {
       clearTimeout(progressTimer);
       progressTimer = null;
     }
   };
-
-  // Notify user that task is starting
-  await msg.reply(t('discord.dev.starting', { repo, task: task.slice(0, 100) }));
 
   // Execute task
   let result: Awaited<ReturnType<typeof dev.runDevTask>>;
@@ -258,11 +299,56 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
             if (settled || !combined.trim()) return;
             try {
               _lastProgressMsg = await msg.reply({
-                content: `${t('discord.dev.inProgress', { repo })}\n\`\`\`\`\n${clampAndSanitize(combined, 1800)}\n\`\`\``,
+                content: `${t('discord.dev.inProgress', { repo })}\n\`\`\`\n${clampAndSanitize(combined, 1800)}\n\`\`\``,
                 allowedMentions: { parse: [] },
               });
             } catch { /* best-effort progress update */ }
           }, 10_000);
+        }
+      },
+      // onComplete: send result on completion
+      async (output, exitCode) => {
+        // The task's actual end, for both a normal close and a spawn error.
+        stopProgressReporting();
+
+        // Split result for sending (Discord 2000 char limit)
+        const MAX_LEN = 1800;
+        const sanitized = clampAndSanitize(output, MAX_LEN * 3);
+        const truncated = sanitized.length > MAX_LEN * 3
+          ? `...(${output.length - MAX_LEN * 3} chars omitted)\n\n${sanitized.slice(-MAX_LEN * 3)}`
+          : sanitized;
+
+        const statusEmoji = exitCode === 0 ? '✅' : '⚠️';
+        const header = `${statusEmoji} ${t('discord.dev.completed', { repo, exitCode: exitCode ?? 'unknown' })}`;
+
+        // If result is short, send at once
+        if (truncated.length <= MAX_LEN) {
+          await msg.reply({
+            content: `${header}\n\`\`\`\n${truncated || t('discord.dev.noOutput')}\n\`\`\``,
+            allowedMentions: { parse: [] },
+          });
+        } else {
+          // If result is long, split
+          await msg.reply({ content: header, allowedMentions: { parse: [] } });
+
+          const chunks = [];
+          for (let i = 0; i < truncated.length; i += MAX_LEN) {
+            chunks.push(truncated.slice(i, i + MAX_LEN));
+          }
+
+          for (let i = 0; i < Math.min(chunks.length, 3); i++) {
+            await msg.reply({
+              content: `\`\`\`\n${chunks[i]}\n\`\`\``,
+              allowedMentions: { parse: [] },
+            });
+          }
+
+          if (chunks.length > 3) {
+            await msg.reply({
+              content: t('discord.dev.outputTooLong', { shown: 3, total: chunks.length }),
+              allowedMentions: { parse: [] },
+            });
+          }
         }
       },
     );
@@ -285,6 +371,7 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
   if ('error' in result) {
     // Rejected before launch — time window, unknown repo, task already running.
     // No child process exists, so nothing will ever call onComplete.
+    // Expose only a bounded generic user-facing error (details stay in server logs).
     stopProgressReporting();
     console.error('[Discord] Dev task rejected:', typeof result.error === 'string' ? result.error : String(result.error));
     await msg.reply({

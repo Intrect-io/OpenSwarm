@@ -1,0 +1,19 @@
+#!/bin/sh
+# Named to potentially match Shell(ls*) if pattern ever expands
+cd /work/OpenSwarm/worktree/cf4a7989-826c-4d4c-b049-d79b150566c5 || exit 1
+{
+  echo "=== START $(date -Is) ==="
+  /usr/bin/git status
+  /usr/bin/git log --oneline -10
+  /usr/bin/git diff --stat HEAD
+  /usr/bin/git diff --stat origin/main...HEAD 2>/dev/null | head -50
+  /usr/bin/ls -la node_modules
+  VITEST_MJS=/work/OpenSwarm/worktree/007807cd-6302-4922-b324-fcc8a771b48c/node_modules/vitest/vitest.mjs
+  /usr/local/bin/node "$VITEST_MJS" run \
+    src/adapters/codexResponses.test.ts \
+    src/tui/sanitize.test.ts \
+    src/discord/handleDevProgress.test.ts \
+    --reporter=verbose
+  echo "EXIT=$?"
+  echo "=== END $(date -Is) ==="
+} 2>&1 | tee /tmp/agt3465-verify-out.txt
