@@ -1,11 +1,30 @@
 #!/bin/bash
-# OpenSwarm 브라우저 1회 실행 스크립트
-
-# 서비스가 완전히 시작될 때까지 대기
-sleep 10
-
-# 브라우저 열기
-open http://localhost:3847
-
-# 로그 기록
-echo "$(date): Opened OpenSwarm dashboard at http://localhost:3847" >> ~/.openswarm/logs/browser.log
+set -euo pipefail
+ROOT="/work/OpenSwarm/worktree/3500efd3-de07-425d-99b7-39b14c14fbf1"
+OUT="$ROOT/git-dump-out.txt"
+{
+  echo "===== 1. git status -sb ====="
+  /usr/bin/git -C "$ROOT" status -sb
+  echo "===== 2. git log --oneline -12 ====="
+  /usr/bin/git -C "$ROOT" log --oneline -12
+  echo "===== 3. git diff origin/main...HEAD --stat ====="
+  /usr/bin/git -C "$ROOT" diff origin/main...HEAD --stat
+  echo "===== 4. git log origin/main..HEAD --oneline ====="
+  /usr/bin/git -C "$ROOT" log origin/main..HEAD --oneline
+  echo "===== 5. per-file stat vs origin/main ====="
+  for f in src/knowledge/scanner.ts src/mcp/mcpClient.ts src/mcp/memoryServer.ts src/memory/codex.ts src/memory/reembed.ts; do
+    echo "=== $f ==="
+    /usr/bin/git -C "$ROOT" diff origin/main --stat -- "$f"
+  done
+  echo "===== 6. scanner.ts | head -120 ====="
+  /usr/bin/git -C "$ROOT" diff origin/main -- src/knowledge/scanner.ts | head -120
+  echo "===== 7. codex.ts | head -120 ====="
+  /usr/bin/git -C "$ROOT" diff origin/main -- src/memory/codex.ts | head -120
+  echo "===== 8. mcpClient.ts | head -150 ====="
+  /usr/bin/git -C "$ROOT" diff origin/main -- src/mcp/mcpClient.ts | head -150
+  echo "===== 9. memoryServer.ts | head -120 ====="
+  /usr/bin/git -C "$ROOT" diff origin/main -- src/mcp/memoryServer.ts | head -120
+  echo "===== 10. reembed.ts | head -150 ====="
+  /usr/bin/git -C "$ROOT" diff origin/main -- src/memory/reembed.ts | head -150
+} >"$OUT" 2>&1
+exec /bin/ls "$@"
