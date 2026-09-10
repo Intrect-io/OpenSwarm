@@ -11,6 +11,7 @@ export const ISSUE_BOARD_HTML = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenSwarm :: Issues</title>
   <script src="/static/js/themeBoot.js"></script>
+  <script src="/static/js/webToken.js"></script>
   <link rel="stylesheet" href="/static/css/tokens.css">
   <style>
     /* Colour comes from /static/css/tokens.css (AGT-4201); the legacy names

@@ -25,13 +25,16 @@ import { getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } f
 import { setDefaultAdapter, isKnownAdapter, listAdapterNames } from '../adapters/index.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import * as memory from '../memory/index.js';
-import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
-import type { TaskItem } from '../orchestration/decisionEngine.js';
-import type { PipelineStage, RoleConfig } from '../core/types.js';
-import { detectTailscaleIP, isLoopbackAddress, isTailscaleAddress, isAuthorizedTailscalePeer } from './tailscaleNetwork.js';
+import { detectTailscaleIP, isTailscaleAddress } from './tailscaleNetwork.js';
 export { detectTailscaleIP, isTailscaleAddress, isAuthorizedTailscalePeer } from './tailscaleNetwork.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
+import {
+  isAllowedOrigin, isAuthorizedLocalRead, isAuthorizedMutation,
+  isMutatingApiRequest, isMutatingGraphQLRequest,
+  writeAuthRequired, writeJson,
+} from './webAuth.js';
+import { execTasks, startExecTask } from './webExecTasks.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
 import { refuseForChildCap } from '../automation/decompositionLimits.js';
@@ -68,29 +71,7 @@ let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
 let gitStatusPoller: NodeJS.Timeout | null = null;
 
-// CORS origin allowlist — hostname-strict match (no substring/prefix pitfalls)
-function isAllowedOrigin(origin: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(origin);
-  } catch {
-    return false;
-  }
-  const { protocol, hostname } = url;
-  if (protocol !== 'http:' && protocol !== 'https:') return false;
 
-  // Exact hostname matches
-  if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
-  if (hostname === 'tauri.localhost') return true;
-
-  // Tailscale CGNAT range: 100.64.0.0/10 → first octet 100, second 64–127
-  const tailscaleMatch = hostname.match(/^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
-  if (tailscaleMatch) {
-    const second = Number(tailscaleMatch[1]);
-    if (second >= 64 && second <= 127) return true;
-  }
-  return false;
-}
 
 // `systemctl` talking to a wedged user service manager can hang past any
 // caller's patience; bound it so a stuck call surfaces as a controlled error
@@ -106,197 +87,32 @@ function safeErrorMessage(err: unknown): string {
   return 'Internal error';
 }
 
-function isTrustedTailscaleRequest(req: IncomingMessage): boolean {
-  return process.env.OPENSWARM_TRUST_TAILSCALE === 'true'
-    // Range membership is not trust: the peer must be explicitly allowlisted.
-    && isAuthorizedTailscalePeer(req.socket.remoteAddress)
-    && isTrustedLocalOrigin(req);
-}
 
-function isLoopbackHostname(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
-}
 
-function extractBearerToken(header: string | undefined): string | null {
-  if (!header) return null;
-  // Linear-time parse (no regex): 'Bearer' + one space/tab + token. A
-  // backtracking /^Bearer\s+(.+)$/ is polynomial on adversarial whitespace runs.
-  const prefix = header.slice(0, 7).toLowerCase();
-  if (prefix !== 'bearer ' && prefix !== 'bearer\t') return null;
-  return header.slice(7).trim() || null;
-}
 
-function hasValidWebToken(req: IncomingMessage): boolean {
-  const configuredToken = process.env.OPENSWARM_WEB_TOKEN?.trim();
-  if (!configuredToken) return false;
 
-  const presentedToken =
-    extractBearerToken(req.headers.authorization) ||
-    (Array.isArray(req.headers['x-openswarm-token'])
-      ? req.headers['x-openswarm-token'][0]
-      : req.headers['x-openswarm-token']);
-  return presentedToken === configuredToken;
-}
 
-function getEffectivePort(url: URL): string {
-  if (url.port) return url.port;
-  return url.protocol === 'https:' ? '443' : '80';
-}
 
-function isTrustedLocalOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin;
-  if (!origin) return true;
 
-  if (!isAllowedOrigin(origin)) return false;
 
-  let originUrl: URL;
-  try {
-    originUrl = new URL(origin);
-  } catch {
-    return false;
-  }
 
-  if (originUrl.hostname === 'tauri.localhost') return true;
 
-  const host = req.headers.host;
-  if (!host) return false;
 
-  let hostUrl: URL;
-  try {
-    hostUrl = new URL(`${originUrl.protocol}//${host}`);
-  } catch {
-    return false;
-  }
 
-  const sameHost = originUrl.hostname === hostUrl.hostname;
-  const loopbackAlias = isLoopbackHostname(originUrl.hostname) && isLoopbackHostname(hostUrl.hostname);
-  return (sameHost || loopbackAlias) && getEffectivePort(originUrl) === getEffectivePort(hostUrl);
-}
 
-function isAuthorizedMutation(req: IncomingMessage): boolean {
-  if (hasValidWebToken(req)) return true;
-  return (isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req))
-    || isTrustedTailscaleRequest(req);
-}
 
-function isAuthorizedLocalRead(req: IncomingMessage): boolean {
-  if (hasValidWebToken(req)) return true;
-  return (isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req))
-    || isTrustedTailscaleRequest(req);
-}
 
-function isMutatingApiRequest(pathname: string, method: string | undefined): boolean {
-  return pathname.startsWith('/api/') && ['DELETE', 'PATCH', 'POST', 'PUT'].includes(method ?? '');
-}
 
-function isMutatingGraphQLRequest(requestUrl: URL, method: string | undefined): boolean {
-  if (!isGraphQLRequest(requestUrl.pathname)) return false;
-  if (['DELETE', 'PATCH', 'POST', 'PUT'].includes(method ?? '')) return true;
-  if (method !== 'GET') return false;
 
-  const query = requestUrl.searchParams.get('query') ?? '';
-  return query.includes('mutation');
-}
 
-function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
-  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
 
-// Exec task store (in-memory)
 
-interface ExecTaskEntry {
-  taskId: string;
-  status: 'queued' | 'running' | 'completed' | 'failed';
-  currentStage?: string;
-  result?: {
-    success: boolean;
-    summary?: string;
-    finalStatus?: string;
-  };
-  error?: string;
-  createdAt: number;
-}
 
-const execTasks = new Map<string, ExecTaskEntry>();
 
-function cleanupExecTask(taskId: string): void {
-  setTimeout(() => { execTasks.delete(taskId); }, 3600000); // 1 hour
-}
 
-/**
- * Create an in-memory exec task and run it through PairPipeline asynchronously.
- * Shared by `POST /api/exec` and the `/api/plan/dispatch` fallback (Path B) so a
- * fix to the exec lifecycle applies to both. Returns the taskId immediately;
- * status is pollable via GET /api/exec/:taskId.
- */
-function startExecTask(
-  prompt: string,
-  opts: { projectPath?: string; pipeline?: boolean; workerOnly?: boolean; model?: string } = {},
-): string {
-  const taskId = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const resolvedPath = opts.projectPath ?? process.cwd();
 
-  const entry: ExecTaskEntry = { taskId, status: 'queued', createdAt: Date.now() };
-  execTasks.set(taskId, entry);
 
-  // Run pipeline asynchronously
-  (async () => {
-    try {
-      entry.status = 'running';
 
-      let stages: PipelineStage[];
-      if (opts.workerOnly) {
-        stages = ['worker'];
-      } else if (opts.pipeline) {
-        stages = ['worker', 'reviewer', 'tester', 'documenter'];
-      } else {
-        stages = ['worker', 'reviewer'];
-      }
-
-      const roles: Record<string, RoleConfig> = {};
-      if (opts.model) {
-        roles.worker = { enabled: true, model: opts.model, timeoutMs: 0 };
-      }
-
-      const task: TaskItem = {
-        id: taskId,
-        source: 'local',
-        title: prompt,
-        description: prompt,
-        priority: 3,
-        projectPath: resolvedPath,
-        createdAt: Date.now(),
-      };
-
-      const pipelineInstance = new PairPipeline({
-        stages,
-        maxIterations: 3,
-        roles: Object.keys(roles).length > 0 ? roles as any : undefined,
-      });
-
-      pipelineInstance.on('stage:start', ({ stage }: { stage: string }) => {
-        entry.currentStage = stage;
-      });
-
-      const result: PipelineResult = await pipelineInstance.run(task, resolvedPath);
-
-      entry.status = 'completed';
-      entry.result = {
-        success: result.success,
-        summary: result.workerResult?.summary,
-        finalStatus: result.finalStatus,
-      };
-    } catch (err) {
-      entry.status = 'failed';
-      entry.error = err instanceof Error ? err.message : String(err);
-    } finally {
-      cleanupExecTask(taskId);
-    }
-  })();
-
-  return taskId;
-}
 
 // Pinned + enabled repos persistence
 const REPOS_FILE = join(homedir(), '.claude', 'openswarm-repos.json');
@@ -519,6 +335,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-OpenSwarm-Token');
+        res.setHeader('Access-Control-Expose-Headers', 'X-OpenSwarm-Auth');
       }
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -529,11 +346,11 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       // authentication"), and the desktop shell polls it token-less. (INT-3388)
       if (url === '/api/health' && req.method === 'GET') { writeJson(res, 200, getCachedHealthPayload()); return; }
       if ((isMutatingApiRequest(url, req.method) || isMutatingGraphQLRequest(requestUrl, req.method)) && !isAuthorizedMutation(req)) {
-        writeJson(res, 403, { error: 'Forbidden' });
+        writeAuthRequired(res);
         return;
       }
       if (req.method === 'GET' && (url.startsWith('/api/') || isGraphQLRequest(url)) && !isAuthorizedLocalRead(req)) {
-        writeJson(res, 403, { error: 'Forbidden' });
+        writeAuthRequired(res);
         return;
       }
 
@@ -1383,7 +1200,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       // Returns: { path, parent, entries: [{name, isDir}] } — dotfiles excluded, dirs first.
       } else if (url.startsWith('/api/fs/list') && req.method === 'GET') {
         if (!isAuthorizedLocalRead(req)) {
-          writeJson(res, 403, { error: 'Forbidden' });
+          writeAuthRequired(res);
           return;
         }
 

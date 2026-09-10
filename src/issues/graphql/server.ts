@@ -125,7 +125,9 @@ export async function handleGraphQL(
 ): Promise<void> {
   if (applyCors(req, res)) return;
   if (!isGraphQLTransportAuthorized(req)) {
-    res.writeHead(403, { 'Content-Type': 'application/json' });
+    // Same marker the REST gate sets: this 403 is about the credential, not
+    // about what was asked for. (AGT-4280)
+    res.writeHead(403, { 'Content-Type': 'application/json', 'X-OpenSwarm-Auth': 'token-required' });
     res.end(JSON.stringify({ errors: [{ message: 'Unauthorized GraphQL request' }] }));
     return;
   }

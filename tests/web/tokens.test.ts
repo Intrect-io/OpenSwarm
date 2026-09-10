@@ -134,6 +134,34 @@ describe('page shells (AGT-4201)', () => {
     }
   });
 
+  it('every browser page installs the access-token seam before its own scripts', () => {
+    // The fix for AGT-4280 is six one-line <script src> edits; nothing else
+    // asserts they are present. Forgetting one is invisible — the page just
+    // 403s silently — and that is exactly what happened to the issue board,
+    // which was missed on the first pass. The script must also precede any
+    // page script, or the first requests go out unauthenticated.
+    const repoRoot = join(__dirname, '..', '..');
+    const serverRendered = [
+      join(repoRoot, 'src', 'support', 'dashboardHtml.ts'),
+      join(repoRoot, 'src', 'issues', 'issueBoardHtml.ts'),
+    ];
+    const pages = [...html, ...serverRendered];
+    for (const file of pages) {
+      const source = readFileSync(file, 'utf8');
+      const name = relative(repoRoot, file);
+      expect(source, `${name} does not load webToken.js`).toContain('/static/js/webToken.js');
+      const seam = source.indexOf('/static/js/webToken.js');
+      const firstInline = source.indexOf('<script>');
+      if (firstInline !== -1) {
+        expect(seam, `${name}: webToken.js must load before the inline script`).toBeLessThan(firstInline);
+      }
+      const firstModule = source.indexOf('<script type="module"');
+      if (firstModule !== -1) {
+        expect(seam, `${name}: webToken.js must load before the page module`).toBeLessThan(firstModule);
+      }
+    }
+  });
+
   it('share one navigation naming every page', () => {
     const routes = ['/app', '/chat', '/orchestration', '/threads', '/warehouse'];
     for (const file of html) {
