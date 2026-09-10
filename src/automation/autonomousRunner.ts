@@ -52,6 +52,7 @@ import {
 } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig } from '../core/types.js';
 import * as execution from './runnerExecution.js';
+import { pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
@@ -2394,6 +2395,10 @@ export class AutonomousRunner {
     broadcastEvent({ type: 'stats', data: this.buildStats() });
     broadcastEvent({ type: 'heartbeat' });
     this.syslog('▶ Heartbeat started');
+    // Swept here rather than on read: a read only knows the one row it asked
+    // for, so without this the table keeps every task the daemon ever drafted.
+    const pruned = pruneDraftCache();
+    if (pruned > 0) this.syslog(`  Pruned ${pruned} expired draft cache entr${pruned === 1 ? 'y' : 'ies'}`);
 
     try {
       const expiredLeases = this.durableRuns.reconcile();
@@ -2792,28 +2797,57 @@ export class AutonomousRunner {
           const fingerprint = JSON.stringify([
             c.task.title, c.task.description ?? '', c.task.trackerUpdatedAt ?? 0,
           ]);
-          const cached = this.preAdmissionScopeCache.get(cacheKey);
-          if ((c.task.fileScope?.length ?? 0) === 0 && cached?.fingerprint === fingerprint) {
-            c.task.fileScope = [...cached.fileScope];
+          const wanted = (c.task.fileScope?.length ?? 0) === 0;
+          const apply = (entry: {
+            fileScope: string[]; draft: NonNullable<TaskItem['preAdmissionDraft']>;
+            description?: string; executionCommentsLoaded?: boolean;
+          }): void => {
+            c.task.fileScope = [...entry.fileScope];
             c.task.fileScopeSource = 'drafted';
-            c.task.preAdmissionDraft = { ...cached.draft, relevantFiles: [...cached.fileScope] };
-            c.task.description = cached.description;
-            c.task.executionCommentsLoaded = cached.executionCommentsLoaded;
+            c.task.preAdmissionDraft = { ...entry.draft, relevantFiles: [...entry.fileScope] };
+            c.task.description = entry.description;
+            c.task.executionCommentsLoaded = entry.executionCommentsLoaded;
+          };
+
+          const cached = this.preAdmissionScopeCache.get(cacheKey);
+          if (wanted && cached?.fingerprint === fingerprint) {
+            apply(cached);
             return;
+          }
+          // The in-memory map is a hot path in front of the durable row, not
+          // the record itself. It holds 256 entries against ~275 active runs
+          // and does not survive a restart, while RETRY_AT backoff is counted
+          // in hours — so on its own it missed on nearly every retry and the
+          // draft was recomputed at ~$0.0043 a call. (AGT-4286)
+          if (wanted) {
+            const durable = readDraftCache<NonNullable<TaskItem['preAdmissionDraft']>>(
+              c.task.id, fingerprint,
+            );
+            if (durable) {
+              apply(durable);
+              this.preAdmissionScopeCache.set(cacheKey, {
+                fingerprint, fileScope: [...durable.fileScope], draft: durable.draft,
+                description: durable.description,
+                executionCommentsLoaded: durable.executionCommentsLoaded,
+              });
+              return;
+            }
           }
           await resolveTaskFileScope(c.task, projPath, {
             draftTask: () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath),
           });
           if (c.task.fileScopeSource === 'drafted' && c.task.preAdmissionDraft) {
-            this.preAdmissionScopeCache.delete(cacheKey);
-            this.preAdmissionScopeCache.set(cacheKey, {
+            const entry = {
               fingerprint, fileScope: [...(c.task.fileScope ?? [])], draft: c.task.preAdmissionDraft,
               description: c.task.description,
               executionCommentsLoaded: c.task.executionCommentsLoaded,
-            });
+            };
+            this.preAdmissionScopeCache.delete(cacheKey);
+            this.preAdmissionScopeCache.set(cacheKey, entry);
             if (this.preAdmissionScopeCache.size > 256) {
               this.preAdmissionScopeCache.delete(this.preAdmissionScopeCache.keys().next().value!);
             }
+            writeDraftCache(c.task.id, entry);
           }
         }));
 
