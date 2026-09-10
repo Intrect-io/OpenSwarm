@@ -13,11 +13,11 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-DEPLOY_DIR="${HOME}/openswarm-deploy"
-REPO_DIR="${DEPLOY_DIR}/repo"          # shallow clone lives here
+DEPLOY_DIR="${OPENSWARM_DEPLOY_DIR:-${HOME}/openswarm-deploy}"
+REPO_DIR="${OPENSWARM_BUILD_REPO_DIR:-${DEPLOY_DIR}/repo}"
 IMAGE_PREFIX="openswarm:vela"
-PLATFORM="linux/amd64"
-DOCKERFILE="${REPO_DIR}/Dockerfile"
+PLATFORM="${OPENSWARM_BUILD_PLATFORM:-linux/amd64}"
+DOCKERFILE="${OPENSWARM_DOCKERFILE:-${REPO_DIR}/Dockerfile}"
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -27,7 +27,7 @@ die() {
 }
 
 usage() {
-  echo "Usage: $0 <sha> [--push]"
+  echo "Usage: $0 <sha> [--push]" >&2
   exit 1
 }
 
@@ -50,27 +50,35 @@ fi
 
 # ── Ensure repo clone ───────────────────────────────────────────────────────
 
-# Resolve the repo URL: prefer the origin of an existing git checkout on the
-# host (DEPLOY_DIR or its parents); fall back to the canonical GitHub URL.
 REPO_URL="$(git -C "${DEPLOY_DIR}" remote get-url origin 2>/dev/null || true)"
 if [[ -z "${REPO_URL}" ]]; then
-  REPO_URL="https://github.com/intrect/OpenSwarm.git"
+  REPO_URL="${OPENSWARM_REPO_URL:-https://github.com/intrect/OpenSwarm.git}"
 fi
 
 if [[ ! -d "${REPO_DIR}/.git" ]]; then
   echo "cloning repository into ${REPO_DIR} ..."
+  mkdir -p "$(dirname "${REPO_DIR}")"
   git clone --filter=blob:none --no-checkout "${REPO_URL}" "${REPO_DIR}"
 fi
 
-# ── Fetch the target SHA ────────────────────────────────────────────────────
+# ── Fetch + checkout the target SHA ─────────────────────────────────────────
+# Partial clone with --no-checkout leaves an empty tree; docker build needs the
+# files. Fetch the commit, then force-checkout so the build context matches SHA.
 
-echo "fetching SHA ${SHA} from origin/main ..."
+echo "fetching SHA ${SHA} ..."
 git -C "${REPO_DIR}" fetch --depth=1 origin "${SHA}" 2>&1 || \
   die "git fetch failed for SHA ${SHA}"
 
-# Verify the SHA exists
 if ! git -C "${REPO_DIR}" cat-file -e "${SHA}^{commit}" 2>/dev/null; then
   die "SHA ${SHA} is not a valid commit"
+fi
+
+echo "checking out ${SHA} ..."
+git -C "${REPO_DIR}" checkout --force "${SHA}" 2>&1 || \
+  die "git checkout failed for SHA ${SHA}"
+
+if [[ ! -f "${DOCKERFILE}" ]]; then
+  die "Dockerfile not found at ${DOCKERFILE} after checkout"
 fi
 
 # ── Generate image tag ──────────────────────────────────────────────────────
@@ -100,6 +108,6 @@ if [[ "${PUSH}" == "true" ]]; then
   echo "push succeeded: ${IMAGE_TAG}"
 fi
 
-# ── Output ──────────────────────────────────────────────────────────────────
+# ── Output (last line consumed by vela-autodeploy.sh) ───────────────────────
 
 echo "${IMAGE_TAG}"
