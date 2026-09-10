@@ -25,7 +25,7 @@ import { getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } f
 import { setDefaultAdapter, isKnownAdapter, listAdapterNames } from '../adapters/index.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import * as memory from '../memory/index.js';
-import { detectTailscaleIP, isTailscaleAddress } from './tailscaleNetwork.js';
+import { detectTailscaleAddresses } from './tailscaleNetwork.js';
 export { detectTailscaleIP, isTailscaleAddress, isAuthorizedTailscalePeer } from './tailscaleNetwork.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
@@ -1412,13 +1412,11 @@ export async function startWebServer(port: number = 3847): Promise<void> {
     });
 
     const trustTailscale = process.env.OPENSWARM_TRUST_TAILSCALE === 'true';
-    // '::' rather than '0.0.0.0', and the difference decides whether the
-    // Tailscale trust path is reachable at all. `isTailscaleAddress` trusts
-    // ONLY the IPv6 ULA prefix — CGNAT is refused on purpose, because
-    // 100.64.0.0/10 is shared with carriers and proves no identity. Binding
-    // IPv4-only left that the one trusted address shape nothing could connect
-    // to, so an operator who had allowlisted their peer exactly was still
-    // asked for a token on every remote request (AGT-4290).
+    // '::' rather than '0.0.0.0'. The Tailscale ULA is IPv6, and binding
+    // IPv4-only left it unreachable — an operator who had allowlisted their
+    // peer exactly was still asked for a token on every remote request
+    // (AGT-4290). CGNAT peers are also trusted now, when explicitly listed
+    // (AGT-4294), but the ULA remains how the tailnet interface is identified.
     //
     // Node defaults to dual-stack (ipv6Only false), so IPv4 clients keep
     // working and arrive as '::ffff:…'. The auth layer already expects that
@@ -1443,7 +1441,9 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (!triedIpv4Fallback && listenHost === ALL_INTERFACES && IPV6_UNAVAILABLE.has(err.code ?? '')) {
         triedIpv4Fallback = true;
         console.warn(`[Web] IPv6 unavailable (${err.code}); falling back to 0.0.0.0. `
-          + 'Tailscale trust requires IPv6 and will not work on this host.');
+          + 'Tailscale trust still works over CGNAT, but without IPv6 there is no ULA to '
+          + 'identify the tailnet interface by, so it is refused unless '
+          + 'OPENSWARM_TAILSCALE_ALLOW_RANGE_LOCAL_END=true. See tailscaleNetwork.ts.');
         server?.listen(port, '0.0.0.0');
       } else {
         reject(err);
@@ -1451,7 +1451,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
     });
 
     server.listen(port, listenHost, () => {
-      const tailscaleIP = detectTailscaleIP();
+      const tailscaleAddrs = detectTailscaleAddresses();
       console.log(`Web interface running at:`);
       console.log(`  - http://127.0.0.1:${port} (localhost)`);
       if (listenHost === ALL_INTERFACES) {
@@ -1460,12 +1460,17 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           : 'token required';
         // The ULA is IPv6, so it needs brackets to be a usable URL — this line
         // is what an operator copies into a browser.
-        if (tailscaleIP) console.log(`  - http://[${tailscaleIP}]:${port} (${access})`);
+        // Both, and the CGNAT one first: it is what `tailscale status` prints,
+        // so it is the address an operator reaches for. (AGT-4294)
+        if (tailscaleAddrs.cgnat) console.log(`  - http://${tailscaleAddrs.cgnat}:${port} (${access})`);
+        if (tailscaleAddrs.ula) console.log(`  - http://[${tailscaleAddrs.ula}]:${port} (${access})`);
         // No Tailscale address found. Say what auth actually applies rather
         // than always claiming a token: with trust on and no token configured
         // there is no token to present, and that misdirection is what
         // AGT-4290 was reported as.
-        else console.log(`  - http://<this-host>:${port} (${access})`);
+        if (!tailscaleAddrs.cgnat && !tailscaleAddrs.ula) {
+          console.log(`  - http://<this-host>:${port} (${access})`);
+        }
       }
       gitStatusPoller = startGitStatusPoller(() => Array.from(pinnedProjects));
       startHealthCache();
