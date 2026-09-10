@@ -182,6 +182,8 @@ export class OpenRouterCliAdapter implements CliAdapter {
       onLog: options.onLog,
       enableTools: options.enableTools ?? true,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
+      finishValidator: options.finishValidator,
+      finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
