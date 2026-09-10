@@ -95,5 +95,14 @@ plan.md
 # on main, #600 carried a third copy, and none of them belong in a checkout.
 cli.json
 cursor/
-.run-tests.sh
+# Generated runners and scratch the agent leaves in its worktree. Named
+# individually rather than by one broad glob so an intentional dotfile is not
+# swallowed: observed so far are .run-tests.sh, .tmp-run-dod-tests.sh (#600),
+# and .run-targeted-tests.mjs / .test-runner-tmp.sh / .cursor-review-git-dump.py
+# (#603). The shape is always "a script the agent wrote to run its own tests".
+.run-*.sh
+.run-*.mjs
+.run-*.js
 .tmp-run-*.sh
+.test-runner-tmp.*
+.cursor-review-*
