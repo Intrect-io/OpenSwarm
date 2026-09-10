@@ -310,6 +310,30 @@ describe('browser access token seam (AGT-4280)', () => {
     expect(document.querySelector('#openswarm-token-prompt')).toBeNull();
   });
 
+  it('gates the GraphQL endpoint as well as /api', () => {
+    // The issue board posts to /graphql, and isMutatingGraphQLRequest puts it
+    // behind the same gate. It was the page missed on the first pass.
+    expect(api.isGatedRequest('/graphql')).toBe(true);
+    expect(api.isGatedRequest('/graphqlish')).toBe(false);
+  });
+
+  it('answers without a prompt when there is no body to attach one to', async () => {
+    // This script runs from <head>, so a request refused during head parsing
+    // has no document.body yet. Throwing there would take down the wrapper
+    // every later request depends on.
+    sessionStorage.setItem(api.TOKEN_KEY, 'tok');
+    const body = document.body;
+    Object.defineProperty(document, 'body', { value: null, configurable: true });
+    try {
+      const { scope, transport } = scopeWith(() => authRefusal());
+      const res = await scope.fetch('/api/stats');
+      expect(res.status).toBe(403);
+      expect(transport).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(document, 'body', { value: body, configurable: true });
+    }
+  });
+
   it('degrades to unauthenticated rather than throwing when storage is blocked', async () => {
     // A browser set to block site data throws on getItem. An unhandled throw
     // here would take down the wrapper every request now depends on.
@@ -441,6 +465,65 @@ describe('live event stream over an authenticated fetch (AGT-4280)', () => {
     // produce a second error.
     await new Promise(r => setTimeout(r, 10));
     expect(errors).toBe(1);
+  });
+
+  it('releases the stream when close() lands before the response does', async () => {
+    // Without an AbortController the request cannot be aborted, so a response
+    // that arrives after close() must have its body cancelled — otherwise the
+    // connection stays open while the caller reconnects every three seconds.
+    sessionStorage.setItem(api.TOKEN_KEY, 'stream-token');
+    let cancelled = false;
+    let deliver: ((r: Response) => void) | null = null;
+    const transport = vi.fn(() => new Promise<Response>((resolve) => { deliver = resolve; }));
+    const scope: Record<string, unknown> = {
+      fetch: transport as unknown as typeof fetch,
+      EventSource: FakeNativeEventSource,
+    };
+    api.install(scope as { fetch: typeof fetch });
+    api.installEventSource(scope);
+
+    const Ctor = scope.EventSource as new (url: string) => { close(): void; onerror: (() => void) | null };
+    const es = new Ctor('/api/events');
+    await vi.waitFor(() => expect(transport).toHaveBeenCalled());
+    es.close();
+    deliver!(new Response(new ReadableStream({
+      start() { /* never enqueues */ },
+      cancel() { cancelled = true; },
+    }), { status: 200 }));
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(cancelled).toBe(true);
+  });
+
+  it('revives the stream when the prompt supplies a token', async () => {
+    // The stand-in goes through the wrapped fetch, so a 403 on the stream
+    // prompts and retries — and the retried response is the one that gets
+    // pumped. Nothing asserted this path before.
+    let attempt = 0;
+    const transport = vi.fn(async (_i: RequestInfo | URL, init?: RequestInit) => {
+      attempt += 1;
+      if (new Headers(init?.headers).get('X-OpenSwarm-Token') !== 'late') return authRefusal();
+      return new Response(new ReadableStream<Uint8Array>({
+        start(c) { c.enqueue(new TextEncoder().encode('data: revived\n\n')); c.close(); },
+      }), { status: 200 });
+    });
+    const scope: Record<string, unknown> = {
+      fetch: transport as unknown as typeof fetch,
+      EventSource: FakeNativeEventSource,
+    };
+    api.install(scope as { fetch: typeof fetch });
+    api.installEventSource(scope);
+    // A token must exist for the stand-in to be chosen at construction time.
+    sessionStorage.setItem(api.TOKEN_KEY, 'stale');
+
+    const Ctor = scope.EventSource as new (url: string) => { onmessage: ((e: { data: string }) => void) | null; onerror: (() => void) | null };
+    const es = new Ctor('/api/events');
+    const seen: string[] = [];
+    es.onmessage = (e) => seen.push(e.data);
+    await answerPrompt('late');
+
+    await vi.waitFor(() => expect(seen).toEqual(['revived']));
+    expect(attempt).toBe(2);
   });
 
   it('does not report an error for a stream the caller closed on purpose', async () => {

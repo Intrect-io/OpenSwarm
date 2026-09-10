@@ -100,6 +100,12 @@ const integrationBoundaryCoverageExcludes = [
   'src/support/repoMetadata.ts',
   'src/support/timeWindow.ts',
   'src/support/web.ts',
+  // Extracted verbatim from web.ts above (AGT-4280) so that file could get
+  // under the size gate. It instantiates and runs PairPipeline — the same
+  // effectful boundary as the agent roles excluded further up — and it was
+  // already outside the measured set when it lived in web.ts. Moving code
+  // between files must not change what the threshold is computed over.
+  'src/support/webExecTasks.ts',
   'src/support/dev.ts',
   'src/support/chatBackend.ts',
   'src/support/gitStatus.ts',

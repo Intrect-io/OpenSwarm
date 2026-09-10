@@ -33,6 +33,13 @@ export function isAllowedOrigin(origin: string): boolean {
     const second = Number(tailscaleMatch[1]);
     if (second >= 64 && second <= 127) return true;
   }
+  // Tailscale ULA, as a URL hostname: `new URL('http://[fd7a:…]:3847').hostname`
+  // keeps the brackets. Without this, browsing to the IPv6 address passed the
+  // socket check and then failed here — so neither Tailscale address worked for
+  // a mutation: CGNAT was refused by the socket check, ULA by this one.
+  if (hostname.startsWith('[') && hostname.endsWith(']')) {
+    if (hostname.slice(1, -1).toLowerCase().startsWith('fd7a:115c:a1e0:')) return true;
+  }
   return false;
 }
 
