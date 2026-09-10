@@ -8,13 +8,15 @@
 // attempts across 275 runs — 4.7 draft calls per attempt. The analysis was
 // being recomputed on nearly every retry of the same task.
 //
-// It was already cached by the right key. `autonomousRunner` fingerprints a
-// task as [title, description, trackerUpdatedAt], which deliberately omits the
-// attempt number so a retry reuses the previous analysis. What failed was the
-// storage: an in-memory Map, capped at 256 entries against 275 active runs,
-// wiped by every daemon restart — twice on the day this was measured, both
-// from autodeploy — while RETRY_AT backoff is counted in hours. Nothing in
-// memory outlives the gap it needs to cross.
+// It was already cached by the right key. `autonomousRunner` fingerprints a task
+// as [title, description] (trackerUpdatedAt was dropped in AGT-4300 — it bumps on
+// the daemon's own tracker mutations, not just content edits, and was causing the
+// exact self-inflicted misses this cache exists to prevent), which deliberately
+// omits the attempt number so a retry reuses the previous analysis. What failed
+// was the storage: an in-memory Map, capped at 256 entries against 275 active
+// runs, wiped by every daemon restart — twice on the day this was measured, both
+// from autodeploy — while RETRY_AT backoff is counted in hours. Nothing in memory
+// outlives the gap it needs to cross.
 //
 // Its own table rather than `automation_runs.metadata_json`: that column is
 // written whole, as `metadata_json = COALESCE(?, metadata_json)`, and

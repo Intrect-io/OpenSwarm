@@ -2794,9 +2794,20 @@ export class AutonomousRunner {
       try {
         await Promise.all(group.map(async c => {
           const cacheKey = `${projPath}\0${c.task.id}`;
-          const fingerprint = JSON.stringify([
-            c.task.title, c.task.description ?? '', c.task.trackerUpdatedAt ?? 0,
-          ]);
+          // title + description ONLY. trackerUpdatedAt used to ride along here
+          // too, but it bumps on every tracker mutation — including the
+          // daemon's own progress comments and state transitions, neither of
+          // which changes anything the draft actually reads. One issue
+          // (AUD-1070, measured 2026-09-10) transitioned state 7 times in a
+          // day with an unchanged description and recomputed its draft on
+          // every single scheduling pass — attempt_no reached 40, and the
+          // in-memory + durable cache (AGT-4286) both had a correct, unused
+          // entry the whole time. Title and description are the only inputs
+          // that change the draft's CONTENT (see buildDraftPrompt), and both
+          // are already separate elements of this array, so an operator edit
+          // to either still invalidates — trackerUpdatedAt added no coverage
+          // beyond that, only self-inflicted misses. (AGT-4300)
+          const fingerprint = JSON.stringify([c.task.title, c.task.description ?? '']);
           const wanted = (c.task.fileScope?.length ?? 0) === 0;
           const apply = (entry: {
             fileScope: string[]; draft: NonNullable<TaskItem['preAdmissionDraft']>;
