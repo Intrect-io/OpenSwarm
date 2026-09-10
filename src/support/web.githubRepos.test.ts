@@ -119,7 +119,16 @@ describe('GitHub repository routes', () => {
 
   it('validates clone input and clones/registers a valid repository', async () => {
     process.env.GH_TOKEN = 'configured';
-    const runner = { registerProjectPath: vi.fn() } as unknown as AutonomousRunner;
+    // `setWebRunner` reconciles enabled projects (web.ts), so a stub with only
+    // `registerProjectPath` throws before the route under test is reached.
+    const runner = {
+      registerProjectPath: vi.fn(),
+      enableProject: vi.fn(),
+      disableProject: vi.fn(),
+      getEnabledProjects: vi.fn(() => [] as string[]),
+      getAllowedProjects: vi.fn(() => [] as string[]),
+      updateAllowedProjects: vi.fn(),
+    } as unknown as AutonomousRunner;
     setWebRunner(runner);
     mocks.execFile.mockImplementation((_command: string, _args: string[], callback: (error: Error | null) => void) => callback(null));
     const base = await serverUrl();
@@ -139,9 +148,19 @@ describe('GitHub repository routes', () => {
 
   it('returns a credential-safe failure for malformed GitHub repository records', async () => {
     process.env.GH_TOKEN = 'test-token';
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify([{
-      full_name: 'Acme/Project', private: 'true', default_branch: 'main', updated_at: '2025-01-01T00:00:00Z',
-    }]), { status: 200 }));
+    // URL-aware, like the sibling test above. The server runs in THIS process,
+    // so a bare `mockResolvedValueOnce` is consumed by the test's own request
+    // to it — the assertion then reads the stub's 200 instead of the route's
+    // 502, and passes or fails for reasons unrelated to the route.
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('https://api.github.com/')) {
+        return new Response(JSON.stringify([{
+          full_name: 'Acme/Project', private: 'true', default_branch: 'main', updated_at: '2025-01-01T00:00:00Z',
+        }]), { status: 200 });
+      }
+      return realFetch(input, init);
+    }));
     const response = await fetch(`${await serverUrl()}/api/github/repos`);
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ error: 'Invalid GitHub repository response' });
