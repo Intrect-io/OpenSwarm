@@ -1,6 +1,12 @@
 // ============================================
 // OpenSwarm - decomposition admission limits
 // Pure: does this plan fit the operator's caps?
+//
+// Callers:
+// - Autonomous runner: refuseForChildCap + reserveDailyCreations (AGT-4122)
+// - Human `/plan` (`POST /api/plan/dispatch`): refuseForChildCap only —
+//   dailyLimit paces unsupervised automation and must not block an explicitly
+//   approved plan (AGT-4123 Option 2)
 // ============================================
 
 export interface DecompositionScope {

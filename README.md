@@ -307,7 +307,7 @@ DISCORD_CHANNEL_ID=your-channel-id
 | `linear` | API key, team ID |
 | `github` | Repos list for CI monitoring |
 | `agents` | Agent definitions (name, projectPath, heartbeat interval) |
-| `autonomous` | Schedule, pair mode, role models, decomposition settings |
+| `autonomous` | Schedule, pair mode, role models, decomposition settings (`maxChildrenPerTask` applies to both the runner and human `/plan`; `dailyLimit` paces the unsupervised runner only — AGT-4123) |
 | `autonomous.includeBacklog` | Treat Linear Backlog as a work queue (default `true`) |
 | `autonomous.unknownScopeAdmission` | `admit` (default): worktrees isolate — predicted file overlap does not defer. `serialize`: Codex-era fail-closed |
 | `prProcessor` | PR auto-improvement schedule, retry limits, conflict resolver config |

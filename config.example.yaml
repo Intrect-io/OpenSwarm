@@ -145,6 +145,12 @@ autonomous:
   decomposition:
     enabled: true                    # Enable decomposition
     thresholdMinutes: 30             # Decompose if estimated time exceeds this
+    # maxChildrenPerTask: structural cap on any one parent — shared by the
+    # autonomous runner and human `/plan` dispatch (AGT-4123 Option 2).
+    maxChildrenPerTask: 5
+    # dailyLimit: paces unsupervised automation only. `/plan` enforces the
+    # child cap above but does not reserve against this budget (AGT-4123).
+    dailyLimit: 20
     plannerModel: gpt-5.6-sol         # High-leverage decomposition stays on Sol
 
   # Backlog grooming (Planner compares fetched open queue states against the repo).

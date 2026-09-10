@@ -207,9 +207,16 @@ const DecompositionConfigSchema = z.object({
   thresholdMinutes: z.number().min(10).max(120).default(30),
   /** Max decomposition depth (default: 2) - prevents infinite nesting */
   maxDepth: z.number().min(1).max(5).default(2).optional(),
-  /** Max children per task (default: 5) - prevents issue explosion */
+  /** Max children per task (default: 5) - prevents issue explosion.
+   * Shared by the autonomous runner and human `/plan` dispatch (AGT-4123). */
   maxChildrenPerTask: z.number().min(1).max(20).default(5).optional(),
-  /** Daily issue creation limit (default: 20) - prevents runaway creation */
+  /**
+   * Daily issue creation limit (default: 20) - paces unsupervised automation.
+   * Applies to the autonomous runner only; human `/plan` dispatch
+   * (`POST /api/plan/dispatch`) enforces `maxChildrenPerTask` but is exempt
+   * from this budget so an approved plan is not refused when the daemon
+   * already spent today's slots (AGT-4123 Option 2).
+   */
   dailyLimit: z.number().min(1).max(100).default(20).optional(),
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog: z.boolean().default(true).optional(),
