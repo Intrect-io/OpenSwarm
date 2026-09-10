@@ -625,6 +625,23 @@ export async function executeTool(
       };
     }
 
+    const MAX_READ_FILE_LIMIT = 2000;
+    const MAX_READ_FILE_OFFSET = 1_000_000;
+
+    function normalizeReadFileOffset(offset: unknown): number {
+      if (typeof offset !== 'number' || !Number.isFinite(offset) || offset < 0 || offset > MAX_READ_FILE_OFFSET) {
+        return 0;
+      }
+      return Math.trunc(offset);
+    }
+
+    function normalizeReadFileLimit(limit: unknown): number {
+      if (typeof limit !== 'number' || !Number.isFinite(limit) || limit < 1) {
+        return 500;
+      }
+      return Math.min(Math.trunc(limit), MAX_READ_FILE_LIMIT);
+    }
+
     switch (name) {
       case 'read_file': {
         // Reads may follow a symlink into this worktree's main checkout, so an
@@ -635,8 +652,8 @@ export async function executeTool(
           allowMainCheckoutRead: !execOptions?.readOnly,
           allowWarehouseRead: true,
         });
-        const offset = args.offset ?? 0;
-        const limit = args.limit ?? 500;
+        const offset = normalizeReadFileOffset(args.offset);
+        const limit = normalizeReadFileLimit(args.limit);
         const cacheKey = `${filePath}#${offset}:${limit}`;
 
         // 같은 루프에서 이미 같은 범위를 읽었으면 디스크 재접근 없이 캐시 반환.

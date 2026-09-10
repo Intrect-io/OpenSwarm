@@ -99,4 +99,47 @@ describe('CI state persistence', () => {
     expect(warn).toHaveBeenCalled();
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/corrupt/i);
   });
+
+  it('normalizes persisted CI state and drops malformed repo entries', async () => {
+    const { loadCIState, normalizeCIState } = await loadModule();
+    expect(normalizeCIState(null)).toBeNull();
+    expect(normalizeCIState({ updatedAt: 't' })).toBeNull();
+    expect(normalizeCIState({
+      updatedAt: '2026-09-01T00:00:00.000Z',
+      repos: {
+        'owner/good': {
+          status: 'broken',
+          brokenSince: '2026-08-01T00:00:00.000Z',
+          activeFailures: [
+            { workflow: 'ci', branch: 'main', runId: 1, url: 'https://x', createdAt: 't' },
+            { workflow: 'ci', branch: 'main', runId: 1.5, url: 'https://x', createdAt: 't' },
+            'nope',
+          ],
+        },
+        'owner/bad-status': { status: 'FINE', activeFailures: [] },
+        'owner/not-object': 12,
+      },
+    })).toEqual({
+      updatedAt: '2026-09-01T00:00:00.000Z',
+      repos: {
+        'owner/good': {
+          repo: 'owner/good',
+          status: 'broken',
+          brokenSince: '2026-08-01T00:00:00.000Z',
+          activeFailures: [
+            { workflow: 'ci', branch: 'main', runId: 1, url: 'https://x', createdAt: 't' },
+          ],
+          lastChecked: '',
+        },
+      },
+    });
+
+    await mkdir(resolve(home, '.openswarm'), { recursive: true });
+    writeFileSync(ciStatePath(), JSON.stringify({
+      updatedAt: '2026-09-01T00:00:00.000Z',
+      repos: { 'owner/good': { status: 'healthy', lastChecked: 't', activeFailures: [] } },
+    }));
+    const loaded = await loadCIState();
+    expect(loaded.repos['owner/good']?.status).toBe('healthy');
+  });
 });

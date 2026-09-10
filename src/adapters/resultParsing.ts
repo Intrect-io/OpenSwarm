@@ -20,8 +20,11 @@ function extractWorkerResultJson(text: string): WorkerResult | null {
 
   try {
     const parsed = JSON.parse(jsonStr);
+    // Require an explicit boolean for success — malformed or absent values
+    // must not be treated as a successful run. (AGT-3428)
+    if (typeof parsed.success !== 'boolean') return null;
     return {
-      success: Boolean(parsed.success),
+      success: parsed.success,
       summary: parsed.summary || t('common.fallback.noSummary'),
       filesChanged: Array.isArray(parsed.filesChanged) ? parsed.filesChanged : [],
       commands: Array.isArray(parsed.commands) ? parsed.commands : [],

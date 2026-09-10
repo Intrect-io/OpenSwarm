@@ -708,6 +708,20 @@ describe('runWorkCommand — options plumbing', () => {
     expect(createCoordinator).toHaveBeenCalledWith(expect.objectContaining({ maxActive: 3 }));
   });
 
+  it('rejects non-positive or non-integer --concurrency before planning', async () => {
+    for (const concurrency of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const createCoordinator = vi.fn(() => fakeCoordinator());
+      const deps = baseDeps({ createCoordinator });
+      const code = await runWorkCommand(
+        { issueIds: ['INT-1'], path: '/repo', yes: true, concurrency },
+        deps,
+      );
+      expect(code).toBe(WORK_EXIT_NOT_RUN);
+      expect(createCoordinator).not.toHaveBeenCalled();
+      expect(deps.logs.join('\n')).toMatch(/Invalid --concurrency/);
+    }
+  });
+
   it('passes the automation db override from config into the coordinator', async () => {
     const createCoordinator = vi.fn(() => fakeCoordinator());
     const deps = baseDeps({

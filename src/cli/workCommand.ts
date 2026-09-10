@@ -473,6 +473,10 @@ async function runWorkCommandInner(
 
   const concurrency = opts.concurrency
     ?? Math.min(tasks.length, config.autonomous?.maxConcurrentTasks ?? 64);
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    log(`Invalid --concurrency ${String(opts.concurrency)}: must be a positive integer.`);
+    return WORK_EXIT_NOT_RUN;
+  }
 
   // ---- Plan ----------------------------------------------------------------
   const recoverable = deps.hasRecoverableWorktree ?? hasRecoverableWorktree;
