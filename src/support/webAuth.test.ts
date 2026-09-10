@@ -26,21 +26,40 @@ import {
 
 /** A request shaped like the parts these predicates read. */
 function req(opts: {
-  origin?: string; host?: string; auth?: string; token?: string; remote?: string;
+  origin?: string; host?: string; auth?: string; token?: string; remote?: string; local?: string;
 } = {}): IncomingMessage {
   const headers: Record<string, string> = {};
   if (opts.origin) headers.origin = opts.origin;
   if (opts.host) headers.host = opts.host;
   if (opts.auth) headers.authorization = opts.auth;
   if (opts.token) headers['x-openswarm-token'] = opts.token;
-  return { headers, socket: { remoteAddress: opts.remote ?? '127.0.0.1' } } as unknown as IncomingMessage;
+  return {
+    headers,
+    // `localAddress` is the address the connection arrived ON. The Tailscale
+    // path checks it, so it is part of the request shape now.
+    socket: { remoteAddress: opts.remote ?? '127.0.0.1', localAddress: opts.local ?? '127.0.0.1' },
+  } as unknown as IncomingMessage;
 }
 
 const ORIGINAL = process.env.OPENSWARM_WEB_TOKEN;
-beforeEach(() => { delete process.env.OPENSWARM_WEB_TOKEN; });
+const ORIGINAL_TRUST = process.env.OPENSWARM_TRUST_TAILSCALE;
+const ORIGINAL_PEERS = process.env.OPENSWARM_TAILSCALE_PEERS;
+beforeEach(() => {
+  delete process.env.OPENSWARM_WEB_TOKEN;
+  delete process.env.OPENSWARM_TRUST_TAILSCALE;
+  delete process.env.OPENSWARM_TAILSCALE_PEERS;
+});
 afterEach(() => {
-  if (ORIGINAL === undefined) delete process.env.OPENSWARM_WEB_TOKEN;
-  else process.env.OPENSWARM_WEB_TOKEN = ORIGINAL;
+  // Restore rather than delete: these are read from the environment at call
+  // time, so a leaked value changes what a later test file is even testing.
+  for (const [key, value] of [
+    ['OPENSWARM_WEB_TOKEN', ORIGINAL],
+    ['OPENSWARM_TRUST_TAILSCALE', ORIGINAL_TRUST],
+    ['OPENSWARM_TAILSCALE_PEERS', ORIGINAL_PEERS],
+  ] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe('isAllowedOrigin', () => {
@@ -209,6 +228,85 @@ describe('isAuthorizedMutation / isAuthorizedLocalRead', () => {
     const r = req({ remote: '192.168.50.99', host: '192.168.50.43:3847' });
     expect(isAuthorizedMutation(r)).toBe(false);
     expect(isAuthorizedLocalRead(r)).toBe(false);
+  });
+
+  it('accepts an IPv4 client arriving mapped, which is how it arrives on a dual-stack bind', () => {
+    // The server binds '::' so the Tailscale ULA is reachable at all
+    // (AGT-4290). IPv4 clients then present as '::ffff:127.0.0.1' rather than
+    // '127.0.0.1'. If this stopped being authorized, the bind change would
+    // have locked every localhost browser out to fix the remote one.
+    const r = req({ remote: '::ffff:127.0.0.1', origin: 'http://localhost:3847', host: 'localhost:3847' });
+    expect(isAuthorizedLocalRead(r)).toBe(true);
+    expect(isAuthorizedMutation(r)).toBe(true);
+  });
+
+  it('lets an allowlisted Tailscale ULA peer read without a token', () => {
+    // The path AGT-4290 made reachable: trust on, peer named exactly, and the
+    // Origin matching its own Host.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = 'fd7a:115c:a1e0::b601:f469';
+    const r = req({
+      remote: 'fd7a:115c:a1e0::b601:f469',
+      local: 'fd7a:115c:a1e0::bc01:c823',
+      origin: 'http://[fd7a:115c:a1e0::bc01:c823]:3847',
+      host: '[fd7a:115c:a1e0::bc01:c823]:3847',
+    });
+    expect(isAuthorizedLocalRead(r)).toBe(true);
+  });
+
+  it('refuses an allowlisted ULA that did not arrive on our Tailscale address', () => {
+    // The exposure the dual-stack bind opens: a ULA carries no allocation
+    // authority, so a LAN neighbour can self-assign an allowlisted address.
+    // Requiring the local end of the socket to be a Tailscale address means
+    // the packet came to us through the tailnet, not to our LAN address with
+    // a forged source.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = 'fd7a:115c:a1e0::b601:f469';
+    const r = req({
+      remote: 'fd7a:115c:a1e0::b601:f469',
+      local: '192.168.50.43',
+      origin: 'http://192.168.50.43:3847',
+      host: '192.168.50.43:3847',
+    });
+    expect(isAuthorizedLocalRead(r)).toBe(false);
+    expect(isAuthorizedMutation(r)).toBe(false);
+  });
+
+  it('accepts a peer written in any of the spellings IPv6 allows', () => {
+    // Node hands us RFC 5952 on the wire. An operator who expanded the address
+    // by hand, or copied it out of a URL bar with brackets, was refused — and
+    // the symptom was "still asked for a token", the thing this fixes.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    const r = () => req({
+      remote: 'fd7a:115c:a1e0::b601:f469',
+      local: 'fd7a:115c:a1e0::bc01:c823',
+      origin: 'http://[fd7a:115c:a1e0::bc01:c823]:3847',
+      host: '[fd7a:115c:a1e0::bc01:c823]:3847',
+    });
+    for (const spelling of [
+      'fd7a:115c:a1e0::b601:f469',
+      'fd7a:115c:a1e0:0:0:0:b601:f469',
+      'fd7a:115c:a1e0:0000:0000:0000:b601:f469',
+      '[fd7a:115c:a1e0::b601:f469]',
+      'FD7A:115C:A1E0::B601:F469',
+    ]) {
+      process.env.OPENSWARM_TAILSCALE_PEERS = spelling;
+      expect(isAuthorizedLocalRead(r()), spelling).toBe(true);
+    }
+  });
+
+  it('still refuses CGNAT, even allowlisted — reaching IPv6 must not widen trust', () => {
+    // 100.64.0.0/10 is shared with carriers, so the address proves no
+    // identity. Binding dual-stack must not turn that judgement over.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.123.244.103';
+    const r = req({
+      remote: '100.123.244.103',
+      origin: 'http://100.95.200.28:3847',
+      host: '100.95.200.28:3847',
+    });
+    expect(isAuthorizedLocalRead(r)).toBe(false);
+    expect(isAuthorizedMutation(r)).toBe(false);
   });
 
   it('refuse loopback when the Origin is not trusted', () => {

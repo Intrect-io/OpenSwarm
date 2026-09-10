@@ -1411,28 +1411,61 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       }
     });
 
+    const trustTailscale = process.env.OPENSWARM_TRUST_TAILSCALE === 'true';
+    // '::' rather than '0.0.0.0', and the difference decides whether the
+    // Tailscale trust path is reachable at all. `isTailscaleAddress` trusts
+    // ONLY the IPv6 ULA prefix — CGNAT is refused on purpose, because
+    // 100.64.0.0/10 is shared with carriers and proves no identity. Binding
+    // IPv4-only left that the one trusted address shape nothing could connect
+    // to, so an operator who had allowlisted their peer exactly was still
+    // asked for a token on every remote request (AGT-4290).
+    //
+    // Node defaults to dual-stack (ipv6Only false), so IPv4 clients keep
+    // working and arrive as '::ffff:…'. The auth layer already expects that
+    // form: isLoopbackAddress lists '::ffff:127.0.0.1' and isTailscaleAddress
+    // strips the prefix before matching.
+    const ALL_INTERFACES = '::';
+    const listenHost = process.env.OPENSWARM_WEB_TOKEN?.trim() || trustTailscale ? ALL_INTERFACES : '127.0.0.1';
+    // A host with IPv6 disabled (ipv6.disable=1, or a container run with
+    // net.ipv6.conf.all.disable_ipv6=1) refuses an AF_INET6 bind outright.
+    // Without this, that error rejects, `startService` rethrows it, and the
+    // daemon does not start at all — strictly worse than the IPv4-only reach
+    // the '::' bind set out to widen. Retried once, then it is a real
+    // failure. (AGT-4290)
+    const IPV6_UNAVAILABLE = new Set(['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'EINVAL', 'EPROTONOSUPPORT']);
+    let triedIpv4Fallback = false;
+
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         console.warn(`Port ${port} is already in use, skipping web server...`);
         server = null;
         resolve();
+      } else if (!triedIpv4Fallback && listenHost === ALL_INTERFACES && IPV6_UNAVAILABLE.has(err.code ?? '')) {
+        triedIpv4Fallback = true;
+        console.warn(`[Web] IPv6 unavailable (${err.code}); falling back to 0.0.0.0. `
+          + 'Tailscale trust requires IPv6 and will not work on this host.');
+        server?.listen(port, '0.0.0.0');
       } else {
         reject(err);
       }
     });
 
-    const trustTailscale = process.env.OPENSWARM_TRUST_TAILSCALE === 'true';
-    const listenHost = process.env.OPENSWARM_WEB_TOKEN?.trim() || trustTailscale ? '0.0.0.0' : '127.0.0.1';
     server.listen(port, listenHost, () => {
       const tailscaleIP = detectTailscaleIP();
       console.log(`Web interface running at:`);
       console.log(`  - http://127.0.0.1:${port} (localhost)`);
-      if (listenHost === '0.0.0.0') {
+      if (listenHost === ALL_INTERFACES) {
         const access = trustTailscale && !process.env.OPENSWARM_WEB_TOKEN?.trim()
           ? 'Tailscale only'
           : 'token required';
-        if (tailscaleIP) console.log(`  - http://${tailscaleIP}:${port} (${access})`);
-        else console.log(`  - http://<this-host>:${port} (token required)`);
+        // The ULA is IPv6, so it needs brackets to be a usable URL — this line
+        // is what an operator copies into a browser.
+        if (tailscaleIP) console.log(`  - http://[${tailscaleIP}]:${port} (${access})`);
+        // No Tailscale address found. Say what auth actually applies rather
+        // than always claiming a token: with trust on and no token configured
+        // there is no token to present, and that misdirection is what
+        // AGT-4290 was reported as.
+        else console.log(`  - http://<this-host>:${port} (${access})`);
       }
       gitStatusPoller = startGitStatusPoller(() => Array.from(pinnedProjects));
       startHealthCache();

@@ -16,7 +16,7 @@ services:
     environment:
       - TZ=Asia/Seoul
       # The dashboard binds 127.0.0.1 (container-internal) unless a token is
-      # set — an unauthenticated 0.0.0.0 bind is refused by design. Without
+      # set — an unauthenticated all-interfaces bind is refused by design. Without
       # this, the published port below answers nothing; the daemon itself and
       # the in-container healthcheck still work. Reads/mutations from outside
       # then require the X-OpenSwarm-Token header (/api/health stays open).
