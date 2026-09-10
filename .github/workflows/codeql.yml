@@ -1,0 +1,51 @@
+name: CodeQL
+
+# AGT-4160 moved CodeQL out of the autonomous pipeline, and it was right to:
+# a whole-database scan per worker edit costs up to 20 minutes per language and
+# parked runs as `security-audit-infra`, so pull requests stopped coming out.
+#
+# But that left the analysis running nowhere. `review-gate.yml` only *uploads*
+# SARIF from `openswarm review` — `codeql-action/upload-sarif` is the ingestion
+# endpoint, not the scanner — so after that change nothing analysed this
+# repository at all. A capability that quietly stops running is the failure
+# this repository spent 2026-09-10 removing from three other gates.
+#
+# So: not per edit, and not never. Weekly, plus on demand, plus on a release
+# tag — the triggers where a 20-minute scan is affordable and the finding is
+# still actionable before it reaches users.
+
+on:
+  schedule:
+    # 04:17 Monday UTC. Off the hour: every repository that asks for "weekly"
+    # gets :00, and the shared runner pool feels it.
+    - cron: '17 4 * * 1'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # `security-extended` over the default suite: the default is tuned to
+          # keep false positives near zero on any repository, and this one is
+          # an agent runtime that spawns processes and writes files under
+          # instructions from a model.
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
