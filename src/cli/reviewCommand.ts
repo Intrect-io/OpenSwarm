@@ -395,6 +395,70 @@ export interface ReviewCommandOptions {
 /**
  * Run the review flow. Injectable deps keep it testable without git/network.
  */
+
+/**
+ * Resolve the reviewer's adapter from flag, environment and config.
+ *
+ * Config is loaded lazily and failures are swallowed: a malformed or absent
+ * config must not stop a review that was going to use the built-in default
+ * anyway. (AGT-4292)
+ *
+ * Two things this must not do on the way.
+ *
+ * It must not read config it does not need. `loadConfig` is not a pure read —
+ * it engages process-wide toggles (`enableHumanSurfaceReadOnly`, the sandbox
+ * executor wiring). Before this resolution existed, a plain `openswarm review`
+ * never called it, so a higher-precedence answer has to short-circuit rather
+ * than load config and then discard it.
+ *
+ * And it must not write to stdout when the caller asked for JSON. `loadConfig`
+ * logs where it loaded from and warns about absent Discord/Linear credentials,
+ * straight to stdout — which lands in front of the JSON document and makes
+ * `openswarm review --json | jq` fail to parse. `cli.ts` already solves this
+ * for telemetry by silencing `console` around the call; the same applies here.
+ *
+ * That fixes THIS call site and not the contract as a whole. `mcpClient.ts`
+ * calls `loadConfig()` unguarded during tool auto-discovery, so a review that
+ * actually uses tools still prints config lines in front of the JSON — a
+ * defect that predates this resolution and is tracked as AGT-4298. The
+ * silencing here is a third ad hoc copy of a pattern that belongs in
+ * `loadConfig` itself; AGT-4298 collapses all three.
+ *
+ * The restore is not reentrancy-safe: each call captures whatever `console.log`
+ * currently is and blind-restores it, so two crossed, non-nested windows would
+ * leave the patched function in place. No caller reaches that today — `cli.ts`
+ * invokes this once per process and `prProcessor.ts` never passes `json` — but
+ * a future concurrent caller needs a nesting counter, not this.
+ */
+async function resolveConfiguredReviewAdapter(flag?: string, quiet = false) {
+  const { resolveReviewAdapter } = await import('./reviewAdapter.js');
+  // A leaf module, not the adapter registry and not config: see adapterNames.ts.
+  const { ADAPTER_NAMES, isConfiguredAdapterName } = await import('../core/adapterNames.js');
+  const env = process.env.OPENSWARM_REVIEW_ADAPTER;
+  // A flag or an env var already decides it. Loading config here would buy
+  // nothing and cost the side effects above.
+  if (flag?.trim() || env?.trim()) {
+    return resolveReviewAdapter({ flag, env }, isConfiguredAdapterName, ADAPTER_NAMES);
+  }
+  let configReview: string | undefined;
+  let configDefault: string | undefined;
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  try {
+    if (quiet) { console.log = () => undefined; console.warn = () => undefined; }
+    const { loadConfig } = await import('../core/config.js');
+    const config = loadConfig();
+    configReview = config.reviewAdapter;
+    configDefault = config.adapter;
+  } catch { /* no config, or unreadable — flag and env still apply */ } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+  }
+  return resolveReviewAdapter(
+    { flag, env, configReview, configDefault }, isConfiguredAdapterName, ADAPTER_NAMES,
+  );
+}
+
 export async function runReviewCommand(
   opts: ReviewCommandOptions = {},
   deps: {
@@ -458,6 +522,12 @@ export async function runReviewCommand(
   });
   if (history.context) log(`Loaded prior review log context for ${changed.length} changed file(s).`);
 
+  // Honour the configured adapter. Without this the reviewer used the registry
+  // default regardless of config, so `adapter:`/`reviewAdapter:` were dead for
+  // this command. (AGT-4292)
+  const adapterChoice = await resolveConfiguredReviewAdapter(opts.adapter, opts.json === true);
+  if (opts.debug && adapterChoice.name) log(`Reviewer adapter: ${adapterChoice.name} (${adapterChoice.source})`);
+
   const review =
     deps.review ??
     (async (wr: WorkerResult, c: string, onLog?: (line: string) => void) => {
@@ -469,7 +539,7 @@ export async function runReviewCommand(
           : 'Review the current working-tree changes for correctness, bugs, and follow-ups.',
         workerResult: wr,
         projectPath: c,
-        adapterName: opts.adapter as never,
+        adapterName: adapterChoice.name as never,
         mode: 'direct',
         priorReviewContext: history.context,
         readOnly: opts.readOnly,
@@ -613,3 +683,4 @@ export async function runReviewCommand(
     }
   }
 }
+// tmp comment 2026년  9월 10일 목요일 20시 43분 03초 KST

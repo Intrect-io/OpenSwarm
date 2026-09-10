@@ -6,6 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
+import { ADAPTER_NAMES } from './adapterNames.js';
 import YAML from 'yaml';
 import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResolverConfig, McpConfig } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
@@ -45,7 +46,7 @@ function getConfigSearchPaths(): string[] {
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const AdapterNameSchema = z.enum(['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude', 'cc-router', 'cursor']);
+const AdapterNameSchema = z.enum(ADAPTER_NAMES);
 
 // Zod Schemas
 
@@ -514,6 +515,13 @@ const DailyReporterConfigSchema = z.object({
 
 const RawConfigSchema = z.object({
   adapter: AdapterNameSchema.default('codex'),
+  /**
+   * Adapter for `openswarm review`, when it should differ from `adapter`.
+   * Review is a second opinion, so running it on the same provider as the work
+   * it checks is a correlated failure — and that provider's quota is the one
+   * already spent. Omit to follow `adapter`. (AGT-4292)
+   */
+  reviewAdapter: AdapterNameSchema.optional(),
   language: z.enum(['en', 'ko']).default('en'),
   discord: DiscordConfigSchema,
   notifications: NotificationsSchema,
@@ -665,6 +673,10 @@ function parseConfigFile(path: string): unknown {
 function transformConfig(raw: RawConfig): SwarmConfig {
   return {
     adapter: raw.adapter,
+    // Hand-picked mapping: a key added to the schema alone never reaches a
+    // caller. That is how AGT-4122 shipped, and how this key first shipped
+    // dead. (AGT-4292)
+    reviewAdapter: raw.reviewAdapter,
     language: raw.language,
     discordToken: raw.discord?.token ?? '',
     discordChannelId: raw.discord?.channelId ?? '',

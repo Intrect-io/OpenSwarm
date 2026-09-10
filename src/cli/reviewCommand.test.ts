@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   buildReviewWorkerResult,
   formatReviewOutput,
@@ -15,6 +15,17 @@ import type { ReviewResult } from '../agents/agentPair.js';
 // other test in this file supplies its own stub, so this mock never affects them.
 const getChangedFilesMock = vi.fn(async () => ['x.ts']);
 vi.mock('../support/gitTracker.js', () => ({ getChangedFiles: getChangedFilesMock }));
+
+// `loadConfig` is not a pure read — it engages process-wide toggles
+// (human-surface read-only, sandbox executor wiring) and logs to stdout. Before
+// AGT-4292 a plain `openswarm review` never called it, so this spy is how the
+// tests below can tell "resolved without touching config" from "loaded config
+// and then discarded it". (AGT-4292)
+const loadConfigMock = vi.hoisted(() => vi.fn(() => ({ adapter: 'codex', reviewAdapter: undefined })));
+vi.mock('../core/config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/config.js')>()),
+  loadConfig: loadConfigMock,
+}));
 
 describe('buildReviewWorkerResult (INT-1955)', () => {
   it('synthesizes a WorkerResult from changed files', () => {
@@ -434,11 +445,21 @@ describe('runReviewCommand machine-readable output (INT-3102)', () => {
 
   it('--json writes the verdict to stdout and keeps prose off it', async () => {
     // Mixing the human report into stdout would break `review --json | jq`.
+    //
+    // `console.log` is captured as well as `process.stdout.write`, and that is
+    // the point: vitest intercepts `console` ABOVE the stdout spy, so anything
+    // written that way never reached the array this test parses. AGT-4292
+    // added a `loadConfig()` call on this path, which logs "Config loading
+    // from …" and two credential warnings straight to stdout, in front of the
+    // JSON document — and this test stayed green through all of it.
     const stdout: string[] = [];
+    const push = (chunk: unknown) => { stdout.push(String(chunk)); };
     const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => {
-      stdout.push(String(chunk));
+      push(chunk);
       return true;
     });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation((...args) => push(args.join(' ')));
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation((...args) => push(args.join(' ')));
     const logs: string[] = [];
     try {
       await runReviewCommand(
@@ -447,13 +468,92 @@ describe('runReviewCommand machine-readable output (INT-3102)', () => {
       );
     } finally {
       write.mockRestore();
+      consoleLog.mockRestore();
+      consoleWarn.mockRestore();
     }
 
+    // Parsing the WHOLE capture is the assertion. `JSON.parse` on a document
+    // with anything in front of it throws, which is exactly what `jq` does.
     const parsed = JSON.parse(stdout.join(''));
     expect(parsed).toMatchObject({ schemaVersion: 1, decision: 'revise', gateRan: true });
     expect(parsed.findings[0]).toMatchObject({ file: 'src/auth.ts', line: 42 });
     // The human verdict block must not have gone to stdout as well.
     expect(logs.join('\n')).not.toContain('Decision: REVISE');
+  });
+
+  it('keeps stdout parseable even when a config file is present to be loaded', async () => {
+    // The regression above was reachable only when `loadConfig()` actually
+    // found something to say. With no flag and no env var the resolution falls
+    // through to config, which is the common path for a CI `review --json`.
+    const prevFlag = process.env.OPENSWARM_REVIEW_ADAPTER;
+    delete process.env.OPENSWARM_REVIEW_ADAPTER;
+    onTestFinished(() => {
+      if (prevFlag === undefined) delete process.env.OPENSWARM_REVIEW_ADAPTER;
+      else process.env.OPENSWARM_REVIEW_ADAPTER = prevFlag;
+    });
+
+    const stdout: string[] = [];
+    const push = (chunk: unknown) => { stdout.push(String(chunk)); };
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => {
+      push(chunk);
+      return true;
+    });
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation((...args) => push(args.join(' ')));
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation((...args) => push(args.join(' ')));
+    try {
+      await runReviewCommand(
+        { json: true },
+        { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: () => {} },
+      );
+    } finally {
+      write.mockRestore();
+      consoleLog.mockRestore();
+      consoleWarn.mockRestore();
+    }
+
+    expect(() => JSON.parse(stdout.join(''))).not.toThrow();
+  });
+
+  it('does not read config when the flag already decided the adapter', async () => {
+    // The short-circuit is not an optimisation. `loadConfig` flips process-wide
+    // toggles that a review run had nothing to do with before this resolution
+    // existed, so "load it and then throw the answer away" is a behaviour
+    // change dressed as a no-op.
+    loadConfigMock.mockClear();
+    await runReviewCommand(
+      { adapter: 'claude' },
+      { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: () => {} },
+    );
+    expect(loadConfigMock).not.toHaveBeenCalled();
+  });
+
+  it('does not read config when the environment already decided it', async () => {
+    const prev = process.env.OPENSWARM_REVIEW_ADAPTER;
+    process.env.OPENSWARM_REVIEW_ADAPTER = 'openrouter';
+    onTestFinished(() => {
+      if (prev === undefined) delete process.env.OPENSWARM_REVIEW_ADAPTER;
+      else process.env.OPENSWARM_REVIEW_ADAPTER = prev;
+    });
+    loadConfigMock.mockClear();
+    await runReviewCommand(
+      {},
+      { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: () => {} },
+    );
+    expect(loadConfigMock).not.toHaveBeenCalled();
+  });
+
+  it('does read config when nothing higher-precedence decided it', async () => {
+    // Guard the guard: without this the two negatives above would also pass if
+    // the config path were removed outright.
+    const prev = process.env.OPENSWARM_REVIEW_ADAPTER;
+    delete process.env.OPENSWARM_REVIEW_ADAPTER;
+    onTestFinished(() => { if (prev !== undefined) process.env.OPENSWARM_REVIEW_ADAPTER = prev; });
+    loadConfigMock.mockClear();
+    await runReviewCommand(
+      {},
+      { getChangedFiles: async () => ['x.ts'], review: reviewed, startProgress: () => null, log: () => {} },
+    );
+    expect(loadConfigMock).toHaveBeenCalled();
   });
 
   it('still prints the human report when --json is absent', async () => {
