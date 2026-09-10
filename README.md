@@ -663,7 +663,7 @@ Before starting, confirm that `OPENSWARM_WORKSPACE` contains every configured
 same `OPENSWARM_IMAGE` image ID; keep the prior immutable image tag for
 rollback. Do not rely on a pre-existing mutable `openswarm:latest` image.
 
-Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated `0.0.0.0` bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
+Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated all-interfaces bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
 
 The compose file wires the persistent and local-data mounts that matter:
 

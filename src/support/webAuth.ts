@@ -9,7 +9,7 @@
 // handling in a 1650-line file, and the surface most worth reading on its own.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isLoopbackAddress, isAuthorizedTailscalePeer } from './tailscaleNetwork.js';
+import { isAuthorizedTailscalePeer, isLoopbackAddress, isTailscaleAddress } from './tailscaleNetwork.js';
 import { isGraphQLRequest } from '../issues/graphql/server.js';
 
 // CORS origin allowlist — hostname-strict match (no substring/prefix pitfalls)
@@ -47,6 +47,21 @@ export function isTrustedTailscaleRequest(req: IncomingMessage): boolean {
   return process.env.OPENSWARM_TRUST_TAILSCALE === 'true'
     // Range membership is not trust: the peer must be explicitly allowlisted.
     && isAuthorizedTailscalePeer(req.socket.remoteAddress)
+    // ...and the connection must have arrived ON our Tailscale address.
+    //
+    // A ULA carries no allocation authority — anyone can assign
+    // fd7a:115c:a1e0::… to their own interface. While the daemon bound IPv4
+    // only, that was moot because nothing could reach the ULA at all. Binding
+    // dual-stack (AGT-4290) makes it reachable over EVERY interface, so a
+    // neighbour on the LAN could self-assign an allowlisted address and be
+    // trusted. Requiring the local end of the socket to be a Tailscale address
+    // means the packet was addressed to us through the tailnet, not to our LAN
+    // address with a forged source.
+    //
+    // This is defence in depth, not proof: an on-link attacker who can also
+    // route our ULA prefix defeats it. Real proof needs the Tailscale control
+    // plane (node key / capability check), which this process does not talk to.
+    && isTailscaleAddress(req.socket.localAddress)
     && isTrustedLocalOrigin(req);
 }
 
