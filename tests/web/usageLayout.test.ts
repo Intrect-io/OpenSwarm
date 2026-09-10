@@ -27,7 +27,28 @@ const RAW = readFileSync(resolve(__dirname, '../../web/static/css/usage.css'), '
  */
 const CSS = RAW.replace(/\/\*[\s\S]*?\*\//g, '');
 
+const TOKENS_CSS = readFileSync(resolve(__dirname, '../../web/static/css/tokens.css'), 'utf8');
+
 describe('usage.css invariants', () => {
+  it('references only custom properties tokens.css actually defines', () => {
+    // Written after three `var(--…)` names that do not exist were shipped into
+    // this file (`--surface-2`, `--text-1`, `--text-2`; the real names are
+    // `--surface2`, `--fg-primary`, `--fg-secondary`). An undefined custom
+    // property is not an error — the declaration is dropped and the rule
+    // renders with an inherited colour, so it looks plausible. Neither the
+    // build, nor oxlint, nor jsdom sees it.
+    const defined = new Set(
+      [...TOKENS_CSS.matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)].map(m => m[1]),
+    );
+    const used = new Set([...CSS.matchAll(/var\((--[a-z0-9-]+)/g)].map(m => m[1]));
+
+    expect([...used].filter(name => !defined.has(name))).toEqual([]);
+    // Guard the guard: if either file stopped being read, both sets would be
+    // empty and the assertion above would pass while checking nothing.
+    expect(used.size).toBeGreaterThan(10);
+    expect(defined.size).toBeGreaterThan(50);
+  });
+
   it('does not scope the rate colours to table cells', () => {
     // `td.rate-low` would leave #sum-cache uncoloured.
     expect(CSS).toMatch(/^\.rate-low\s/m);

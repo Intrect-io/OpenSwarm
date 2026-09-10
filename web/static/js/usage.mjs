@@ -11,7 +11,45 @@
 // cache rate, cost per call, calls per task — are the ones that carry the
 // cost signal; the raw rows do not have them.
 
-const AXES = ['day', 'model', 'stage', 'adapter', 'project', 'task'];
+// AGT-4296: a window shorter than a day, and an axis fine enough to draw it
+// on. 24h was the shortest window the selector offered, and a 24h total is
+// dominated by whatever ran before the last deploy — the draft cache rate read
+// 34.1% over 24h and 66.8% over the last two hours, and only the second one
+// described the code actually running.
+
+/** Axes fetched for every window. The time axis is chosen per window. */
+const AXES = ['model', 'stage', 'adapter', 'project', 'task'];
+
+/**
+ * The finest time axis that still draws a series for this window.
+ *
+ * Beyond two days an hourly series is 720 bars, which is a texture rather than
+ * a reading. Anything the selector does not offer — a hand-typed ISO date,
+ * which can name a window of any length — falls back to the coarse axis rather
+ * than guessing.
+ */
+export function timeAxisFor(since) {
+  const m = /^(\d+)([mhd])$/.exec(String(since ?? '').trim());
+  if (!m) return 'day';
+  const hours = Number(m[1]) * { m: 1 / 60, h: 1, d: 24 }[m[2]];
+  return hours <= 48 ? 'hour' : 'day';
+}
+
+/**
+ * A bucket key as a reader's clock shows it.
+ *
+ * `2026-09-10T14` is a UTC hour and carries no minutes, which `Date.parse`
+ * rejects on its own — so it is completed before parsing. A day key is left
+ * alone: converting it would shift it by the UTC offset and relabel the day,
+ * which is AGT-4293's business, not this change's.
+ */
+export function formatBucket(key) {
+  const text = String(key ?? '');
+  if (!text.includes('T')) return text;
+  const at = new Date(`${text}:00:00Z`);
+  if (Number.isNaN(at.getTime())) return text;
+  return at.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', hour12: false });
+}
 
 /**
  * cachedTokens / promptTokens, or null when there is nothing to divide.
@@ -197,7 +235,7 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
   };
 }
 
-/** Render the day axis as bars, oldest first — a series read left to right in time. */
+/** Render the time axis as bars, oldest first — a series read left to right in time. */
 export function renderDays(container, aggregate) {
   container.replaceChildren();
   const rows = [...(aggregate?.rows ?? [])].sort((a, b) => String(a.key).localeCompare(String(b.key)));
@@ -225,7 +263,9 @@ export function renderDays(container, aggregate) {
 
     const day = document.createElement('span');
     day.className = 'bar-day';
-    day.textContent = row.key;
+    day.textContent = formatBucket(row.key);
+    // The raw key stays reachable: the label is now a rendering of it.
+    day.title = row.key;
 
     const track = document.createElement('div');
     track.className = 'bar-track';
@@ -298,16 +338,24 @@ export function renderSummary(root, { model, task }) {
  * partial render for the rarer per-request failures is a separate change.
  */
 export async function loadUsage(since, fetchImpl = globalThis.fetch) {
-  const results = await Promise.all(AXES.map(async (by) => {
+  const timeAxis = timeAxisFor(since);
+  const results = await Promise.all([timeAxis, ...AXES].map(async (by) => {
     const res = await fetchImpl(`/api/usage?since=${encodeURIComponent(since)}&by=${by}`);
     if (!res.ok) throw new Error(`/api/usage?by=${by} → ${res.status}`);
     return [by, await res.json()];
   }));
-  return Object.fromEntries(results);
+  const data = Object.fromEntries(results);
+  // `time` is whichever axis was chosen, so the renderer need not know which.
+  data.time = data[timeAxis];
+  data.timeAxis = timeAxis;
+  return data;
 }
 
 /** Windows the selector offers. A hand-typed `?since=` outside this set is ignored. */
-export const WINDOWS = ['24h', '7d', '30d'];
+// A landed fix is invisible in a 24h total: the draft cache rate read 34.1%
+// over 24h and 66.8% over the last two hours, and only the second described
+// the deployed code. (AGT-4296)
+export const WINDOWS = ['1h', '2h', '6h', '24h', '7d', '30d'];
 
 /** The window named by the URL, or null when it names nothing valid. */
 export function windowFromSearch(search) {
@@ -359,7 +407,12 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
       const data = await loadUsage(since, fetchImpl);
       if (seq !== latest) return;   // a newer window is already in flight
       renderSummary(root, data);
-      renderDays(root.querySelector('#days'), data.day);
+      renderDays(root.querySelector('#days'), data.time);
+      // The card is headed by whoever knows which axis was chosen. Left fixed
+      // it read 일별 over hourly labels like `9. 10. 23시`, on first load for
+      // every reader, because the default window is 24h.
+      const daysTitle = root.querySelector('#days-title');
+      if (daysTitle) daysTitle.textContent = data.timeAxis === 'hour' ? '시간별' : '일별';
       const LABELS = { model: '모델', stage: '스테이지', adapter: '어댑터', project: '프로젝트' };
       for (const axis of ['model', 'stage', 'adapter', 'project']) {
         const table = root.querySelector(`#table-${axis}`);
