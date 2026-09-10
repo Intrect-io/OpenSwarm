@@ -6,11 +6,12 @@ from datetime import datetime
 from typing import Literal
 
 try:
-    from pydantic import BaseModel, ConfigDict, Field
+    from pydantic import BaseModel, ConfigDict, Field, field_validator
 except ImportError:  # Pydantic v1 compatibility
     from pydantic import BaseModel, Field
 
     ConfigDict = None  # type: ignore[assignment]
+    field_validator = None  # type: ignore[assignment]
 
 
 TaskExecutionStatus = Literal[
@@ -71,6 +72,29 @@ class OpenSwarmTaskState(AliasModel):
     execution: ExecutionState = Field(default_factory=ExecutionState)
     worktree: WorktreeState = Field(default_factory=WorktreeState)
     updated_at: datetime = Field(alias="updatedAt")
+
+    if field_validator is not None:
+        @field_validator("topo_rank", mode="before")
+        @classmethod
+        def coerce_topo_rank(cls, v: object) -> int | None:
+            """Accept canonical integral values (int, float with no fractional part, string digits)."""
+            if v is None:
+                return None
+            if isinstance(v, int) and not isinstance(v, bool):
+                return v
+            if isinstance(v, float):
+                if not (v == int(v) and v >= 0):
+                    raise ValueError(f"Expected non-negative integral value, got {v!r}")
+                return int(v)
+            if isinstance(v, str):
+                try:
+                    n = int(v)
+                    if n >= 0:
+                        return n
+                except (ValueError, TypeError):
+                    pass
+                raise ValueError(f"Expected non-negative integral value, got {v!r}")
+            raise ValueError(f"Expected non-negative integral value, got {v!r}")
 
     def model_dump(self, **kwargs):
         """Omit absent optional fields from serialization."""
