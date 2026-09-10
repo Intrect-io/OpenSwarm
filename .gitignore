@@ -85,3 +85,15 @@ openswarm.orb-*.json
 # Subprojects
 openclaw/
 plan.md
+
+# Agent-runtime droppings. The daemon runs agents inside each git worktree, and
+# they write their own scratch there: `cli.json`/`cursor/cli.json` are
+# cursor-agent permission configs (they grant `Shell(**)` and `Shell(rm*)`), and
+# `.tmp-run-*.sh`/`.run-tests.sh` are generated runners that hardcode a
+# container worktree UUID and `rm -rf node_modules`. A worker's `git add -A`
+# swept all of them into commits — #598 landed `cli.json` and `cursor/cli.json`
+# on main, #600 carried a third copy, and none of them belong in a checkout.
+cli.json
+cursor/
+.run-tests.sh
+.tmp-run-*.sh
