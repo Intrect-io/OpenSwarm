@@ -22,6 +22,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <a href="/orchestration">Orchestration</a>
       <a href="/threads">Threads</a>
       <a href="/warehouse">Warehouse</a>
+      <a href="/usage">Usage</a>
       <a href="/issues">Issues</a>
     </nav>
     <div class="topbar-spacer"></div>
