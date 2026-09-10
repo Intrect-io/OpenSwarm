@@ -34,6 +34,7 @@ import {
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
+import { adapterFetch } from './httpDispatcher.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 // Picked from the Atlas pool benchmark (benchmarks/, INT-3106): v4-flash passed
@@ -77,7 +78,7 @@ function catalogSpec(): CatalogSpec {
         }
       }
       if (!apiKey) return [];
-      const res = await fetch(`${OPENROUTER_API_BASE}/models`, {
+      const res = await adapterFetch(`${OPENROUTER_API_BASE}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
@@ -294,7 +295,7 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     }
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
       const request = prepareApprovedModelRequest(`${OPENROUTER_API_BASE}/chat/completions`, body);
-      const res = await fetch(request.url, {
+      const res = await adapterFetch(request.url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,

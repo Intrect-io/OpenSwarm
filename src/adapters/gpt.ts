@@ -28,6 +28,7 @@ import {
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
+import { adapterFetch } from './httpDispatcher.js';
 
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
 // Was pinned to `gpt-4o` long after the GPT-5 line shipped — the exact staleness
@@ -57,7 +58,7 @@ function catalogSpec(): CatalogSpec {
     fetchLive: async () => {
       const apiKey = process.env.OPENAI_API_KEY?.trim();
       if (!apiKey) return [];
-      const res = await fetch(`${OPENAI_API_BASE}/models`, {
+      const res = await adapterFetch(`${OPENAI_API_BASE}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
@@ -220,7 +221,7 @@ export class GptCliAdapter implements CliAdapter {
       }
       const doCall = async (accessToken: string) => {
         const request = prepareApprovedModelRequest(`${OPENAI_API_BASE}/chat/completions`, body);
-        const res = await fetch(request.url, {
+        const res = await adapterFetch(request.url, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${accessToken}`,

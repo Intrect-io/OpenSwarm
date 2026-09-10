@@ -5,7 +5,7 @@
 // (unlike the codex `exec` CLI, which is a black box). INT-1586.
 // ============================================
 
-import { Agent, fetch as undiciFetch } from 'undici';
+import { adapterFetch } from './httpDispatcher.js';
 
 import type {
   CliAdapter,
@@ -51,27 +51,9 @@ type ResponsesInputItem =
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string };
 
-/**
- * Dedicated dispatcher for Codex Responses traffic, pinned to HTTP/1.1.
- *
- * Node's global fetch negotiates h2 with this origin, and undici then carries
- * several concurrent requests as streams over a couple of connections. The
- * server admits only a few concurrent streams per connection, so with N
- * reviewers in one process a request sat in undici waiting for a stream slot:
- * measured at concurrency 4, `create -> sendHeaders` was 17.30s median while
- * the server itself answered in 1.07s. Splitting the same work across four
- * processes was fast purely because each got its own connection.
- *
- * One connection per in-flight request restores that, without needing a
- * process boundary. undici's own `fetch` is required — a dispatcher built from
- * the npm package is rejected by the copy bundled inside Node's global fetch
- * (same constraint as support/outboundUrl.ts). (AGT-4220)
- */
-let codexDispatcher: Agent | undefined;
-function getCodexDispatcher(): Agent {
-  codexDispatcher ??= new Agent({ allowH2: false, connections: 64, pipelining: 1 });
-  return codexDispatcher;
-}
+// The dispatcher rationale now lives in httpDispatcher.ts, shared with every
+// other HTTPS adapter: they run in the same process at the same concurrency and
+// hit the same stall. (AGT-4220)
 
 /**
  * Resolve the reasoning effort for a Responses API request. An explicit effort
@@ -513,11 +495,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       // NOTE: never set max_output_tokens — the Codex backend rejects it with HTTP 400.
       const doCall = async (accessToken: string): Promise<ChatLikeResponse> => {
         const request = this.prepareRequest(body);
-        // undici's Response is spec-compatible with the global one; the DOM lib
-        // types are structurally distinct, so cross the boundary once, here —
-        // same bridge support/outboundUrl.ts makes.
-        const res = await undiciFetch(request.url, {
-          dispatcher: getCodexDispatcher(),
+        const res = await adapterFetch(request.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -530,7 +508,7 @@ export class CodexResponsesAdapter implements CliAdapter {
           body: request.body,
           // The caller's signal AND this call's own deadline. Either aborts.
           signal: abortSignalWithDeadline(signal, timeoutMs),
-        } as never) as unknown as Response;
+        } as never);
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
