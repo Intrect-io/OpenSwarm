@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(**)",
+      "Shell(ls)",
+      "Shell(npm)",
+      "Shell(npx)",
+      "Shell(node)",
+      "Shell(git)",
+      "Shell(bash)",
+      "Shell(sh)",
+      "Shell(npx *)",
+      "Shell(node *)",
+      "Shell(npm *)",
+      "Shell(git *)"
+    ],
+    "deny": []
+  },
+  "approvalMode": "unrestricted"
+}
