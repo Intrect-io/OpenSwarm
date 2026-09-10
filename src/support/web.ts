@@ -34,12 +34,35 @@ import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
+import { refuseForChildCap } from '../automation/decompositionLimits.js';
 import { projectInfoForRepository } from '../automation/runnerState.js';
+import { loadConfig } from '../core/config.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import type { SubTask } from './planner.js';
 import { buildHealthPayload } from './healthEndpoint.js';
 import { HttpError, readBody } from './httpBody.js';
 import { tryHandleAppRoutes } from './webAppRoutes.js';
+
+/**
+ * Decomposition knobs for human `/plan` dispatch (AGT-4123 Option 2).
+ *
+ * Shares `maxChildrenPerTask` with the runner — a structural limit on any one
+ * parent — but deliberately does **not** consult `reserveDailyCreations`.
+ * `dailyLimit` is returned only so `createSubIssuesWithDependencies` can log
+ * the counter; `/plan` never reserves against it. An explicitly approved plan
+ * must not be refused because the daemon already spent today's slots.
+ */
+function resolvePlanDecompositionLimits(): { maxChildrenPerTask: number; dailyLimit: number } {
+  try {
+    const decomposition = loadConfig().autonomous?.decomposition;
+    return {
+      maxChildrenPerTask: decomposition?.maxChildrenPerTask ?? 5,
+      dailyLimit: decomposition?.dailyLimit ?? 20,
+    };
+  } catch {
+    return { maxChildrenPerTask: 5, dailyLimit: 20 };
+  }
+}
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
@@ -1331,6 +1354,25 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           // engine, which routes through the same source), then heartbeat.
           const source = getTaskSource();
           if (source) {
+            const { maxChildrenPerTask: maxChildren, dailyLimit } = resolvePlanDecompositionLimits();
+            // Cap before creating the parent so an oversize plan does not leave
+            // an orphan issue. dailyLimit is intentionally not reserved here —
+            // see resolvePlanDecompositionLimits (AGT-4123 Option 2).
+            if (tasks.length > 0) {
+              const capRefusal = refuseForChildCap(
+                { existingChildren: 0, recovering: false, plannedChildren: tasks.length },
+                maxChildren,
+              );
+              if (capRefusal) {
+                writeJson(res, 400, {
+                  error: `Plan refused: ${capRefusal}`,
+                  code: 'decomposition_child_cap',
+                  maxChildrenPerTask: maxChildren,
+                });
+                return;
+              }
+            }
+
             const parent = await source.createTask(
               goal,
               `Planned via the \`/plan\` cockpit.\n\n${tasks.length} sub-task(s) dispatched.`,
@@ -1355,6 +1397,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             }
 
             const totalMinutes = tasks.reduce((sum, t) => sum + (t.estimatedMinutes || 0), 0);
+            // dailyLimit is logging-only here; /plan does not call reserveDailyCreations (AGT-4123).
             await createSubIssuesWithDependencies(
               parent.id,
               { title: goal },
@@ -1362,7 +1405,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
               totalMinutes,
               { reportToDiscord: () => {}, scheduleNextHeartbeat: triggerHeartbeat },
               parent.id,
-              20,
+              dailyLimit,
             );
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({

@@ -446,9 +446,13 @@ export type DecompositionConfig = {
   thresholdMinutes: number;
   /** Max decomposition depth (default: 2) - prevents infinite nesting */
   maxDepth?: number;
-  /** Max children per task (default: 5) - prevents issue explosion */
+  /** Max children per task (default: 5) - prevents issue explosion.
+   * Shared by the autonomous runner and human `/plan` dispatch. */
   maxChildrenPerTask?: number;
-  /** Daily issue creation limit (default: 20) - prevents runaway creation */
+  /**
+   * Daily issue creation limit (default: 20) - paces unsupervised automation.
+   * Autonomous runner only; `/plan` is exempt (AGT-4123 Option 2).
+   */
   dailyLimit?: number;
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog?: boolean;

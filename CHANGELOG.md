@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Human `/plan` respects `maxChildrenPerTask` but not `dailyLimit` (AGT-4123).** `POST /api/plan/dispatch` now refuses with `decomposition_child_cap` when an approved plan would leave more children than `autonomous.decomposition.maxChildrenPerTask` on the new parent (sharing `refuseForChildCap` with the autonomous path). The automation-pacing `dailyLimit` / `reserveDailyCreations` budget remains runner-only — an explicitly confirmed plan is not refused because the daemon already spent today's slots.
+
 
 ## 0.23.0 — 2026-09-10
 

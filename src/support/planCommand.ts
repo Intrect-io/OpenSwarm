@@ -11,6 +11,11 @@
 // The Planner itself (runPlanner) and the dispatch engine (POST /api/plan/dispatch
 // → createSubIssuesWithDependencies / exec pipeline) already exist; this only adds
 // the human-in-the-loop approval surface.
+//
+// Dispatch Path A enforces `autonomous.decomposition.maxChildrenPerTask` via
+// refuseForChildCap but does **not** call reserveDailyCreations — that admission
+// gate paces the unsupervised runner only (AGT-4123 Option 2). Created children
+// still flow through createSubIssuesWithDependencies → registerDecomposition.
 
 import { runPlanner, type SubTask } from './planner.js';
 
