@@ -50,6 +50,8 @@ class ExecutionState(AliasModel):
     status: TaskExecutionStatus = "backlog"
     blocked_reason: str | None = Field(default=None, alias="blockedReason")
     retry_count: int = Field(default=0, alias="retryCount")
+    # Use float (not StrictFloat) so Pydantic v1 accepts integral JSON values
+    # like "confidence": 1, matching the canonical Zod z.number().min(0).max(1).
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     last_session_id: str | None = Field(default=None, alias="lastSessionId")
 
@@ -57,11 +59,10 @@ class ExecutionState(AliasModel):
 class OpenSwarmTaskState(AliasModel):
     version: Literal[1] = 1
     issue_id: str = Field(alias="issueId")
-    issue_identifier: str | None = Field(default=None, alias="issueIdentifier")
-    title: str | None = None
-    project_id: str | None = Field(default=None, alias="projectId")
-    project_name: str | None = Field(default=None, alias="projectName")
-    parent_issue_id: str | None = Field(default=None, alias="parentIssueId")
+    title: str = ""
+    description: str = ""
+    priority: int = 0
+    area: str = ""
     child_issue_ids: list[str] = Field(default_factory=list, alias="childIssueIds")
     dependency_issue_ids: list[str] = Field(default_factory=list, alias="dependencyIssueIds")
     dependency_titles: list[str] = Field(default_factory=list, alias="dependencyTitles")
