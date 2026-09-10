@@ -4,7 +4,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { withFileLock } from './fileLock.js';
+import { withFileLock, withFileLockSync } from './fileLock.js';
 
 /** A pid that cannot be running: above the platform maximum. */
 const DEAD_PID = 0x7fffffff;
@@ -127,5 +127,42 @@ describe('withFileLock stale takeover', () => {
 
     await expect(withFileLock(lockPath, async () => 'taken', { timeoutMs: 40, malformedStaleMs: 60_000 }))
       .rejects.toThrow(/Timed out waiting for file lock/);
+  });
+});
+
+describe('withFileLockSync', () => {
+  let dir: string;
+  let lockPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openswarm-filelock-sync-'));
+    lockPath = join(dir, 'nested', 'resource.lock');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('runs the operation under a held lock and releases afterward', () => {
+    const result = withFileLockSync(lockPath, () => {
+      expect(existsSync(lockPath)).toBe(true);
+      expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toMatchObject({ pid: process.pid });
+      return 42;
+    });
+    expect(result).toBe(42);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('releases the lock when the sync operation throws', () => {
+    expect(() => withFileLockSync(lockPath, () => {
+      throw new Error('sync boom');
+    })).toThrow('sync boom');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('takes over a lock left behind by a dead process', () => {
+    writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, token: 'dead' }), { mode: 0o600 });
+    expect(withFileLockSync(lockPath, () => 'taken', { timeoutMs: 500 })).toBe('taken');
+    expect(existsSync(lockPath)).toBe(false);
   });
 });

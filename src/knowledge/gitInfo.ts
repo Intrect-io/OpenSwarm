@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import type { KnowledgeGraph } from './graph.js';
 import type { GitInfo } from './types.js';
+import { saveGraph } from './store.js';
 
 // Git Command Runner (same pattern as gitTracker.ts)
 
@@ -118,22 +119,25 @@ export async function enrichWithGitInfo(
 
   for (const mod of modules) {
     const churn = churns.get(mod.path);
-    if (churn) {
-      const gitInfo: GitInfo = {
+    const gitInfo: GitInfo = churn
+      ? {
         lastCommitDate: churn.lastCommitDate,
         commitCount30d: churn.commitCount,
         churnScore: Math.round((churn.commitCount / maxCommits) * 1000) / 1000,
-      };
-      mod.gitInfo = gitInfo;
-    } else {
-      // File not in git history (no changes in 30 days)
-      mod.gitInfo = {
+      }
+      : {
         lastCommitDate: 0,
         commitCount30d: 0,
         churnScore: 0,
       };
-    }
+    graph.addNode({
+      ...mod,
+      metrics: { ...mod.metrics },
+      gitInfo,
+    });
   }
+
+  await saveGraph(graph);
 
   console.log(`[GitInfo] Enriched ${modules.length} modules with git data (${churns.size} files had changes in ${sinceDays}d)`);
 }

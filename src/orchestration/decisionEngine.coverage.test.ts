@@ -17,10 +17,27 @@ const fsMock = vi.hoisted(() => ({
 }));
 vi.mock('fs/promises', () => fsMock);
 
+const fileLockMock = vi.hoisted(() => ({
+  withFileLock: vi.fn((_path: string, operation: () => unknown) => operation()),
+}));
+vi.mock('../support/fileLock.js', () => fileLockMock);
+
+const atomicFileMock = vi.hoisted(() => ({
+  atomicWriteFile: vi.fn(),
+}));
+vi.mock('../support/atomicFile.js', () => atomicFileMock);
+
 const timeWindowMock = vi.hoisted(() => ({ checkWorkAllowed: vi.fn() }));
 vi.mock('../support/timeWindow.js', () => timeWindowMock);
 
-const taskStateMock = vi.hoisted(() => ({ getTaskReadiness: vi.fn() }));
+const taskStateMock = vi.hoisted(() => ({
+  getTaskReadiness: vi.fn(),
+  getTaskState: vi.fn(() => undefined),
+  tryClaimTaskAdmission: vi.fn((_id: string, _patch?: unknown) => ({
+    issueId: _id,
+    execution: { status: 'in_progress' },
+  })),
+}));
 vi.mock('../taskState/store.js', () => taskStateMock);
 
 const memoryMock = vi.hoisted(() => ({ saveCognitiveMemory: vi.fn() }));
@@ -114,6 +131,13 @@ beforeEach(() => {
   fsMock.readFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
   fsMock.writeFile.mockResolvedValue(undefined);
   fsMock.mkdir.mockResolvedValue(undefined);
+  fileLockMock.withFileLock.mockImplementation((_path: string, operation: () => unknown) => operation());
+  atomicFileMock.atomicWriteFile.mockResolvedValue(undefined);
+  taskStateMock.getTaskState.mockReturnValue(undefined);
+  taskStateMock.tryClaimTaskAdmission.mockImplementation((_id: string) => ({
+    issueId: _id,
+    execution: { status: 'in_progress' },
+  }));
   workflowMock.loadWorkflow.mockResolvedValue(workflow());
   workflowMock.listWorkflows.mockResolvedValue([]);
   workflowMock.createCIPipelineTemplate.mockReturnValue(workflow({ id: 'ci-fallback' }));
@@ -198,6 +222,17 @@ describe('DecisionEngine.heartbeat', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('waiting on dependency (blocked by: blocker-1)'));
   });
 
+  it('filters out a task that is already executing locally', async () => {
+    taskStateMock.getTaskState.mockReturnValueOnce({
+      issueId: 'issue-1',
+      execution: { status: 'in_progress' },
+    });
+    const engine = new DecisionEngine();
+    const result = await engine.heartbeat([task()]);
+    expect(result).toEqual({ action: 'skip', reason: 'No executable tasks in backlog' });
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('already executing'));
+  });
+
   it('rejects a task whose source is outside backlog scope', async () => {
     const engine = new DecisionEngine();
     const result = await engine.heartbeat([task({ source: 'github_pr' })]);
@@ -230,6 +265,20 @@ describe('DecisionEngine.heartbeat', () => {
     workflowMock.loadWorkflow.mockResolvedValueOnce(wf);
     const result = await engine.heartbeat([t]);
     expect(result).toEqual({ action: 'execute', task: t, workflow: wf, reason: `Auto-executing: ${t.title}` });
+    expect(taskStateMock.tryClaimTaskAdmission).toHaveBeenCalledWith('issue-1', expect.objectContaining({
+      issueIdentifier: 'INT-1',
+      title: t.title,
+    }));
+  });
+
+  it('skips when autoExecute claim fails (already claimed)', async () => {
+    taskStateMock.tryClaimTaskAdmission.mockReturnValueOnce(null);
+    const engine = new DecisionEngine({ autoExecute: true });
+    const t = task({ workflowId: 'wf-1' });
+    workflowMock.loadWorkflow.mockResolvedValueOnce(workflow());
+    const result = await engine.heartbeat([t]);
+    expect(result.action).toBe('skip');
+    expect(result.reason).toContain('already claimed');
   });
 
   it('defers (requires approval) when autoExecute is false', async () => {
@@ -383,10 +432,11 @@ describe('DecisionEngine.addToBacklog', () => {
     fsMock.readFile.mockResolvedValueOnce(JSON.stringify([discoveredTask({ title: 'existing' })]));
     await engine.addToBacklog(discoveredTask({ title: 'new finding' }));
 
-    expect(fsMock.writeFile).toHaveBeenCalledTimes(1);
-    const written = JSON.parse(fsMock.writeFile.mock.calls[0][1] as string);
+    expect(atomicFileMock.atomicWriteFile).toHaveBeenCalledTimes(1);
+    const written = JSON.parse(atomicFileMock.atomicWriteFile.mock.calls[0][1] as string);
     expect(written).toHaveLength(2);
     expect(written[1].title).toBe('new finding');
+    expect(fileLockMock.withFileLock).toHaveBeenCalled();
     expect(memoryMock.saveCognitiveMemory).toHaveBeenCalledWith(
       'belief',
       expect.stringContaining('new finding'),
@@ -398,7 +448,7 @@ describe('DecisionEngine.addToBacklog', () => {
     const engine = new DecisionEngine();
     fsMock.readFile.mockRejectedValueOnce(new Error('ENOENT'));
     await engine.addToBacklog(discoveredTask());
-    const written = JSON.parse(fsMock.writeFile.mock.calls[0][1] as string);
+    const written = JSON.parse(atomicFileMock.atomicWriteFile.mock.calls[0][1] as string);
     expect(written).toHaveLength(1);
   });
 
@@ -465,6 +515,17 @@ describe('DecisionEngine.heartbeatMultiple', () => {
     expect(result.tasks.map((s) => s.task.id)).toEqual(['a', 'b']);
     expect(result.reason).toBe('Auto-executing 2 tasks');
     expect(result.skippedCount).toBe(0);
+    expect(taskStateMock.tryClaimTaskAdmission).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips when all selected tasks fail admission claim', async () => {
+    taskStateMock.tryClaimTaskAdmission.mockReturnValue(null);
+    const engine = new DecisionEngine({ autoExecute: true });
+    const a = task({ id: 'a', issueId: 'a', workflowId: 'wf-1' });
+    const result = await engine.heartbeatMultiple([a], 3);
+    expect(result.action).toBe('skip');
+    expect(result.reason).toContain('already claimed');
+    expect(result.tasks).toEqual([]);
   });
 
   it('defers multiple selected tasks (requires approval) when autoExecute is false', async () => {

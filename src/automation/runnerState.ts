@@ -9,7 +9,7 @@ import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
-import { withFileLock } from '../support/fileLock.js';
+import { withFileLockSync } from '../support/fileLock.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -23,229 +23,369 @@ import { withFileLock } from '../support/fileLock.js';
 export function isPathEnabled(resolvedPath: string, enabledProjects: Set<string>): boolean {
   for (const enabled of enabledProjects) {
     const rel = relative(enabled, resolvedPath);
-    if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`)
-      && !rel.startsWith(`..${sep}`))) {
-      return true;
-    }
+    if (rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) return true;
   }
   return false;
 }
 
-// ── Paths ──────────────────────────────────
+// State-file paths honor env overrides so tests (and alternate deployments) can
+// redirect them off the real ~/.claude state — an unset override keeps the exact
+// legacy path (backward compatible). Without this, every runner integration test
+// wrote the LIVE daemon's state files (observed: ISSUE-1 accrued 184 phantom failures),
+// which also made those tests flaky. Read at import; tests stub the env then re-import.
+// NOTE: these use OPENSWARM_RUNNER_* names, deliberately DISTINCT from the canonical
+// task store's OPENSWARM_TASK_STATE_FILE (src/taskState/store.ts) — this legacy runner
+// state has a different schema ({completed,failed,retryTimes,…}), so sharing the env
+// var would let one store silently overwrite the other's file. (INT-2543)
+export const TASK_STATE_FILE = process.env.OPENSWARM_RUNNER_TASK_STATE_FILE || join(homedir(), '.claude', 'openswarm-task-state.json');
+export const PIPELINE_HISTORY_FILE = process.env.OPENSWARM_RUNNER_PIPELINE_HISTORY_FILE || join(homedir(), '.claude', 'openswarm-pipeline-history.json');
+export const REJECTION_STATE_FILE = process.env.OPENSWARM_RUNNER_REJECTION_STATE_FILE || join(homedir(), '.claude', 'openswarm-rejection-state.json');
+export const DECOMPOSITION_STATE_FILE = process.env.OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE || join(homedir(), '.claude', 'openswarm-decomposition-state.json');
+export const DAILY_PACE_FILE = join(homedir(), '.openswarm', 'daily-pace.json');
+export const PROJECT_SELECTION_FILE = join(homedir(), '.openswarm', 'project-selection.json');
+const MAX_PIPELINE_HISTORY = 100;
+const MAX_REJECTION_ATTEMPTS = 3;
 
-const OPENSWARM_DIR = join(homedir(), '.openswarm');
+// 5시간 롤링 윈도우 기반 프로젝트별 pace 제어
+// Claude Max는 5시간마다 quota가 리프레시되므로 이에 맞춤
 
-export const TASK_STATE_FILE = join(OPENSWARM_DIR, 'task-state.json');
-export const PIPELINE_HISTORY_FILE = join(OPENSWARM_DIR, 'pipeline-history.json');
-export const REJECTION_STATE_FILE = join(OPENSWARM_DIR, 'rejection-state.json');
-export const DECOMPOSITION_STATE_FILE = join(OPENSWARM_DIR, 'decomposition-state.json');
-export const DAILY_PACE_FILE = join(OPENSWARM_DIR, 'daily-pace.json');
-export const PROJECT_SELECTION_FILE = join(OPENSWARM_DIR, 'project-selection.json');
+const WINDOW_MS = 5 * 60 * 60 * 1000; // 5시간
 
-// ── Daily Pace ─────────────────────────────
-
-interface ProjectPaceEntry {
-  projectName: string;
-  windowCount: number;
-  windowStart: string;
+export interface ProjectPaceEntry {
+  completedAt: string; // ISO-8601
+  costUsd?: number;
 }
 
-interface PaceState {
-  projects: Record<string, ProjectPaceEntry>;
+export interface PaceState {
+  projects: Record<string, ProjectPaceEntry[]>;
+  updatedAt: string;
 }
 
-interface DailyPaceState {
-  date: string;
-  completedCount: number;
+export interface DailyPaceState {
+  completedToday: number;
+  dateKey: string;
+  lastCompletionAt: string | null;
+  projectCounts: Record<string, number>;
 }
+
+let paceState: PaceState | null = null;
 
 function ensurePaceDir(): void {
-  mkdirSync(OPENSWARM_DIR, { recursive: true });
+  const dir = join(homedir(), '.openswarm');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
 }
 
 function ensureParentDir(file: string): void {
   mkdirSync(dirname(file), { recursive: true });
 }
 
-let paceState: PaceState | null = null;
-
 function ensurePaceLoaded(): PaceState {
-  if (paceState !== null) return paceState;
+  if (paceState) return paceState;
   try {
     if (existsSync(DAILY_PACE_FILE)) {
       const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
       paceState = JSON.parse(raw) as PaceState;
+      if (!paceState!.projects) paceState!.projects = {};
     } else {
-      paceState = { projects: {} };
+      paceState = { projects: {}, updatedAt: new Date().toISOString() };
     }
   } catch {
-    paceState = { projects: {} };
+    paceState = { projects: {}, updatedAt: new Date().toISOString() };
   }
-  return paceState;
+  return paceState!;
 }
 
-export function getProjectWindowCount(projectName: string): number {
-  const state = ensurePaceLoaded();
-  const entry = state.projects[projectName];
-  if (!entry) return 0;
-  const windowStart = new Date(entry.windowStart);
-  const now = new Date();
-  const hoursDiff = (now.getTime() - windowStart.getTime()) / (1000 * 60 * 60);
-  if (hoursDiff > 24) return 0;
-  return entry.windowCount;
-}
-
-export function canProjectAcceptTask(projectName: string, cap: number): boolean {
-  return getProjectWindowCount(projectName) < cap;
-}
-
-export function getTotalWindowCount(): number {
-  let total = 0;
-  for (const projectName of Object.keys(ensurePaceLoaded().projects)) {
-    total += getProjectWindowCount(projectName);
-  }
-  return total;
-}
-
-export function getDailyCompletedCount(): number {
+function savePace(): void {
   try {
-    if (existsSync(DAILY_PACE_FILE)) {
-      const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
-      const state = JSON.parse(raw) as DailyPaceState;
-      const today = new Date().toLocaleDateString('en-CA');
-      if (state.date === today) return state.completedCount;
-    }
-  } catch {
-    // ignore
+    ensurePaceDir();
+    atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(paceState, null, 2));
+  } catch (err) {
+    console.warn('[Pace] Failed to save:', err);
   }
-  return 0;
 }
 
-/**
- * Increment the daily completed count.
- */
-export function incrementDailyCompleted(): void {
-  ensurePaceDir();
-  void withFileLock(DAILY_PACE_FILE + '.lock', async () => {
-    let state: DailyPaceState;
-    try {
-      if (existsSync(DAILY_PACE_FILE)) {
-        const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
-        state = JSON.parse(raw) as DailyPaceState;
-      } else {
-        state = { date: '', completedCount: 0 };
-      }
-    } catch {
-      state = { date: '', completedCount: 0 };
+// Persisted dashboard/CLI project selection so "disable all" survives a daemon
+// restart (otherwise enabledProjects resets and the run-all fallback kicks back
+// in). (INT-2208) `touched` mirrors AutonomousRunner.projectSelectionTouched.
+export interface ProjectSelection {
+  enabled: string[];
+  touched: boolean;
+}
+
+export function loadProjectSelection(file: string = PROJECT_SELECTION_FILE): ProjectSelection {
+  try {
+    if (existsSync(file)) {
+      const data = JSON.parse(readFileSync(file, 'utf8'));
+      return { enabled: Array.isArray(data.enabled) ? data.enabled : [], touched: !!data.touched };
     }
-    const today = new Date().toLocaleDateString('en-CA');
-    if (state.date !== today) {
-      state.date = today;
-      state.completedCount = 0;
-    }
-    state.completedCount++;
-    atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(state));
+  } catch {
+    /* corrupt/unreadable → safe default below */
+  }
+  return { enabled: [], touched: false };
+}
+
+export function saveProjectSelection(sel: ProjectSelection, file: string = PROJECT_SELECTION_FILE): void {
+  try {
+    ensureParentDir(file);
+    withFileLockSync(file + '.lock', () => {
+      atomicWriteFileSync(file, JSON.stringify(sel, null, 2));
+    });
+  } catch (err) {
+    console.warn('[ProjectSelection] Failed to save:', err);
+  }
+}
+
+function pruneOldEntries(entries: ProjectPaceEntry[]): ProjectPaceEntry[] {
+  const cutoff = Date.now() - WINDOW_MS;
+  return entries.filter(e => new Date(e.completedAt).getTime() > cutoff);
+}
+
+// Cap helpers (getProjectWindowCount / canProjectAcceptTask / getTotalWindowCount)
+// were removed with the per-project 5h cap (INT-2317). Completion recording stays
+// below — daily-pace.json remains useful as a cost/throughput telemetry trail.
+
+export function recordProjectCompletion(projectName: string, costUsd?: number): void {
+  withFileLockSync(DAILY_PACE_FILE + '.lock', () => {
+    // Reload under the lock so concurrent completions do not drop each other.
+    paceState = null;
+    const state = ensurePaceLoaded();
+    if (!state.projects[projectName]) state.projects[projectName] = [];
+    state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
+    state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
+    state.updatedAt = new Date().toISOString();
+    savePace();
+    console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
   });
 }
 
-/**
- * Check if the system can accept more tasks based on daily limit.
- */
-export function canAcceptMoreTasks(dailyLimit: number): boolean {
-  return getDailyCompletedCount() < dailyLimit;
+export function getDailyPaceInfo(): DailyPaceState {
+  const state = ensurePaceLoaded();
+  const projectCounts: Record<string, number> = {};
+  let totalToday = 0;
+  let lastCompletion: string | null = null;
+  const today = new Date().toLocaleDateString('en-CA');
+
+  for (const [name, entries] of Object.entries(state.projects)) {
+    const active = pruneOldEntries(entries);
+    projectCounts[name] = active.length;
+    for (const e of entries) {
+      if (e.completedAt.startsWith(today)) totalToday++;
+      if (!lastCompletion || e.completedAt > lastCompletion) lastCompletion = e.completedAt;
+    }
+  }
+
+  return { completedToday: totalToday, dateKey: today, lastCompletionAt: lastCompletion, projectCounts };
 }
 
-// ── Pipeline History ───────────────────────
+/** Last failure detail per issue — injected into the next attempt's worker
+ * prompt so a re-picked task doesn't repeat the exact mistake the reviewer
+ * already called out (INT-2474). Capped and cleared on success. */
+export interface LastFailureEntry {
+  detail: string;
+  at: string; // ISO-8601
+}
+
+const MAX_FAILURE_DETAIL_CHARS = 2000;
+
+export interface TaskState {
+  completedTaskIds: Set<string>;
+  failedTaskCounts: Map<string, number>;
+  failedTaskRetryTimes: Map<string, number>; // issueId → next retry timestamp (ms)
+  lastFailureDetails: Map<string, LastFailureEntry>; // issueId → last failure feedback
+}
+
+/** Placeholder strings that carry zero diagnostic value — never persist these
+ *  as a failure detail when something meaningful is available (INT-2504). */
+const JUNK_DETAILS = new Set([
+  'Unknown error',
+  'No feedback provided',
+  'No summary provided',
+  'Worker execution failed',
+  // t('common.fallback.noSummary') literals — the reviewer parse fallback emits
+  // these as `feedback` and they leaked through as a persisted "detail" (live:
+  // INT-2193 lastFailure === '(no summary)').
+  '(no summary)',
+  '(요약 없음)',
+]);
+
+/**
+ * Pick the first MEANINGFUL failure detail. The old chain
+ * (`workerResult.error || reviewResult.feedback`) let a junk-but-truthy error
+ * string ("Unknown error" from the text-fallback parser) mask the reviewer's
+ * actionable feedback — the retry then got injected with garbage (INT-2504).
+ */
+export function pickFailureDetail(candidates: Array<string | undefined>): string | undefined {
+  for (const c of candidates) {
+    const trimmed = c?.trim();
+    if (trimmed && !JUNK_DETAILS.has(trimmed)) return trimmed;
+  }
+  return undefined;
+}
+
+/** Prefer the stage that actually failed over earlier successful feedback. */
+export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
+  const workerFailure = result.workerResult?.success === false
+    ? pickFailureDetail([
+      result.workerResult.error,
+      result.workerResult.haltReason,
+      result.workerResult.noChangesReason,
+      result.workerResult.summary,
+    ])
+    : undefined;
+  const testerFailure = result.testerResult?.success === false
+    ? pickFailureDetail([
+      result.testerResult.error,
+      result.testerResult.output,
+      result.testerResult.failedTests?.join(', '),
+    ])
+    : undefined;
+
+  // Guards, security audit, verification, worktree setup and publication
+  // report through `stages[]` rather than a typed sub-result. Without this
+  // fallback the ledger recorded 57% of one day's failures with no message
+  // at all (vela, 2026-09-01), and the reason was unrecoverable once the
+  // container's log was gone.
+  const failedStage = [...result.stages].reverse().find((stage) => !stage.success);
+  const stageError = failedStage && 'error' in failedStage.result && typeof failedStage.result.error === 'string'
+    ? `${failedStage.stage}: ${failedStage.result.error}`
+    : undefined;
+
+  return pickFailureDetail([
+    // Publication failed after every stage passed: nothing below describes it.
+    result.failureDetail,
+    testerFailure,
+    result.lastReviewFeedback,
+    result.reviewResult?.feedback,
+    workerFailure,
+    stageError,
+    result.stuckReason,
+  ]);
+}
+
+export function recordLastFailureDetail(state: TaskState, issueId: string, detail: string): void {
+  const trimmed = detail.trim();
+  if (!trimmed) return;
+  state.lastFailureDetails.set(issueId, {
+    detail: trimmed.slice(0, MAX_FAILURE_DETAIL_CHARS),
+    at: new Date().toISOString(),
+  });
+}
+
+export function loadTaskState(state: TaskState): void {
+  try {
+    if (!existsSync(TASK_STATE_FILE)) return;
+    const raw = readFileSync(TASK_STATE_FILE, 'utf8');
+    const data = JSON.parse(raw) as {
+      completed?: string[];
+      failed?: Record<string, number>;
+      retryTimes?: Record<string, number>;
+      lastFailures?: Record<string, LastFailureEntry>;
+    };
+    if (Array.isArray(data.completed)) {
+      for (const id of data.completed) state.completedTaskIds.add(id);
+    }
+    if (data.failed && typeof data.failed === 'object') {
+      for (const [id, count] of Object.entries(data.failed)) {
+        state.failedTaskCounts.set(id, count as number);
+      }
+    }
+    if (data.retryTimes && typeof data.retryTimes === 'object') {
+      for (const [id, time] of Object.entries(data.retryTimes)) {
+        state.failedTaskRetryTimes.set(id, time as number);
+      }
+    }
+    if (data.lastFailures && typeof data.lastFailures === 'object') {
+      for (const [id, entry] of Object.entries(data.lastFailures)) {
+        if (entry && typeof entry.detail === 'string') state.lastFailureDetails.set(id, entry);
+      }
+    }
+    console.log(`[AutonomousRunner] Loaded task state: ${state.completedTaskIds.size} completed, ${state.failedTaskCounts.size} failed`);
+  } catch (err) {
+    console.warn('[AutonomousRunner] Failed to load task state:', err);
+  }
+}
+
+export function saveTaskState(state: TaskState): void {
+  try {
+    const data = {
+      completed: Array.from(state.completedTaskIds),
+      failed: Object.fromEntries(state.failedTaskCounts),
+      retryTimes: Object.fromEntries(state.failedTaskRetryTimes),
+      lastFailures: Object.fromEntries(state.lastFailureDetails),
+      updatedAt: new Date().toISOString(),
+    };
+    ensureParentDir(TASK_STATE_FILE);
+    withFileLockSync(TASK_STATE_FILE + '.lock', () => {
+      atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(data, null, 2));
+    });
+  } catch (err) {
+    console.warn('[AutonomousRunner] Failed to save task state:', err);
+  }
+}
+
+// Pipeline History (persistent, time-ordered)
 
 export interface PipelineHistoryEntry {
-  issueId: string;
-  pipelineId: string;
-  startedAt: string;
-  completedAt: string;
-  result: PipelineResult;
-  failureCause?: string;
+  sessionId: string;
+  issueIdentifier?: string;
+  issueId?: string;
+  taskTitle: string;
+  projectName?: string;
+  projectPath?: string;
+  success: boolean;
+  finalStatus: string;
+  iterations: number;
+  totalDuration: number;
+  stages: { stage: string; success: boolean; duration: number }[];
+  cost?: { costUsd: number; inputTokens: number; outputTokens: number };
+  prUrl?: string;
+  reviewerFeedback?: string; // Reviewer rejection reason (for debugging)
+  failureCause?: FailureCause;
+  completedAt: string; // ISO-8601
 }
 
-export interface PipelineHistory {
-  entries: PipelineHistoryEntry[];
+export type FailureCause = 'reviewer-reject' | 'infra' | 'rate-limit' | 'no-changes' | 'gate-fail' | 'timeout' | 'stuck' | 'cancelled';
+
+export interface FailureCauseSignals {
+  success: boolean;
+  finalStatus: string;
+  failureSignal?: 'gate-fail' | 'timeout' | 'stuck';
+  workerFilesChanged?: number;
+  reviewerDecision?: string;
 }
 
-let pipelineHistory: PipelineHistory | null = null;
-
-function ensurePipelineHistoryLoaded(): PipelineHistory {
-  if (pipelineHistory !== null) return pipelineHistory;
-  try {
-    if (existsSync(PIPELINE_HISTORY_FILE)) {
-      const raw = readFileSync(PIPELINE_HISTORY_FILE, 'utf8');
-      pipelineHistory = JSON.parse(raw) as PipelineHistory;
-    } else {
-      pipelineHistory = { entries: [] };
-    }
-  } catch {
-    pipelineHistory = { entries: [] };
-  }
-  return pipelineHistory;
+/** Classify only explicit result fields; never infer from reviewer prose. */
+export function classifyFailureCause(signals: FailureCauseSignals): FailureCause | undefined {
+  if (signals.success) return undefined;
+  if (signals.finalStatus === 'cancelled') return 'cancelled';
+  if (signals.finalStatus === 'rate_limited') return 'rate-limit';
+  if (signals.failureSignal === 'timeout') return 'timeout';
+  if (signals.finalStatus === 'infra_error') return 'infra';
+  if (signals.failureSignal === 'stuck') return 'stuck';
+  if (signals.workerFilesChanged === 0) return 'no-changes';
+  if (signals.failureSignal === 'gate-fail') return 'gate-fail';
+  if (signals.finalStatus === 'rejected' || signals.reviewerDecision === 'reject' || signals.reviewerDecision === 'revise') return 'reviewer-reject';
+  return undefined;
 }
 
-export function addPipelineHistory(entry: PipelineHistoryEntry): void {
-  void withFileLock(PIPELINE_HISTORY_FILE + '.lock', async () => {
-    const history = ensurePipelineHistoryLoaded();
-    history.entries.push(entry);
-    // Keep last 100 entries
-    if (history.entries.length > 100) {
-      history.entries = history.entries.slice(-100);
-    }
-    try {
-      ensureParentDir(PIPELINE_HISTORY_FILE);
-      atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
-    } catch (err) {
-      console.warn('[PipelineHistory] Failed to save:', err);
-    }
-  });
+export function aggregateFailureCauses(entries: PipelineHistoryEntry[]): Record<FailureCause, number> {
+  const counts: Record<FailureCause, number> = {
+    'reviewer-reject': 0, infra: 0, 'rate-limit': 0, 'no-changes': 0,
+    'gate-fail': 0, timeout: 0, stuck: 0, cancelled: 0,
+  };
+  for (const entry of entries) if (entry.failureCause) counts[entry.failureCause]++;
+  return counts;
 }
 
-export function getPipelineHistory(): PipelineHistoryEntry[] {
-  return ensurePipelineHistoryLoaded().entries;
-}
-
-export function getPipelineHistoryForIssue(issueId: string): PipelineHistoryEntry[] {
-  return ensurePipelineHistoryLoaded().entries.filter(e => e.issueId === issueId);
-}
-
-export function getLastPipelineResult(issueId: string): PipelineResult | undefined {
-  const entries = getPipelineHistoryForIssue(issueId);
-  return entries.length > 0 ? entries[entries.length - 1].result : undefined;
-}
-
-export function aggregateFailureCauses(limit: number = 10): Array<{ cause: string; count: number }> {
-  const counts = new Map<string, number>();
-  for (const entry of ensurePipelineHistoryLoaded().entries) {
-    if (entry.failureCause) {
-      counts.set(entry.failureCause, (counts.get(entry.failureCause) ?? 0) + 1);
-    }
-  }
-  return Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([cause, count]) => ({ cause, count }));
-}
-
-export function classifyFailureCause(result: PipelineResult): string | undefined {
-  if (result.success) return undefined;
-  if (result.finalStatus === 'rejected') return 'review_rejected';
-  if (result.finalStatus === 'failed') return 'execution_failed';
-  if (result.finalStatus === 'error') return 'system_error';
-  if (result.finalStatus === 'cancelled') return 'cancelled';
-  return 'unknown';
-}
-
-// ── Rejection State ──────────────────────────
+// Rejection State (track reviewer rejections per issue)
 
 export interface RejectionEntry {
   issueId: string;
   count: number;
   lastRejection: string; // ISO-8601
-  reasons: string[];
+  reasons: string[]; // Last N rejection reasons
 }
 
 export interface RejectionState {
@@ -253,6 +393,7 @@ export interface RejectionState {
   updatedAt: string;
 }
 
+// In-memory cache
 let rejectionState: RejectionState | null = null;
 
 function ensureRejectionStateLoaded(): RejectionState {
@@ -272,70 +413,88 @@ function ensureRejectionStateLoaded(): RejectionState {
 
 export function getRejectionCount(issueId: string): number {
   const state = ensureRejectionStateLoaded();
-  return state.rejections[issueId]?.count ?? 0;
+  return state.rejections[issueId]?.count || 0;
 }
 
-export async function recordRejection(issueId: string, reason: string): Promise<number> {
-  const state = ensureRejectionStateLoaded();
-
-  let entry = state.rejections[issueId];
-  if (!entry) {
-    entry = {
+export function incrementRejection(issueId: string, reason: string): number {
+  return withFileLockSync(REJECTION_STATE_FILE + '.lock', () => {
+    // Cross-process RMW: reload disk state under the lock so concurrent
+    // increments never drop each other's count/reasons. (AGT-3420)
+    rejectionState = null;
+    const state = ensureRejectionStateLoaded();
+    const entry = state.rejections[issueId] || {
       issueId,
       count: 0,
       lastRejection: new Date().toISOString(),
       reasons: [],
     };
-  }
 
-  entry.count++;
-  entry.lastRejection = new Date().toISOString();
-  entry.reasons.push(reason);
+    entry.count++;
+    entry.lastRejection = new Date().toISOString();
+    entry.reasons.push(reason);
 
-  // Keep only last 5 reasons
-  if (entry.reasons.length > 5) {
-    entry.reasons = entry.reasons.slice(-5);
-  }
+    // Keep only last 5 reasons
+    if (entry.reasons.length > 5) {
+      entry.reasons = entry.reasons.slice(-5);
+    }
 
-  state.rejections[issueId] = entry;
-  state.updatedAt = new Date().toISOString();
+    state.rejections[issueId] = entry;
+    state.updatedAt = new Date().toISOString();
 
-  // Persist to disk with cross-process lock
-  try {
-    ensureParentDir(REJECTION_STATE_FILE);
-    await withFileLock(REJECTION_STATE_FILE + '.lock', async () => {
+    try {
+      ensureParentDir(REJECTION_STATE_FILE);
       atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
-    });
-  } catch (err) {
-    console.warn('[RejectionState] Failed to save:', err);
-  }
+    } catch (err) {
+      console.warn('[RejectionState] Failed to save:', err);
+    }
 
-  return entry.count;
+    return entry.count;
+  });
 }
 
-export function getRejectionReasons(issueId: string): string[] {
+export function clearRejection(issueId: string): void {
+  withFileLockSync(REJECTION_STATE_FILE + '.lock', () => {
+    rejectionState = null;
+    const state = ensureRejectionStateLoaded();
+    delete state.rejections[issueId];
+    state.updatedAt = new Date().toISOString();
+
+    try {
+      ensureParentDir(REJECTION_STATE_FILE);
+      atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[RejectionState] Failed to save:', err);
+    }
+  });
+}
+
+export function isRejectionLimitReached(issueId: string): boolean {
+  return getRejectionCount(issueId) >= MAX_REJECTION_ATTEMPTS;
+}
+
+export function getAllRejectionEntries(): RejectionEntry[] {
   const state = ensureRejectionStateLoaded();
-  return state.rejections[issueId]?.reasons ?? [];
+  return Object.values(state.rejections);
 }
 
-export function getRejectionState(): RejectionState {
-  return ensureRejectionStateLoaded();
-}
-
-// ── Decomposition State ──────────────────────
+// Decomposition State (track parent-child relationships and daily limits)
 
 export interface DecompositionEntry {
   issueId: string;
-  decomposedAt: string;
-  subtaskCount: number;
+  parentId?: string; // Parent issue ID (if this is a sub-issue)
+  depth: number; // 0 = root, 1 = child, 2 = grandchild, etc.
+  childrenCount: number; // Number of sub-issues created from this issue
+  createdAt: string; // ISO-8601
 }
 
 export interface DecompositionState {
   decompositions: Record<string, DecompositionEntry>;
   dailyCreationCount: number;
-  dailyCreationDate: string;
+  dailyCreationDate: string; // YYYY-MM-DD
+  updatedAt: string;
 }
 
+// In-memory cache
 let decompositionState: DecompositionState | null = null;
 
 function ensureDecompositionStateLoaded(): DecompositionState {
@@ -344,6 +503,7 @@ function ensureDecompositionStateLoaded(): DecompositionState {
     if (existsSync(DECOMPOSITION_STATE_FILE)) {
       const raw = readFileSync(DECOMPOSITION_STATE_FILE, 'utf8');
       decompositionState = JSON.parse(raw) as DecompositionState;
+      // Reset daily counter if date changed
       const today = new Date().toLocaleDateString('en-CA');
       if (decompositionState.dailyCreationDate !== today) {
         decompositionState.dailyCreationCount = 0;
@@ -355,6 +515,7 @@ function ensureDecompositionStateLoaded(): DecompositionState {
         decompositions: {},
         dailyCreationCount: 0,
         dailyCreationDate: today,
+        updatedAt: new Date().toISOString(),
       };
     }
   } catch {
@@ -363,20 +524,159 @@ function ensureDecompositionStateLoaded(): DecompositionState {
       decompositions: {},
       dailyCreationCount: 0,
       dailyCreationDate: today,
+      updatedAt: new Date().toISOString(),
     };
   }
   return decompositionState;
 }
 
-export function recordDecomposition(issueId: string, subtaskCount: number): void {
-  void withFileLock(DECOMPOSITION_STATE_FILE + '.lock', async () => {
+export function getDecompositionDepth(issueId: string): number {
+  const state = ensureDecompositionStateLoaded();
+  return state.decompositions[issueId]?.depth || 0;
+}
+
+export function getChildrenCount(issueId: string): number {
+  const state = ensureDecompositionStateLoaded();
+  return state.decompositions[issueId]?.childrenCount || 0;
+}
+
+/**
+ * Reset daily counter if date has changed (handles long-running service).
+ * ensureDecompositionStateLoaded only checks date on initial disk load;
+ * this function ensures the counter resets even when using the in-memory cache.
+ */
+function resetDailyCounterIfNeeded(): void {
+  withFileLockSync(DECOMPOSITION_STATE_FILE + '.lock', () => {
+    decompositionState = null;
     const state = ensureDecompositionStateLoaded();
+    const today = new Date().toLocaleDateString('en-CA');
+    if (state.dailyCreationDate !== today) {
+      console.log(`[DecompositionState] Daily counter reset: ${state.dailyCreationCount} → 0 (date: ${state.dailyCreationDate} → ${today})`);
+      state.dailyCreationCount = 0;
+      state.dailyCreationDate = today;
+      state.updatedAt = new Date().toISOString();
+      try {
+        ensureParentDir(DECOMPOSITION_STATE_FILE);
+        atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
+      } catch (err) {
+        console.warn('[DecompositionState] Failed to persist daily reset:', err);
+      }
+    }
+  });
+}
+
+export function getDailyCreationCount(): number {
+  resetDailyCounterIfNeeded();
+  const state = ensureDecompositionStateLoaded();
+  return state.dailyCreationCount;
+}
+
+export function canCreateMoreIssues(dailyLimit: number): boolean {
+  return getDailyCreationCount() < dailyLimit;
+}
+
+/**
+ * Slots promised to in-flight decompositions but not yet created.
+ *
+ * Deliberately outside the persisted state: `registerDecomposition` writes that
+ * state to disk, so folding a hold into it would persist an inflated count on
+ * every successful decomposition and a restart would read the inflation as real
+ * spending for the rest of the day.
+ */
+let heldDailyCreations = 0;
+
+/**
+ * Claim `count` slots of today's creation budget in one synchronous step, or
+ * refuse.
+ *
+ * Reading the count and acting on it cannot be split: a caller reads it, then
+ * awaits an LLM plan and several Linear round-trips before anything is
+ * registered. Fan-out runs pipelines in parallel by design, so a second run
+ * reads the same pre-creation count in that window and both overshoot the cap.
+ * (AGT-4122)
+ *
+ * Holds live only in this process. A crash drops them, which is the safe
+ * direction — the durable count then reflects exactly what was created.
+ *
+ * Every granted reservation must be released with `releaseDailyReservation`.
+ */
+export function reserveDailyCreations(count: number, dailyLimit: number): boolean {
+  resetDailyCounterIfNeeded();
+  const state = ensureDecompositionStateLoaded();
+  if (state.dailyCreationCount + heldDailyCreations + count > dailyLimit) return false;
+  heldDailyCreations += count;
+  return true;
+}
+
+/**
+ * Drop a hold taken by `reserveDailyCreations`. `registerDecomposition` records
+ * what was actually created, so the whole reservation is released regardless of
+ * the outcome — including when the decomposition failed and created nothing.
+ */
+export function releaseDailyReservation(count: number): void {
+  heldDailyCreations = Math.max(0, heldDailyCreations - count);
+}
+
+/** Slots currently promised to in-flight decompositions. Test seam. */
+export function getHeldDailyCreations(): number {
+  return heldDailyCreations;
+}
+
+export function registerDecomposition(
+  issueId: string,
+  parentId: string | undefined,
+  childrenIds: string[]
+): void {
+  withFileLockSync(DECOMPOSITION_STATE_FILE + '.lock', () => {
+    // Reload under the lock so concurrent decompositions never lose child links
+    // or double-count the daily budget from a stale in-memory snapshot. (AGT-3420)
+    decompositionState = null;
+    const state = ensureDecompositionStateLoaded();
+    const now = new Date().toISOString();
+    const parentDepth = parentId ? (state.decompositions[parentId]?.depth ?? 0) : -1;
+    const issueDepth = parentDepth + 1;
+    const uniqueChildren = [...new Set(childrenIds)];
+    const existingChildren = new Set(
+      Object.values(state.decompositions)
+        .filter((entry) => entry.parentId === issueId)
+        .map((entry) => entry.issueId),
+    );
+
+    // Validate the full batch before mutating the in-memory projection. A child
+    // identity collision must leave no half-created parent entry behind.
+    for (const childId of uniqueChildren) {
+      const existing = state.decompositions[childId];
+      if (existing && existing.parentId !== issueId) {
+        throw new Error(`Decomposition child ${childId} is already owned by ${existing.parentId ?? 'no parent'}`);
+      }
+    }
+
+    const existingIssue = state.decompositions[issueId];
     state.decompositions[issueId] = {
       issueId,
-      decomposedAt: new Date().toISOString(),
-      subtaskCount,
+      parentId,
+      depth: issueDepth,
+      childrenCount: new Set([...existingChildren, ...uniqueChildren]).size,
+      createdAt: existingIssue?.createdAt ?? now,
     };
-    state.dailyCreationCount++;
+
+    let newlyRegistered = 0;
+    for (const childId of uniqueChildren) {
+      const existing = state.decompositions[childId];
+      if (!existingChildren.has(childId)) newlyRegistered++;
+      state.decompositions[childId] = {
+        issueId: childId,
+        parentId: issueId,
+        depth: issueDepth + 1,
+        childrenCount: existing?.childrenCount ?? 0,
+        createdAt: existing?.createdAt ?? now,
+      };
+    }
+
+    // Retried deterministic children do not consume the daily budget twice.
+    state.dailyCreationCount += newlyRegistered;
+    state.updatedAt = new Date().toISOString();
+
     try {
       ensureParentDir(DECOMPOSITION_STATE_FILE);
       atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
@@ -386,163 +686,246 @@ export function recordDecomposition(issueId: string, subtaskCount: number): void
   });
 }
 
-export function getDecompositionCount(): number {
-  return ensureDecompositionStateLoaded().dailyCreationCount;
-}
+// Pipeline History (persistent, time-ordered)
 
-export function getDecomposition(issueId: string): DecompositionEntry | undefined {
-  return ensureDecompositionStateLoaded().decompositions[issueId];
-}
+// In-memory cache (loaded once at startup, appended per completion)
+let pipelineHistory: PipelineHistoryEntry[] | null = null;
 
-// ── Project Selection ────────────────────────
-
-export interface ProjectSelectionEntry {
-  projectName: string;
-  lastSelected: string;
-  selectionCount: number;
-}
-
-export interface ProjectSelectionState {
-  projects: Record<string, ProjectSelectionEntry>;
-}
-
-let projectSelectionState: ProjectSelectionState | null = null;
-
-function ensureProjectSelectionLoaded(): ProjectSelectionState {
-  if (projectSelectionState !== null) return projectSelectionState;
+function ensureHistoryLoaded(): PipelineHistoryEntry[] {
+  if (pipelineHistory !== null) return pipelineHistory;
   try {
-    if (existsSync(PROJECT_SELECTION_FILE)) {
-      const raw = readFileSync(PROJECT_SELECTION_FILE, 'utf8');
-      projectSelectionState = JSON.parse(raw) as ProjectSelectionState;
+    if (existsSync(PIPELINE_HISTORY_FILE)) {
+      const raw = readFileSync(PIPELINE_HISTORY_FILE, 'utf8');
+      pipelineHistory = JSON.parse(raw) as PipelineHistoryEntry[];
     } else {
-      projectSelectionState = { projects: {} };
+      pipelineHistory = [];
     }
   } catch {
-    projectSelectionState = { projects: {} };
+    pipelineHistory = [];
   }
-  return projectSelectionState;
+  return pipelineHistory;
 }
 
-export function recordProjectSelection(projectName: string): void {
-  void withFileLock(PROJECT_SELECTION_FILE + '.lock', async () => {
-    const state = ensureProjectSelectionLoaded();
-    const entry = state.projects[projectName] || {
-      projectName,
-      lastSelected: new Date().toISOString(),
-      selectionCount: 0,
-    };
-    entry.lastSelected = new Date().toISOString();
-    entry.selectionCount++;
-    state.projects[projectName] = entry;
+export function appendPipelineHistory(entry: PipelineHistoryEntry): void {
+  withFileLockSync(PIPELINE_HISTORY_FILE + '.lock', () => {
+    // Reload under the lock so concurrent completions keep every history entry.
+    pipelineHistory = null;
+    const history = ensureHistoryLoaded();
+    history.unshift(entry); // newest first
+    if (history.length > MAX_PIPELINE_HISTORY) {
+      history.length = MAX_PIPELINE_HISTORY;
+    }
     try {
-      ensureParentDir(PROJECT_SELECTION_FILE);
-      atomicWriteFileSync(PROJECT_SELECTION_FILE, JSON.stringify(state, null, 2));
+      ensureParentDir(PIPELINE_HISTORY_FILE);
+      atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
     } catch (err) {
-      console.warn('[ProjectSelection] Failed to save:', err);
+      console.warn('[PipelineHistory] Failed to save:', err);
     }
   });
 }
 
-export function loadProjectSelection(): ProjectSelectionState {
-  return ensureProjectSelectionLoaded();
+export function getPipelineHistory(limit = 50): PipelineHistoryEntry[] {
+  return ensureHistoryLoaded().slice(0, limit);
 }
 
-export function saveProjectSelection(state: ProjectSelectionState): void {
-  void withFileLock(PROJECT_SELECTION_FILE + '.lock', async () => {
-    try {
-      ensureParentDir(PROJECT_SELECTION_FILE);
-      atomicWriteFileSync(PROJECT_SELECTION_FILE, JSON.stringify(state, null, 2));
-    } catch (err) {
-      console.warn('[ProjectSelection] Failed to save:', err);
-    }
-  });
-}
-
-// ── Task State ───────────────────────────────
-
-export interface TaskStateEntry {
-  issueId: string;
-  pipelineId?: string;
-  startedAt?: string;
-  completedAt?: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  result?: PipelineResult;
-}
-
-export interface TaskState {
-  tasks: Record<string, TaskStateEntry>;
-}
-
-let taskState: TaskState | null = null;
-
-function ensureTaskStateLoaded(): TaskState {
-  if (taskState !== null) return taskState;
-  try {
-    if (existsSync(TASK_STATE_FILE)) {
-      const raw = readFileSync(TASK_STATE_FILE, 'utf8');
-      taskState = JSON.parse(raw) as TaskState;
-    } else {
-      taskState = { tasks: {} };
-    }
-  } catch {
-    taskState = { tasks: {} };
-  }
-  return taskState;
-}
-
-export function getTaskState(issueId: string): TaskStateEntry | undefined {
-  return ensureTaskStateLoaded().tasks[issueId];
-}
-
-export function setTaskState(issueId: string, entry: TaskStateEntry): void {
-  void withFileLock(TASK_STATE_FILE + '.lock', async () => {
-    const state = ensureTaskStateLoaded();
-    state.tasks[issueId] = entry;
-    try {
-      ensureParentDir(TASK_STATE_FILE);
-      atomicWriteFileSync(TASK_STATE_FILE, JSON.stringify(state, null, 2));
-    } catch (err) {
-      console.warn('[TaskState] Failed to save:', err);
-    }
-  });
-}
-
-export function getAllTaskStates(): TaskStateEntry[] {
-  return Object.values(ensureTaskStateLoaded().tasks);
-}
-
-// ── Project Info ─────────────────────────────
+// Project Info Query (for dashboard)
 
 export interface ProjectInfo {
-  name: string;
   path: string;
+  name: string;
+  /** Stable tracker identity used to join a pinned repo without name guessing. */
+  linearProjectId?: string;
   enabled: boolean;
+  running: { id: string; title: string; priority: number; issueIdentifier?: string; issueUrl?: string }[];
+  queued: { id: string; title: string; priority: number; issueIdentifier?: string; issueUrl?: string }[];
+  pending: { id: string; title: string; priority: number; issueIdentifier?: string; issueUrl?: string; linearState?: string }[];
 }
 
-export function getProjectInfo(task: TaskItem, allowedProjects: string[]): ProjectInfo | undefined {
-  if (!task.description) return undefined;
-  for (const projectPath of allowedProjects) {
-    if (task.description.includes(projectPath)) {
-      return {
-        name: basename(projectPath),
-        path: projectPath,
-        enabled: true,
-      };
+type RunningEntry = { task: TaskItem; projectPath: string };
+type QueuedEntry = { task: TaskItem; projectPath: string };
+
+export function buildProjectsInfo(
+  fetchedTasks: TaskItem[],
+  running: RunningEntry[],
+  queued: QueuedEntry[],
+  pathCache: Map<string, string>,
+  enabledProjects: Set<string>,
+): ProjectInfo[] {
+  const projectMap = new Map<string, { id?: string; name: string; path: string | null; tasks: TaskItem[] }>();
+
+  for (const task of fetchedTasks) {
+    const projName = task.linearProject?.name || '(unknown)';
+    const projectKey = task.linearProject?.id || projName;
+    if (!projectMap.has(projectKey)) {
+      projectMap.set(projectKey, {
+        id: task.linearProject?.id,
+        name: projName,
+        path: pathCache.get(projName) ?? null,
+        tasks: [],
+      });
+    }
+    projectMap.get(projectKey)!.tasks.push(task);
+  }
+
+  for (const r of running) {
+    const projName = r.task.linearProject?.name || '(unknown)';
+    const projectKey = r.task.linearProject?.id || projName;
+    if (!projectMap.has(projectKey)) {
+      projectMap.set(projectKey, { id: r.task.linearProject?.id, name: projName, path: r.projectPath, tasks: [] });
+    } else if (!projectMap.get(projectKey)!.path) {
+      projectMap.get(projectKey)!.path = r.projectPath;
     }
   }
-  return undefined;
+  for (const q of queued) {
+    const projName = q.task.linearProject?.name || '(unknown)';
+    const projectKey = q.task.linearProject?.id || projName;
+    if (!projectMap.has(projectKey)) {
+      projectMap.set(projectKey, { id: q.task.linearProject?.id, name: projName, path: q.projectPath, tasks: [] });
+    } else if (!projectMap.get(projectKey)!.path) {
+      projectMap.get(projectKey)!.path = q.projectPath;
+    }
+  }
+
+  const activeIds = new Set([
+    ...running.map(r => r.task.issueId || r.task.id),
+    ...queued.map(q => q.task.issueId || q.task.id),
+  ]);
+
+  return Array.from(projectMap.values()).map(proj => {
+    const projectPath = proj.path ?? '';
+    const belongsToProject = (task: TaskItem): boolean => proj.id
+      ? task.linearProject?.id === proj.id
+      : (task.linearProject?.name || '(unknown)') === proj.name;
+    return {
+      path: projectPath,
+      name: proj.name,
+      ...(proj.id ? { linearProjectId: proj.id } : {}),
+      enabled: Boolean(projectPath) && isPathEnabled(projectPath, enabledProjects),
+      running: running.filter(r => belongsToProject(r.task))
+        .map(r => ({
+          id: taskEventKey(r.task), title: r.task.title, priority: r.task.priority,
+          ...(r.task.issueIdentifier ? { issueIdentifier: r.task.issueIdentifier } : {}),
+          ...(r.task.issueUrl ? { issueUrl: r.task.issueUrl } : {}),
+        })),
+      queued: queued.filter(q => belongsToProject(q.task))
+        .map(q => ({
+          id: taskEventKey(q.task), title: q.task.title, priority: q.task.priority,
+          ...(q.task.issueIdentifier ? { issueIdentifier: q.task.issueIdentifier } : {}),
+          ...(q.task.issueUrl ? { issueUrl: q.task.issueUrl } : {}),
+        })),
+      pending: proj.tasks.filter(t => !activeIds.has(t.issueId || t.id))
+        .map(t => ({
+          id: taskEventKey(t), title: t.title, priority: t.priority,
+          ...(t.issueIdentifier || t.issueId ? { issueIdentifier: t.issueIdentifier || t.issueId } : {}),
+          ...(t.issueUrl ? { issueUrl: t.issueUrl } : {}),
+          ...(t.linearState ? { linearState: t.linearState } : {}),
+        })),
+    };
+  });
 }
 
-export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
-  if (result.success) return undefined;
-  if (result.finalStatus === 'rejected') {
-    return result.lastReviewFeedback ?? result.reviewResult?.feedback ?? 'Review rejected';
+/**
+ * Join one configured repository to the runner's tracker projection.
+ *
+ * The repository metadata project id is authoritative. Name matching remains
+ * a compatibility fallback for repositories created before openswarm.json,
+ * and is case-insensitive because directory casing is not a tracker identity.
+ */
+export function projectInfoForRepository(
+  projects: readonly ProjectInfo[],
+  input: { path: string; directoryName: string; linearProjectId?: string; linearProjectName?: string },
+): ProjectInfo | undefined {
+  if (input.linearProjectId) {
+    // A configured tracker id is authoritative. Do not fall back to a stale
+    // path/name association and accidentally display another project's tasks.
+    return projects.find((project) => project.linearProjectId === input.linearProjectId);
   }
-  if (result.finalStatus === 'failed') {
-    return result.lastExecutionError ?? 'Execution failed';
-  }
-  if (result.finalStatus === 'error') {
-    return result.lastExecutionError ?? 'System error';
-  }
-  return undefined;
+
+  const byPath = projects.find((project) => project.path === input.path);
+  if (byPath) return byPath;
+
+  const expectedName = (input.linearProjectName ?? input.directoryName).toLowerCase();
+  return projects.find((project) => project.name.toLowerCase() === expectedName);
+}
+
+// Exponential Backoff for Failed Task Retries
+
+const BACKOFF_MINUTES = [10, 30, 60, 120]; // 10min, 30min, 1h, 2h
+
+/**
+ * Calculate backoff delay in milliseconds based on attempt number.
+ * @param attemptNumber - 1-indexed attempt number (1 = first failure)
+ * @returns Delay in milliseconds
+ */
+export function calculateBackoffTime(attemptNumber: number): number {
+  const index = Math.min(attemptNumber - 1, BACKOFF_MINUTES.length - 1);
+  return BACKOFF_MINUTES[index] * 60 * 1000;
+}
+
+/**
+ * Check if a task can be retried now (based on scheduled retry time).
+ * @param issueId - Issue ID to check
+ * @param retryTimes - Map of issueId → next retry timestamp
+ * @returns true if retry is allowed now, false if still in backoff period
+ */
+export function canRetryNow(issueId: string, retryTimes: Map<string, number>): boolean {
+  const nextRetryTime = retryTimes.get(issueId);
+  if (!nextRetryTime) return true; // No backoff scheduled
+  return Date.now() >= nextRetryTime;
+}
+
+/**
+ * Set next retry time for a failed task using exponential backoff.
+ * @param issueId - Issue ID
+ * @param attemptNumber - Current attempt number (1-indexed)
+ * @param retryTimes - Map to update
+ * @returns Next retry timestamp (ms)
+ */
+export function setRetryTime(
+  issueId: string,
+  attemptNumber: number,
+  retryTimes: Map<string, number>
+): number {
+  const delayMs = calculateBackoffTime(attemptNumber);
+  const nextRetryTime = Date.now() + delayMs;
+  retryTimes.set(issueId, nextRetryTime);
+  return nextRetryTime;
+}
+
+/**
+ * Clear retry time for a task (on success or manual recovery).
+ * @param issueId - Issue ID
+ * @param retryTimes - Map to update
+ */
+export function clearRetryTime(issueId: string, retryTimes: Map<string, number>): void {
+  retryTimes.delete(issueId);
+}
+
+/**
+ * Get next retry time for a task.
+ * @param issueId - Issue ID
+ * @param retryTimes - Map to query
+ * @returns Next retry timestamp (ms) or undefined if not scheduled
+ */
+export function getRetryTime(issueId: string, retryTimes: Map<string, number>): number | undefined {
+  return retryTimes.get(issueId);
+}
+
+/**
+ * Format retry time as human-readable string.
+ * @param timestamp - Timestamp in milliseconds
+ * @returns Formatted string like "in 15 minutes" or "in 2 hours"
+ */
+export function formatRetryTime(timestamp: number): string {
+  const now = Date.now();
+  const diffMs = timestamp - now;
+  if (diffMs <= 0) return 'now';
+
+  const minutes = Math.ceil(diffMs / (60 * 1000));
+  if (minutes < 60) return `in ${minutes} minute${minutes === 1 ? '' : 's'}`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (remainingMinutes === 0) return `in ${hours} hour${hours === 1 ? '' : 's'}`;
+  return `in ${hours}h ${remainingMinutes}m`;
 }

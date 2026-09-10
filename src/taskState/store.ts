@@ -401,30 +401,39 @@ export function listTaskStates(): OpenSwarmTaskState[] {
   return Object.values(ensureStoreLoaded().tasks);
 }
 
+function upsertTaskStateUnlocked(
+  store: TaskStateStore,
+  issueId: string,
+  patch: Partial<OpenSwarmTaskState>,
+): OpenSwarmTaskState {
+  const current = store.tasks[issueId] || createDefaultState(issueId);
+  const { execution, worktree, ...topLevelPatch } = patch;
+  const definedTopLevelPatch = Object.fromEntries(
+    Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
+  ) as Partial<OpenSwarmTaskState>;
+  const merged: OpenSwarmTaskState = {
+    ...current,
+    ...definedTopLevelPatch,
+    issueId,
+    childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
+    dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
+    dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
+    fileScope: patch.fileScope ?? current.fileScope ?? [],
+    execution: { ...current.execution, ...execution },
+    worktree: { ...current.worktree, ...worktree },
+    updatedAt: new Date().toISOString(),
+  };
+
+  store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
+  return store.tasks[issueId];
+}
+
 export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
   return withStoreLock(() => {
     const store = ensureStoreLoaded();
-    const current = store.tasks[issueId] || createDefaultState(issueId);
-    const { execution, worktree, ...topLevelPatch } = patch;
-    const definedTopLevelPatch = Object.fromEntries(
-      Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
-    ) as Partial<OpenSwarmTaskState>;
-    const merged: OpenSwarmTaskState = {
-      ...current,
-      ...definedTopLevelPatch,
-      issueId,
-      childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
-      dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
-      dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
-      fileScope: patch.fileScope ?? current.fileScope ?? [],
-      execution: { ...current.execution, ...execution },
-      worktree: { ...current.worktree, ...worktree },
-      updatedAt: new Date().toISOString(),
-    };
-
-    store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
+    const result = upsertTaskStateUnlocked(store, issueId, patch);
     persistStore();
-    return store.tasks[issueId];
+    return result;
   });
 }
 
@@ -543,6 +552,38 @@ export function markTaskInProgress(
       branchName: patch.branchName,
       worktreePath: patch.worktreePath,
     },
+  });
+}
+
+export function tryClaimTaskAdmission(
+  issueId: string,
+  patch: Parameters<typeof markTaskInProgress>[1] = {},
+): OpenSwarmTaskState | null {
+  return withStoreLock(() => {
+    const store = ensureStoreLoaded();
+    const current = store.tasks[issueId];
+    if (current?.execution.status === 'in_progress') {
+      return null;
+    }
+    const result = upsertTaskStateUnlocked(store, issueId, {
+      issueIdentifier: patch.issueIdentifier,
+      title: patch.title,
+      projectId: patch.projectId,
+      projectName: patch.projectName,
+      linearState: patch.linearState ?? 'In Progress',
+      execution: {
+        status: 'in_progress',
+        blockedReason: undefined,
+        retryCount: 0,
+        lastSessionId: patch.sessionId,
+      },
+      worktree: {
+        branchName: patch.branchName,
+        worktreePath: patch.worktreePath,
+      },
+    });
+    persistStore();
+    return result;
   });
 }
 
