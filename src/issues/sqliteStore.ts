@@ -354,7 +354,57 @@ export class SqliteIssueStore implements IIssueStore {
     `);
     // 부모 이슈의 child 목록은 쿼리 시 동적 조회
 
+    const findByLinearId = this.db.prepare('SELECT id FROM issues WHERE linear_id = ?');
+    const findByLinearIdentifier = this.db.prepare(
+      'SELECT id FROM issues WHERE linear_identifier = ? COLLATE NOCASE'
+    );
+    const updateLinearLinked = this.db.prepare(`
+      UPDATE issues SET
+        project_id = ?, title = ?, description = ?, status = ?, priority = ?,
+        source = ?, assignee = ?, milestone = ?, estimate_minutes = ?, complexity = ?,
+        parent_id = ?, linear_id = ?, linear_identifier = ?, linear_url = ?,
+        updated_at = ?, closed_at = CASE
+          WHEN ? IN ('done', 'cancelled') THEN COALESCE(closed_at, ?)
+          ELSE NULL
+        END
+      WHERE id = ?
+    `);
+
     const transaction = this.db.transaction(() => {
+      // Concurrent inbound sync can race past getIssueByLinearId; keep one mapping.
+      if (input.linearId) {
+        const existing = findByLinearId.get(input.linearId) as { id: string } | undefined;
+        if (existing) {
+          const status = input.status ?? 'backlog';
+          updateLinearLinked.run(
+            input.projectId, input.title, input.description ?? '',
+            status, input.priority ?? 'medium', input.source ?? 'local',
+            input.assignee ?? null, input.milestone ?? null,
+            input.estimateMinutes ?? null, input.complexity ?? null,
+            input.parentId ?? null,
+            input.linearId, input.linearIdentifier ?? null, input.linearUrl ?? null,
+            now, status, now, existing.id,
+          );
+          return existing.id;
+        }
+      }
+      if (input.linearIdentifier) {
+        const existing = findByLinearIdentifier.get(input.linearIdentifier) as { id: string } | undefined;
+        if (existing) {
+          const status = input.status ?? 'backlog';
+          updateLinearLinked.run(
+            input.projectId, input.title, input.description ?? '',
+            status, input.priority ?? 'medium', input.source ?? 'local',
+            input.assignee ?? null, input.milestone ?? null,
+            input.estimateMinutes ?? null, input.complexity ?? null,
+            input.parentId ?? null,
+            input.linearId ?? null, input.linearIdentifier, input.linearUrl ?? null,
+            now, status, now, existing.id,
+          );
+          return existing.id;
+        }
+      }
+
       insertIssue.run(
         id, input.projectId, input.title, input.description ?? '',
         input.status ?? 'backlog', input.priority ?? 'medium', input.source ?? 'local',
@@ -380,10 +430,47 @@ export class SqliteIssueStore implements IIssueStore {
       }
 
       insertEvent.run(nanoid(12), id, input.title, now);
+      return id;
     });
 
-    transaction();
-    return this.getIssue(id)!;
+    const resolvedId = (() => {
+      try {
+        return transaction() as string;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Cross-process inbound sync can both pass the pre-insert SELECT and then
+        // collide on the unique Linear indexes — reclaim the winner's row.
+        if (/UNIQUE/i.test(message) && (input.linearId || input.linearIdentifier)) {
+          const existing = input.linearId
+            ? this.getIssueByLinearId(input.linearId)
+            : this.getIssueByIdentifier(input.linearIdentifier!);
+          if (existing) {
+            return this.updateIssue(existing.id, {
+              projectId: input.projectId,
+              title: input.title,
+              description: input.description,
+              status: input.status,
+              priority: input.priority,
+              source: input.source,
+              assignee: input.assignee,
+              milestone: input.milestone,
+              estimateMinutes: input.estimateMinutes,
+              complexity: input.complexity,
+              parentId: input.parentId,
+              linearId: input.linearId,
+              linearIdentifier: input.linearIdentifier,
+              linearUrl: input.linearUrl,
+              labels: input.labels,
+              dependencies: input.dependencies,
+              relevantFiles: input.relevantFiles,
+              acceptanceCriteria: input.acceptanceCriteria,
+            })!.id;
+          }
+        }
+        throw error;
+      }
+    })();
+    return this.getIssue(resolvedId)!;
   }
 
   getIssue(id: string): Issue | null {

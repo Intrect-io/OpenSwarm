@@ -444,12 +444,40 @@ async function hasLegacySchemaColumns(t: Table): Promise<boolean> {
   return schema.fields.some(field => LEGACY_SCHEMA_COLUMNS.has(field.name));
 }
 
+/** Page size for full-table Lance scans (legacy migration, etc.). */
+export const LEGACY_MIGRATION_PAGE_SIZE = 10_000;
+
+type OffsetLimitQuery = {
+  offset: (n: number) => { limit: (n: number) => { toArray: () => Promise<any[]> } };
+};
+
+/**
+ * Read every row from a Lance table via offset/limit pages.
+ * A single `.limit(100_000)` truncates larger stores; this loops until a short page.
+ */
+export async function fetchAllTableRows(
+  table: { query: () => OffsetLimitQuery },
+  pageSize: number = LEGACY_MIGRATION_PAGE_SIZE,
+): Promise<any[]> {
+  const size = Math.max(1, Math.floor(pageSize));
+  const rows: any[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await table.query().offset(offset).limit(size).toArray();
+    if (page.length === 0) break;
+    rows.push(...page);
+    offset += page.length;
+    if (page.length < size) break;
+  }
+  return rows;
+}
+
 async function migrateLeanSchemaIfNeeded(database: Connection, current: Table): Promise<Table> {
   if (!(await hasLegacySchemaColumns(current))) return current;
 
   const tableName = current.name;
   console.log(`${status.info('[Memory]')} ${c.dim('migrating')} ${c.cyan(tableName)} ${c.dim('to v3 lean schema')}`);
-  const rows = await current.query().limit(100_000).toArray();
+  const rows = await fetchAllTableRows(current);
   let normalized = normalizeRecords(rows);
   if (normalized.length === 0) {
     const now = Date.now();
@@ -1027,7 +1055,8 @@ export async function deleteMemoriesByDerivedFrom(derivedFrom: string): Promise<
   // Resolve matching ids in JS, then delete by the lowercase `id` column. A direct
   // predicate on the camelCase `derivedFrom` column is unreliable — datafusion
   // lowercases unquoted identifiers and the quoted form matched nothing here.
-  const rows = (await table.query().limit(100_000).toArray()) as unknown as CognitiveMemoryRecord[];
+  // Paginate: a single `.limit(100_000)` truncates larger stores.
+  const rows = (await fetchAllTableRows(table)) as unknown as CognitiveMemoryRecord[];
   const ids = rows.filter((r) => r.derivedFrom === derivedFrom).map((r) => String(r.id));
   if (ids.length === 0) return 0;
   const list = ids.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
