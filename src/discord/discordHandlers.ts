@@ -26,13 +26,22 @@ import {
   formatTimeAgo,
 } from './discordCore.js';
 import { t, getDateLocale } from '../locale/index.js';
+import {
+  boundedFieldValue,
+  boundedDescription,
+  genericUserError,
+  paginateEmbedFields,
+  truncate,
+  DISCORD_EMBED_FIELD_VALUE_LIMIT,
+  DISCORD_EMBED_TITLE_LIMIT,
+} from '../support/outputBudget.js';
 
 /**
  * Helper: Reply with Embed for consistent Discord UI
  */
 async function replyWithEmbed(msg: Message, content: string, color: number = 0x00ff41): Promise<void> {
   const embed = new EmbedBuilder()
-    .setDescription(content)
+    .setDescription(boundedDescription(content))
     .setColor(color)
     .setTimestamp();
   await msg.reply({ embeds: [embed] });
@@ -169,58 +178,53 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
       'Backlog': 0x95a5a6,
     };
 
-    // Pagination (max 10 per embed)
-    const ITEMS_PER_PAGE = 10;
-    const totalPages = Math.ceil(issues.length / ITEMS_PER_PAGE);
+    // Build all fields, then paginate by Discord embed field + aggregate budgets
+    const allFields = issues.map((issue) => {
+      const priority = priorityEmoji[issue.priority as keyof typeof priorityEmoji] ?? '⚪';
+      const stateEmoji = {
+        'Todo': '📝',
+        'In Progress': '⚙️',
+        'In Review': '👀',
+        'Done': '✅',
+        'Backlog': '📦',
+      }[issue.state] ?? '📋';
 
+      let value = `${priority} **${issue.identifier}**: ${issue.title}\n`;
+      value += `${stateEmoji} ${issue.state}`;
+
+      if (issue.project) {
+        value += ` · ${issue.project.name}`;
+      }
+
+      if (issue.labels && issue.labels.length > 0) {
+        value += `\n🏷️ ${issue.labels.join(', ')}`;
+      }
+
+      return {
+        name: `\u200b`,
+        value: boundedFieldValue(value, DISCORD_EMBED_FIELD_VALUE_LIMIT),
+        inline: false,
+      };
+    });
+
+    const fieldPages = paginateEmbedFields(allFields);
     const embeds: EmbedBuilder[] = [];
 
-    for (let page = 0; page < totalPages; page++) {
-      const startIdx = page * ITEMS_PER_PAGE;
-      const endIdx = Math.min(startIdx + ITEMS_PER_PAGE, issues.length);
-      const pageIssues = issues.slice(startIdx, endIdx);
-
+    for (let page = 0; page < fieldPages.length; page++) {
+      const pageFields = fieldPages[page];
       const embed = new EmbedBuilder()
         .setTitle(sessionName
           ? t('discord.issues.sessionIssues', { session: sessionName })
           : t('discord.issues.myIssues')
         )
-        .setColor(stateColor[pageIssues[0]?.state as keyof typeof stateColor] ?? 0x3498db)
+        .setColor(stateColor[issues[0]?.state as keyof typeof stateColor] ?? 0x3498db)
         .setTimestamp();
 
-      if (totalPages > 1) {
-        embed.setFooter({ text: t('discord.issues.page', { current: page + 1, total: totalPages }) });
+      if (fieldPages.length > 1) {
+        embed.setFooter({ text: t('discord.issues.page', { current: page + 1, total: fieldPages.length }) });
       }
 
-      const fields = pageIssues.map((issue) => {
-        const priority = priorityEmoji[issue.priority as keyof typeof priorityEmoji] ?? '⚪';
-        const stateEmoji = {
-          'Todo': '📝',
-          'In Progress': '⚙️',
-          'In Review': '👀',
-          'Done': '✅',
-          'Backlog': '📦',
-        }[issue.state] ?? '📋';
-
-        let value = `${priority} **${issue.identifier}**: ${issue.title}\n`;
-        value += `${stateEmoji} ${issue.state}`;
-
-        if (issue.project) {
-          value += ` · ${issue.project.name}`;
-        }
-
-        if (issue.labels && issue.labels.length > 0) {
-          value += `\n🏷️ ${issue.labels.join(', ')}`;
-        }
-
-        return {
-          name: `\u200b`,
-          value,
-          inline: false,
-        };
-      });
-
-      embed.addFields(...fields);
+      embed.addFields(...pageFields);
       embeds.push(embed);
     }
 
@@ -240,8 +244,7 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
       }
     }
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    await replyWithEmbed(msg, t('discord.issues.fetchError', { error: errorMsg }), 0xff0000);
+    await replyWithEmbed(msg, t('discord.issues.fetchError', { error: genericUserError(error) }), 0xff0000);
   }
 }
 
@@ -281,18 +284,15 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
     };
 
     const embed = new EmbedBuilder()
-      .setTitle(`${issue.identifier}: ${issue.title}`)
+      .setTitle(truncate(`${issue.identifier}: ${issue.title}`, DISCORD_EMBED_TITLE_LIMIT))
       .setColor(stateColor[issue.state as keyof typeof stateColor] ?? 0x3498db)
       .setTimestamp();
 
     // Description
     if (issue.description) {
-      const desc = issue.description.length > 1024
-        ? issue.description.slice(0, 1021) + '...'
-        : issue.description;
       embed.addFields({
         name: '📝 Description',
-        value: desc,
+        value: boundedFieldValue(issue.description),
         inline: false,
       });
     }
@@ -319,7 +319,7 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
 
     embed.addFields({
       name: '📊 Details',
-      value: infoValue,
+      value: boundedFieldValue(infoValue),
       inline: false,
     });
 
@@ -339,7 +339,7 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
 
       embed.addFields({
         name: `💬 ${t('discord.issues.commentsCount', { count: issue.comments.length })}`,
-        value: commentValue,
+        value: boundedFieldValue(commentValue),
         inline: false,
       });
     } else {
@@ -352,8 +352,7 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
 
     await msg.reply({ embeds: [embed] });
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    await replyWithEmbed(msg, t('discord.issue.fetchError', { error: errorMsg }), 0xff0000);
+    await replyWithEmbed(msg, t('discord.issue.fetchError', { error: genericUserError(error) }), 0xff0000);
   }
 }
 
@@ -720,7 +719,7 @@ export async function handleSchedule(msg: Message, args: string[]): Promise<void
       const job = await scheduler.addSchedule(name, projectPath, prompt, interval, msg.author.username);
       await msg.reply(`✅ ${t('discord.schedule.addSuccess', { name: job.name, schedule: job.schedule })}`);
     } catch (err) {
-      await msg.reply(`❌ ${t('discord.schedule.addFailed', { error: err instanceof Error ? err.message : String(err) })}`);
+      await msg.reply(`❌ ${t('discord.schedule.addFailed', { error: genericUserError(err) })}`);
     }
     return;
   }
@@ -800,7 +799,7 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
 
       await msg.reply(`✅ ${t('discord.codex.saveSuccess', { path: summaryPath })}`);
     } catch (err) {
-      await msg.reply(`❌ ${t('discord.codex.saveFailed', { error: err instanceof Error ? err.message : String(err) })}`);
+      await msg.reply(`❌ ${t('discord.codex.saveFailed', { error: genericUserError(err) })}`);
     }
     return;
   }
@@ -924,7 +923,7 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
         : `✅ ${t('discord.auto.startedSolo')}`;
       await msg.reply(startMsg);
     } catch (err) {
-      await msg.reply(`❌ ${t('discord.errors.startFailed', { error: err instanceof Error ? err.message : String(err) })}`);
+      await msg.reply(`❌ ${t('discord.errors.startFailed', { error: genericUserError(err) })}`);
     }
     return;
   }

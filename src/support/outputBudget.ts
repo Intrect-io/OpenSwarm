@@ -32,6 +32,8 @@ export const AUDIT_FILES_MAX = 20;
 export const AUDIT_COMMANDS_MAX = 12;
 export const AUDIT_SUMMARY_CAP = 600;
 export const AUDIT_GOAL_CAP = 400;
+/** Cap length of a single file path or command entry before rendering. */
+export const AUDIT_ENTRY_CAP = 200;
 
 // ── TUI display budgets ──
 export const TUI_LOG_LINE_LIMIT = 200;
@@ -55,7 +57,9 @@ export function truncate(value: string, limit: number): string {
 
 /** Truncate a string to `limit` chars, appending a suffix when clipped. */
 export function truncateWithSuffix(value: string, limit: number, suffix = '\n… (truncated)'): string {
+  if (limit <= 0) return '';
   if (value.length <= limit) return value;
+  if (suffix.length >= limit) return truncate(value, limit);
   return `${value.slice(0, limit - suffix.length)}${suffix}`;
 }
 
@@ -103,11 +107,55 @@ export function boundedLinearTitle(value: string): string {
   return truncateWithSuffix(value, LINEAR_TITLE_LIMIT);
 }
 
-/** Sanitize and bound exception text for user-facing output. */
+/** Sanitize and bound exception text for operator-facing stderr/logs (not end-user Discord). */
 export function sanitizeException(error: unknown): string {
   if (error == null) return 'An unknown error occurred.';
   const msg = error instanceof Error ? error.message : String(error);
-  // Strip any content that looks like a stack trace or internal path
+  // Strip stack traces / multiline dumps; keep a single bounded line.
   const cleaned = msg.split('\n')[0].trim();
   return truncate(cleaned || 'An error occurred.', 200);
+}
+
+/** Generic, bounded user-visible failure — never includes raw exception content. */
+export function genericUserError(_error?: unknown): string {
+  return 'Something went wrong. Please try again.';
+}
+
+/**
+ * Pack Discord embed fields while respecting per-field and aggregate value budgets.
+ * Returns pages of fields suitable for one embed each.
+ */
+export function paginateEmbedFields(
+  fields: Array<{ name: string; value: string; inline?: boolean }>,
+  options?: {
+    fieldValueLimit?: number;
+    aggregateLimit?: number;
+    maxFields?: number;
+  },
+): Array<Array<{ name: string; value: string; inline?: boolean }>> {
+  const fieldValueLimit = options?.fieldValueLimit ?? DISCORD_EMBED_FIELD_VALUE_LIMIT;
+  const aggregateLimit = options?.aggregateLimit ?? DISCORD_EMBED_AGGREGATE_VALUE_LIMIT;
+  const maxFields = options?.maxFields ?? DISCORD_EMBED_FIELDS_PER_EMBED;
+
+  const pages: Array<Array<{ name: string; value: string; inline?: boolean }>> = [];
+  let current: Array<{ name: string; value: string; inline?: boolean }> = [];
+  let aggregate = 0;
+
+  for (const field of fields) {
+    const value = boundedFieldValue(field.value, fieldValueLimit);
+    const next = { name: truncate(field.name, DISCORD_EMBED_FIELD_NAME_LIMIT), value, inline: field.inline };
+    const fits =
+      current.length < maxFields &&
+      aggregate + value.length <= aggregateLimit;
+    if (!fits && current.length > 0) {
+      pages.push(current);
+      current = [];
+      aggregate = 0;
+    }
+    // A single field larger than the remaining budget still goes on its own page (already bounded).
+    current.push(next);
+    aggregate += value.length;
+  }
+  if (current.length > 0) pages.push(current);
+  return pages;
 }

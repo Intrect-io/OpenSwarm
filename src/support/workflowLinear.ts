@@ -10,10 +10,16 @@ import {
   StepResult,
   topologicalSort,
 } from '../orchestration/workflow.js';
+import {
+  boundedLinearText,
+  LINEAR_DESCRIPTION_LIMIT,
+  LINEAR_COMMENT_LIMIT,
+} from './outputBudget.js';
 
-const LINEAR_BLOCK_LIMIT = 3000;
+const LINEAR_BLOCK_LIMIT = LINEAR_COMMENT_LIMIT;
 const LINEAR_INLINE_LIMIT = 500;
 
+/** Linear comment blocks: keep the historical ASCII truncation marker for callers/tests. */
 function truncateForLinear(value: string, limit: number): string {
   return value.length > limit ? `${value.slice(0, limit)}\n... (truncated)` : value;
 }
@@ -129,7 +135,7 @@ function buildWorkflowDescription(workflow: WorkflowConfig): string {
   parts.push('---');
   parts.push('_Managed by OpenSwarm Workflow Engine_');
 
-  return parts.join('\n');
+  return boundedLinearText(parts.join('\n'), LINEAR_DESCRIPTION_LIMIT);
 }
 
 /**
@@ -166,7 +172,7 @@ function buildStepDescription(step: WorkflowStep, workflow: WorkflowConfig): str
   parts.push('---');
   parts.push(`_Part of workflow: ${workflow.name}_`);
 
-  return parts.join('\n');
+  return boundedLinearText(parts.join('\n'), LINEAR_DESCRIPTION_LIMIT);
 }
 
 /**
@@ -214,7 +220,7 @@ export function stepResultToComment(result: StepResult): string {
     parts.push(result.changedFiles.map(f => `- \`${f}\``).join('\n'));
   }
 
-  return parts.join('\n');
+  return boundedLinearText(parts.join('\n'), LINEAR_COMMENT_LIMIT);
 }
 
 /**
@@ -291,7 +297,7 @@ export function createExecutionSummary(execution: WorkflowExecution): {
     }
   }
 
-  return { body: parts.join('\n'), health };
+  return { body: boundedLinearText(parts.join('\n'), LINEAR_COMMENT_LIMIT), health };
 }
 
 // Linear MCP Command Templates

@@ -16,6 +16,14 @@ import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgre
 import { status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import {
+  sanitizeException,
+  truncate,
+  flattenToSingleLine,
+  CLI_FEEDBACK_LINES,
+  CLI_STDERR_LINE_LIMIT,
+  PROMPT_FEEDBACK_LIMIT,
+} from '../support/outputBudget.js';
 
 // Types
 
@@ -223,7 +231,7 @@ export async function runCli(options: CliRunOptions): Promise<void> {
     result = await pipeline.run(task, projectPath);
   } catch (error) {
     stopHeartbeat();
-    console.error('\n  Pipeline execution failed:', error instanceof Error ? error.message : error);
+    console.error('\n  Pipeline execution failed:', sanitizeException(error));
     process.exitCode = 1;
     return;
   }
@@ -269,18 +277,22 @@ function printResult(result: PipelineResult): void {
 
   console.log('  ======================================');
 
-  // Summary
+  // Summary — sanitize + bound untrusted pipeline content
   if (result.workerResult?.summary) {
-    console.log(`  Summary: ${sanitizeTerminalText(result.workerResult.summary)}`);
+    const summary = truncate(
+      flattenToSingleLine(sanitizeTerminalText(result.workerResult.summary)),
+      CLI_STDERR_LINE_LIMIT,
+    );
+    console.log(`  Summary: ${summary}`);
   }
 
   // Files changed
   if (result.workerResult?.filesChanged && result.workerResult.filesChanged.length > 0) {
     const files = result.workerResult.filesChanged;
     if (files.length <= 5) {
-      console.log(`  Files:   ${files.map(sanitizeTerminalText).join(', ')}`);
+      console.log(`  Files:   ${files.map((f) => sanitizeTerminalText(f)).join(', ')}`);
     } else {
-      console.log(`  Files:   ${files.slice(0, 5).join(', ')} +${files.length - 5} more`);
+      console.log(`  Files:   ${files.slice(0, 5).map((f) => sanitizeTerminalText(f)).join(', ')} +${files.length - 5} more`);
     }
   }
 
@@ -292,13 +304,14 @@ function printResult(result: PipelineResult): void {
   parts.push(`Duration: ${formatDuration(result.totalDuration)}`);
   console.log(`  ${parts.join(' | ')}`);
 
-  // Reviewer feedback on failure
+  // Reviewer feedback on failure — per-field line + aggregate budget
   if (!result.success && result.reviewResult?.feedback) {
     console.log('');
     console.log('  Feedback:');
-    const lines = result.reviewResult.feedback.split('\n').slice(0, 5);
+    const bounded = truncate(sanitizeTerminalText(result.reviewResult.feedback), PROMPT_FEEDBACK_LIMIT);
+    const lines = bounded.split('\n').slice(0, CLI_FEEDBACK_LINES);
     for (const line of lines) {
-      console.log(`    ${line}`);
+      console.log(`    ${truncate(flattenToSingleLine(line), CLI_STDERR_LINE_LIMIT)}`);
     }
   }
 

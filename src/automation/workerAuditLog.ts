@@ -14,8 +14,8 @@ import {
   AUDIT_COMMANDS_MAX,
   AUDIT_SUMMARY_CAP,
   AUDIT_GOAL_CAP,
-  capArray,
-  codeList,
+  AUDIT_ENTRY_CAP,
+  truncate,
 } from '../support/outputBudget.js';
 
 /** Caps so a chatty agent can't post a multi-MB comment. */
@@ -26,12 +26,12 @@ const GOAL_CAP = AUDIT_GOAL_CAP;
 
 function cap(s: string | undefined, n: number): string {
   if (!s) return '';
-  const trimmed = s.trim();
-  return trimmed.length > n ? `${trimmed.slice(0, n - 1)}…` : trimmed;
+  return truncate(s.trim(), n);
 }
 
 function inlineCode(s: string): string {
-  return `\`${s.replaceAll('`', '\\`')}\``;
+  // Cap individual entry length before wrapping so a single path/command can't blow the comment.
+  return `\`${truncate(s, AUDIT_ENTRY_CAP).replaceAll('`', '\\`')}\``;
 }
 
 /** Render a list as inline code, capped, with an "+N more" suffix when truncated. */
@@ -43,74 +43,69 @@ function codeList(items: string[] | undefined, max: number): string {
 }
 
 export interface WorkerStartInfo {
+  /** 1-based iteration/attempt number. */
+  attempt: number;
+  maxAttempts?: number;
   taskTitle: string;
-  taskDescription: string;
-  projectPath: string;
-  /** The goal the worker was asked to achieve (from the task). */
-  goal?: string;
+  /** Prompt summary — task description or draft intent summary. */
+  taskGoal?: string;
+  /** Files the worker is expected to touch (from draft analysis / impact). */
+  targetFiles?: string[];
+  /** Resolved model for this worker run. */
+  model?: string;
+  /** Max agentic turns (proxy for effort budget). */
+  maxTurns?: number;
+  /** True when this run follows reviewer/guard feedback (a revision). */
+  isRevision?: boolean;
 }
 
-/**
- * Build the "worker started" audit comment.
- */
+/** Comment body posted when a worker run starts (the instruction). */
 export function buildWorkerStartComment(info: WorkerStartInfo): string {
-  const sections: CommentSection[] = [];
+  const attemptLabel = info.maxAttempts
+    ? `attempt #${info.attempt}/${info.maxAttempts}`
+    : `attempt #${info.attempt}`;
+  const heading = info.isRevision ? 'Worker revision' : 'Worker instruction';
 
-  if (info.goal) {
-    sections.push({ label: 'Goal', body: cap(info.goal, GOAL_CAP) });
+  const sections: CommentSection[] = [{ label: 'Task', body: cap(info.taskTitle, 200) }];
+  if (info.taskGoal) sections.push({ label: 'Goal', body: cap(info.taskGoal, GOAL_CAP) });
+  if (info.targetFiles && info.targetFiles.length > 0) {
+    sections.push({ label: 'Target files', body: codeList(info.targetFiles, MAX_FILES) });
   }
 
   return formatAutomationComment({
-    heading: 'Worker started',
-    summary: cap(info.taskTitle, SUMMARY_CAP),
+    heading: `${heading} (${attemptLabel})`,
     sections,
-    meta: {
-      Project: info.projectPath,
-    },
+    meta: { Model: info.model, 'Max turns': info.maxTurns },
     attribution: 'Worker audit log',
   });
 }
 
 export interface WorkerCompleteInfo {
-  result: WorkerResult;
-  /** Seconds the worker ran for. */
-  durationSec?: number;
-  /** Which attempt number this was (1-based). */
-  attempt?: number;
-  /** Max attempts allowed. */
+  attempt: number;
   maxAttempts?: number;
+  result: WorkerResult;
+  /** Worker run duration in seconds. */
+  durationSec?: number;
 }
 
-/**
- * Build the "worker completed" audit comment.
- * Caps individual file and command entries before rendering to prevent oversized comments.
- */
+/** Comment body posted when a worker run completes (the actions taken). */
 export function buildWorkerCompleteComment(info: WorkerCompleteInfo): string {
   const { result } = info;
-  const verdict = result.success ? '✅ Complete' : '❌ Failed';
-  const attemptLabel = info.attempt != null && info.maxAttempts != null
-    ? `(attempt ${info.attempt}/${info.maxAttempts})`
-    : '';
+  const attemptLabel = info.maxAttempts
+    ? `attempt #${info.attempt}/${info.maxAttempts}`
+    : `attempt #${info.attempt}`;
+  const verdict = result.haltReason ? 'Halted' : result.success ? 'Done' : 'Failed';
 
-  const sections: CommentSection[] = [];
+  const files = result.filesChanged ?? [];
+  const commands = result.commands ?? [];
 
-  // Files changed — capped to prevent oversized comments
-  if (result.filesChanged && result.filesChanged.length > 0) {
-    const { shown, omitted } = capArray(result.filesChanged, MAX_FILES);
-    const filesStr = shown.map(inlineCode).join(', ');
-    const body = omitted > 0 ? `${filesStr} _+${omitted} more_` : filesStr;
-    sections.push({ label: 'Files changed', body });
+  const sections: CommentSection[] = [
+    { label: `Files changed (${files.length})`, body: codeList(files, MAX_FILES) },
+  ];
+  if (commands.length > 0) {
+    sections.push({ label: `Commands (${commands.length})`, body: codeList(commands, MAX_COMMANDS) });
   }
-
-  // Commands run — capped to prevent oversized comments
-  if (result.commands && result.commands.length > 0) {
-    const { shown, omitted } = capArray(result.commands, MAX_COMMANDS);
-    const cmdsStr = shown.map(inlineCode).join(', ');
-    const body = omitted > 0 ? `${cmdsStr} _+${omitted} more_` : cmdsStr;
-    sections.push({ label: 'Commands', body });
-  }
-
-  // Error — capped
+  if (result.haltReason) sections.push({ label: 'Halt reason', body: cap(result.haltReason, GOAL_CAP) });
   if (result.error) sections.push({ label: 'Error', body: cap(result.error, GOAL_CAP) });
 
   const duration = info.durationSec != null

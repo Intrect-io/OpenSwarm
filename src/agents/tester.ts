@@ -52,126 +52,306 @@ export interface TesterResult {
  * Build Tester prompt
  */
 function buildTesterPrompt(options: TesterOptions): string {
-  const prompts = getPrompts();
-  return prompts.buildTesterPrompt({
-    taskTitle: options.taskTitle,
-    taskDescription: options.taskDescription,
-    workerResult: options.workerResult,
-  });
+  const workerReport = `
+- **Success:** ${options.workerResult.success}
+- **Summary:** ${options.workerResult.summary}
+- **Files Changed:** ${options.workerResult.filesChanged.join(', ') || '(none)'}
+- **Commands:** ${options.workerResult.commands.join(', ') || '(none)'}
+`;
+
+  return `# Tester Agent
+
+## Original Task
+- **Title:** ${options.taskTitle}
+- **Description:** ${options.taskDescription.slice(0, 200)}${options.taskDescription.length > 200 ? '...' : ''}
+
+## Worker's Changes
+${workerReport}
+
+## Instructions
+1. Run tests for the changed files
+2. Verify that all existing tests pass
+3. Suggest new tests if needed for new functionality
+4. Report test coverage if available
+
+## Test Execution Steps
+1. Check the project's test command (package.json, pytest.ini, etc.)
+2. Run relevant test files
+3. Analyze any failed tests
+4. Determine if additional tests are needed
+
+## Output Format (IMPORTANT - must output in this format at the end)
+After testing is complete, output the result in the following JSON format:
+
+\`\`\`json
+{
+  "success": true,
+  "testsPassed": 10,
+  "testsFailed": 0,
+  "coverage": 85.5,
+  "failedTests": [],
+  "suggestions": ["Additional test suggestions (if any)"]
+}
+\`\`\`
+
+On failure:
+\`\`\`json
+{
+  "success": false,
+  "testsPassed": 8,
+  "testsFailed": 2,
+  "coverage": 75.0,
+  "failedTests": ["test_feature.py::test_case1", "test_feature.py::test_case2"],
+  "suggestions": ["Failure cause analysis", "Fix suggestions"],
+  "error": "Detailed error message"
+}
+\`\`\`
+`;
 }
 
-// Execution
+// Tester Execution
 
+/**
+ * Run Tester agent
+ */
 export async function runTester(options: TesterOptions): Promise<TesterResult> {
   const prompt = buildTesterPrompt(options);
-  const adapter = getAdapter(options.adapterName || 'cli');
-  const result = await spawnCli(adapter, prompt, {
-    timeoutMs: options.timeoutMs ?? 120_000,
-    maxTurns: options.maxTurns ?? 5,
-    model: options.model,
-  });
-
-  const output = result.output.trim();
-  const parsed = parseTesterOutput(output);
-
-  return {
-    ...parsed,
-    costInfo: result.costInfo,
-  };
-}
-
-// Parsing
-
-export function parseTesterOutput(output: string): TesterResult {
-  // Try JSON extraction first
-  const jsonResult = extractResultJson(output);
-  if (jsonResult) return jsonResult;
-
-  // Fallback to text extraction
-  return extractFromText(output);
-}
-
-export function extractResultJson(text: string): TesterResult | null {
-  const jsonMatch = text.match(/\{[\s\S]*"success"[\s\S]*\}/);
-  if (!jsonMatch) return null;
+  const cwd = expandPath(options.projectPath);
+  const adapter = getAdapter(options.adapterName);
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]);
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: options.timeoutMs,
+      model: options.model,
+      maxTurns: options.maxTurns,
+    });
+
+    return parseTesterOutput(raw.stdout);
+  } catch (error) {
+    // Rate-limit AND infra failures (CLI exit, timeout, auth, spawn) mean the
+    // TESTER never ran — they are NOT "tests failed". Propagate so the pipeline
+    // classifies rate_limited / infra_error instead of feeding a bogus
+    // "fix the tests" self-repair loop that burns iterations → false STUCK.
+    // worker.ts:337 / reviewer.ts:264 already do this; the tester was missing it. (INT-2521)
+    if (error instanceof RateLimitError) throw error;
+    if (isInfraError(error)) throw error;
+    return {
+      success: false,
+      testsPassed: 0,
+      testsFailed: 0,
+      output: '',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Parse Tester output
+ */
+export function parseTesterOutput(output: string): TesterResult {
+  try {
+    const costInfo = extractCostFromStreamJson(output);
+    if (costInfo) {
+      console.log(`[Tester] Cost: ${formatCost(costInfo)}`);
+    }
+
+    // Extract result entry from NDJSON
+    let resultText = '';
+    for (const line of output.split('\n')) {
+      try {
+        const event = JSON.parse(line.trim());
+        if (event.type === 'result' && event.result) {
+          resultText = event.result;
+          break;
+        }
+        if (event.type === 'item.completed' && event.item?.type === 'agent_message' && event.item.text) {
+          resultText = event.item.text;
+        }
+      } catch { /* skip non-JSON lines */ }
+    }
+
+    if (!resultText) {
+      const result = extractFromText(output);
+      result.costInfo = costInfo;
+      return result;
+    }
+
+    // Extract JSON block from result
+    const result = extractResultJson(resultText) || extractFromText(resultText);
+    result.costInfo = costInfo;
+    return result;
+  } catch (error) {
+    console.error('[Tester] Parse error:', error);
+    return extractFromText(output);
+  }
+}
+
+/**
+ * Extract JSON block from result
+ */
+function extractResultJson(text: string): TesterResult | null {
+  // Find ```json ... ``` block
+  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+  if (!jsonMatch) {
+    // Find plain JSON object
+    const objMatch = text.match(/\{\s*"success"\s*:/);
+    if (!objMatch) return null;
+
+    const startIdx = objMatch.index!;
+    let depth = 0;
+    let endIdx = startIdx;
+
+    for (let i = startIdx; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      if (text[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          endIdx = i + 1;
+          break;
+        }
+      }
+    }
+
+    try {
+      const parsed = JSON.parse(text.slice(startIdx, endIdx));
+      return normalizeResult(parsed, text);
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[1]);
     return normalizeResult(parsed, text);
   } catch {
     return null;
   }
 }
 
+/**
+ * Normalize result
+ */
 function normalizeResult(parsed: any, output: string): TesterResult {
   return {
     success: Boolean(parsed.success),
     testsPassed: typeof parsed.testsPassed === 'number' ? parsed.testsPassed : 0,
     testsFailed: typeof parsed.testsFailed === 'number' ? parsed.testsFailed : 0,
     coverage: typeof parsed.coverage === 'number' ? parsed.coverage : undefined,
-    output: typeof parsed.output === 'string' ? parsed.output : output,
-    failedTests: Array.isArray(parsed.failedTests) ? parsed.failedTests : [],
-    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
-    error: typeof parsed.error === 'string' ? parsed.error : undefined,
+    output,
+    failedTests: Array.isArray(parsed.failedTests) ? parsed.failedTests : undefined,
+    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : undefined,
+    error: parsed.error,
   };
 }
 
+/**
+ * Extract result from text (when JSON parsing fails)
+ */
 function extractFromText(text: string): TesterResult {
+  // Estimate success
+  const hasError = /error|fail|exception|cannot/i.test(text);
+  const hasSuccess = /pass|success|completed|all tests/i.test(text);
+
+  // Extract test statistics
+  let testsPassed = 0;
+  let testsFailed = 0;
+
+  // Common test result patterns
+  const passMatch = text.match(/(\d+)\s*(?:passed|pass|passing)/i);
+  const failMatch = text.match(/(\d+)\s*(?:failed|fail|failing)/i);
+
+  if (passMatch) testsPassed = parseInt(passMatch[1], 10);
+  if (failMatch) testsFailed = parseInt(failMatch[1], 10);
+
+  // Extract coverage
+  let coverage: number | undefined;
+  const coverageMatch = text.match(/(?:coverage|cov)[:\s]*(\d+(?:\.\d+)?)\s*%/i);
+  if (coverageMatch) {
+    coverage = parseFloat(coverageMatch[1]);
+  }
+
+  // Extract failed tests
+  const failedTests: string[] = [];
+  const failedPattern = /(?:FAILED|FAIL)\s+([^\s]+(?:::[\w_]+)?)/gi;
+  const failedMatches = text.matchAll(failedPattern);
+  for (const m of failedMatches) {
+    if (!failedTests.includes(m[1])) {
+      failedTests.push(m[1]);
+    }
+  }
+
+  // A tester that produced NO output verified nothing — the "no error keyword ⇒
+  // success" default would fake a PASS on an empty/degenerate run and let
+  // unverified code through the blocking test gate. Only genuinely empty output is
+  // flagged, so a short-but-real run ("collected 0 items") is unaffected. (INT-2521)
+  const noOutput = text.trim().length === 0;
   return {
-    success: !text.includes('FAIL') && !text.includes('failed'),
-    testsPassed: 0,
-    testsFailed: 0,
+    success: !noOutput && (!hasError || (hasSuccess && testsFailed === 0)),
+    testsPassed,
+    testsFailed,
+    coverage,
     output: text,
-    failedTests: [],
-    suggestions: [],
-    error: extractErrorMessage(text),
+    failedTests: failedTests.length > 0 ? failedTests : undefined,
+    error: hasError ? extractErrorMessage(text) : (noOutput ? 'Tester produced no output — result unverified' : undefined),
   };
 }
 
-function extractErrorMessage(text: string): string | undefined {
-  const errorMatch = text.match(/error:?\s*(.+)/i);
-  return errorMatch ? errorMatch[1] : undefined;
+/**
+ * Extract error message
+ */
+function extractErrorMessage(text: string): string {
+  const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
+  if (errorMatch) {
+    return errorMatch[1].slice(0, 200);
+  }
+
+  const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
+  if (lines.length > 0) {
+    return lines[0].slice(0, 200);
+  }
+
+  return 'Unknown error';
 }
 
 // Formatting
 
 /**
- * Format test report as a Discord message
+ * Format Tester result as Discord message
  */
 export function formatTestReport(result: TesterResult): string {
   const statusEmoji = result.success ? '✅' : '❌';
   const lines: string[] = [];
 
-  lines.push(`${statusEmoji} **Test Results: ${result.success ? 'Passed' : 'Failed'}**`);
+  lines.push(`${statusEmoji} **Tester Result: ${result.success ? 'PASS' : 'FAIL'}**`);
   lines.push('');
-  lines.push(`**Tests Passed:** ${result.testsPassed}`);
-  lines.push(`**Tests Failed:** ${result.testsFailed}`);
+  lines.push(`**Passed:** ${result.testsPassed} | **Failed:** ${result.testsFailed}`);
 
-  if (result.coverage != null) {
-    lines.push(`**Coverage:** ${(result.coverage * 100).toFixed(1)}%`);
+  if (result.coverage !== undefined) {
+    lines.push(`**Coverage:** ${result.coverage.toFixed(1)}%`);
   }
 
   if (result.failedTests && result.failedTests.length > 0) {
     lines.push('');
     lines.push('**Failed Tests:**');
-    for (const test of result.failedTests.slice(0, PROMPT_FAILED_TESTS_LIMIT)) {
-      lines.push(`  ❌ ${test}`);
+    for (const test of result.failedTests.slice(0, 5)) {
+      lines.push(`  • \`${test}\``);
     }
-    if (result.failedTests.length > PROMPT_FAILED_TESTS_LIMIT) {
-      lines.push(`  … +${result.failedTests.length - PROMPT_FAILED_TESTS_LIMIT} more`);
+    if (result.failedTests.length > 5) {
+      lines.push(`  • ... +${result.failedTests.length - 5} more`);
     }
   }
 
   if (result.suggestions && result.suggestions.length > 0) {
     lines.push('');
     lines.push('**Suggestions:**');
-    for (const suggestion of result.suggestions.slice(0, PROMPT_SUGGESTIONS_LIMIT)) {
+    for (const suggestion of result.suggestions.slice(0, 3)) {
       lines.push(`  • ${suggestion}`);
     }
   }
 
   if (result.error) {
-    lines.push('');
     lines.push(`**Error:** ${result.error}`);
   }
 
@@ -179,39 +359,34 @@ export function formatTestReport(result: TesterResult): string {
 }
 
 /**
- * Build test fix prompt for the worker.
+ * Convert Tester result to Worker feedback.
  * Enforces aggregate bounds on feedback to prevent prompt bloat.
  */
 export function buildTestFixPrompt(result: TesterResult): string {
   const lines: string[] = [];
 
-  lines.push(`The tests ${result.success ? 'passed' : 'failed'}.`);
-  lines.push(`Tests passed: ${result.testsPassed}, Tests failed: ${result.testsFailed}`);
+  lines.push('## Test Failures');
+  lines.push('');
+  lines.push(`**Passed:** ${result.testsPassed} | **Failed:** ${result.testsFailed}`);
 
-  if (result.coverage != null) {
-    lines.push(`Coverage: ${(result.coverage * 100).toFixed(1)}%`);
-  }
-
-  // Bound failed tests list to prevent prompt bloat
   if (result.failedTests && result.failedTests.length > 0) {
     lines.push('');
     lines.push('### Failed Tests:');
     const shown = result.failedTests.slice(0, PROMPT_FAILED_TESTS_LIMIT);
     for (let i = 0; i < shown.length; i++) {
-      lines.push(`${i + 1}. \`${shown[i]}\``);
+      lines.push(`${i + 1}. \`${truncate(shown[i], 200)}\``);
     }
     if (result.failedTests.length > PROMPT_FAILED_TESTS_LIMIT) {
       lines.push(`… +${result.failedTests.length - PROMPT_FAILED_TESTS_LIMIT} more`);
     }
   }
 
-  // Bound suggestions list to prevent prompt bloat
   if (result.suggestions && result.suggestions.length > 0) {
     lines.push('');
     lines.push('### Fix Suggestions:');
     const shown = result.suggestions.slice(0, PROMPT_SUGGESTIONS_LIMIT);
     for (let i = 0; i < shown.length; i++) {
-      lines.push(`${i + 1}. ${shown[i]}`);
+      lines.push(`${i + 1}. ${truncate(shown[i], 300)}`);
     }
     if (result.suggestions.length > PROMPT_SUGGESTIONS_LIMIT) {
       lines.push(`… +${result.suggestions.length - PROMPT_SUGGESTIONS_LIMIT} more`);
@@ -222,11 +397,7 @@ export function buildTestFixPrompt(result: TesterResult): string {
   lines.push('Fix the above test failures.');
 
   const full = lines.join('\n');
-  // Enforce aggregate prompt budget
   return full.length > PROMPT_FEEDBACK_LIMIT
-    ? full.slice(0, PROMPT_FEEDBACK_LIMIT - 3) + '…'
+    ? `${full.slice(0, PROMPT_FEEDBACK_LIMIT - 1)}…`
     : full;
 }
-
-// Re-export getPrompts for tester
-import { getPrompts } from '../locale/index.js';

@@ -34,6 +34,14 @@ describe('DataTable (EPIC INT-1813 S6)', () => {
     expect(f).not.toContain('작업상태확인');
   });
 
+  it('flattens multiline cell text before clipping so newlines cannot bypass layout', () => {
+    const f = render(
+      <DataTable columns={['NOTE']} rows={[['line1\nline2\nline3']]} maxCellWidth={20} />,
+    ).lastFrame()!;
+    expect(f).toContain('line1 line2 line3');
+    expect(f).not.toContain('\nline2');
+  });
+
   it('keeps rendered rows within the terminal width', () => {
     const f = render(
       <DataTable

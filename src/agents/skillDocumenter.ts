@@ -9,7 +9,7 @@ import { getAdapter, spawnCli } from '../adapters/index.js';
 import { type CostInfo, extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
-import { boundedMessageContent, DISCORD_MESSAGE_CONTENT_LIMIT } from '../support/outputBudget.js';
+import { boundedMessageContent } from '../support/outputBudget.js';
 
 // Types
 
@@ -44,73 +44,142 @@ function buildSkillDocumenterPrompt(options: SkillDocumenterOptions): string {
 
   return `/documents
 
-## Task
+## Task Context
+- **Task:** ${options.taskTitle}
+- **Description:** ${options.taskDescription.slice(0, 200)}${options.taskDescription.length > 200 ? '...' : ''}
 
-${options.taskTitle}
-
-${options.taskDescription}
-
-## Worker Report
-
+## Worker's Changes
 ${workerReport}
 
-## Instructions
+Update the project documentation to reflect the changes from the above task.
+After the documentation update is complete, output the result in the following JSON format:
 
-Review the worker's changes and update the project's documentation accordingly.
-
-1. Check if any documentation files need updating based on the changes made.
-2. Update relevant documentation files.
-3. If no documentation changes are needed, report that.
-
-## Output Format
-
-Return a JSON object with the following structure:
 \`\`\`json
 {
-  "success": true/false,
-  "updatedFiles": ["path/to/file1.md", ...],
-  "summary": "Brief summary of documentation changes"
+  "success": true,
+  "updatedFiles": ["CLAUDE.md", "docs/architecture.md"],
+  "summary": "Added new module description to architecture docs"
 }
-\`\`\``;
+\`\`\`
+
+When there is nothing to update:
+\`\`\`json
+{
+  "success": true,
+  "updatedFiles": [],
+  "summary": "No documentation update needed (minor change)"
+}
+\`\`\`
+
+On failure:
+\`\`\`json
+{
+  "success": false,
+  "updatedFiles": [],
+  "summary": "Documentation update failed",
+  "error": "Detailed error message"
+}
+\`\`\`
+`;
 }
 
-// Execution
+// Skill Documenter Execution
 
 export async function runSkillDocumenter(options: SkillDocumenterOptions): Promise<SkillDocumenterResult> {
   const prompt = buildSkillDocumenterPrompt(options);
-  const adapter = getAdapter(options.adapterName || 'cli');
-  const result = await spawnCli(adapter, prompt, {
-    timeoutMs: options.timeoutMs ?? 120_000,
-    maxTurns: options.maxTurns ?? 5,
-    model: options.model,
-  });
+  const cwd = expandPath(options.projectPath);
+  const adapter = getAdapter(options.adapterName);
 
-  const output = result.output.trim();
-  const parsed = parseSkillDocumenterOutput(output);
-
-  return {
-    ...parsed,
-    costInfo: result.costInfo,
-  };
+  try {
+    const raw = await spawnCli(adapter, {
+      prompt,
+      cwd,
+      timeoutMs: options.timeoutMs,
+      model: options.model,
+      maxTurns: options.maxTurns,
+    });
+    return parseSkillDocumenterOutput(raw.stdout);
+  } catch (error) {
+    if (error instanceof RateLimitError) throw error;
+    return {
+      success: false,
+      updatedFiles: [],
+      summary: 'Skill Documenter execution failed',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
-// Parsing
+// Output Parsing
 
 function parseSkillDocumenterOutput(output: string): SkillDocumenterResult {
-  // Try JSON extraction first
-  const jsonResult = extractResultJson(output);
-  if (jsonResult) return jsonResult;
+  try {
+    const costInfo = extractCostFromStreamJson(output);
+    if (costInfo) {
+      console.log(`[SkillDocumenter] Cost: ${formatCost(costInfo)}`);
+    }
 
-  // Fallback to text extraction
-  return extractFromText(output);
+    // Extract result entry from NDJSON
+    let resultText = '';
+    for (const line of output.split('\n')) {
+      try {
+        const event = JSON.parse(line.trim());
+        if (event.type === 'result' && event.result) {
+          resultText = event.result;
+          break;
+        }
+        if (event.type === 'item.completed' && event.item?.type === 'agent_message' && event.item.text) {
+          resultText = event.item.text;
+        }
+      } catch { /* skip non-JSON lines */ }
+    }
+
+    if (!resultText) {
+      const result = extractFromText(output);
+      result.costInfo = costInfo;
+      return result;
+    }
+
+    const result = extractResultJson(resultText) || extractFromText(resultText);
+    result.costInfo = costInfo;
+    return result;
+  } catch (error) {
+    console.error('[SkillDocumenter] Parse error:', error);
+    return extractFromText(output);
+  }
 }
 
 function extractResultJson(text: string): SkillDocumenterResult | null {
-  const jsonMatch = text.match(/\{[\s\S]*"success"[\s\S]*\}/);
-  if (!jsonMatch) return null;
+  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
+  if (!jsonMatch) {
+    const objMatch = text.match(/\{\s*"success"\s*:/);
+    if (!objMatch) return null;
+
+    const startIdx = objMatch.index!;
+    let depth = 0;
+    let endIdx = startIdx;
+
+    for (let i = startIdx; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      if (text[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          endIdx = i + 1;
+          break;
+        }
+      }
+    }
+
+    try {
+      const parsed = JSON.parse(text.slice(startIdx, endIdx));
+      return normalizeResult(parsed);
+    } catch {
+      return null;
+    }
+  }
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(jsonMatch[1]);
     return normalizeResult(parsed);
   } catch {
     return null;
@@ -121,28 +190,52 @@ function normalizeResult(parsed: any): SkillDocumenterResult {
   return {
     success: Boolean(parsed.success),
     updatedFiles: Array.isArray(parsed.updatedFiles) ? parsed.updatedFiles : [],
-    summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-    error: typeof parsed.error === 'string' ? parsed.error : undefined,
+    summary: parsed.summary || '(no summary)',
+    error: parsed.error,
   };
 }
 
 function extractFromText(text: string): SkillDocumenterResult {
+  const hasError = /error|fail|exception/i.test(text);
+  const hasSuccess = /success|completed|updated|documented/i.test(text);
+
+  const updatedFiles: string[] = [];
+  const filePatterns = [
+    /(?:updated?|modified?|created?|wrote?):\s*(.+\.(?:md|rst|txt))/gi,
+    /(?:CLAUDE|AGENTS|README|docs?)\.md/gi,
+  ];
+
+  for (const pattern of filePatterns) {
+    const matches = text.matchAll(pattern);
+    for (const m of matches) {
+      const file = m[1] || m[0];
+      if (!updatedFiles.includes(file)) {
+        updatedFiles.push(file);
+      }
+    }
+  }
+
   return {
-    success: text.includes('success') || text.includes('updated'),
-    updatedFiles: extractSummary(text).split('\n').filter(l => l.includes('.md') || l.includes('.ts')),
+    success: !hasError || hasSuccess,
+    updatedFiles: updatedFiles.slice(0, 10),
     summary: extractSummary(text),
-    error: extractErrorMessage(text),
+    error: hasError ? extractErrorMessage(text) : undefined,
   };
 }
 
 function extractSummary(text: string): string {
-  const lines = text.split('\n').filter(l => l.length > 0);
-  return lines.slice(0, 5).join('\n');
+  const lines = text.split('\n').filter((l) => l.trim().length > 10);
+  if (lines.length === 0) return '(no summary)';
+  const summary = lines[0].trim();
+  return summary.length > 200 ? summary.slice(0, 200) + '...' : summary;
 }
 
-function extractErrorMessage(text: string): string | undefined {
-  const errorMatch = text.match(/error:?\s*(.+)/i);
-  return errorMatch ? errorMatch[1] : undefined;
+function extractErrorMessage(text: string): string {
+  const errorMatch = text.match(/(?:error|exception|failed?):\s*(.+)/i);
+  if (errorMatch) return errorMatch[1].slice(0, 200);
+  const lines = text.split('\n').filter((l) => /error|fail/i.test(l));
+  if (lines.length > 0) return lines[0].slice(0, 200);
+  return 'Unknown error';
 }
 
 // Formatting
@@ -169,9 +262,5 @@ export function formatSkillDocReport(result: SkillDocumenterResult): string {
     lines.push(`**Error:** ${result.error}`);
   }
 
-  const full = lines.join('\n');
-  // Ensure the entire message fits within Discord limits
-  return full.length > DISCORD_MESSAGE_CONTENT_LIMIT
-    ? full.slice(0, DISCORD_MESSAGE_CONTENT_LIMIT - 3) + '…'
-    : full;
+  return boundedMessageContent(lines.join('\n'));
 }
