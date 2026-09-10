@@ -83,33 +83,9 @@ export class TraceCollector {
   }
 
   /**
-   * 새 trace 시작
-   * @returns trace ID
+   * Bound a string value to maxBytes before retention.
+   * Applied before any expensive conversion or storage.
    */
-  startTrace(name: string, metadata: Record<string, unknown> = {}): string {
-    if (this.traces.size >= this.maxTraces) {
-      const completed = [...this.traces].find(([, trace]) => trace.status !== 'running');
-      if (!completed) throw new Error(`Trace capacity exceeded (${this.maxTraces} active traces)`);
-      this.traces.delete(completed[0]);
-  collectTrace(name: string, metadata?: Record<string, unknown>, error?: Error) {
-    // Bound inputs before retention
-    const safeName = this.tailWithinBytes(name, 4096);
-    const safeMetadata = metadata ? JSON.parse(this.tailWithinBytes(JSON.stringify(metadata), 4096)) : undefined;
-    const safeError = error ? new Error(this.tailWithinBytes(error.message, 4096)) : undefined;
-
-    const traceId = randomUUID();
-    const trace: Trace = {
-      traceId,
-      name: safeName,
-      startTime: Date.now(),
-      status: 'running',
-      spans: [],
-      metadata: safeMetadata || {}
-    };
-    this.traces.set(traceId, trace);
-    return traceId;
-  }
-
   private tailWithinBytes(value: string, maxBytes: number): string {
     if (maxBytes <= 0) return '';
     const bytes = Buffer.from(value, 'utf8');
@@ -118,93 +94,133 @@ export class TraceCollector {
   }
 
   /**
-   * trace 종료
+   * Bound metadata record keys/values to maxBytes total serialized size.
    */
-  endTrace(traceId: string, status: SpanStatus = 'completed'): Trace | undefined {
-    const trace = this.traces.get(traceId);
-    if (!trace) return undefined;
-    if (trace.status !== 'running') return trace;
-    if (status === 'running') throw new Error('endTrace requires a terminal status');
-
-    trace.endTime = Date.now();
-    trace.status = status;
-
-    // 아직 running인 span을 모두 종료
-    for (const span of trace.spans) {
-      if (span.status === 'running') {
-        span.endTime = trace.endTime;
-        span.status = status;
-      }
-    }
-
-    return trace;
+  private boundMetadata(metadata: Record<string, unknown>, maxBytes: number): Record<string, unknown> {
+    if (Object.keys(metadata).length === 0) return {};
+    const serialized = JSON.stringify(metadata);
+    if (Buffer.byteLength(serialized, 'utf8') <= maxBytes) return metadata;
+    const truncated = this.tailWithinBytes(serialized, maxBytes);
+    return JSON.parse(truncated) as Record<string, unknown>;
   }
 
   /**
-   * trace 내에 새 span 시작
-   * @param parentSpanId - 부모 span ID (계층 구조용)
+   * 새 trace 시작
+   * @returns trace ID
+   */
+  startTrace(name: string, metadata: Record<string, unknown> = {}): string {
+    // Bound inputs before retention
+    const safeName = this.tailWithinBytes(name, 4096);
+    const safeMetadata = this.boundMetadata(metadata, 4096);
+
+    if (this.traces.size >= this.maxTraces) {
+      const completed = [...this.traces].find(([, trace]) => trace.status !== 'running');
+      if (!completed) throw new Error(`Trace capacity exceeded (${this.maxTraces} active traces)`);
+      this.traces.delete(completed[0]);
+    }
+
+    const traceId = randomUUID();
+    const trace: Trace = {
+      traceId,
+      name: safeName,
+      startTime: Date.now(),
+      status: 'running',
+      spans: [],
+      metadata: safeMetadata,
+    };
+    this.traces.set(traceId, trace);
+    return traceId;
+  }
+
+  /**
+   * 새 span 시작
    * @returns span ID
    */
-  startSpan(
-    traceId: string,
-    name: string,
-    parentSpanId?: string,
-    metadata: Record<string, unknown> = {},
-  ): string | undefined {
+  startSpan(traceId: string, name: string, parentSpanId?: string): string {
     const trace = this.traces.get(traceId);
-    if (!trace || trace.status !== 'running') return undefined;
+    if (!trace) throw new Error(`Trace ${traceId} not found`);
     if (trace.spans.length >= this.maxSpansPerTrace) {
-      throw new Error(`Span capacity exceeded for trace ${traceId} (${this.maxSpansPerTrace})`);
+      throw new Error(`Span capacity exceeded for trace ${traceId} (${this.maxSpansPerTrace} spans)`);
     }
+
+    // Bound span name before retention
+    const safeName = this.tailWithinBytes(name, 4096);
 
     const spanId = randomUUID();
     const span: Span = {
       spanId,
       traceId,
       parentSpanId,
-      name,
+      name: safeName,
       status: 'running',
       startTime: Date.now(),
-      metadata,
+      metadata: {},
     };
     trace.spans.push(span);
     return spanId;
   }
 
   /**
-   * span 종료
+   * span 완료
    */
-  endSpan(traceId: string, spanId: string, status: SpanStatus = 'completed'): Span | undefined {
+  endSpan(traceId: string, spanId: string): boolean {
     const trace = this.traces.get(traceId);
-    if (!trace) return undefined;
-
+    if (!trace) return false;
     const span = trace.spans.find((s) => s.spanId === spanId);
-    if (!span) return undefined;
-    if (span.status !== 'running') return span;
-    if (status === 'running') throw new Error('endSpan requires a terminal status');
-
+    if (!span) return false;
+    span.status = 'completed';
     span.endTime = Date.now();
-    span.status = status;
-    return span;
+    return true;
   }
 
   /**
-   * span에 에러 기록
+   * span 실패 처리
    */
-  recordError(
-    traceId: string,
-    spanId: string,
-    error: { message: string; stack?: string; code?: string },
-  ): boolean {
+  failSpan(traceId: string, spanId: string, error: { message: string; stack?: string; code?: string }): boolean {
     const trace = this.traces.get(traceId);
     if (!trace) return false;
-
     const span = trace.spans.find((s) => s.spanId === spanId);
     if (!span) return false;
 
-    span.errorInfo = error;
+    // Bound error payload before retention
+    span.errorInfo = {
+      message: this.tailWithinBytes(error.message, 4096),
+      stack: error.stack ? this.tailWithinBytes(error.stack, 4096) : undefined,
+      code: error.code ? this.tailWithinBytes(error.code, 256) : undefined,
+    };
     span.status = 'failed';
     span.endTime = span.endTime ?? Date.now();
+    return true;
+  }
+
+  /**
+   * trace 완료
+   */
+  endTrace(traceId: string): boolean {
+    const trace = this.traces.get(traceId);
+    if (!trace) return false;
+    trace.status = 'completed';
+    trace.endTime = Date.now();
+    return true;
+  }
+
+  /**
+   * trace 실패 처리
+   */
+  failTrace(traceId: string, error: { message: string; stack?: string; code?: string }): boolean {
+    const trace = this.traces.get(traceId);
+    if (!trace) return false;
+    trace.status = 'failed';
+    trace.endTime = Date.now();
+    // Bound error info before retention
+    trace.metadata = this.boundMetadata({
+      ...trace.metadata,
+      error: {
+        message: this.tailWithinBytes(error.message, 4096),
+        stack: error.stack ? this.tailWithinBytes(error.stack, 4096) : undefined,
+        code: error.code ? this.tailWithinBytes(error.code, 256) : undefined,
+      },
+    }, 4096);
     return true;
   }
 

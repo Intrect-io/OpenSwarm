@@ -34,7 +34,7 @@ export interface TaskLogSnapshot {
   truncated: boolean;
 }
 
-export const TASK_LOG_RING_SIZE = 1000;
+export const TASK_LOG_RING_SIZE = 1_000;
 export const TASK_LOG_MAX_LINE_CHARS = 400;
 export const TASK_LOG_MAX_BUFFERS = 24;
 export const TASK_LOG_RETENTION_MS = 10 * 60_000;
@@ -53,6 +53,17 @@ interface TaskLogBuffer {
 const buffers = new Map<string, TaskLogBuffer>();
 const cleanupTimers = new Map<string, NodeJS.Timeout>();
 let nextSeq = 1;
+
+/**
+ * Bound a string value to maxBytes before storage.
+ * Applied before any expensive conversion or interpolation.
+ */
+function tailWithinBytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.length <= maxBytes) return value;
+  return `…truncated…\n${bytes.subarray(bytes.length - Math.max(0, maxBytes - 16)).toString('utf8')}`;
+}
 
 function evictIfNeeded(): void {
   if (buffers.size < TASK_LOG_MAX_BUFFERS) return;
@@ -73,21 +84,23 @@ function evictIfNeeded(): void {
 }
 
 /** Returns the sequence assigned to the line (0 when nothing was stored). */
-export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): void {
+export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): number {
+  if (!taskId || typeof line !== 'string') return 0;
+  // Bound stage and task identity fields before storage — prevent memory
+  // exhaustion from oversized identity strings.
   const safeTaskId = tailWithinBytes(taskId, 512);
   const safeStage = tailWithinBytes(stage, 512);
-  if (!taskId || typeof line !== 'string') return 0;
-  let buffer = buffers.get(taskId);
+  let buffer = buffers.get(safeTaskId);
   if (!buffer) {
     evictIfNeeded();
     buffer = { lines: [], truncated: false, completed: false, lastAppendAt: now };
-    buffers.set(taskId, buffer);
+    buffers.set(safeTaskId, buffer);
   } else {
     // Refresh LRU position and mark live again — a task id that logs after
     // completion (retry reusing the id) must not be reaped by a stale timer.
-    buffers.delete(taskId);
-    buffers.set(taskId, buffer);
-    cancelTaskLogCleanup(taskId);
+    buffers.delete(safeTaskId);
+    buffers.set(safeTaskId, buffer);
+    cancelTaskLogCleanup(safeTaskId);
     buffer.lastAppendAt = now;
   }
 
@@ -97,7 +110,7 @@ export function appendTaskLog(taskId: string, stage: string, line: string, now =
     buffer.truncated = true;
   }
   const seq = nextSeq++;
-  buffer.lines.push({ stage, line: text, ts: now, seq });
+  buffer.lines.push({ stage: safeStage, line: text, ts: now, seq });
   if (buffer.lines.length > TASK_LOG_RING_SIZE) {
     buffer.lines.shift();
     buffer.truncated = true;
@@ -112,12 +125,12 @@ export function getTaskLog(taskId: string): TaskLogSnapshot | null {
   return { taskId, lines: buffer.lines.slice(), truncated: buffer.truncated };
 }
 
-/** Called on task:completed — keep the transcript readable for a grace window. */
+/** Schedule cleanup for a completed task. */
 export function scheduleTaskLogCleanup(taskId: string, delayMs = TASK_LOG_RETENTION_MS): void {
   const buffer = buffers.get(taskId);
   if (!buffer) return;
-  // Replace any prior timer directly — cancelTaskLogCleanup would also clear
-  // the completed flag this function is about to set.
+  // Cancel any prior timer first — the new timer must own the truncated flag
+  // this function is about to set.
   const prior = cleanupTimers.get(taskId);
   if (prior) clearTimeout(prior);
   buffer.completed = true;
