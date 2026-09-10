@@ -248,16 +248,24 @@ describe('health payload cache (AGT-4079)', () => {
 
   it('refreshes time-sensitive fields on the timer, within 1s tolerance', () => {
     vi.useFakeTimers();
+    // `process.uptime()` reads the real clock, which fake timers do not move —
+    // so advancing them proves nothing about re-reading unless the source is
+    // controlled. Spying on it is what makes "moved with the tick" observable:
+    // each refresh must call it again rather than keep the seeded value.
+    let fakeUptime = 10;
+    const uptimeSpy = vi.spyOn(process, 'uptime').mockImplementation(() => fakeUptime);
     const stop = startHealthCache(1_000);
     const first = getCachedHealthPayload();
     const firstUptime = first.uptime_s;
 
     // Advance past two refresh ticks: uptime must move with the timer, not
     // freeze at the seed value (the reviewer's DoD-3 finding).
+    fakeUptime = 12.5;
     vi.advanceTimersByTime(2_500);
     const second = getCachedHealthPayload();
     expect(second.uptime_s).toBeGreaterThanOrEqual(firstUptime + 2);
     expect(second.uptime_s).toBeLessThanOrEqual(firstUptime + 3); // 1s tolerance
+    uptimeSpy.mockRestore();
 
     // Memory fields are re-read per tick too.
     expect(second.rss_mb).toBeGreaterThan(0);

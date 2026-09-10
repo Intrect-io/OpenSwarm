@@ -86,7 +86,10 @@ export function buildHealthPayload(
     backend_instance_id: instanceId,
     backend_pid: pid,
     backend_parent_pid: ppid,
-    uptime_s: uptimeS,
+    // Whole seconds: this is the shape vega's shell parses, and an exhaustive
+    // test pins it. Dropping the floor turned `12` into `12.9` for every
+    // consumer of the contract.
+    uptime_s: Math.floor(uptimeS),
     ...memoryFields(deps.memory),
   };
 }
