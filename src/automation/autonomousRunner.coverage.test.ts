@@ -394,6 +394,78 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       expect(refetched.preAdmissionDraft?.relevantFiles).toEqual(['src/drafted.ts']);
     });
 
+    it('reuses a sufficient drafted scope even after a state-transition timestamp bump (AGT-4300)', async () => {
+      // trackerUpdatedAt bumps on every tracker mutation, including the
+      // daemon's OWN progress comments and state transitions — neither
+      // changes anything the draft prompt reads. Measured on vela
+      // (AUD-1070, 2026-09-10): 7 same-day state transitions with an
+      // unchanged description, attempt_no reached 40, and a correct durable
+      // cache entry (AGT-4286) sat unused because trackerUpdatedAt used to
+      // ride along in the fingerprint. Title and description are the only
+      // draft-relevant fields, and both are already separate elements of the
+      // fingerprint array, so this only removes a self-inflicted miss — it
+      // does not remove real invalidation coverage (see the next test).
+      const r = new AutonomousRunner(cfg({ worktreeMode: true, maxConcurrentTasks: 2 }));
+      const internal = r as unknown as Internal;
+      resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+        candidate.fileScope = ['src/drafted.ts'];
+        candidate.fileScopeSource = 'drafted';
+        candidate.preAdmissionDraft = {
+          taskType: 'bugfix', intentSummary: 'repair the drafted implementation',
+          relevantFiles: ['src/drafted.ts'],
+          suggestedApproach: 'change the existing implementation carefully',
+          completionCriteria: ['focused test passes'], sufficient: true,
+          registrySnapshot: [], durationMs: 1,
+        };
+        return candidate.fileScope;
+      });
+      detectFileConflictsMock.mockImplementation(async (tasks: TaskItem[]) => ({
+        safe: tasks, conflictGroups: [],
+      }));
+      const first = task({ id: 'timestamp-churn', description: 'stable description', trackerUpdatedAt: 10 });
+      // Same title+description, later trackerUpdatedAt — a daemon-authored
+      // comment or a Backlog<->Todo<->In Progress bounce, not an operator edit.
+      const bumped = task({ id: 'timestamp-churn', description: 'stable description', trackerUpdatedAt: 99_999 });
+
+      await internal.detectSafeCandidateIds([{ task: first, projectPath: '/repo' }]);
+      await internal.detectSafeCandidateIds([{ task: bumped, projectPath: '/repo' }]);
+
+      expect(resolveTaskFileScopeMock).toHaveBeenCalledTimes(1);
+      expect(bumped.fileScopeSource).toBe('drafted');
+      expect(bumped.preAdmissionDraft?.relevantFiles).toEqual(['src/drafted.ts']);
+    });
+
+    it('still recomputes the draft when the description actually changed', async () => {
+      // The invalidation guarantee this cache exists to preserve: an operator
+      // rewriting the issue body must not reuse a draft written against the
+      // old text. Title and description alone carry this — trackerUpdatedAt
+      // was never load-bearing for it.
+      const r = new AutonomousRunner(cfg({ worktreeMode: true, maxConcurrentTasks: 2 }));
+      const internal = r as unknown as Internal;
+      resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+        candidate.fileScope = ['src/drafted.ts'];
+        candidate.fileScopeSource = 'drafted';
+        candidate.preAdmissionDraft = {
+          taskType: 'bugfix', intentSummary: 'repair the drafted implementation',
+          relevantFiles: ['src/drafted.ts'],
+          suggestedApproach: 'change the existing implementation carefully',
+          completionCriteria: ['focused test passes'], sufficient: true,
+          registrySnapshot: [], durationMs: 1,
+        };
+        return candidate.fileScope;
+      });
+      detectFileConflictsMock.mockImplementation(async (tasks: TaskItem[]) => ({
+        safe: tasks, conflictGroups: [],
+      }));
+      const first = task({ id: 'text-edit', description: 'original description', trackerUpdatedAt: 10 });
+      const edited = task({ id: 'text-edit', description: 'operator rewrote this entirely', trackerUpdatedAt: 10 });
+
+      await internal.detectSafeCandidateIds([{ task: first, projectPath: '/repo' }]);
+      await internal.detectSafeCandidateIds([{ task: edited, projectPath: '/repo' }]);
+
+      expect(resolveTaskFileScopeMock).toHaveBeenCalledTimes(2);
+    });
+
     it('still defers overlapping scopes when worktree fan-out is disabled', async () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: false, worktreeMode: true, maxConcurrentTasks: 3,
