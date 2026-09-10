@@ -11,6 +11,7 @@ import { registryTypeDefs } from '../../registry/graphql/typeDefs.js';
 import { registryResolvers } from '../../registry/graphql/resolvers.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { useQueryCostAnalysis } from './costAnalysis.js';
 
 const CORS_METHODS = 'GET, POST, OPTIONS';
 const CORS_HEADERS = 'Content-Type, Authorization, X-OpenSwarm-GraphQL-Token';
@@ -103,6 +104,7 @@ const yoga = createYoga({
     typeDefs: [typeDefs, registryTypeDefs],
     resolvers: [resolvers, registryResolvers],
   }),
+  plugins: [useQueryCostAnalysis()],
   graphqlEndpoint: '/graphql',
   cors: false,
   logging: {

@@ -29,10 +29,17 @@ export function openBrowser(url: string): void {
   console.error(url);
 
   const { command, args } = getOpenCommand(url);
+  // Detached + unref: the launcher is a one-shot helper whose lifetime must
+  // not hold the Node event loop open. Every caller here is an OAuth PKCE flow
+  // that then blocks on its own callback server, so a lingering `open`/
+  // `xdg-open` child would otherwise keep the process alive after the flow
+  // settles (or times out) until the browser itself exits.
   const child = spawn(command, args, {
     stdio: 'ignore',
     windowsHide: true,
+    detached: true,
   });
+  child.unref();
   let reported = false;
 
   // Still worth saying when the launcher itself failed: it tells the user the

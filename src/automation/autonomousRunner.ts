@@ -610,7 +610,7 @@ export class AutonomousRunner {
         this.saveTaskState();
         // Track project-level pace (5h rolling window)
         const projectName = task.linearProject?.name ?? 'unknown';
-        recordProjectCompletion(projectName, result.totalCost?.costUsd);
+        await recordProjectCompletion(projectName, result.totalCost?.costUsd);
       }
 
       // Skip completion handling when another open PR already owns the planned
@@ -626,7 +626,7 @@ export class AutonomousRunner {
           console.error('[Outbox] Completion delivery pass failed:', error));
         const durableState = this.durableRuns.getRun(task.issueId)?.state;
         if (durableState === 'DONE') {
-          recordProjectCompletion(task.linearProject?.name ?? 'unknown', result.totalCost?.costUsd);
+          await recordProjectCompletion(task.linearProject?.name ?? 'unknown', result.totalCost?.costUsd);
           console.log(`[Scheduler] Durable completion committed for ${task.issueId}`);
         } else {
           console.warn(`[Scheduler] ${task.issueId} remains ${durableState ?? 'unknown'}; not counted complete`);
@@ -2102,10 +2102,15 @@ export class AutonomousRunner {
     };
   }
 
+  private readonly kgRefreshByPath = new Map<string, Promise<unknown>>();
+
   private refreshKnowledgeGraphs(): void {
     for (const projectPath of this.config.allowedProjects) {
       const resolvedPath = normalizeProjectPath(projectPath);
-      refreshGraph(resolvedPath).then(graph => {
+      // Coalesce concurrent heartbeats: one in-flight refresh per project.
+      if (this.kgRefreshByPath.has(resolvedPath)) continue;
+
+      const flight = refreshGraph(resolvedPath).then(graph => {
         if (graph) {
           const slug = toProjectSlug(resolvedPath);
           broadcastEvent({
@@ -2113,9 +2118,17 @@ export class AutonomousRunner {
             data: { projectSlug: slug, nodeCount: graph.nodeCount, edgeCount: graph.edgeCount },
           });
         }
+        return graph;
       }).catch((e) => {
         console.error(`[AutonomousRunner] Knowledge graph refresh failed for ${resolvedPath}:`, e);
+        return null;
+      }).finally(() => {
+        if (this.kgRefreshByPath.get(resolvedPath) === flight) {
+          this.kgRefreshByPath.delete(resolvedPath);
+        }
       });
+
+      this.kgRefreshByPath.set(resolvedPath, flight);
     }
   }
 
