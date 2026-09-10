@@ -226,9 +226,22 @@ export function openQuestionFor(events, actorAddress, scope = {}) {
 }
 
 export function latestAddressable(events) {
-  const spoken = events.filter(isAgentMessage).sort((a, b) => a.seq - b.seq);
+  // `isUtterance`, not `isAgentMessage`: the latter drops every
+  // SYSTEM_EVENT_KINDS event (adapter-route, review-run, mcp-audit,
+  // council-update) before the role check runs, so a `review-run` — a real
+  // agent's own call sign from periodicReview.ts — was never addressable.
+  //
+  // `daemon` is excluded by role instead. `adapter-route` (worker.ts's
+  // recordRoute, actor `adapter-router`) and `mcp-audit` (daemonActor in
+  // runCoordination.ts / orchestratorAgent.ts, actor `openswarm-daemon`) are
+  // both stamped `actorRole: 'daemon'`; neither identity runs an agentic loop
+  // or calls `coordination_read`, so addressing either strands the operator's
+  // reply forever. (AGT-4059)
+  //
+  // Keep in sync with the CLI port in `src/cli/attachHandler.ts`.
+  const spoken = events.filter(isUtterance).sort((a, b) => a.seq - b.seq);
   for (let i = spoken.length - 1; i >= 0; i -= 1) {
-    if (spoken[i].actorRole !== 'human') return spoken[i];
+    if (spoken[i].actorRole !== 'human' && spoken[i].actorRole !== 'daemon') return spoken[i];
   }
   return null;
 }

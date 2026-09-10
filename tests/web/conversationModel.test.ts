@@ -199,6 +199,37 @@ describe('latestAddressable', () => {
       event({ actor: 'operator-dashboard', actorRole: 'human' }),
     ])).toBeNull();
   });
+
+  it('skips a trailing adapter-route event — the daemon\'s provider-fallback bookkeeping, not an agent', () => {
+    const target = latestAddressable([
+      event({ id: 'worker-spoke', seq: 1, actor: 'sable', actorRole: 'worker' }),
+      event({
+        id: 'route', seq: 2, kind: 'adapter-route', actor: 'adapter-router', actorRole: 'daemon',
+        recipient: 'sable',
+      }),
+    ]);
+    expect(target.id).toBe('worker-spoke');
+  });
+
+  it('skips a trailing mcp-audit event — the daemon\'s tool-policy bookkeeping, not an agent', () => {
+    const target = latestAddressable([
+      event({ id: 'worker-spoke', seq: 1, actor: 'sable', actorRole: 'worker' }),
+      event({
+        id: 'audit', seq: 2, kind: 'mcp-audit', actor: 'openswarm-daemon', actorRole: 'daemon',
+      }),
+    ]);
+    expect(target.id).toBe('worker-spoke');
+  });
+
+  it('still addresses a trailing review-run event — a real review agent, not daemon bookkeeping', () => {
+    const target = latestAddressable([
+      event({ id: 'worker-spoke', seq: 1, actor: 'sable', actorRole: 'worker' }),
+      event({
+        id: 'review', seq: 2, kind: 'review-run', actor: 'reviewer-eb2a', actorRole: 'review-agent',
+      }),
+    ]);
+    expect(target.id).toBe('review');
+  });
 });
 
 describe('openQuestionFor (AGT-4030)', () => {

@@ -58,10 +58,11 @@ function isUtterance(event: CoordinationEvent): boolean {
 
 /**
  * Last agent (non-human actor) to speak about this task, or null if none has
- * yet. Also excludes `actorRole: 'daemon'`: unlike the dashboard's own
- * `latestAddressable` (which only excludes `'human'`), this CLI picks a
- * recipient with no human in the loop to notice a bad pick, so it must not
- * be looser than the dashboard about it. `adapter-route`
+ * yet. Also excludes `actorRole: 'daemon'`, as the dashboard's own
+ * `latestAddressable` now does too — it used to exclude only `'human'`, and
+ * this port was deliberately stricter because the CLI picks a recipient with
+ * no human in the loop to notice a bad pick. The two now agree. (AGT-4059)
+ * `adapter-route`
  * (`src/agents/worker.ts`'s `recordRoute`, actor `adapter-router`) and
  * `mcp-audit` (`daemonActor` in `runCoordination.ts`/`orchestratorAgent.ts`,
  * actor `openswarm-daemon`) are both stamped `actorRole: 'daemon'` — neither
