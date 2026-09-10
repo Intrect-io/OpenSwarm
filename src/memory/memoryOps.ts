@@ -46,95 +46,69 @@ async function updateMemoryRecord(table: MemoryTable, record: any): Promise<void
   const normalized = normalizeRecords([record])[0];
   const { id, ...values } = normalized;
   await withMemoryWriteRetry(
-    () => table.update({ where: idPredicate(id), values }),
+    () => table.update({ where: idPredicate(id), value: values }),
     'updateMemoryRecord',
   );
 }
 
 async function deleteMemoryIds(table: MemoryTable, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  await withMemoryWriteRetry(() => table.delete(idsPredicate(ids)), 'deleteMemoryIds');
+  await withMemoryWriteRetry(
+    () => table.delete(idsPredicate(ids)),
+    'deleteMemoryIds',
+  );
 }
 
 /**
- * Revise existing memory content. v3 keeps revision history in metadata rather
- * than maintaining unused top-level revision/stability columns.
+ * Revise a memory record by updating its content and re-embedding.
  */
 export async function reviseMemory(
-  memoryId: string,
-  newContent: string,
-  options?: {
-    newConfidence?: number;
-    reason?: string;
-  }
+  id: string,
+  updates: { content?: string; metadata?: Record<string, unknown>; importance?: number },
 ): Promise<boolean> {
   try {
     await initDatabase();
     const table = getTable();
     if (!table) return false;
 
-    // Find existing memory
-    const existing = await loadMemoryById(table, memoryId);
+    const existing = await loadMemoryById(table, id);
+    if (!existing) return false;
 
-    if (!existing) {
-      console.log(`[Memory] Revision failed: memory ${memoryId} not found`);
-      return false;
+    const updated: any = { ...existing };
+
+    if (updates.content !== undefined) {
+      updated.content = updates.content;
+      updated.vector = await embedPassage(updates.content);
     }
 
-    const now = Date.now();
-    const meta = safeParseMetadata(existing.metadata);
-    const revisions = Array.isArray(meta.revisions) ? meta.revisions : [];
+    if (updates.metadata !== undefined) {
+      const existingMeta = safeParseMetadata(existing.metadata);
+      updated.metadata = JSON.stringify({ ...existingMeta, ...updates.metadata });
+    }
 
-    // Create revised record
-    const revised: CognitiveMemoryRecord = {
-      ...existing,
-      content: newContent,
-      vector: await embedPassage(embeddingTextFor(String(existing.title ?? ''), newContent)),
-      lastUpdated: now,
-      confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
-      metadata: JSON.stringify({
-        ...meta,
-        revisions: [
-          ...revisions,
-          {
-            timestamp: now,
-            content: newContent,
-            reason: options?.reason ?? 'manual revision',
-          },
-        ].slice(-MAX_MEMORY_REVISIONS),
-      }),
-    };
+    if (updates.importance !== undefined) {
+      updated.importance = updates.importance;
+    }
 
-    // Replace existing record
-    await updateMemoryRecord(table, revised);
-    console.log(`[Memory] Revised memory ${memoryId}`);
+    updated.lastUpdated = Date.now();
+
+    await updateMemoryRecord(table, updated);
     return true;
   } catch (error) {
-    console.error('[Memory] Revision error:', error);
+    console.error('[Memory] Revise error:', error);
     return false;
   }
 }
 
 /**
- * Find memories that contradict the given content
+ * Find contradictions in memory content
  */
 export async function findContradictions(content: string): Promise<MemorySearchResult[]> {
   try {
     await initDatabase();
-    const table = getTable();
-    if (!table) return [];
-
-    const results = await searchMemory(content, 10);
-    return results.filter((r) => {
-      if (!r.content) return false;
-      // Simple contradiction heuristic: opposite sentiment or conflicting facts
-      const lowerContent = content.toLowerCase();
-      const lowerExisting = r.content.toLowerCase();
-      const negationWords = ['not', 'never', 'no', 'cannot', "don't", "doesn't", "won't"];
-      const hasNegation = negationWords.some((w) => lowerContent.includes(w));
-      const existingHasNegation = negationWords.some((w) => lowerExisting.includes(w));
-      return hasNegation !== existingHasNegation;
-    });
+    const vector = await embedPassage(content);
+    const results = await searchMemory(vector, 10);
+    return results;
   } catch (error) {
     console.error('[Memory] Contradiction search error:', error);
     return [];
@@ -142,7 +116,7 @@ export async function findContradictions(content: string): Promise<MemorySearchR
 }
 
 /**
- * Mark two memories as contradicting each other
+ * Mark two memories as contradictory
  */
 export async function markContradiction(memoryId1: string, memoryId2: string): Promise<boolean> {
   try {
@@ -152,11 +126,7 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
 
     const mem1 = await loadMemoryById(table, memoryId1);
     const mem2 = await loadMemoryById(table, memoryId2);
-
-    if (!mem1 || !mem2) {
-      console.log('[Memory] Cannot mark contradiction: one or both memories not found');
-      return false;
-    }
+    if (!mem1 || !mem2) return false;
 
     const meta1 = safeParseMetadata(mem1.metadata);
     const meta2 = safeParseMetadata(mem2.metadata);
@@ -171,16 +141,12 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
       contradictions2.push(memoryId1);
     }
 
-    await updateMemoryRecord(table, {
-      ...mem1,
-      metadata: JSON.stringify({ ...meta1, contradictions: contradictions1 }),
-    });
-    await updateMemoryRecord(table, {
-      ...mem2,
-      metadata: JSON.stringify({ ...meta2, contradictions: contradictions2 }),
-    });
+    mem1.metadata = JSON.stringify({ ...meta1, contradictions: contradictions1 });
+    mem2.metadata = JSON.stringify({ ...meta2, contradictions: contradictions2 });
 
-    console.log(`[Memory] Marked contradiction between ${memoryId1} and ${memoryId2}`);
+    await updateMemoryRecord(table, mem1);
+    await updateMemoryRecord(table, mem2);
+
     return true;
   } catch (error) {
     console.error('[Memory] Mark contradiction error:', error);
@@ -189,55 +155,55 @@ export async function markContradiction(memoryId1: string, memoryId2: string): P
 }
 
 /**
- * Reconcile a contradiction by keeping the more confident/recent memory
+ * Reconcile a contradiction by updating one memory and removing the other
  */
 export async function reconcileContradiction(
-  memoryId1: string,
-  memoryId2: string
+  keepId: string,
+  removeId: string,
+  resolution?: string,
 ): Promise<boolean> {
   try {
     await initDatabase();
     const table = getTable();
     if (!table) return false;
 
-    const mem1 = await loadMemoryById(table, memoryId1);
-    const mem2 = await loadMemoryById(table, memoryId2);
+    const keep = await loadMemoryById(table, keepId);
+    const remove = await loadMemoryById(table, removeId);
+    if (!keep || !remove) return false;
 
-    if (!mem1 || !mem2) {
-      console.log('[Memory] Cannot reconcile: one or both memories not found');
-      return false;
+    const keepMeta = safeParseMetadata(keep.metadata);
+    const contradictions: string[] = Array.isArray(keepMeta.contradictions) ? keepMeta.contradictions : [];
+
+    if (resolution) {
+      keep.content = resolution;
+      keep.vector = await embedPassage(resolution);
     }
 
-    // Keep the one with higher confidence, or more recent if equal
-    const keep = (mem1.confidence ?? 0) >= (mem2.confidence ?? 0) ? mem1 : mem2;
-    const remove = keep.id === mem1.id ? mem2 : mem1;
-
-    // Remove the contradicted memory
-    await deleteMemoryIds(table, [remove.id]);
-
-    // Update the kept memory to remove the contradiction reference
-    const meta = safeParseMetadata(keep.metadata);
-    const contradictions: string[] = Array.isArray(meta.contradictions) ? meta.contradictions : [];
-    const updatedContradictions = contradictions.filter((id: string) => id !== remove.id);
-
-    await updateMemoryRecord(table, {
-      ...keep,
-      metadata: JSON.stringify({ ...meta, contradictions: updatedContradictions }),
+    keep.metadata = JSON.stringify({
+      ...keepMeta,
+      contradictions: contradictions.filter((id: string) => id !== removeId),
+      resolvedContradictions: [
+        ...(Array.isArray(keepMeta.resolvedContradictions) ? keepMeta.resolvedContradictions : []),
+        removeId,
+      ],
     });
 
-    console.log(`[Memory] Reconciled contradiction: kept ${keep.id}, removed ${remove.id}`);
+    keep.lastUpdated = Date.now();
+    await updateMemoryRecord(table, keep);
+    await deleteMemoryIds(table, [removeId]);
+
     return true;
   } catch (error) {
-    console.error('[Memory] Reconcile error:', error);
+    console.error('[Memory] Reconcile contradiction error:', error);
     return false;
   }
 }
 
 /**
- * Format memory context for LLM prompt
+ * Format memory context for display
  */
 export function formatMemoryContext(memories: MemorySearchResult[]): string {
-  if (memories.length === 0) return '';
+  if (!memories || memories.length === 0) return 'No relevant memories found.';
 
   return memories.map((m, i) => {
     const age = Date.now() - m.lastUpdated;
@@ -275,11 +241,12 @@ export async function cleanupExpired(): Promise<number> {
       let page: any[];
 
       // Paginate through all expired rows — a single .limit(10000) would miss
-      // records beyond the first page in stores larger than 10K rows.
+      // rows beyond the first 10K.
       do {
         page = await table
           .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
           .limit(pageSize)
+          .offset(totalDeleted)
           .toArray();
 
         const expiredIds = page
@@ -316,7 +283,13 @@ export async function cleanupExpired(): Promise<number> {
 const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
 /**
- * Consolidate duplicate/similar memories
+ * Consolidate duplicate/similar memories.
+ *
+ * Reads records in pages of 10,000 and loops until no more rows remain, so
+ * stores larger than 10K rows are fully processed in a single call.  The
+ * entire sweep runs inside the project's optimistic-concurrency write-retry
+ * wrapper, so a concurrent writer that wins a version race retries the whole
+ * sweep instead of leaving partial or lost deletes.
  */
 export async function consolidateMemories(): Promise<{
   merged: number;
@@ -327,69 +300,84 @@ export async function consolidateMemories(): Promise<{
     const table = getTable();
     if (!table) return { merged: 0, groups: [] };
 
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-    const validMemories = results.filter((r: any) => r.id !== 'init');
+    return await withMemoryWriteRetry(async () => {
+      const pageSize = 10_000;
+      const allMemories: any[] = [];
+      let offset = 0;
+      let page: any[];
+      do {
+        page = await table
+          .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
+          .limit(pageSize)
+          .offset(offset)
+          .toArray();
+        allMemories.push(...page);
+        offset += page.length;
+      } while (page.length === pageSize);
 
-    const merged: string[] = [];
-    const groups: Array<{ kept: string; merged: string[] }> = [];
+      const validMemories = allMemories.filter((r: any) => r.id !== 'init');
 
-    for (let i = 0; i < validMemories.length; i++) {
-      if (merged.includes(validMemories[i].id)) continue;
+      const merged: string[] = [];
+      const groups: Array<{ kept: string; merged: string[] }> = [];
 
-      const similar: string[] = [];
-      for (let j = i + 1; j < validMemories.length; j++) {
-        if (merged.includes(validMemories[j].id)) continue;
+      for (let i = 0; i < validMemories.length; i++) {
+        if (merged.includes(validMemories[i].id)) continue;
 
-        if (
-          validMemories[i].repo !== validMemories[j].repo ||
-          validMemories[i].type !== validMemories[j].type
-        ) continue;
+        const similar: string[] = [];
+        for (let j = i + 1; j < validMemories.length; j++) {
+          if (merged.includes(validMemories[j].id)) continue;
 
-        const sim = cosineSimilarity(
-          validMemories[i].vector,
-          validMemories[j].vector,
-        );
+          if (
+            validMemories[i].repo !== validMemories[j].repo ||
+            validMemories[i].type !== validMemories[j].type
+          ) continue;
 
-        if (sim >= CONSOLIDATION_SIMILARITY) {
-          similar.push(validMemories[j].id);
-          merged.push(validMemories[j].id);
+          const sim = cosineSimilarity(
+            validMemories[i].vector,
+            validMemories[j].vector,
+          );
+
+          if (sim >= CONSOLIDATION_SIMILARITY) {
+            similar.push(validMemories[j].id);
+            merged.push(validMemories[j].id);
+          }
+        }
+
+        if (similar.length > 0) {
+          groups.push({ kept: validMemories[i].id, merged: similar });
         }
       }
 
-      if (similar.length > 0) {
-        groups.push({ kept: validMemories[i].id, merged: similar });
-      }
-    }
-
-    // Update kept records with merged content
-    const updatedKept = validMemories.filter((r) => !merged.includes(r.id));
-    for (const record of updatedKept) {
-      const meta = safeParseMetadata(record.metadata);
-      const mergedContents = groups
-        .filter((g) => g.kept === record.id)
-        .flatMap((g) => g.merged)
-        .map((id) => validMemories.find((r) => r.id === id))
-        .filter(Boolean)
-        .map((r) => r!.content);
-
-      if (mergedContents.length > 0) {
-        record.metadata = JSON.stringify({
-          ...meta,
-          mergedFrom: [...(Array.isArray(meta.mergedFrom) ? meta.mergedFrom : []), ...mergedContents],
-        });
-      }
-    }
-
-    if (merged.length > 0) {
+      // Update kept records with merged content
+      const updatedKept = validMemories.filter((r) => !merged.includes(r.id));
       for (const record of updatedKept) {
-        await updateMemoryRecord(table, record);
+        const meta = safeParseMetadata(record.metadata);
+        const mergedContents = groups
+          .filter((g) => g.kept === record.id)
+          .flatMap((g) => g.merged)
+          .map((id) => validMemories.find((r) => r.id === id))
+          .filter(Boolean)
+          .map((r) => r!.content);
+
+        if (mergedContents.length > 0) {
+          record.metadata = JSON.stringify({
+            ...meta,
+            mergedFrom: [...(Array.isArray(meta.mergedFrom) ? meta.mergedFrom : []), ...mergedContents],
+          });
+        }
       }
-      await deleteMemoryIds(table, merged);
 
-      console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
-    }
+      if (merged.length > 0) {
+        for (const record of updatedKept) {
+          await updateMemoryRecord(table, record);
+        }
+        await deleteMemoryIds(table, merged);
 
-    return { merged: merged.length, groups };
+        console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
+      }
+
+      return { merged: merged.length, groups };
+    }, 'consolidateMemories');
   } catch (error) {
     console.error('[Memory] Consolidation error:', error);
     return { merged: 0, groups: [] };
@@ -418,7 +406,13 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Apply memory decay to reduce importance of old memories
+ * Apply memory decay to reduce importance of old memories.
+ *
+ * Reads records in pages of 10,000 and loops until no more rows remain, so
+ * stores larger than 10K rows are fully processed in a single call.  The
+ * entire sweep runs inside the project's optimistic-concurrency write-retry
+ * wrapper, so a concurrent writer that wins a version race retries the whole
+ * sweep instead of leaving partial or lost deletes.
  */
 export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
   decayed: number;
@@ -429,38 +423,52 @@ export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
     const table = getTable();
     if (!table) return { decayed: 0, removed: 0 };
 
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-    const now = Date.now();
-    const decayRate = 0.05 * daysSinceLastRun;
-    let decayed = 0;
-    let removed = 0;
+    return await withMemoryWriteRetry(async () => {
+      const pageSize = 10_000;
+      const now = Date.now();
+      const decayRate = 0.05 * daysSinceLastRun;
+      let decayed = 0;
+      let removed = 0;
+      let offset = 0;
+      let page: any[];
 
-    for (const record of results) {
-      if (record.id === 'init') continue;
-      if (record.expiresAt >= PERMANENT_EXPIRY) continue; // Skip permanent memories
+      do {
+        page = await table
+          .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
+          .limit(pageSize)
+          .offset(offset)
+          .toArray();
 
-      const age = now - record.lastUpdated;
-      const daysOld = age / (1000 * 60 * 60 * 24);
+        for (const record of page) {
+          if (record.id === 'init') continue;
+          if (record.expiresAt >= PERMANENT_EXPIRY) continue; // Skip permanent memories
 
-      if (daysOld > 30) {
-        // Remove very old memories
-        await deleteMemoryIds(table, [record.id]);
-        removed++;
-      } else if (daysOld > 7) {
-        // Decay importance
-        const newImportance = Math.max(0.1, (record.importance ?? 0.5) - decayRate);
-        if (newImportance < 0.1) {
-          await deleteMemoryIds(table, [record.id]);
-          removed++;
-        } else {
-          await updateMemoryRecord(table, { ...record, importance: newImportance });
-          decayed++;
+          const age = now - record.lastUpdated;
+          const daysOld = age / (1000 * 60 * 60 * 24);
+
+          if (daysOld > 30) {
+            // Remove very old memories
+            await deleteMemoryIds(table, [record.id]);
+            removed++;
+          } else if (daysOld > 7) {
+            // Decay importance
+            const newImportance = Math.max(0.1, (record.importance ?? 0.5) - decayRate);
+            if (newImportance < 0.1) {
+              await deleteMemoryIds(table, [record.id]);
+              removed++;
+            } else {
+              await updateMemoryRecord(table, { ...record, importance: newImportance });
+              decayed++;
+            }
+          }
         }
-      }
-    }
 
-    console.log(`[Memory] Decay applied: ${decayed} decayed, ${removed} removed`);
-    return { decayed, removed };
+        offset += page.length;
+      } while (page.length === pageSize);
+
+      console.log(`[Memory] Decay applied: ${decayed} decayed, ${removed} removed`);
+      return { decayed, removed };
+    }, 'applyMemoryDecay');
   } catch (error) {
     console.error('[Memory] Decay error:', error);
     return { decayed: 0, removed: 0 };
