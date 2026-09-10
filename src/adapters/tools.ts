@@ -6,7 +6,8 @@
 // ============================================
 
 import fs from 'node:fs/promises';
-import { existsSync, realpathSync } from 'node:fs';
+import { createReadStream, existsSync, realpathSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
@@ -336,6 +337,11 @@ function isCommandBlocked(command: string): boolean {
   // Checked against both forms: quoting can hide a mid-word splice from the
   // raw text (`r"$(true)"m`) until the quotes are stripped away.
   if (hasMidWordSubstitution(command) || hasMidWordSubstitution(normalized)) return true;
+  // Process-substitution payloads are still part of the command string, so
+  // blocked verbs inside `<(...)` / `>(...)` match BLOCKED_COMMANDS after
+  // normalizeForGuard (including printf/ANSI-C escapes). Mid-word gluing of
+  // those spans is rejected above; bare `>(cat …)` is intentionally not a
+  // deny-list hit — cat is outside the destructive-command contract.
   return BLOCKED_COMMANDS.some(pattern => pattern.test(command) || pattern.test(normalized));
 }
 
@@ -369,9 +375,80 @@ export interface ToolResult {
  * key once MAX_READ_CACHE_ENTRIES is exceeded.
  */
 const MAX_READ_CACHE_ENTRIES = 64;
+/** Cap bytes scanned from disk so a multi-GB file cannot inflate process memory. */
+const MAX_READ_SOURCE_BYTES = 2 * 1024 * 1024;
+/** Cap tool-result payload returned into agent context. */
+const MAX_READ_OUTPUT_BYTES = 256 * 1024;
+/** Cap a single source line so one huge line cannot defeat the line/limit budget. */
+const MAX_READ_LINE_CHARS = 16_384;
 
 export interface ReadCache {
   store: Map<string, string>;
+}
+
+/**
+ * Stream a line range from disk without retaining the whole file. Stops once
+ * the selected range is filled, the source-byte budget is exhausted, or the
+ * rendered output would exceed MAX_READ_OUTPUT_BYTES.
+ */
+async function readFileRangeBounded(
+  filePath: string,
+  offset: number,
+  limit: number,
+): Promise<{ content: string; notes: string[] }> {
+  const start = Math.max(0, Math.floor(Number(offset) || 0));
+  const maxLines = Math.max(1, Math.min(Math.floor(Number(limit) || 500), 2000));
+  const notes: string[] = [];
+  const out: string[] = [];
+  let outputBytes = 0;
+  let sourceBytes = 0;
+  let lineIdx = 0;
+  let rangeFilled = false;
+
+  const rl = createInterface({
+    input: createReadStream(filePath, { encoding: 'utf8', highWaterMark: 64 * 1024 }),
+    crlfDelay: Infinity,
+  });
+
+  try {
+    for await (const rawLine of rl) {
+      if (rangeFilled) {
+        notes.push('more lines available — raise offset to continue');
+        break;
+      }
+
+      const lineBytes = Buffer.byteLength(rawLine, 'utf8') + 1;
+      sourceBytes += lineBytes;
+      if (sourceBytes > MAX_READ_SOURCE_BYTES) {
+        notes.push(`source truncated after ~${MAX_READ_SOURCE_BYTES} bytes`);
+        break;
+      }
+
+      if (lineIdx >= start && out.length < maxLines) {
+        const display = rawLine.length > MAX_READ_LINE_CHARS
+          ? `${rawLine.slice(0, MAX_READ_LINE_CHARS)}…`
+          : rawLine;
+        const numbered = `${lineIdx + 1}\t${display}`;
+        const numberedBytes = Buffer.byteLength(numbered, 'utf8') + 1;
+        if (outputBytes + numberedBytes > MAX_READ_OUTPUT_BYTES) {
+          notes.push(`output truncated at ${MAX_READ_OUTPUT_BYTES} bytes`);
+          break;
+        }
+        out.push(numbered);
+        outputBytes += numberedBytes;
+      }
+
+      lineIdx++;
+      if (lineIdx >= start + maxLines) rangeFilled = true;
+    }
+  } finally {
+    rl.close();
+  }
+
+  return {
+    content: out.join('\n'),
+    notes,
+  };
 }
 
 export function createReadCache(): ReadCache {
@@ -661,14 +738,9 @@ export async function executeTool(
           };
         }
 
-        const content = await fs.readFile(filePath, 'utf-8');
-        const lines = content.split('\n');
-        const slice = lines.slice(offset, offset + limit);
-        const numbered = slice.map((line, i) => `${offset + i + 1}\t${line}`).join('\n');
-        const truncated = lines.length > offset + limit
-          ? `\n... (${lines.length - offset - limit} more lines)`
-          : '';
-        const result = numbered + truncated;
+        const { content, notes } = await readFileRangeBounded(filePath, offset, limit);
+        const suffix = notes.length ? `\n... (${notes.join('; ')})` : '';
+        const result = content + suffix;
         if (cache) cacheSet(cache, cacheKey, result);
         return { tool_call_id: callId, content: result, is_error: false };
       }

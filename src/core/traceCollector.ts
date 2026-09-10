@@ -9,6 +9,73 @@ import { randomUUID } from 'node:crypto';
 
 export type SpanStatus = 'running' | 'completed' | 'failed';
 
+const MAX_TRACE_NAME_CHARS = 256;
+const MAX_TRACE_METADATA_BYTES = 8 * 1024;
+const MAX_TRACE_METADATA_KEYS = 32;
+const MAX_TRACE_METADATA_DEPTH = 4;
+const MAX_ERROR_MESSAGE_CHARS = 2_048;
+const MAX_ERROR_STACK_CHARS = 4_096;
+
+function boundName(name: string): string {
+  const label = typeof name === 'string' && name.length > 0 ? name : 'unnamed';
+  return label.length > MAX_TRACE_NAME_CHARS
+    ? `${label.slice(0, MAX_TRACE_NAME_CHARS)}…`
+    : label;
+}
+
+function boundMetadata(value: unknown, depth = 0): unknown {
+  if (depth >= MAX_TRACE_METADATA_DEPTH) return '[max-depth]';
+  if (value == null) return value;
+  if (typeof value === 'string') {
+    return value.length > 1_024 ? `${value.slice(0, 1_024)}…` : value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    return value.slice(0, 32).map((item) => boundMetadata(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    let keys = 0;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (keys >= MAX_TRACE_METADATA_KEYS) break;
+      const safeKey = key.length > 128 ? `${key.slice(0, 128)}…` : key;
+      out[safeKey] = boundMetadata(child, depth + 1);
+      keys++;
+    }
+    return out;
+  }
+  return String(value).slice(0, 256);
+}
+
+function retainMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const bounded = boundMetadata(metadata) as Record<string, unknown>;
+  const encoded = JSON.stringify(bounded);
+  if (Buffer.byteLength(encoded, 'utf8') <= MAX_TRACE_METADATA_BYTES) return bounded;
+  return { truncated: true, preview: encoded.slice(0, 512) };
+}
+
+function boundErrorInfo(error: { message: string; stack?: string; code?: string }): {
+  message: string;
+  stack?: string;
+  code?: string;
+} {
+  return {
+    message: typeof error.message === 'string'
+      ? (error.message.length > MAX_ERROR_MESSAGE_CHARS
+        ? `${error.message.slice(0, MAX_ERROR_MESSAGE_CHARS)}…`
+        : error.message)
+      : 'error',
+    ...(typeof error.stack === 'string'
+      ? {
+          stack: error.stack.length > MAX_ERROR_STACK_CHARS
+            ? `${error.stack.slice(0, MAX_ERROR_STACK_CHARS)}…`
+            : error.stack,
+        }
+      : {}),
+    ...(typeof error.code === 'string' ? { code: error.code.slice(0, 64) } : {}),
+  };
+}
+
 /**
  * 개별 작업 단위 (도구 호출, 에이전트 실행 등)
  */
@@ -95,11 +162,11 @@ export class TraceCollector {
     const traceId = randomUUID();
     const trace: Trace = {
       traceId,
-      name,
+      name: boundName(name),
       startTime: Date.now(),
       status: 'running',
       spans: [],
-      metadata,
+      metadata: retainMetadata(metadata),
     };
     this.traces.set(traceId, trace);
     return traceId;
@@ -150,10 +217,10 @@ export class TraceCollector {
       spanId,
       traceId,
       parentSpanId,
-      name,
+      name: boundName(name),
       status: 'running',
       startTime: Date.now(),
-      metadata,
+      metadata: retainMetadata(metadata),
     };
     trace.spans.push(span);
     return spanId;
@@ -190,7 +257,7 @@ export class TraceCollector {
     const span = trace.spans.find((s) => s.spanId === spanId);
     if (!span) return false;
 
-    span.errorInfo = error;
+    span.errorInfo = boundErrorInfo(error);
     span.status = 'failed';
     span.endTime = span.endTime ?? Date.now();
     return true;

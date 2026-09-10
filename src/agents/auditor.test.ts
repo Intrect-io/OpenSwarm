@@ -3,10 +3,22 @@
 // Test Status: Complete
 
 import { describe, it, expect } from 'vitest';
-import { formatAuditReport, type AuditorOptions, type AuditorResult } from './auditor.js';
+import { formatAuditReport, parseAuditorOutput, type AuditorOptions, type AuditorResult } from './auditor.js';
 import type { WorkerResult } from './agentPair.js';
 
 describe('auditor', () => {
+  describe('parseAuditorOutput string-guard', () => {
+    it('ignores non-string result payloads instead of throwing on .match', () => {
+      const output = [
+        JSON.stringify({ type: 'result', result: { success: true, nested: true } }),
+        JSON.stringify({ type: 'result', result: '```json\n{"success":true,"bsScore":1,"criticalCount":0,"warningCount":0,"minorCount":0,"issues":[],"summary":"ok"}\n```' }),
+      ].join('\n');
+      const parsed = parseAuditorOutput(output);
+      expect(parsed.success).toBe(true);
+      expect(parsed.summary).toBe('ok');
+    });
+  });
+
   describe('formatAuditReport', () => {
     it('should format successful audit result', () => {
       const result: AuditorResult = {

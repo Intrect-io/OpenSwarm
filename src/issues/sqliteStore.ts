@@ -440,7 +440,13 @@ export class SqliteIssueStore implements IIssueStore {
       }
 
       if (patch.status !== undefined) {
-        this.applyStatusChange(id, existing.status, patch.status, 'system');
+        // Read the live status inside the write transaction so concurrent
+        // updaters do not each stamp the same pre-txn oldValue onto the event log.
+        const row = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+          | { status: IssueStatus }
+          | undefined;
+        if (!row) return;
+        this.applyStatusChange(id, row.status, patch.status, 'system');
       }
     });
 
@@ -532,11 +538,14 @@ export class SqliteIssueStore implements IIssueStore {
   // ============ 상태 전이 ============
 
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null {
-    const existing = this.getIssue(id);
-    if (!existing) return null;
-
-    this.applyStatusChange(id, existing.status, status, actor ?? 'system');
-    return this.getIssue(id);
+    return this.db.transaction(() => {
+      const row = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+        | { status: IssueStatus }
+        | undefined;
+      if (!row) return null;
+      this.applyStatusChange(id, row.status, status, actor ?? 'system');
+      return this.getIssue(id);
+    })();
   }
 
   private applyStatusChange(id: string, oldStatus: IssueStatus, status: IssueStatus, actor: string): void {

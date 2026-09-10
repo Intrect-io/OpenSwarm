@@ -298,6 +298,24 @@ describe('SmartStreamBuffer', () => {
     expect(stdout.split('\n').filter((line) => JSON.parse(line).type === 'result')).toHaveLength(8);
   });
 
+  it('caps a single oversized result event rather than retaining it verbatim', () => {
+    const buf = new SmartStreamBuffer();
+    const huge = 'H'.repeat(200_000);
+    buf.processChunk(ndjson({
+      type: 'result',
+      result: huge,
+      total_cost_usd: 0.01,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+    const stdout = buf.buildFilteredStdout();
+    expect(Buffer.byteLength(stdout, 'utf8')).toBeLessThanOrEqual(64 * 1024 + 64);
+    const parsed = JSON.parse(stdout.trim());
+    expect(parsed.type).toBe('result');
+    expect(parsed.total_cost_usd).toBe(0.01);
+    expect(String(parsed.result).length).toBeLessThan(huge.length);
+    expect(String(parsed.result)).toContain('[truncated]');
+  });
+
   it('handles non-JSON lines gracefully', () => {
     const buf = new SmartStreamBuffer();
     buf.processChunk('this is not json\n');

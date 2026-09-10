@@ -116,7 +116,8 @@ export async function runAuditor(options: AuditorOptions): Promise<AuditorResult
 
 // Output Parsing
 
-function parseAuditorOutput(output: string): AuditorResult {
+/** @internal exported for unit tests — NDJSON result payload must be a string. */
+export function parseAuditorOutput(output: string): AuditorResult {
   try {
     const costInfo = extractCostFromStreamJson(output);
     if (costInfo) {
@@ -128,11 +129,16 @@ function parseAuditorOutput(output: string): AuditorResult {
     for (const line of output.split('\n')) {
       try {
         const event = JSON.parse(line.trim());
-        if (event.type === 'result' && event.result) {
+        if (event.type === 'result' && typeof event.result === 'string' && event.result) {
           resultText = event.result;
           break;
         }
-        if (event.type === 'item.completed' && event.item?.type === 'agent_message' && event.item.text) {
+        if (
+          event.type === 'item.completed'
+          && event.item?.type === 'agent_message'
+          && typeof event.item.text === 'string'
+          && event.item.text
+        ) {
           resultText = event.item.text;
         }
       } catch { /* skip non-JSON lines */ }

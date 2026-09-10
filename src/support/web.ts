@@ -28,8 +28,8 @@ import * as memory from '../memory/index.js';
 import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
-import { detectTailscaleIP, isLoopbackAddress, isTailscaleAddress } from './tailscaleNetwork.js';
-export { detectTailscaleIP, isTailscaleAddress } from './tailscaleNetwork.js';
+import { detectTailscaleIP, isLoopbackAddress, isAuthorizedTailscaleRemote } from './tailscaleNetwork.js';
+export { detectTailscaleIP, isAuthorizedTailscaleRemote, isTailscaleAddress } from './tailscaleNetwork.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
@@ -60,11 +60,12 @@ function isAllowedOrigin(origin: string): boolean {
   if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
   if (hostname === 'tauri.localhost') return true;
 
-  // Tailscale CGNAT range: 100.64.0.0/10 → first octet 100, second 64–127
+  // Tailscale CGNAT range: 100.64.0.0/10 → first octet 100, second 64–127.
+  // Only allow when this host is on Tailscale — CGNAT is shared RFC 6598 space.
   const tailscaleMatch = hostname.match(/^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
   if (tailscaleMatch) {
     const second = Number(tailscaleMatch[1]);
-    if (second >= 64 && second <= 127) return true;
+    if (second >= 64 && second <= 127 && detectTailscaleIP()) return true;
   }
   return false;
 }
@@ -85,7 +86,7 @@ function safeErrorMessage(err: unknown): string {
 
 function isTrustedTailscaleRequest(req: IncomingMessage): boolean {
   return process.env.OPENSWARM_TRUST_TAILSCALE === 'true'
-    && isTailscaleAddress(req.socket.remoteAddress)
+    && isAuthorizedTailscaleRemote(req.socket.remoteAddress)
     && isTrustedLocalOrigin(req);
 }
 

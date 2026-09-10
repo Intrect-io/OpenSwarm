@@ -6,6 +6,8 @@ import {
   scheduleTaskLogCleanup,
   TASK_LOG_MAX_BUFFERS,
   TASK_LOG_MAX_LINE_CHARS,
+  TASK_LOG_MAX_STAGE_CHARS,
+  TASK_LOG_MAX_TASK_ID_CHARS,
   TASK_LOG_RETENTION_MS,
   TASK_LOG_RING_SIZE,
   __resetTaskLogsForTests,
@@ -74,6 +76,17 @@ describe('taskLogStore', () => {
     appendTaskLog('t1', 'worker', 'x'.repeat(TASK_LOG_MAX_LINE_CHARS + 50));
     const snapshot = getTaskLog('t1')!;
     expect(snapshot.lines[0].line.length).toBe(TASK_LOG_MAX_LINE_CHARS + 1); // +ellipsis
+    expect(snapshot.truncated).toBe(true);
+  });
+
+  it('bounds oversized stage and task-id fields', () => {
+    const longStage = 's'.repeat(TASK_LOG_MAX_STAGE_CHARS + 40);
+    const longId = 'i'.repeat(TASK_LOG_MAX_TASK_ID_CHARS + 40);
+    appendTaskLog(longId, longStage, 'ok');
+    const snapshot = getTaskLog(longId)!;
+    expect(snapshot).not.toBeNull();
+    expect(snapshot.taskId.length).toBe(TASK_LOG_MAX_TASK_ID_CHARS + 1);
+    expect(snapshot.lines[0].stage.length).toBe(TASK_LOG_MAX_STAGE_CHARS + 1);
     expect(snapshot.truncated).toBe(true);
   });
 

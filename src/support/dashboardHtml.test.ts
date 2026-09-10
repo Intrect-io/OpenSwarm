@@ -35,6 +35,17 @@ describe('stage row escaping (AGT-3476)', () => {
     expect(html).toContain('"<div class=\\"sstatus\\">" + escapeHtml(r.status || "") + "</div>"');
   });
 
+  it('escapes knowledge-graph hot module names before innerHTML insert', () => {
+    expect(html).toContain('escapeHtml(m.split("/").pop() || "")');
+    expect(html).not.toContain('map(function(m){return m.split("/").pop()})');
+  });
+
+  it('allowlists pipeline decision values before using them as CSS classes', () => {
+    expect(html).toContain('/^(approve|revise|reject)$/i.test');
+    expect(html).toContain('sd-decision-" + safe');
+    expect(html).not.toContain('sd-decision-" + r.decision');
+  });
+
   it('leaves no unescaped status interpolation behind', () => {
     // The exact shape the fix replaced. Catches a partial revert of either site.
     expect(html).not.toContain('"sdot " + (r.status || "")');

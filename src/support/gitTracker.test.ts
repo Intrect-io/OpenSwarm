@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -210,5 +210,14 @@ describe('gitTracker', () => {
         rmSync(notGit, { recursive: true, force: true });
       }
     });
+  });
+
+  it('decodes git subprocess output with a streaming TextDecoder', async () => {
+    // Source pin: Buffer#toString() on each chunk corrupts multi-byte UTF-8
+    // sequences split across stream events.
+    const source = readFileSync(new URL('./gitTracker.ts', import.meta.url), 'utf-8');
+    expect(source).toContain("new TextDecoder('utf8')");
+    expect(source).toContain('decode(data, { stream: true })');
+    expect(source).not.toMatch(/stdout \+= data\.toString\(\)/);
   });
 });

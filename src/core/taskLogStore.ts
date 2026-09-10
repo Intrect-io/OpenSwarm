@@ -10,9 +10,10 @@
 // Deliberately import-free: eventHub imports this module, and route modules
 // import both — any import from here would be a cycle waiting to happen.
 //
-// Memory bound is threefold: per-line truncation x per-task ring x LRU buffer
-// cap. Worst case 24 x 1000 x (~400 UTF-16 chars + object overhead) ≈ 22 MB;
-// observed agent lines average ~80 chars, so typical usage is 1–3 MB.
+// Memory bound is fourfold: per-line truncation x per-stage/id caps x per-task
+// ring x LRU buffer cap. Worst case 24 x 1000 x (~400+64 UTF-16 chars + object
+// overhead) ≈ 22 MB; observed agent lines average ~80 chars, so typical usage
+// is 1–3 MB.
 
 export interface TaskLogLine {
   stage: string;
@@ -36,6 +37,10 @@ export interface TaskLogSnapshot {
 
 export const TASK_LOG_RING_SIZE = 1000;
 export const TASK_LOG_MAX_LINE_CHARS = 400;
+/** Stage labels are retained on every ring entry — bound them like line text. */
+export const TASK_LOG_MAX_STAGE_CHARS = 64;
+/** Task ids are Map keys; an unbounded caller-supplied id would defeat the ~22 MB bound. */
+export const TASK_LOG_MAX_TASK_ID_CHARS = 128;
 export const TASK_LOG_MAX_BUFFERS = 24;
 export const TASK_LOG_RETENTION_MS = 10 * 60_000;
 
@@ -72,20 +77,35 @@ function evictIfNeeded(): void {
   }
 }
 
+function boundTaskId(taskId: string): string {
+  return taskId.length > TASK_LOG_MAX_TASK_ID_CHARS
+    ? `${taskId.slice(0, TASK_LOG_MAX_TASK_ID_CHARS)}…`
+    : taskId;
+}
+
+function boundStage(stage: string): string {
+  const label = typeof stage === 'string' && stage.length > 0 ? stage : 'unknown';
+  return label.length > TASK_LOG_MAX_STAGE_CHARS
+    ? `${label.slice(0, TASK_LOG_MAX_STAGE_CHARS)}…`
+    : label;
+}
+
 /** Returns the sequence assigned to the line (0 when nothing was stored). */
 export function appendTaskLog(taskId: string, stage: string, line: string, now = Date.now()): number {
   if (!taskId || typeof line !== 'string') return 0;
-  let buffer = buffers.get(taskId);
+  const id = boundTaskId(taskId);
+  const boundedStage = boundStage(stage);
+  let buffer = buffers.get(id);
   if (!buffer) {
     evictIfNeeded();
     buffer = { lines: [], truncated: false, completed: false, lastAppendAt: now };
-    buffers.set(taskId, buffer);
+    buffers.set(id, buffer);
   } else {
     // Refresh LRU position and mark live again — a task id that logs after
     // completion (retry reusing the id) must not be reaped by a stale timer.
-    buffers.delete(taskId);
-    buffers.set(taskId, buffer);
-    cancelTaskLogCleanup(taskId);
+    buffers.delete(id);
+    buffers.set(id, buffer);
+    cancelTaskLogCleanup(id);
     buffer.lastAppendAt = now;
   }
 
@@ -94,8 +114,11 @@ export function appendTaskLog(taskId: string, stage: string, line: string, now =
     text = `${text.slice(0, TASK_LOG_MAX_LINE_CHARS)}…`;
     buffer.truncated = true;
   }
+  if (id !== taskId || boundedStage !== (typeof stage === 'string' ? stage : 'unknown')) {
+    buffer.truncated = true;
+  }
   const seq = nextSeq++;
-  buffer.lines.push({ stage, line: text, ts: now, seq });
+  buffer.lines.push({ stage: boundedStage, line: text, ts: now, seq });
   if (buffer.lines.length > TASK_LOG_RING_SIZE) {
     buffer.lines.shift();
     buffer.truncated = true;
@@ -105,38 +128,41 @@ export function appendTaskLog(taskId: string, stage: string, line: string, now =
 
 /** Snapshot copy (safe to serialize while appends continue). Null → 404. */
 export function getTaskLog(taskId: string): TaskLogSnapshot | null {
-  const buffer = buffers.get(taskId);
+  const id = boundTaskId(taskId);
+  const buffer = buffers.get(id);
   if (!buffer) return null;
-  return { taskId, lines: buffer.lines.slice(), truncated: buffer.truncated };
+  return { taskId: id, lines: buffer.lines.slice(), truncated: buffer.truncated };
 }
 
 /** Called on task:completed — keep the transcript readable for a grace window. */
 export function scheduleTaskLogCleanup(taskId: string, delayMs = TASK_LOG_RETENTION_MS): void {
-  const buffer = buffers.get(taskId);
+  const id = boundTaskId(taskId);
+  const buffer = buffers.get(id);
   if (!buffer) return;
   // Replace any prior timer directly — cancelTaskLogCleanup would also clear
   // the completed flag this function is about to set.
-  const prior = cleanupTimers.get(taskId);
+  const prior = cleanupTimers.get(id);
   if (prior) clearTimeout(prior);
   buffer.completed = true;
   const timer = setTimeout(() => {
-    cleanupTimers.delete(taskId);
+    cleanupTimers.delete(id);
     // The completed flag is cleared whenever the task id came back to life —
     // never delete a buffer that has gone live again.
-    if (buffers.get(taskId)?.completed) buffers.delete(taskId);
+    if (buffers.get(id)?.completed) buffers.delete(id);
   }, delayMs);
   timer.unref?.();
-  cleanupTimers.set(taskId, timer);
+  cleanupTimers.set(id, timer);
 }
 
 /** Called on task:started / new log lines — the task id is live (again). */
 export function cancelTaskLogCleanup(taskId: string): void {
-  const timer = cleanupTimers.get(taskId);
+  const id = boundTaskId(taskId);
+  const timer = cleanupTimers.get(id);
   if (timer) {
     clearTimeout(timer);
-    cleanupTimers.delete(taskId);
+    cleanupTimers.delete(id);
   }
-  const buffer = buffers.get(taskId);
+  const buffer = buffers.get(id);
   if (buffer) buffer.completed = false;
 }
 

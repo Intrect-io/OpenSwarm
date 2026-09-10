@@ -181,6 +181,16 @@ export async function handleCheck(
         }
       }
 
+      if (!result.scanComplete) {
+        console.log(`\n  ${c.yellow('Scan incomplete')} — depth/size/timeout limits excluded some sources.`);
+        for (const path of result.skippedPaths.slice(0, 10)) {
+          console.log(`    ${c.dim(path)}`);
+        }
+        if (result.skippedPaths.length > 10) {
+          console.log(`    ${c.dim(`...and ${result.skippedPaths.length - 10} more`)}`);
+        }
+      }
+
       // 스캔 후 통계 표시
       const stats = store.getStats(projectId);
       console.log(`\n${c.bold('Registry Status')}`);

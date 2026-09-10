@@ -139,7 +139,10 @@ export async function enrichWithGitInfo(
 }
 
 /**
- * List of recently changed files (for incremental update trigger)
+ * List of recently changed files (for incremental update trigger).
+ * Includes commits since `sinceTimestamp`, plus staged/unstaged tracked
+ * changes and untracked source paths — otherwise a brand-new file that has
+ * never been committed never refreshes the knowledge graph.
  */
 export async function getRecentlyChangedFiles(
   projectPath: string,
@@ -147,17 +150,43 @@ export async function getRecentlyChangedFiles(
 ): Promise<string[]> {
   try {
     const sinceDate = new Date(sinceTimestamp).toISOString();
-    const output = await runGitCommand(projectPath, [
+    const files = new Set<string>();
+    const absorb = (output: string): void => {
+      for (const line of output.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) files.add(trimmed);
+      }
+    };
+
+    absorb(await runGitCommand(projectPath, [
       'log',
       `--since=${sinceDate}`,
       '--name-only',
       '--format=',
-    ]);
+    ]));
 
-    const files = new Set<string>();
-    for (const line of output.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) files.add(trimmed);
+    // Tracked working-tree / index changes (may predate or postdate last scan).
+    for (const args of [
+      ['diff', '--name-only', 'HEAD'],
+      ['diff', '--name-only', '--cached'],
+    ] as string[][]) {
+      try {
+        absorb(await runGitCommand(projectPath, args));
+      } catch {
+        /* empty tree / no HEAD — skip */
+      }
+    }
+
+    // Untracked files: a newly created src/foo.ts is invisible to git log/diff
+    // until `git add`, which left refreshGraph returning a stale cached graph.
+    try {
+      absorb(await runGitCommand(projectPath, [
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+      ]));
+    } catch {
+      /* ignore */
     }
 
     return Array.from(files);

@@ -36,6 +36,15 @@ describe('TraceCollector', () => {
       expect(trace!.metadata.issueId).toBe('INT-100');
     });
 
+    it('oversized names and metadata are bounded before retention', () => {
+      const hugeName = 'n'.repeat(10_000);
+      const hugeMeta = { blob: 'x'.repeat(100_000), nested: { deep: 'y'.repeat(5_000) } };
+      const traceId = collector.startTrace(hugeName, hugeMeta);
+      const trace = collector.getTrace(traceId)!;
+      expect(trace.name.length).toBeLessThanOrEqual(257);
+      expect(JSON.stringify(trace.metadata).length).toBeLessThan(20_000);
+    });
+
     it('trace를 종료하면 completed 상태가 되어야 한다', () => {
       const traceId = collector.startTrace('test-session');
       const trace = collector.endTrace(traceId);

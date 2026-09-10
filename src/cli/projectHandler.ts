@@ -48,8 +48,18 @@ export function loadRepos(file: string = REPOS_FILE): ReposConfig {
     };
   } catch (error) {
     const recoveryPath = `${file}.corrupt-${Date.now()}`;
-    try { renameSync(file, recoveryPath); } catch { /* preserve original error below */ }
-    throw new Error(`Repository registry is malformed at ${file}; preserved as ${recoveryPath}: ${error instanceof Error ? error.message : String(error)}`);
+    let quarantined = false;
+    try {
+      renameSync(file, recoveryPath);
+      quarantined = true;
+    } catch { /* leave original in place; report accurately below */ }
+    const detail = error instanceof Error ? error.message : String(error);
+    if (quarantined) {
+      throw new Error(`Repository registry is malformed at ${file}; preserved as ${recoveryPath}: ${detail}`);
+    }
+    throw new Error(
+      `Repository registry is malformed at ${file}; quarantine to ${recoveryPath} failed — original left in place: ${detail}`,
+    );
   }
 }
 

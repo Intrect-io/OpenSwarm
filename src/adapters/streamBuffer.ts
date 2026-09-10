@@ -16,12 +16,51 @@ const MAX_RESULT_EVENTS = 8;
 const MAX_TEXT_FRAGMENTS = 256;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_LINE_BUFFER_BYTES = 1024 * 1024;
+/** Per result-event NDJSON line — without this, eight unbounded results defeat the event-count cap. */
+const MAX_RESULT_EVENT_BYTES = 64 * 1024;
+
+/**
+ * Rebuild a result event under a byte budget, preferring to keep cost/usage
+ * fields and truncating the free-form `result` / text payload.
+ */
+function truncateResultEventLine(
+  line: string,
+  event: Record<string, unknown>,
+  maxBytes: number,
+): string {
+  if (Buffer.byteLength(line, 'utf8') <= maxBytes) return line;
+  const copy: Record<string, unknown> = { ...event };
+  const truncatableKeys = ['result', 'error', 'message'] as const;
+  for (const key of truncatableKeys) {
+    const value = copy[key];
+    if (typeof value !== 'string') continue;
+    // Binary-search a UTF-8-safe prefix that fits with the rest of the object.
+    let lo = 0;
+    let hi = value.length;
+    let best = '';
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      copy[key] = `${value.slice(0, mid)}…[truncated]`;
+      const candidate = JSON.stringify(copy);
+      if (Buffer.byteLength(candidate, 'utf8') <= maxBytes) {
+        best = candidate;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (best) return best;
+    copy[key] = '…[truncated]';
+  }
+  const fallback = JSON.stringify({ type: 'result', result: '…[truncated]', truncated: true });
+  return Buffer.byteLength(fallback, 'utf8') <= maxBytes ? fallback : '{"type":"result","result":"…[truncated]"}';
+}
 
 /**
  * SmartStreamBuffer filters Claude CLI stream-json (NDJSON) output in real-time.
  *
  * Kept events:
- * - type 'result' — preserved verbatim (contains cost, usage, final result text)
+ * - type 'result' — retained (cost/usage) with a per-event byte cap
  * - type 'assistant' — only text blocks extracted (tool_use blocks discarded)
  *
  * Discarded events:
@@ -78,8 +117,15 @@ export class SmartStreamBuffer {
       const event = JSON.parse(line);
 
       if (event.type === 'result') {
-        // Preserve result events verbatim — they contain cost/usage data
-        this.resultEvents.push(line);
+        // Preserve result events for cost/usage parsers, but bound each line so
+        // a single huge `result` string cannot defeat MAX_RESULT_EVENTS.
+        const asRecord = (event && typeof event === 'object')
+          ? event as Record<string, unknown>
+          : { type: 'result' };
+        const capped = Buffer.byteLength(line, 'utf8') > MAX_RESULT_EVENT_BYTES
+          ? truncateResultEventLine(line, asRecord, MAX_RESULT_EVENT_BYTES)
+          : line;
+        this.resultEvents.push(capped);
         if (this.resultEvents.length > MAX_RESULT_EVENTS) this.resultEvents.shift();
         return;
       }

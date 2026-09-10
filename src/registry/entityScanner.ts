@@ -647,6 +647,10 @@ export interface ScanResult {
   errors: string[];
   durationMs: number;
   languageBreakdown: Record<string, number>;
+  /** False when depth, size, or timeout limits excluded source that may still exist. */
+  scanComplete: boolean;
+  /** Paths skipped for size / depth (bounded list for diagnostics). */
+  skippedPaths: string[];
 }
 
 // ============ 메인 스캔 함수 ============
@@ -679,13 +683,24 @@ export async function scanRepository(
   const allExtracted: ExtractedEntity[] = [];
   const testFiles: TestFileInfo[] = [];
   const errors: string[] = [];
+  const skippedPaths: string[] = [];
+  let scanComplete = true;
   const languageBreakdown: Record<string, number> = {};
   const scannedSourceFiles = new Set<string>();
   let scannedFiles = 0;
 
   async function walk(dirPath: string, relPath: string, depth: number): Promise<void> {
-    if (depth > maxDepth) return;
-    if (Date.now() - startTime > timeoutMs) return;
+    if (depth > maxDepth) {
+      scanComplete = false;
+      if (skippedPaths.length < 50) {
+        skippedPaths.push(`${relPath || '.'} (maxDepth ${maxDepth})`);
+      }
+      return;
+    }
+    if (Date.now() - startTime > timeoutMs) {
+      scanComplete = false;
+      return;
+    }
 
     let entries;
     try {
@@ -729,7 +744,12 @@ export async function scanRepository(
             }
           }
         } catch (err) {
-          errors.push(`${entryRelPath}: ${err instanceof Error ? err.message : String(err)}`);
+          const message = err instanceof Error ? err.message : String(err);
+          errors.push(`${entryRelPath}: ${message}`);
+          if (/exceeds \d+ bytes/.test(message)) {
+            scanComplete = false;
+            if (skippedPaths.length < 50) skippedPaths.push(`${entryRelPath} (oversized)`);
+          }
         }
       }
     }
@@ -858,5 +878,7 @@ export async function scanRepository(
     errors,
     durationMs: Date.now() - startTime,
     languageBreakdown,
+    scanComplete,
+    skippedPaths,
   };
 }

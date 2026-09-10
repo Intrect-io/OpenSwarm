@@ -115,6 +115,8 @@ const scanResult = (over: Partial<ScanResult> = {}): ScanResult => ({
   errors: [],
   durationMs: 42,
   languageBreakdown: {},
+  scanComplete: true,
+  skippedPaths: [],
   ...over,
 });
 

@@ -71,3 +71,31 @@ describe('scanRepository non-repo guard (INT-2507)', () => {
     await expect(scanRepository(dir, 'junk')).rejects.toThrow(/non-git directory/);
   });
 });
+
+describe('scanRepository completeness signals (audit 2026-08-09)', () => {
+  it('marks scanComplete=false when maxDepth excludes nested sources', async () => {
+    const { mkdtempSync, writeFileSync, mkdirSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'osw-depth-'));
+    mkdirSync(join(dir, 'a', 'b'), { recursive: true });
+    writeFileSync(join(dir, 'a', 'b', 'deep.ts'), 'export const x = 1;\n');
+    const { scanRepository } = await import('./entityScanner.js');
+    const result = await scanRepository(dir, 'depth-project', { allowNonRepo: true, maxDepth: 1 });
+    expect(result.scanComplete).toBe(false);
+    expect(result.skippedPaths.some((p) => p.includes('maxDepth'))).toBe(true);
+  });
+
+  it('marks scanComplete=false and records oversized source paths', async () => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'osw-oversize-'));
+    writeFileSync(join(dir, 'big.ts'), 'x'.repeat(600 * 1024));
+    const { scanRepository } = await import('./entityScanner.js');
+    const result = await scanRepository(dir, 'oversize-project', { allowNonRepo: true });
+    expect(result.scanComplete).toBe(false);
+    expect(result.skippedPaths.some((p) => p.includes('oversized'))).toBe(true);
+    expect(result.errors.some((e) => /exceeds \d+ bytes/.test(e))).toBe(true);
+  });
+});

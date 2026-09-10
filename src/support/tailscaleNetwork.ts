@@ -25,3 +25,19 @@ export function detectTailscaleIP(): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * Whether a remote socket address may be treated as a Tailscale peer for
+ * authorization. CGNAT 100.64/10 is shared RFC 6598 space — only trust it when
+ * THIS host actually has a Tailscale interface. The product-specific ULA prefix
+ * is accepted on its own.
+ */
+export function isAuthorizedTailscaleRemote(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.startsWith('::ffff:') ? address.slice(7) : address;
+  if (normalized.toLowerCase().startsWith('fd7a:115c:a1e0:')) return true;
+  // Shared CGNAT: require a local Tailscale iface so non-Tailscale CGNAT hosts
+  // cannot satisfy OPENSWARM_TRUST_TAILSCALE alone.
+  if (!detectTailscaleIP()) return false;
+  return isTailscaleAddress(address);
+}

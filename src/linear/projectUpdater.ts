@@ -484,19 +484,17 @@ async function refreshProjectOverview(projectId: string, projectPath?: string): 
     // Strip any previously-appended compact summary so it isn't doubled on each call.
     const baseDesc = stripped.replace(/\s*\[Done:\d+ InProgress:\d+ Todo:\d+\]$/, '').trimEnd();
 
-    // Build a compact summary line for description (fits within 255 chars)
+    // Build a compact summary line for description (fits within 255 chars).
+    // Reserve capacity for the summary first — truncating after append can
+    // silently drop the entire status line when baseDesc already fills 255.
     const doneCount = stateCounts.get('Done') ?? 0;
     const inProgressCount = stateCounts.get('In Progress') ?? 0;
     const todoCount = stateCounts.get('Todo') ?? 0;
-    const compactSummary = `Done:${doneCount} InProgress:${inProgressCount} Todo:${todoCount}`;
-    const descWithSummary = baseDesc
-      ? `${baseDesc}\n\n[${compactSummary}]`
-      : compactSummary;
-
-    // Truncate to 255 chars (Linear hard limit)
-    const finalDesc = descWithSummary.length > 255
-      ? descWithSummary.slice(0, 252) + '...'
-      : descWithSummary;
+    const finalDesc = buildOverviewDescription(baseDesc, {
+      done: doneCount,
+      inProgress: inProgressCount,
+      todo: todoCount,
+    });
 
     await linear.updateProject(projectId, { description: finalDesc });
     console.log(`[ProjectUpdater] Project overview updated for "${project.name}"`);
@@ -506,6 +504,30 @@ async function refreshProjectOverview(projectId: string, projectPath?: string): 
 }
 
 // Helpers
+
+/** Linear project description hard limit. */
+const LINEAR_DESC_LIMIT = 255;
+
+/**
+ * Append a compact Done/InProgress/Todo summary, reserving suffix capacity so
+ * a long base description cannot truncate the status line away.
+ * Exported for unit tests.
+ */
+export function buildOverviewDescription(
+  baseDesc: string,
+  counts: { done: number; inProgress: number; todo: number },
+): string {
+  const compactSummary = `Done:${counts.done} InProgress:${counts.inProgress} Todo:${counts.todo}`;
+  const bracketed = `[${compactSummary}]`;
+  if (!baseDesc) return compactSummary.slice(0, LINEAR_DESC_LIMIT);
+  const suffix = `\n\n${bracketed}`;
+  const room = Math.max(0, LINEAR_DESC_LIMIT - suffix.length);
+  if (room === 0) return bracketed.slice(0, LINEAR_DESC_LIMIT);
+  const head = baseDesc.length <= room
+    ? baseDesc
+    : `${baseDesc.slice(0, Math.max(0, room - 1))}…`;
+  return `${head}${suffix}`;
+}
 
 function formatDuration(ms: number): string {
   const sec = Math.floor(ms / 1000);

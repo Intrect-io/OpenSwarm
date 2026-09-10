@@ -764,7 +764,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 "modules:" + s.totalModules + " tests:" + s.totalTestFiles +
                 " untested:" + s.untestedModules.length +
                 " churn:" + (s.avgChurnScore || 0).toFixed(2) +
-                (s.hotModules.length ? " hot:" + s.hotModules.slice(0,3).map(function(m){return m.split("/").pop()}).join(",") : "") +
+                (s.hotModules.length ? " hot:" + s.hotModules.slice(0,3).map(function(m){return escapeHtml(m.split("/").pop() || "")}).join(",") : "") +
               "</div>"
             );
           }
@@ -931,8 +931,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
       if (r.summary) addLine("Summary", escapeHtml(r.summary));
       if (r.decision) {
-        const cls = "sd-decision-" + r.decision;
-        addLine("Decision", "<span class=\\"" + cls + "\\">" + escapeHtml(r.decision.toUpperCase()) + "</span>");
+        const safe = /^(approve|revise|reject)$/i.test(String(r.decision)) ? String(r.decision).toLowerCase() : "unknown";
+        const cls = "sd-decision-" + safe;
+        addLine("Decision", "<span class=\\"" + cls + "\\">" + escapeHtml(String(r.decision).toUpperCase()) + "</span>");
       }
       if (r.feedback) addLine("Feedback", escapeHtml(r.feedback));
       if (Array.isArray(r.filesChanged) && r.filesChanged.length > 0) {
@@ -1008,8 +1009,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         // without having to expand.
         let inlineSummary = "";
         if (r.decision) {
-          const cls = "sd-decision-" + r.decision;
-          inlineSummary = "<span class=\\"" + cls + "\\">" + escapeHtml(r.decision.toUpperCase()) + "</span>" +
+          const safe = /^(approve|revise|reject)$/i.test(String(r.decision)) ? String(r.decision).toLowerCase() : "unknown";
+          const cls = "sd-decision-" + safe;
+          inlineSummary = "<span class=\\"" + cls + "\\">" + escapeHtml(String(r.decision).toUpperCase()) + "</span>" +
             (r.feedback ? " · " + escapeHtml(r.feedback.slice(0, 80)) : "");
         } else if (r.summary) {
           inlineSummary = escapeHtml(r.summary);

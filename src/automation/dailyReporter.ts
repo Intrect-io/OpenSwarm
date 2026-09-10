@@ -5,7 +5,12 @@
 
 import { Cron } from 'croner';
 import { LinearClient, type Project } from '@linear/sdk';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { postStatusUpdate } from '../linear/index.js';
+import { atomicWriteFile } from '../support/atomicFile.js';
+import { withFileLock } from '../support/fileLock.js';
 
 let cronJob: Cron | null = null;
 let linearClient: LinearClient | null = null;
@@ -14,6 +19,20 @@ let teamId: string | null = null;
 let reportInFlight: Promise<void> | null = null;
 // Project path mapping (projectId → projectPath) for knowledge graph metrics
 let projectPathMapping = new Map<string, string>();
+
+/** Per-day progress so a partial failure retries only unfinished projects. */
+export const DAILY_REPORT_PROGRESS_FILE = process.env.OPENSWARM_DAILY_REPORT_PROGRESS_FILE
+  || join(
+    process.env.VITEST ? tmpdir() : homedir(),
+    process.env.VITEST
+      ? `openswarm-daily-report-progress-${process.pid}.json`
+      : '.openswarm/daily-report-progress.json',
+  );
+
+type DailyReportProgress = {
+  date: string;
+  completedProjectIds: string[];
+};
 
 export interface DailyReporterConfig {
   schedule: string; // Cron expression (default: "0 18 * * *" for 6 PM daily)
@@ -78,6 +97,54 @@ export function stopDailyReporter(): void {
   }
 }
 
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function loadProgress(): Promise<DailyReportProgress> {
+  const today = todayKey();
+  return withFileLock(`${DAILY_REPORT_PROGRESS_FILE}.lock`, async () => {
+    try {
+      const parsed = JSON.parse(await readFile(DAILY_REPORT_PROGRESS_FILE, 'utf8')) as Partial<DailyReportProgress>;
+      if (
+        parsed.date === today
+        && Array.isArray(parsed.completedProjectIds)
+        && parsed.completedProjectIds.every((id) => typeof id === 'string')
+      ) {
+        return { date: today, completedProjectIds: [...new Set(parsed.completedProjectIds)] };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    return { date: today, completedProjectIds: [] };
+  });
+}
+
+async function markProjectPublished(projectId: string): Promise<void> {
+  const today = todayKey();
+  await withFileLock(`${DAILY_REPORT_PROGRESS_FILE}.lock`, async () => {
+    let completedProjectIds: string[] = [];
+    try {
+      const parsed = JSON.parse(await readFile(DAILY_REPORT_PROGRESS_FILE, 'utf8')) as Partial<DailyReportProgress>;
+      if (
+        parsed.date === today
+        && Array.isArray(parsed.completedProjectIds)
+        && parsed.completedProjectIds.every((id) => typeof id === 'string')
+      ) {
+        completedProjectIds = parsed.completedProjectIds;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (!completedProjectIds.includes(projectId)) completedProjectIds.push(projectId);
+    await atomicWriteFile(
+      DAILY_REPORT_PROGRESS_FILE,
+      JSON.stringify({ date: today, completedProjectIds }),
+      0o600,
+    );
+  });
+}
+
 /**
  * Manually trigger daily reports (for testing)
  */
@@ -117,14 +184,25 @@ export async function generateDailyReports(): Promise<void> {
 
     console.log(`[DailyReporter] Found ${activeProjects.length} active projects`);
 
-    // Generate status update for each project
+    const progress = await loadProgress();
+    const alreadyDone = new Set(progress.completedProjectIds);
+
+    // Generate status update for each project — skip ones already published today.
     let successCount = 0;
     let failCount = 0;
+    let skippedCount = 0;
 
     for (const project of activeProjects) {
+      if (alreadyDone.has(project.id)) {
+        skippedCount++;
+        successCount++;
+        continue;
+      }
       try {
         const projectPath = projectPathMapping.get(project.id);
         await postStatusUpdate(project.id, project.name, projectPath);
+        await markProjectPublished(project.id);
+        alreadyDone.add(project.id);
         successCount++;
       } catch (err) {
         console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
@@ -132,7 +210,11 @@ export async function generateDailyReports(): Promise<void> {
       }
     }
 
-    console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
+    console.log(
+      `[DailyReporter] Reports completed: ${successCount} success`
+      + (skippedCount > 0 ? ` (${skippedCount} already published today)` : '')
+      + `, ${failCount} failed`,
+    );
 
     // Send summary to Discord
     if (discordReporter && successCount > 0) {

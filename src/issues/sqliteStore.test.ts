@@ -103,6 +103,23 @@ describe('getStats scoping', () => {
   });
 });
 
+describe('status transition oldValue', () => {
+  it('records status_changed oldValue from the in-transaction status', () => {
+    const store = new SqliteIssueStore(path());
+    const issue = store.createIssue({ projectId: 'p', title: 'status race', status: 'todo' });
+
+    store.changeStatus(issue.id, 'in_progress');
+    store.updateIssue(issue.id, { status: 'done' });
+
+    const events = store.getEvents(issue.id).filter((e) => e.type === 'status_changed');
+    // Newest first — the done transition must cite in_progress, not the
+    // pre-transaction todo that updateIssue would have captured outside the txn.
+    expect(events[0]?.oldValue).toBe('in_progress');
+    expect(events[0]?.newValue).toBe('done');
+    store.close();
+  });
+});
+
 describe('store permissions (INT-2961 audit)', () => {
   it('keeps the database and its WAL sidecars owner-only', async () => {
     // The store holds issue titles, descriptions and task history for every

@@ -574,7 +574,10 @@ export async function getMemoryStats(): Promise<{
     const table = getTable();
     if (!table) return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0 };
 
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
+    // Full-table scalar scan — vector search with a hard 10k cap silently
+    // under-counted large stores and returned incomplete type/repo averages.
+    const rowCount = await table.countRows();
+    const results = await table.query().limit(Math.max(rowCount, 1)).toArray();
 
     const byType: Record<MemoryType, number> = { ...DEFAULT_BY_TYPE };
     const byRepo: Record<string, number> = {};
@@ -639,8 +642,10 @@ export async function getRecentConversations(
     if (!table) return [];
 
     // Scalar scan is intentional: vector similarity must not decide which
-    // messages count as recent. The final ordering uses the source timestamp.
-    const results = await table.query().limit(100_000).toArray();
+    // messages count as recent. Size the query from the live row count so
+    // newer conversations outside an arbitrary 100k window are not omitted.
+    const rowCount = await table.countRows();
+    const results = await table.query().limit(Math.max(rowCount, 1)).toArray();
 
     // Filter: journal + chat (channelId matching is loose for legacy data compat)
     const filtered = results

@@ -193,6 +193,17 @@ describe('executeTool', () => {
       expect(result.content).toContain('3\tgamma');
       expect(result.content).not.toContain('1\talpha');
     });
+
+    it('bounds a single huge line and notes output truncation', async () => {
+      const hugePath = path.join(TMP_DIR, 'huge-line.txt');
+      // Well over MAX_READ_LINE_CHARS (16_384) and enough to hit output budget if many lines.
+      await fs.writeFile(hugePath, `${'x'.repeat(40_000)}\nsecond\n`, 'utf-8');
+      const result = await executeTool(makeCall('read_file', { path: hugePath, limit: 1 }), TMP_DIR);
+      expect(result.is_error).toBe(false);
+      expect(result.content).toContain('1\t');
+      expect(result.content).toContain('…');
+      expect(result.content.length).toBeLessThan(40_000);
+    });
   });
 
   // ── write_file ──

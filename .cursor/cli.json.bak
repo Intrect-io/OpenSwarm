@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(ls)",
+      "Shell(npx*)",
+      "Shell(node*)",
+      "Shell(npm*)",
+      "Shell(**)"
+    ],
+    "deny": []
+  }
+}

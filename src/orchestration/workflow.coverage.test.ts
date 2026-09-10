@@ -202,10 +202,19 @@ describe('workflow storage round trips', () => {
 
   it('saves and loads an execution by ID', async () => {
     const executionId = uniqueId('cov-execution');
+    const workflowId = uniqueId('cov-wf-for-exec');
     cleanupExecutionIds.push(executionId);
+    cleanupWorkflowIds.push(workflowId);
+
+    await saveWorkflow({
+      id: workflowId,
+      name: 'Exec Host',
+      projectPath: '/tmp/project',
+      steps: [{ id: 'step', name: 'Step', prompt: 'run' }],
+    });
 
     const execution: WorkflowExecution = {
-      workflowId: 'wf-1',
+      workflowId,
       executionId,
       status: 'running',
       startedAt: Date.now(),
@@ -218,6 +227,19 @@ describe('workflow storage round trips', () => {
     const loaded = await loadExecution(executionId);
 
     expect(loaded).toEqual(execution);
+  });
+
+  it('refuses to persist an execution when its workflow definition is missing', async () => {
+    const executionId = uniqueId('cov-execution-orphan');
+    cleanupExecutionIds.push(executionId);
+
+    await expect(saveExecution({
+      workflowId: uniqueId('missing-wf'),
+      executionId,
+      status: 'running',
+      startedAt: Date.now(),
+      stepResults: {},
+    })).rejects.toThrow(/workflow .+ is missing/);
   });
 
   it('returns null when loading a well-formed but nonexistent execution ID', async () => {

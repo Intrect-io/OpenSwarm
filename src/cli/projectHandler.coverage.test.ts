@@ -222,6 +222,15 @@ describe('loadRepos malformed-JSON recovery (via handleProjectList)', () => {
     expect(() => handleProjectList()).toThrow(/preserved as/);
     expect(renameSyncMock).toHaveBeenCalledOnce();
   });
+
+  it('reports quarantine failure accurately when renameSync fails', () => {
+    readFileSyncMock.mockReturnValue('{ not valid json ,, }');
+    existsSyncMock.mockImplementation((p: string) => typeof p === 'string' && p.endsWith('openswarm-repos.json'));
+    renameSyncMock.mockImplementationOnce(() => {
+      throw new Error('EACCES');
+    });
+    expect(() => handleProjectList()).toThrow(/quarantine .* failed — original left in place/);
+  });
 });
 
 describe('loadRepos defaults missing fields (via handleProjectList)', () => {

@@ -86,3 +86,49 @@ describe('isTailscaleAddress', () => {
     expect(isTailscaleAddress('fd00::1')).toBe(false);
   });
 });
+
+describe('isAuthorizedTailscaleRemote', () => {
+  it('accepts Tailscale ULA without requiring a local iface', async () => {
+    vi.resetModules();
+    vi.doMock('node:os', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:os')>();
+      return {
+        ...actual,
+        default: { ...actual, networkInterfaces: () => ({ en0: [iface('192.168.1.20')] }) },
+        networkInterfaces: () => ({ en0: [iface('192.168.1.20')] }),
+      };
+    });
+    const { isAuthorizedTailscaleRemote } = await import('./web.js');
+    expect(isAuthorizedTailscaleRemote('fd7a:115c:a1e0::b601:f469')).toBe(true);
+  });
+
+  it('rejects CGNAT remotes when this host has no Tailscale interface', async () => {
+    vi.resetModules();
+    vi.doMock('node:os', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:os')>();
+      return {
+        ...actual,
+        default: { ...actual, networkInterfaces: () => ({ en0: [iface('192.168.1.20')] }) },
+        networkInterfaces: () => ({ en0: [iface('192.168.1.20')] }),
+      };
+    });
+    const { isAuthorizedTailscaleRemote, isTailscaleAddress } = await import('./web.js');
+    expect(isTailscaleAddress('100.95.1.2')).toBe(true);
+    expect(isAuthorizedTailscaleRemote('100.95.1.2')).toBe(false);
+  });
+
+  it('accepts CGNAT remotes only when this host is on Tailscale', async () => {
+    vi.resetModules();
+    vi.doMock('node:os', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:os')>();
+      return {
+        ...actual,
+        default: { ...actual, networkInterfaces: () => ({ utun3: [iface('100.95.200.28')] }) },
+        networkInterfaces: () => ({ utun3: [iface('100.95.200.28')] }),
+      };
+    });
+    const { isAuthorizedTailscaleRemote } = await import('./web.js');
+    expect(isAuthorizedTailscaleRemote('100.95.1.2')).toBe(true);
+    expect(isAuthorizedTailscaleRemote('::ffff:100.64.0.1')).toBe(true);
+  });
+});

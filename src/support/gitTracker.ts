@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { TextDecoder } from 'node:util';
 
 /**
  * Extract changed file list via git diff
@@ -302,6 +303,8 @@ function runGitCommand(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Pr
 
     let stdout = '';
     let stderr = '';
+    const stdoutDec = new TextDecoder('utf8');
+    const stderrDec = new TextDecoder('utf8');
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
@@ -310,12 +313,20 @@ function runGitCommand(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Pr
       reject(new Error(`git ${args.join(' ')} timed out after ${GIT_CMD_TIMEOUT_MS}ms`));
     }, GIT_CMD_TIMEOUT_MS);
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
-    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+    // Stream-aware decode so a multi-byte UTF-8 character split across chunks
+    // is not corrupted the way naive Buffer#toString() would.
+    proc.stdout.on('data', (data: Buffer) => {
+      stdout += stdoutDec.decode(data, { stream: true });
+    });
+    proc.stderr.on('data', (data: Buffer) => {
+      stderr += stderrDec.decode(data, { stream: true });
+    });
 
     proc.on('close', (code) => {
       settled = true;
       clearTimeout(timer);
+      stdout += stdoutDec.decode();
+      stderr += stderrDec.decode();
       if (code === 0) {
         resolve(stdout);
       } else {

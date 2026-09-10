@@ -7,6 +7,8 @@ import { basename, isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import * as yaml from 'yaml';
+import { withFileLock } from '../support/fileLock.js';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Types & Interfaces
 
@@ -271,13 +273,21 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
   return filePath;
 }
 
+function workflowDefLockPath(workflowId: string): string {
+  return storageFilePath(WORKFLOW_DIR, workflowId, '.lock');
+}
+
 /**
  * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
   const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
-  await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');
+  // Share a lock with saveExecution so a definition rewrite cannot race an
+  // execution persist that already validated against the prior definition.
+  await withFileLock(workflowDefLockPath(workflow.id), async () => {
+    await atomicWriteFile(filePath, yaml.stringify(workflow));
+  });
   console.log(`[Workflow] Saved: ${workflow.name} (${workflow.id})`);
 }
 
@@ -328,7 +338,17 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
   const filePath = storageFilePath(EXECUTION_DIR, execution.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(execution, null, 2), 'utf-8');
+  // Validate the workflow definition under the same lock saveWorkflow holds so
+  // a concurrent definition replacement cannot leave an orphaned execution.
+  await withFileLock(workflowDefLockPath(execution.workflowId), async () => {
+    const workflow = await loadWorkflow(execution.workflowId);
+    if (!workflow) {
+      throw new Error(
+        `Cannot save execution ${execution.executionId}: workflow ${execution.workflowId} is missing`,
+      );
+    }
+    await atomicWriteFile(filePath, JSON.stringify(execution, null, 2));
+  });
 }
 
 /**

@@ -3,10 +3,25 @@
 // Test Status: Complete
 
 import { describe, it, expect } from 'vitest';
-import { formatDocReport, type DocumenterOptions, type DocumenterResult } from './documenter.js';
+import { formatDocReport, parseDocumenterOutput, type DocumenterOptions, type DocumenterResult } from './documenter.js';
 import type { WorkerResult } from './agentPair.js';
 
 describe('documenter', () => {
+  describe('parseDocumenterOutput string-guard', () => {
+    it('ignores non-string result payloads instead of throwing on .match', () => {
+      const output = [
+        JSON.stringify({ type: 'result', result: { success: true, nested: true } }),
+        JSON.stringify({
+          type: 'result',
+          result: '```json\n{"success":true,"updatedFiles":["README.md"],"summary":"documented"}\n```',
+        }),
+      ].join('\n');
+      const parsed = parseDocumenterOutput(output);
+      expect(parsed.success).toBe(true);
+      expect(parsed.summary).toBe('documented');
+    });
+  });
+
   describe('formatDocReport', () => {
     it('should format successful documentation result', () => {
       const result: DocumenterResult = {

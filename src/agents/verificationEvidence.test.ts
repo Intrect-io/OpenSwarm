@@ -54,4 +54,21 @@ describe('renderVerifyEvidence', () => {
     expect(rendered).toContain('…truncated…');
     expect(rendered).toContain('TAIL-MARKER');
   });
+
+  it('bounds huge command names before interpolating into the summary', () => {
+    const rendered = renderVerifyEvidence([evidence({
+      command: {
+        name: 'n'.repeat(10_000),
+        run: 'true',
+        kind: 'typecheck',
+        timeoutMs: 1_000,
+      },
+      baseStatus: 'pass',
+      headStatus: 'fail',
+      newFailure: true,
+      rawOutputTail: 'boom',
+    })]);
+    expect(Buffer.byteLength(rendered)).toBeLessThanOrEqual(6 * 1024);
+    expect(rendered).not.toContain('n'.repeat(500));
+  });
 });
