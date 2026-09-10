@@ -43,7 +43,7 @@
   function readToken() {
     try {
       return window.sessionStorage.getItem(TOKEN_KEY) || '';
-    } catch (err) {
+    } catch {
       return '';
     }
   }
@@ -52,7 +52,7 @@
     try {
       if (token) window.sessionStorage.setItem(TOKEN_KEY, token);
       else window.sessionStorage.removeItem(TOKEN_KEY);
-    } catch (err) {
+    } catch {
       // Non-fatal: the token still authorizes this page for its lifetime via
       // the in-memory value the caller holds.
     }
@@ -77,7 +77,7 @@
       // one would send `/api/x` to another host while this still called it
       // same-origin — attaching the token to a cross-origin request.
       url = new URL(raw, document.baseURI || window.location.href);
-    } catch (err) {
+    } catch {
       return null;
     }
     return url.origin === window.location.origin ? url.pathname : null;
@@ -264,7 +264,7 @@
     var nativeFetch = scope.fetch.bind(scope);
     try {
       Object.defineProperty(scope, INSTALLED, { value: true, enumerable: false, configurable: true });
-    } catch (err) { scope[INSTALLED] = true; }
+    } catch { scope[INSTALLED] = true; }
 
     scope.fetch = function (input, init) {
       if (!isGatedRequest(input)) return nativeFetch(input, init);
@@ -344,7 +344,7 @@
           // to have aborted it, the connection would otherwise stay open while
           // the caller reconnects every three seconds, exhausting the per-host
           // connection budget.
-          try { response.body.cancel(); } catch (err) { /* already released */ }
+          try { response.body.cancel(); } catch { /* already released */ }
           return undefined;
         }
         self.readyState = 1;
@@ -413,7 +413,7 @@
       this._closed = true;
       this.readyState = 2;
       if (this._controller) {
-        try { this._controller.abort(); } catch (err) { /* already aborted */ }
+        try { this._controller.abort(); } catch { /* already aborted */ }
       }
     };
 
@@ -438,7 +438,7 @@
     scope.EventSource = makeTokenEventSource(scope, Native);
     try {
       Object.defineProperty(scope, ES_INSTALLED, { value: true, enumerable: false, configurable: true });
-    } catch (err) { scope[ES_INSTALLED] = true; }
+    } catch { scope[ES_INSTALLED] = true; }
   }
 
   // Exposed for tests and for pages that want to manage the token themselves.
