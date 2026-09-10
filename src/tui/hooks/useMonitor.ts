@@ -9,6 +9,21 @@ import type { Table } from '../monitorRows.js';
 
 const MONITOR_REQUEST_TIMEOUT_MS = 15_000;
 
+// Clamp the poll interval to safe finite bounds: below 100ms the polling loop
+// can starve the TUI render loop, and non-finite values (NaN/Infinity) would
+// make setInterval fire immediately/never. Above 5 min a stale tab just polls
+// rarely — still valid, so it is the upper bound.
+const MIN_POLL_INTERVAL_MS = 100;
+const MAX_POLL_INTERVAL_MS = 300_000;
+const DEFAULT_POLL_INTERVAL_MS = 5000;
+
+export function clampPollIntervalMs(intervalMs: number | undefined): number {
+  const raw = typeof intervalMs === 'number' && Number.isFinite(intervalMs)
+    ? intervalMs
+    : DEFAULT_POLL_INTERVAL_MS;
+  return Math.max(MIN_POLL_INTERVAL_MS, Math.min(raw, MAX_POLL_INTERVAL_MS));
+}
+
 export interface MonitorResult {
   table: Table | null;
   error: string | null;
@@ -64,7 +79,7 @@ export function useMonitor(
       }
     };
     void load();
-    const timer = setInterval(() => void load(), intervalMs);
+    const timer = setInterval(() => void load(), clampPollIntervalMs(intervalMs));
     return () => {
       cancelled = true;
       activeController?.abort();

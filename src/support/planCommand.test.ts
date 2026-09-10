@@ -133,4 +133,40 @@ describe('runPlanCommand', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(out.join('\n')).toContain('boom');
   });
+
+  it('dispatches the approved plan to the daemon', async () => {
+    mockedRunPlanner.mockResolvedValue(plannerResult([
+      { title: 'a', description: 'a', estimatedMinutes: 10, priority: 1 },
+      { title: 'b', description: 'b', estimatedMinutes: 20, priority: 2, dependencies: ['a'] },
+    ]) as never);
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ mode: 'pipeline', taskIds: ['1', '2'] }) }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { io, out } = makeIO(['yes']);
+    await runPlanCommand('g', io, {});
+
+    expect(mockedRunPlanner).toHaveBeenCalledWith(expect.objectContaining({ taskTitle: 'g' }));
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(bodyOf(fetchMock).subTasks).toHaveLength(2);
+    expect(out.join('\n')).toContain('Dispatched 2 task(s)');
+  });
+
+  it('contains a rejected planner run as a controlled error message (AGT-3417)', async () => {
+    mockedRunPlanner.mockRejectedValue(new Error('RateLimitError: slow down'));
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { io, out } = makeIO([]);
+    await expect(runPlanCommand('g', io, {})).resolves.toBeUndefined();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(out.join('\n')).toContain('✖ Planner failed: RateLimitError: slow down');
+  });
+
+  it('stringifies non-Error planner rejections (AGT-3417)', async () => {
+    mockedRunPlanner.mockRejectedValue('plain string failure');
+    const { io, out } = makeIO([]);
+    await expect(runPlanCommand('g', io, {})).resolves.toBeUndefined();
+    expect(out.join('\n')).toContain('✖ Planner failed: plain string failure');
+  });
 });
