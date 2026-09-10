@@ -134,6 +134,33 @@ describe('runOrchestrator', () => {
     expect(passed.webTools).toBe(true);
   });
 
+  it('drops a model that does not belong to the orchestrator adapter', async () => {
+    // This path reached spawnCli without ever consulting the compat layer, so a
+    // config id from another provider went verbatim to the CLI and the
+    // `orchestrator` role was unreachable in every per-role model table.
+    // (AGT-4273)
+    dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-compat-'));
+    process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');
+    (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
+    getMcpTools.mockResolvedValue([tool('linear__get_issue')]);
+    const { runOrchestrator } = await import('./orchestratorAgent.js');
+
+    await runOrchestrator({
+      repository: '/repo',
+      taskId: 'coordination',
+      objective: 'x',
+      policy: { servers: ['linear'] },
+      adapterName: 'codex-responses',
+      // An OpenRouter/Atlas id. codex-responses only runs gpt-* slugs, so this
+      // must become the adapter's own default rather than reaching the CLI.
+      model: 'deepseek/deepseek-v4-flash',
+      trigger: 'coordination-event',
+    });
+
+    expect(spawnCli.mock.calls[0][1]).toMatchObject({ model: 'gpt-5.6-terra' });
+    expect(spawnCli.mock.calls[0][1]).not.toMatchObject({ model: 'deepseek/deepseek-v4-flash' });
+  });
+
   it('passes the explicit supervisor model and reasoning route to the native loop', async () => {
     dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-route-'));
     process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'events.json');

@@ -155,7 +155,7 @@ export async function runPlanner(options: PlannerOptions): Promise<PlannerResult
     // let a provider-pinned config id sail through — decomposition.plannerModel
     // 'gpt-5.5' reached `claude -p --model gpt-5.5` and 404'd every
     // decomposition. Incompatible → undefined → adapter default. (INT-2510)
-    const model = mapModelForProvider(adapter.name as AdapterName, options.model);
+    const model = mapModelForProvider(adapter.name as AdapterName, options.model, 'planner');
 
     const raw = await spawnCli(adapter, {
       prompt,

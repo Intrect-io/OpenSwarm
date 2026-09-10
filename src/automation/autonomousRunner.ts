@@ -87,6 +87,7 @@ import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export { pickPipelineFailureDetail } from './runnerState.js';
 import type { AdapterName } from '../adapters/types.js';
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
+import type { ModelRole } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
 import {
   applyBacklogGrooming,
@@ -3388,45 +3389,51 @@ export class AutonomousRunner {
     // provider; otherwise drop it (undefined) so the target adapter resolves its
     // own default via getDefaultModel(). Shared with the planner's model guard
     // (src/adapters/modelCompat.ts) so both stay in sync. (INT-2510)
-    const mapModelForProvider = (model: string | undefined, role?: string): string | undefined =>
+    const mapModelForProvider = (model: string | undefined, role?: ModelRole): string | undefined =>
       mapModelForAdapter(adapter, model, role);
 
     this.config.defaultAdapter = adapter;
 
     if (this.config.defaultRoles) {
-      const roleConfig = <T extends { adapter?: AdapterName; model?: string }>(role: T): T => {
+      // The role NAME travels with the model. Without it every entry here
+      // mapped anonymously, so an adapter that resolves per role — cursor, whose
+      // catalogue shares no id with any other provider — could not tell the
+      // worker from the reviewer and gave both the same model. That is the role
+      // split going missing at the one call site whose entire job is to preserve
+      // it. (AGT-4273)
+      const roleConfig = <T extends { adapter?: AdapterName; model?: string }>(role: T, roleName: ModelRole): T => {
         if (!overrideRoleAdapters && role.adapter) return role;
         return {
           ...role,
           adapter,
-          model: mapModelForProvider(role.model),
+          model: mapModelForProvider(role.model, roleName),
         };
       };
       this.config.defaultRoles.worker = {
-        ...roleConfig(this.config.defaultRoles.worker),
+        ...roleConfig(this.config.defaultRoles.worker, 'worker'),
       };
       this.config.defaultRoles.reviewer = {
-        ...roleConfig(this.config.defaultRoles.reviewer),
+        ...roleConfig(this.config.defaultRoles.reviewer, 'reviewer'),
       };
 
       if (this.config.defaultRoles.tester) {
         this.config.defaultRoles.tester = {
-          ...roleConfig(this.config.defaultRoles.tester),
+          ...roleConfig(this.config.defaultRoles.tester, 'tester'),
         };
       }
       if (this.config.defaultRoles.documenter) {
         this.config.defaultRoles.documenter = {
-          ...roleConfig(this.config.defaultRoles.documenter),
+          ...roleConfig(this.config.defaultRoles.documenter, 'documenter'),
         };
       }
       if (this.config.defaultRoles.auditor) {
         this.config.defaultRoles.auditor = {
-          ...roleConfig(this.config.defaultRoles.auditor),
+          ...roleConfig(this.config.defaultRoles.auditor, 'auditor'),
         };
       }
       if (this.config.defaultRoles['skill-documenter']) {
         this.config.defaultRoles['skill-documenter'] = {
-          ...roleConfig(this.config.defaultRoles['skill-documenter']),
+          ...roleConfig(this.config.defaultRoles['skill-documenter'], 'skill-documenter'),
         };
       }
     }
