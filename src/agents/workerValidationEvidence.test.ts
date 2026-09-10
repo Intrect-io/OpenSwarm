@@ -67,6 +67,23 @@ describe('missingWorkerValidationIssues', () => {
     })).length).toBeGreaterThan(0);
   });
 
+  it('requires validation for executable formats under locale/i18n dirs', () => {
+    // sh/swift/sql (and other VALIDATION_RELEVANT executables) must not inherit
+    // the data-only exemption that applies to json locale strings.
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/locales/format.sh'],
+      commands: [],
+    })).length).toBeGreaterThan(0);
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/i18n/Localizable.swift'],
+      commands: [],
+    })).length).toBeGreaterThan(0);
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/locales/seed.sql'],
+      commands: [],
+    })).length).toBeGreaterThan(0);
+  });
+
   it('treats a source module named readme.ts as code, not docs', () => {
     // README.md is docs; readme.ts is a real module and must hit the gate.
     expect(missingWorkerValidationIssues(worker({

@@ -25,6 +25,16 @@ describe('SqliteIssueStore durable semantics', () => {
     store.close();
   });
 
+  it('returns the existing row when createIssue is called again with the same id', () => {
+    const store = new SqliteIssueStore(path());
+    const first = store.createIssue({ id: 'stable-1', projectId: 'p', title: 'first' });
+    const second = store.createIssue({ id: 'stable-1', projectId: 'p', title: 'ignored duplicate' });
+    expect(second.id).toBe(first.id);
+    expect(second.title).toBe('first');
+    expect(store.listIssues().total).toBe(1);
+    store.close();
+  });
+
   it('emits memory_linked only for a newly inserted link', () => {
     const store = new SqliteIssueStore(path());
     const issue = store.createIssue({ projectId: 'p', title: 'link' });

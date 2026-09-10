@@ -4,15 +4,22 @@
 // Purpose: Query + Mutation 리졸버
 // ============================================
 
-import { getIssueStore } from '../sqliteStore.js';
+import { getIssueStore, type SqliteIssueStore } from '../sqliteStore.js';
 import { autoLinkMemories, enrichIssueContext } from '../memoryBridge.js';
-import type { IssueFilter } from '../schema.js';
+import type { Issue, IssueFilter } from '../schema.js';
 
 const DEFAULT_ISSUE_LIMIT = 50;
 const MAX_ISSUE_LIMIT = 200;
 const DEFAULT_EVENT_LIMIT = 50;
 const DEFAULT_RECENT_EVENT_LIMIT = 20;
 const MAX_EVENT_LIMIT = 200;
+
+/** Bound fire-and-forget auto-link jobs after createIssue. */
+const AUTO_LINK_MAX_CONCURRENT = 4;
+const AUTO_LINK_TIMEOUT_MS = 15_000;
+let autoLinkTimeoutMs = AUTO_LINK_TIMEOUT_MS;
+let autoLinkInFlight = 0;
+const autoLinkWaiters: Array<() => void> = [];
 
 function clampLimit(limit: number | undefined, defaultLimit: number, maxLimit: number): number {
   if (limit === undefined || !Number.isInteger(limit)) return defaultLimit;
@@ -50,6 +57,87 @@ function normalizeIssueFilter(filter: IssueFilter | undefined): IssueFilter {
     offset: clampOffset(filter?.offset),
   };
 }
+
+async function acquireAutoLinkSlot(): Promise<void> {
+  if (autoLinkInFlight < AUTO_LINK_MAX_CONCURRENT) {
+    autoLinkInFlight++;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    autoLinkWaiters.push(() => {
+      autoLinkInFlight++;
+      resolve();
+    });
+  });
+}
+
+function releaseAutoLinkSlot(): void {
+  autoLinkInFlight = Math.max(0, autoLinkInFlight - 1);
+  const next = autoLinkWaiters.shift();
+  if (next) next();
+}
+
+/**
+ * Supervise createIssue auto-link work: concurrency cap, deadline, and failure
+ * observation — no unbounded fire-and-forget.
+ *
+ * Clears the timeout on settle and absorbs a late work rejection when the
+ * deadline wins, so neither side can surface an unhandled rejection.
+ */
+function scheduleAutoLinkMemories(store: SqliteIssueStore, issue: Issue): void {
+  void (async () => {
+    await acquireAutoLinkSlot();
+    const started = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const work = autoLinkMemories(store, issue);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`autoLinkMemories timed out after ${autoLinkTimeoutMs}ms`)),
+          autoLinkTimeoutMs,
+        );
+        timer.unref?.();
+        work.then(() => resolve(), reject);
+      });
+    } catch (err) {
+      console.warn(
+        `[GraphQL] 메모리 자동 연결 실패 (issue=${issue.id}, elapsed=${Date.now() - started}ms, inFlight=${autoLinkInFlight}):`,
+        err,
+      );
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      // If the deadline won, absorb a late rejection from the still-running work.
+      void work.catch(() => {});
+      releaseAutoLinkSlot();
+    }
+  })();
+}
+
+/** @internal Test hooks for auto-link concurrency / timeout supervision. */
+export const __autoLinkTestHooks = {
+  maxConcurrent: AUTO_LINK_MAX_CONCURRENT,
+  defaultTimeoutMs: AUTO_LINK_TIMEOUT_MS,
+  get timeoutMs() {
+    return autoLinkTimeoutMs;
+  },
+  get inFlight() {
+    return autoLinkInFlight;
+  },
+  get waiterCount() {
+    return autoLinkWaiters.length;
+  },
+  setTimeoutMs(ms: number) {
+    autoLinkTimeoutMs = ms;
+  },
+  reset() {
+    autoLinkInFlight = 0;
+    autoLinkWaiters.length = 0;
+    autoLinkTimeoutMs = AUTO_LINK_TIMEOUT_MS;
+  },
+  schedule: scheduleAutoLinkMemories,
+  acquire: acquireAutoLinkSlot,
+  release: releaseAutoLinkSlot,
+};
 
 export const resolvers = {
   Query: {
@@ -99,10 +187,8 @@ export const resolvers = {
       const store = getIssueStore();
       const issue = store.createIssue(input);
 
-      // 비동기로 메모리 자동 연결 (실패해도 이슈 생성은 성공)
-      autoLinkMemories(store, issue).catch((err) => {
-        console.warn('[GraphQL] 메모리 자동 연결 실패:', err);
-      });
+      // Bounded + supervised background auto-link (failure does not fail create).
+      scheduleAutoLinkMemories(store, issue);
 
       return issue;
     },

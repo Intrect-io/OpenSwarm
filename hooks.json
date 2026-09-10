@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "/bin/bash .cursor/hooks/before-ls.sh",
+        "matcher": "ls"
+      }
+    ]
+  }
+}

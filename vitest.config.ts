@@ -1,4 +1,6 @@
 import { defineConfig } from 'vitest/config';
+import os from 'node:os';
+import path from 'node:path';
 
 const integrationBoundaryCoverageExcludes = [
   // External model/provider adapters and process wrappers are covered by smoke/e2e tests.
@@ -124,6 +126,9 @@ const integrationBoundaryCoverageExcludes = [
 ];
 
 export default defineConfig({
+  // Verification mounts the worktree read-only; vite's default cache under
+  // node_modules/.vite-temp then fails with EROFS. Keep the cache in TMPDIR.
+  cacheDir: path.join(os.tmpdir(), 'openswarm-vite-cache'),
   test: {
     globals: true,
     environment: 'node',

@@ -152,6 +152,33 @@ describe('getPRChecks', () => {
       vi.useRealTimers();
     }
   });
+
+  it('clamps poll sleep to the remaining end-to-end deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      mockGhJson({
+        headRefOid: 'head-a',
+        statusCheckRollup: [{ name: 'unit', status: 'IN_PROGRESS', conclusion: null }],
+      });
+      mockGhJson({
+        headRefOid: 'head-a',
+        statusCheckRollup: [{ name: 'unit', status: 'IN_PROGRESS', conclusion: null }],
+      });
+
+      const resultPromise = waitForCICompletion('owner/repo', 42, {
+        timeoutMs: 50,
+        pollIntervalMs: 10_000,
+        expectedHeadSha: 'head-a',
+      });
+      // A fixed 10s poll would blow past the 50ms deadline; clamped sleep must exit on time.
+      await vi.advanceTimersByTimeAsync(50);
+
+      const result = await resultPromise;
+      expect(result.status).toBe('pending');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('repository fan-out', () => {

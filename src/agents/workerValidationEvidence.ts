@@ -11,6 +11,10 @@ const DOC_ONLY_FILE_RE = /(^|\/)(README|CHANGELOG|LICENSE|NOTICE)(\.(md|mdx|txt|
 // nothing to build or test on their own; exempt them so a data-only edit does
 // not get bounced for "no validation command".
 const DATA_ONLY_DIR_RE = /(^|\/)(locales?|i18n|fixtures?|__fixtures__|__snapshots__|snapshots?|__mocks__|mocks?|testdata|test-data)\//i;
+// Executable / source formats under data dirs still require validation evidence.
+// Broader than TESTER_CODE_FILE_RE: includes sh/swift/sql/etc. that VALIDATION_RELEVANT
+// already tracks, but excludes pure data formats (json/yaml/toml).
+const EXECUTABLE_SOURCE_FILE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rs|go|java|rb|c|cc|cpp|h|hpp|swift|kt|kts|scala|cs|php|sh|bash|zsh|sql)$/i;
 const VALIDATION_COMMAND_RE = /\b(npm\s+(?:test|run\s+(?:test|build|lint|typecheck|check|ci|verify|validate|smoke))|pnpm\s+(?:test|run\s+(?:test|build|lint|typecheck|check|ci|verify|validate|smoke))|yarn\s+(?:test|run\s+(?:test|build|lint|typecheck|check|ci|verify|validate|smoke))|bun\s+(?:test|run\s+(?:test|build|lint|typecheck|check|ci|verify|validate|smoke))|vitest|jest|mocha|pytest|ruff|mypy|pyright|tsc|eslint|oxlint|cargo\s+(?:check|test|clippy|build)|go\s+(?:test|vet|build)|swift\s+test|gradle\s+(?:test|build|check)|mvn\s+(?:test|verify)|make\b|cmake\b|py_compile|compileall|clippy|fmt\s+--check)\b/i;
 // Anchored at each segment start: a leading inspection verb means that segment
 // ran no validation (e.g. `rg "npm test"` searches for the string, it does not
@@ -23,8 +27,9 @@ export function isValidationRelevantFile(file: string): boolean {
   if (/(^|\/)docs?\//i.test(file)) return false;
   if (VALIDATION_RELEVANT_BASENAME_RE.test(file)) return true;
   // Data/asset trees (locale, fixtures, snapshots, mocks) are exempt ONLY for
-  // non-code assets. A real source module under such a dir still needs a check.
-  if (DATA_ONLY_DIR_RE.test(file) && !TESTER_CODE_FILE_RE.test(file)) return false;
+  // non-executable assets. Source/executable modules under such a dir (including
+  // sh/swift/sql and locale i18n modules) still need a validation check.
+  if (DATA_ONLY_DIR_RE.test(file) && !EXECUTABLE_SOURCE_FILE_RE.test(file)) return false;
   return VALIDATION_RELEVANT_FILE_RE.test(file) && !DOC_ONLY_FILE_RE.test(file);
 }
 

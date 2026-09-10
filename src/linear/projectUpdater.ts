@@ -402,7 +402,7 @@ const PROJECT_OVERVIEW_ISSUES_QUERY = `
     }
   }`;
 
-async function fetchProjectOverviewIssues(
+export async function fetchProjectOverviewIssues(
   linear: LinearClient,
   projectId: string,
 ): Promise<ProjectOverviewIssueNode[]> {
@@ -411,7 +411,8 @@ async function fetchProjectOverviewIssues(
   }).client;
   const issueNodes: ProjectOverviewIssueNode[] = [];
   let after: string | undefined;
-  let complete = false;
+  let hasNextPage = false;
+  const safetyCap = PROJECT_OVERVIEW_MAX_PAGES * PROJECT_OVERVIEW_PAGE_SIZE;
 
   for (let page = 0; page < PROJECT_OVERVIEW_MAX_PAGES; page++) {
     const res = await withRateLimit('linear', () =>
@@ -429,19 +430,23 @@ async function fetchProjectOverviewIssues(
       }),
     );
     const issues = res.data.project?.issues;
-    if (!issues) break;
+    if (!issues) {
+      throw new Error('Project overview pagination returned no issues connection');
+    }
 
     issueNodes.push(...issues.nodes);
-    if (!issues.pageInfo.hasNextPage) {
-      complete = true;
-      break;
+    hasNextPage = issues.pageInfo.hasNextPage === true;
+    if (!hasNextPage) break;
+
+    const endCursor = issues.pageInfo.endCursor ?? undefined;
+    if (!endCursor || endCursor === after) {
+      throw new Error('Project overview pagination returned a missing or repeated cursor');
     }
-    after = issues.pageInfo.endCursor ?? undefined;
-    if (!after) break;
+    after = endCursor;
   }
 
-  if (!complete && issueNodes.length >= PROJECT_OVERVIEW_MAX_PAGES * PROJECT_OVERVIEW_PAGE_SIZE) {
-    throw new Error(`Project overview exceeds the ${PROJECT_OVERVIEW_MAX_PAGES * PROJECT_OVERVIEW_PAGE_SIZE}-issue safety cap`);
+  if (hasNextPage) {
+    throw new Error(`Project overview exceeds the ${safetyCap}-issue safety cap`);
   }
 
   return issueNodes;
