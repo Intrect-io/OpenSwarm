@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { tryHandleWarehouseRoutes } from './warehouseRoutes.js';
+import { resolveWarehouseReadPath, tryHandleWarehouseRoutes } from './warehouseRoutes.js';
 
 const ROOT = await fs.mkdtemp('/var/tmp/openswarm-warehouse-routes-');
 const OUTSIDE = await fs.mkdtemp('/var/tmp/openswarm-warehouse-outside-');
@@ -59,6 +59,13 @@ afterAll(async () => {
 });
 
 describe('warehouse HTTP routes', () => {
+  it('returns one canonical path used for both authorization and I/O', async () => {
+    const expected = await fs.realpath(path.join(ROOT, 'INDEX.md'));
+    const authorized = resolveWarehouseReadPath('INDEX.md');
+    expect(authorized).toBe(expected);
+    await expect(fs.readFile(authorized, 'utf8')).resolves.toBe('# Warehouse\n');
+  });
+
   it('lists dotfiles with size and mtime for browser exploration', async () => {
     const response = await call('GET', '/api/warehouse/tree?path=vega-agent/env');
     expect(response).toMatchObject({ handled: true, status: 200 });

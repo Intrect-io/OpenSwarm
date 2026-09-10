@@ -104,17 +104,72 @@ describe('validatePath realpath containment', () => {
     }
   });
 
-  it('allows warehouse reads while keeping writes outside the project root denied', async () => {
+  it('validatePath itself accepts warehouse only when allowWarehouseRead is true', async () => {
+    vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
+    const file = path.join(WAREHOUSE_DIR, 'direct-validate.env');
+    await fs.writeFile(file, 'KEY_NAME=redacted\n');
+    try {
+      const allowed = validatePath(file, TMP_DIR, { allowWarehouseRead: true });
+      expect(allowed).toBe(await fs.realpath(file));
+      expect(() => validatePath(file, TMP_DIR)).toThrow(/outside the project root/);
+      expect(() => validatePath(file, TMP_DIR, { allowWarehouseRead: false })).toThrow(/outside the project root/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('allows warehouse reads when OPENSWARM_WAREHOUSE_ROOT is set', async () => {
     vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
     const file = path.join(WAREHOUSE_DIR, 'vega-agent.env');
     await fs.writeFile(file, 'KEY_NAME=redacted\n');
     try {
       const read = await executeTool(makeCall('read_file', { path: file }), TMP_DIR);
-      const write = await executeTool(makeCall('write_file', { path: file, content: 'changed' }), TMP_DIR);
       expect(read).toMatchObject({ is_error: false });
       expect(read.content).toContain('KEY_NAME=redacted');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses warehouse writes even when OPENSWARM_WAREHOUSE_ROOT is set', async () => {
+    vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
+    const file = path.join(WAREHOUSE_DIR, 'vega-agent-write.env');
+    await fs.writeFile(file, 'KEY_NAME=redacted\n');
+    try {
+      const write = await executeTool(makeCall('write_file', { path: file, content: 'changed' }), TMP_DIR);
       expect(write).toMatchObject({ is_error: true });
+      expect(write.content).toContain('outside the project root');
       await expect(fs.readFile(file, 'utf8')).resolves.toBe('KEY_NAME=redacted\n');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('still refuses unrelated outside paths when warehouse is configured', async () => {
+    vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
+    try {
+      const result = await executeTool(
+        makeCall('read_file', { path: '/etc/passwd' }),
+        TMP_DIR,
+      );
+      expect(result).toMatchObject({ is_error: true });
+      expect(result.content).toContain('outside the project root');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('still allows /tmp reads when warehouse is configured', async () => {
+    vi.stubEnv('OPENSWARM_WAREHOUSE_ROOT', WAREHOUSE_DIR);
+    const filePath = path.join(TMP_DIR, 'warehouse-tmp-unchanged.txt');
+    await fs.writeFile(filePath, 'tmp-ok', 'utf-8');
+    try {
+      const result = await executeTool(
+        makeCall('read_file', { path: filePath }),
+        path.join(TMP_DIR, 'absent-project-cwd'),
+      );
+      expect(result).toMatchObject({ is_error: false });
+      expect(result.content).toContain('tmp-ok');
     } finally {
       vi.unstubAllEnvs();
     }
