@@ -41,10 +41,10 @@ export function loadRepos(file: string = REPOS_FILE): ReposConfig {
   try {
     const raw = JSON.parse(readFileSync(file, 'utf-8')) as Partial<ReposConfig>;
     return {
-      pinned: Array.isArray(raw.pinned) ? raw.pinned : [],
-      enabled: Array.isArray(raw.enabled) ? raw.enabled : [],
-      basePaths: Array.isArray(raw.basePaths) ? raw.basePaths : [],
-      removedConfigPaths: Array.isArray(raw.removedConfigPaths) ? raw.removedConfigPaths : [],
+      pinned: raw.pinned ?? [],
+      enabled: raw.enabled ?? [],
+      basePaths: raw.basePaths ?? [],
+      removedConfigPaths: raw.removedConfigPaths ?? [],
     };
   } catch (error) {
     const recoveryPath = `${file}.corrupt-${Date.now()}`;
@@ -81,63 +81,78 @@ export function removeProject(cfg: ReposConfig, path: string): ReposConfig {
 
 export async function handleProjectAdd(rawPath: string): Promise<void> {
   const path = expandPath(rawPath, true);
-  if (!existsSync(path)) {
-    console.error(c.red(`✗ Path does not exist: ${path}`));
-    return;
-  }
-  if (!statSync(path).isDirectory()) {
+  if (!existsSync(path) || !statSync(path).isDirectory()) {
     console.error(c.red(`✗ Not a directory: ${path}`));
-    return;
+    process.exit(1);
   }
-
-  const cfg = loadRepos();
-  if (cfg.enabled.includes(path)) {
-    console.log(c.yellow(`⚠ Already registered: ${path}`));
-    return;
+  if (!existsSync(join(path, '.git'))) {
+    console.error(c.yellow(`⚠ ${path} is not a git repo — workers run in git worktrees and need one.`));
   }
-
-  saveRepos(addProject(cfg, path));
+  saveRepos(addProject(loadRepos(), path));
   console.log(c.green(`✓ Added work repo: ${path}`));
 
-  // Try to auto-map to a Linear project (non-blocking)
-  try {
-    const meta = await loadRepoMetadata(path);
-    if (meta?.linearProjectId) {
-      console.log(c.dim(`  → Auto-mapped to Linear project ${meta.linearProjectId}`));
-    }
-  } catch (err) {
-    if (err instanceof RepoMetadataError && err.code === 'NO_OPENSWARM_JSON') {
-      console.log(c.dim('  No openswarm.json found — run `openswarm init` to set up Linear mapping.'));
-    } else {
-      console.warn(c.yellow(`  ⚠ Could not read repo metadata: ${err instanceof Error ? err.message : String(err)}`));
-    }
-  }
+  // Registering the path is not enough: the daemon works Linear issues, which
+  // belong to a Linear project. Map this repo to a team/project (written into
+  // <repo>/openswarm.json) so it resolves without fuzzy name matching.
+  await mapRepoToLinear(path);
+
+  console.log(c.dim('  A running daemon picks this up within a few seconds — otherwise start it with `openswarm start`.'));
 }
 
-export async function mapRepoToLinear(path: string): Promise<void> {
-  const cfg = loadRepos();
-  if (!cfg.enabled.includes(path) && !cfg.pinned.includes(path)) {
-    console.error(c.red(`✗ Not a registered work repo: ${path}`));
+/**
+ * Best-effort interactive Linear mapping for a freshly added repo. Never throws:
+ * the path is registered regardless. Skips silently when already mapped, when
+ * stdin is not a TTY (scripted/CI), or when Linear isn't configured.
+ */
+async function mapRepoToLinear(path: string): Promise<void> {
+  try {
+    const meta = await loadRepoMetadata(path);
+    if (meta?.linear?.projectId) {
+      const label = meta.linear.projectName ?? meta.linear.projectId;
+      console.log(c.dim(`  Linear: already mapped → ${meta.linear.teamKey ?? '?'}/${label}`));
+      return;
+    }
+  } catch (err) {
+    if (err instanceof RepoMetadataError) {
+      console.error(c.yellow(`  ⚠ ${err.message} — re-mapping.`));
+    }
+  }
+
+  if (!process.stdin.isTTY) {
+    console.log(c.dim('  Linear mapping skipped (non-interactive) — run `openswarm add` in a terminal, or add openswarm.json manually.'));
     return;
   }
-  // Linear mapping is handled by `openswarm init` — this is a convenience alias
-  console.log(c.dim(`  Run \`openswarm init ${path}\` to set up Linear mapping.`));
+
+  const { resolveLinearCredential, pickAndSaveLinearMapping } = await import('./linearMapping.js');
+  const cred = await resolveLinearCredential();
+  if (!cred) {
+    console.log(c.dim('  Linear not configured — run `openswarm auth login --provider linear` to map this repo, or add openswarm.json manually.'));
+    return;
+  }
+
+  console.log(c.bold('  Map this repo to a Linear project:'));
+  try {
+    const result = await pickAndSaveLinearMapping(path, cred);
+    if (result.kind === 'no-teams') {
+      console.log(c.dim('  No Linear teams visible — skipped. Add openswarm.json manually if needed.'));
+    } else if (result.kind === 'skipped') {
+      console.log(c.dim('  Repo mapping skipped — add openswarm.json later to pin the Linear project.'));
+    }
+  } catch (err) {
+    // @inquirer throws ExitPromptError on Ctrl-C — treat as a skip, not a crash.
+    if (err instanceof Error && err.name === 'ExitPromptError') {
+      console.log(c.dim('  Linear mapping skipped.'));
+      return;
+    }
+    throw err;
+  }
 }
 
 export function handleProjectList(): void {
   const cfg = loadRepos();
-  const all = [...new Set([...cfg.pinned, ...cfg.enabled])];
-  if (all.length === 0) {
-    console.log(c.dim('No work repos registered.'));
-    return;
-  }
-  console.log(c.bold(`Work repos (${all.length}):`));
-  for (const p of all) {
-    const tags: string[] = [];
-    if (cfg.pinned.includes(p)) tags.push('pinned');
-    if (cfg.enabled.includes(p)) tags.push('enabled');
-    console.log(`  ${p} ${c.dim(`(${tags.join(', ')})`)}`);
-  }
+  console.log(c.bold('Work repos (enabled):'));
+  if (cfg.enabled.length === 0) console.log('  (none)');
+  for (const p of cfg.enabled) console.log(`  ${c.green('✓')} ${p}${cfg.pinned.includes(p) ? c.dim(' (pinned)') : ''}`);
   if (cfg.removedConfigPaths.length > 0) {
     console.log(c.dim('\nExcluded (denylist):'));
     for (const p of cfg.removedConfigPaths) console.log(c.dim(`  ✗ ${p}`));

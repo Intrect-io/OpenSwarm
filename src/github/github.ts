@@ -399,7 +399,15 @@ export async function loadCIState(): Promise<CIState> {
     return empty();
   }
   try {
-    return JSON.parse(data);
+    const parsed = JSON.parse(data) as unknown;
+    const normalized = normalizeCIState(parsed);
+    if (!normalized) {
+      console.warn(
+        `[CI] CI state at ${CI_STATE_PATH} failed schema validation — repo health history is being reset`,
+      );
+      return empty();
+    }
+    return normalized;
   } catch (err) {
     console.warn(
       `[CI] CI state at ${CI_STATE_PATH} is corrupt — repo health history is being reset:`,
@@ -407,6 +415,58 @@ export async function loadCIState(): Promise<CIState> {
     );
     return empty();
   }
+}
+
+function normalizeActiveFailure(raw: unknown): ActiveFailure | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.workflow !== 'string' || typeof o.branch !== 'string') return null;
+  if (typeof o.url !== 'string' || typeof o.createdAt !== 'string') return null;
+  if (typeof o.runId !== 'number' || !Number.isInteger(o.runId) || o.runId < 0) return null;
+  return {
+    workflow: o.workflow,
+    branch: o.branch,
+    runId: o.runId,
+    url: o.url,
+    createdAt: o.createdAt,
+  };
+}
+
+function normalizeRepoHealth(repo: string, raw: unknown): RepoHealth | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (o.status !== 'healthy' && o.status !== 'broken' && o.status !== 'unknown') return null;
+  const activeFailures = Array.isArray(o.activeFailures)
+    ? o.activeFailures.map(normalizeActiveFailure).filter((f): f is ActiveFailure => f !== null)
+    : [];
+  const health: RepoHealth = {
+    repo: typeof o.repo === 'string' && o.repo.length > 0 ? o.repo : repo,
+    status: o.status,
+    activeFailures,
+    lastChecked: typeof o.lastChecked === 'string' ? o.lastChecked : '',
+  };
+  if (typeof o.brokenSince === 'string') health.brokenSince = o.brokenSince;
+  if (typeof o.lastReminder === 'string') health.lastReminder = o.lastReminder;
+  return health;
+}
+
+/** Validate persisted CI state before callers consume it. */
+export function normalizeCIState(raw: unknown): CIState | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (!o.repos || typeof o.repos !== 'object' || Array.isArray(o.repos)) return null;
+  const repos: Record<string, RepoHealth> = {};
+  for (const [key, value] of Object.entries(o.repos as Record<string, unknown>)) {
+    if (typeof key !== 'string' || key.length === 0) continue;
+    const health = normalizeRepoHealth(key, value);
+    if (health) repos[key] = health;
+  }
+  return {
+    repos,
+    updatedAt: typeof o.updatedAt === 'string' && o.updatedAt.length > 0
+      ? o.updatedAt
+      : new Date().toISOString(),
+  };
 }
 
 /**

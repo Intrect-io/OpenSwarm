@@ -196,6 +196,26 @@ describe('agent codename passthrough (AGT-4019)', () => {
   });
 });
 
+describe('worker success field boundary (AGT-3428)', () => {
+  it('rejects JSON results whose success field is not a boolean', () => {
+    for (const success of ['true', 1, 0, null, 'yes'] as unknown[]) {
+      const parsed = parseWorkerResult(wrap({
+        success,
+        summary: 'structured-only-marker',
+        filesChanged: ['only-from-json.ts'],
+      }));
+      // Non-boolean success must not take the structured path.
+      expect(parsed.filesChanged).toEqual([]);
+      expect(parsed.summary).not.toBe('structured-only-marker');
+    }
+  });
+
+  it('accepts an explicit boolean success', () => {
+    expect(parseWorkerResult(wrap({ success: true, summary: 'ok' })).success).toBe(true);
+    expect(parseWorkerResult(wrap({ success: false, summary: 'nope', error: 'x' })).success).toBe(false);
+  });
+});
+
 describe("the worker's report survives extraction (AGT-4073)", () => {
   // The worker prompt asks for a plain-text report whose FIRST line is the
   // agent's `Codename:` introduction, and for no JSON on the success path — so

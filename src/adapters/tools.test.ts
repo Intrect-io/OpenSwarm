@@ -193,6 +193,23 @@ describe('executeTool', () => {
       expect(result.content).toContain('3\tgamma');
       expect(result.content).not.toContain('1\talpha');
     });
+
+    it('normalizes malformed offset/limit instead of trusting them', async () => {
+      const badOffset = await executeTool(
+        makeCall('read_file', { path: filePath, offset: -10, limit: Number.NaN }),
+        TMP_DIR,
+      );
+      expect(badOffset.is_error).toBe(false);
+      expect(badOffset.content).toContain('1\talpha');
+
+      const oversized = await executeTool(
+        makeCall('read_file', { path: filePath, offset: 0, limit: 1_000_000 }),
+        TMP_DIR,
+      );
+      expect(oversized.is_error).toBe(false);
+      // Cap must still return the small file contents without throwing.
+      expect(oversized.content).toContain('3\tgamma');
+    });
   });
 
   // ── write_file ──
