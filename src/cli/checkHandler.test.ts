@@ -48,6 +48,8 @@ const scanRepositoryMock = vi.hoisted(() => vi.fn());
 const bsScanRepositoryMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../registry/sqliteStore.js', () => ({
+  // Keep in sync with production page cap used by handleCheck --tree pagination.
+  LIST_ENTITIES_MAX_LIMIT: 2,
   getRegistryStore: () => store,
   closeRegistryStore,
 }));
@@ -825,6 +827,32 @@ describe('handleCheck --tree', () => {
     await handleCheck(undefined, { tree: true });
 
     expect(out()).toContain('100% tested');
+  });
+
+  it('paginates --tree listEntities using the store page cap across every page', async () => {
+    // LIST_ENTITIES_MAX_LIMIT is mocked to 2 above — five entities require 3 pages.
+    const all = [
+      entity({ id: '1', filePath: 'src/p1.ts', hasTests: true }),
+      entity({ id: '2', filePath: 'src/p2.ts', hasTests: true }),
+      entity({ id: '3', filePath: 'src/p3.ts', hasTests: true }),
+      entity({ id: '4', filePath: 'src/p4.ts', hasTests: true }),
+      entity({ id: '5', filePath: 'src/p5.ts', hasTests: true }),
+    ];
+    store.listEntities.mockImplementation((filter?: { limit?: number; offset?: number }) => {
+      const limit = filter?.limit ?? all.length;
+      const offset = filter?.offset ?? 0;
+      return { entities: all.slice(offset, offset + limit), total: all.length };
+    });
+
+    const { handleCheck } = await import('./checkHandler.js');
+    await handleCheck(undefined, { tree: true, project: 'proj-x' });
+
+    expect(store.listEntities.mock.calls.length).toBeGreaterThan(1);
+    expect(store.listEntities.mock.calls[0][0]).toMatchObject({ limit: 2, offset: 0 });
+    expect(store.listEntities.mock.calls[1][0]).toMatchObject({ limit: 2, offset: 2 });
+    expect(out()).toContain('src/');
+    expect(out()).toContain('p1.ts');
+    expect(out()).toContain('p5.ts');
   });
 });
 

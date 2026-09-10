@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addComment, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, initLinear, parseBlockerIdentifiers } from './linear.js';
+import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -7,6 +7,100 @@ import { LinearClient } from '@linear/sdk';
 // initLinear() installs a fake we control, instead of refactoring the function
 // to take an injected client just for this test.
 vi.mock('@linear/sdk', () => ({ LinearClient: vi.fn() }));
+
+describe('active/backlog inventory bounds', () => {
+  function installIssueClient(opts: {
+    nodes: Array<Record<string, unknown>>;
+    fetchNextNodes?: Array<Record<string, unknown>>;
+    expectedFirst: number;
+  }) {
+    clearLinearCache();
+    const makeIssue = (node: Record<string, unknown>) => ({
+      ...node,
+      comments: vi.fn(async (args?: { first?: number }) => {
+        expect(args?.first).toBe(LINEAR_RELATED_PAGE_SIZE);
+        return { nodes: [] };
+      }),
+      labels: vi.fn(async (args?: { first?: number }) => {
+        expect(args?.first).toBe(LINEAR_RELATED_PAGE_SIZE);
+        return { nodes: [] };
+      }),
+      state: Promise.resolve({ name: 'In Progress' }),
+      project: Promise.resolve(undefined),
+    });
+
+    const connection = {
+      nodes: opts.nodes.map(makeIssue),
+      pageInfo: { hasNextPage: Boolean(opts.fetchNextNodes?.length) },
+      fetchNext: async () => {
+        connection.nodes.push(...(opts.fetchNextNodes ?? []).map(makeIssue));
+        connection.pageInfo.hasNextPage = false;
+        return connection;
+      },
+    };
+
+    const fakeClient = {
+      issues: vi.fn(async (args: { first?: number }) => {
+        expect(args.first).toBe(opts.expectedFirst);
+        return connection;
+      }),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+    return { fakeClient, connection };
+  }
+
+  it('bounds active-issue pagination and enrichment work', async () => {
+    const page1 = Array.from({ length: LINEAR_ACTIVE_PAGE_SIZE }, (_, i) => ({
+      id: `a-${i}`,
+      identifier: `AGT-${i}`,
+      title: `Active ${i}`,
+      url: `https://linear.app/i/${i}`,
+      description: null,
+      priority: 2,
+    }));
+    const page2 = Array.from({ length: LINEAR_ACTIVE_PAGE_SIZE }, (_, i) => ({
+      id: `b-${i}`,
+      identifier: `AGT-B-${i}`,
+      title: `Active B ${i}`,
+      url: `https://linear.app/i/b${i}`,
+      description: null,
+      priority: 3,
+    }));
+    const { fakeClient } = installIssueClient({
+      nodes: page1,
+      fetchNextNodes: page2,
+      expectedFirst: LINEAR_ACTIVE_PAGE_SIZE,
+    });
+
+    const result = await getInProgressIssues('worker');
+    expect(fakeClient.issues).toHaveBeenCalledWith(expect.objectContaining({
+      first: LINEAR_ACTIVE_PAGE_SIZE,
+    }));
+    expect(result.length).toBeLessThanOrEqual(LINEAR_ACTIVE_ENRICH_CAP);
+    expect(result.length).toBe(LINEAR_ACTIVE_PAGE_SIZE * Math.min(2, LINEAR_ACTIVE_MAX_PAGES));
+  });
+
+  it('bounds backlog list retrieval before picking the next issue', async () => {
+    const nodes = Array.from({ length: LINEAR_BACKLOG_PAGE_SIZE + 5 }, (_, i) => ({
+      id: `bl-${i}`,
+      identifier: `AGT-BL-${i}`,
+      title: `Backlog ${i}`,
+      url: `https://linear.app/i/bl${i}`,
+      description: null,
+      priority: i === 0 ? 0 : 1,
+    }));
+    const { fakeClient } = installIssueClient({
+      nodes,
+      expectedFirst: LINEAR_BACKLOG_PAGE_SIZE,
+    });
+    const next = await getNextBacklogIssue('worker');
+    expect(fakeClient.issues).toHaveBeenCalledWith(expect.objectContaining({
+      first: LINEAR_BACKLOG_PAGE_SIZE,
+    }));
+    expect(next?.identifier).toBe('AGT-BL-1');
+  });
+});
 
 describe('effectCommentId', () => {
   it('derives a stable, marker-specific UUIDv4 for Linear uniqueness', () => {
@@ -135,6 +229,14 @@ describe('drainLinearConnection', () => {
       fetchNext: async () => conn,
     };
     await expect(drainLinearConnection(conn)).resolves.toEqual([{ id: 'x' }]);
+  });
+
+  it('honors an explicit maxPages cap for active-inventory drains', async () => {
+    const pages = Array.from({ length: 6 }, (_, i) => [{ id: `p${i}` }]);
+    const conn = connection(pages);
+    await expect(drainLinearConnection(conn, LINEAR_ACTIVE_MAX_PAGES)).resolves.toEqual(
+      pages.slice(0, LINEAR_ACTIVE_MAX_PAGES).flat(),
+    );
   });
 
   it('tolerates a connection with no pageInfo', async () => {

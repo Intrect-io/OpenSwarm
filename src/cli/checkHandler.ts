@@ -6,7 +6,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { getRegistryStore, closeRegistryStore } from '../registry/sqliteStore.js';
+import { getRegistryStore, closeRegistryStore, LIST_ENTITIES_MAX_LIMIT } from '../registry/sqliteStore.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import type {
   CodeEntity, EntityStatus, RiskLevel, WarningSeverity, WarningCategory,
@@ -255,11 +255,15 @@ export async function handleCheck(
       const projectId = opts.project ?? resolveProjectId(process.cwd());
       const scopePath = filePath || '';  // optional dir scope
       const entities: CodeEntity[] = [];
-      const pageSize = 5_000;
+      const pageSize = LIST_ENTITIES_MAX_LIMIT;
       for (let offset = 0; ; offset += pageSize) {
         const page = store.listEntities({ projectId, limit: pageSize, offset });
         entities.push(...page.entities);
-        if (entities.length >= page.total || page.entities.length === 0) break;
+        if (
+          page.entities.length === 0
+          || page.entities.length < pageSize
+          || entities.length >= page.total
+        ) break;
       }
 
       // Group entities by directory → file

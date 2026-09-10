@@ -7,6 +7,7 @@ import type { RegisterEntityInput } from './sqliteStore.js';
 const registered: RegisterEntityInput[] = [];
 
 vi.mock('./sqliteStore.js', () => ({
+  LIST_ENTITIES_MAX_LIMIT: 5_000,
   getRegistryStore: () => ({
     listEntities: () => ({ entities: [], total: 0 }),
     registerEntity: (input: RegisterEntityInput) => {
