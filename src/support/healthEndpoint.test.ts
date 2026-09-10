@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { buildHealthPayload } from './healthEndpoint.js';
+import { buildHealthPayload, getCachedHealthPayload, startHealthCache, stopHealthCache } from './healthEndpoint.js';
 
 const lifecycle = vi.hoisted(() => ({
   pollers: [] as NodeJS.Timeout[],
@@ -238,4 +238,63 @@ describe('buildHealthPayload memory reporting (AGT-4063)', () => {
     expect(payload.heap_limit_mb).toBeGreaterThan(payload.heap_used_mb);
   });
 
+});
+
+describe('health payload cache (AGT-4079)', () => {
+  afterEach(() => {
+    stopHealthCache();
+    vi.useRealTimers();
+  });
+
+  it('refreshes time-sensitive fields on the timer, within 1s tolerance', () => {
+    vi.useFakeTimers();
+    // `process.uptime()` reads the real clock, which fake timers do not move —
+    // so advancing them proves nothing about re-reading unless the source is
+    // controlled. Spying on it is what makes "moved with the tick" observable:
+    // each refresh must call it again rather than keep the seeded value.
+    let fakeUptime = 10;
+    const uptimeSpy = vi.spyOn(process, 'uptime').mockImplementation(() => fakeUptime);
+    const stop = startHealthCache(1_000);
+    const first = getCachedHealthPayload();
+    const firstUptime = first.uptime_s;
+
+    // Advance past two refresh ticks: uptime must move with the timer, not
+    // freeze at the seed value (the reviewer's DoD-3 finding).
+    fakeUptime = 12.5;
+    vi.advanceTimersByTime(2_500);
+    const second = getCachedHealthPayload();
+    expect(second.uptime_s).toBeGreaterThanOrEqual(firstUptime + 2);
+    expect(second.uptime_s).toBeLessThanOrEqual(firstUptime + 3); // 1s tolerance
+    uptimeSpy.mockRestore();
+
+    // Memory fields are re-read per tick too.
+    expect(second.rss_mb).toBeGreaterThan(0);
+    stop();
+  });
+
+  it('serves the last snapshot during a stall instead of timing out', () => {
+    vi.useFakeTimers();
+    const stop = startHealthCache(1_000);
+    const before = getCachedHealthPayload();
+
+    // Simulate a multi-second event-loop stall: no timer ticks run, yet the
+    // handler must still get an instant, well-formed answer.
+    const during = getCachedHealthPayload();
+    expect(during).toBe(before);
+    expect(during.status).toBe('ok');
+    expect(typeof during.uptime_s).toBe('number');
+    stop();
+  });
+
+  it('is idempotent: a second start does not double the refresh rate', () => {
+    vi.useFakeTimers();
+    const stop1 = startHealthCache(1_000);
+    const stop2 = startHealthCache(1_000);
+    const seeded = getCachedHealthPayload();
+    vi.advanceTimersByTime(1_000);
+    // Exactly one tick's worth of progress, not two.
+    expect(getCachedHealthPayload().uptime_s).toBeLessThan(seeded.uptime_s + 2);
+    stop1();
+    stop2();
+  });
 });

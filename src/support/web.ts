@@ -39,7 +39,7 @@ import { projectInfoForRepository } from '../automation/runnerState.js';
 import { loadConfig } from '../core/config.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import type { SubTask } from './planner.js';
-import { buildHealthPayload } from './healthEndpoint.js';
+import { getCachedHealthPayload, startHealthCache, stopHealthCache } from './healthEndpoint.js';
 import { HttpError, readBody } from './httpBody.js';
 import { tryHandleAppRoutes } from './webAppRoutes.js';
 
@@ -527,7 +527,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       }
       // Health stays ahead of both auth gates: no secrets ("diagnostics, not
       // authentication"), and the desktop shell polls it token-less. (INT-3388)
-      if (url === '/api/health' && req.method === 'GET') { writeJson(res, 200, buildHealthPayload()); return; }
+      if (url === '/api/health' && req.method === 'GET') { writeJson(res, 200, getCachedHealthPayload()); return; }
       if ((isMutatingApiRequest(url, req.method) || isMutatingGraphQLRequest(requestUrl, req.method)) && !isAuthorizedMutation(req)) {
         writeJson(res, 403, { error: 'Forbidden' });
         return;
@@ -1618,6 +1618,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         else console.log(`  - http://<this-host>:${port} (token required)`);
       }
       gitStatusPoller = startGitStatusPoller(() => Array.from(pinnedProjects));
+      startHealthCache();
       startHealthChecker(30000);
       resolve();
     });
@@ -1632,6 +1633,7 @@ export async function stopWebServer(): Promise<void> {
     stopGitStatusPoller();
     gitStatusPoller = null;
   }
+  stopHealthCache();
   stopHealthChecker();
   stopReposWatcher();
 
