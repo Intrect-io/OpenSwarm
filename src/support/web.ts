@@ -371,6 +371,39 @@ function pathDenylistVariants(p: string): string[] {
   return [...variants];
 }
 
+/** One destination policy for GitHub discovery and cloning. */
+function getWorkspaceRoot(): string {
+  const configured = process.env.OPENSWARM_WORKSPACE_ROOT?.trim();
+  if (configured) return resolvePath(configured);
+  if (existsSync('/work')) return resolvePath('/work');
+  return resolvePath(homedir(), 'dev');
+}
+
+function getCloneDestination(fullName: string): string | null {
+  const root = getWorkspaceRoot();
+  const destination = resolvePath(root, fullName.split('/')[1]!);
+  const rootPrefix = root.endsWith('/') ? root : `${root}/`;
+  return destination !== root && destination.startsWith(rootPrefix) ? destination : null;
+}
+
+function registerPinnedProject(projectPath: string): void {
+  pinnedProjects.add(projectPath);
+  // An explicit registration is a deliberate re-enable (both path forms — INT-2799).
+  for (const v of pathDenylistVariants(projectPath)) removedConfigPaths.delete(v);
+  saveReposConfig();
+  const name = basename(projectPath);
+  if (name && runnerRef) runnerRef.registerProjectPath(name, projectPath);
+}
+
+function runGitClone(fullName: string, destination: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['clone', `https://github.com/${fullName}.git`, destination], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 /**
  * Re-read ~/.claude/openswarm-repos.json and apply it to the in-memory registry
  * + runner. The file is the source of truth: the in-memory pinned/basePaths/
@@ -641,6 +674,110 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
 
+      // ---- GitHub repository discovery ----
+      } else if (url === '/api/github/repos' && req.method === 'GET') {
+        const token = process.env.GH_TOKEN?.trim();
+        if (!token) {
+          writeJson(res, 503, { error: 'GH_TOKEN not configured' });
+          return;
+        }
+        try {
+          const upstream = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated', {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+          });
+          if (!upstream.ok) {
+            writeJson(res, upstream.status === 401 || upstream.status === 403 ? 502 : 503, {
+              error: 'GitHub repository request failed',
+            });
+            return;
+          }
+          const repositories: unknown = await upstream.json();
+          if (!Array.isArray(repositories)) {
+            writeJson(res, 502, { error: 'Invalid GitHub repository response' });
+            return;
+          }
+          const normalized = [] as Array<{
+            fullName: string;
+            private: boolean;
+            defaultBranch: string;
+            updatedAt: string;
+            cloned: boolean;
+          }>;
+          for (const repo of repositories) {
+            if (!repo || typeof repo !== 'object') {
+              writeJson(res, 502, { error: 'Invalid GitHub repository response' });
+              return;
+            }
+            const data = repo as Record<string, unknown>;
+            // Validate every field emitted by this endpoint before touching the
+            // filesystem. A partial upstream response is not safe to normalize.
+            if (typeof data.full_name !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(data.full_name)
+              || typeof data.private !== 'boolean' || typeof data.default_branch !== 'string'
+              || typeof data.updated_at !== 'string') {
+              writeJson(res, 502, { error: 'Invalid GitHub repository response' });
+              return;
+            }
+            const destination = getCloneDestination(data.full_name);
+            normalized.push({
+              fullName: data.full_name,
+              private: data.private,
+              defaultBranch: data.default_branch,
+              updatedAt: data.updated_at,
+              cloned: destination !== null && existsSync(destination),
+            });
+          }
+          const query = requestUrl.searchParams.get('q');
+          const filtered = query === null
+            ? normalized
+            : normalized.filter(repo => repo.fullName.toLowerCase().includes(query.toLowerCase()));
+          writeJson(res, 200, filtered);
+        } catch {
+          writeJson(res, 502, { error: 'GitHub repository request failed' });
+        }
+
+      // ---- Clone and register a GitHub repository ----
+      } else if (url === '/api/repos/clone' && req.method === 'POST') {
+        const token = process.env.GH_TOKEN?.trim();
+        if (!token) {
+          writeJson(res, 503, { error: 'GH_TOKEN not configured' });
+          return;
+        }
+        let parsed: { fullName?: unknown };
+        try {
+          parsed = JSON.parse(await readBody(req)) as { fullName?: unknown };
+        } catch {
+          writeJson(res, 400, { error: 'Invalid JSON' });
+          return;
+        }
+        const fullName = parsed.fullName;
+        const segments = typeof fullName === 'string' ? fullName.split('/') : [];
+        if (typeof fullName !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(fullName)
+          || segments.includes('.') || segments.includes('..')) {
+          writeJson(res, 400, { error: 'Invalid repository name' });
+          return;
+        }
+        const destination = getCloneDestination(fullName);
+        if (!destination) {
+          writeJson(res, 400, { error: 'Invalid repository destination' });
+          return;
+        }
+        if (existsSync(destination)) {
+          writeJson(res, 409, { error: 'Repository destination already exists' });
+          return;
+        }
+        try {
+          await runGitClone(fullName, destination);
+        } catch {
+          writeJson(res, 502, { error: 'Git clone failed' });
+          return;
+        }
+        try {
+          registerPinnedProject(destination);
+          writeJson(res, 201, { fullName, destination });
+        } catch {
+          writeJson(res, 500, { error: 'Repository registration failed' });
+        }
+
       // ---- Local projects for picker ----
       } else if (url === '/api/local-projects' && req.method === 'GET') {
         const configPaths = runnerRef?.getAllowedProjects() ?? [];
@@ -662,14 +799,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         try {
           const { projectPath } = JSON.parse(body) as { projectPath: string };
           if (typeof projectPath === 'string' && projectPath) {
-            pinnedProjects.add(projectPath);
-            // R6: an explicit pin is a deliberate re-enable — clear the denylist (both path
-            // forms — INT-2799) so it isn't skipped again by setWebRunner on the next restart.
-            for (const v of pathDenylistVariants(projectPath)) removedConfigPaths.delete(v);
-            saveReposConfig();
-            // Seed path cache so Linear project name matches immediately
-            const name = projectPath.split('/').pop();
-            if (name && runnerRef) runnerRef.registerProjectPath(name, projectPath);
+            registerPinnedProject(projectPath);
           }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
