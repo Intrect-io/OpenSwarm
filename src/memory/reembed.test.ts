@@ -28,7 +28,19 @@ vi.mock('./memoryCore.js', () => ({
   getTable: () => ({
     name: 'cognitive_memory',
     schema: async () => ({ fields: [] }),
-    query: () => ({ limit: () => ({ toArray: async () => state.rows }) }),
+    query: () => ({
+      limit: (n: number) => ({
+        offset: (off: number) => ({
+          toArray: async () => state.rows.slice(off, off + n),
+        }),
+        toArray: async () => state.rows.slice(0, n),
+      }),
+      offset: (off: number) => ({
+        limit: (n: number) => ({
+          toArray: async () => state.rows.slice(off, off + n),
+        }),
+      }),
+    }),
   }),
   setTable: state.setTable,
   embedPassage: vi.fn(async (text: string) => {
@@ -140,5 +152,19 @@ describe('reembedMemoryTable', () => {
     expect(result.total).toBe(0);
     expect(state.createEmptyTable).toHaveBeenCalled();
     expect(state.createTable).not.toHaveBeenCalled();
+  });
+
+  it('pages through stores larger than batchSize without truncating', async () => {
+    state.rows = Array.from({ length: 5 }, (_, i) => row({ id: `r${i}`, title: `T${i}`, content: `C${i}` }));
+
+    const result = await reembedMemoryTable({
+      memoryDir: mkdtempSync(resolve(tmpdir(), 'osw-re-')),
+      batchSize: 2,
+    });
+
+    expect(result.total).toBe(5);
+    expect(result.reembedded).toBe(5);
+    expect(state.embedCalls).toHaveLength(5);
+    expect(state.createTable.mock.calls[0][1]).toHaveLength(5);
   });
 });

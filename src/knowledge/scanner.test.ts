@@ -145,4 +145,13 @@ describe('knowledge scanner', () => {
     expect(ids).toContain('src/app.ts');
     expect(ids.filter(id => id.includes('google-cloud-sdk') || id.includes('third_party') || id.includes('vendor/'))).toEqual([]);
   });
+
+  it('aborts a full scan when the node budget is exceeded', async () => {
+    await writeProjectFile('src/a.ts', 'export const a = 1;\n');
+    await writeProjectFile('src/b.ts', 'export const b = 1;\n');
+    await writeProjectFile('src/c.ts', 'export const c = 1;\n');
+
+    // Project root + directory nodes also count toward the budget.
+    await expect(scanProject(tmp, 'test-project', { maxNodes: 2 })).rejects.toThrow(/node budget/);
+  });
 });

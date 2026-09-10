@@ -31,7 +31,10 @@ async function acquireSearchSlot(): Promise<void> {
     return;
   }
   return new Promise<void>((resolve) => {
-    searchQueue.push(resolve);
+    searchQueue.push(() => {
+      activeSearches++;
+      resolve();
+    });
   });
 }
 

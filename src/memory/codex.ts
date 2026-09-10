@@ -12,7 +12,7 @@
  */
 
 import { promises as fs } from 'fs';
-import { resolve, basename, join, relative, posix } from 'path';
+import { resolve, basename, join, posix } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
 import { createHash, randomBytes } from 'crypto';
@@ -107,12 +107,12 @@ export function generateSessionId(): string {
 }
 
 /**
- * Session filename suffix from session ID
+ * Session filename suffix from session ID.
+ * Hash the full id so suffixes discriminate ids that share a long prefix
+ * (a leading slice of `session-<ms>` was effectively constant for ~11 days).
  */
 export function sessionFilenameSuffix(id: string): string {
-  // Extract the hex portion after "session-" for a short unique suffix
-  const hex = id.replace(/^session-/, '');
-  return hex.slice(0, 8);
+  return createHash('sha256').update(id).digest('hex').slice(0, 12);
 }
 
 /**

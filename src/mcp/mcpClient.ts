@@ -247,12 +247,14 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
   const unreachable: string[] = [];
   const entries = Object.entries(registry);
   let next = 0;
+  let discoveryStopped = false;
   // Global qualified-name dedup set — prevents duplicate tool definitions
   // across servers that expose the same qualified name.
   const globalSeenQualified = new Set<string>();
   const worker = async (): Promise<void> => {
-    while (next < entries.length) {
+    while (next < entries.length && !discoveryStopped) {
       const [server, cfg] = entries[next++];
+      if (discoveryStopped) break;
       try {
         const listed = (await withClient(cfg, (c) => c.listTools())) as { tools?: McpTool[] };
         const seenNames = new Set<string>();
@@ -266,6 +268,7 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
             break;
           }
           if (defs.length >= MAX_TOTAL_TOOLS) {
+            discoveryStopped = true;
             console.warn(`[MCP] total tools exceeded ${MAX_TOTAL_TOOLS} — stopping discovery`);
             break;
           }

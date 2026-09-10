@@ -45,6 +45,7 @@ const TEST_FILE_PATTERNS = [
 const MAX_FILE_SIZE = 512 * 1024; // 512KB — skip large generated files
 const MAX_DEPTH = 15;
 const SCAN_TIMEOUT_MS = 30_000;
+const MAX_INCREMENTAL_UPDATE_MS = 15_000;
 const MAX_GRAPH_NODES = 50_000; // Bounded node budget — prevents OOM on repos with generated code
 
 // Import Regex Patterns
@@ -126,11 +127,12 @@ export async function incrementalUpdate(
     if (lexicalRelative === '..' || lexicalRelative.startsWith(`..${sep}`) || isAbsolute(lexicalRelative)) {
       throw new Error(`Changed path escapes repository root through a symlink: ${file}`);
     }
-    let canonical: string;
+    let canonical: string | undefined;
     try {
       canonical = await realpath(candidate);
     } catch {
       // Deleted paths cannot be canonicalized; the lexical containment check applies.
+      continue;
     }
     const relPath = relative(root, canonical);
     if (relPath === '..' || relPath.startsWith(`..${sep}`) || isAbsolute(relPath)) {

@@ -9,8 +9,10 @@
 // table in one pass, following compaction's build-then-swap shape so a failure
 // leaves the original table intact.
 //
-// Processing is done in bounded batches of 1000 records to keep memory usage
-// predictable even for large stores (100k+ records).
+// Rows are fetched in bounded pages and encoded in bounded batches so peak
+// transient memory stays predictable for large stores. Unlike compaction, a
+// full page is never treated as a hard reject — we keep paging until exhausted
+// (no silent 1_000_000 truncate, no size-based throw).
 
 import { c, status } from '../support/colors.js';
 import {
@@ -46,13 +48,66 @@ export interface ReembedOptions {
   onProgress?: (done: number, total: number) => void;
   /** How often to fire onProgress (default 50). */
   progressEvery?: number;
-  /** Batch size for bounded-memory processing (default 1000). */
+  /** Batch size for bounded-memory fetch + encode (default 1000). */
   batchSize?: number;
+}
+
+type QueryBuilder = {
+  limit: (n: number) => {
+    offset?: (n: number) => { toArray: () => Promise<unknown[]> };
+    toArray: () => Promise<unknown[]>;
+  };
+  offset?: (n: number) => {
+    limit: (n: number) => { toArray: () => Promise<unknown[]> };
+  };
+};
+
+/**
+ * Fetch one page of rows. Prefer native offset when available; otherwise fall
+ * back to limit(offset+batchSize) + slice so stores larger than any single
+ * query window can still be fully re-embedded without a hard reject.
+ */
+async function fetchPage(
+  table: { query: () => QueryBuilder },
+  offset: number,
+  batchSize: number,
+): Promise<CognitiveMemoryRecord[]> {
+  const q = table.query();
+  // Prefer offset→limit (LanceDB); also accept limit→offset if the builder exposes it.
+  if (typeof q.offset === 'function') {
+    return (await q.offset(offset).limit(batchSize).toArray()) as unknown as CognitiveMemoryRecord[];
+  }
+  const limited = q.limit(batchSize);
+  if (typeof limited.offset === 'function') {
+    return (await limited.offset(offset).toArray()) as unknown as CognitiveMemoryRecord[];
+  }
+  const rows = (await table.query().limit(offset + batchSize).toArray()) as unknown as CognitiveMemoryRecord[];
+  return rows.slice(offset, offset + batchSize);
+}
+
+/**
+ * Load every row via bounded pages. Does not reject when the store is large.
+ */
+async function loadAllRowsPaged(
+  table: { query: () => QueryBuilder },
+  batchSize: number,
+): Promise<CognitiveMemoryRecord[]> {
+  const rows: CognitiveMemoryRecord[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await fetchPage(table, offset, batchSize);
+    if (page.length === 0) break;
+    rows.push(...page);
+    if (page.length < batchSize) break;
+    offset += page.length;
+  }
+  return rows;
 }
 
 /**
  * Rebuild every stored vector with the current encoder.
- * Processes records in bounded batches to keep memory predictable.
+ * Processes records in bounded batches to keep peak encode memory predictable.
+ * Does not reject large stores (unlike compaction's safety-limit throw).
  */
 export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<ReembedResult> {
   await initDatabase(options.memoryDir ?? MEMORY_DIR);
@@ -65,7 +120,8 @@ export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<
   const progressEvery = options.progressEvery ?? 50;
   const batchSize = options.batchSize ?? 1_000;
 
-  const rows = (await table.query().limit(1_000_000).toArray()) as unknown as CognitiveMemoryRecord[];
+  // Page through the entire store — no 1_000_000 silent truncate, no hard reject.
+  const rows = await loadAllRowsPaged(table as { query: () => QueryBuilder }, batchSize);
   const total = rows.length;
   console.log(`${status.info('[Reembed]')} ${c.dim('rebuilding')} ${c.cyan(String(total))} ${c.dim('vectors with')} ${c.yellow(spec.id)}`);
 
@@ -75,7 +131,7 @@ export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<
   let reembedded = 0;
   let empty = 0;
 
-  // Process in bounded batches to keep memory predictable
+  // Encode in bounded batches so peak transient work stays O(batchSize).
   for (let batchStart = 0; batchStart < normalized.length; batchStart += batchSize) {
     const batchEnd = Math.min(batchStart + batchSize, normalized.length);
     const batch = normalized.slice(batchStart, batchEnd);
