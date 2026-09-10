@@ -46,21 +46,73 @@ afterEach(() => {
 });
 
 describe('runPlanCommand', () => {
-  it('dispatches the approved plan to the daemon', async () => {
+  it('dispatches the approved sub-tasks on yes', async () => {
     mockedRunPlanner.mockResolvedValue(plannerResult([
-      { title: 'a', description: 'a', estimatedMinutes: 10, priority: 1 },
-      { title: 'b', description: 'b', estimatedMinutes: 20, priority: 2, dependencies: ['a'] },
+      { title: 'A', description: 'da', estimatedMinutes: 10, priority: 2 },
+      { title: 'B', description: 'db', estimatedMinutes: 15, priority: 3, dependencies: ['A'] },
     ]) as never);
-    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ mode: 'pipeline', taskIds: ['1', '2'] }) }));
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ mode: 'linear', parentIssue: { identifier: 'INT-9' } }), { status: 200 }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const { io, out } = makeIO(['yes']);
+    await runPlanCommand('build X', io, { projectPath: '/tmp/proj' });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/plan/dispatch');
+    const body = bodyOf(fetchMock);
+    expect(body.goal).toBe('build X');
+    expect(body.projectPath).toBe('/tmp/proj');
+    expect(body.subTasks).toHaveLength(2);
+    expect(out.join('\n')).toContain('INT-9');
+  });
+
+  it('does not dispatch on no', async () => {
+    mockedRunPlanner.mockResolvedValue(
+      plannerResult([{ title: 'A', description: 'd', estimatedMinutes: 5, priority: 2 }]) as never,
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { io, out } = makeIO(['no']);
     await runPlanCommand('g', io, {});
 
-    expect(mockedRunPlanner).toHaveBeenCalledWith(expect.objectContaining({ taskTitle: 'g' }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(out.join('\n')).toContain('Cancelled');
+  });
+
+  it('drops a sub-task on edit, then dispatches the remainder', async () => {
+    mockedRunPlanner.mockResolvedValue(plannerResult([
+      { title: 'A', description: 'da', estimatedMinutes: 10, priority: 2 },
+      { title: 'B', description: 'db', estimatedMinutes: 15, priority: 3 },
+    ]) as never);
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ mode: 'exec', taskIds: ['t1'] }), { status: 202 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // edit → drop #2 → yes
+    const { io } = makeIO(['edit', 'yes'], ['2']);
+    await runPlanCommand('g', io, {});
+
+    const body = bodyOf(fetchMock);
+    expect(body.subTasks).toHaveLength(1);
+    expect(body.subTasks[0].title).toBe('A');
+  });
+
+  it('uses the single-task path when no decomposition is needed', async () => {
+    mockedRunPlanner.mockResolvedValue(plannerResult([], false) as never);
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ mode: 'linear', parentIssue: { identifier: 'INT-1' } }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { io } = makeIO(['yes']);
+    await runPlanCommand('small task', io, {});
+
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(bodyOf(fetchMock).subTasks).toHaveLength(2);
-    expect(out.join('\n')).toContain('Dispatched 2 task(s)');
+    expect(bodyOf(fetchMock).subTasks).toEqual([]);
   });
 
   it('reports a planner failure without dispatching', async () => {
@@ -80,6 +132,23 @@ describe('runPlanCommand', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(out.join('\n')).toContain('boom');
+  });
+
+  it('dispatches the approved plan to the daemon', async () => {
+    mockedRunPlanner.mockResolvedValue(plannerResult([
+      { title: 'a', description: 'a', estimatedMinutes: 10, priority: 1 },
+      { title: 'b', description: 'b', estimatedMinutes: 20, priority: 2, dependencies: ['a'] },
+    ]) as never);
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ mode: 'pipeline', taskIds: ['1', '2'] }) }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { io, out } = makeIO(['yes']);
+    await runPlanCommand('g', io, {});
+
+    expect(mockedRunPlanner).toHaveBeenCalledWith(expect.objectContaining({ taskTitle: 'g' }));
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(bodyOf(fetchMock).subTasks).toHaveLength(2);
+    expect(out.join('\n')).toContain('Dispatched 2 task(s)');
   });
 
   it('contains a rejected planner run as a controlled error message (AGT-3417)', async () => {
