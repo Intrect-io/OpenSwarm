@@ -219,6 +219,14 @@ export function pickFailureDetail(candidates: Array<string | undefined>): string
 
 /** Prefer the stage that actually failed over earlier successful feedback. */
 export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
+  const workerFailure = result.workerResult?.success === false
+    ? pickFailureDetail([
+      result.workerResult.error,
+      result.workerResult.haltReason,
+      result.workerResult.noChangesReason,
+      result.workerResult.summary,
+    ])
+    : undefined;
   const testerFailure = result.testerResult?.success === false
     ? pickFailureDetail([
       result.testerResult.error,
@@ -227,11 +235,25 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     ])
     : undefined;
 
+  // Guards, security audit, verification, worktree setup and publication
+  // report through `stages[]` rather than a typed sub-result. Without this
+  // fallback the ledger recorded 57% of one day's failures with no message
+  // at all (vela, 2026-09-01), and the reason was unrecoverable once the
+  // container's log was gone.
+  const failedStage = [...result.stages].reverse().find((stage) => !stage.success);
+  const stageError = failedStage && 'error' in failedStage.result && typeof failedStage.result.error === 'string'
+    ? `${failedStage.stage}: ${failedStage.result.error}`
+    : undefined;
+
   return pickFailureDetail([
+    // Publication failed after every stage passed: nothing below describes it.
+    result.failureDetail,
     testerFailure,
     result.lastReviewFeedback,
     result.reviewResult?.feedback,
-    result.workerResult?.error,
+    workerFailure,
+    stageError,
+    result.stuckReason,
   ]);
 }
 
@@ -599,14 +621,14 @@ export function registerDecomposition(
 
   // Validate the full batch before mutating the in-memory projection. A child
   // identity collision must leave no half-created parent entry behind.
-  // Reserve capacity atomically before any mutation
+  // Daily creation capacity is reserved atomically via reserveDailyCreations()
+  // in the caller (runnerExecution) before child issues are created.
   for (const childId of uniqueChildren) {
     const existing = state.decompositions[childId];
     if (existing && existing.parentId !== issueId) {
       throw new Error(`Decomposition child ${childId} is already owned by ${existing.parentId ?? 'no parent'}`);
     }
   }
-  // All checks passed, proceed with mutation
 
   const existingIssue = state.decompositions[issueId];
   state.decompositions[issueId] = {

@@ -129,12 +129,9 @@ export async function saveBlockingConstraint(
     derivedFrom: `issue:${issue.id}`,
   });
 
+  // linkMemory already emits a single memory_linked event — do not add a second one.
   if (memoryId) {
     store.linkMemory(issue.id, memoryId);
-    store.addEvent(issue.id, 'memory_linked', {
-      memoryId,
-      content: `블로킹 제약 조건 기억 저장: ${reason}`,
-    });
   }
 
   return memoryId;

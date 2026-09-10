@@ -272,9 +272,63 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
 }
 
 /**
+ * Reject incomplete step results and DAG-illegal lifecycle states before persist.
+ */
+export function validateExecution(
+  execution: WorkflowExecution,
+  workflowSteps?: WorkflowStep[],
+): void {
+  const results = execution.stepResults;
+
+  for (const [id, result] of Object.entries(results)) {
+    if (result.stepId !== id) {
+      throw new Error(`Step result key "${id}" does not match stepId "${result.stepId}"`);
+    }
+    if (result.status === 'completed' && result.completedAt == null) {
+      throw new Error(`Step ${id} is completed but has no completedAt`);
+    }
+    if (result.status === 'failed' && (result.error == null || result.error === '')) {
+      throw new Error(`Step ${id} is failed but has no error`);
+    }
+    if (
+      (result.status === 'failed' || result.status === 'skipped') &&
+      result.completedAt == null
+    ) {
+      throw new Error(`Step ${id} is ${result.status} but has no completedAt`);
+    }
+  }
+
+  if (!workflowSteps || workflowSteps.length === 0) return;
+
+  const stepById = new Map(workflowSteps.map((step) => [step.id, step]));
+  for (const [id, result] of Object.entries(results)) {
+    if (result.status === 'pending') continue;
+    const step = stepById.get(id);
+    if (!step?.dependsOn) continue;
+    for (const dep of step.dependsOn) {
+      const depResult = results[dep];
+      if (!depResult || depResult.status === 'pending' || depResult.status === 'running') {
+        throw new Error(
+          `Step ${id} cannot be ${result.status} when dependency ${dep} is ${depResult?.status ?? 'missing'}`,
+        );
+      }
+      if (depResult.status === 'failed' && result.status !== 'failed' && result.status !== 'skipped') {
+        throw new Error(
+          `Step ${id} cannot be ${result.status} when dependency ${dep} is failed`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
+  const validation = validateWorkflow(workflow);
+  if (!validation.valid) {
+    throw new Error(`Invalid workflow: ${validation.errors.join(', ')}`);
+  }
   const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
   await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');
@@ -326,7 +380,8 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
  * Save execution state
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
-  validateExecution(execution);
+  const workflow = await loadWorkflow(execution.workflowId);
+  validateExecution(execution, workflow?.steps);
   const filePath = storageFilePath(EXECUTION_DIR, execution.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(execution, null, 2), 'utf-8');
@@ -371,8 +426,6 @@ export function createCIPipelineTemplate(projectPath: string): WorkflowConfig {
         dependsOn: ['lint'],
         onFailure: 'abort',
       },
-      // Validate execution state before persistence
-      validateExecution(execution);
       {
         id: 'build',
         name: 'Build Check',
@@ -482,38 +535,6 @@ export function validateWorkflow(workflow: WorkflowConfig): { valid: boolean; er
   return { valid: errors.length === 0, errors };
 }
 
-export async function saveExecution(execution: WorkflowExecution): Promise<void> {
-  const stepMap = new Map(execution.steps.map(s => [s.id, s]));
-
-  // Enforce complete result coverage
-  for (const step of execution.steps) {
-    if (step.status === 'completed' && !step.result) {
-      throw new Error(`Step ${step.id} is completed but has no result`);
-    }
-    if (step.status === 'failed' && !step.result) {
-      throw new Error(`Step ${step.id} is failed but has no result`);
-    }
-  }
-
-  // Enforce DAG-consistent lifecycle transitions
-  for (const step of execution.steps) {
-    if (step.dependsOn) {
-      for (const dep of step.dependsOn) {
-        const depStep = stepMap.get(dep);
-        if (!depStep) {
-          throw new Error(`Step ${step.id} depends on non-existent step ${dep}`);
-        }
-        if (depStep.status === 'pending' && step.status !== 'pending') {
-          throw new Error(`Step ${step.id} cannot be ${step.status} when dependency ${dep} is pending`);
-        }
-        if (depStep.status === 'running' && step.status !== 'pending' && step.status !== 'running') {
-          throw new Error(`Step ${step.id} cannot be ${step.status} when dependency ${dep} is running`);
-        }
-      }
-    }
-  }
-
-  const dir = resolve(homedir(), '.openswarm', 'workflows');
 // Exports
 
 export {

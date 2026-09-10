@@ -205,28 +205,31 @@ export async function runDevTask(
 
   // Handle completion
   claudeProcess.on('close', (code) => {
-    // Extract cost from stream-json output
-    const costInfo = extractCostFromStreamJson(devTask.output);
-    if (costInfo) {
-      console.log(`[Dev] ${repo} cost: ${formatCost(costInfo)}`);
-    }
-
-    // Extract result text from stream-json for output
     let resultText = devTask.output;
     try {
-      const lines = devTask.output.split('\n').filter(Boolean);
-      const resultLine = lines.find((l) => l.includes('"type":"result"'));
-      if (resultLine) {
-        const parsed = JSON.parse(resultLine);
-        if (parsed.result) resultText = parsed.result;
+      // Extract cost from stream-json output
+      const costInfo = extractCostFromStreamJson(devTask.output);
+      if (costInfo) {
+        console.log(`[Dev] ${repo} cost: ${formatCost(costInfo)}`);
       }
-    } catch { /* use original */ }
 
-    let duration = 0;
-    try {
-      duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
+      // Extract result text from stream-json for output
+      try {
+        const lines = devTask.output.split('\n').filter(Boolean);
+        const resultLine = lines.find((l) => l.includes('"type":"result"'));
+        if (resultLine) {
+          const parsed = JSON.parse(resultLine);
+          if (parsed.result) resultText = parsed.result;
+        }
+      } catch { /* use original */ }
+
+      // Generate report file
+      const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
       generateReport(devTask, code, duration);
+    } catch (err) {
+      console.error(`[Dev] close-handler reporting failed for ${taskId}:`, err);
     } finally {
+      // Cleanup must run even when reporting throws
       onComplete?.(resultText, code);
       activeTasks.delete(taskId);
     }
