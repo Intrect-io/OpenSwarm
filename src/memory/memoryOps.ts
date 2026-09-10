@@ -25,6 +25,29 @@ import { embeddingTextFor } from './embeddingConfig.js';
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
 
+/**
+ * In-process queue that serializes full read-modify-write memory mutations.
+ * withMemoryWriteRetry only retries individual Lance commits; without this,
+ * concurrent revise/consolidate/reconcile can overwrite each other's metadata.
+ */
+let memoryMutationQueue: Promise<void> = Promise.resolve();
+
+export async function withMemoryMutationLock<T>(op: () => Promise<T>): Promise<T> {
+  let result!: T;
+  let failure: unknown;
+  const run = memoryMutationQueue.then(async () => {
+    try {
+      result = await op();
+    } catch (error) { // cxt-ignore: error_swallow,exception_hiding — rethrown after the queue settles
+      failure = error;
+    }
+  });
+  memoryMutationQueue = run.then(() => undefined, () => undefined);
+  await run;
+  if (failure) throw failure;
+  return result;
+}
+
 function sqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
@@ -69,51 +92,53 @@ export async function reviseMemory(
   }
 ): Promise<boolean> {
   try {
-    await initDatabase();
-    const table = getTable();
-    if (!table) return false;
+    return await withMemoryMutationLock(async () => {
+      await initDatabase();
+      const table = getTable();
+      if (!table) return false;
 
-    // Find existing memory
-    const existing = await loadMemoryById(table, memoryId);
+      // Find existing memory
+      const existing = await loadMemoryById(table, memoryId);
 
-    if (!existing) {
-      console.log(`[Memory] Revision failed: memory ${memoryId} not found`);
-      return false;
-    }
+      if (!existing) {
+        console.log(`[Memory] Revision failed: memory ${memoryId} not found`);
+        return false;
+      }
 
-    const now = Date.now();
-    const meta = safeParseMetadata(existing.metadata);
-    const revisions = Array.isArray(meta.revisions) ? meta.revisions : [];
+      const now = Date.now();
+      const meta = safeParseMetadata(existing.metadata);
+      const revisions = Array.isArray(meta.revisions) ? meta.revisions : [];
 
-    // Create revised record
-    const revised: CognitiveMemoryRecord = {
-      ...existing,
-      content: newContent,
-      vector: await embedPassage(embeddingTextFor(String(existing.title ?? ''), newContent)),
-      lastUpdated: now,
-      confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
-      metadata: JSON.stringify({
-        ...meta,
-        revisions: [
-          ...revisions,
-          {
+      // Create revised record
+      const revised: CognitiveMemoryRecord = {
+        ...existing,
+        content: newContent,
+        vector: await embedPassage(embeddingTextFor(String(existing.title ?? ''), newContent)),
+        lastUpdated: now,
+        confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
+        metadata: JSON.stringify({
+          ...meta,
+          revisions: [
+            ...revisions,
+            {
+              timestamp: now,
+              reason: options?.reason || 'manual revision',
+              previousContent: existing.content.slice(0, 200),
+            },
+          ].slice(-MAX_MEMORY_REVISIONS),
+          lastRevision: {
             timestamp: now,
             reason: options?.reason || 'manual revision',
             previousContent: existing.content.slice(0, 200),
           },
-        ].slice(-MAX_MEMORY_REVISIONS),
-        lastRevision: {
-          timestamp: now,
-          reason: options?.reason || 'manual revision',
-          previousContent: existing.content.slice(0, 200),
-        },
-      }),
-    };
+        }),
+      };
 
-    await updateMemoryRecord(table, revised);
+      await updateMemoryRecord(table, revised);
 
-    console.log(`[Memory] Revised ${memoryId}`);
-    return true;
+      console.log(`[Memory] Revised ${memoryId}`);
+      return true;
+    });
   } catch (error) {
     console.error('[Memory] Revision error:', error);
     return false;
@@ -172,37 +197,39 @@ export async function findContradictions(content: string): Promise<MemorySearchR
  */
 export async function markContradiction(memoryId1: string, memoryId2: string): Promise<boolean> {
   try {
-    await initDatabase();
-    const table = getTable();
-    if (!table) return false;
+    return await withMemoryMutationLock(async () => {
+      await initDatabase();
+      const table = getTable();
+      if (!table) return false;
 
-    const memory1 = await loadMemoryById(table, memoryId1);
-    const memory2 = await loadMemoryById(table, memoryId2);
+      const memory1 = await loadMemoryById(table, memoryId1);
+      const memory2 = await loadMemoryById(table, memoryId2);
 
-    if (!memory1 || !memory2) {
-      console.log('[Memory] Cannot mark contradiction: one or both memories not found');
-      return false;
-    }
+      if (!memory1 || !memory2) {
+        console.log('[Memory] Cannot mark contradiction: one or both memories not found');
+        return false;
+      }
 
-    const meta1 = safeParseMetadata(memory1.metadata);
-    const meta2 = safeParseMetadata(memory2.metadata);
-    const contradicts1 = Array.isArray(meta1.contradicts) ? meta1.contradicts : [];
-    const contradicts2 = Array.isArray(meta2.contradicts) ? meta2.contradicts : [];
+      const meta1 = safeParseMetadata(memory1.metadata);
+      const meta2 = safeParseMetadata(memory2.metadata);
+      const contradicts1 = Array.isArray(meta1.contradicts) ? meta1.contradicts : [];
+      const contradicts2 = Array.isArray(meta2.contradicts) ? meta2.contradicts : [];
 
-    if (!contradicts1.includes(memoryId2)) contradicts1.push(memoryId2);
-    if (!contradicts2.includes(memoryId1)) contradicts2.push(memoryId1);
+      if (!contradicts1.includes(memoryId2)) contradicts1.push(memoryId2);
+      if (!contradicts2.includes(memoryId1)) contradicts2.push(memoryId1);
 
-    // Lower importance for both (PRD: decrease importance on contradiction)
-    memory1.importance = Math.max(0.2, (memory1.importance ?? 0.5) - 0.15);
-    memory2.importance = Math.max(0.2, (memory2.importance ?? 0.5) - 0.15);
-    memory1.metadata = JSON.stringify({ ...meta1, contradicts: contradicts1 });
-    memory2.metadata = JSON.stringify({ ...meta2, contradicts: contradicts2 });
+      // Lower importance for both (PRD: decrease importance on contradiction)
+      memory1.importance = Math.max(0.2, (memory1.importance ?? 0.5) - 0.15);
+      memory2.importance = Math.max(0.2, (memory2.importance ?? 0.5) - 0.15);
+      memory1.metadata = JSON.stringify({ ...meta1, contradicts: contradicts1 });
+      memory2.metadata = JSON.stringify({ ...meta2, contradicts: contradicts2 });
 
-    await updateMemoryRecord(table, memory1);
-    await updateMemoryRecord(table, memory2);
+      await updateMemoryRecord(table, memory1);
+      await updateMemoryRecord(table, memory2);
 
-    console.log(`[Memory] Marked contradiction between ${memoryId1} and ${memoryId2}`);
-    return true;
+      console.log(`[Memory] Marked contradiction between ${memoryId1} and ${memoryId2}`);
+      return true;
+    });
   } catch (error) {
     console.error('[Memory] Mark contradiction error:', error);
     return false;
@@ -218,38 +245,40 @@ export async function reconcileContradiction(
   reason: string
 ): Promise<boolean> {
   try {
-    await initDatabase();
-    const table = getTable();
-    if (!table) return false;
+    return await withMemoryMutationLock(async () => {
+      await initDatabase();
+      const table = getTable();
+      if (!table) return false;
 
-    const keepMemory = await loadMemoryById(table, keepId);
-    const archiveMemory = await loadMemoryById(table, archiveId);
+      const keepMemory = await loadMemoryById(table, keepId);
+      const archiveMemory = await loadMemoryById(table, archiveId);
 
-    if (!keepMemory || !archiveMemory) {
-      console.log('[Memory] Cannot reconcile: one or both memories not found');
-      return false;
-    }
+      if (!keepMemory || !archiveMemory) {
+        console.log('[Memory] Cannot reconcile: one or both memories not found');
+        return false;
+      }
 
-    // Boost kept memory
-    keepMemory.confidence = Math.min(1, (keepMemory.confidence ?? 0.7) + 0.1);
+      // Boost kept memory
+      keepMemory.confidence = Math.min(1, (keepMemory.confidence ?? 0.7) + 0.1);
 
-    // Archive the other via metadata + low importance. v3 does not maintain a
-    // top-level decay field.
-    archiveMemory.importance = 0.1;
-    archiveMemory.metadata = JSON.stringify({
-      ...safeParseMetadata(archiveMemory.metadata),
-      archived: {
-        timestamp: Date.now(),
-        reason,
-        supersededBy: keepId,
-      },
+      // Archive the other via metadata + low importance. v3 does not maintain a
+      // top-level decay field.
+      archiveMemory.importance = 0.1;
+      archiveMemory.metadata = JSON.stringify({
+        ...safeParseMetadata(archiveMemory.metadata),
+        archived: {
+          timestamp: Date.now(),
+          reason,
+          supersededBy: keepId,
+        },
+      });
+
+      await updateMemoryRecord(table, keepMemory);
+      await updateMemoryRecord(table, archiveMemory);
+
+      console.log(`[Memory] Reconciled: kept ${keepId}, archived ${archiveId}`);
+      return true;
     });
-
-    await updateMemoryRecord(table, keepMemory);
-    await updateMemoryRecord(table, archiveMemory);
-
-    console.log(`[Memory] Reconciled: kept ${keepId}, archived ${archiveId}`);
-    return true;
   } catch (error) {
     console.error('[Memory] Reconciliation error:', error);
     return false;
@@ -404,80 +433,82 @@ export async function consolidateMemories(): Promise<{
   groups: Array<{ kept: string; merged: string[] }>;
 }> {
   try {
-    await initDatabase();
-    const table = getTable();
-    if (!table) return { merged: 0, groups: [] };
+    return await withMemoryMutationLock(async () => {
+      await initDatabase();
+      const table = getTable();
+      if (!table) return { merged: 0, groups: [] };
 
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-    const validMemories = results.filter((r: any) => r.id !== 'init');
+      const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
+      const validMemories = results.filter((r: any) => r.id !== 'init');
 
-    const merged: string[] = [];
-    const groups: Array<{ kept: string; merged: string[] }> = [];
-    const updatedKept: any[] = [];
+      const merged: string[] = [];
+      const groups: Array<{ kept: string; merged: string[] }> = [];
+      const updatedKept: any[] = [];
 
-    // Find similar memory groups
-    for (let i = 0; i < validMemories.length; i++) {
-      const m1 = validMemories[i];
-      if (merged.includes(m1.id)) continue;
+      // Find similar memory groups
+      for (let i = 0; i < validMemories.length; i++) {
+        const m1 = validMemories[i];
+        if (merged.includes(m1.id)) continue;
 
-      const similarGroup: any[] = [m1];
+        const similarGroup: any[] = [m1];
 
-      for (let j = i + 1; j < validMemories.length; j++) {
-        const m2 = validMemories[j];
-        if (merged.includes(m2.id)) continue;
-        if (m1.type !== m2.type || m1.repo !== m2.repo) continue;
+        for (let j = i + 1; j < validMemories.length; j++) {
+          const m2 = validMemories[j];
+          if (merged.includes(m2.id)) continue;
+          if (m1.type !== m2.type || m1.repo !== m2.repo) continue;
 
-        // Calculate cosine similarity
-        const similarity = cosineSimilarity(m1.vector, m2.vector);
+          // Calculate cosine similarity
+          const similarity = cosineSimilarity(m1.vector, m2.vector);
 
-        if (similarity >= CONSOLIDATION_SIMILARITY) {
-          similarGroup.push(m2);
-          merged.push(m2.id);
+          if (similarity >= CONSOLIDATION_SIMILARITY) {
+            similarGroup.push(m2);
+            merged.push(m2.id);
+          }
+        }
+
+        // Merge if group has duplicates
+        if (similarGroup.length > 1) {
+          // Keep the one with highest importance * confidence
+          similarGroup.sort((a, b) =>
+            (b.importance ?? 0.5) * (b.confidence ?? 0.5) -
+            (a.importance ?? 0.5) * (a.confidence ?? 0.5)
+          );
+
+          const kept = similarGroup[0];
+          const toMerge = similarGroup.slice(1);
+
+          // Boost kept memory
+          kept.confidence = Math.min(1, (kept.confidence ?? 0.7) + 0.05 * toMerge.length);
+          const meta = safeParseMetadata(kept.metadata);
+          kept.metadata = JSON.stringify({
+            ...meta,
+            consolidatedFrom: [
+              ...(Array.isArray(meta.consolidatedFrom) ? meta.consolidatedFrom : []),
+              ...toMerge.map((m: any) => m.id),
+            ].slice(-MAX_MEMORY_REVISIONS),
+          });
+          updatedKept.push(kept);
+
+          groups.push({
+            kept: kept.id,
+            merged: toMerge.map((m: any) => m.id),
+          });
+
+          console.log(`[Memory] Consolidated ${toMerge.length} duplicates into ${kept.id}`);
         }
       }
 
-      // Merge if group has duplicates
-      if (similarGroup.length > 1) {
-        // Keep the one with highest importance * confidence
-        similarGroup.sort((a, b) =>
-          (b.importance ?? 0.5) * (b.confidence ?? 0.5) -
-          (a.importance ?? 0.5) * (a.confidence ?? 0.5)
-        );
+      if (merged.length > 0) {
+        for (const record of updatedKept) {
+          await updateMemoryRecord(table, record);
+        }
+        await deleteMemoryIds(table, merged);
 
-        const kept = similarGroup[0];
-        const toMerge = similarGroup.slice(1);
-
-        // Boost kept memory
-        kept.confidence = Math.min(1, (kept.confidence ?? 0.7) + 0.05 * toMerge.length);
-        const meta = safeParseMetadata(kept.metadata);
-        kept.metadata = JSON.stringify({
-          ...meta,
-          consolidatedFrom: [
-            ...(Array.isArray(meta.consolidatedFrom) ? meta.consolidatedFrom : []),
-            ...toMerge.map((m: any) => m.id),
-          ].slice(-MAX_MEMORY_REVISIONS),
-        });
-        updatedKept.push(kept);
-
-        groups.push({
-          kept: kept.id,
-          merged: toMerge.map((m: any) => m.id),
-        });
-
-        console.log(`[Memory] Consolidated ${toMerge.length} duplicates into ${kept.id}`);
+        console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
       }
-    }
 
-    if (merged.length > 0) {
-      for (const record of updatedKept) {
-        await updateMemoryRecord(table, record);
-      }
-      await deleteMemoryIds(table, merged);
-
-      console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
-    }
-
-    return { merged: merged.length, groups };
+      return { merged: merged.length, groups };
+    });
   } catch (error) {
     console.error('[Memory] Consolidation error:', error);
     return { merged: 0, groups: [] };
