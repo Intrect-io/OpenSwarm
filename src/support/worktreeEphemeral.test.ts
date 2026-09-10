@@ -133,4 +133,22 @@ describe('agent-runtime scratch (2026-09-10)', () => {
       expect(isEphemeralWorktreeArtifact(file)).toBe(false);
     }
   });
+
+  it('sweeps the dotless runner spelling, which reached main once', () => {
+    // #604 landed `tmp-run-memory-tests.sh` on main. Every rule here assumed a
+    // leading dot, so the same script under a one-character-different name
+    // walked straight past both this predicate and .gitignore.
+    expect(isEphemeralWorktreeArtifact('tmp-run-memory-tests.sh')).toBe(true);
+    expect(isEphemeralWorktreeArtifact('tmp-run-focused.mjs')).toBe(true);
+    expect(isEphemeralWorktreeArtifact('sub/dir/tmp-run-x.js')).toBe(true);
+  });
+
+  it('leaves a project file that merely starts the same way', () => {
+    // The rule matches `tmp-run-` at a path root with a script extension, so a
+    // source file that happens to share the prefix is not swept.
+    expect(isEphemeralWorktreeArtifact('src/tmp-runner.ts')).toBe(false);
+    expect(isEphemeralWorktreeArtifact('tmp-run-notes.md')).toBe(false);
+    expect(isEphemeralWorktreeArtifact('docs/tmp-run-guide.txt')).toBe(false);
+  });
+
 });

@@ -71,6 +71,11 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     || /(?:^|\/)cli\.json$/.test(file)
     || /(?:^|\/)\.run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
     || /(?:^|\/)\.tmp-run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
+    // Dotless too. Every rule above assumed a leading dot, and #604 put
+    // `tmp-run-memory-tests.sh` on main because of it — the same script, the
+    // same purpose, one character different. Anchored so a project's own
+    // `scripts/tmp-run.sh` is untouched only if it is not at a path root.
+    || /(?:^|\/)tmp-run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
     || /(?:^|\/)\.test-runner-tmp\.[^/]+$/.test(file)
     || /(?:^|\/)\.cursor-review-[^/]+$/.test(file);
 }
