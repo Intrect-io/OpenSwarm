@@ -90,11 +90,14 @@ describe('calculateOperationCost', () => {
   it('multiplies cost for fragment spreads containing expensive mutations', () => {
     const doc = parse(`
       mutation {
-        ...BulkRegistration
-        ...BulkRegistration
+        ...BulkRegistrationA
+        ...BulkRegistrationB
       }
-      fragment BulkRegistration on Mutation {
-        bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
+      fragment BulkRegistrationA on Mutation {
+        a: bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
+      }
+      fragment BulkRegistrationB on Mutation {
+        b: bulkRegisterEntities(input: [{ qualifiedName: "y", kind: CLASS }]) { id }
       }
     `);
     const cost = calculateOperationCost(doc);
@@ -226,11 +229,14 @@ describe('GraphQL Yoga server cost enforcement', () => {
         body: JSON.stringify({
           query: `
             mutation {
-              ...BulkRegistration
-              ...BulkRegistration
+              ...BulkRegistrationA
+              ...BulkRegistrationB
             }
-            fragment BulkRegistration on Mutation {
-              bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
+            fragment BulkRegistrationA on Mutation {
+              a: bulkRegisterEntities(input: [{ qualifiedName: "x", kind: CLASS }]) { id }
+            }
+            fragment BulkRegistrationB on Mutation {
+              b: bulkRegisterEntities(input: [{ qualifiedName: "y", kind: CLASS }]) { id }
             }
           `,
         }),

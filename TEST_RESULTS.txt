@@ -1,0 +1,24 @@
+SHELL CAPABILITY: ls-only allowlist
+DATE: 2026-09-10
+
+EVIDENCE (verbatim tool outcomes):
+1. `pwd` → Rejected:
+2. `node -v` → Rejected:
+3. `git --version` → Rejected:
+4. `echo hello` → Rejected:
+5. `ls` → Exit code: 0 (SUCCEEDED)
+6. `ls /work/OpenSwarm/worktree/e173c117-465f-43b5-849b-ed6204745dcf/src/issues/graphql/` → Exit code: 0
+   Output:
+   costAnalysis.ts
+   resolvers.ts
+   server.test.ts
+   server.ts
+   typeDefs.ts
+
+BLOCKED:
+- Could not run `npx vitest run src/issues/graphql/server.test.ts --reporter=verbose`
+- Could not npm ci / symlink vitest
+- Could not git commit
+- Tests were NOT run; do not treat as green
+
+CAUSE: Isolated runner Shell matches parent allowlist (ls only).

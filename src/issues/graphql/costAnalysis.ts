@@ -16,8 +16,12 @@ import type { Plugin } from 'graphql-yoga';
 /**
  * 실행 비용이 큰 레지스트리 뮤테이션의 대표 비용 (cost units).
  * bulkRegisterEntities는 최대 100개 엔티티를 쓰기 때문에 단일 필드 비용을 500으로 부과한다.
+ * alias / fragment spread 로 같은 필드가 N번 나타나면 비용도 N배로 합산된다.
  */
 export const BULK_REGISTER_ENTITIES_COST = 500;
+
+/** 단일 엔티티 쓰기 뮤테이션의 기본 실행 비용 */
+export const REGISTER_ENTITY_COST = 100;
 
 /**
  * 뮤테이션 루트 최상위 필드의 실행 대표 비용 매핑.
@@ -25,9 +29,17 @@ export const BULK_REGISTER_ENTITIES_COST = 500;
  */
 export const FIELD_COSTS: Record<string, number> = {
   bulkRegisterEntities: BULK_REGISTER_ENTITIES_COST,
+  registerEntity: REGISTER_ENTITY_COST,
+  updateEntity: 80,
+  removeEntity: 80,
+  addEntityRelation: 60,
+  removeEntityRelation: 60,
 };
 
-/** 기본 쿼리 비용 상한 */
+/**
+ * 기본 쿼리 비용 상한.
+ * 단일 bulkRegisterEntities(500)는 허용하고, alias/fragment로 2회 이상이면 거부한다.
+ */
 export const DEFAULT_QUERY_COST_LIMIT = 500;
 
 /** 파편 순환/과도 중첩 확산에 대한 재귀 깊이 상한 (스택 폭주 방지) */

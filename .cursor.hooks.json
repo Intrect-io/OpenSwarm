@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": "bash /work/OpenSwarm/worktree/e173c117-465f-43b5-849b-ed6204745dcf/hooks/after-edit.sh"
+      }
+    ]
+  }
+}
