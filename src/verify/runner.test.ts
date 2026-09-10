@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VerifyCommand } from './manifest.js';
-import { runVerify } from './runner.js';
+import {
+  buildVerifyToolchainPath,
+  runVerify,
+  VERIFY_ALLOWED_DEPENDENCY_DIRS,
+  VERIFY_TOOLCHAIN_PATH_PREFIXES,
+} from './runner.js';
 
 let root: string;
 let repo: string;
@@ -602,5 +607,32 @@ describe('runVerify', () => {
     });
     expect(Buffer.byteLength(evidence.rawOutputTail)).toBeLessThanOrEqual(8 * 1024);
     expect(evidence.rawOutputTail).toContain('tail-marker');
+  });
+});
+
+describe('buildVerifyToolchainPath', () => {
+  it('keeps only the explicit read-only toolchain prefixes and project dependency bins', () => {
+    const path = buildVerifyToolchainPath(
+      ['/usr/bin', '/home/user/.local/bin', '/opt/homebrew/bin', '/tmp/evil/bin'].join(':'),
+      '/repo',
+      '/repo/packages/api',
+    );
+    const parts = path.split(':');
+    for (const prefix of VERIFY_TOOLCHAIN_PATH_PREFIXES) {
+      expect(parts).toContain(prefix);
+    }
+    expect(parts).toContain('/repo/node_modules/.bin');
+    expect(parts).toContain('/repo/packages/api/node_modules/.bin');
+    expect(parts).not.toContain('/home/user/.local/bin');
+    expect(parts).not.toContain('/tmp/evil/bin');
+    expect(VERIFY_ALLOWED_DEPENDENCY_DIRS.has('node_modules')).toBe(true);
+  });
+
+  it('preserves nvm/fnm-style version-manager bin directories', () => {
+    const path = buildVerifyToolchainPath(
+      '/home/user/.nvm/versions/node/v22.0.0/bin:/usr/bin',
+      '/repo',
+    );
+    expect(path.split(':')).toContain('/home/user/.nvm/versions/node/v22.0.0/bin');
   });
 });

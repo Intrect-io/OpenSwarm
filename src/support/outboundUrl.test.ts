@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPublicLookup, isPrivateIp, type DnsAllResolver } from './outboundUrl.js';
+import { createPublicLookup, createPinnedPublicLookup, isPrivateIp, type DnsAllResolver } from './outboundUrl.js';
 
 function resolverReturning(addresses: Array<{ address: string; family: number }>): DnsAllResolver {
   return (_hostname, _options, callback) => callback(null, addresses);
@@ -42,6 +42,30 @@ describe('createPublicLookup callback contract', () => {
     const lookup = createPublicLookup(resolverReturning([]));
     let error: Error | null = null;
     lookup('empty.example', { all: true }, (err) => { error = err; });
+    expect(error).toBeInstanceOf(Error);
+  });
+});
+
+describe('createPinnedPublicLookup', () => {
+  it('returns only the pre-validated addresses without a second DNS round-trip', () => {
+    const addresses = [{ address: '93.184.216.34', family: 4 }];
+    const lookup = createPinnedPublicLookup(addresses);
+    const seen: unknown[] = [];
+    lookup('example.com', { all: true }, (...args) => seen.push(args));
+    lookup('example.com', {}, (...args) => seen.push(args));
+    expect(seen).toEqual([
+      [null, addresses],
+      [null, '93.184.216.34', 4],
+    ]);
+  });
+
+  it('refuses when the pinned set includes a private address', () => {
+    const lookup = createPinnedPublicLookup([
+      { address: '93.184.216.34', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ]);
+    let error: Error | null = null;
+    lookup('rebind.example', { all: true }, (err) => { error = err; });
     expect(error).toBeInstanceOf(Error);
   });
 });

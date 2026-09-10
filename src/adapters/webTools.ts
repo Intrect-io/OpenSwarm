@@ -128,7 +128,15 @@ async function fetchWithTimeout(
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location');
         if (!location) throw new Error('Redirect response has no location');
-        await response.body?.cancel();
+        // Release the redirect body before the next hop so undici does not keep
+        // the prior socket/buffer alive across a chain of Location responses.
+        if (response.body) {
+          try {
+            await response.body.cancel();
+          } catch {
+            await response.arrayBuffer().catch(() => undefined);
+          }
+        }
         const next = new URL(location, current);
         if (carriesSensitiveRequestData && next.origin !== initialOrigin) {
           throw new Error('Refusing to forward credentials or request body across origins');

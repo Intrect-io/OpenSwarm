@@ -22,11 +22,32 @@ const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 30_000;
 const execFileAsync = promisify(execFile);
-const DEPENDENCY_INPUTS = new Set([
+
+/** Dependency manifests the sandbox may observe when comparing base vs head. */
+export const VERIFY_DEPENDENCY_INPUTS = new Set([
   'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock',
   'Cargo.toml', 'Cargo.lock', 'go.mod', 'go.sum', 'requirements.txt', 'pyproject.toml',
   'uv.lock', 'poetry.lock',
 ]);
+
+/** Shared dependency directories the verify sandbox may bind read-only from the live tree. */
+export const VERIFY_ALLOWED_DEPENDENCY_DIRS = new Set([
+  'node_modules', '.venv-verify', '.venv', 'venv',
+]);
+
+/**
+ * Read-only toolchain PATH prefixes verification may inherit. Anything else on
+ * the host PATH (writable home dirs, arbitrary tool installs) stays out of the
+ * sandbox so a malicious checkout cannot pick an unexpected binary via PATH.
+ */
+export const VERIFY_TOOLCHAIN_PATH_PREFIXES = [
+  '/usr/bin',
+  '/bin',
+  '/usr/local/bin',
+  '/opt/homebrew/bin',
+] as const;
+
+const DEPENDENCY_INPUTS = VERIFY_DEPENDENCY_INPUTS;
 
 export interface VerifyEvidence {
   command: VerifyCommand;
@@ -69,7 +90,7 @@ async function verificationSharedPaths(projectPath: string, commands: VerifyComm
     if (localDirectory === '..' || localDirectory.startsWith(`..${sep}`) || isAbsolute(localDirectory)) {
       throw new Error(`[security] verify cwd escapes project root: ${directory}`);
     }
-    for (const name of ['node_modules', '.venv-verify', '.venv', 'venv']) {
+    for (const name of VERIFY_ALLOWED_DEPENDENCY_DIRS) {
       const dependency = join(localDirectory, name);
       try {
         await access(join(projectPath, dependency));
@@ -90,7 +111,7 @@ function isPrivateEnvironmentPath(path: string): boolean {
 function sharedPathSecretFilter(sharedPath: string): (path: string) => boolean {
   // Like the companion's secret scan, dependency payloads retain packaged
   // certificates (e.g. certifi/cacert.pem). Local configuration stays excluded.
-  return ['node_modules', '.venv', '.venv-verify', 'venv'].includes(basename(sharedPath))
+  return VERIFY_ALLOWED_DEPENDENCY_DIRS.has(basename(sharedPath))
     ? (path) => path.split(sep).some(isPrivateConfigurationFile)
     : isPrivateEnvironmentPath;
 }
@@ -270,6 +291,52 @@ function vegaVerifyWorkspaceRoot(root: string): string | undefined {
   return existsSync(join(root, 'pipeline', 'path_guard.py')) ? root : undefined;
 }
 
+/**
+ * Build the sandbox PATH from an explicit read-only toolchain allowlist plus
+ * project-local dependency bins (node_modules/.bin, venv/bin). Host PATH entries
+ * outside those prefixes are dropped.
+ */
+export function buildVerifyToolchainPath(
+  envPath: string | undefined,
+  root: string,
+  cwd: string = root,
+): string {
+  const entries: string[] = [];
+  const seen = new Set<string>();
+  const add = (candidate: string): void => {
+    if (!candidate || seen.has(candidate)) return;
+    seen.add(candidate);
+    entries.push(candidate);
+  };
+
+  for (const prefix of VERIFY_TOOLCHAIN_PATH_PREFIXES) add(prefix);
+
+  for (const base of [cwd, root]) {
+    add(join(base, 'node_modules', '.bin'));
+    for (const venv of VERIFY_ALLOWED_DEPENDENCY_DIRS) {
+      if (venv === 'node_modules') continue;
+      add(join(base, venv, process.platform === 'win32' ? 'Scripts' : 'bin'));
+    }
+  }
+
+  for (const part of (envPath ?? '').split(delimiter)) {
+    if (!part) continue;
+    const normalized = part.replace(/\\/g, '/').replace(/\/+$/, '');
+    const allowedPrefix = VERIFY_TOOLCHAIN_PATH_PREFIXES.some(
+      (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
+    );
+    const projectLocal = /(?:^|\/)(?:node_modules\/\.bin|(?:\.venv-verify|\.venv|venv)\/(?:bin|Scripts))$/
+      .test(normalized);
+    // Node version managers install under */bin — keep those so `node`/`npm`
+    // remain reachable without opening the entire home directory PATH.
+    const versionManagerBin = /(?:^|\/)(?:\.?nvm|fnm|asdf|volta|n)(?:\/|$)/.test(normalized)
+      && /\/bin$/.test(normalized);
+    if (allowedPrefix || projectLocal || versionManagerBin) add(part);
+  }
+
+  return entries.join(delimiter);
+}
+
 async function runWithSandboxExecutor(
   command: VerifyCommand,
   root: string,
@@ -281,13 +348,12 @@ async function runWithSandboxExecutor(
   const timeoutMs = command.timeoutMs ?? 300_000;
   try {
     const session = await createSession(root);
-    const cwdBin = join(cwd, 'node_modules', '.bin');
-    const rootBin = join(root, 'node_modules', '.bin');
     const relativeCwd = relative(root, cwd) || '.';
     const vegaWorkspace = vegaVerifyWorkspaceRoot(root);
+    const toolchainPath = buildVerifyToolchainPath(process.env.PATH, root, cwd);
     const result = await session.execute([
       `cd -- ${shellQuote(relativeCwd)}`,
-      `export PATH=${shellQuote(`${cwdBin}${delimiter}${rootBin}`)}:"$PATH"`,
+      `export PATH=${shellQuote(toolchainPath)}`,
       ...(vegaWorkspace ? [`export VEGA_EXTRA_PATHS=${shellQuote(vegaWorkspace)}`] : []),
       // Bundled VEGA toolsets intentionally use the narrower headless-workspace
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
@@ -358,7 +424,7 @@ async function runCommand(
   await Promise.all([mkdir(isolatedHome, { recursive: true }), mkdir(isolatedTmp, { recursive: true })]);
   const processMarker = `openswarm-verify-${randomUUID()}`;
   const safeEnv: NodeJS.ProcessEnv = {
-    PATH: env.PATH,
+    PATH: buildVerifyToolchainPath(env.PATH, root, cwd),
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
     XDG_CONFIG_HOME: join(isolatedHome, '.config'),

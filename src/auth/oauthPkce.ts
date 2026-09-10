@@ -32,8 +32,11 @@ const OAUTH_ORIGINATOR = 'openswarm';
  * ::1 (including the IPv4-mapped ::ffff:127.0.0.1 form Node reports when a
  * dual-stack socket receives an IPv4 connection). Any other remote address is
  * rejected so the callback server cannot be driven from off-host.
+ *
+ * The OpenAI redirect_uri stays `http://localhost:<port>/auth/callback` (the
+ * registered client value); browsers may still connect via ::1 or 127.0.0.1.
  */
-function isLoopbackRemote(address: string | undefined): boolean {
+export function isLoopbackRemote(address: string | undefined): boolean {
   if (!address) return false;
   const family = isIP(address);
   if (family === 4) return address === '127.0.0.1';

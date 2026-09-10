@@ -58,6 +58,29 @@ describe('redirect method rewriting', () => {
     expect(second.method).toBe('POST');
     expect(second.body).toBeTruthy();
   });
+
+  it('cancels the redirect response body before following the next hop', async () => {
+    const cancel = vi.fn(async () => {});
+    let calls = 0;
+    const f = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          status: 302,
+          ok: false,
+          statusText: 'Found',
+          headers: new Headers({ location: 'https://example.com/next' }),
+          body: { cancel },
+          arrayBuffer: async () => new ArrayBuffer(0),
+        } as unknown as Response;
+      }
+      return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
+    });
+    vi.stubGlobal('fetch', f);
+    await webFetch('https://example.com/start');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(f).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('webFetch', () => {

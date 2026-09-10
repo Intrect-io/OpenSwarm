@@ -1,12 +1,73 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type IncomingMessage } from 'node:http';
-import { handleGraphQL, isGraphQLTransportAuthorized } from './server.js';
+import {
+  createGraphQLCostRule,
+  handleGraphQL,
+  isGraphQLRequest,
+  isGraphQLTransportAuthorized,
+} from './server.js';
+import { validate, buildSchema, parse } from 'graphql';
 
 function request(address: string | undefined, headers: Record<string, string> = {}): IncomingMessage {
   return { socket: { remoteAddress: address }, headers } as unknown as IncomingMessage;
 }
 
 afterEach(() => { delete process.env.OPENSWARM_GRAPHQL_TOKEN; });
+
+describe('isGraphQLRequest exact endpoint matching', () => {
+  it('accepts only the exact /graphql path (with or without query/hash)', () => {
+    expect(isGraphQLRequest('/graphql')).toBe(true);
+    expect(isGraphQLRequest('/graphql?query={__typename}')).toBe(true);
+    expect(isGraphQLRequest('/graphql#section')).toBe(true);
+  });
+
+  it('rejects path-prefix lookalikes that previously matched startsWith', () => {
+    expect(isGraphQLRequest('/graphql/')).toBe(false);
+    expect(isGraphQLRequest('/graphql/admin')).toBe(false);
+    expect(isGraphQLRequest('/graphqlfoo')).toBe(false);
+    expect(isGraphQLRequest('/api/graphql')).toBe(false);
+    expect(isGraphQLRequest(undefined)).toBe(false);
+    expect(isGraphQLRequest('')).toBe(false);
+  });
+});
+
+describe('GraphQL query cost limits', () => {
+  const schema = buildSchema(`
+    type Query {
+      a: Query
+      b: String
+    }
+  `);
+
+  it('rejects a document that exceeds max depth', () => {
+    const query = '{ a { a { a { a { b } } } } }';
+    const errors = validate(schema, parse(query), [createGraphQLCostRule({ maxDepth: 3 })]);
+    expect(errors.some((e) => /maximum depth/i.test(e.message))).toBe(true);
+  });
+
+  it('rejects a document that exceeds field or alias counts', () => {
+    const query = '{ x: b y: b z: b }';
+    const errors = validate(schema, parse(query), [
+      createGraphQLCostRule({ maxFieldCount: 2, maxAliasCount: 2, maxCost: 100 }),
+    ]);
+    expect(errors.some((e) => /maximum (field|alias) count/i.test(e.message))).toBe(true);
+  });
+
+  it('rejects a document that exceeds weighted execution cost', () => {
+    // cost accumulates as Σ depth at each field enter — a wide shallow fan-out
+    // of depth-1 fields exceeds a tight budget without tripping depth/alias caps.
+    const query = '{ a1: b a2: b a3: b a4: b }';
+    const errors = validate(schema, parse(query), [
+      createGraphQLCostRule({ maxDepth: 10, maxFieldCount: 20, maxAliasCount: 20, maxCost: 3 }),
+    ]);
+    expect(errors.some((e) => /maximum execution cost/i.test(e.message))).toBe(true);
+  });
+
+  it('allows a shallow bounded query', () => {
+    const errors = validate(schema, parse('{ b }'), [createGraphQLCostRule()]);
+    expect(errors).toEqual([]);
+  });
+});
 
 describe('GraphQL transport authorization', () => {
   it('allows a proven loopback transport without trusting Origin', () => {

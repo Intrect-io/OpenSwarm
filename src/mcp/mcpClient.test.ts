@@ -11,6 +11,7 @@ import {
   initMcpTools,
   callMcpTool,
   withDeadline,
+  sanitizeInputSchema,
 } from './mcpClient.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 
@@ -414,5 +415,32 @@ describe('withDeadline', () => {
     await vi.advanceTimersByTimeAsync(25);
     await assertion;
     vi.useRealTimers();
+  });
+});
+
+describe('sanitizeInputSchema bounds', () => {
+  it('keeps a small object schema', () => {
+    const schema = { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] };
+    expect(sanitizeInputSchema(schema)).toEqual(schema);
+  });
+
+  it('replaces oversized serialized schemas with the empty object schema', () => {
+    const properties: Record<string, unknown> = {};
+    for (let i = 0; i < 40; i++) {
+      properties[`field_${i}`] = { type: 'string', description: 'x'.repeat(500) };
+    }
+    const out = sanitizeInputSchema({ type: 'object', properties });
+    expect(out).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('replaces schemas with too many properties', () => {
+    const properties: Record<string, unknown> = {};
+    for (let i = 0; i < 80; i++) properties[`p${i}`] = { type: 'string' };
+    expect(sanitizeInputSchema({ type: 'object', properties })).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('rejects non-object root types', () => {
+    expect(sanitizeInputSchema({ type: 'string' })).toEqual({ type: 'object', properties: {} });
+    expect(sanitizeInputSchema(null)).toEqual({ type: 'object', properties: {} });
   });
 });

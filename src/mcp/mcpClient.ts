@@ -34,6 +34,9 @@ const MCP_JSON_PATH = join(homedir(), '.openswarm', 'mcp.json');
 const MAX_MCP_TOOL_RESULT_CHARS = 20_000;
 const MCP_CONNECT_TIMEOUT_MS = 15_000;
 const MCP_OPERATION_TIMEOUT_MS = 30_000;
+/** Bound remote tool input schemas before they are cached or exposed to the model. */
+const MAX_INPUT_SCHEMA_BYTES = 16_384;
+const MAX_INPUT_SCHEMA_PROPERTIES = 64;
 const EMPTY_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties: {} };
 
 interface ServerConfig {
@@ -123,9 +126,46 @@ function isJsonSchemaObject(schema: unknown, depth = 0): schema is Record<string
   return true;
 }
 
-function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
+function countSchemaProperties(schema: Record<string, unknown>, depth = 0): number {
+  if (depth > 8) return Number.POSITIVE_INFINITY;
+  let count = 0;
+  if (isRecord(schema.properties)) {
+    count += Object.keys(schema.properties).length;
+    for (const value of Object.values(schema.properties)) {
+      if (isRecord(value)) count += countSchemaProperties(value, depth + 1);
+    }
+  }
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const value = schema[keyword];
+    if (!Array.isArray(value)) continue;
+    for (const entry of value) {
+      if (isRecord(entry)) count += countSchemaProperties(entry, depth + 1);
+    }
+  }
+  if (isRecord(schema.items)) count += countSchemaProperties(schema.items, depth + 1);
+  else if (Array.isArray(schema.items)) {
+    for (const entry of schema.items) {
+      if (isRecord(entry)) count += countSchemaProperties(entry, depth + 1);
+    }
+  }
+  if (isRecord(schema.additionalProperties)) {
+    count += countSchemaProperties(schema.additionalProperties, depth + 1);
+  }
+  return count;
+}
+
+/** Drop oversized or non-object remote schemas so tool defs cannot balloon the cache. */
+export function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
   if (!isJsonSchemaObject(schema)) return EMPTY_INPUT_SCHEMA;
   if (schema.type !== undefined && schema.type !== 'object') return EMPTY_INPUT_SCHEMA;
+  if (countSchemaProperties(schema) > MAX_INPUT_SCHEMA_PROPERTIES) return EMPTY_INPUT_SCHEMA;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(schema);
+  } catch {
+    return EMPTY_INPUT_SCHEMA;
+  }
+  if (serialized.length > MAX_INPUT_SCHEMA_BYTES) return EMPTY_INPUT_SCHEMA;
   return schema;
 }
 
