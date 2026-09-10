@@ -23,6 +23,10 @@ import {
 } from './discordCore.js';
 import { t, getDateLocale } from '../locale/index.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import { sanitizeTerminalText } from '../tui/sanitize.js';
+
+/** Hard cap on a Discord pair-thread text message (chars). */
+const MAX_PAIR_REPORT_CHARS = 4096;
 
 /**
  * !pair command handler
@@ -189,16 +193,14 @@ async function startPairSession(
 
 /**
  * Truncate and neutralize a worker report string before posting to Discord.
- * Caps total length at 4096 characters and strips content that could be
- * attacker-controlled or excessively verbose.
+ * Strips terminal/control sequences first, then caps total length so
+ * attacker-controlled or excessively verbose output cannot exhaust memory
+ * or break the Discord client.
  */
 function sanitizeReport(report: string): string {
-  // Hard cap at 4096 characters (Discord embed field limit is 1024, but
-  // thread.send accepts longer text; 4096 is a safe bound for a single message).
-  if (report.length > 4096) {
-    report = report.slice(0, 4093) + '...';
-  }
-  return report;
+  const neutralized = sanitizeTerminalText(report);
+  if (neutralized.length <= MAX_PAIR_REPORT_CHARS) return neutralized;
+  return `${neutralized.slice(0, MAX_PAIR_REPORT_CHARS - 1)}…`;
 }
 
 /**

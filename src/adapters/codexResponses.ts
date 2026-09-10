@@ -248,6 +248,8 @@ async function consumeResponsesStream(
   let buffer = '';
   // Reasoning summary streams token-by-token; buffer and emit whole lines so the
   // live log shows readable thoughts instead of one-word-per-line spam.
+  /** Hard cap on retained reasoning partial text (64 KB). */
+  const MAX_REASONING_BUF = 64 * 1024;
   let reasoningBuf = '';
   const flushReasoning = (force: boolean) => {
     if (!onReasoning) { reasoningBuf = ''; return; }
@@ -269,6 +271,9 @@ async function consumeResponsesStream(
     if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
     if (onReasoning && ev.type === 'response.reasoning_summary_text.delta' && ev.delta) {
       reasoningBuf += ev.delta;
+      if (reasoningBuf.length > MAX_REASONING_BUF) {
+        reasoningBuf = reasoningBuf.slice(-MAX_REASONING_BUF);
+      }
       flushReasoning(false);
     }
     // End of a summary part → flush whatever partial line remains.

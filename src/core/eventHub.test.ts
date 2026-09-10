@@ -814,4 +814,54 @@ describe('eventHub', () => {
       }
     });
   });
+
+  describe('payload and backpressure bounds (AGT-3429)', () => {
+    it('truncates oversized log lines before retaining them', () => {
+      const longLine = 'L'.repeat(10_000);
+      broadcastEvent({
+        type: 'log',
+        data: { taskId: 'task-1', stage: 'worker', line: longLine },
+      });
+
+      const buffer = getLogBuffer();
+      expect(buffer).toHaveLength(1);
+      const logged = buffer[0] as Extract<HubEvent, { type: 'log' }>;
+      expect(logged.data.line.length).toBeLessThanOrEqual(4_000);
+      expect(logged.data.line.endsWith('…')).toBe(true);
+    });
+
+    it('truncates oversized chat text before retaining it', () => {
+      broadcastEvent({
+        type: 'chat:user',
+        data: { text: 'C'.repeat(20_000), ts: Date.now() },
+      });
+      const buffer = getChatBuffer();
+      expect(buffer).toHaveLength(1);
+      const chat = buffer[0] as Extract<HubEvent, { type: 'chat:user' }>;
+      expect(chat.data.text.length).toBeLessThanOrEqual(16_384);
+    });
+
+    it('disconnects an SSE client that exceeds backpressure thresholds', () => {
+      const destroy = vi.fn();
+      const stalledRes = {
+        write: vi.fn(() => false),
+        once: vi.fn(),
+        removeListener: vi.fn(),
+        destroy,
+      } as any;
+
+      cleanupFunctions.push(addSSEClient(stalledRes, true));
+      expect(getActiveSSECount()).toBe(1);
+
+      for (let i = 0; i < 64; i++) {
+        broadcastEvent({
+          type: 'log',
+          data: { taskId: 'bp', stage: 'worker', line: `line-${i}` },
+        });
+      }
+
+      expect(getActiveSSECount()).toBe(0);
+      expect(destroy).toHaveBeenCalled();
+    });
+  });
 });

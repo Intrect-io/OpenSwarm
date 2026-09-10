@@ -348,9 +348,13 @@ async function runChatViaAdapter(
     'Chat response cancelled',
   );
   if (raw.exitCode !== 0 && !raw.stdout.trim()) {
-    throw new Error(raw.stderr.trim() || `${provider} exited with code ${raw.exitCode}`);
+    throw new Error(raw.stderr.trim().slice(0, 256 * 1024) || `${provider} exited with code ${raw.exitCode}`);
   }
-  const text = raw.stdout.trim();
+  // Bound retained adapter stdout before returning to chat UI (AGT-3429).
+  const MAX_ADAPTER_STDOUT_CHARS = 1024 * 1024;
+  const text = raw.stdout.length > MAX_ADAPTER_STDOUT_CHARS
+    ? raw.stdout.slice(0, MAX_ADAPTER_STDOUT_CHARS).trim()
+    : raw.stdout.trim();
   // Non-streaming adapters emit nothing via onToken — flush the full reply once.
   if (!streamed) options.onText?.(text, false);
   return { response: text || '[No response]', provider, model };
@@ -453,6 +457,11 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
         proc.stdin?.end(stdin);
       }
 
+      // Hard caps on retained CLI chat output (AGT-3429). Oversized streams are
+      // truncated in place so a runaway subprocess cannot exhaust process memory.
+      const MAX_CHAT_STDOUT_CHARS = 1024 * 1024; // 1 MiB
+      const MAX_CHAT_STDERR_CHARS = 256 * 1024; // 256 KiB
+      const MAX_CHAT_PARTIAL_BUFFER_CHARS = 64 * 1024; // 64 KiB
       let stdout = '';
       let stderr = '';
       let buffer = '';
@@ -460,6 +469,12 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
       let startedStreaming = false;
       let thinkingTimer: NodeJS.Timeout | null = null;
       let settled = false;
+
+      const appendBounded = (current: string, chunk: string, max: number): string => {
+        if (current.length >= max) return current;
+        const room = max - current.length;
+        return room >= chunk.length ? current + chunk : current + chunk.slice(0, room);
+      };
 
       const cleanupProcessHooks = () => {
         if (thinkingTimer) clearTimeout(thinkingTimer);
@@ -529,13 +544,13 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
 
       proc.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
-        stdout += text;
-        buffer += text;
+        stdout = appendBounded(stdout, text, MAX_CHAT_STDOUT_CHARS);
+        buffer = appendBounded(buffer, text, MAX_CHAT_PARTIAL_BUFFER_CHARS);
         flushLines(false);
       });
 
       proc.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
+        stderr = appendBounded(stderr, chunk.toString(), MAX_CHAT_STDERR_CHARS);
       });
 
       proc.on('close', (code) => {
