@@ -64,7 +64,6 @@
     "discord.js": "^14.14.1",
     "fullscreen-ink": "^0.1.0",
     "graphql": "^16.13.2",
-    "graphql-cost-analysis": "^1.0.3",
     "graphql-yoga": "^5.19.0",
     "ink": "^7.1.0",
     "ink-gradient": "^4.0.1",
