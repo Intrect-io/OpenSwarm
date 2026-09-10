@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyLimitResponse, detectRateLimit, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
+import { classifyLimitResponse, detectRateLimit, parseRetryAfterSeconds, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, throttleWaitMs } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { runAgenticLoop } from './agenticLoop.js';
@@ -184,17 +184,47 @@ describe('resolveLimitResponse integration (INT-2520)', () => {
 });
 
 describe('Retry-After HTTP-date parsing (AGT-3442)', () => {
-  it('parses an HTTP-date Retry-After header as an absolute epoch timestamp', () => {
-    // RFC 7231 §7.1.3: Retry-After can be an HTTP-date.
-    const headers = new Headers({ 'retry-after': 'Fri, 09 Sep 2026 18:42:00 GMT' });
+  it('parses delta-seconds and HTTP-date Retry-After values', () => {
+    expect(parseRetryAfterSeconds('120')).toBe(120);
+    expect(parseRetryAfterSeconds(' 45 ')).toBe(45);
+    // Prefix digits must not silently win over a malformed token.
+    expect(parseRetryAfterSeconds('60xyz')).toBeUndefined();
+    expect(parseRetryAfterSeconds('not-a-date')).toBeUndefined();
+
+    const future = new Date(Date.now() + 180_000);
+    const before = Math.floor(Date.now() / 1000);
+    const seconds = parseRetryAfterSeconds(future.toUTCString());
+    const after = Math.floor(Date.now() / 1000);
+    expect(seconds).toBeDefined();
+    const expected = Math.floor(future.getTime() / 1000);
+    expect(seconds!).toBeGreaterThanOrEqual(expected - after);
+    expect(seconds!).toBeLessThanOrEqual(expected - before);
+  });
+
+  it('exposes HTTP-date Retry-After as seconds-from-now via classifyLimitResponse', () => {
+    // Use a relative future date so the assertion does not rot when wall-clock moves.
+    const future = new Date(Date.now() + 120_000);
+    const headers = new Headers({ 'retry-after': future.toUTCString() });
+    const before = Math.floor(Date.now() / 1000);
     const result = classifyLimitResponse(headers, '{}');
+    const after = Math.floor(Date.now() / 1000);
     expect(result.quota).toBe(false); // no quota-exhausted body signature
-    // 2026-09-09T18:42:00Z in epoch seconds
-    const expected = Math.floor(new Date('2026-09-09T18:42:00Z').getTime() / 1000);
+    const expected = Math.floor(future.getTime() / 1000);
     expect(result.retryAfterSeconds).toBeGreaterThan(0);
-    // The derived retryAfterSeconds should be delta-seconds from now to that date.
-    const now = Math.floor(Date.now() / 1000);
-    expect(result.retryAfterSeconds).toBe(expected - now);
+    // Allow ±1s for the wall-clock tick between before/after and the parse.
+    expect(result.retryAfterSeconds!).toBeGreaterThanOrEqual(expected - after);
+    expect(result.retryAfterSeconds!).toBeLessThanOrEqual(expected - before);
+  });
+
+  it('sets RateLimitError.resetsAt from an HTTP-date Retry-After on a 429', () => {
+    const future = new Date(Date.now() + 300_000);
+    const headers = new Headers({ 'retry-after': future.toUTCString() });
+    const err = rateLimitFromHttpResponse(429, headers, '{"error":"rate limit"}');
+    expect(err).toBeInstanceOf(RateLimitError);
+    const expected = Math.floor(future.getTime() / 1000);
+    // ±1s: parseRetryAfterSeconds and extractResetsAt each sample Date.now().
+    expect(err!.resetsAt).toBeGreaterThanOrEqual(expected - 1);
+    expect(err!.resetsAt).toBeLessThanOrEqual(expected + 1);
   });
 });
 

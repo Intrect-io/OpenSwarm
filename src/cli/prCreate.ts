@@ -37,6 +37,11 @@ export interface PrCreateDeps {
     description: string,
   ) => Promise<string>;
   currentBranch?: (cwd: string) => Promise<string>;
+  /**
+   * When injected, replaces both the dirty/upstream gate and the ahead-of-upstream
+   * check (tests). The default path validates dirty + upstream separately, then
+   * returns whether HEAD is ahead of `@{u}`.
+   */
   hasDirtyOrAhead?: (cwd: string) => Promise<boolean>;
 }
 
@@ -44,18 +49,26 @@ async function defaultCurrentBranch(cwd: string): Promise<string> {
   return (await git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
 }
 
-async function defaultHasDirtyOrAhead(cwd: string): Promise<boolean> {
+/** Fail closed on dirty trees and unpublished (no-upstream) feature branches. */
+async function assertPublishableFeatureBranch(cwd: string): Promise<void> {
   const dirty = (await git(cwd, 'status', '--porcelain')).trim();
-  if (dirty) return true;
-  // Anything ahead of upstream, or unpushed commits on a new branch.
-  try {
-    const ahead = (await git(cwd, 'rev-list', '--count', '@{u}..HEAD')).trim();
-    return parseInt(ahead, 10) > 0;
-  } catch {
-    // No upstream — check commits vs default base via commitAndCreatePR itself.
-    const log = (await git(cwd, 'log', '--oneline', '-1')).trim();
-    return log.length > 0;
+  if (dirty) {
+    throw new Error(
+      'Uncommitted changes in the working tree — commit or stash before creating a PR',
+    );
   }
+  try {
+    await git(cwd, 'rev-parse', '--abbrev-ref', '@{u}');
+  } catch {
+    throw new Error(
+      'Current branch has no upstream — push the feature branch before creating a PR',
+    );
+  }
+}
+
+async function defaultHasAheadOfUpstream(cwd: string): Promise<boolean> {
+  const ahead = (await git(cwd, 'rev-list', '--count', '@{u}..HEAD')).trim();
+  return parseInt(ahead, 10) > 0;
 }
 
 /**
@@ -97,9 +110,18 @@ export async function createPrFromCwd(
     );
   }
 
-  const hasWork = deps.hasDirtyOrAhead ?? defaultHasDirtyOrAhead;
-  if (!(await hasWork(cwd))) {
-    throw new Error('Nothing to publish — working tree clean and no commits ahead of upstream');
+  const hasWork = deps.hasDirtyOrAhead;
+  if (hasWork) {
+    if (!(await hasWork(cwd))) {
+      throw new Error('Nothing to publish — working tree clean and no commits ahead of upstream');
+    }
+  } else {
+    // Default path: refuse dirty trees and branches with no upstream, then
+    // require at least one commit ahead of @{u}. (AGT-3442)
+    await assertPublishableFeatureBranch(cwd);
+    if (!(await defaultHasAheadOfUpstream(cwd))) {
+      throw new Error('Nothing to publish — working tree clean and no commits ahead of upstream');
+    }
   }
 
   const title =

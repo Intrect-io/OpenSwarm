@@ -110,6 +110,23 @@ export function parseResetsAtFromBody(text: string): number | undefined {
   return m ? parseInt(m[1], 10) : undefined;
 }
 
+/**
+ * RFC 7231 §7.1.3: Retry-After is either 1*DIGIT delta-seconds or an HTTP-date.
+ * Returns seconds-from-now when parseable; undefined when the value is unusable.
+ */
+export function parseRetryAfterSeconds(value: string): number | undefined {
+  const trimmed = value.trim();
+  // Delta-seconds must be the entire token — parseInt("Fri, …") is NaN, but
+  // parseInt("60xyz") would silently accept a prefix, so require /^\d+$/.
+  if (/^\d+$/.test(trimmed)) {
+    const delta = parseInt(trimmed, 10);
+    return Number.isFinite(delta) ? delta : undefined;
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isFinite(dateMs)) return undefined;
+  return Math.max(0, Math.floor(dateMs / 1000) - Math.floor(Date.now() / 1000));
+}
+
 /** Pull a unix reset timestamp (seconds) out of headers or a JSON body, if present. */
 function extractResetsAt(headers: Headers | undefined, body: string): number | undefined {
   const fromHeader = (k: string): number | undefined => {
@@ -129,12 +146,10 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   if (codexReset != null) return codexReset;
   const retryAfter = headers?.get('retry-after');
   if (retryAfter != null) {
-    // RFC 7231 §7.1.3: Retry-After is either delta-seconds or an HTTP-date.
-    // Delta-seconds → seconds-from-now; HTTP-date → absolute epoch seconds.
-    const delta = parseInt(retryAfter, 10);
-    if (Number.isFinite(delta)) return Math.floor(Date.now() / 1000) + delta;
-    const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) return Math.floor(dateMs / 1000);
+    // RFC 7231 §7.1.3 via parseRetryAfterSeconds (delta-seconds or HTTP-date).
+    // Convert seconds-from-now → absolute epoch for RateLimitError.resetsAt.
+    const seconds = parseRetryAfterSeconds(retryAfter);
+    if (seconds != null) return Math.floor(Date.now() / 1000) + seconds;
   }
   return parseResetsAtFromBody(body);
 }
@@ -208,7 +223,21 @@ export function classifyLimitResponse(headers: Headers | undefined, body: string
     return Number.isFinite(n) ? n : undefined;
   };
   const usedPercent = num('x-codex-primary-used-percent');
-  const retryAfterSeconds = num('retry-after');
+  // Prefer Retry-After (delta-seconds or HTTP-date). Fall back to the codex
+  // absolute reset epoch, converted to seconds-from-now. Default 0 so callers
+  // that honor the field never treat "missing" as an unbounded wait. (AGT-3442)
+  let retryAfterSeconds: number | undefined;
+  const retryAfter = headers?.get('retry-after');
+  if (retryAfter != null) {
+    retryAfterSeconds = parseRetryAfterSeconds(retryAfter);
+  }
+  if (retryAfterSeconds == null) {
+    const resetAt = num('x-codex-primary-reset-at');
+    if (resetAt != null) {
+      retryAfterSeconds = Math.max(0, resetAt - Math.floor(Date.now() / 1000));
+    }
+  }
+  if (retryAfterSeconds == null) retryAfterSeconds = 0;
   const lower = body.toLowerCase();
   const quota =
     QUOTA_EXHAUSTED_SUBSTRINGS.some((s) => lower.includes(s)) ||

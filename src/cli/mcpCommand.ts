@@ -50,7 +50,7 @@ export function parseServerSpec(target: string | undefined, args: string[], pres
       const known = Object.keys(BUILTIN_MCP_SERVERS).join(', ');
       throw new Error(`mcp add: unknown preset "${preset}" (known: ${known})`);
     }
-    return { preset };
+    return McpServerSchema.parse({ preset }) as McpServerConfig;
   }
   if (target && /^https?:\/\//.test(target)) {
     // Validate the URL is well-formed before it is persisted to the registry.
@@ -58,13 +58,23 @@ export function parseServerSpec(target: string | undefined, args: string[], pres
     if (!parsed.success) {
       throw new Error(`mcp add: invalid server URL "${target}": ${parsed.error.issues[0]?.message ?? 'malformed'}`);
     }
-    return { url: target };
+    return parsed.data as McpServerConfig;
   }
-  if (target) return { command: target, ...(args.length ? { args } : {}) };
+  if (target) {
+    const parsed = McpServerSchema.safeParse({
+      command: target,
+      ...(args.length ? { args } : {}),
+    });
+    if (!parsed.success) {
+      throw new Error(`mcp add: invalid command spec: ${parsed.error.issues[0]?.message ?? 'malformed'}`);
+    }
+    return parsed.data as McpServerConfig;
+  }
   throw new Error('mcp add: provide a --preset, a URL, or a command');
 }
 
 export function addServer(json: McpJson, name: string, spec: McpServerConfig): McpJson {
+  if (!name.trim()) throw new Error('mcp add: a non-empty server name is required');
   return { mcpServers: { ...json.mcpServers, [name]: spec } };
 }
 

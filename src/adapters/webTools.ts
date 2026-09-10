@@ -129,7 +129,18 @@ async function fetchWithTimeout(
         const location = response.headers.get('location');
         if (!location) throw new Error('Redirect response has no location');
         await response.body?.cancel();
-        const next = new URL(location, current);
+        let next: URL;
+        try {
+          next = new URL(location, current);
+        } catch {
+          throw new Error(`Invalid redirect location: ${location}`);
+        }
+        // Validate the hop before following: only http(s) destinations are
+        // eligible (publicFetch would also reject, but fail closed here so a
+        // credentialed request never even attempts a file:/javascript: target).
+        if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+          throw new Error(`Refusing redirect to non-http(s) URL (${next.protocol})`);
+        }
         if (carriesSensitiveRequestData && next.origin !== initialOrigin) {
           throw new Error('Refusing to forward credentials or request body across origins');
         }
