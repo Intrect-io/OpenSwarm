@@ -187,6 +187,8 @@ export class LocalModelAdapter implements CliAdapter {
       onLog: options.onLog,
       enableTools: (options.enableTools ?? true) && supportsTools,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
+      finishValidator: options.finishValidator,
+      finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,

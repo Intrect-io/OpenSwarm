@@ -679,42 +679,90 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
       onLog?.(`[Draft] Usage limit on ${adaptersToTry[i - 1]}, fallback to ${adapterName}`);
     }
 
-    // drafter hard gate (INT-1917): retry until the brief is faithful enough.
-    for (let attempt = 1; attempt <= DRAFT_MAX_ATTEMPTS; attempt += 1) {
-      const attemptPrompt = attempt === 1 ? prompt : prompt + DRAFT_RETRY_NUDGE;
-      try {
-        const raw = await spawnCli(adapter, {
-          prompt: attemptPrompt,
-          cwd: options.projectPath, // read the real repo (INT-1917) — was '/tmp'
-          timeoutMs: draftTimeoutMs, // size-adaptive: 30s timed out on large repos → type=unknown (INT-2485)
+    // drafter hard gate (INT-1917): retry within the SAME conversation until the
+    // brief is faithful enough, instead of a caller-side loop that called spawnCli
+    // again per attempt. That used to throw away the just-warmed KV-cache prefix
+    // on every retry — measured on vela, the retry's first call landed at 0.3%
+    // cache against 95%+ for the calls around it (AGT-4300). finishValidator
+    // rejects in place and continues the loop's own messages array instead.
+    let lastAttemptNumber = 0;
+    try {
+      const raw = await spawnCli(adapter, {
+        prompt,
+        cwd: options.projectPath, // read the real repo (INT-1917) — was '/tmp'
+        timeoutMs: draftTimeoutMs, // size-adaptive: 30s timed out on large repos → type=unknown (INT-2485)
+        model: resolvedModel,
+        // +(DRAFT_MAX_ATTEMPTS-1) turns of headroom for the finish-retry round(s) —
+        // it doesn't need to re-explore from scratch like a fresh attempt did, so
+        // this is not a full second budget.maxTurns.
+        maxTurns: budget.maxTurns + (DRAFT_MAX_ATTEMPTS - 1),
+        processContext: { taskId: options.taskId ?? options.taskTitle, stage: 'draft' },
+        finishValidatorMaxRetries: DRAFT_MAX_ATTEMPTS - 1,
+        finishValidator: (finalText, attempt) => {
+          lastAttemptNumber = attempt;
+          const parsed = parseDraftResponse(finalText);
+          const sufficient = isDraftSufficient(parsed);
+          onLog?.(`[Draft] ${adapterName}(${resolvedModel}) attempt ${attempt}: type=${parsed.taskType}, files=${parsed.relevantFiles?.length ?? 0}, criteria=${parsed.completionCriteria?.length ?? 0}, sufficient=${sufficient}`);
+          if (sufficient) return { ok: true };
+          onLog?.('[Draft] Brief insufficient — retrying with a stricter prompt');
+          return { ok: false, nudge: DRAFT_RETRY_NUDGE };
+        },
+      });
+
+      haikuResult = parseDraftResponse(raw.stdout);
+      succeeded = true;
+      draftSufficient = isDraftSufficient(haikuResult);
+      if (lastAttemptNumber === 0) {
+        // finishValidator never fired (no-tool-calls path never reached, e.g. the
+        // maxTurns-exhaustion salvage answered instead) — log once so this attempt
+        // is still visible.
+        onLog?.(`[Draft] ${adapterName}(${resolvedModel}): type=${haikuResult.taskType}, files=${haikuResult.relevantFiles?.length ?? 0}, criteria=${haikuResult.completionCriteria?.length ?? 0}, sufficient=${draftSufficient}`);
+      }
+      if (draftSufficient) break outer;
+
+      // Fallback for the in-session retry NOT actually happening — either the
+      // adapter doesn't route through runAgenticLoop at all (codex, claude,
+      // cursor, codex-responses, cc-router: subprocess/CLI-delegate or a
+      // shared loop this diff didn't wire finishValidator into), or the model
+      // spent its whole turn budget exploring before its first would-be final
+      // answer and the maxTurns-exhaustion salvage answered instead of the
+      // no-tool-calls branch where finishValidator lives — either way
+      // `lastAttemptNumber` never reaches DRAFT_MAX_ATTEMPTS, meaning the
+      // brief got fewer real chances than the hard gate is supposed to give
+      // it. Restore the old safety net with exactly one extra fresh call,
+      // rather than silently shipping a thin brief on adapters this diff
+      // can't make cache-friendly. (Found in layer-2 review, AGT-4300.)
+      if (lastAttemptNumber < DRAFT_MAX_ATTEMPTS) {
+        onLog?.(`[Draft] ${adapterName}(${resolvedModel}): in-session retry unavailable or exhausted by turn budget — one fresh retry`);
+        const fallbackRaw = await spawnCli(adapter, {
+          prompt: prompt + DRAFT_RETRY_NUDGE,
+          cwd: options.projectPath,
+          timeoutMs: draftTimeoutMs,
           model: resolvedModel,
-          maxTurns: budget.maxTurns, // size-adaptive: 3 ran out reading a real repo before emitting the brief (INT-2485)
+          maxTurns: budget.maxTurns,
           processContext: { taskId: options.taskId ?? options.taskTitle, stage: 'draft' },
         });
-
-        haikuResult = parseDraftResponse(raw.stdout);
-        succeeded = true;
-        draftSufficient = isDraftSufficient(haikuResult);
-        onLog?.(`[Draft] ${adapterName}(${resolvedModel}) attempt ${attempt}: type=${haikuResult.taskType}, files=${haikuResult.relevantFiles?.length ?? 0}, criteria=${haikuResult.completionCriteria?.length ?? 0}, sufficient=${draftSufficient}`);
+        const fallbackResult = parseDraftResponse(fallbackRaw.stdout);
+        const fallbackSufficient = isDraftSufficient(fallbackResult);
+        onLog?.(`[Draft] ${adapterName}(${resolvedModel}) fresh retry: type=${fallbackResult.taskType}, files=${fallbackResult.relevantFiles?.length ?? 0}, criteria=${fallbackResult.completionCriteria?.length ?? 0}, sufficient=${fallbackSufficient}`);
+        haikuResult = fallbackResult;
+        draftSufficient = fallbackSufficient;
         if (draftSufficient) break outer;
-        if (attempt < DRAFT_MAX_ATTEMPTS) {
-          onLog?.('[Draft] Brief insufficient — retrying with a stricter prompt');
-        }
-      } catch (err) {
-        // A typed rate limit must NOT be swallowed into a best-effort draft — it
-        // has to reach the pipeline so the scheduler pauses instead of the planner
-        // + worker continuing to hammer the exhausted provider. (INT-2521)
-        if (err instanceof RateLimitError) throw err;
-        lastError = err;
-        const errMsg = err instanceof Error ? err.message : String(err);
-        onLog?.(`[Draft] analysis failed (${adapterName}): ${errMsg}`);
-
-        if (!isFallbackAttempt && isProviderQuotaError(errMsg) && adaptersToTry.length > 1) {
-          break; // break inner → try the fallback adapter
-        }
-        // Non-quota failure: stop entirely, continue pipeline with best-effort data.
-        break outer;
       }
+    } catch (err) {
+      // A typed rate limit must NOT be swallowed into a best-effort draft — it
+      // has to reach the pipeline so the scheduler pauses instead of the planner
+      // + worker continuing to hammer the exhausted provider. (INT-2521)
+      if (err instanceof RateLimitError) throw err;
+      lastError = err;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      onLog?.(`[Draft] analysis failed (${adapterName}): ${errMsg}`);
+
+      if (!isFallbackAttempt && isProviderQuotaError(errMsg) && adaptersToTry.length > 1) {
+        continue; // try the fallback adapter
+      }
+      // Non-quota failure: stop entirely, continue pipeline with best-effort data.
+      break outer;
     }
     // Got a response from this adapter (sufficient or best-effort after retries).
     // Only quota errors (which leave succeeded=false) cascade to the fallback

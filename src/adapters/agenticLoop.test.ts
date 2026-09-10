@@ -251,6 +251,71 @@ describe('runAgenticLoop nudge budgets (INT-1925)', () => {
   });
 });
 
+describe('runAgenticLoop finishValidator (AGT-4300)', () => {
+  it('rejects a would-be final answer and continues the SAME conversation instead of returning', async () => {
+    const calls: number[] = [];
+    let callApiInvocations = 0;
+    const callApi = async (messages: ChatMessage[]) => {
+      callApiInvocations++;
+      // Every call after the first sees the growing history — proof this is
+      // one continuous session, not a caller restarting a fresh conversation
+      // per attempt (the whole point of the fix: keep the warm KV-cache prefix).
+      calls.push(messages.length);
+      return finalResp(callApiInvocations === 1 ? 'thin answer' : 'faithful answer');
+    };
+    const finishValidator = vi.fn(async (finalText: string) => {
+      if (finalText === 'thin answer') return { ok: false as const, nudge: 'try harder' };
+      return { ok: true as const };
+    });
+
+    const result = await runAgenticLoop({
+      prompt: 'draft this task', cwd: process.cwd(), model: 'test', callApi,
+      maxTurns: 10, webTools: false,
+      finishValidator, finishValidatorMaxRetries: 1,
+    });
+
+    expect(callApiInvocations).toBe(2); // one rejected, one accepted — no restart
+    expect(finishValidator).toHaveBeenCalledTimes(2);
+    expect(finishValidator).toHaveBeenNthCalledWith(1, 'thin answer', 1);
+    expect(finishValidator).toHaveBeenNthCalledWith(2, 'faithful answer', 2);
+    expect(result.text).toBe('faithful answer');
+    // The second call's message array is longer than the first's — the nudge
+    // was appended as a new turn on the SAME messages array, not a fresh one.
+    expect(calls[1]).toBeGreaterThan(calls[0]);
+  });
+
+  it('gives up and returns the last candidate once finishValidatorMaxRetries is exhausted', async () => {
+    let callApiInvocations = 0;
+    const callApi = async () => {
+      callApiInvocations++;
+      return finalResp('always thin');
+    };
+    const finishValidator = vi.fn(async () => ({ ok: false as const, nudge: 'try harder' }));
+
+    const result = await runAgenticLoop({
+      prompt: 'draft this task', cwd: process.cwd(), model: 'test', callApi,
+      maxTurns: 10, webTools: false,
+      finishValidator, finishValidatorMaxRetries: 1,
+    });
+
+    // maxRetries=1 allows exactly one rejection before the loop stops asking
+    // the validator and returns the last text as-is, rather than looping
+    // forever on a model that never satisfies the gate.
+    expect(callApiInvocations).toBe(2); // one rejected round, one accepted-by-exhaustion round
+    expect(finishValidator).toHaveBeenCalledTimes(2);
+    expect(result.text).toBe('always thin');
+  });
+
+  it('does not call finishValidator at all when unset (default off)', async () => {
+    const callApi = async () => finalResp('plain answer');
+    const result = await runAgenticLoop({
+      prompt: 'do a thing', cwd: process.cwd(), model: 'test', callApi,
+      maxTurns: 10, webTools: false,
+    });
+    expect(result.text).toBe('plain answer');
+  });
+});
+
 describe('runAgenticLoop warehouse discovery (AGT-4128)', () => {
   it('points every tool-loop worker at the warehouse index before it asks for local-only data', async () => {
     let firstMessages: ChatMessage[] = [];

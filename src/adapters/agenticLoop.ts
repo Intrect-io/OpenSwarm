@@ -12,7 +12,7 @@ import { WEB_TOOL_DEFINITIONS } from './webTools.js';
 import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
-import type { CliRunResult } from './types.js';
+import type { CliRunResult, FinishValidation } from './types.js';
 import type { ChatUsage } from './chatStream.js';
 import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
@@ -132,6 +132,20 @@ export interface AgenticLoopOptions {
    * 기본 0 (비활성) — 수정 없는 작업(진단·분석)도 정상이므로 옵트인.
    */
   nudgeMaxOnNoEdit?: number;
+  /**
+   * Gate on the loop's finish itself, not just on whether it edited a file.
+   * Called with the model's would-be final answer before the loop returns;
+   * `{ ok: false, nudge }` appends the nudge as a new user turn and
+   * `continue`s the SAME conversation instead of returning. This is what
+   * lets a caller reject an insufficient answer (e.g. draftAnalyzer's hard
+   * gate) without restarting a fresh `spawnCli` call, which used to throw
+   * away the provider's warm KV-cache prefix on every retry — measured on
+   * vela: the retry's first call landed at 0.3% cache against 95%+ for the
+   * calls around it (AGT-4300). Bounded by `finishValidatorMaxRetries`.
+   */
+  finishValidator?: (finalText: string, attempt: number) => FinishValidation | Promise<FinishValidation>;
+  /** Max times `finishValidator` may reject an answer before the loop gives up and returns it anyway. Default 0. */
+  finishValidatorMaxRetries?: number;
   /** Verification-harness files for which edit/write are refused (see tools.ts ToolExecOptions) */
   protectedFiles?: string[];
   /** bash tool timeout — docker-based tests need minutes (default 30s) */
@@ -241,6 +255,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     compactAfterMessages = 60,
     keepRecentMessages = 16,
     nudgeMaxOnNoEdit = 0,
+    finishValidator,
+    finishValidatorMaxRetries = 0,
     protectedFiles,
     bashTimeoutMs,
     webTools = true,
@@ -360,6 +376,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // could exhaust it and then slip past the guard, ending analysis-only. (INT-1925)
   let noEditNudgesUsed = 0;
   let readLoopNudgesUsed = 0;
+  let finishValidatorRetriesUsed = 0;
   // AGT-4054: an operator or another agent can reach out mid-task without this
   // agent asking first — nothing else in the loop surfaces that unprompted, so
   // track how long it has been since coordination_read last actually consumed
@@ -612,7 +629,31 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       // Normalize it to empty so the final-answer recovery below retries instead
       // of returning an effectively blank success. (INT-2879)
       const content = assistantMsg.content;
-      finalText = typeof content === 'string' && content.trim() ? content : '';
+      const candidateFinalText = typeof content === 'string' && content.trim() ? content : '';
+
+      // Caller-side finish gate (AGT-4300). A rejected answer used to mean the
+      // CALLER started a brand-new spawnCli conversation for the retry — cold
+      // start, none of this session's warm cache. Rejecting HERE instead keeps
+      // the same messages array and just appends another turn, the same way the
+      // no-edit guard above does. Called on EVERY candidate, including the final
+      // one after retries are exhausted, so a caller logging inside the
+      // validator sees every attempt, not just the ones that got a retry.
+      if (finishValidator) {
+        const verdict = await finishValidator(candidateFinalText, finishValidatorRetriesUsed + 1);
+        if (!verdict.ok && finishValidatorRetriesUsed < finishValidatorMaxRetries) {
+          finishValidatorRetriesUsed++;
+          onLog?.(
+            `↩ Finish gate: answer rejected (retry ${finishValidatorRetriesUsed}/${finishValidatorMaxRetries})`,
+          );
+          messages.push({ role: 'assistant', content: assistantMsg.content ?? '' });
+          messages.push({ role: 'user', content: verdict.nudge ?? 'That answer was not accepted. Try again.' });
+          continue;
+        }
+        // Either accepted, or retries are exhausted — fall through and return
+        // this candidate as-is rather than looping forever on a model that
+        // never satisfies the gate.
+      }
+      finalText = candidateFinalText;
       break;
     }
 

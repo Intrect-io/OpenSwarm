@@ -105,36 +105,41 @@ describe('runDraftAnalysis fallback', () => {
     ).rejects.toBeInstanceOf(RateLimitError);
   });
 
-  it('drafter hard gate: retries on the same adapter when the brief is insufficient', async () => {
+  it('drafter hard gate: retries in the SAME spawnCli call when the brief is insufficient (AGT-4300)', async () => {
+    // The gate retry used to be a caller-side loop that called spawnCli again —
+    // a fresh conversation that threw away the just-warmed provider cache
+    // (measured on vela: the retry's first call landed at 0.3% cache against
+    // 95%+ around it). It now retries INSIDE one spawnCli call via
+    // finishValidator, which the real agenticLoop invokes with each would-be
+    // final answer; this mock plays that same role so the test exercises the
+    // actual wiring (finishValidatorMaxRetries, the nudge, the attempt count)
+    // rather than asserting a call count that no longer means what it used to.
     vi.spyOn(adapterModule, 'getDefaultAdapterName').mockReturnValue('codex');
     vi.spyOn(adapterModule, 'getAdapter').mockReturnValue(makeAdapter('codex'));
 
-    vi.spyOn(adapterModule, 'spawnCli')
-      // attempt 1: thin brief (no completionCriteria) → insufficient → retry
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: JSON.stringify({
-          taskType: 'feature',
-          intentSummary: 'do the thing',
-          relevantFiles: [],
-          suggestedApproach: 'figure it out',
-        }),
-        stderr: '',
-        durationMs: 1,
-      } as CliRunResult)
-      // attempt 2: faithful brief with execution-grounded criteria → sufficient
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: JSON.stringify({
-          taskType: 'feature',
-          intentSummary: 'Wire the resolver into the streaming path',
-          relevantFiles: ['src/streaming.ts'],
-          suggestedApproach: 'call resolve_turn_model from build_request',
-          completionCriteria: ['resolve_turn_model invoked from streaming.ts (call site cited)'],
-        }),
-        stderr: '',
-        durationMs: 1,
-      } as CliRunResult);
+    const thinBrief = JSON.stringify({
+      taskType: 'feature',
+      intentSummary: 'do the thing',
+      relevantFiles: [],
+      suggestedApproach: 'figure it out',
+    });
+    const faithfulBrief = JSON.stringify({
+      taskType: 'feature',
+      intentSummary: 'Wire the resolver into the streaming path',
+      relevantFiles: ['src/streaming.ts'],
+      suggestedApproach: 'call resolve_turn_model from build_request',
+      completionCriteria: ['resolve_turn_model invoked from streaming.ts (call site cited)'],
+    });
+
+    const spawnCliSpy = vi.spyOn(adapterModule, 'spawnCli').mockImplementation(async (_adapter, options) => {
+      expect(options.finishValidatorMaxRetries).toBeGreaterThan(0);
+      const first = await options.finishValidator!(thinBrief, 1);
+      expect(first.ok).toBe(false);
+      expect(first.nudge).toBeTruthy();
+      const second = await options.finishValidator!(faithfulBrief, 2);
+      expect(second.ok).toBe(true);
+      return { exitCode: 0, stdout: faithfulBrief, stderr: '', durationMs: 1 } as CliRunResult;
+    });
 
     const result = await runDraftAnalysis({
       taskTitle: 'Wire resolver',
@@ -142,26 +147,72 @@ describe('runDraftAnalysis fallback', () => {
       projectPath: '/tmp/project',
     });
 
-    expect(adapterModule.spawnCli).toHaveBeenCalledTimes(2); // gate retry on same adapter
+    expect(spawnCliSpy).toHaveBeenCalledTimes(1); // one conversation, not a fresh one per attempt
     expect(result.sufficient).toBe(true);
     expect(result.completionCriteria).toHaveLength(1);
   });
 
-  it('drafter hard gate: marks insufficient when retries still yield a thin brief', async () => {
+  it('drafter hard gate: marks insufficient when the finish gate exhausts its retries on a thin brief', async () => {
     vi.spyOn(adapterModule, 'getDefaultAdapterName').mockReturnValue('codex');
     vi.spyOn(adapterModule, 'getAdapter').mockReturnValue(makeAdapter('codex'));
-    // Always thin → never passes the gate.
-    vi.spyOn(adapterModule, 'spawnCli').mockResolvedValue({
-      exitCode: 0,
-      stdout: JSON.stringify({ taskType: 'feature', intentSummary: 'x', relevantFiles: [], suggestedApproach: 'y' }),
-      stderr: '',
-      durationMs: 1,
-    } as CliRunResult);
+
+    const thinBrief = JSON.stringify({ taskType: 'feature', intentSummary: 'x', relevantFiles: [], suggestedApproach: 'y' });
+
+    const spawnCliSpy = vi.spyOn(adapterModule, 'spawnCli').mockImplementation(async (_adapter, options) => {
+      const maxRetries = options.finishValidatorMaxRetries ?? 0;
+      let verdict = await options.finishValidator!(thinBrief, 1);
+      for (let attempt = 2; !verdict.ok && attempt <= maxRetries + 1; attempt += 1) {
+        verdict = await options.finishValidator!(thinBrief, attempt);
+      }
+      // Retries exhausted without an `ok` verdict — the real loop returns the
+      // last candidate text as-is rather than looping forever.
+      return { exitCode: 0, stdout: thinBrief, stderr: '', durationMs: 1 } as CliRunResult;
+    });
 
     const result = await runDraftAnalysis({ taskTitle: 'T', taskDescription: 'D', projectPath: '/tmp/project' });
 
-    expect(adapterModule.spawnCli).toHaveBeenCalledTimes(2); // exhausts gate retries
+    expect(spawnCliSpy).toHaveBeenCalledTimes(1);
     expect(result.sufficient).toBe(false);
+  });
+
+  it('falls back to one fresh retry when finishValidator never got its full quota (AGT-4300 layer-2 fix)', async () => {
+    // finishValidator only works on adapters routed through runAgenticLoop
+    // (openrouter/gpt/local/atlascloud), and even there a run that exhausts
+    // its turn budget while still exploring never reaches the no-tool-calls
+    // branch where finishValidator lives. Either way, the first spawnCli call
+    // here behaves like those cases: it never calls options.finishValidator
+    // at all (as codex/claude/cursor/codex-responses/cc-router would) and just
+    // returns a thin brief. Without this fallback, the hard gate would give
+    // this adapter fewer real chances than the two it is supposed to get.
+    vi.spyOn(adapterModule, 'getDefaultAdapterName').mockReturnValue('codex');
+    vi.spyOn(adapterModule, 'getAdapter').mockReturnValue(makeAdapter('codex'));
+
+    const thinBrief = JSON.stringify({ taskType: 'feature', intentSummary: 'x', relevantFiles: [], suggestedApproach: 'y' });
+    const faithfulBrief = JSON.stringify({
+      taskType: 'feature',
+      intentSummary: 'Wire the resolver into the streaming path',
+      relevantFiles: ['src/streaming.ts'],
+      suggestedApproach: 'call resolve_turn_model from build_request',
+      completionCriteria: ['resolve_turn_model invoked from streaming.ts (call site cited)'],
+    });
+
+    const spawnCliSpy = vi.spyOn(adapterModule, 'spawnCli')
+      // First call: never invokes options.finishValidator — simulates an
+      // adapter that doesn't route through runAgenticLoop at all.
+      .mockResolvedValueOnce({ exitCode: 0, stdout: thinBrief, stderr: '', durationMs: 1 } as CliRunResult)
+      // Fallback fresh retry: a faithful brief this time.
+      .mockResolvedValueOnce({ exitCode: 0, stdout: faithfulBrief, stderr: '', durationMs: 1 } as CliRunResult);
+
+    const result = await runDraftAnalysis({ taskTitle: 'T', taskDescription: 'D', projectPath: '/tmp/project' });
+
+    expect(spawnCliSpy).toHaveBeenCalledTimes(2);
+    // The fallback call's prompt carries the same retry nudge the old
+    // per-attempt loop used to append, so weaker/non-loop adapters still get
+    // a stricter second try, not just a repeat of the first prompt.
+    const fallbackCallArgs = spawnCliSpy.mock.calls[1][1];
+    expect(fallbackCallArgs.prompt).toContain('Your previous brief was insufficient');
+    expect(result.sufficient).toBe(true);
+    expect(result.completionCriteria).toHaveLength(1);
   });
 
   it('does not fallback on non-quota failures', async () => {

@@ -14,6 +14,22 @@ export type { WorkerResult, ReviewResult };
 export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
 
 /**
+ * Result of validating a would-be final answer from the agentic loop
+ * (see `CliRunOptions.finishValidator`).
+ */
+export interface FinishValidation {
+  /** Accept the answer and let the loop return it. */
+  ok: boolean;
+  /**
+   * When `ok` is false, the message appended as a new user turn so the model
+   * retries IN THE SAME conversation (as an assistant/user exchange), rather
+   * than the caller starting a brand-new `spawnCli` call. Required when `ok`
+   * is false.
+   */
+  nudge?: string;
+}
+
+/**
  * Raw result from a CLI process execution
  */
 export interface CliRunResult {
@@ -139,6 +155,20 @@ export interface CliRunOptions {
    * - 'whole-file': write_file rewrites only.
    */
   editFormat?: 'json' | 'search-replace' | 'whole-file';
+  /**
+   * Gate on the loop's finish, not just on whether it edited a file. When
+   * the loop is about to return a final answer with no more tool calls,
+   * this is called with that text; returning `{ ok: false, nudge }` appends
+   * the nudge as a new user turn and continues the SAME conversation
+   * instead of returning — unlike a caller-side retry that calls `spawnCli`
+   * again, this keeps the provider's warm KV-cache prefix instead of paying
+   * for a cold start on every retry. Bounded by `finishValidatorMaxRetries`
+   * (default 0 — no retries; the loop returns the first answer as-is).
+   * (AGT-4300)
+   */
+  finishValidator?: (finalText: string, attempt: number) => FinishValidation | Promise<FinishValidation>;
+  /** Max times `finishValidator` may reject an answer before the loop gives up and returns it anyway. Default 0. */
+  finishValidatorMaxRetries?: number;
 }
 
 /**
