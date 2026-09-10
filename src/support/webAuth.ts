@@ -9,7 +9,7 @@
 // handling in a 1650-line file, and the surface most worth reading on its own.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { isAuthorizedTailscalePeer, isLoopbackAddress, isTailscaleAddress } from './tailscaleNetwork.js';
+import { isAuthorizedTailscalePeer, isLoopbackAddress, isTailscaleLocalEnd } from './tailscaleNetwork.js';
 import { isGraphQLRequest } from '../issues/graphql/server.js';
 
 // CORS origin allowlist — hostname-strict match (no substring/prefix pitfalls)
@@ -58,10 +58,20 @@ export function isTrustedTailscaleRequest(req: IncomingMessage): boolean {
     // means the packet was addressed to us through the tailnet, not to our LAN
     // address with a forged source.
     //
-    // This is defence in depth, not proof: an on-link attacker who can also
-    // route our ULA prefix defeats it. Real proof needs the Tailscale control
-    // plane (node key / capability check), which this process does not talk to.
-    && isTailscaleAddress(req.socket.localAddress)
+    // ...on the Tailscale interface, identified by the ULA it carries rather
+    // than by address range. "Not globally routable" is not "same adjacency":
+    // 100.64.0.0/10 is also carrier-grade NAT and a stock Kubernetes pod
+    // range, so a range test would trust a listed peer reaching a tethered or
+    // containerised daemon over the carrier network. (AGT-4294)
+    //
+    // Still defence in depth, not proof: an on-link attacker who can deliver a
+    // frame to this host's MAC defeats it either way. Real proof needs the
+    // Tailscale control plane — tailscaled's local API answers `whois` for a
+    // source address — which this process does not talk to yet.
+    //
+    // The bar matters because trust here reaches POST /api/exec, which hands
+    // an arbitrary prompt to a coding agent with shell access on this host.
+    && isTailscaleLocalEnd(req.socket.localAddress)
     && isTrustedLocalOrigin(req);
 }
 

@@ -15,7 +15,25 @@
 // form was refused here, because a bracketed IPv6 hostname matched none of the
 // allowed shapes. A test on either function alone would have passed.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+
+// The Tailscale path now identifies its interface by the ULA that interface
+// carries (AGT-4294), so these tests must name the host's addresses rather
+// than inherit whatever the machine running them happens to have.
+const DAEMON_ULA = 'fd7a:115c:a1e0::bc01:c823';
+const DAEMON_CGNAT = '100.95.200.28';
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    networkInterfaces: () => ({
+      lo0: [{ address: '127.0.0.1' }],
+      en0: [{ address: '192.168.50.43' }],
+      // One interface carrying both, exactly as tailscaled presents it.
+      utun2: [{ address: DAEMON_CGNAT }, { address: DAEMON_ULA }],
+    }),
+  };
+});
 import type { IncomingMessage } from 'node:http';
 
 import {
@@ -44,7 +62,8 @@ function req(opts: {
 const ORIGINAL = process.env.OPENSWARM_WEB_TOKEN;
 const ORIGINAL_TRUST = process.env.OPENSWARM_TRUST_TAILSCALE;
 const ORIGINAL_PEERS = process.env.OPENSWARM_TAILSCALE_PEERS;
-beforeEach(() => {
+beforeEach(async () => {
+  (await import('./tailscaleNetwork.js')).resetTailscaleInterfaceCacheForTests();
   delete process.env.OPENSWARM_WEB_TOKEN;
   delete process.env.OPENSWARM_TRUST_TAILSCALE;
   delete process.env.OPENSWARM_TAILSCALE_PEERS;
@@ -295,13 +314,112 @@ describe('isAuthorizedMutation / isAuthorizedLocalRead', () => {
     }
   });
 
-  it('still refuses CGNAT, even allowlisted — reaching IPv6 must not widen trust', () => {
+  it('lets an allowlisted CGNAT peer read, arriving on our CGNAT address', () => {
+    // The address `tailscale status` prints, which is the one an operator
+    // types. Both ends are CGNAT here: the browser's source and the daemon's
+    // own Tailscale address it connected to (AGT-4294).
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.126.196.94';
+    const r = req({
+      remote: '100.126.196.94',
+      local: '100.95.200.28',
+      origin: 'http://100.95.200.28:3847',
+      host: '100.95.200.28:3847',
+    });
+    expect(isAuthorizedLocalRead(r)).toBe(true);
+  });
+
+  it('refuses Tailscale trust when no ULA identifies the tailnet interface', async () => {
+    // Reached by `tailscale down` or a tailscaled restart, not only by IPv6
+    // being disabled. Falling back to the range test there would trust a
+    // listed peer arriving on a pod IP or a carrier-NAT uplink — the exact
+    // widening interface scoping exists to prevent.
+    const os = await import('node:os');
+    const spy = vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      eth0: [{ address: '100.96.4.17' }], tailscale0: [{ address: '100.95.200.28' }],
+    } as never);
+    (await import('./tailscaleNetwork.js')).resetTailscaleInterfaceCacheForTests();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    onTestFinished(async () => {
+      spy.mockRestore();
+      (await import('./tailscaleNetwork.js')).resetTailscaleInterfaceCacheForTests();
+    });
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.126.196.94';
+
+    const r = req({ remote: '100.126.196.94', local: '100.96.4.17', host: '100.96.4.17:3847' });
+    expect(isAuthorizedLocalRead(r)).toBe(false);
+    expect(isAuthorizedMutation(r)).toBe(false);
+
+    // ...unless the operator explicitly accepts the weaker rule.
+    process.env.OPENSWARM_TAILSCALE_ALLOW_RANGE_LOCAL_END = 'true';
+    onTestFinished(() => { delete process.env.OPENSWARM_TAILSCALE_ALLOW_RANGE_LOCAL_END; });
+    expect(isAuthorizedLocalRead(r)).toBe(true);
+  });
+
+  it('accepts the IPv4-mapped form both ends actually arrive in', () => {
+    // The daemon binds '::' (AGT-4290), so an IPv4 client's remoteAddress AND
+    // localAddress both arrive '::ffff:'-prefixed — verified against a real
+    // dual-stack socket. Every other CGNAT case here uses the bare form, so
+    // deleting the strip that makes production work left the suite green.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.126.196.94';
+    const r = req({
+      remote: '::ffff:100.126.196.94',
+      local: '::ffff:100.95.200.28',
+      host: '100.95.200.28:3847',
+    });
+    expect(isAuthorizedLocalRead(r)).toBe(true);
+    expect(isAuthorizedMutation(r)).toBe(true);
+  });
+
+  it('refuses a listed peer that reached a 100.x address which is not ours', () => {
+    // The reason the local end is matched against the interface rather than
+    // the range: 100.64.0.0/10 is also carrier-grade NAT and a stock k8s pod
+    // range, so a tethered or containerised daemon would otherwise trust a
+    // listed peer arriving over the carrier network.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.126.196.94';
+    for (const local of ['100.71.3.9', '100.96.4.17']) {
+      const r = req({ remote: '100.126.196.94', local, host: `${local}:3847` });
+      expect(isAuthorizedLocalRead(r), local).toBe(false);
+      expect(isAuthorizedMutation(r), local).toBe(false);
+    }
+  });
+
+  it('refuses a spoofed peer that reached us on a LAN address with no Origin', () => {
+    // The case the local-end check actually exists for. A browser cannot
+    // reach it — a LAN Origin is not on the allowlist and a cross-host Origin
+    // fails the CSRF match — but a non-browser client sends no Origin at all,
+    // and `isTrustedLocalOrigin` allows that by design (same-origin GETs do
+    // not send one). So with a self-assigned allowlisted source aimed at our
+    // LAN address, nothing else in the chain says no.
+    //
+    // 100.64.0.0/10 is not internet-routable, so arriving on our Tailscale
+    // address is what says the packet came through the tailnet.
+    process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
+    process.env.OPENSWARM_TAILSCALE_PEERS = '100.126.196.94';
+    const spoofed = req({ remote: '100.126.196.94', local: '192.168.50.43', host: '192.168.50.43:3847' });
+    expect(isAuthorizedLocalRead(spoofed)).toBe(false);
+    expect(isAuthorizedMutation(spoofed)).toBe(false);
+
+    // Same request, arriving on the daemon's own Tailscale address: allowed.
+    const viaTailnet = req({ remote: '100.126.196.94', local: '100.95.200.28', host: '100.95.200.28:3847' });
+    expect(isAuthorizedLocalRead(viaTailnet)).toBe(true);
+  });
+
+  it('still refuses CGNAT that the operator never listed', () => {
     // 100.64.0.0/10 is shared with carriers, so the address proves no
     // identity. Binding dual-stack must not turn that judgement over.
     process.env.OPENSWARM_TRUST_TAILSCALE = 'true';
-    process.env.OPENSWARM_TAILSCALE_PEERS = '100.123.244.103';
+    process.env.OPENSWARM_TAILSCALE_PEERS = 'fd7a:115c:a1e0::b601:f469';
     const r = req({
       remote: '100.123.244.103',
+      // Arriving on our own Tailscale address, so the local-end check passes
+      // and the allowlist is the only thing that can refuse this. Without
+      // this line the default '127.0.0.1' refused it for the wrong reason and
+      // deleting the allowlist check left the test green.
+      local: '100.95.200.28',
       origin: 'http://100.95.200.28:3847',
       host: '100.95.200.28:3847',
     });
