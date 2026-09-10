@@ -17,6 +17,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { adapterCanRunUnderHumanSurfaceBoundary, getAdapter, spawnCli } from '../adapters/index.js';
+import { mapModelForProvider } from '../adapters/modelCompat.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 import { getMcpTools } from '../mcp/mcpClient.js';
 import { filterMcpToolsForRole, type RoleMcpPolicy } from './mcpPolicy.js';
@@ -112,7 +113,13 @@ export async function runOrchestrator(options: OrchestratorRunOptions): Promise<
     );
   }
 
-  const model = options.model ?? await adapter.getDefaultModel();
+  // This path reached spawnCli without ever consulting the compat layer, so a
+  // config id from another provider went verbatim to the CLI and the
+  // `orchestrator` role was unreachable in every per-role table. Measured
+  // 2026-09-10: that is how an id cursor-agent rejects outright would arrive
+  // here. (AGT-4273)
+  const model = mapModelForProvider(adapter.name as AdapterName, options.model, 'orchestrator')
+    ?? await adapter.getDefaultModel();
   options.signal?.throwIfAborted();
   await store.publish({
     repository: options.repository,

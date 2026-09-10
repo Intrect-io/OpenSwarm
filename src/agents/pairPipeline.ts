@@ -52,6 +52,7 @@ import { safeConsole } from '../support/safeLog.js';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
+import type { ModelRole } from '../adapters/modelCompat.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
@@ -292,7 +293,7 @@ export class PairPipeline extends EventEmitter {
         taskTitle: context.task.title, taskDescription: context.task.description || '',
         workerResult: context.workerResult!, projectPath: context.projectPath,
         timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-        model: this.config.roles?.tester?.model, maxTurns: this.config.roles?.tester?.maxTurns,
+        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model), maxTurns: this.config.roles?.tester?.maxTurns,
         adapterName: this.config.roles?.tester?.adapter,
       }),
     });
@@ -303,12 +304,12 @@ export class PairPipeline extends EventEmitter {
   private async runStage(
     stage: PipelineStage,
     context: PipelineContext,
-    overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high' }
+    overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high'; modelRole?: ModelRole }
   ): Promise<StageResult> {
     const startTime = Date.now();
     // Display model: explicit override → configured (jobProfile/role) → adapter
     // default (so the TUI/dashboard aren't blank when config omits it). (INT-2393)
-    const stageModel = compatibleStageModel(this.config, stage, overrides?.model)
+    const stageModel = compatibleStageModel(this.config, stage, overrides?.model, overrides?.modelRole ?? stage)
       ?? modelForTask(this.config, stage, context.task)
       ?? await resolveAdapterDefaultModel(this.config.roles?.[stage]?.adapter, this.defaultModelCache);
     const prefix = context.taskPrefix;
@@ -394,7 +395,10 @@ export class PairPipeline extends EventEmitter {
             // light/heavy → gpt-5.5/5.4), falling back to roles.worker.model. Reading
             // roles.worker.model directly here silently dropped the jobProfile model, so a
             // codex worker fell through to the CLI's config.toml default (Codex-Spark). (INT-1599)
-            model: compatibleStageModel(this.config, 'worker', overrides?.model)
+            // `overrides.modelRole` (not the stage) so an escalation resolves as
+            // an escalation. This call — not the `stageModel` above, which is the
+            // display value — is the one that reaches the agent. (AGT-4273)
+            model: compatibleStageModel(this.config, 'worker', overrides?.model, overrides?.modelRole ?? 'worker')
               ?? modelForTask(this.config, 'worker', context.task),
             maxTurns: this.config.roles?.worker?.maxTurns,
             adapterName: this.config.roles?.worker?.adapter,
@@ -491,7 +495,10 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
             // jobProfile model precedence (see worker stage above). (INT-1599)
-            model: compatibleStageModel(this.config, 'reviewer', overrides?.model)
+            // `overrides.modelRole` (not the stage) so an escalation resolves as
+            // an escalation. This call — not the `stageModel` above, which is the
+            // display value — is the one that reaches the agent. (AGT-4273)
+            model: compatibleStageModel(this.config, 'reviewer', overrides?.model, overrides?.modelRole ?? 'reviewer')
               ?? modelForTask(this.config, 'reviewer', context.task),
             maxTurns: reviewerMaxTurns,
             adapterName: this.config.roles?.reviewer?.adapter,
@@ -559,7 +566,7 @@ export class PairPipeline extends EventEmitter {
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('documenter', this.config.roles?.documenter?.timeoutMs),
-            model: this.config.roles?.documenter?.model,
+            model: compatibleStageModel(this.config, 'documenter', this.config.roles?.documenter?.model),
             maxTurns: this.config.roles?.documenter?.maxTurns,
             adapterName: this.config.roles?.documenter?.adapter,
           });
@@ -576,7 +583,7 @@ export class PairPipeline extends EventEmitter {
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('auditor', this.config.roles?.auditor?.timeoutMs),
-            model: this.config.roles?.auditor?.model,
+            model: compatibleStageModel(this.config, 'auditor', this.config.roles?.auditor?.model),
             maxTurns: this.config.roles?.auditor?.maxTurns,
             adapterName: this.config.roles?.auditor?.adapter,
           });
@@ -593,7 +600,7 @@ export class PairPipeline extends EventEmitter {
             workerResult: context.workerResult,
             projectPath: context.projectPath,
             timeoutMs: stageTimeoutMs('skill-documenter', this.config.roles?.['skill-documenter']?.timeoutMs),
-            model: this.config.roles?.['skill-documenter']?.model,
+            model: compatibleStageModel(this.config, 'skill-documenter', this.config.roles?.['skill-documenter']?.model),
             maxTurns: this.config.roles?.['skill-documenter']?.maxTurns,
             adapterName: this.config.roles?.['skill-documenter']?.adapter,
           });
@@ -1128,8 +1135,13 @@ export class PairPipeline extends EventEmitter {
         const reviewerEscalateThreshold = reviewerCfg?.escalateAfterIteration ?? 3;
         const shouldEscalateReviewer = context.currentIteration >= reviewerEscalateThreshold && !!reviewerEscalateModel;
 
+        // `modelRole: 'escalate'` so the escalation resolves as an escalation.
+        // Without it the override runs through the reviewer's own role, and on
+        // an adapter that routes per role — cursor — it produced the reviewer's
+        // model verbatim while the line below announced a spot check on a
+        // different one. (AGT-4273)
         const reviewerOverrides = shouldEscalateReviewer
-          ? { model: reviewerEscalateModel }
+          ? { model: reviewerEscalateModel, modelRole: 'escalate' as const }
           : undefined;
 
         if (shouldEscalateReviewer && reviewerEscalateModel) {

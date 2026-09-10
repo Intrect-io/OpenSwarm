@@ -14,6 +14,7 @@ import type {
   WorkerResult,
 } from './types.js';
 import { parseReviewerResult, parseWorkerResult } from './resultParsing.js';
+import { readCachedCatalog, writeCachedCatalog } from './modelCatalog.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
@@ -23,6 +24,8 @@ export class CursorCliAdapter implements CliAdapter {
   // Model table from `cursor-agent --list-models`, cached for the adapter
   // lifetime so buildCommand can reject unsupported ids without a subprocess.
   private cachedModels: string[] | null = null;
+  // Bounded by the distinct model ids a config names, which is a handful.
+  private readonly warnedModels = new Set<string>();
   readonly capabilities: AdapterCapabilities = {
     supportsStreaming: true,
     supportsJsonOutput: true,
@@ -60,6 +63,11 @@ export class CursorCliAdapter implements CliAdapter {
         .map((line) => line.split(/\s+-\s+/)[0]?.trim())
         .filter((id): id is string => !!id && /^[\w.\-:/@]+$/.test(id));
       this.cachedModels = models;
+      // Persisted as well as memoised: `mapModelForProvider` runs in processes
+      // that never spawn cursor-agent, and a lookup with nothing behind it is a
+      // check that always misses — the exact failure this file's role routing
+      // exists to remove.
+      writeCachedCatalog('cursor', models);
       return models;
     } catch {
       return [];
@@ -79,9 +87,40 @@ export class CursorCliAdapter implements CliAdapter {
    */
   private resolveModel(wanted: string): string {
     // Vendor-slug ids ("z-ai/…", "zai-org/…") never exist on cursor-agent.
-    if (wanted.includes('/')) return 'auto';
-    if (this.cachedModels) return this.cachedModels.includes(wanted) ? wanted : 'auto';
+    if (wanted.includes('/')) return this.substitute(wanted, 'it is namespaced, and cursor-agent has no namespaced ids');
+    // In-memory first, then the catalogue this adapter persisted on a previous
+    // run. `listModels()` is reached only through `getDefaultModel()`, which
+    // fires only when NO model is configured — so a daemon that pins its models
+    // never warmed the field, and this fell through to handing cursor-agent an
+    // id nobody had checked. Measured 2026-09-10: that is how `gpt-5-codex`
+    // reached the CLI and aborted the run. Reading the file keeps buildCommand
+    // synchronous and subprocess-free; awaiting `listModels()` here made every
+    // run pay for `--list-models` on a hot path.
+    const known = this.cachedModels ?? readCachedCatalog('cursor')?.models ?? null;
+    // A catalogue we could not obtain is not evidence against the id: an empty
+    // or missing list must not force every model to `auto`.
+    if (known?.length && !known.includes(wanted)) {
+      return this.substitute(wanted, 'cursor-agent does not list it');
+    }
     return wanted;
+  }
+
+  /**
+   * Say what is being run instead of what was asked for.
+   *
+   * This rewrite used to be silent, and silence is what made it dangerous: a
+   * provider switch onto cursor turned every role's model into `auto` while
+   * `mapModelForProvider` reported that it had kept them, so worker and
+   * reviewer became one model with no line in any log. Once per distinct id,
+   * because the daemon runs these by the dozen and a per-run line would be
+   * noise rather than signal.
+   */
+  private substitute(wanted: string, why: string): string {
+    if (!this.warnedModels.has(wanted)) {
+      this.warnedModels.add(wanted);
+      console.log(`[cursor] model ${wanted} replaced with auto: ${why}`);
+    }
+    return 'auto';
   }
 
   buildCommand(options: CliRunOptions): CliCommandSpec {

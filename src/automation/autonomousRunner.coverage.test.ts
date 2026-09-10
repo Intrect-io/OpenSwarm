@@ -37,6 +37,12 @@ const { detectFileConflictsMock, resolveTaskFileScopeMock, describeScopeConflict
   describeScopeConflictMock: vi.fn((): unknown => null),
 }));
 
+vi.mock('../adapters/modelCatalog.js', () => ({
+  // Never read the developer's real ~/.openswarm state from a unit test: an
+  // ambient catalogue silently decided this suite's verdict once already.
+  readCachedCatalog: () => null,
+  writeCachedCatalog: () => {},
+}));
 vi.mock('../orchestration/conflictDetector.js', () => ({
   detectFileConflicts: detectFileConflictsMock,
   resolveTaskFileScope: resolveTaskFileScopeMock,
@@ -606,6 +612,34 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
         },
       }));
       expect(() => r.switchProvider('claude')).not.toThrow();
+    });
+
+    // The tests above assert `not.toThrow()` and nothing else, so relabelling
+    // worker as reviewer left all 102 of them green. The role NAME is the whole
+    // mechanism by which the split survives a switch, and it was unpinned.
+    // (AGT-4273)
+    it('keeps worker and reviewer on DIFFERENT models when switching to cursor', () => {
+      const r = new AutonomousRunner(cfg({
+        defaultAdapter: 'openrouter',
+        workerModel: 'deepseek/deepseek-v4-flash',
+        reviewerModel: 'deepseek/deepseek-v4-flash',
+        defaultRoles: {
+          worker: { enabled: true, model: 'deepseek/deepseek-v4-flash' },
+          reviewer: { enabled: true, model: 'deepseek/deepseek-v4-flash' },
+        },
+      }));
+
+      r.switchProvider('cursor');
+
+      const after = (r as unknown as { config: AutonomousConfig }).config;
+      // Bulk implementation is cheap and concurrent; the role that judges it is
+      // not the same model, which is the entire point of having a reviewer.
+      expect(after.defaultRoles?.worker.model).toBe('auto');
+      expect(after.defaultRoles?.reviewer.model).toBe('cursor-grok-4.6-high');
+      expect(after.defaultRoles?.worker.model).not.toBe(after.defaultRoles?.reviewer.model);
+      expect(after.workerModel).toBe('auto');
+      expect(after.reviewerModel).toBe('cursor-grok-4.6-high');
+      expect(after.plannerModel === undefined || after.plannerModel === 'cursor-grok-4.6-high').toBe(true);
     });
 
     it('remaps jobProfiles roles, dropping incompatible models', () => {

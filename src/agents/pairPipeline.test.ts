@@ -12,6 +12,7 @@ import { RateLimitError } from '../adapters/rateLimitError.js';
 const runWorker = vi.fn();
 const runReviewer = vi.fn();
 const runDocumenter = vi.fn();
+const runAuditor = vi.fn();
 const broadcastEvent = vi.fn();
 const getDefaultModel = vi.fn();
 
@@ -33,6 +34,11 @@ vi.mock('./reviewer.js', async () => {
 vi.mock('./documenter.js', async () => {
   const actual = await vi.importActual<typeof import('./documenter.js')>('./documenter.js');
   return { ...actual, runDocumenter };
+});
+
+vi.mock('./auditor.js', async () => {
+  const actual = await vi.importActual<typeof import('./auditor.js')>('./auditor.js');
+  return { ...actual, runAuditor };
 });
 
 vi.mock('../knowledge/index.js', () => ({
@@ -257,6 +263,113 @@ describe('PairPipeline model selection', () => {
     expect(runWorker).toHaveBeenCalledWith(expect.objectContaining<Partial<WorkerOptions>>({
       model: 'sonnet',
     }));
+  });
+
+  it('routes the auditor stage model through the compat layer', async () => {
+    // The auditor read `config.roles.auditor.model` raw, so it never reached
+    // `mapModelForProvider` — a foreign id went to the adapter unmapped, and
+    // `auditor`, a JUDGING role, was unreachable in every per-role model table.
+    // (AGT-4273)
+    // Explicit, not the describe default: earlier tests queue `mockResolvedValueOnce`
+    // values and `clearAllMocks` does not drain those queues, so a leftover
+    // `revise` would loop the pipeline and never reach the auditor.
+    runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'ok' });
+    runAuditor.mockResolvedValue({ passed: true, findings: [], summary: 'ok' });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer', 'auditor'],
+      maxIterations: 1,
+      // The worker mock reports one changed file; the default threshold is 3,
+      // so without this the auditor is skipped and the test asserts nothing.
+      skipAuditorUnderFileCount: 0,
+      roles: {
+        worker: { enabled: true, adapter: 'cursor', model: 'deepseek/deepseek-v4-flash', timeoutMs: 0 },
+        reviewer: { enabled: true, adapter: 'cursor', model: 'deepseek/deepseek-v4-flash', timeoutMs: 0 },
+        auditor: { enabled: true, adapter: 'cursor', model: 'deepseek/deepseek-v4-flash', timeoutMs: 0 },
+      },
+    });
+
+    await pipeline.run(task(), process.cwd());
+
+    expect(runAuditor).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'cursor-grok-4.6-high',
+    }));
+  });
+
+  it('runs a worker escalation on a model above the worker, not on the worker itself', async () => {
+    // The twin of the reviewer case, and the more frequently exercised of the
+    // two: the worker's default escalateAfterIteration is 2 against the
+    // reviewer's 3. Resolving the override by stage gave it the worker's own
+    // model while `pipeline:escalation` broadcast a different `toModel` to the
+    // dashboard. (AGT-4273)
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'The retry loop swallows the abort signal; propagate cancellation to the adapter call.' })
+      .mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 4,
+      roles: {
+        worker: {
+          enabled: true,
+          adapter: 'cursor',
+          model: 'deepseek/deepseek-v4-flash',
+          escalateModel: 'gpt-5.6-terra-max',
+          escalateAfterIteration: 2,
+          timeoutMs: 0,
+        },
+        reviewer: { enabled: true, adapter: 'cursor', model: 'deepseek/deepseek-v4-flash', timeoutMs: 0 },
+      },
+    });
+
+    await pipeline.run(task(), process.cwd());
+
+    const models = runWorker.mock.calls.map(c => (c[0] as { model?: string }).model);
+    expect(models).toContain('auto');
+    expect(models).toContain('cursor-grok-4.6-xhigh');
+  });
+
+  it('runs a reviewer escalation on a model above the reviewer, not on the reviewer itself', async () => {
+    // The escalation runs IN the reviewer stage, so resolving it by stage gave
+    // it the reviewer's own model on any adapter that routes per role — while
+    // the pipeline logged "escalating to gpt-5.6-terra-max". A log line about
+    // work that did not happen. (AGT-4273)
+    // Iteration 1 revises so a second reviewer pass happens; the threshold puts
+    // the escalation on that second pass.
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'The retry loop swallows the abort signal; propagate cancellation to the adapter call.' })
+      .mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 4,
+      roles: {
+        worker: { enabled: true, adapter: 'cursor', model: 'deepseek/deepseek-v4-flash', timeoutMs: 0 },
+        reviewer: {
+          enabled: true,
+          adapter: 'cursor',
+          model: 'deepseek/deepseek-v4-flash',
+          escalateModel: 'gpt-5.6-terra-max',
+          // 2, not 1: iterations are 1-based here, so a threshold of 1 escalates
+          // the very first pass and the test would never observe the plain
+          // reviewer model it is contrasting against.
+          escalateAfterIteration: 2,
+          timeoutMs: 0,
+        },
+      },
+    });
+
+    await pipeline.run(task(), process.cwd());
+
+    // Both models appear across the run: the plain reviewer first, then the
+    // escalation. What must NOT happen is the escalated pass reusing the
+    // reviewer's own model.
+    const models = runReviewer.mock.calls.map(c => (c[0] as { model?: string }).model);
+    expect(models).toContain('cursor-grok-4.6-high');
+
+    expect(models).toContain('cursor-grok-4.6-xhigh');
   });
 
   it('a post-success documenter rate-limit does NOT revert the approved task (INT-2521)', async () => {
