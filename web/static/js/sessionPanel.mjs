@@ -25,7 +25,6 @@ export class SessionPanel {
   #diff;
   #fetchLog;
   #taskId = null;
-  #tab = 'transcript';
   #seeded = new Set();
 
   constructor(root, { store, transcripts, transcriptView, diffPanel, fetchLog }) {
@@ -131,7 +130,6 @@ export class SessionPanel {
   }
 
   #setTab(tab) {
-    this.#tab = tab;
     for (const button of this.#root.querySelectorAll('.session-tab')) {
       button.classList.toggle('active', button.dataset.tab === tab);
     }

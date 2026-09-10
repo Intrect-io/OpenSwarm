@@ -14,7 +14,7 @@ function mutationKey(prefix) {
 async function request(fetchImpl, path, options = {}) {
   const response = await fetchImpl(path, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    headers: { 'Content-Type': 'application/json', ...options.headers },
   });
   let body = null;
   try { body = await response.json(); } catch { /* an error below still names the status */ }

@@ -157,7 +157,7 @@ describe('webSearch — backend selection', () => {
     vi.stubEnv('OPENSWARM_SEARXNG_KEY', 'secret-key');
     expect(searchBackend()).toBe('searxng');
     const f = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect((init?.headers as Record<string, string>)['X-VEGA-Key']).toBe('secret-key');
+      expect((init?.headers as Record<string, string> | undefined)?.['X-VEGA-Key']).toBe('secret-key');
       return new Response(JSON.stringify({ results: [] }), { status: 200 });
     });
     vi.stubGlobal('fetch', f);

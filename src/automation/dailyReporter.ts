@@ -6,7 +6,7 @@
 import { Cron } from 'croner';
 import { LinearClient, type Project } from '@linear/sdk';
 import { postStatusUpdate } from '../linear/index.js';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -22,15 +22,6 @@ let projectPathMapping = new Map<string, string>();
 // A crash or partial failure leaves the previous watermark intact so the next
 // run can retry the same window.
 const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.json');
-
-function readWatermark(): string | null {
-  try {
-    if (existsSync(WATERMARK_FILE)) {
-      return JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')).date as string;
-    }
-  } catch { /* corrupt → treat as no watermark */ }
-  return null;
-}
 
 function writeWatermark(date: string): void {
   const dir = dirname(WATERMARK_FILE);
