@@ -1,0 +1,1 @@
+# trigger 3 — fire afterFileEdit if hooks loaded
