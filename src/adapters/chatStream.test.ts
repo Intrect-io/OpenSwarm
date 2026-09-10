@@ -1,5 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
-import { reduceChatChunks } from './chatStream.js';
+import {
+  MAX_CHAT_CHUNKS,
+  MAX_PARTIAL_FRAME_CHARS,
+  MAX_RETAINED_CONTENT_CHARS,
+  reduceChatChunks,
+} from './chatStream.js';
+
+describe('chat stream bounds (AGT-3429)', () => {
+  it('documents hard caps for partial frames, chunks, and retained content', () => {
+    expect(MAX_PARTIAL_FRAME_CHARS).toBe(64 * 1024);
+    expect(MAX_CHAT_CHUNKS).toBe(1024);
+    expect(MAX_RETAINED_CONTENT_CHARS).toBe(1024 * 1024);
+  });
+});
 
 describe('reduceChatChunks', () => {
   it('accumulates content deltas and emits each via onToken in order', () => {

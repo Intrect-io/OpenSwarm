@@ -9,6 +9,9 @@ import {
   reduceResponsesEvents,
   resolveReasoningEffort,
   selectDefaultCodexResponseModel,
+  MAX_FRAME_LENGTH,
+  MAX_RETAINED_EVENTS,
+  MAX_REASONING_BUF,
 } from './codexResponses.js';
 import { runAgenticLoop, type ChatMessage } from './agenticLoop.js';
 import { RateLimitError } from './rateLimitError.js';
@@ -16,6 +19,14 @@ import type { ToolDefinition } from './tools.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe('Codex Responses SSE retention bounds (AGT-3429)', () => {
+  it('documents hard caps for partial frames, retained events, and reasoning buffers', () => {
+    expect(MAX_FRAME_LENGTH).toBe(64 * 1024);
+    expect(MAX_RETAINED_EVENTS).toBe(4096);
+    expect(MAX_REASONING_BUF).toBe(64 * 1024);
+  });
 });
 
 describe('parseWorkerOutput command backfill', () => {

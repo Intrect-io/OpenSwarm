@@ -101,9 +101,11 @@ function parseChunkLine(line: string): StreamChunk | null {
 }
 
 /** Hard cap for retained partial-frame data in the SSE buffer (64 KB). */
-const MAX_CONTENT_LENGTH = 64 * 1024;
-/** Hard cap on accumulated parsed chunks (1024). */
-const MAX_CHAT_CHUNKS = 1024;
+export const MAX_PARTIAL_FRAME_CHARS = 64 * 1024;
+/** Hard cap on accumulated parsed chunks retained for final reduce. */
+export const MAX_CHAT_CHUNKS = 1024;
+/** Hard cap on retained assistant content assembled from the stream (1 MiB). */
+export const MAX_RETAINED_CONTENT_CHARS = 1024 * 1024;
 
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
@@ -116,10 +118,19 @@ export async function consumeChatCompletionsStream(
   const chunks: StreamChunk[] = [];
   const decoder = new TextDecoder();
   let buffer = '';
+  let retainedContentChars = 0;
   const handle = (c: StreamChunk | null) => {
     if (!c) return;
     const delta = c.choices?.[0]?.delta?.content;
-    if (onToken && typeof delta === 'string' && delta) onToken(delta);
+    if (onToken && typeof delta === 'string' && delta) {
+      // Still emit live tokens, but stop retaining more content beyond the hard cap.
+      if (retainedContentChars < MAX_RETAINED_CONTENT_CHARS) {
+        const room = MAX_RETAINED_CONTENT_CHARS - retainedContentChars;
+        const emit = delta.length <= room ? delta : delta.slice(0, room);
+        retainedContentChars += emit.length;
+        onToken(emit);
+      }
+    }
     // Enforce hard cap on retained chunks to prevent memory exhaustion
     if (chunks.length >= MAX_CHAT_CHUNKS) {
       chunks.shift();
@@ -131,8 +142,8 @@ export async function consumeChatCompletionsStream(
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     // Enforce hard cap on partial-frame buffer to prevent memory exhaustion
-    if (buffer.length > MAX_CONTENT_LENGTH) {
-      buffer = buffer.slice(-MAX_CONTENT_LENGTH);
+    if (buffer.length > MAX_PARTIAL_FRAME_CHARS) {
+      buffer = buffer.slice(-MAX_PARTIAL_FRAME_CHARS);
     }
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
@@ -141,5 +152,10 @@ export async function consumeChatCompletionsStream(
   handle(parseChunkLine(buffer));
 
   // Final reduce WITHOUT onToken (already emitted above) to assemble the result.
-  return reduceChatChunks(chunks);
+  const reduced = reduceChatChunks(chunks);
+  const content = reduced.choices[0]?.message.content;
+  if (typeof content === 'string' && content.length > MAX_RETAINED_CONTENT_CHARS) {
+    reduced.choices[0].message.content = content.slice(0, MAX_RETAINED_CONTENT_CHARS);
+  }
+  return reduced;
 }

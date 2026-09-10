@@ -213,9 +213,11 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
 }
 
 /** Hard cap for retained partial-frame data in the SSE buffer (64 KB). */
-const MAX_FRAME_LENGTH = 64 * 1024;
+export const MAX_FRAME_LENGTH = 64 * 1024;
 /** Hard cap on retained parsed SSE events before reduceResponsesEvents (4096). */
-const MAX_RETAINED_EVENTS = 4096;
+export const MAX_RETAINED_EVENTS = 4096;
+/** Hard cap on retained reasoning partial text (64 KB). */
+export const MAX_REASONING_BUF = 64 * 1024;
 
 /** Parse a `data: {json}` SSE line into an event, or null for keep-alives/[DONE]. */
 function parseSseLine(line: string): SseEvent | null {
@@ -248,8 +250,6 @@ async function consumeResponsesStream(
   let buffer = '';
   // Reasoning summary streams token-by-token; buffer and emit whole lines so the
   // live log shows readable thoughts instead of one-word-per-line spam.
-  /** Hard cap on retained reasoning partial text (64 KB). */
-  const MAX_REASONING_BUF = 64 * 1024;
   let reasoningBuf = '';
   const flushReasoning = (force: boolean) => {
     if (!onReasoning) { reasoningBuf = ''; return; }
