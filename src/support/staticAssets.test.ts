@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  contentTypeFor, readAppShell, readStaticAsset, readThreadBoardShell, resolveStaticRoot, StaticAssetError,
+  contentTypeFor, readAppShell, readStaticAsset, readThreadBoardShell, readUsageShell,
+  resolveStaticRoot, StaticAssetError,
 } from './staticAssets.js';
 
 describe('contentTypeFor', () => {
@@ -25,6 +26,14 @@ describe('resolveStaticRoot', () => {
 
   it('ships the durable repository thread shell', async () => {
     expect((await readThreadBoardShell())?.toString()).toContain('Repository threads');
+  });
+
+  it('ships the usage shell, wired to its module (AGT-4289)', async () => {
+    // A shell that loses its <script> renders an empty page and still 200s,
+    // so assert the seam, not just that some HTML came back.
+    const shell = (await readUsageShell())?.toString() ?? '';
+    expect(shell).toContain('/static/js/usage.mjs');
+    expect(shell).toContain('/static/js/webToken.js');
   });
 });
 

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>OpenSwarm · Usage</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <script src="/static/js/webToken.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
+  <link rel="stylesheet" href="/static/css/usage.css" />
+</head>
+<body class="page-usage">
+  <header class="topbar">
+    <a class="brand" href="/app">🐝 OpenSwarm</a>
+    <span class="page-title">Usage</span>
+    <nav class="topbar-nav" aria-label="Pages">
+      <a href="/app">Cockpit</a>
+      <a href="/chat">Chat</a>
+      <a href="/orchestration">Orchestration</a>
+      <a href="/threads">Threads</a>
+      <a href="/warehouse">Warehouse</a>
+      <a href="/usage" aria-current="page">Usage</a>
+      <a href="/">Supervisor</a>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <label class="sr-only" for="window">기간</label>
+      <select id="window" class="select">
+        <option value="24h" selected>최근 24시간</option>
+        <option value="7d">최근 7일</option>
+        <option value="30d">최근 30일</option>
+      </select>
+      <button type="button" id="refresh" class="btn btn-secondary btn-sm">새로고침</button>
+      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="테마 전환" aria-pressed="false">
+        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="usage-main">
+    <p id="status" class="status-line status" role="status" aria-live="polite">불러오는 중…</p>
+
+    <section class="summary" aria-label="요약">
+      <div class="card stat"><span class="stat-label">비용</span><strong id="sum-cost" class="stat-value">—</strong><span id="sum-cost-note" class="stat-note"></span></div>
+      <div class="card stat"><span class="stat-label">호출</span><strong id="sum-calls" class="stat-value">—</strong><span id="sum-calls-note" class="stat-note"></span></div>
+      <div class="card stat"><span class="stat-label">토큰</span><strong id="sum-tokens" class="stat-value">—</strong><span id="sum-tokens-note" class="stat-note"></span></div>
+      <div class="card stat"><span class="stat-label">캐시 적중률</span><strong id="sum-cache" class="stat-value">—</strong><span class="stat-note">cached / prompt</span></div>
+    </section>
+
+    <section class="card panel" aria-labelledby="days-title">
+      <h2 id="days-title" class="card-head">일별</h2>
+      <div class="card-body"><div id="days" class="bars"></div></div>
+    </section>
+
+    <div class="grid">
+      <section class="card panel" aria-labelledby="model-title">
+        <h2 id="model-title" class="card-head">모델</h2>
+        <p id="note-model" class="muted task-note"></p>
+        <div class="card-body table-wrap"><table id="table-model"></table></div>
+      </section>
+      <section class="card panel" aria-labelledby="stage-title">
+        <h2 id="stage-title" class="card-head">스테이지</h2>
+        <p id="note-stage" class="muted task-note"></p>
+        <div class="card-body table-wrap"><table id="table-stage"></table></div>
+      </section>
+      <section class="card panel" aria-labelledby="adapter-title">
+        <h2 id="adapter-title" class="card-head">어댑터</h2>
+        <p id="note-adapter" class="muted task-note"></p>
+        <div class="card-body table-wrap"><table id="table-adapter"></table></div>
+      </section>
+      <section class="card panel" aria-labelledby="project-title">
+        <h2 id="project-title" class="card-head">프로젝트</h2>
+        <p id="note-project" class="muted task-note"></p>
+        <div class="card-body table-wrap"><table id="table-project"></table></div>
+      </section>
+    </div>
+
+    <section class="card panel" aria-labelledby="tasks-title">
+      <h2 id="tasks-title" class="card-head">작업별 — 호출이 많은 순</h2>
+      <p id="task-note" class="muted task-note"></p>
+      <div class="card-body table-wrap"><table id="table-task"></table></div>
+    </section>
+
+    <section class="card access" aria-labelledby="access-title">
+      <h2 id="access-title" class="card-head">원격 접근</h2>
+      <div class="card-body">
+        <p class="muted">로컬이 아닌 브라우저에서는 배포 시 설정한 웹 토큰이 필요합니다.</p>
+        <label for="web-token">OpenSwarm 웹 토큰</label>
+        <div class="token-row">
+          <input id="web-token" class="input" type="password" autocomplete="off" spellcheck="false" />
+          <button id="save-token" type="button" class="btn btn-secondary">적용</button>
+        </div>
+        <button id="clear-token" class="text-button" type="button">이 탭의 토큰 지우기</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/static/js/usage.mjs"></script>
+</body>
+</html>

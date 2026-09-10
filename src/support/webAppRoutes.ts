@@ -10,7 +10,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
-import { readAppShell, readStaticAsset, StaticAssetError } from './staticAssets.js';
+import { readStaticAsset, StaticAssetError } from './staticAssets.js';
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -24,6 +24,44 @@ function statusCodeOf(err: unknown): number {
 function messageOf(err: unknown): string {
   if (err instanceof Error && err.message) return err.message;
   return 'Internal error';
+}
+
+/**
+ * Page shells: a URL, and the reader that returns its HTML.
+ *
+ * These were six copies of the same ten lines. One table and one helper means
+ * a new page is one entry, and the 404-when-unbuilt behaviour has a single
+ * definition rather than six that can drift apart.
+ */
+const PAGE_SHELLS: Record<string, () => Promise<Buffer | null>> = {
+  '/orchestration': async () => (await import('./staticAssets.js')).readOrchestrationShell(),
+  '/chat': async () => (await import('./staticAssets.js')).readChatShell(),
+  '/warehouse': async () => (await import('./staticAssets.js')).readWarehouseShell(),
+  '/usage': async () => (await import('./staticAssets.js')).readUsageShell(),
+  '/threads': async () => (await import('./staticAssets.js')).readThreadBoardShell(),
+  '/app': async () => (await import('./staticAssets.js')).readAppShell(),
+};
+
+/**
+ * Serve the shell registered for this URL. Returns false when the URL names no
+ * page, so the caller falls through to the routes after it.
+ *
+ * A missing shell is 404, not 500: the assets are a build product, and the
+ * message says how to produce them.
+ */
+export async function tryServePageShell(res: ServerResponse, url: string): Promise<boolean> {
+  // hasOwn, not a bare index: `url` is request input, and this must not
+  // depend on the caller's `/`-prefix invariant surviving a future change.
+  if (!Object.hasOwn(PAGE_SHELLS, url)) return false;
+  const load = PAGE_SHELLS[url];
+  const shell = await load();
+  if (!shell) {
+    writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
+  } else {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(shell);
+  }
+  return true;
 }
 
 /**
@@ -66,64 +104,7 @@ export async function tryHandleAppRoutes(
     if (await tryHandleWorkSessionRoutes(req, res, url, requestUrl, runner)) return true;
   }
 
-  if (url === '/orchestration') {
-    const { readOrchestrationShell } = await import('./staticAssets.js');
-    const shell = await readOrchestrationShell();
-    if (!shell) {
-      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(shell);
-    }
-    return true;
-  }
-
-  if (url === '/chat') {
-    const { readChatShell } = await import('./staticAssets.js');
-    const shell = await readChatShell();
-    if (!shell) {
-      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(shell);
-    }
-    return true;
-  }
-
-  if (url === '/warehouse') {
-    const { readWarehouseShell } = await import('./staticAssets.js');
-    const shell = await readWarehouseShell();
-    if (!shell) {
-      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(shell);
-    }
-    return true;
-  }
-
-  if (url === '/threads') {
-    const { readThreadBoardShell } = await import('./staticAssets.js');
-    const shell = await readThreadBoardShell();
-    if (!shell) {
-      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(shell);
-    }
-    return true;
-  }
-
-  if (url === '/app') {
-    const shell = await readAppShell();
-    if (!shell) {
-      writeJson(res, 404, { error: 'Static assets not built (run npm run build)' });
-    } else {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-      res.end(shell);
-    }
-    return true;
-  }
+  if (await tryServePageShell(res, url)) return true;
 
   if (url.startsWith('/static/')) {
     try {

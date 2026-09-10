@@ -149,6 +149,11 @@ export async function readThreadBoardShell(): Promise<Buffer | null> {
   return readShellFile('threads.html');
 }
 
+/** The usage dashboard shell (AGT-4289). */
+export async function readUsageShell(): Promise<Buffer | null> {
+  return readShellFile('usage.html');
+}
+
 /** The /app entry document, or null when assets are not present. */
 export async function readAppShell(): Promise<Buffer | null> {
   return readShellFile('app.html');

@@ -163,7 +163,7 @@ describe('page shells (AGT-4201)', () => {
   });
 
   it('share one navigation naming every page', () => {
-    const routes = ['/app', '/chat', '/orchestration', '/threads', '/warehouse'];
+    const routes = ['/app', '/chat', '/orchestration', '/threads', '/warehouse', '/usage'];
     for (const file of html) {
       const source = readFileSync(file, 'utf8');
       const name = relative(ROOT, file);

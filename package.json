@@ -24,7 +24,7 @@
     "postbuild": "chmod +x dist/cli.js && node -e \"const fs=require('node:fs');fs.rmSync('dist/web-static',{recursive:true,force:true});fs.cpSync('web/static','dist/web-static',{recursive:true})\"",
     "start": "node --env-file=.env dist/index.js",
     "stop": "pkill -f 'node --env-file=.env.*openswarm' 2>/dev/null || echo 'No process running'",
-    "lint": "oxlint src/",
+    "lint": "oxlint src/ web/static/js/",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run",
     "test:coverage": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run --coverage",
