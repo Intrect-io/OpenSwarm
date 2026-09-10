@@ -107,5 +107,11 @@ cursor/
 .run-*.mjs
 .run-*.js
 .tmp-run-*.sh
+# The dotless spelling too. Every pattern above assumed a leading dot, so
+# #604 landed `tmp-run-memory-tests.sh` on main unnoticed — an eighth shape
+# after the seven already listed. The agent writes both spellings.
+tmp-run-*.sh
+tmp-run-*.mjs
+tmp-run-*.js
 .test-runner-tmp.*
 .cursor-review-*
