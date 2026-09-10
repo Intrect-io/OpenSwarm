@@ -138,8 +138,15 @@ export async function generateDailyReports(): Promise<void> {
     if (discordReporter && successCount > 0) {
       await sendDiscordSummary(activeProjects.length, successCount, failCount);
     }
+
+    // Surface total failure so callers/cron do not treat an empty day as done
+    // (audit AGT-3455: do not advance a daily watermark after a failed run).
+    if (successCount === 0 && failCount > 0) {
+      throw new Error(`[DailyReporter] All ${failCount} project report(s) failed`);
+    }
   } catch (error) {
     console.error('[DailyReporter] Failed to generate reports:', error);
+    throw error;
   }
 }
 

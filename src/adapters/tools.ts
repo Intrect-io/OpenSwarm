@@ -195,7 +195,8 @@ export const APPLY_PATCH_TOOL: ToolDefinition = {
 const BLOCKED_COMMANDS = [
   /\brm\s+(-[rR]f?|--recursive)\b/,
   /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+clean\s+-fd\b/,
+  // Match -fd / -fdx / -df / -dff / … after quote/escape normalization (audit AGT-3455).
+  /\bgit\s+clean\s+-[a-zA-Z0-9]*f[a-zA-Z0-9]*d[a-zA-Z0-9]*\b/,
   /\bdrop\s+database\b/i,
   /\btruncate\s+table\b/i,
   /\bchmod\s+777\b/,

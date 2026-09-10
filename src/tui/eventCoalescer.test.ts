@@ -79,4 +79,22 @@ describe('createCoalescer (INT-2407)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('drops oldest items once maxBatch is exceeded (AGT-3455)', () => {
+    vi.useFakeTimers();
+    try {
+      const batches: number[][] = [];
+      const c = createCoalescer<number>({
+        delayMs: 50,
+        maxBatch: 3,
+        onFlush: (items) => batches.push(items),
+      });
+      for (let i = 1; i <= 10; i++) c.push(i);
+      expect(c.pending()).toBe(3);
+      vi.advanceTimersByTime(50);
+      expect(batches).toEqual([[8, 9, 10]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

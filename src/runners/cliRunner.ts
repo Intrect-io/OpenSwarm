@@ -42,8 +42,12 @@ async function checkDefaultAdapter(): Promise<boolean> {
 
 function validateMaxIterations(value: number | undefined): number {
   const maxIterations = value ?? 3;
-  if (!Number.isInteger(maxIterations) || maxIterations < 1) {
-    console.error(`Error: --max-iterations must be a positive integer. Received: ${String(value)}`);
+  if (!Number.isInteger(maxIterations) || maxIterations < 1 || maxIterations > 10_000) {
+    // Bound + neutralize the diagnostic so a malformed CLI value cannot dump
+    // megabytes or terminal control sequences into stderr. (audit AGT-3455)
+    const raw = String(value ?? '');
+    const shown = sanitizeTerminalText(raw).slice(0, 64) || '(empty)';
+    console.error(`Error: --max-iterations must be a positive integer ≤ 10000. Received: ${shown}`);
     process.exit(1);
   }
   return maxIterations;

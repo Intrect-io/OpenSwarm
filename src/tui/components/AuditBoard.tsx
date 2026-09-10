@@ -87,7 +87,7 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
         <Text key={label} color={theme.dim}>
           {'  '}
           <Spinner />
-          {` ${sanitizeTerminalText(label)}`}
+          {` ${truncate(sanitizeTerminalText(label), 48)}`}
           {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 48)}` : ''}
         </Text>
       ))}
@@ -95,7 +95,7 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
           operator with "16 failed" and nothing to act on. (AGT-3990) */}
       {errored.map(([label, s]) => (
         <Text key={label} color={theme.warn}>
-          {`  ${ICON.warn} ${sanitizeTerminalText(label)}`}
+          {`  ${ICON.warn} ${truncate(sanitizeTerminalText(label), 48)}`}
           {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 64)}` : ''}
         </Text>
       ))}

@@ -57,12 +57,17 @@ describe('parseSseFrames (EPIC INT-1813 S5)', () => {
   it('reconnects with skipReplay after an established stream ends', async () => {
     const paths: string[] = [];
     const responses: EventEmitter[] = [];
-    httpGetMock.mockImplementation((options: { path: string }, callback: (res: EventEmitter & { setEncoding: () => void }) => void) => {
+    httpGetMock.mockImplementation((options: { path: string }, callback: (res: EventEmitter & { setEncoding: () => void; resume?: () => void }) => void) => {
       paths.push(options.path);
-      const res = Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
+      const res = Object.assign(new EventEmitter(), {
+        setEncoding: vi.fn(),
+        resume: vi.fn(),
+        statusCode: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
       responses.push(res);
       callback(res);
-      return Object.assign(new EventEmitter(), { destroy: vi.fn() });
+      return Object.assign(new EventEmitter(), { destroy: vi.fn(), setTimeout: vi.fn() });
     });
 
     const handle = connectEventStream({ port: 3847, onEvent: vi.fn(), reconnectMs: 1 });
@@ -71,5 +76,42 @@ describe('parseSseFrames (EPIC INT-1813 S5)', () => {
     handle.close();
 
     expect(paths).toEqual(['/api/events', '/api/events?skipReplay=1']);
+  });
+
+  it('reconnects when the request stalls before response headers (AGT-3455)', async () => {
+    const paths: string[] = [];
+    let firstReq: EventEmitter & { destroy: ReturnType<typeof vi.fn>; setTimeout: ReturnType<typeof vi.fn> };
+    httpGetMock.mockImplementation((options: { path: string }, _callback: (res: EventEmitter) => void) => {
+      paths.push(options.path);
+      const req = Object.assign(new EventEmitter(), {
+        destroy: vi.fn(function (this: EventEmitter, err?: Error) {
+          this.emit('error', err ?? new Error('destroyed'));
+        }),
+        setTimeout: vi.fn(function (this: EventEmitter, ms: number) {
+          if (ms > 0 && paths.length === 1) {
+            queueMicrotask(() => this.emit('timeout'));
+          }
+        }),
+      });
+      if (paths.length === 1) firstReq = req;
+      else {
+        const res = Object.assign(new EventEmitter(), {
+          setEncoding: vi.fn(),
+          resume: vi.fn(),
+          statusCode: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+        queueMicrotask(() => _callback(res));
+      }
+      return req;
+    });
+
+    const handle = connectEventStream({ port: 3847, onEvent: vi.fn(), reconnectMs: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    handle.close();
+
+    expect(firstReq!.destroy).toHaveBeenCalled();
+    expect(paths[0]).toBe('/api/events');
+    expect(paths.length).toBeGreaterThanOrEqual(2);
   });
 });

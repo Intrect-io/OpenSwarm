@@ -9,6 +9,8 @@ import http from 'node:http';
 import type { HubEvent } from '../core/eventHub.js';
 
 const MAX_SSE_PARTIAL_BUFFER_CHARS = 64 * 1024;
+/** Bound how long we wait for response headers before treating the connect as stalled. */
+const SSE_CONNECT_TIMEOUT_MS = 15_000;
 
 /**
  * Parse accumulated SSE text into events + the leftover (incomplete) tail.
@@ -120,6 +122,8 @@ export function connectEventStream(opts: EventStreamOptions): EventStreamHandle 
     req = http.get(
       { host, port: opts.port, path: eventStreamPath(connectedOnce), headers: { Accept: 'text/event-stream' } },
       (res) => {
+        // Headers arrived — cancel the connect-stall timer.
+        req?.setTimeout(0);
         if (!isValidSseResponse(res)) {
           res.resume();
           scheduleReconnect();
@@ -143,6 +147,12 @@ export function connectEventStream(opts: EventStreamOptions): EventStreamHandle 
         res.on('end', scheduleReconnect);
       },
     );
+    // If the TCP connect succeeds but headers never arrive (stalled proxy/daemon),
+    // destroy and reconnect rather than hanging forever. (audit AGT-3455)
+    req.setTimeout(SSE_CONNECT_TIMEOUT_MS);
+    req.on('timeout', () => {
+      req?.destroy(new Error('SSE connect timed out waiting for response headers'));
+    });
     req.on('error', scheduleReconnect);
   }
 

@@ -54,4 +54,18 @@ describe('renderVerifyEvidence', () => {
     expect(rendered).toContain('…truncated…');
     expect(rendered).toContain('TAIL-MARKER');
   });
+
+  it('bounds intermediate failure-output allocation under many huge tails (AGT-3455)', () => {
+    const many = Array.from({ length: 40 }, (_, i) => evidence({
+      command: { name: `cmd-${i}`, run: `echo ${i}`, kind: 'test', timeoutMs: 1_000 },
+      baseStatus: 'pass',
+      headStatus: 'fail',
+      newFailure: true,
+      rawOutputTail: 'Y'.repeat(200_000),
+    }));
+    const rendered = renderVerifyEvidence(many);
+    expect(Buffer.byteLength(rendered)).toBeLessThanOrEqual(6 * 1024);
+    // Summaries are capped too — must not list all 40 commands.
+    expect(rendered).toContain('more command(s) omitted');
+  });
 });

@@ -52,6 +52,7 @@ export function usePipelineEvents(
     // status stays immediate (not coalesced) so the live indicator is snappy.
     const coalescer = createCoalescer<HubEvent>({
       delayMs: flushMs,
+      maxBatch: 256,
       onFlush: (events) => {
         if (!disposed) dispatch({ type: 'batch', events });
       },

@@ -20,6 +20,8 @@ import * as pairWebhook from '../agents/pairWebhook.js';
 
 import {
   pairModeConfig,
+  clampDiscordText,
+  neutralizeDiscordMentions,
 } from './discordCore.js';
 import { t, getDateLocale } from '../locale/index.js';
 import { safeConsole as console } from '../support/safeLog.js';
@@ -588,17 +590,27 @@ async function sendFinalSummary(
       ].join('\n'), inline: false },
       { name: t('discord.pair.summary.filesLabel'), value: filesStr.slice(0, 1000) || t('discord.pair.summary.noFiles'), inline: false },
     )
-    .setFooter({ text: `Session: ${session.id} | Task: ${session.taskId}` })
+    // Footer hard limit is 2048; session/task ids can be attacker-/session-controlled. (audit AGT-3455)
+    .setFooter({
+      text: clampDiscordText(
+        `Session: ${neutralizeDiscordMentions(String(session.id))} | Task: ${neutralizeDiscordMentions(String(session.taskId))}`,
+        2048,
+      ),
+    })
     .setTimestamp();
 
   // Add reviewer feedback if available
   if (session.reviewer.feedback) {
     const feedback = session.reviewer.feedback;
-    const feedbackStr = [
-      t('discord.pair.summary.decisionLabel', { decision: feedback.decision.toUpperCase() }),
+    const feedbackStr = neutralizeDiscordMentions([
+      t('discord.pair.summary.decisionLabel', { decision: String(feedback.decision).toUpperCase() }),
       t('discord.pair.summary.feedbackLabel', { feedback: feedback.feedback.slice(0, 200) }),
-    ].join('\n');
-    embed.addFields({ name: t('discord.pair.summary.reviewerFeedback'), value: feedbackStr, inline: false });
+    ].join('\n'));
+    embed.addFields({
+      name: t('discord.pair.summary.reviewerFeedback'),
+      value: clampDiscordText(feedbackStr, 1024),
+      inline: false,
+    });
   }
 
   await thread.send({ embeds: [embed] });

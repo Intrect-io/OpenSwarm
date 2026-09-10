@@ -127,8 +127,10 @@ describe('runCli', () => {
       expect(logged(console.error)).toContain('is not a directory');
     });
 
-    it.each([0, -1, 2.5, NaN])('rejects a non-positive-integer iteration cap: %s', async (value) => {
+    it.each([0, -1, 2.5, NaN, 10_001])('rejects a non-positive-integer iteration cap: %s', async (value) => {
       await expectExit(1, runCli({ task: 't', projectPath: process.cwd(), maxIterations: value }));
+      expect(logged(console.error)).toMatch(/positive integer/i);
+      expect(logged(console.error).length).toBeLessThan(500);
     });
   });
 

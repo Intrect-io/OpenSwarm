@@ -620,4 +620,28 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(issues.length).toBe(0);
     });
   });
+
+  describe('bsDetector path containment (AGT-3455)', () => {
+    it('does not follow a changed-file symlink outside the project', async () => {
+      const { symlinkSync } = await import('node:fs');
+      const { platform: osPlatform } = await import('node:os');
+      if (osPlatform() === 'win32') return;
+
+      const outside = mkdtempSync(join(tmpdir(), 'openswarm-outside-'));
+      const secret = join(outside, 'secret.ts');
+      writeFileSync(secret, 'const apiKey = "sk-live-abcdefghijklmnopqrstuvwxyz012345";\n');
+      symlinkSync(secret, join(repo, 'linked-file.ts'));
+
+      const scanSpy = vi.spyOn(await import('../registry/bsDetector.js'), 'scanFile');
+      const res = await runGuards(
+        mockWorker(['linked-file.ts']),
+        repo,
+        { bsDetector: true },
+      );
+      expect(scanSpy).not.toHaveBeenCalled();
+      expect(guardIssues(res, 'bsDetector')).toEqual([]);
+      scanSpy.mockRestore();
+      rmSync(outside, { recursive: true, force: true });
+    });
+  });
 });

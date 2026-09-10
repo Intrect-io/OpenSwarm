@@ -295,10 +295,41 @@ async function runBsDetectorGuard(
   let hasCritical = false;
 
   try {
-    const { join } = await import('node:path');
+    const { existsSync } = await import('node:fs');
+    const { realpath } = await import('node:fs/promises');
+    // Resolve the project root to its real path so symlink escapes are judged
+    // against the same canonical base as each changed file. (audit AGT-3455)
+    let projectRoot: string;
+    try {
+      projectRoot = await realpath(projectPath);
+    } catch {
+      projectRoot = resolve(projectPath);
+    }
+
     for (const filePath of workerResult.filesChanged) {
-      const fullPath = join(projectPath, filePath);
-      const bsIssues = await scanFileForBs(fullPath);
+      // Lexical rejection before any filesystem access on model-derived paths.
+      if (isAbsolute(filePath) || normalize(filePath).split(/[/\\]/).includes('..')) {
+        continue;
+      }
+      const fullPath = resolve(projectRoot, filePath);
+      const lexicalRel = relative(projectRoot, fullPath);
+      if (lexicalRel.startsWith('..') || isAbsolute(lexicalRel)) continue;
+
+      let scanPath = fullPath;
+      try {
+        if (existsSync(fullPath)) {
+          scanPath = await realpath(fullPath);
+        }
+      } catch {
+        continue;
+      }
+      const realRel = relative(projectRoot, scanPath);
+      if (realRel.startsWith('..') || isAbsolute(realRel)) {
+        // Symlink (or mount) target escapes the project — do not follow.
+        continue;
+      }
+
+      const bsIssues = await scanFileForBs(scanPath);
 
       for (const bs of bsIssues) {
         const prefix = bs.severity === 'critical' ? 'CRITICAL' : bs.severity === 'warning' ? 'WARNING' : 'MINOR';

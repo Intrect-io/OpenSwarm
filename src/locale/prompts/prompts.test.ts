@@ -264,6 +264,31 @@ describe('buildWorkerPrompt', () => {
     expect(result).toContain('[no test]');
   });
 
+  it('bounds registry brief rendering under the worker-context budget (AGT-3455)', () => {
+    const huge = 'Z'.repeat(8_000);
+    const briefs = Array.from({ length: 80 }, (_, i) => ({
+      filePath: `src/f${i}.ts`,
+      summary: huge,
+      highlights: [huge],
+      entities: Array.from({ length: 20 }, (_, j) => ({
+        kind: 'function' as const,
+        name: `fn${j}`,
+        signature: huge,
+        status: 'active' as const,
+        hasTests: true,
+      })),
+    }));
+    const result = enPrompts.buildWorkerPrompt({
+      ...base,
+      context: { registryBriefs: briefs },
+    });
+    // Without mid-render budget this intermediate payload is multi-MB; with it
+    // the final prompt stays within a few hundred KB of the 120k context cap.
+    expect(result.length).toBeLessThan(250_000);
+    expect(result).toContain('File Map');
+    expect(result).not.toContain('src/f79.ts');
+  });
+
   it('with context.draftAnalysis: includes Pre-Analysis section', () => {
     const result = enPrompts.buildWorkerPrompt({
       ...base,

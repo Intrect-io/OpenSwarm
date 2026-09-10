@@ -36,6 +36,26 @@ describe('missingWorkerValidationIssues', () => {
     })).length).toBeGreaterThan(0);
   });
 
+  it('rejects validation tokens that appear only inside shell substitutions (AGT-3455)', () => {
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/example.ts'],
+      commands: ['echo $(npm test)'],
+    })).length).toBeGreaterThan(0);
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/example.ts'],
+      commands: ['true "$(pytest)"'],
+    })).length).toBeGreaterThan(0);
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/example.ts'],
+      commands: ['VAR=$(npx tsc) echo done'],
+    })).length).toBeGreaterThan(0);
+    // A real validation command must still count even when another segment uses substitution.
+    expect(missingWorkerValidationIssues(worker({
+      filesChanged: ['src/example.ts'],
+      commands: ['echo $(date) && npm test'],
+    }))).toEqual([]);
+  });
+
   it('flags .mts/.cts source edited without a validation command', () => {
     expect(missingWorkerValidationIssues(worker({
       filesChanged: ['src/config.mts'],

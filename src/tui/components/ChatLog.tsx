@@ -34,15 +34,24 @@ const ROLE_ICON: Record<ChatLine['role'], string> = {
 // fill the full-screen frame and push the input box off-screen. The finalized
 // message renders in full once committed to history. (INT-2014 / INT-2013)
 const STREAM_TAIL_LINES = 14;
+/** Soft character budget for finalized history shown on screen (audit AGT-3455). */
+const HISTORY_RENDER_BUDGET_CHARS = 24_000;
+const PER_MESSAGE_RENDER_CAP = 4_000;
 
 function tailLines(text: string, n: number): string {
   const lines = text.split('\n');
   return lines.length <= n ? text : `…\n${lines.slice(-n).join('\n')}`;
 }
 
+function clipForRender(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `…\n${text.slice(-(maxChars - 2))}`;
+}
+
 function Message({ line }: { line: ChatLine }) {
   const safeContent = sanitizeTerminalText(line.content);
-  const body = line.role === 'assistant' ? renderMarkdown(safeContent) : safeContent;
+  const clipped = clipForRender(safeContent, PER_MESSAGE_RENDER_CAP);
+  const body = line.role === 'assistant' ? renderMarkdown(clipped) : clipped;
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={ROLE_COLOR[line.role]} bold>{`${ROLE_ICON[line.role]} ${ROLE_LABEL[line.role]}`}</Text>
@@ -65,7 +74,16 @@ export interface ChatLogProps {
 
 export function ChatLog({ history, streaming, activity = [], busy, maxMessages = 40 }: ChatLogProps) {
   const live = streaming !== null || busy;
-  const shown = maxMessages > 0 ? history.slice(-maxMessages) : [];
+  // Walk newest-first until the render budget is spent, then reverse for display.
+  const windowed = maxMessages > 0 ? history.slice(-maxMessages) : [];
+  const shown: ChatLine[] = [];
+  let budget = HISTORY_RENDER_BUDGET_CHARS;
+  for (let i = windowed.length - 1; i >= 0 && budget > 0; i--) {
+    const line = windowed[i];
+    const cost = Math.min(line.content.length, PER_MESSAGE_RENDER_CAP);
+    shown.unshift(line);
+    budget -= cost;
+  }
   return (
     <Box flexDirection="column">
       {shown.map((line, i) => (

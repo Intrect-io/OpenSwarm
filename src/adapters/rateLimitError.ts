@@ -110,6 +110,29 @@ export function parseResetsAtFromBody(text: string): number | undefined {
   return m ? parseInt(m[1], 10) : undefined;
 }
 
+/**
+ * Parse an HTTP Retry-After value (RFC 9110 §10.2.3): either delay-seconds or
+ * an HTTP-date. Returns seconds-from-now (>= 0), or undefined when unparseable.
+ * Integer seconds win first so `120` is never misread as a date; HTTP-dates
+ * convert via Date.parse (IMF-fixdate and the legacy RFC 850 / asctime forms
+ * that Date.parse accepts).
+ */
+export function parseRetryAfterSeconds(raw: string | null | undefined): number | undefined {
+  if (raw == null) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  // Delay-seconds: non-negative integer (optional surrounding whitespace already trimmed).
+  if (/^\d+$/.test(trimmed)) {
+    const n = parseInt(trimmed, 10);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  const atMs = Date.parse(trimmed);
+  if (!Number.isFinite(atMs)) return undefined;
+  const seconds = Math.ceil((atMs - Date.now()) / 1000);
+  // Past dates → 0 (retry immediately) rather than a negative wait.
+  return Math.max(0, seconds);
+}
+
 /** Pull a unix reset timestamp (seconds) out of headers or a JSON body, if present. */
 function extractResetsAt(headers: Headers | undefined, body: string): number | undefined {
   const fromHeader = (k: string): number | undefined => {
@@ -119,7 +142,7 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   };
   // Only headers/fields that are genuinely UNIX-epoch seconds or seconds-from-now:
   //  - x-codex-primary-reset-at: epoch seconds
-  //  - Retry-After: seconds-from-now (→ convert to epoch)
+  //  - Retry-After: seconds-from-now OR HTTP-date (→ convert to epoch)
   //  - body "resets_at": epoch seconds
   // Deliberately NOT x-ratelimit-reset-requests/-tokens: OpenAI returns those as
   // DURATION strings ("1s", "6ms", "2m59s"), not epoch — parseInt would yield a
@@ -127,7 +150,7 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   // 60s default, which is correct rather than wrong. (INT-2520 review)
   const codexReset = fromHeader('x-codex-primary-reset-at');
   if (codexReset != null) return codexReset;
-  const retryAfter = fromHeader('retry-after');
+  const retryAfter = parseRetryAfterSeconds(headers?.get('retry-after'));
   if (retryAfter != null) return Math.floor(Date.now() / 1000) + retryAfter;
   return parseResetsAtFromBody(body);
 }
@@ -201,7 +224,9 @@ export function classifyLimitResponse(headers: Headers | undefined, body: string
     return Number.isFinite(n) ? n : undefined;
   };
   const usedPercent = num('x-codex-primary-used-percent');
-  const retryAfterSeconds = num('retry-after');
+  // Honor both delay-seconds and HTTP-date Retry-After so throttle waits match
+  // extractResetsAt / RateLimitError reset metadata (audit AGT-3455).
+  const retryAfterSeconds = parseRetryAfterSeconds(headers?.get('retry-after'));
   const lower = body.toLowerCase();
   const quota =
     QUOTA_EXHAUSTED_SUBSTRINGS.some((s) => lower.includes(s)) ||

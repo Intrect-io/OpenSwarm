@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { clampDiscordText, getChatHistory, questionCorrelationIdFrom, saveChatHistory, startTypingIndicator } from './discordCore.js';
+import { clampDiscordText, getChatHistory, neutralizeDiscordMentions, questionCorrelationIdFrom, saveChatHistory, sanitizeDiscordOutbound, startTypingIndicator } from './discordCore.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 afterEach(() => {
@@ -40,6 +40,11 @@ describe('Discord outbound bounds', () => {
     const value = clampDiscordText('x'.repeat(5000), 4096);
     expect(value).toHaveLength(4096);
     expect(value.endsWith('…')).toBe(true);
+  });
+
+  it('neutralizes @everyone / @here in model-controlled outbound text (AGT-3455)', () => {
+    expect(neutralizeDiscordMentions('ping @everyone and @here now')).not.toMatch(/@(everyone|here)\b/i);
+    expect(sanitizeDiscordOutbound(`@everyone ${'x'.repeat(3000)}`, 100)).toHaveLength(100);
   });
 
   it('observes initial and repeated typing failures without unhandled rejection', async () => {

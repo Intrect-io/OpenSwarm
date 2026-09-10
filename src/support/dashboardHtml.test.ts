@@ -47,3 +47,23 @@ describe('stage row escaping (AGT-3476)', () => {
     expect(html).toContain('function escapeAttr(text)');
   });
 });
+
+// Custom Linear state names are rendered into issue section labels; they must
+// go through escapeHtml so a state like `<img onerror=...>` cannot inject HTML.
+describe('Linear state label escaping (AGT-3455)', () => {
+  const html = buildDashboardHtml(['claude']);
+
+  it('escapes both known and custom linearState section labels', () => {
+    expect(html).toContain(
+      '"<div class=\\"issue-sec-label\\">" + escapeHtml(sn.toLowerCase()) + " (" + byState[sn].length + ")</div>"',
+    );
+    expect(html).toContain(
+      '"<div class=\\"issue-sec-label\\">" + escapeHtml(otherKeys[oi].toLowerCase()) + " (" + byState[otherKeys[oi]].length + ")</div>"',
+    );
+  });
+
+  it('leaves no unescaped state-name interpolation behind', () => {
+    expect(html).not.toContain('"issue-sec-label\\">" + sn.toLowerCase()');
+    expect(html).not.toContain('"issue-sec-label\\">" + otherKeys[oi].toLowerCase()');
+  });
+});

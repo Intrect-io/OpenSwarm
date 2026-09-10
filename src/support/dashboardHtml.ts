@@ -739,7 +739,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
               var sn = stateOrder[si];
               if (!byState[sn] || !byState[sn].length) continue;
               secs.push(
-                "<div class=\\"issue-sec-label\\">" + sn.toLowerCase() + " (" + byState[sn].length + ")</div>" +
+                "<div class=\\"issue-sec-label\\">" + escapeHtml(sn.toLowerCase()) + " (" + byState[sn].length + ")</div>" +
                 byState[sn].map(t => issueRow(t, "idot-pnd")).join("")
               );
             }
@@ -747,7 +747,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             for (var oi = 0; oi < otherKeys.length; oi++) {
               if (stateOrder.indexOf(otherKeys[oi]) === -1) {
                 secs.push(
-                  "<div class=\\"issue-sec-label\\">" + otherKeys[oi].toLowerCase() + " (" + byState[otherKeys[oi]].length + ")</div>" +
+                  "<div class=\\"issue-sec-label\\">" + escapeHtml(otherKeys[oi].toLowerCase()) + " (" + byState[otherKeys[oi]].length + ")</div>" +
                   byState[otherKeys[oi]].map(t => issueRow(t, "idot-pnd")).join("")
                 );
               }

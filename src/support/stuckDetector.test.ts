@@ -22,6 +22,19 @@ describe('StuckDetector', () => {
     expect(detector.check()).toMatchObject({ isStuck: true });
   });
 
+  it('ignores invalid threshold overrides and keeps defaults (AGT-3455)', () => {
+    const detector = new StuckDetector({
+      sameErrorRepeat: -1 as number,
+      sameOutputRepeat: Number.NaN,
+      revisionLoop: 0,
+      monologue: 1.5 as number,
+    });
+    // Defaults: sameErrorRepeat=2 — two identical errors still trip stuck.
+    detector.addEntry(entry({ success: false, error: 'boom' }));
+    detector.addEntry(entry({ success: false, error: 'boom' }));
+    expect(detector.check()).toMatchObject({ isStuck: true });
+  });
+
   it('does NOT treat a repeating INFRA error as a stuck loop (INT-2521)', () => {
     // An infra/capacity error recurring a few times is a retryable outage, not a
     // genuine stuck loop — it backs off and is excluded from STUCK elsewhere.

@@ -347,6 +347,20 @@ describe('classifyLimitResponse — spent quota vs short-window throttle (INT-29
     expect(classifyLimitResponse(new Headers({ 'retry-after': '7' }), '').retryAfterSeconds).toBe(7);
     expect(classifyLimitResponse(new Headers(), '').retryAfterSeconds).toBeUndefined();
   });
+
+  it('honors HTTP-date Retry-After for transient throttle waits (AGT-3455)', () => {
+    const at = new Date(Date.now() + 45_000);
+    // IMF-fixdate as used by HTTP-date Retry-After (RFC 9110).
+    const httpDate = at.toUTCString();
+    const c = classifyLimitResponse(new Headers({ 'retry-after': httpDate }), 'Too Many Requests');
+    expect(c.quota).toBe(false);
+    expect(c.retryAfterSeconds).toBeGreaterThanOrEqual(40);
+    expect(c.retryAfterSeconds).toBeLessThanOrEqual(50);
+
+    const err = rateLimitFromHttpResponse(429, new Headers({ 'retry-after': httpDate }), 'slow down');
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect(err?.resetsAt).toBeGreaterThan(Math.floor(Date.now() / 1000) + 30);
+  });
 });
 
 describe('resolveLimitResponse gating (INT-2907)', () => {

@@ -25,6 +25,12 @@ export interface CoalescerOptions<T> {
   onFlush: (items: T[]) => void;
   /** Max time an item waits before flushing. `<= 0` flushes synchronously on push. */
   delayMs: number;
+  /**
+   * Hard cap on buffered items. Under an event flood, older items are dropped
+   * once this limit is reached so memory and a single React commit stay bounded.
+   * Default: unbounded (legacy behaviour).
+   */
+  maxBatch?: number;
   /** Injectable timer (defaults to global setTimeout) — swapped in tests. */
   setTimer?: (cb: () => void, ms: number) => TimerHandle;
   /** Injectable clear (defaults to global clearTimeout). */
@@ -39,6 +45,7 @@ export interface CoalescerOptions<T> {
 export function createCoalescer<T>(options: CoalescerOptions<T>): Coalescer<T> {
   const setTimer = options.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
   const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
+  const maxBatch = options.maxBatch != null && options.maxBatch > 0 ? options.maxBatch : undefined;
   let buffer: T[] = [];
   let timer: TimerHandle | null = null;
 
@@ -53,6 +60,10 @@ export function createCoalescer<T>(options: CoalescerOptions<T>): Coalescer<T> {
   return {
     push(item) {
       buffer.push(item);
+      if (maxBatch != null && buffer.length > maxBatch) {
+        // Keep the newest events — older flood noise is less useful to render.
+        buffer = buffer.slice(-maxBatch);
+      }
       if (options.delayMs <= 0) {
         emit();
         return;

@@ -51,6 +51,15 @@ describe('writeEnvVars', () => {
     expect(readFileSync(p, 'utf8')).toContain('TOKEN="a b#c"');
   });
 
+  it('escapes newline and carriage-return so the .env stays one physical line', () => {
+    const p = freshEnvPath();
+    writeEnvVars(p, { MULTILINE: 'line1\nline2\rline3' });
+    const txt = readFileSync(p, 'utf8');
+    // Serialized as escape sequences — not raw control chars that would break the line.
+    expect(txt).toContain('MULTILINE="line1\\nline2\\rline3"');
+    expect(txt.split('\n').filter((l) => l.startsWith('MULTILINE=')).length).toBe(1);
+  });
+
   it('round-trips a quoted value through loadEnvFile parsing', () => {
     const p = freshEnvPath();
     writeEnvVars(p, { WEBHOOK: 'https://x.example/y?z=1 2' });
@@ -201,5 +210,21 @@ describe('loadEnvFile', () => {
 
     expect(result.shadowedKeys).toEqual([]);
     expect(process.env.FRESH).toBe('from-file');
+  });
+
+  it('round-trips newline/CR and literal backslash-n through writeEnvVars + loadEnvFile', () => {
+    projectDir = mkdtempSync(join(tmpdir(), 'env-project-'));
+    mockedHome = mkdtempSync(join(tmpdir(), 'env-home-'));
+    // Include a literal backslash+n so unescape must not treat `\\n` as newline.
+    writeEnvVars(join(projectDir, '.env'), { SECRET_NL: 'a\nb\\nc\rd' });
+
+    stashEnv('SECRET_NL', 'OPENSWARM_ENV', 'OPENSWARM_CONFIG');
+    delete process.env.OPENSWARM_ENV;
+    delete process.env.OPENSWARM_CONFIG;
+    delete process.env.SECRET_NL;
+    vi.spyOn(process, 'cwd').mockReturnValue(projectDir);
+
+    loadEnvFile();
+    expect(process.env.SECRET_NL).toBe('a\nb\\nc\rd');
   });
 });

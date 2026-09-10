@@ -58,13 +58,22 @@ function gh(args: string[]): Promise<string> {
 // --- Fetch functions ---
 
 async function fetchGitStatus(projectPath: string): Promise<GitStatus | null> {
-  const branch = await git(projectPath, ['branch', '--show-current']);
-  if (!branch) return null; // not a git repo or error
+  // `branch --show-current` is empty for detached HEAD, which previously made
+  // us report "not a git repo". Confirm the work tree first, then label
+  // detached HEADs with the short SHA. (audit AGT-3455)
+  const inside = await git(projectPath, ['rev-parse', '--is-inside-work-tree']);
+  if (inside !== 'true') return null;
+
+  let branch = await git(projectPath, ['branch', '--show-current']);
+  if (!branch) {
+    const short = await git(projectPath, ['rev-parse', '--short', 'HEAD']);
+    branch = short ? `detached@${short}` : 'detached';
+  }
 
   const porcelain = await git(projectPath, ['status', '--porcelain']);
   const lines = porcelain ? porcelain.split('\n').filter(Boolean) : [];
 
-  // ahead/behind
+  // ahead/behind (no upstream → leave 0/0; detached usually has none)
   let ahead = 0;
   let behind = 0;
   const revList = await git(projectPath, ['rev-list', '--left-right', '--count', 'HEAD...@{u}']);

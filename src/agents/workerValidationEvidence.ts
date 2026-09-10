@@ -34,6 +34,23 @@ function validationRelevantFiles(files: string[]): string[] {
   });
 }
 
+/** True when a validation token appears only inside $(...), `...`, or ${...}. */
+function validationOnlyInsideSubstitution(segment: string): boolean {
+  // Strip substitution spans, then re-test. If the outer command no longer
+  // matches, the validation token lived only inside an expansion
+  // (e.g. `echo $(npm test)`, `VAR=$(pytest) echo done`) and is not evidence
+  // that a validation run completed. (audit AGT-3455)
+  const stripped = segment
+    .replace(/\$\([^()]*\)/g, ' ')
+    .replace(/\$\{[^{}]*\}/g, ' ')
+    .replace(/`[^`]*`/g, ' ');
+  if (stripped === segment) return false;
+  const outerLooksLike =
+    (!INSPECTION_ONLY_COMMAND_RE.test(stripped) && VALIDATION_COMMAND_RE.test(stripped)) ||
+    SCRIPT_SMOKE_COMMAND_RE.test(stripped);
+  return !outerLooksLike;
+}
+
 function commandLooksLikeValidation(command: string): boolean {
   // Workers routinely chain inspection then validation in one string
   // (e.g. "git diff && npm test"). Evaluate each shell segment independently so
@@ -44,7 +61,9 @@ function commandLooksLikeValidation(command: string): boolean {
   const candidates = segments.length > 0 ? segments : [command];
   return candidates.some(seg => {
     if (INSPECTION_ONLY_COMMAND_RE.test(seg)) return false;
-    return VALIDATION_COMMAND_RE.test(seg) || SCRIPT_SMOKE_COMMAND_RE.test(seg);
+    if (!(VALIDATION_COMMAND_RE.test(seg) || SCRIPT_SMOKE_COMMAND_RE.test(seg))) return false;
+    if (validationOnlyInsideSubstitution(seg)) return false;
+    return true;
   });
 }
 

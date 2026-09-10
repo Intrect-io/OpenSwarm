@@ -642,6 +642,23 @@ export function clampDiscordText(value: string, limit: number): string {
   return `${value.slice(0, limit - 1)}…`;
 }
 
+/**
+ * Neutralize mass-mention tokens in model/adapter-controlled text before
+ * posting. Discord still parses `@everyone` / `@here` inside ordinary content
+ * unless the bot opts out of those mentions; zero-width insertion breaks the
+ * parse without changing readable text much. (audit AGT-3455)
+ */
+export function neutralizeDiscordMentions(value: string): string {
+  return value
+    .replace(/@everyone/gi, '@\u200beveryone')
+    .replace(/@here/gi, '@\u200bhere');
+}
+
+/** Bound + neutralize outbound chat/tool text in one pass. */
+export function sanitizeDiscordOutbound(value: string, limit = 2000): string {
+  return clampDiscordText(neutralizeDiscordMentions(value), limit);
+}
+
 export function startTypingIndicator(
   channel: { sendTyping: () => Promise<unknown> },
   intervalMs = 8_000,
@@ -876,14 +893,14 @@ export async function handleChat(msg: Message): Promise<void> {
     updateHistoryResponse(channelId, msg.id, response);
 
     if (toolCalls.length > 0) {
-      const toolSummary = toolCalls.slice(0, 10).map(tc => `• ${tc}`).join('\n');
+      const toolSummary = toolCalls.slice(0, 10).map(tc => `• ${sanitizeDiscordOutbound(tc, 180)}`).join('\n');
       const toolMsg = `🔧 **${t('discord.toolCalls', { n: toolCalls.length })}**\n${toolSummary}${toolCalls.length > 10 ? `\n... ${t('common.moreItems', { n: toolCalls.length - 10 })}` : ''}`;
-      await msg.reply(toolMsg);
+      await msg.reply(sanitizeDiscordOutbound(toolMsg));
     }
 
     const chunks = splitMessage(response, 2000);
     for (const chunk of chunks) {
-      await msg.reply(chunk);
+      await msg.reply(sanitizeDiscordOutbound(chunk));
     }
 
     await saveChatHistory({

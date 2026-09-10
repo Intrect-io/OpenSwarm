@@ -34,6 +34,15 @@ const DEFAULT_THRESHOLDS: StuckThresholds = {
   monologue: 6,
 };
 
+/** Positive finite integer only; anything else falls back to the default. */
+function normalizeThreshold(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    return fallback;
+  }
+  // Cap absurd overrides so a malicious/huge config cannot force megabyte history scans.
+  return Math.min(value, 1_000);
+}
+
 /**
  * Stuck Detection main class
  */
@@ -42,7 +51,12 @@ export class StuckDetector {
   private thresholds: StuckThresholds;
 
   constructor(thresholds: Partial<StuckThresholds> = {}) {
-    this.thresholds = { ...DEFAULT_THRESHOLDS, ...thresholds };
+    this.thresholds = {
+      sameOutputRepeat: normalizeThreshold(thresholds.sameOutputRepeat, DEFAULT_THRESHOLDS.sameOutputRepeat),
+      sameErrorRepeat: normalizeThreshold(thresholds.sameErrorRepeat, DEFAULT_THRESHOLDS.sameErrorRepeat),
+      revisionLoop: normalizeThreshold(thresholds.revisionLoop, DEFAULT_THRESHOLDS.revisionLoop),
+      monologue: normalizeThreshold(thresholds.monologue, DEFAULT_THRESHOLDS.monologue),
+    };
   }
 
   /**

@@ -95,12 +95,19 @@ function parseLine(line: string): [string, string] | null {
     if (end > 0) {
       let inner = value.slice(1, end);
       if (first === '"') {
-        inner = inner
-          .replace(/\\n/g, '\n')
-          .replace(/\\r/g, '\r')
-          .replace(/\\t/g, '\t')
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, '\\');
+        // Single-pass unescape so `\\n` stays backslash+n (not newline).
+        inner = inner.replace(/\\([nrt"\\])/g, (_, ch: string) => {
+          switch (ch) {
+            case 'n':
+              return '\n';
+            case 'r':
+              return '\r';
+            case 't':
+              return '\t';
+            default:
+              return ch;
+          }
+        });
       }
       return [key, inner];
     }
@@ -114,9 +121,15 @@ function parseLine(line: string): [string, string] | null {
 
 /** Serialize a single KEY=value entry, double-quoting when the value needs it. */
 function formatEnvLine(key: string, value: string): string {
-  const needsQuote = value === '' || /[\s#"'$]/.test(value);
+  // Newlines/CRs must be escaped — a raw `\n` would split the physical .env
+  // line and break loadEnvFile's one-line parser (audit: envFile.ts formatEnvLine).
+  const needsQuote = value === '' || /[\s#"'$\\]/.test(value);
   if (!needsQuote) return `${key}=${value}`;
-  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
   return `${key}="${escaped}"`;
 }
 

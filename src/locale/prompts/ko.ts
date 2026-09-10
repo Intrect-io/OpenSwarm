@@ -10,9 +10,19 @@ const DATA_BLOCK_OPEN = '<openswarm-untrusted-data>';
 const DATA_BLOCK_CLOSE = '</openswarm-untrusted-data>';
 const MAX_PROMPT_DATA_CHARS = 20_000;
 const MAX_PROMPT_COLLECTION_ITEMS = 100;
+/** Aggregate worker-context budget; enforced while building, not only after join. */
+const MAX_WORKER_CONTEXT_CHARS = 120_000;
 
 function bounded<T>(values: readonly T[]): readonly T[] {
   return values.slice(0, MAX_PROMPT_COLLECTION_ITEMS);
+}
+
+function pushWithinBudget(parts: string[], line: string, budget: { remaining: number }): boolean {
+  const cost = line.length + (parts.length > 0 ? 1 : 0);
+  if (cost > budget.remaining) return false;
+  parts.push(line);
+  budget.remaining -= cost;
+  return true;
 }
 
 function escapePromptData(value: string): string {
@@ -194,30 +204,42 @@ ${promptDataBlock(previousFeedback)}
       }
 
       if (context.registryBriefs && context.registryBriefs.length > 0) {
-        parts.push('');
-        parts.push('### 파일 맵 (Code Registry — 이 파일들은 Read 불필요)');
+        // Enforce the aggregate context budget while rendering briefs/entities so
+        // 100×100 capped blocks cannot allocate a multi-megabyte intermediate
+        // string before a post-hoc truncate. (audit AGT-3455)
+        const budget = { remaining: Math.max(0, MAX_WORKER_CONTEXT_CHARS - parts.reduce((n, p) => n + p.length + 1, 0)) };
+        pushWithinBudget(parts, '', budget);
+        pushWithinBudget(parts, '### 파일 맵 (Code Registry — 이 파일들은 Read 불필요)', budget);
         for (const brief of bounded(context.registryBriefs)) {
-          parts.push('**파일:**');
-          parts.push(promptDataBlock(brief.filePath));
-          parts.push('**요약:**');
-          parts.push(promptDataBlock(brief.summary));
+          const fileBlock = promptDataBlock(brief.filePath);
+          const summaryBlock = promptDataBlock(brief.summary);
+          if (!pushWithinBudget(parts, '**파일:**', budget)) break;
+          if (!pushWithinBudget(parts, fileBlock, budget)) break;
+          if (!pushWithinBudget(parts, '**요약:**', budget)) break;
+          if (!pushWithinBudget(parts, summaryBlock, budget)) break;
           if (brief.highlights.length > 0) {
-            parts.push('**하이라이트:**');
-            parts.push(promptDataBlock(brief.highlights.join(', ')));
+            const highlightsBlock = promptDataBlock(brief.highlights.join(', '));
+            if (!pushWithinBudget(parts, '**하이라이트:**', budget)) break;
+            if (!pushWithinBudget(parts, highlightsBlock, budget)) break;
           }
           if (brief.entities && brief.entities.length > 0) {
+            let entityStopped = false;
             for (const e of bounded(brief.entities)) {
               const flags: string[] = [];
               if (e.status !== 'active') flags.push(e.status);
               if (!e.hasTests) flags.push('no test');
-              parts.push('**엔티티:**');
-              parts.push(promptDataBlock([
+              const entityBlock = promptDataBlock([
                 e.kind,
                 e.name,
                 e.signature ?? '',
                 flags.length ? `[${flags.join(', ')}]` : '',
-              ].filter(Boolean).join(' ')));
+              ].filter(Boolean).join(' '));
+              if (!pushWithinBudget(parts, '**엔티티:**', budget) || !pushWithinBudget(parts, entityBlock, budget)) {
+                entityStopped = true;
+                break;
+              }
             }
+            if (entityStopped) break;
           }
         }
       }
