@@ -11,7 +11,7 @@ import { readdir, open, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, extname, dirname, resolve } from 'node:path';
-import { getRegistryStore } from './sqliteStore.js';
+import { getRegistryStore, LIST_ENTITIES_MAX_LIMIT } from './sqliteStore.js';
 import type { CodeEntity, EntityKind, RiskLevel } from './schema.js';
 
 // ============ 상수 ============
@@ -46,6 +46,25 @@ async function readBoundedRegularFile(filePath: string): Promise<string> {
 }
 const MAX_DEPTH = 15;
 const SCAN_TIMEOUT_MS = 180_000;
+const MIN_SCAN_TIMEOUT_MS = 1_000;
+
+/**
+ * Parse and clamp scanner traversal overrides so callers cannot request
+ * unbounded depth/timeout (or non-finite values).
+ */
+export function normalizeScanTraversalOptions(options?: {
+  maxDepth?: number;
+  timeoutMs?: number;
+}): { maxDepth: number; timeoutMs: number } {
+  const maxDepth = normalizeBound(options?.maxDepth, MAX_DEPTH, 1, MAX_DEPTH);
+  const timeoutMs = normalizeBound(options?.timeoutMs, SCAN_TIMEOUT_MS, MIN_SCAN_TIMEOUT_MS, SCAN_TIMEOUT_MS);
+  return { maxDepth, timeoutMs };
+}
+
+function normalizeBound(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
+}
 
 // ============ 언어 정의 ============
 
@@ -671,8 +690,7 @@ export async function scanRepository(
   }
 
   const startTime = Date.now();
-  const maxDepth = options?.maxDepth ?? MAX_DEPTH;
-  const timeoutMs = options?.timeoutMs ?? SCAN_TIMEOUT_MS;
+  const { maxDepth, timeoutMs } = normalizeScanTraversalOptions(options);
   const verbose = options?.verbose ?? false;
   const store = getRegistryStore();
 
@@ -743,13 +761,20 @@ export async function scanRepository(
     console.log(`  [test-map] ${testMap.size} entities mapped to tests`);
   }
 
-  // 레지스트리 동기화
+  // 레지스트리 동기화 — page size must match the store query cap so OFFSET
+  // advances by the number of rows actually returned (never skips a page).
   const existingEntities: CodeEntity[] = [];
-  const existingPageSize = 10_000;
+  const existingPageSize = LIST_ENTITIES_MAX_LIMIT;
   for (let offset = 0; ; offset += existingPageSize) {
     const page = store.listEntities({ projectId, limit: existingPageSize, offset });
     existingEntities.push(...page.entities);
-    if (existingEntities.length >= page.total || page.entities.length === 0) break;
+    // Stop when the store reports completion, returns a short page, or yields nothing.
+    // Short-page stop prevents an infinite loop if `total` is misreported.
+    if (
+      page.entities.length === 0
+      || page.entities.length < existingPageSize
+      || existingEntities.length >= page.total
+    ) break;
   }
   const existingByQName = new Map(existingEntities.map(e => [e.qualifiedName, e]));
   const extractedQNames = new Set<string>();

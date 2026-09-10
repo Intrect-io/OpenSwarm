@@ -14,19 +14,50 @@ vi.mock('node:os', async () => {
   return { ...actual, homedir: () => TEST_HOME };
 });
 
+interface FakeQuery {
+  where: (predicate: string) => FakeQuery;
+  limit: (n: number) => { toArray: () => Promise<unknown[]> };
+  orderBy: (spec: Array<{ column: string; ascending?: boolean }>) => FakeQuery;
+}
+
 interface FakeTable {
   schema: () => Promise<{ fields: Array<{ name: string }> }>;
-  search: (vector: number[]) => { limit: (n: number) => { toArray: () => Promise<unknown[]> } };
+  query: () => FakeQuery;
 }
 
 function fakeTable(schemaFields: string[], rows: unknown[]): FakeTable {
+  const sorted = [...rows].sort((a, b) => {
+    const aid = String((a as { id?: unknown }).id ?? '');
+    const bid = String((b as { id?: unknown }).id ?? '');
+    return aid.localeCompare(bid);
+  }) as Array<Record<string, unknown>>;
+
+  function pageAfter(cursor: string | undefined, limit: number): unknown[] {
+    const start = cursor === undefined
+      ? 0
+      : sorted.findIndex((row) => String(row.id ?? '') > cursor);
+    if (start < 0) return [];
+    return sorted.slice(start, start + limit);
+  }
+
+  function makeQuery(cursor: string | undefined): FakeQuery {
+    const query: FakeQuery = {
+      where: (predicate: string) => {
+        const match = /^id > '((?:[^']|'')*)'$/.exec(predicate);
+        const next = match ? match[1].replace(/''/g, "'") : undefined;
+        return makeQuery(next);
+      },
+      orderBy: () => query,
+      limit: (n: number) => ({
+        toArray: async () => pageAfter(cursor, n),
+      }),
+    };
+    return query;
+  }
+
   return {
     schema: async () => ({ fields: schemaFields.map((name) => ({ name })) }),
-    search: () => ({
-      limit: () => ({
-        toArray: async () => rows,
-      }),
-    }),
+    query: () => makeQuery(undefined),
   };
 }
 
@@ -149,5 +180,21 @@ describe('inspectMemoryStatus', () => {
     expect(status.expiredRows).toBe(1);
     expect(status.lowImportanceRows).toBe(1);
     expect(status.avgImportance).toBeCloseTo((0.5 + 0.4 + 0.3 + 0.05 + 0.9) / 5, 10);
+  });
+
+  it('streams status aggregation across multiple id-cursor pages', async () => {
+    const rows = [
+      { id: 'a', type: 'fact', content: '1', importance: 0.2, expiresAt: 9999999999999 },
+      { id: 'b', type: 'fact', content: '2', importance: 0.4, expiresAt: 9999999999999 },
+      { id: 'c', type: 'fact', content: '3', importance: 0.6, expiresAt: 9999999999999 },
+      { id: 'd', type: 'fact', content: '4', importance: 0.8, expiresAt: 9999999999999 },
+    ];
+    const { iterateMemoryStatusPages } = await import('./memoryCommand.js');
+    const pages: Array<Array<Record<string, unknown>>> = [];
+    for await (const page of iterateMemoryStatusPages(fakeTable(['id', 'importance', 'expiresAt'], rows), 2)) {
+      pages.push(page);
+    }
+    expect(pages).toHaveLength(2);
+    expect(pages.map((p) => p.map((r) => r.id))).toEqual([['a', 'b'], ['c', 'd']]);
   });
 });

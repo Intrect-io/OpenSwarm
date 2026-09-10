@@ -21,6 +21,7 @@ interface MockState {
   updated: Array<{ id: string; patch: UpdateEntityInput }>;
   statusChanges: Array<{ id: string; status: string }>;
   registerShouldThrowFor: Set<string>;
+  listCalls: Array<{ limit: number; offset: number }>;
 }
 
 const state: MockState = {
@@ -29,6 +30,7 @@ const state: MockState = {
   updated: [],
   statusChanges: [],
   registerShouldThrowFor: new Set(),
+  listCalls: [],
 };
 
 function resetState(): void {
@@ -37,11 +39,21 @@ function resetState(): void {
   state.updated = [];
   state.statusChanges = [];
   state.registerShouldThrowFor = new Set();
+  state.listCalls = [];
 }
 
 vi.mock('./sqliteStore.js', () => ({
+  LIST_ENTITIES_MAX_LIMIT: 2,
   getRegistryStore: () => ({
-    listEntities: () => ({ entities: state.existingEntities, total: state.existingEntities.length }),
+    listEntities: (filter?: { limit?: number; offset?: number }) => {
+      const limit = filter?.limit ?? state.existingEntities.length;
+      const offset = filter?.offset ?? 0;
+      state.listCalls.push({ limit, offset });
+      return {
+        entities: state.existingEntities.slice(offset, offset + limit),
+        total: state.existingEntities.length,
+      };
+    },
     registerEntity: (input: RegisterEntityInput) => {
       if (state.registerShouldThrowFor.has(input.name)) {
         throw new Error(`simulated register failure for ${input.name}`);
@@ -423,5 +435,57 @@ describe('entity scanner coverage extensions', () => {
 
     expect(result.removed).toBe(1);
     expect(state.statusChanges).toEqual([{ id: 'src/gone.ts::goneFn', status: 'broken' }]);
+  });
+
+  it('reconciles every page when the registry exceeds one listEntities page', async () => {
+    await writeProjectFile('src/keep.ts', 'export function keepFn(): void {\n  return;\n}\n');
+
+    // With LIST_ENTITIES_MAX_LIMIT mocked to 2, five stale entities force 3+ pages.
+    state.existingEntities = [
+      makeExistingEntity({
+        qualifiedName: 'src/keep.ts::keepFn',
+        filePath: 'src/keep.ts',
+        name: 'keepFn',
+        author: 'scanner',
+        status: 'active',
+      }),
+      ...[0, 1, 2, 3, 4].map((i) => makeExistingEntity({
+        qualifiedName: `src/stale${i}.ts::stale${i}`,
+        filePath: `src/stale${i}.ts`,
+        name: `stale${i}`,
+        author: 'scanner',
+        status: 'active',
+      })),
+    ];
+
+    const { scanRepository } = await import('./entityScanner.js');
+    const result = await scanRepository(tmp, 'test-project', { allowNonRepo: true });
+
+    expect(state.listCalls.length).toBeGreaterThan(1);
+    expect(state.listCalls[0]).toEqual({ limit: 2, offset: 0 });
+    expect(state.listCalls[1]).toEqual({ limit: 2, offset: 2 });
+    expect(result.removed).toBe(5);
+    expect(state.statusChanges.map((c) => c.id).sort()).toEqual([
+      'src/stale0.ts::stale0',
+      'src/stale1.ts::stale1',
+      'src/stale2.ts::stale2',
+      'src/stale3.ts::stale3',
+      'src/stale4.ts::stale4',
+    ]);
+  });
+});
+
+describe('normalizeScanTraversalOptions', () => {
+  it('parses, clamps, and falls back for depth/timeout overrides', async () => {
+    const { normalizeScanTraversalOptions } = await import('./entityScanner.js');
+    expect(normalizeScanTraversalOptions()).toEqual({ maxDepth: 15, timeoutMs: 180_000 });
+    expect(normalizeScanTraversalOptions({ maxDepth: 3, timeoutMs: 5_000 }))
+      .toEqual({ maxDepth: 3, timeoutMs: 5_000 });
+    expect(normalizeScanTraversalOptions({ maxDepth: 999, timeoutMs: 999_999 }))
+      .toEqual({ maxDepth: 15, timeoutMs: 180_000 });
+    expect(normalizeScanTraversalOptions({ maxDepth: 0, timeoutMs: 10 }))
+      .toEqual({ maxDepth: 1, timeoutMs: 1_000 });
+    expect(normalizeScanTraversalOptions({ maxDepth: Number.NaN, timeoutMs: Number.POSITIVE_INFINITY }))
+      .toEqual({ maxDepth: 15, timeoutMs: 180_000 });
   });
 });

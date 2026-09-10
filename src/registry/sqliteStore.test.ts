@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SqliteRegistryStore } from './sqliteStore.js';
+import { LIST_ENTITIES_MAX_LIMIT, SqliteRegistryStore } from './sqliteStore.js';
 
 let dir: string | undefined;
 let store: SqliteRegistryStore | undefined;
@@ -40,5 +40,19 @@ describe('SqliteRegistryStore safe queries', () => {
     expect(registry.getEntitiesByIssueId('INT-1', 'a').map((entity) => entity.id)).toEqual([a.id]);
     expect(registry.entitiesByTag('layer', 'api', 'b').map((entity) => entity.id)).toEqual([b.id]);
     expect(registry.getUnresolvedWarnings(undefined, 'a').map((warning) => warning.entityId)).toEqual([a.id]);
+  });
+
+  it('clamps listEntities page size to the store query cap', () => {
+    const registry = createStore();
+    for (let i = 0; i < 5; i++) {
+      registry.registerEntity({ projectId: 'p', kind: 'function', name: `fn${i}`, filePath: `src/f${i}.ts` });
+    }
+    const oversize = registry.listEntities({ projectId: 'p', limit: LIST_ENTITIES_MAX_LIMIT + 1000, offset: 0 });
+    expect(oversize.entities.length).toBe(5);
+    expect(oversize.total).toBe(5);
+
+    const page = registry.listEntities({ projectId: 'p', limit: 2, offset: 2 });
+    expect(page.entities).toHaveLength(2);
+    expect(page.total).toBe(5);
   });
 });

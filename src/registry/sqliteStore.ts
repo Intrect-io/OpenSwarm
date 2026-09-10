@@ -21,6 +21,10 @@ import type {
 const DEFAULT_DB_PATH = resolve(homedir(), '.openswarm', 'registry.db');
 const SQLITE_IN_CHUNK_SIZE = 500;
 
+/** Store-level page cap for listEntities — callers must paginate with this size. */
+export const LIST_ENTITIES_MAX_LIMIT = 5_000;
+export const LIST_ENTITIES_DEFAULT_LIMIT = 50;
+
 function clampInteger(value: number, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(maximum, Math.max(0, Math.trunc(value)));
@@ -496,8 +500,12 @@ export class SqliteRegistryStore {
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limit = filter?.limit ?? 50;
-    const offset = filter?.offset ?? 0;
+    const rawLimit = filter?.limit ?? LIST_ENTITIES_DEFAULT_LIMIT;
+    const limit = Math.min(
+      LIST_ENTITIES_MAX_LIMIT,
+      Math.max(1, Number.isFinite(rawLimit) ? Math.trunc(rawLimit) : LIST_ENTITIES_DEFAULT_LIMIT),
+    );
+    const offset = clampInteger(filter?.offset ?? 0, 0);
 
     const countRow = this.db.prepare(
       `SELECT COUNT(*) as cnt FROM code_entities e ${ftsJoin} ${where}`
