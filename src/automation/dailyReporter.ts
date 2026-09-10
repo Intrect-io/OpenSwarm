@@ -5,7 +5,13 @@
 
 import { Cron } from 'croner';
 import { LinearClient, type Project } from '@linear/sdk';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { postStatusUpdate } from '../linear/index.js';
+import { withFileLock } from '../support/fileLock.js';
+
+/** Cross-process lock so two daemon instances cannot publish the same day twice. */
+const DAILY_REPORT_LOCK = join(homedir(), '.openswarm', 'daily-reporter.lock');
 
 let cronJob: Cron | null = null;
 let linearClient: LinearClient | null = null;
@@ -79,68 +85,71 @@ export function stopDailyReporter(): void {
 }
 
 /**
- * Manually trigger daily reports (for testing)
+ * Manually trigger daily reports (for testing).
+ * Serialized across daemon instances so concurrent crons cannot double-post.
  */
 export async function generateDailyReports(): Promise<void> {
-  if (!linearClient) {
-    console.warn('[DailyReporter] LinearClient not set, skipping reports');
-    return;
-  }
-
-  if (!teamId) {
-    console.warn('[DailyReporter] Team ID not set, skipping reports');
-    return;
-  }
-
-  console.log('[DailyReporter] Generating daily reports...');
-
-  try {
-    // Fetch all active projects from Linear
-    const team = await linearClient.team(teamId);
-    if (!team) {
-      console.warn('[DailyReporter] Team not found');
+  return withFileLock(DAILY_REPORT_LOCK, async () => {
+    if (!linearClient) {
+      console.warn('[DailyReporter] LinearClient not set, skipping reports');
       return;
     }
 
-    const activeProjects: Project[] = [];
-    let after: string | undefined;
-    do {
-      const projects = await team.projects({ first: 50, after });
-      activeProjects.push(...projects.nodes.filter(p => p.state !== 'canceled'));
-      after = projects.pageInfo.hasNextPage ? projects.pageInfo.endCursor ?? undefined : undefined;
-    } while (after);
-
-    if (activeProjects.length === 0) {
-      console.log('[DailyReporter] No active projects found');
+    if (!teamId) {
+      console.warn('[DailyReporter] Team ID not set, skipping reports');
       return;
     }
 
-    console.log(`[DailyReporter] Found ${activeProjects.length} active projects`);
+    console.log('[DailyReporter] Generating daily reports...');
 
-    // Generate status update for each project
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const project of activeProjects) {
-      try {
-        const projectPath = projectPathMapping.get(project.id);
-        await postStatusUpdate(project.id, project.name, projectPath);
-        successCount++;
-      } catch (err) {
-        console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
-        failCount++;
+    try {
+      // Fetch all active projects from Linear
+      const team = await linearClient.team(teamId);
+      if (!team) {
+        console.warn('[DailyReporter] Team not found');
+        return;
       }
-    }
 
-    console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
+      const activeProjects: Project[] = [];
+      let after: string | undefined;
+      do {
+        const projects = await team.projects({ first: 50, after });
+        activeProjects.push(...projects.nodes.filter(p => p.state !== 'canceled'));
+        after = projects.pageInfo.hasNextPage ? projects.pageInfo.endCursor ?? undefined : undefined;
+      } while (after);
 
-    // Send summary to Discord
-    if (discordReporter && successCount > 0) {
-      await sendDiscordSummary(activeProjects.length, successCount, failCount);
+      if (activeProjects.length === 0) {
+        console.log('[DailyReporter] No active projects found');
+        return;
+      }
+
+      console.log(`[DailyReporter] Found ${activeProjects.length} active projects`);
+
+      // Generate status update for each project
+      let successCount = 0;
+      let failCount = 0;
+
+      for (const project of activeProjects) {
+        try {
+          const projectPath = projectPathMapping.get(project.id);
+          await postStatusUpdate(project.id, project.name, projectPath);
+          successCount++;
+        } catch (err) {
+          console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
+          failCount++;
+        }
+      }
+
+      console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
+
+      // Send summary to Discord
+      if (discordReporter && successCount > 0) {
+        await sendDiscordSummary(activeProjects.length, successCount, failCount);
+      }
+    } catch (error) {
+      console.error('[DailyReporter] Failed to generate reports:', error);
     }
-  } catch (error) {
-    console.error('[DailyReporter] Failed to generate reports:', error);
-  }
+  }, { timeoutMs: 600_000 });
 }
 
 /**

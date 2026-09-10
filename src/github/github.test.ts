@@ -152,6 +152,29 @@ describe('getPRChecks', () => {
       vi.useRealTimers();
     }
   });
+
+  it('disposes the deadline timer when CI settles', async () => {
+    vi.useFakeTimers();
+    const clearSpy = vi.spyOn(global, 'clearTimeout');
+    try {
+      mockGhJson({
+        headRefOid: 'head-a',
+        statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+      });
+
+      await expect(waitForCICompletion('owner/repo', 7, {
+        timeoutMs: 60_000,
+        pollIntervalMs: 30_000,
+        expectedHeadSha: 'head-a',
+      })).resolves.toMatchObject({ status: 'success', headSha: 'head-a' });
+
+      // The wall-clock deadline must not linger after settlement.
+      expect(clearSpy).toHaveBeenCalled();
+    } finally {
+      clearSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('repository fan-out', () => {

@@ -11,10 +11,20 @@
 // actually exercised, rather than mocking node:fs (which is what the sibling
 // telemetry tests do, and what would hide a non-atomic write).
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/** A pid that cannot be running: above the platform maximum. */
+const DEAD_PID = 0x7fffffff;
 
 let home: string;
 let previousHome: string | undefined;
@@ -26,6 +36,10 @@ vi.mock('node:os', async (importOriginal) => {
 
 function stateFile(): string {
   return join(home, '.config', 'openswarm', 'telemetry.json');
+}
+
+function lockFile(): string {
+  return `${stateFile()}.lock`;
 }
 
 function readPersisted(): { installId?: string; noticeShown?: boolean } {
@@ -180,5 +194,46 @@ describe('install id stability', () => {
     run();
 
     expect(readPersisted().installId).toBe(afterFirst);
+  });
+});
+
+describe('telemetry lock reclaim — ownership-safe', () => {
+  it('reclaims a lock left behind by a dead process', async () => {
+    const { maybeShowNotice } = await loadTelemetry();
+    mkdirSync(join(home, '.config', 'openswarm'), { recursive: true });
+    writeFileSync(lockFile(), JSON.stringify({ pid: DEAD_PID, token: 'dead-owner' }), {
+      mode: 0o600,
+    });
+
+    maybeShowNotice();
+
+    expect(readPersisted().installId).toMatch(/^[A-Za-z0-9_-]{21}$/);
+    // Our writer must release its own lock; the dead lock must not stick around.
+    expect(existsSync(lockFile())).toBe(false);
+  });
+
+  it('does not reclaim a live-owned lock (leaves foreign token intact)', async () => {
+    const { maybeShowNotice } = await loadTelemetry();
+    mkdirSync(join(home, '.config', 'openswarm'), { recursive: true });
+    writeFileSync(lockFile(), JSON.stringify({ pid: process.pid, token: 'live-replacement' }), {
+      mode: 0o600,
+    });
+
+    // First Date.now() sets the wait deadline; later calls jump past it so the
+    // best-effort path proceeds unlocked without sleeping wall-clock seconds.
+    const base = Date.now();
+    let calls = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+      calls += 1;
+      return calls === 1 ? base : base + 6_000;
+    });
+    try {
+      maybeShowNotice();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(existsSync(lockFile())).toBe(true);
+    expect(JSON.parse(readFileSync(lockFile(), 'utf8')).token).toBe('live-replacement');
   });
 });

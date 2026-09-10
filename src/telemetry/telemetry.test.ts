@@ -16,6 +16,8 @@ vi.mock('node:fs', () => ({
   renameSync: () => undefined,
   existsSync: () => false,
   unlinkSync: () => undefined,
+  statSync: () => ({ mtimeMs: Date.now() }),
+  chmodSync: () => undefined,
 }));
 
 import { initTelemetry, isTelemetryEnabled, track, buildPayload, serializeTelemetryPayload } from './telemetry.js';

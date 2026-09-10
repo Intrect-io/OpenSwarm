@@ -7,8 +7,9 @@ vi.mock('node:child_process', () => ({ spawn: (...a: unknown[]) => spawnMock(...
 const { openBrowser } = await import('./openBrowser.js');
 
 /** A spawn() stand-in whose exit can be driven per test. */
-function fakeChild(): EventEmitter {
-  const child = new EventEmitter();
+function fakeChild(): EventEmitter & { unref: ReturnType<typeof vi.fn> } {
+  const child = new EventEmitter() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
+  child.unref = vi.fn();
   spawnMock.mockReturnValue(child);
   return child;
 }
@@ -76,5 +77,17 @@ describe('openBrowser', () => {
     child.emit('close', 1);
     const hits = errors.filter((l) => /열지 못했습니다/.test(l)).length;
     expect(hits).toBe(1);
+  });
+
+  it('detaches the launcher child and unrefs it so it cannot pin the event loop', () => {
+    const child = fakeChild() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
+    child.unref = vi.fn();
+    openBrowser(URL);
+    expect(spawnMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ detached: true, stdio: 'ignore' }),
+    );
+    expect(child.unref).toHaveBeenCalled();
   });
 });

@@ -148,12 +148,22 @@ describe('runnerState persistence and helpers', () => {
     // the rolling-window prune is still observable via getDailyPaceInfo.
     expect(mod.getDailyPaceInfo().projectCounts.Alpha).toBe(1);
 
-    mod.recordProjectCompletion('Alpha', 1.25);
+    await mod.recordProjectCompletion('Alpha', 1.25);
     const info = mod.getDailyPaceInfo();
     expect(info.completedToday).toBe(2);
     expect(info.projectCounts.Alpha).toBe(2);
     expect(info.lastCompletionAt).toBe('2025-03-04T10:00:00.000Z');
     expect(existsSync(mod.DAILY_PACE_FILE)).toBe(true);
+  });
+
+  it('serializes concurrent pace updates without losing entries', async () => {
+    mkdirSync(join(tempHome, '.openswarm'), { recursive: true });
+    await Promise.all([
+      mod.recordProjectCompletion('Race', 0.1),
+      mod.recordProjectCompletion('Race', 0.2),
+      mod.recordProjectCompletion('Race', 0.3),
+    ]);
+    expect(mod.getDailyPaceInfo().projectCounts.Race).toBe(3);
   });
 
   it('loads and saves task state sets and maps', async () => {

@@ -16,12 +16,102 @@
 
 import os, { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, writeFileSync, fsyncSync, closeSync, unlinkSync, statSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
+const TELEMETRY_LOCK = `${TELEMETRY_FILE}.lock`;
+const TELEMETRY_LOCK_STALE_MS = 30_000;
+const TELEMETRY_LOCK_WAIT_MS = 5;
+const TELEMETRY_LOCK_TIMEOUT_MS = 5_000;
+
+const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+type TelemetryLockOwner = { pid: number; token: string };
+
+function telemetryLockAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function readTelemetryLockOwner(lockPath: string): TelemetryLockOwner | null {
+  try {
+    const value = JSON.parse(readFileSync(lockPath, 'utf8')) as Partial<TelemetryLockOwner>;
+    return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.token === 'string'
+      ? { pid: value.pid!, token: value.token }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-process lock for telemetry state. Stale reclaim is ownership-safe:
+ * after judging a lock dead/stale we re-check mtime+token before unlink so we
+ * cannot remove a lock a different owner just acquired.
+ */
+function withTelemetryLock<T>(operation: () => T): T {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const deadline = Date.now() + TELEMETRY_LOCK_TIMEOUT_MS;
+  let lockFd: number | undefined;
+  const lockToken = randomUUID();
+
+  while (lockFd === undefined) {
+    try {
+      lockFd = openSync(TELEMETRY_LOCK, 'wx', 0o600);
+      writeFileSync(lockFd, JSON.stringify({ pid: process.pid, token: lockToken }), 'utf8');
+      fsyncSync(lockFd);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw error;
+      try {
+        const owner = readTelemetryLockOwner(TELEMETRY_LOCK);
+        const judgedMtimeMs = statSync(TELEMETRY_LOCK).mtimeMs;
+        const lockAgeMs = Date.now() - judgedMtimeMs;
+        const staleMalformed = !owner && lockAgeMs > TELEMETRY_LOCK_STALE_MS;
+        const abandoned = owner !== null && !telemetryLockAlive(owner.pid);
+        if (staleMalformed || abandoned) {
+          const currentMtimeMs = statSync(TELEMETRY_LOCK).mtimeMs;
+          const currentOwner = readTelemetryLockOwner(TELEMETRY_LOCK);
+          const sameLock = currentMtimeMs === judgedMtimeMs
+            && currentOwner?.token === owner?.token;
+          if (sameLock) unlinkSync(TELEMETRY_LOCK);
+          continue;
+        }
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw statError;
+      }
+      if (Date.now() >= deadline) {
+        // Best-effort telemetry must not hang the CLI — proceed unlocked.
+        return operation();
+      }
+      Atomics.wait(lockWaitBuffer, 0, 0, TELEMETRY_LOCK_WAIT_MS);
+    }
+  }
+
+  try {
+    return operation();
+  } finally {
+    closeSync(lockFd);
+    try {
+      if (readTelemetryLockOwner(TELEMETRY_LOCK)?.token === lockToken) {
+        unlinkSync(TELEMETRY_LOCK);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // Non-fatal — next writer will reclaim if needed.
+      }
+    }
+  }
+}
 
 // Collection endpoint (Cloudflare Worker → D1 intrect-telemetry.openswarm_events).
 // Kept fixed in the client so a local environment variable cannot redirect even
@@ -62,22 +152,10 @@ function readState(): TelemetryState | null {
 }
 
 /**
- * Persist state, re-reading immediately beforehand so a concurrent writer's
- * install id is preserved rather than replaced.
- *
- * Two things were wrong. The write was in-place (`writeFileSync`), so a reader
- * could observe a truncated file mid-write — the repo already writes every other
- * piece of local state through `atomicWriteFileSync` (temp + fsync + rename), and
- * this was the one path that did not. And both callers computed a whole new state
- * from a read that had happened earlier, so on a first run the daemon and the CLI
- * each minted their own install id and whichever wrote last silently replaced the
- * other — the identifier is supposed to be stable for the install, and it also
- * made `maybeShowNotice` able to clobber an id written between its own read and
- * write.
- *
- * Re-reading here does not make the update atomic (that would need a lock), but
- * it makes the outcome converge: whoever writes second keeps the id that is
- * already on disk, so the install ends up with ONE id either way.
+ * Merge on-disk telemetry state with a caller-computed next state.
+ * An id already on disk always wins so concurrent first-runs converge.
+ * Writers acquire `withTelemetryLock` so stale reclaim cannot drop another
+ * owner's lock between judgement and unlink.
  */
 export function mergeState(
   current: TelemetryState | null,
@@ -92,14 +170,6 @@ export function mergeState(
     // that read the state before it was displayed.
     noticeShown: next.noticeShown || current?.noticeShown,
   };
-}
-
-function writeState(state: TelemetryState): void {
-  try {
-    atomicWriteFileSync(TELEMETRY_FILE, JSON.stringify(mergeState(readState(), state), null, 2));
-  } catch {
-    // A read-only home or race is non-fatal: telemetry just stays best-effort.
-  }
 }
 
 /** Truthy env opt-out signals (OpenSwarm-specific + the cross-tool DO_NOT_TRACK). */
@@ -118,14 +188,17 @@ export function isTelemetryEnabled(): boolean {
 }
 
 function getInstallId(): string {
-  const state = readState();
-  if (isValidInstallId(state?.installId)) return state.installId;
-  writeState({ installId: nanoid(), noticeShown: state?.noticeShown });
-  // Read back rather than returning the freshly minted id: a concurrent first
-  // run may have won, and the event should carry the id the install actually
-  // keeps, not the one this process happened to generate.
-  const persisted = readState();
-  return isValidInstallId(persisted?.installId) ? persisted.installId : nanoid();
+  return withTelemetryLock(() => {
+    const state = readState();
+    if (isValidInstallId(state?.installId)) return state.installId;
+    const minted = nanoid();
+    atomicWriteFileSync(
+      TELEMETRY_FILE,
+      JSON.stringify(mergeState(state, { installId: minted, noticeShown: state?.noticeShown }), null, 2),
+    );
+    const persisted = readState();
+    return isValidInstallId(persisted?.installId) ? persisted.installId : minted;
+  });
 }
 
 /**
@@ -134,14 +207,23 @@ function getInstallId(): string {
  */
 export function maybeShowNotice(): void {
   if (!isTelemetryEnabled()) return;
-  const state = readState();
-  if (state?.noticeShown) return;
-  process.stderr.write(
-    '\nOpenSwarm collects anonymous usage data (command, version, OS) to guide development.\n' +
-      'No code, prompts, paths, or personal data are sent. Opt out: OPENSWARM_TELEMETRY=0\n' +
-      'Details: https://github.com/unohee/OpenSwarm#privacy--telemetry\n\n',
-  );
-  writeState({ installId: state?.installId ?? nanoid(), noticeShown: true });
+  withTelemetryLock(() => {
+    const state = readState();
+    if (state?.noticeShown) return;
+    process.stderr.write(
+      '\nOpenSwarm collects anonymous usage data (command, version, OS) to guide development.\n' +
+        'No code, prompts, paths, or personal data are sent. Opt out: OPENSWARM_TELEMETRY=0\n' +
+        'Details: https://github.com/unohee/OpenSwarm#privacy--telemetry\n\n',
+    );
+    atomicWriteFileSync(
+      TELEMETRY_FILE,
+      JSON.stringify(
+        mergeState(state, { installId: state?.installId ?? nanoid(), noticeShown: true }),
+        null,
+        2,
+      ),
+    );
+  });
 }
 
 export interface TrackOptions {

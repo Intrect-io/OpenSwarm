@@ -45,21 +45,44 @@ export async function withFileLock<T>(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const current = await owner(path);
+      let judgedMtimeMs: number | undefined;
       let malformedAndStale = false;
       if (current === null) {
         try {
-          malformedAndStale = Date.now() - (await stat(path)).mtimeMs > malformedStaleMs;
+          judgedMtimeMs = (await stat(path)).mtimeMs;
+          malformedAndStale = Date.now() - judgedMtimeMs > malformedStaleMs;
         } catch (statError) {
           // The holder released the lock between our failed open and this stat.
           // That is the normal hand-off, not an error: retry the open.
           if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') throw statError;
           continue;
         }
+      } else {
+        try {
+          judgedMtimeMs = (await stat(path)).mtimeMs;
+        } catch (statError) {
+          if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') throw statError;
+          continue;
+        }
       }
-      if ((current !== null && !alive(current.pid)) || malformedAndStale) {
-        await unlink(path).catch((unlinkError) => {
-          if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
-        });
+      // Reclaim only the lock we judged. Between judgement and unlink the holder
+      // can release and a third process can take a fresh lock; deleting THAT one
+      // would put two writers on the resource. Re-check mtime+token first.
+      if (((current !== null && !alive(current.pid)) || malformedAndStale) && judgedMtimeMs !== undefined) {
+        const judgedToken = current?.token;
+        try {
+          const currentOwner = await owner(path);
+          const currentMtimeMs = (await stat(path)).mtimeMs;
+          const sameLock = currentMtimeMs === judgedMtimeMs
+            && currentOwner?.token === judgedToken;
+          if (sameLock) {
+            await unlink(path).catch((unlinkError) => {
+              if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+            });
+          }
+        } catch (statError) {
+          if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') throw statError;
+        }
         continue;
       }
       if (Date.now() >= deadline) throw new Error(`Timed out waiting for file lock: ${path}`);

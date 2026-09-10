@@ -9,6 +9,7 @@ import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { withFileLock } from '../support/fileLock.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -41,6 +42,7 @@ export const PIPELINE_HISTORY_FILE = process.env.OPENSWARM_RUNNER_PIPELINE_HISTO
 export const REJECTION_STATE_FILE = process.env.OPENSWARM_RUNNER_REJECTION_STATE_FILE || join(homedir(), '.claude', 'openswarm-rejection-state.json');
 export const DECOMPOSITION_STATE_FILE = process.env.OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE || join(homedir(), '.claude', 'openswarm-decomposition-state.json');
 export const DAILY_PACE_FILE = join(homedir(), '.openswarm', 'daily-pace.json');
+const DAILY_PACE_LOCK = `${DAILY_PACE_FILE}.lock`;
 export const PROJECT_SELECTION_FILE = join(homedir(), '.openswarm', 'project-selection.json');
 const MAX_PIPELINE_HISTORY = 100;
 const MAX_REJECTION_ATTEMPTS = 3;
@@ -80,29 +82,24 @@ function ensureParentDir(file: string): void {
   mkdirSync(dirname(file), { recursive: true });
 }
 
-function ensurePaceLoaded(): PaceState {
-  if (paceState) return paceState;
+function loadPaceFromDisk(): PaceState {
   try {
     if (existsSync(DAILY_PACE_FILE)) {
       const raw = readFileSync(DAILY_PACE_FILE, 'utf8');
-      paceState = JSON.parse(raw) as PaceState;
-      if (!paceState!.projects) paceState!.projects = {};
-    } else {
-      paceState = { projects: {}, updatedAt: new Date().toISOString() };
+      const parsed = JSON.parse(raw) as PaceState;
+      if (!parsed.projects) parsed.projects = {};
+      return parsed;
     }
   } catch {
-    paceState = { projects: {}, updatedAt: new Date().toISOString() };
+    /* corrupt/unreadable → empty */
   }
-  return paceState!;
+  return { projects: {}, updatedAt: new Date().toISOString() };
 }
 
-function savePace(): void {
-  try {
-    ensurePaceDir();
-    atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(paceState, null, 2));
-  } catch (err) {
-    console.warn('[Pace] Failed to save:', err);
-  }
+function ensurePaceLoaded(): PaceState {
+  if (paceState) return paceState;
+  paceState = loadPaceFromDisk();
+  return paceState;
 }
 
 // Persisted dashboard/CLI project selection so "disable all" survives a daemon
@@ -143,14 +140,26 @@ function pruneOldEntries(entries: ProjectPaceEntry[]): ProjectPaceEntry[] {
 // were removed with the per-project 5h cap (INT-2317). Completion recording stays
 // below — daily-pace.json remains useful as a cost/throughput telemetry trail.
 
-export function recordProjectCompletion(projectName: string, costUsd?: number): void {
-  const state = ensurePaceLoaded();
-  if (!state.projects[projectName]) state.projects[projectName] = [];
-  state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
-  state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
-  state.updatedAt = new Date().toISOString();
-  savePace();
-  console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
+/**
+ * Record a project completion into the shared daily-pace file.
+ * Cross-process locked so concurrent daemon writers cannot lose updates.
+ */
+export async function recordProjectCompletion(projectName: string, costUsd?: number): Promise<void> {
+  try {
+    await withFileLock(DAILY_PACE_LOCK, async () => {
+      const state = loadPaceFromDisk();
+      if (!state.projects[projectName]) state.projects[projectName] = [];
+      state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
+      state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
+      state.updatedAt = new Date().toISOString();
+      ensurePaceDir();
+      atomicWriteFileSync(DAILY_PACE_FILE, JSON.stringify(state, null, 2));
+      paceState = state;
+      console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
+    });
+  } catch (err) {
+    console.warn('[Pace] Failed to record completion:', err);
+  }
 }
 
 export function getDailyPaceInfo(): DailyPaceState {

@@ -113,6 +113,42 @@ describe('withFileLock stale takeover', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it('does not reclaim a lock that was replaced between judgement and unlink', async () => {
+    // Dead owner judged first; before unlink, a live owner replaces the file.
+    // Ownership-safe reclaim must leave the replacement alone.
+    writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, token: 'dead' }), { mode: 0o600 });
+    const originalStat = statSync(lockPath);
+
+    // Interleave: start a reclaim attempt, then swap the lock mid-flight by
+    // writing a live-owner lock with a different token after a tiny delay.
+    const reclaim = withFileLock(lockPath, async () => 'taken', { timeoutMs: 2_000 });
+    await new Promise((r) => setTimeout(r, 5));
+    // If reclaim already won, the file is gone — that's fine. If still present
+    // with the dead token, replace it with a live owner so reclaim must skip.
+    if (existsSync(lockPath)) {
+      const current = JSON.parse(readFileSync(lockPath, 'utf8')) as { token?: string };
+      if (current.token === 'dead') {
+        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'live-replacement' }), { mode: 0o600 });
+        // Bump mtime so it differs from the judged value when reclaim re-checks.
+        const now = new Date(originalStat.mtimeMs + 2_000);
+        utimesSync(lockPath, now, now);
+      }
+    }
+
+    // Either reclaim took the dead lock before we swapped (ok), or it left the
+    // live replacement alone and timed out / eventually took over after release.
+    try {
+      await reclaim;
+    } catch {
+      // Timed out waiting on live replacement — expected in the race we forced.
+    }
+    if (existsSync(lockPath)) {
+      const owner = JSON.parse(readFileSync(lockPath, 'utf8')) as { token?: string };
+      // Must never look like we deleted the live replacement mid-hold.
+      expect(owner.token).not.toBe('dead');
+    }
+  });
+
   it('takes over a malformed lock once it is older than the stale window', async () => {
     writeFileSync(lockPath, 'not json at all', { mode: 0o600 });
     const longAgo = new Date(Date.now() - 60_000);

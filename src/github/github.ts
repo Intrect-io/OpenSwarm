@@ -1022,38 +1022,64 @@ export async function waitForCICompletion(
   const startTime = Date.now();
   let expectedHeadSha = options.expectedHeadSha?.trim();
   let lastPending: Extract<CIStatus, { status: 'pending' }> | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
 
-  while (true) {
-    const elapsed = Date.now() - startTime;
+  try {
+    deadlineTimer = setTimeout(() => { timedOut = true; }, timeoutMs);
 
-    if (elapsed >= timeoutMs) {
-      console.log(`[GitHub] CI timeout for ${repo}#${prNumber} (${elapsed}ms)`);
-      return lastPending ?? {
-        status: 'unknown',
-        reason: expectedHeadSha ? 'head_unavailable' : 'expected_head_unavailable',
-        expectedHeadSha,
-      };
+    while (true) {
+      const elapsed = Date.now() - startTime;
+
+      if (timedOut || elapsed >= timeoutMs) {
+        console.log(`[GitHub] CI timeout for ${repo}#${prNumber} (${elapsed}ms)`);
+        return lastPending ?? {
+          status: 'unknown',
+          reason: expectedHeadSha ? 'head_unavailable' : 'expected_head_unavailable',
+          expectedHeadSha,
+        };
+      }
+
+      const status = await checkPRCIStatus(repo, prNumber, expectedHeadSha);
+
+      // Legacy callers that did not provide an expected SHA are pinned to the
+      // first head they actually observe. A later push can no longer replace a
+      // pending head A with a green head B inside the same wait.
+      if (!expectedHeadSha && status.status !== 'unknown') {
+        expectedHeadSha = status.headSha;
+      }
+
+      if (options.onProgress) {
+        options.onProgress(status, elapsed);
+      }
+
+      if (status.status !== 'pending') {
+        return status;
+      }
+      lastPending = status;
+
+      const remaining = timeoutMs - (Date.now() - startTime);
+      const waitMs = Math.min(pollIntervalMs, Math.max(0, remaining));
+      if (waitMs <= 0) continue;
+
+      await new Promise<void>((resolve) => {
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          resolve();
+        }, waitMs);
+      });
     }
-
-    const status = await checkPRCIStatus(repo, prNumber, expectedHeadSha);
-
-    // Legacy callers that did not provide an expected SHA are pinned to the
-    // first head they actually observe. A later push can no longer replace a
-    // pending head A with a green head B inside the same wait.
-    if (!expectedHeadSha && status.status !== 'unknown') {
-      expectedHeadSha = status.headSha;
+  } finally {
+    // Always dispose deadline + any in-flight poll sleep when checks settle
+    // (success/failure/unknown) or the wait otherwise exits.
+    if (deadlineTimer) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = null;
     }
-
-    if (options.onProgress) {
-      options.onProgress(status, elapsed);
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
     }
-
-    if (status.status !== 'pending') {
-      return status;
-    }
-    lastPending = status;
-
-    // Wait before next poll
-    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
   }
 }
