@@ -32,6 +32,7 @@ import {
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
+import { adapterFetch } from './httpDispatcher.js';
 
 /** Model listing must never block a run for long — it is advisory metadata. */
 const MODEL_LIST_TIMEOUT_MS = 10_000;
@@ -66,7 +67,7 @@ function catalogSpec(): CatalogSpec {
     fetchLive: async () => {
       const apiKey = getEnvApiKey();
       if (!apiKey) return [];
-      const res = await fetch(`${ATLASCLOUD_API_BASE}/models`, {
+      const res = await adapterFetch(`${ATLASCLOUD_API_BASE}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
@@ -224,7 +225,7 @@ export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudA
     }
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
       const request = prepareApprovedModelRequest(`${ATLASCLOUD_API_BASE}/chat/completions`, body);
-      const res = await fetch(request.url, {
+      const res = await adapterFetch(request.url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
