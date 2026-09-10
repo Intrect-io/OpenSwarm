@@ -179,6 +179,9 @@ export interface PipelineContext {
   newSecurityFindings?: import('../verify/securityAudit.js').SecurityFinding[];
   /** Pair-level stagnation detector reason, preserved so the scheduler does not rerun the same loop. */
   stuckReason?: string;
+  abortSignal?: AbortSignal;
+  /** Per-run stuck detector — never share across concurrent run() calls. */
+  stuckDetector?: import('../support/stuckDetector.js').StuckDetector;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

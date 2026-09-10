@@ -190,11 +190,30 @@ export async function runDevTask(
 
   activeTasks.set(taskId, devTask);
 
+  // Idempotent finalization: close and error can both fire; cancelTask may
+  // remove the map entry before the child exits. Callback failures must not
+  // leave the task stuck in activeTasks or prevent cleanup.
+  let finalized = false;
+  const finalize = (resultText: string, code: number | null): void => {
+    if (finalized) return;
+    finalized = true;
+    activeTasks.delete(taskId);
+    try {
+      onComplete?.(resultText, code);
+    } catch (callbackError) {
+      console.error(`[Dev] onComplete failed for ${taskId}:`, callbackError);
+    }
+  };
+
   // Collect stdout
   claudeProcess.stdout?.on('data', (data: Buffer) => {
     const chunk = data.toString();
     devTask.output += chunk;
-    onProgress?.(chunk);
+    try {
+      onProgress?.(chunk);
+    } catch (callbackError) {
+      console.error(`[Dev] onProgress failed for ${taskId}:`, callbackError);
+    }
   });
 
   // Collect stderr
@@ -224,17 +243,19 @@ export async function runDevTask(
 
     // Generate report file
     const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
-    generateReport(devTask, code, duration);
+    try {
+      generateReport(devTask, code, duration);
+    } catch (reportError) {
+      console.error(`[Dev] generateReport failed for ${taskId}:`, reportError);
+    }
 
-    onComplete?.(resultText, code);
-    activeTasks.delete(taskId);
+    finalize(resultText, code);
   });
 
   // Handle errors
   claudeProcess.on('error', (err) => {
     devTask.output += `\nError: ${err.message}`;
-    onComplete?.(devTask.output, -1);
-    activeTasks.delete(taskId);
+    finalize(devTask.output, -1);
   });
 
   return { taskId, path };
@@ -260,8 +281,14 @@ export function cancelTask(taskId: string): boolean {
   const task = activeTasks.get(taskId);
   if (!task) return false;
 
-  task.process.kill('SIGTERM');
+  // Free the repo slot immediately; finalize on close still runs once (idempotent)
+  // so onComplete is isolated from double close/error delivery.
   activeTasks.delete(taskId);
+  try {
+    task.process.kill('SIGTERM');
+  } catch {
+    // Process may already be gone; close handler still finalizes.
+  }
   return true;
 }
 

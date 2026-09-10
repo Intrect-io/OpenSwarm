@@ -298,7 +298,16 @@ function withStoreLock<T>(operation: () => T): T {
           const currentOwner = readStoreLockOwner(lockPath);
           const sameLock = currentMtimeMs === judgedMtimeMs
             && currentOwner?.token === owner?.token;
-          if (sameLock) unlinkSync(lockPath);
+          if (sameLock) {
+            try {
+              unlinkSync(lockPath);
+            } catch (unlinkError) {
+              const code = (unlinkError as NodeJS.ErrnoException).code;
+              // Another reclaim raced (ENOENT) or claim markers make a dir lock
+              // non-empty (ENOTEMPTY) — retry the acquire loop.
+              if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw unlinkError;
+            }
+          }
           continue;
         }
       } catch (statError) {

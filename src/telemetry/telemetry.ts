@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { nanoid } from 'nanoid';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { withFileLockSync } from '../support/fileLock.js';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
@@ -96,7 +97,9 @@ export function mergeState(
 
 function writeState(state: TelemetryState): void {
   try {
-    atomicWriteFileSync(TELEMETRY_FILE, JSON.stringify(mergeState(readState(), state), null, 2));
+    withFileLockSync(`${TELEMETRY_FILE}.lock`, () => {
+      atomicWriteFileSync(TELEMETRY_FILE, JSON.stringify(mergeState(readState(), state), null, 2));
+    });
   } catch {
     // A read-only home or race is non-fatal: telemetry just stays best-effort.
   }

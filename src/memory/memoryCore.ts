@@ -5,9 +5,10 @@
  */
 import { connect, Table, Connection } from '@lancedb/lancedb';
 import { pipeline, env as transformersEnv, type FeatureExtractionPipeline } from '@huggingface/transformers';
-import { resolve } from 'path';
+import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { c, status } from '../support/colors.js';
+import { withFileLock } from '../support/fileLock.js';
 import { safeConsole as console } from '../support/safeLog.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -404,6 +405,16 @@ export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100
   return rows.map((row: any) => String(row.id));
 }
 
+/** Cross-process lock serializing memory table mutations (writes + compaction). */
+export function memoryMutationLockPath(): string {
+  return process.env.OPENSWARM_MEMORY_MUTATION_LOCK
+    ?? join(homedir(), '.openswarm', 'memory-mutation.lock');
+}
+
+export async function withMemoryMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+  return withFileLock(memoryMutationLockPath(), operation, { timeoutMs: 120_000 });
+}
+
 /**
  * Retry a Lance write (add/update/delete) on optimistic-concurrency conflict.
  *
@@ -416,12 +427,15 @@ export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100
  * jitter to desynchronize the competing writers. Appends and predicated
  * update/delete are safe to re-run: Lance re-commits against the latest version on
  * each attempt, so a retry is not a double-apply.
+ *
+ * Each attempt runs under {@link withMemoryMutationLock} so compaction cannot
+ * interleave with a write mid-retry.
  */
 export async function withMemoryWriteRetry<T>(op: () => Promise<T>, label = 'write'): Promise<T> {
   const MAX_ATTEMPTS = 8;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await op();
+      return await withMemoryMutationLock(() => op());
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too

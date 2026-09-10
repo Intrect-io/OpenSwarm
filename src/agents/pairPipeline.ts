@@ -3,6 +3,7 @@
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 import { EventEmitter } from 'node:events';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
@@ -77,6 +78,7 @@ export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
 
+type RunControl = { signal?: AbortSignal; stuck: StuckDetector };
 
 /**
  * Resolve the coordination identity for one stage of a task.
@@ -89,14 +91,18 @@ import { stageTimeoutMs } from './stageTimeouts.js';
  */
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
+  /** Fallback for callers outside run(); each run() installs a fresh detector via AsyncLocalStorage. */
   private stuckDetector: StuckDetector;
-  /** Set per run() — aborts the pipeline + in-flight adapter call on cancel/disable. */
-  private abortSignal?: AbortSignal;
+  /** Per-run abort + stuck controls — never share across concurrent run() calls. */
+  private static runControl = new AsyncLocalStorage<RunControl>();
   /** Cache of adapter default models (heavy: OAuth + live catalog) keyed by adapter name. (INT-2393) */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
   /** Throw if this run has been cancelled. Called at iteration/stage boundaries. */
   private throwIfAborted(): void {
-    if (this.abortSignal?.aborted) throw new PipelineCancelledError();
+    if (PairPipeline.runControl.getStore()?.signal?.aborted) throw new PipelineCancelledError();
+  }
+  private getStuck(): StuckDetector {
+    return PairPipeline.runControl.getStore()?.stuck ?? this.stuckDetector;
   }
 
   constructor(config: PipelineConfig) {
@@ -129,13 +135,11 @@ export class PairPipeline extends EventEmitter {
    * On failure at any stage, returns to Worker (up to maxIterations)
    */
   async run(task: TaskItem, projectPath: string, opts?: { signal?: AbortSignal }): Promise<PipelineResult> {
+    const stuckDetector = createStuckDetector({ sameErrorRepeat: 3, revisionLoop: 4 });
+    return PairPipeline.runControl.run({ signal: opts?.signal, stuck: stuckDetector }, async () => {
     const startTime = Date.now();
     const stages: StageResult[] = [];
     const maxIterations = this.config.maxIterations ?? 3;
-    this.abortSignal = opts?.signal;
-
-    // Reset stuck detector (new pipeline run)
-    this.stuckDetector.reset();
 
     // Ensure repo graph snapshot exists (first-time scan if needed)
     if (!hasRepoSnapshot(projectPath)) {
@@ -168,6 +172,8 @@ export class PairPipeline extends EventEmitter {
       currentIteration: 0,
       taskPrefix,
       reflection: createReflectionState(),
+      abortSignal: opts?.signal,
+      stuckDetector,
     };
     try {
       if (this.config.verify?.enabled) try {
@@ -215,7 +221,7 @@ export class PairPipeline extends EventEmitter {
     } catch (error) {
       // Cancellation (project disable / manual stop) is not a failure — surface it
       // as 'cancelled' so the scheduler doesn't count it failed or trigger a retry.
-      const cancelled = error instanceof PipelineCancelledError || !!this.abortSignal?.aborted;
+      const cancelled = error instanceof PipelineCancelledError || !!PairPipeline.runControl.getStore()?.signal?.aborted;
       // A 429/usage-limit propagates up here from any stage (worker/reviewer/…).
       // Surface it as its own finalStatus so the runner pauses until quota resets
       // instead of counting a failure and spamming Linear comments. (INT-1906)
@@ -260,6 +266,7 @@ export class PairPipeline extends EventEmitter {
         },
       };
     }
+    });
   }
   /**
    * Worker에 주입할 코드 컨텍스트 수집
@@ -274,7 +281,7 @@ export class PairPipeline extends EventEmitter {
   private async runPostSuccessStage(stage: PipelineStage, context: PipelineContext, stages: StageResult[]): Promise<void> {
     try { stages.push(await this.runStage(stage, context)); }
     catch (err) {
-      if (err instanceof PipelineCancelledError || this.abortSignal?.aborted) throw err;
+      if (err instanceof PipelineCancelledError || PairPipeline.runControl.getStore()?.signal?.aborted) throw err;
       safeConsole.warn(`[${context.taskPrefix}] ${stage} skipped (non-blocking failure): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -415,7 +422,7 @@ export class PairPipeline extends EventEmitter {
             onLog,
             processContext: { taskId: taskEventKey(context.task), stage: 'worker' },
             workerContext,
-            signal: this.abortSignal,
+            signal: PairPipeline.runControl.getStore()?.signal,
             instructionCapsule: this.config.instructionCapsule,
             mcpTools: this.config.roleMcpTools?.worker,
             adapterRouting: this.config.adapterRouting,
@@ -512,7 +519,7 @@ export class PairPipeline extends EventEmitter {
                 type: 'log',
                 data: { taskId: taskEventKey(context.task), stage: 'reviewer', line: `[${prefix}] ${line}` },
               }),
-            signal: this.abortSignal,
+            signal: PairPipeline.runControl.getStore()?.signal,
             instructionCapsule: this.config.instructionCapsule,
             mcpTools: this.config.roleMcpTools?.reviewer,
             coordinationContext: coordinationContextFor(context, 'reviewer'),
@@ -777,7 +784,7 @@ export class PairPipeline extends EventEmitter {
       context.currentIteration++;
 
       // Stuck detection check (before iteration starts)
-      const stuckCheck = this.stuckDetector.check();
+      const stuckCheck = this.getStuck().check();
       if (stuckCheck.isStuck) {
         context.stuckReason = stuckCheck.reason;
         safeConsole.error(`[${context.taskPrefix}] STUCK DETECTED: ${stuckCheck.reason}`);
@@ -833,7 +840,7 @@ export class PairPipeline extends EventEmitter {
       stages.push(workerResult);
 
       // Record Worker result in stuck detector
-      this.stuckDetector.addEntry({
+      this.getStuck().addEntry({
         stage: 'worker',
         success: workerResult.success,
         output: (workerResult.result as WorkerResult).summary,
@@ -1143,7 +1150,7 @@ export class PairPipeline extends EventEmitter {
         const decision = (reviewerResult.result as ReviewResult).decision;
 
         // Record Reviewer result in stuck detector
-        this.stuckDetector.addEntry({
+        this.getStuck().addEntry({
           stage: 'reviewer',
           success: reviewerResult.success,
           decision: decision,

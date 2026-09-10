@@ -9,6 +9,7 @@ import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { withFileLockSync } from '../support/fileLock.js';
 
 /**
  * Write-temp-then-rename instead of an in-place write, so a crash mid-write (or
@@ -684,14 +685,21 @@ function ensureHistoryLoaded(): PipelineHistoryEntry[] {
 }
 
 export function appendPipelineHistory(entry: PipelineHistoryEntry): void {
-  const history = ensureHistoryLoaded();
-  history.unshift(entry); // newest first
-  if (history.length > MAX_PIPELINE_HISTORY) {
-    history.length = MAX_PIPELINE_HISTORY;
-  }
   try {
-    ensureParentDir(PIPELINE_HISTORY_FILE);
-    atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
+    withFileLockSync(`${PIPELINE_HISTORY_FILE}.lock`, () => {
+      let history: PipelineHistoryEntry[] = [];
+      try {
+        if (existsSync(PIPELINE_HISTORY_FILE)) {
+          history = JSON.parse(readFileSync(PIPELINE_HISTORY_FILE, 'utf8')) as PipelineHistoryEntry[];
+          if (!Array.isArray(history)) history = [];
+        }
+      } catch { history = []; }
+      history.unshift(entry);
+      if (history.length > MAX_PIPELINE_HISTORY) history.length = MAX_PIPELINE_HISTORY;
+      ensureParentDir(PIPELINE_HISTORY_FILE);
+      atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
+      pipelineHistory = history;
+    }, { timeoutMs: 10_000 });
   } catch (err) {
     console.warn('[PipelineHistory] Failed to save:', err);
   }

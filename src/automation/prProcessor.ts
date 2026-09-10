@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { withFileLock } from '../support/fileLock.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
 const execFileAsync = promisify(execFile);
@@ -249,6 +250,7 @@ const PRStateSchema = z.object({
 // Constants
 
 const PR_STATE_PATH = resolve(homedir(), '.openswarm', 'pr-state.json');
+const PR_STATE_LOCK = `${PR_STATE_PATH}.lock`;
 
 // PR Processor
 
@@ -367,16 +369,29 @@ export class PRProcessor {
     projectPath: string,
   ): Promise<{ success: boolean; error?: string; iterations: number }> {
     const key = `${pr.repo}#${pr.number}`;
-    const state = await this.loadState();
-    state.prs[key] = {
-      ...state.prs[key],
-      repo: pr.repo,
-      prNumber: pr.number,
-      status: 'processing',
-      iterations: 0,
-    };
+    // Lease only the durable RMW bookends — not the long pipeline — so cron
+    // saveState can still proceed while review feedback is being addressed.
+    const state = await this.withStateLock(async () => {
+      const current = await this.loadState();
+      current.prs[key] = {
+        ...current.prs[key],
+        repo: pr.repo,
+        prNumber: pr.number,
+        status: 'processing',
+        iterations: 0,
+      };
+      await this.saveStateUnlocked(current);
+      return current;
+    });
+
     await this.processReviewFeedback(pr, projectPath, state, key, 0);
-    await this.saveState(state);
+
+    await this.withStateLock(async () => {
+      const disk = await this.loadState();
+      disk.prs[key] = state.prs[key];
+      await this.saveStateUnlocked(disk);
+    });
+
     const entry = state.prs[key];
     return {
       success: entry?.status === 'completed',
@@ -1477,6 +1492,10 @@ export class PRProcessor {
   // State Persistence
   // ============================================
 
+  private async withStateLock<T>(operation: () => Promise<T>): Promise<T> {
+    return withFileLock(PR_STATE_LOCK, operation, { timeoutMs: 60_000 });
+  }
+
   private async loadState(): Promise<PRState> {
     try {
       const data = await readFile(PR_STATE_PATH, 'utf-8');
@@ -1489,8 +1508,15 @@ export class PRProcessor {
     }
   }
 
-  private async saveState(state: PRState): Promise<void> {
+  /** Atomic write only — caller must already hold {@link PR_STATE_LOCK}. */
+  private async saveStateUnlocked(state: PRState): Promise<void> {
     state.updatedAt = new Date().toISOString();
     atomicWriteFileSync(PR_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`);
+  }
+
+  private async saveState(state: PRState): Promise<void> {
+    await withFileLock(PR_STATE_LOCK, async () => {
+      await this.saveStateUnlocked(state);
+    }, { timeoutMs: 15_000 });
   }
 }

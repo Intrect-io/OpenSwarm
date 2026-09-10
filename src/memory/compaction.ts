@@ -2,7 +2,16 @@
 // OpenSwarm - Memory Compaction
 // ============================================
 
-import { getDb, getTable, initDatabase, EMBEDDING_DIM, PERMANENT_EXPIRY, normalizeRecords, setTable } from './memoryCore.js';
+import {
+  getDb,
+  getTable,
+  initDatabase,
+  EMBEDDING_DIM,
+  PERMANENT_EXPIRY,
+  normalizeRecords,
+  setTable,
+  withMemoryMutationLock,
+} from './memoryCore.js';
 import type { CognitiveMemoryRecord } from './memoryCore.js';
 import { isTransientReviewRejectionMemory } from './memoryFilters.js';
 
@@ -112,105 +121,106 @@ export async function compactMemoryTable(): Promise<{
   console.log('[Compaction] Starting memory table compaction...');
 
   try {
-    await initDatabase();
-    const table = getTable();
-    const db = getDb();
+    return await withMemoryMutationLock(async () => {
+      await initDatabase();
+      const table = getTable();
+      const db = getDb();
 
-    if (!table || !db) {
-      console.error('[Compaction] Database not initialized');
-      return { before: 0, after: 0, removed: 0, deduplicated: 0 };
-    }
+      if (!table || !db) {
+        console.error('[Compaction] Database not initialized');
+        return { before: 0, after: 0, removed: 0, deduplicated: 0 };
+      }
 
-    // 1. Read all records
-    const queryLimit = 100_000;
-    const allRecords = await table
-      .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
-      .limit(queryLimit)
-      .toArray();
+      // 1. Read all records
+      const queryLimit = 100_000;
+      const allRecords = await table
+        .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
+        .limit(queryLimit)
+        .toArray();
 
-    if (allRecords.length >= queryLimit) {
-      throw new Error(`Memory compaction refused: query reached the ${queryLimit}-row safety limit`);
-    }
+      if (allRecords.length >= queryLimit) {
+        throw new Error(`Memory compaction refused: query reached the ${queryLimit}-row safety limit`);
+      }
 
-    const beforeCount = allRecords.length;
-    console.log(`[Compaction] Found ${beforeCount} records`);
+      const beforeCount = allRecords.length;
+      console.log(`[Compaction] Found ${beforeCount} records`);
 
-    if (beforeCount === 0) {
-      console.log('[Compaction] No records to compact');
-      return { before: 0, after: 0, removed: 0, deduplicated: 0 };
-    }
+      if (beforeCount === 0) {
+        console.log('[Compaction] No records to compact');
+        return { before: 0, after: 0, removed: 0, deduplicated: 0 };
+      }
 
-    // 2. Filter valid records
-    const now = Date.now();
-    const validRecords = allRecords.filter((r: any) => {
-      if (r.id === 'init') return true;
+      // 2. Filter valid records
+      const now = Date.now();
+      const validRecords = allRecords.filter((r: any) => {
+        if (r.id === 'init') return true;
 
-      // Remove transient infrastructure failures that were previously stored as
-      // high-importance reviewer constraints.
-      if (isTransientReviewRejectionMemory(r)) return false;
+        // Remove transient infrastructure failures that were previously stored as
+        // high-importance reviewer constraints.
+        if (isTransientReviewRejectionMemory(r)) return false;
 
-      // Remove if expired
-      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) return false;
+        // Remove if expired
+        if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) return false;
 
-      // Remove if unimportant
-      if (r.importance < MIN_IMPORTANCE) return false;
+        // Remove if unimportant
+        if (r.importance < MIN_IMPORTANCE) return false;
 
-      return true;
-    });
+        return true;
+      });
 
-    const afterFilter = validRecords.length;
-    console.log(`[Compaction] After filtering: ${afterFilter} records (removed ${beforeCount - afterFilter})`);
+      const afterFilter = validRecords.length;
+      console.log(`[Compaction] After filtering: ${afterFilter} records (removed ${beforeCount - afterFilter})`);
 
-    // 3. Deduplicate
-    const deduplicated = removeDuplicates(validRecords as CognitiveMemoryRecord[]);
-    const afterDedup = deduplicated.length;
-    console.log(`[Compaction] After deduplication: ${afterDedup} records (merged ${afterFilter - afterDedup})`);
+      // 3. Deduplicate
+      const deduplicated = removeDuplicates(validRecords as CognitiveMemoryRecord[]);
+      const afterDedup = deduplicated.length;
+      console.log(`[Compaction] After deduplication: ${afterDedup} records (merged ${afterFilter - afterDedup})`);
 
-    // 4. Validate replacement before touching the live table
-    const normalized = normalizeRecords(deduplicated);
-    const targetTableName = table.name;
-    const tempTableName = `${targetTableName}_compact_${Date.now()}`;
+      // 4. Validate replacement before touching the live table
+      const normalized = normalizeRecords(deduplicated);
+      const targetTableName = table.name;
+      const tempTableName = `${targetTableName}_compact_${Date.now()}`;
 
-    console.log(`[Compaction] Creating validated replacement for ${targetTableName}...`);
-    if (normalized.length > 0) {
-      await db.createTable(tempTableName, normalized);
-    } else {
-      await db.createEmptyTable(tempTableName, await table.schema());
-    }
-
-    let replaced = false;
-    try {
-      console.log(`[Compaction] Replacing ${targetTableName} with compacted data...`);
+      console.log(`[Compaction] Creating validated replacement for ${targetTableName}...`);
       if (normalized.length > 0) {
-        await db.createTable(targetTableName, normalized, { mode: 'overwrite' });
+        await db.createTable(tempTableName, normalized);
       } else {
-        await db.createEmptyTable(targetTableName, await table.schema(), { mode: 'overwrite' });
+        await db.createEmptyTable(tempTableName, await table.schema());
       }
-      const newTable = await db.openTable(targetTableName);
-      setTable(newTable);
-      replaced = true;
-    } finally {
-      if (replaced) {
-        try {
-          await db.dropTable(tempTableName);
-        } catch (cleanupError) {
-          console.warn(`[Compaction] Failed to drop temporary table ${tempTableName}:`, cleanupError);
+
+      let replaced = false;
+      try {
+        console.log(`[Compaction] Replacing ${targetTableName} with compacted data...`);
+        if (normalized.length > 0) {
+          await db.createTable(targetTableName, normalized, { mode: 'overwrite' });
+        } else {
+          await db.createEmptyTable(targetTableName, await table.schema(), { mode: 'overwrite' });
         }
-      } else {
-        console.warn(`[Compaction] Replacement failed; retained recoverable table ${tempTableName}`);
+        const newTable = await db.openTable(targetTableName);
+        setTable(newTable);
+        replaced = true;
+      } finally {
+        if (replaced) {
+          try {
+            await db.dropTable(tempTableName);
+          } catch (cleanupError) {
+            console.warn(`[Compaction] Failed to drop temporary table ${tempTableName}:`, cleanupError);
+          }
+        } else {
+          console.warn(`[Compaction] Replacement failed; retained recoverable table ${tempTableName}`);
+        }
       }
-    }
 
-    const stats = {
-      before: beforeCount,
-      after: afterDedup,
-      removed: beforeCount - afterDedup,
-      deduplicated: afterFilter - afterDedup,
-    };
+      const stats = {
+        before: beforeCount,
+        after: afterDedup,
+        removed: beforeCount - afterDedup,
+        deduplicated: afterFilter - afterDedup,
+      };
 
-    console.log('[Compaction] Complete:', stats);
-    return stats;
-
+      console.log('[Compaction] Complete:', stats);
+      return stats;
+    });
   } catch (error) {
     console.error('[Compaction] Failed:', error);
     throw error;

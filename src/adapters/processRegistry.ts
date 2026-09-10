@@ -113,28 +113,47 @@ export function getAllProcesses(): ProcessInfo[] {
   return Array.from(registry.values());
 }
 
+const KILL_ESCALATE_MS = 5_000;
+
 /**
  * Kill a tracked process by PID.
- * Uses process tree utilities for clean shutdown.
- * Returns false if the PID is not tracked or the process is already dead.
+ * Signals through the retained ChildProcess handle — never by raw PID — so a
+ * recycled numeric PID cannot be escalated into after the original child exits.
+ * Soft kill schedules SIGKILL escalation after {@link KILL_ESCALATE_MS} only
+ * while this exact registry identity still owns the handle; the caller does not
+ * wait for that timer (so a recycled PID in those seconds is never signalled).
  */
 export async function killProcess(pid: number, force = false): Promise<boolean> {
   const info = registry.get(pid);
-  if (!info) return false;
+  const proc = processHandles.get(pid);
+  if (!info || !proc) return false;
 
-  // Ownership check: confirm the entry still belongs to the same identity
-  // before killing. A reused PID would have a different spawnedAt.
-  const current = registry.get(pid);
-  if (!current || current.taskId !== info.taskId || current.spawnedAt !== info.spawnedAt) {
-    return false;
-  }
+  const stillOurs = (): boolean => {
+    const current = registry.get(pid);
+    return (
+      !!current
+      && current.taskId === info.taskId
+      && current.spawnedAt === info.spawnedAt
+      && processHandles.get(pid) === proc
+    );
+  };
+
+  if (!stillOurs()) return false;
 
   try {
     if (force) {
-      await terminateCliProcessTree(pid);
-    } else {
-      await signalCliProcessTree(pid);
+      if (!stillOurs()) return false;
+      terminateCliProcessTree(proc);
+      return true;
     }
+
+    signalCliProcessTree(proc, 'SIGTERM');
+    const timer = setTimeout(() => {
+      if (stillOurs()) terminateCliProcessTree(proc);
+    }, KILL_ESCALATE_MS);
+    proc.once('close', () => {
+      clearTimeout(timer);
+    });
     return true;
   } catch {
     return false;

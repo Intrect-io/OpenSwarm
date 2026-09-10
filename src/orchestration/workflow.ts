@@ -7,6 +7,8 @@ import { basename, isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import * as yaml from 'yaml';
+import { atomicWriteFile } from '../support/atomicFile.js';
+import { withFileLock } from '../support/fileLock.js';
 
 // Types & Interfaces
 
@@ -277,7 +279,9 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
   const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
-  await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');
+  await withFileLock(`${filePath}.lock`, async () => {
+    await atomicWriteFile(filePath, yaml.stringify(workflow));
+  }, { timeoutMs: 10_000 });
   console.log(`[Workflow] Saved: ${workflow.name} (${workflow.id})`);
 }
 
@@ -328,7 +332,9 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
   const filePath = storageFilePath(EXECUTION_DIR, execution.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(execution, null, 2), 'utf-8');
+  await withFileLock(`${filePath}.lock`, async () => {
+    await atomicWriteFile(filePath, JSON.stringify(execution, null, 2));
+  }, { timeoutMs: 10_000 });
 }
 
 /**

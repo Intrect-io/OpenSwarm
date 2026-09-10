@@ -1,11 +1,22 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { withMemoryWriteRetry } from './memoryCore.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
+
+const lockDir = mkdtempSync(join(tmpdir(), 'openswarm-mem-lock-'));
+process.env.OPENSWARM_MEMORY_MUTATION_LOCK = join(lockDir, 'mutation.lock');
+
+const { withMemoryWriteRetry } = await import('./memoryCore.js');
 
 // withMemoryWriteRetry wraps Lance writes so `openswarm review --max` (up to 16
 // concurrent reviewer processes sharing one on-disk table) survives Lance's
 // optimistic-concurrency conflicts instead of surfacing "Too many concurrent
 // writers". Fake timers skip the real backoff sleeps.
 describe('withMemoryWriteRetry (INT-2817 store-path concurrency)', () => {
+  afterAll(() => {
+    rmSync(lockDir, { recursive: true, force: true });
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
