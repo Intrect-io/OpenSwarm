@@ -7,6 +7,7 @@ import {
   chatToResponsesInput,
   toolsToResponsesTools,
   reduceResponsesEvents,
+  createResponsesReducer,
   resolveReasoningEffort,
   selectDefaultCodexResponseModel,
 } from './codexResponses.js';
@@ -292,6 +293,66 @@ describe('reduceResponsesEvents', () => {
       },
     });
     expect(res.usage).toEqual({ prompt_tokens: 42, completion_tokens: 7, total_tokens: 49, cached_tokens: 0 });
+  });
+
+  it('streams 10k events with correct reduction and bounded memory (O(1) event retention)', () => {
+    const EVENT_COUNT = 10_000;
+    const expected = Array.from({ length: EVENT_COUNT }, (_, i) => String(i % 10)).join('');
+
+    // Production streaming path: feed events one-at-a-time with no event history array.
+    const reducer = createResponsesReducer();
+    const heapBefore = process.memoryUsage().heapUsed;
+    for (let i = 0; i < EVENT_COUNT; i += 1) {
+      reducer.handle({ type: 'response.output_text.delta', delta: String(i % 10) });
+    }
+    reducer.handle({
+      type: 'response.completed',
+      response: { usage: { input_tokens: 3, output_tokens: EVENT_COUNT } },
+    });
+    const res = reducer.finish();
+    const heapAfter = process.memoryUsage().heapUsed;
+
+    expect(res.choices[0].message.content).toBe(expected);
+    expect(res.choices[0].message.content).toHaveLength(EVENT_COUNT);
+    expect(res.choices[0].finish_reason).toBe('stop');
+    expect(res.usage).toEqual({
+      prompt_tokens: 3,
+      completion_tokens: EVENT_COUNT,
+      total_tokens: 3 + EVENT_COUNT,
+      cached_tokens: 0,
+    });
+
+    // Bound: aggregated text is ~10KB. Retaining 10k parsed event objects on top
+    // typically costs multiple MB. Cap growth well above text size but far below
+    // a full event-history retention profile so GC noise does not flake the suite.
+    const growth = Math.max(0, heapAfter - heapBefore);
+    expect(growth).toBeLessThan(16 * 1024 * 1024);
+
+    // Cost of retaining the event history itself (the defect we avoid on the stream path).
+    const history: Array<{ type: string; delta: string }> = [];
+    const histBefore = process.memoryUsage().heapUsed;
+    for (let i = 0; i < EVENT_COUNT; i += 1) {
+      history.push({ type: 'response.output_text.delta', delta: String(i % 10) });
+    }
+    const histAfter = process.memoryUsage().heapUsed;
+    const historyGrowth = Math.max(0, histAfter - histBefore);
+    // Sanity: the history array alone is a meaningful allocation; incremental
+    // reduction growth should stay at or below that ceiling.
+    expect(history.length).toBe(EVENT_COUNT);
+    if (historyGrowth > 256 * 1024) {
+      expect(growth).toBeLessThanOrEqual(historyGrowth);
+    }
+    history.length = 0;
+
+    // List wrapper still produces the same final answer for large streams.
+    expect(
+      reduceResponsesEvents(
+        Array.from({ length: EVENT_COUNT }, (_, i) => ({
+          type: 'response.output_text.delta' as const,
+          delta: String(i % 10),
+        })),
+      ).choices[0].message.content,
+    ).toBe(expected);
   });
 });
 

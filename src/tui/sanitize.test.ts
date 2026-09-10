@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { safeIsoDate, sanitizeTerminalText } from './sanitize.js';
+import { clampAndSanitize, safeIsoDate, sanitizeTerminalText } from './sanitize.js';
 
 describe('terminal sanitization', () => {
   it('removes CSI, OSC, and control bytes while preserving layout whitespace', () => {
@@ -10,5 +10,14 @@ describe('terminal sanitization', () => {
   it('does not render invalid timestamps', () => {
     expect(safeIsoDate('not-a-date')).toBeUndefined();
     expect(safeIsoDate('2026-07-23T00:00:00Z')).toBe('2026-07-23T00:00:00.000Z');
+  });
+
+  it('clamps length and neutralizes Discord mentions after stripping escapes', () => {
+    const raw = `\u001b[31m${'@everyone'} <@123> ${'x'.repeat(50)}`;
+    const out = clampAndSanitize(raw, 20);
+    expect(out.length).toBeLessThanOrEqual(20);
+    expect(out).not.toContain('@everyone');
+    expect(out.startsWith('@\u200Beveryone')).toBe(true);
+    expect(out).not.toMatch(/\u001b/);
   });
 });

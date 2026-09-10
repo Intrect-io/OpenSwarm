@@ -60,10 +60,11 @@ export function sanitizeAndNeutralize(value: string): string {
 }
 
 /**
- * Clamp text to a maximum length with an ellipsis suffix, then sanitize.
+ * Sanitize then clamp text to a maximum length with an ellipsis suffix.
  * Suitable for Discord embed fields derived from external input.
+ * Applies terminal-escape stripping, Discord mention neutralization, then length bound.
  */
 export function clampAndSanitize(value: string, limit: number): string {
-  const clamped = value.length <= limit ? value : value.slice(0, Math.max(0, limit - 1)) + '\u2026';
-  return sanitizeAndNeutralize(clamped);
+  const cleaned = sanitizeAndNeutralize(sanitizeTerminalText(value));
+  return cleaned.length <= limit ? cleaned : cleaned.slice(0, Math.max(0, limit - 1)) + '\u2026';
 }

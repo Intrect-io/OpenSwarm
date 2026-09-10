@@ -29,15 +29,23 @@ import {
 import { t, getDateLocale } from '../locale/index.js';
 import { clampAndSanitize } from '../tui/sanitize.js';
 
+/** Discord embed description hard limit (API). */
+export const DISCORD_EMBED_DESCRIPTION_LIMIT = 4096;
+/** Discord embed footer text hard limit (API). */
+const DISCORD_EMBED_FOOTER_LIMIT = 2048;
+
 /**
- * Helper: Reply with Embed for consistent Discord UI
+ * Helper: Reply with Embed for consistent Discord UI.
+ * Truncates and sanitizes externally derived content before render.
  */
 async function replyWithEmbed(msg: Message, content: string, color: number = 0x00ff41): Promise<void> {
+  // Sanitize terminal escapes, neutralize mentions, then clamp to Discord's embed limit.
+  const description = clampAndSanitize(content, DISCORD_EMBED_DESCRIPTION_LIMIT);
   const embed = new EmbedBuilder()
-    .setDescription(content)
+    .setDescription(description)
     .setColor(color)
     .setTimestamp();
-  await msg.reply({ embeds: [embed] });
+  await msg.reply({ embeds: [embed], allowedMentions: { parse: [] } });
 }
 
 /**
@@ -151,7 +159,7 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
 
     const embed = new EmbedBuilder()
       .setTitle(`${issue.identifier} — ${issue.title}`)
-      .setDescription(clampAndSanitize(issue.description || t('discord.issue.noDescription'), 4096))
+      .setDescription(clampAndSanitize(issue.description || t('discord.issue.noDescription'), DISCORD_EMBED_DESCRIPTION_LIMIT))
       .setColor(0x00ae86)
       .setTimestamp(issue.updatedAt);
 
@@ -188,7 +196,7 @@ export async function handleCI(msg: Message): Promise<void> {
 
   const embed = new EmbedBuilder()
     .setTitle(t('discord.ci.title'))
-    .setDescription(clampAndSanitize(status.description || '', 4096))
+    .setDescription(clampAndSanitize(status.description || '', DISCORD_EMBED_DESCRIPTION_LIMIT))
     .setColor(status.success ? 0x00ff41 : 0xff0000)
     .setTimestamp(status.updatedAt);
 
@@ -249,7 +257,10 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
             progressChunks = [];
             if (settled || !combined.trim()) return;
             try {
-              _lastProgressMsg = await msg.reply(`${t('discord.dev.inProgress', { repo })}\n\`\`\`\`\n${combined}\n\`\`\``);
+              _lastProgressMsg = await msg.reply({
+                content: `${t('discord.dev.inProgress', { repo })}\n\`\`\`\`\n${clampAndSanitize(combined, 1800)}\n\`\`\``,
+                allowedMentions: { parse: [] },
+              });
             } catch { /* best-effort progress update */ }
           }, 10_000);
         }
@@ -263,8 +274,11 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
     // Catch and report a bounded generic error instead of propagating raw
     // dev-task internals to the Discord user.
     stopProgressReporting();
-    const safeMsg = clampDiscordText(err instanceof Error ? err.message : String(err), 500);
-    await msg.reply(`❌ ${t('discord.dev.taskError', { error: safeMsg })}`);
+    console.error('[Discord] Dev task failed:', err instanceof Error ? err.message : String(err));
+    await msg.reply({
+      content: '❌ Development task failed. Check server logs for details.',
+      allowedMentions: { parse: [] },
+    });
     return;
   }
 
@@ -272,8 +286,11 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
     // Rejected before launch — time window, unknown repo, task already running.
     // No child process exists, so nothing will ever call onComplete.
     stopProgressReporting();
-    const errMsg = typeof result.error === 'string' ? result.error : String(result.error);
-    await msg.reply(`❌ ${clampDiscordText(errMsg, 1800)}`);
+    console.error('[Discord] Dev task rejected:', typeof result.error === 'string' ? result.error : String(result.error));
+    await msg.reply({
+      content: '❌ Development task could not start. Check server logs for details.',
+      allowedMentions: { parse: [] },
+    });
   }
 }
 
@@ -409,12 +426,12 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
 
     const embed = new EmbedBuilder()
       .setTitle(t('discord.codex.title'))
-      .setDescription(clampAndSanitize(recent.join('\n'), 4096))
+      .setDescription(clampAndSanitize(recent.join('\n'), DISCORD_EMBED_DESCRIPTION_LIMIT))
       .setColor(0x9b59b6)
-      .setFooter({ text: clampAndSanitize(t('discord.codex.pathLabel', { path: codex.getCodexPath() }), 2048) })
+      .setFooter({ text: clampAndSanitize(t('discord.codex.pathLabel', { path: codex.getCodexPath() }), DISCORD_EMBED_FOOTER_LIMIT) })
       .setTimestamp();
 
-    await msg.reply({ embeds: [embed] });
+    await msg.reply({ embeds: [embed], allowedMentions: { parse: [] } });
     return;
   }
 
@@ -459,7 +476,7 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
 
       const embed = new EmbedBuilder()
         .setTitle(t('discord.codex.sessionTitle', { id }))
-        .setDescription(clampAndSanitize(session.description || '', 4096))
+        .setDescription(clampAndSanitize(session.description || '', DISCORD_EMBED_DESCRIPTION_LIMIT))
         .setColor(0x9b59b6)
         .setTimestamp(session.startedAt);
 
