@@ -615,7 +615,7 @@ openswarm start --foreground  # run attached (logs stream to the terminal)
 openswarm status              # pid, uptime, log path
 openswarm stop                # stop the daemon
 openswarm dash                # open the web dashboard (:3847)
-openswarm cost --since 24h    # LLM spend by model (--by stage|task|project|adapter|day, --json)
+openswarm cost --since 24h    # LLM spend by model (--by stage|task|project|adapter|day|hour, --json)
 ```
 
 Every model API call is appended to `~/.openswarm/usage/<UTC date>.jsonl` with the

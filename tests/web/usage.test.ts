@@ -12,11 +12,12 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
 import {
   attributedTasks, cacheRate, costPerCall, formatCost, formatPercent, formatTokens,
-  loadUsage, rateClass, renderDays, renderSummary, renderTable, share,
+  formatBucket, loadUsage, rateClass, renderDays, renderSummary, renderTable, share,
+  timeAxisFor, WINDOWS,
   rowShare, startUsageView, truncationNote, UNATTRIBUTED, windowFromSearch,
 } from '../../web/static/js/usage.mjs';
 
@@ -30,6 +31,17 @@ function row(key: string, over: Record<string, number> = {}) {
 }
 
 /** Mount the real shell so the tests bind to the same ids the page ships. */
+// `UTC on the wire, local on screen` is invisible where the two coincide, and
+// CI runners are UTC — a mutant that skips the conversion entirely passes
+// there. Pinned to a non-zero offset so the assertion can fail everywhere.
+// Only the offset is load-bearing; any non-UTC zone would do. (AGT-4296)
+const ORIGINAL_TZ = process.env.TZ;
+beforeAll(() => { process.env.TZ = 'Asia/Seoul'; });
+afterAll(() => {
+  if (ORIGINAL_TZ === undefined) delete process.env.TZ;
+  else process.env.TZ = ORIGINAL_TZ;
+});
+
 function mountShell(): void {
   document.body.innerHTML = SHELL.replace(/^[\s\S]*?<body[^>]*>/, '').replace(/<\/body>[\s\S]*$/, '');
 }
@@ -390,6 +402,7 @@ describe('loading', () => {
     const data = await loadUsage('7d', fetchImpl as never);
 
     const asked = fetchImpl.mock.calls.map(([url]) => new URL(url as string, 'http://x').searchParams.get('by'));
+    // 7d is past the hourly ceiling, so the time axis is still `day`.
     expect(asked.sort()).toEqual(['adapter', 'day', 'model', 'project', 'stage', 'task']);
     expect(fetchImpl.mock.calls.every(([url]) => (url as string).includes('since=7d'))).toBe(true);
     expect(data.model.rows[0].key).toBe('model-a');
@@ -401,7 +414,9 @@ describe('loading', () => {
 
     expect(document.querySelector('#table-model tbody td')?.textContent).toBe('model-a');
     expect(document.querySelector('#table-stage tbody td')?.textContent).toBe('stage-a');
-    expect(document.querySelector('#days .bar-day')?.textContent).toBe('day-a');
+    // The default window is 24h, so the series comes off the hour axis.
+    expect(document.querySelector('#days .bar-day')?.textContent).toBe('hour-a');
+    expect(document.querySelector('#days-title')?.textContent).toBe('시간별');
     expect(document.querySelector('#status')?.textContent).toContain('기준');
   });
 
@@ -620,5 +635,78 @@ describe('loading', () => {
     select.dispatchEvent(new Event('change'));
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
     expect((fetchImpl.mock.calls[0][0] as string)).toContain('since=30d');
+  });
+});
+
+describe('windows and the time axis (AGT-4296)', () => {
+  beforeEach(mountShell);
+
+  const ok = (by: string) => ({
+    ok: true,
+    json: async () => ({ since: '2026-09-09T00:00:00.000Z', until: '2026-09-10T00:00:00.000Z', by, rows: [row(`${by}-a`)], total: row('total') }),
+  });
+
+  it('picks the finest axis that still draws a series, and stops before it is a texture', () => {
+    expect(timeAxisFor('1h')).toBe('hour');
+    expect(timeAxisFor('2h')).toBe('hour');
+    expect(timeAxisFor('48h')).toBe('hour');
+    expect(timeAxisFor('49h')).toBe('day');
+    expect(timeAxisFor('7d')).toBe('day');
+    expect(timeAxisFor('90m')).toBe('hour');
+    // A hand-typed ISO date can name a window of any length, so it takes the
+    // coarse axis rather than a guess. Same for a missing value.
+    expect(timeAxisFor('2026-09-01')).toBe('day');
+    expect(timeAxisFor(undefined)).toBe('day');
+  });
+
+  it('offers the short windows the selector was missing', () => {
+    expect(WINDOWS.slice(0, 3)).toEqual(['1h', '2h', '6h']);
+    const offered = [...document.querySelectorAll('#window option')].map(o => (o as HTMLOptionElement).value);
+    expect(offered).toEqual(WINDOWS);
+    // Every option is a window the URL parser will accept back.
+    expect(offered.every(v => windowFromSearch(`?since=${v}`) === v)).toBe(true);
+  });
+
+  it('asks for the hour axis on a short window and renders it as the series', async () => {
+    const fetchImpl = vi.fn(async (url: string) => ok(new URL(url, 'http://x').searchParams.get('by')!));
+    const data = await loadUsage('2h', fetchImpl as never);
+
+    const asked = fetchImpl.mock.calls.map(([url]) => new URL(url as string, 'http://x').searchParams.get('by'));
+    expect(asked).toContain('hour');
+    expect(asked).not.toContain('day');
+    expect(data.timeAxis).toBe('hour');
+    expect(data.time).toBe(data.hour);
+  });
+
+  it("renders a UTC hour bucket on the reader's clock, and leaves a day alone", () => {
+    // A literal, not the implementation's own expression: recomputing the
+    // expected value with the code under test says "the code equals the code"
+    // and would not notice a wrong `timeZone`. 14:00Z is 23시 in the pinned zone.
+    expect(formatBucket('2026-09-10T14')).toBe('9. 10. 23시');
+    // A day key must NOT be converted — shifting it by the offset relabels the
+    // day, which is AGT-4293's scope, not this change's.
+    expect(formatBucket('2026-09-10')).toBe('2026-09-10');
+    expect(formatBucket('not-a-bucket')).toBe('not-a-bucket');
+    expect(formatBucket(undefined)).toBe('');
+  });
+
+  it('keeps the raw bucket key reachable after formatting it', () => {
+    document.body.innerHTML = '<div id="d"></div>';
+    renderDays(document.querySelector('#d')!, { rows: [row('2026-09-10T14')], total: row('total') });
+    const label = document.querySelector('#d .bar-day') as HTMLElement;
+    expect(label.title).toBe('2026-09-10T14');
+    expect(label.textContent).toBe('9. 10. 23시');
+  });
+
+  it('heads the card with the axis it actually drew', async () => {
+    const fetchImpl = vi.fn(async (url: string) => ok(new URL(url, 'http://x').searchParams.get('by')!));
+    const view = startUsageView({ fetchImpl: fetchImpl as never, location: { search: '' } as never });
+    (document.querySelector('#window') as HTMLSelectElement).value = '7d';
+    await view.refresh();
+    expect(document.querySelector('#days-title')?.textContent).toBe('일별');
+
+    (document.querySelector('#window') as HTMLSelectElement).value = '1h';
+    await view.refresh();
+    expect(document.querySelector('#days-title')?.textContent).toBe('시간별');
   });
 });

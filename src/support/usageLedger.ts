@@ -144,7 +144,7 @@ function isUsageRecord(value: unknown): value is UsageRecord {
     && (typeof v.costUsd === 'number' || v.costUsd === null);
 }
 
-export const USAGE_GROUP_KEYS = ['model', 'stage', 'task', 'project', 'adapter', 'day'] as const;
+export const USAGE_GROUP_KEYS = ['model', 'stage', 'task', 'project', 'adapter', 'day', 'hour'] as const;
 export type UsageGroupKey = (typeof USAGE_GROUP_KEYS)[number];
 
 export interface UsageAggregateRow {
@@ -173,6 +173,11 @@ function groupKeyOf(record: UsageRecord, by: UsageGroupKey): string {
     case 'task': return record.taskId ?? '(unattributed)';
     case 'project': return record.cwd ? basename(record.cwd) : '(unknown)';
     case 'day': return record.ts.slice(0, 10);
+    // '2026-09-10T14'. UTC on the wire, like `day`; the client renders it in
+    // local time. A window shorter than a day drawn on the `day` axis is a
+    // single bar, which is not a series — which is why the dashboard's
+    // shortest window used to be 24h. (AGT-4296)
+    case 'hour': return record.ts.slice(0, 13);
   }
 }
 

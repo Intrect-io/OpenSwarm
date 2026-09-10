@@ -103,6 +103,23 @@ describe('usage ledger', () => {
     expect(aggregateUsage(records, 'day').rows.map((r) => r.key).sort()).toEqual(['2026-09-02', '2026-09-03']);
   });
 
+  it('groups by UTC hour, so a window shorter than a day is still a series', () => {
+    // Rendered on the `day` axis a 1h window is one bar, which is not a series
+    // — the reason the shortest window on the dashboard used to be 24h.
+    const records = [
+      record({ ts: '2026-09-02T03:59:59.999Z' }),
+      record({ ts: '2026-09-02T04:00:00.000Z' }),
+      record({ ts: '2026-09-02T04:30:00.000Z' }),
+    ];
+    const rows = aggregateUsage(records, 'hour').rows;
+
+    expect(rows.map((r) => r.key).sort()).toEqual(['2026-09-02T03', '2026-09-02T04']);
+    expect(rows.find((r) => r.key === '2026-09-02T04')?.calls).toBe(2);
+    // The same records still bucket into one day, so `hour` is an addition and
+    // not a redefinition of the coarser axis.
+    expect(aggregateUsage(records, 'day').rows).toHaveLength(1);
+  });
+
   it('parses durations back from now and ISO dates', () => {
     const now = Date.parse('2026-09-02T12:00:00.000Z');
     expect(parseUsageSince('90m', now)).toBe(now - 90 * 60_000);
