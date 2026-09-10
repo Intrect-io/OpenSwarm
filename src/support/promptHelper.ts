@@ -46,7 +46,7 @@ export interface Prompter {
 }
 
 /** Maximum number of queued stdin lines to prevent unbounded memory growth. */
-const MAX_LINE_QUEUE = 100;
+export const MAX_LINE_QUEUE = 100;
 
 /**
  * Create an interactive prompter backed by readline.
@@ -67,7 +67,7 @@ export function createPrompter(input: Readable = processStdin, output: Writable 
     if (w) w.resolve(line);
     else {
       lineQueue.push(line);
-      // Bound queue to prevent unbounded memory growth (INT-XXXX)
+      // Bound queue to prevent unbounded memory growth
       if (lineQueue.length > MAX_LINE_QUEUE) lineQueue.shift();
     }
   });

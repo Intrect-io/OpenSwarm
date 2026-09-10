@@ -26,6 +26,18 @@ export function deleteLastGrapheme(value: string): string {
   return value.slice(0, lastIndex);
 }
 
+/** Prompt icon (2) + cursor (1) + border padding (4) + border (2). */
+export const CHAT_INPUT_DISPLAY_OVERHEAD = 2 + 1 + 4 + 2;
+
+/**
+ * Clip displayed chat input to the terminal-column budget while leaving the
+ * full controlled value untouched for submit/editing.
+ */
+export function clipChatInputDisplay(value: string, columns: number): string {
+  const maxDisplayLen = Math.max(10, columns - CHAT_INPUT_DISPLAY_OVERHEAD);
+  return value.length > maxDisplayLen ? value.slice(0, maxDisplayLen - 1) + '…' : value;
+}
+
 export interface ChatInputProps {
   value: string;
   active: boolean;
@@ -100,11 +112,7 @@ export function ChatInput({
   // Clip displayed text to available terminal width, preserving the full
   // controlled value. Account for prompt icon (2 chars) + cursor (1 char)
   // + border padding (2 chars left/right = 4 chars) + border (2 chars).
-  const DISPLAY_OVERHEAD = 2 + 1 + 4 + 2; // icon + cursor + padding + border
-  const maxDisplayLen = Math.max(10, columns - DISPLAY_OVERHEAD);
-  const displayValue = value.length > maxDisplayLen
-    ? value.slice(0, maxDisplayLen - 1) + '…'
-    : value;
+  const displayValue = clipChatInputDisplay(value, columns);
 
   return (
     <Box borderStyle="round" borderColor={active ? theme.borderActive : theme.border} paddingX={1}>
