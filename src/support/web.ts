@@ -28,8 +28,8 @@ import * as memory from '../memory/index.js';
 import { PairPipeline, type PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
-import { detectTailscaleIP, isLoopbackAddress, isTailscaleAddress } from './tailscaleNetwork.js';
-export { detectTailscaleIP, isTailscaleAddress } from './tailscaleNetwork.js';
+import { detectTailscaleIP, isLoopbackAddress, isTailscaleAddress, isAuthorizedTailscalePeer } from './tailscaleNetwork.js';
+export { detectTailscaleIP, isTailscaleAddress, isAuthorizedTailscalePeer } from './tailscaleNetwork.js';
 import { runChatCompletion, getDefaultChatModel } from './chatBackend.js';
 import { handleGraphQL, isGraphQLRequest } from '../issues/graphql/server.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
@@ -108,7 +108,8 @@ function safeErrorMessage(err: unknown): string {
 
 function isTrustedTailscaleRequest(req: IncomingMessage): boolean {
   return process.env.OPENSWARM_TRUST_TAILSCALE === 'true'
-    && isTailscaleAddress(req.socket.remoteAddress)
+    // Range membership is not trust: the peer must be explicitly allowlisted.
+    && isAuthorizedTailscalePeer(req.socket.remoteAddress)
     && isTrustedLocalOrigin(req);
 }
 

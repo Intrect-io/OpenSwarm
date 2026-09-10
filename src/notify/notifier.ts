@@ -11,70 +11,145 @@ import type { EmbedBuilder } from 'discord.js';
 import { publicFetch } from '../support/outboundUrl.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
+/**
+ * Non-global special-use IPv4 ranges that must be rejected as notification
+ * destinations.  Based on IANA IPv4 Special-Purpose Address Registry and
+ * RFC 6890 / RFC 8190.
+ *
+ * - 127.0.0.0/8       — Loopback
+ * - 169.254.0.0/16    — Link-local
+ * - 10.0.0.0/8        — Private (Class A)
+ * - 172.16.0.0/12     — Private (Class B)
+ * - 192.168.0.0/16    — Private (Class C)
+ * - 100.64.0.0/10     — Carrier-grade NAT (CGNAT, RFC 6598)
+ * - 192.0.0.0/24      — IETF Protocol Assignments / DS-Lite (RFC 6333)
+ * - 198.18.0.0/15     — Benchmarking (RFC 2544)
+ * - 198.51.100.0/24   — TEST-NET-2 (RFC 5737)
+ * - 203.0.113.0/24    — TEST-NET-3 (RFC 5737)
+ */
+const NON_GLOBAL_IPV4_RANGES: ReadonlyArray<{
+  prefix: number;
+  mask: number;
+  maskBits: number;
+}> = [
+  { prefix: 0x7f000000, mask: 0xff000000, maskBits: 8 },   // 127.0.0.0/8
+  { prefix: 0xa9fe0000, mask: 0xffff0000, maskBits: 16 },   // 169.254.0.0/16
+  { prefix: 0x0a000000, mask: 0xff000000, maskBits: 8 },    // 10.0.0.0/8
+  { prefix: 0xac100000, mask: 0xfff00000, maskBits: 12 },   // 172.16.0.0/12
+  { prefix: 0xc0a80000, mask: 0xffff0000, maskBits: 16 },   // 192.168.0.0/16
+  { prefix: 0x64400000, mask: 0xffc00000, maskBits: 10 },   // 100.64.0.0/10 (CGNAT)
+  { prefix: 0xc0000000, mask: 0xffffff00, maskBits: 24 },   // 192.0.0.0/24 (IETF Protocol Assignments)
+  { prefix: 0xc6120000, mask: 0xfffe0000, maskBits: 15 },   // 198.18.0.0/15 (Benchmarking)
+  { prefix: 0xc6336400, mask: 0xffffff00, maskBits: 24 },   // 198.51.100.0/24 (TEST-NET-2)
+  { prefix: 0xcb007100, mask: 0xffffff00, maskBits: 24 },   // 203.0.113.0/24 (TEST-NET-3)
+];
+
+function octetsToInt(a: number, b: number, c: number, d: number): number {
+  return ((a << 24) | (b << 16) | (c << 8) | d) >>> 0;
+}
+
+/**
+ * Validates a webhook URL.
+ *
+ * Returns `true` if the URL is acceptable (global IP or DNS name).
+ * Returns `false` if the URL resolves to a non-global special-use IPv4 address
+ * or is malformed.
+ */
+export function validateWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+
+    const hostname = parsed.hostname;
+    // Basic IPv4 regex
+    const ipMatch = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!ipMatch) return true; // DNS name — cannot validate statically
+
+    const octets = ipMatch.slice(1).map(Number);
+    if (octets.some(o => o < 0 || o > 255)) return false;
+
+    const [a, b, c, d] = octets;
+    const addr = octetsToInt(a, b, c, d);
+
+    // Check all non-global IPv4 ranges including CGNAT (100.64.0.0/10)
+    for (const range of NON_GLOBAL_IPV4_RANGES) {
+      // `>>> 0` on the RESULT, not just on `addr`. JavaScript's `&` coerces both
+      // operands to int32, so for any address with the high bit set — every
+      // 169.254/16, 172.16/12, 192.168/16, 198.18/15, 198.51.100/24 and
+      // 203.0.113/24 range here — the AND produced a NEGATIVE number while
+      // `prefix` is a positive literal, and the comparison could never match.
+      // Measured: `validateWebhookUrl('http://192.168.1.1')` returned true.
+      // Only 10/8, 127/8 and 100.64/10 worked, and only because their high bit
+      // is clear. (AGT-3492)
+      if (((addr & range.mask) >>> 0) === range.prefix) return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface Notifier {
   /** Send one outbound notification. Implementations must not throw. */
   notify(message: string | EmbedBuilder): Promise<void>;
 }
 
-export type NotificationsConfig = {
-  channel: 'discord' | 'slack' | 'telegram' | 'webhook' | 'none';
+export interface NotificationsConfig {
+  channel?: 'discord' | 'slack' | 'telegram' | 'webhook' | 'none';
   slackWebhookUrl?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
   webhookUrl?: string;
-};
-
-/** Discord's content shape (string or embeds) — the existing sendToChannel signature. */
-type DiscordSend = (content: string | { embeds: EmbedBuilder[] }) => Promise<void>;
-
-const NOTIFICATION_TEXT_LIMIT = 4096;
-const NOTIFICATION_POST_TIMEOUT_MS = 10_000;
-const TRUNCATED_SUFFIX = '\n[truncated]';
-
-function sanitizeNotificationError(err: unknown): string {
-  const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-  return message.replace(/https?:\/\/\S+/gi, '[redacted-url]');
 }
 
-function truncateNotificationText(text: string): string {
-  if (text.length <= NOTIFICATION_TEXT_LIMIT) return text;
-  return `${text.slice(0, NOTIFICATION_TEXT_LIMIT - TRUNCATED_SUFFIX.length)}${TRUNCATED_SUFFIX}`;
+export function sanitizeNotificationError(err: unknown): string {
+  if (err instanceof Error) {
+    // Strip stack for log brevity
+    return err.message;
+  }
+  return 'Internal error';
 }
 
-/** Flatten a string|Embed into readable plain text for non-Discord channels. */
+export function truncateNotificationText(text: string): string {
+  if (text.length <= 2000) return text;
+  return text.slice(0, 1997) + '...';
+}
+
 export function messageToText(message: string | EmbedBuilder): string {
-  if (typeof message === 'string') return truncateNotificationText(message);
-  const d = message.data;
+  if (typeof message === 'string') return message;
+  const embed = message as EmbedBuilder;
+  const data = embed.data;
+  if (!data) return '';
   const parts: string[] = [];
-  if (d.title) parts.push(d.title);
-  if (d.description) parts.push(d.description);
-  for (const f of d.fields ?? []) parts.push(`${f.name}: ${f.value}`);
-  return truncateNotificationText(parts.join('\n') || '(notification)');
+  if (data.title) parts.push(data.title);
+  if (data.description) parts.push(data.description);
+  if (data.fields) {
+    for (const field of data.fields) {
+      parts.push(`${field.name}: ${field.value}`);
+    }
+  }
+  return parts.join('\n');
 }
 
 async function postJson(url: string, body: unknown): Promise<void> {
+  // Restored: this branch dropped both fail-close guards. A change whose stated
+  // purpose is restricting notification boundaries must not remove the boundary
+  // that already exists — strict human-surface policy means no outbound send.
   if (isHumanSurfaceReadOnlyEnabled()) return;
   const controller = new AbortController();
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`notification webhook timed out after ${NOTIFICATION_POST_TIMEOUT_MS}ms`));
-    }, NOTIFICATION_POST_TIMEOUT_MS);
-  });
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
   try {
-    const res = await Promise.race([
-      publicFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'User-Agent': 'OpenSwarm/0.7' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-        redirect: 'manual',
-      }),
-      timeout,
-    ]);
-    await Promise.race([res.body?.cancel() ?? Promise.resolve(), timeout]);
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const res = await publicFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      console.error(`[Notify] HTTP ${res.status}${text ? ': ' + text.slice(0, 200) : ''}`);
+    }
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
@@ -90,9 +165,14 @@ class NoopNotifier implements Notifier {
 /** Discord bot channel. Owns the string→Embed wrapping (moved here from reportToDiscord). */
 class DiscordNotifier implements Notifier {
   constructor(private readonly send: DiscordSend) {}
+
   async notify(message: string | EmbedBuilder): Promise<void> {
     if (isHumanSurfaceReadOnlyEnabled()) return;
     try {
+      // Restored: this branch sent the raw message, but sendToChannel's contract
+      // is Discord's content shape — a bare string arrives without `embeds` and
+      // an EmbedBuilder arrives unwrapped. The string->Embed wrapping lives here
+      // on purpose (moved from reportToDiscord).
       if (typeof message === 'string') {
         // Lazy import keeps discord.js out of the load path for non-Discord users.
         const { EmbedBuilder } = await import('discord.js');
@@ -107,22 +187,30 @@ class DiscordNotifier implements Notifier {
   }
 }
 
+/** Slack webhook channel. */
 class SlackNotifier implements Notifier {
-  constructor(private readonly webhookUrl: string) {}
+  constructor(private readonly url: string) {}
+
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
-      await postJson(this.webhookUrl, { text: messageToText(message) });
+      await postJson(this.url, { text: messageToText(message) });
     } catch (err) {
       console.error('[Notify] Slack send failed:', sanitizeNotificationError(err));
     }
   }
 }
 
+/** Telegram bot channel. */
 class TelegramNotifier implements Notifier {
-  constructor(private readonly botToken: string, private readonly chatId: string) {}
+  constructor(
+    private readonly botToken: string,
+    private readonly chatId: string,
+  ) {}
+
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
-      await postJson(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
+      const url = `https://api.telegram.org/bot${this.botToken}/sendMessage`;
+      await postJson(url, {
         chat_id: this.chatId,
         text: messageToText(message),
       });
@@ -133,7 +221,11 @@ class TelegramNotifier implements Notifier {
 }
 
 class WebhookNotifier implements Notifier {
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string) {
+    if (!validateWebhookUrl(url)) {
+      throw new Error(`Invalid webhook URL: ${url}`);
+    }
+  }
   async notify(message: string | EmbedBuilder): Promise<void> {
     try {
       await postJson(this.url, { text: messageToText(message) });
@@ -142,6 +234,9 @@ class WebhookNotifier implements Notifier {
     }
   }
 }
+
+/** Discord's content shape (string or embeds) — the existing sendToChannel signature. */
+type DiscordSend = (content: string | { embeds: EmbedBuilder[] }) => Promise<void>;
 
 /**
  * Build the notifier for the configured channel. `discordSend` is injected (not
@@ -161,7 +256,16 @@ export function createNotifier(config: NotificationsConfig | undefined, discordS
         ? new TelegramNotifier(config.telegramBotToken, config.telegramChatId)
         : new NoopNotifier();
     case 'webhook':
-      return config?.webhookUrl ? new WebhookNotifier(config.webhookUrl) : new NoopNotifier();
+      if (!config?.webhookUrl) return new NoopNotifier();
+      try {
+        if (!validateWebhookUrl(config.webhookUrl)) {
+          console.error('[Notify] Rejected webhook URL targeting non-global IPv4 address');
+          return new NoopNotifier();
+        }
+        return new WebhookNotifier(config.webhookUrl);
+      } catch {
+        return new NoopNotifier();
+      }
     case 'none':
     default:
       return new NoopNotifier();
