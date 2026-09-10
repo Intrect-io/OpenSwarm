@@ -16,6 +16,7 @@ import { resolve, basename, join } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Codex storage path
 const CODEX_DIR = resolve(homedir(), '.openswarm/codex');
@@ -74,7 +75,7 @@ _No sessions recorded yet._
 ---
 _Last updated: ${new Date().toISOString()}_
 `;
-    await fs.writeFile(indexPath, initialIndex, 'utf-8');
+    await atomicWriteFile(indexPath, initialIndex, 0o644);
     console.log('[Codex] Initialized index.md');
   }
 }
@@ -351,7 +352,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
     `_Last updated: ${new Date().toISOString()}_`
   );
 
-  await fs.writeFile(indexPath, content, 'utf-8');
+  await atomicWriteFile(indexPath, content, 0o644);
   console.log('[Codex] Updated index.md');
 }
 

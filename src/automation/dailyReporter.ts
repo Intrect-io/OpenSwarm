@@ -6,6 +6,9 @@
 import { Cron } from 'croner';
 import { LinearClient, type Project } from '@linear/sdk';
 import { postStatusUpdate } from '../linear/index.js';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 
 let cronJob: Cron | null = null;
 let linearClient: LinearClient | null = null;
@@ -14,6 +17,29 @@ let teamId: string | null = null;
 let reportInFlight: Promise<void> | null = null;
 // Project path mapping (projectId → projectPath) for knowledge graph metrics
 let projectPathMapping = new Map<string, string>();
+
+// Watermark file — persisted only after a fully successful report generation.
+// A crash or partial failure leaves the previous watermark intact so the next
+// run can retry the same window.
+const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.json');
+
+function readWatermark(): string | null {
+  try {
+    if (existsSync(WATERMARK_FILE)) {
+      return JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')).date as string;
+    }
+  } catch { /* corrupt → treat as no watermark */ }
+  return null;
+}
+
+function writeWatermark(date: string): void {
+  const dir = dirname(WATERMARK_FILE);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  // Atomic: write to temp then rename so a crash never corrupts the watermark.
+  const tmp = WATERMARK_FILE + '.tmp';
+  writeFileSync(tmp, JSON.stringify({ date }), 'utf8');
+  renameSync(tmp, WATERMARK_FILE);
+}
 
 export interface DailyReporterConfig {
   schedule: string; // Cron expression (default: "0 18 * * *" for 6 PM daily)
@@ -41,34 +67,40 @@ export function registerProjectPath(projectId: string, projectPath: string): voi
 }
 
 /**
- * Start daily reporter with cron schedule
+ * Start the daily reporter cron job
  */
 export function startDailyReporter(config: DailyReporterConfig): void {
   if (!config.enabled) {
-    console.log('[DailyReporter] Disabled in configuration');
+    console.log('[DailyReporter] Disabled by config');
     return;
   }
 
   if (cronJob) {
-    console.log('[DailyReporter] Already running');
-    return;
+    console.warn('[DailyReporter] Already running, stopping first');
+    stopDailyReporter();
   }
 
-  const schedule = config.schedule || '0 18 * * *'; // Default: 6 PM daily
+  const schedule = config.schedule || '0 18 * * *';
+  console.log(`[DailyReporter] Starting with schedule: ${schedule}`);
 
   cronJob = new Cron(schedule, async () => {
-    if (reportInFlight) return;
-    reportInFlight = generateDailyReports()
-      .catch((error) => console.error('[DailyReporter] Scheduled report failed:', error))
-      .finally(() => { reportInFlight = null; });
-    await reportInFlight;
+    if (reportInFlight) {
+      console.log('[DailyReporter] Previous report still in progress, skipping');
+      return;
+    }
+    reportInFlight = generateDailyReports();
+    try {
+      await reportInFlight;
+    } finally {
+      reportInFlight = null;
+    }
   });
 
-  console.log(`[DailyReporter] Started with schedule: ${schedule}`);
+  console.log('[DailyReporter] Cron job started');
 }
 
 /**
- * Stop daily reporter
+ * Stop the daily reporter cron job
  */
 export function stopDailyReporter(): void {
   if (cronJob) {
@@ -79,7 +111,8 @@ export function stopDailyReporter(): void {
 }
 
 /**
- * Manually trigger daily reports (for testing)
+ * Generate daily status reports for all active projects
+ * Watermark is persisted ONLY after all reports succeed.
  */
 export async function generateDailyReports(): Promise<void> {
   if (!linearClient) {
@@ -134,12 +167,24 @@ export async function generateDailyReports(): Promise<void> {
 
     console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
 
+    // Only persist watermark when ALL reports succeeded.
+    // If any failed, the watermark stays at the previous value so the next
+    // run retries the same window instead of skipping it.
+    if (failCount === 0) {
+      const today = new Date().toISOString().slice(0, 10);
+      writeWatermark(today);
+      console.log(`[DailyReporter] Watermark persisted: ${today}`);
+    } else {
+      console.warn(`[DailyReporter] ${failCount} report(s) failed — watermark NOT updated`);
+    }
+
     // Send summary to Discord
     if (discordReporter && successCount > 0) {
       await sendDiscordSummary(activeProjects.length, successCount, failCount);
     }
   } catch (error) {
     console.error('[DailyReporter] Failed to generate reports:', error);
+    // Watermark NOT persisted on exception — retry next window.
   }
 }
 

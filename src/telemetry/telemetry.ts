@@ -16,12 +16,32 @@
 
 import os, { homedir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  writeFileSync,
+  unlinkSync,
+  fsyncSync,
+  statSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import {
+  isProofCapableSpace,
+  processAppearsAlive,
+  processNamespaceId,
+  sameProcessNamespace,
+} from '../support/processLiveness.js';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const TELEMETRY_FILE = join(STATE_DIR, 'telemetry.json');
+const TELEMETRY_LOCK = `${TELEMETRY_FILE}.lock`;
+const LOCK_STALE_MS = 30_000;
+const LOCK_ABANDON_MS = 600_000;
 
 // Collection endpoint (Cloudflare Worker → D1 intrect-telemetry.openswarm_events).
 // Kept fixed in the client so a local environment variable cannot redirect even
@@ -94,11 +114,86 @@ export function mergeState(
   };
 }
 
+function readTelemetryLockOwner(lockPath: string): { pid: number; token: string; ns?: string | null } | null {
+  try {
+    const value = JSON.parse(readFileSync(lockPath, 'utf8')) as { pid?: number; token?: string; ns?: string | null };
+    return Number.isInteger(value.pid) && (value.pid ?? 0) > 0 && typeof value.token === 'string'
+      ? { pid: value.pid!, token: value.token, ns: value.ns === null ? null : typeof value.ns === 'string' ? value.ns : undefined }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reclaim a crashed telemetry lock without permanently disabling persistence.
+ * Namespace-proofed: never free a live owner in another pid space.
+ */
+function recoverTelemetryLock(): void {
+  if (!existsSync(TELEMETRY_LOCK)) return;
+  const owner = readTelemetryLockOwner(TELEMETRY_LOCK);
+  try {
+    const age = Date.now() - statSync(TELEMETRY_LOCK).mtimeMs;
+    if (!owner) {
+      if (age > LOCK_STALE_MS) unlinkSync(TELEMETRY_LOCK);
+      return;
+    }
+    if (isProofCapableSpace(owner.ns ?? undefined) && sameProcessNamespace(owner.ns ?? undefined)) {
+      if (!processAppearsAlive(owner.pid)) unlinkSync(TELEMETRY_LOCK);
+      return;
+    }
+    if (age > LOCK_ABANDON_MS) unlinkSync(TELEMETRY_LOCK);
+  } catch {
+    // Leave the lock; writeState will retry or degrade gracefully.
+  }
+}
+
+function withTelemetryLock(operation: () => void): void {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const token = randomUUID();
+  const deadline = Date.now() + 2_000;
+  let lockFd: number | undefined;
+
+  while (lockFd === undefined) {
+    try {
+      lockFd = openSync(TELEMETRY_LOCK, 'wx', 0o600);
+      writeFileSync(lockFd, JSON.stringify({
+        pid: process.pid,
+        token,
+        ns: processNamespaceId() ?? null,
+      }), 'utf8');
+      fsyncSync(lockFd);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      recoverTelemetryLock();
+      if (Date.now() >= deadline) {
+        // Do NOT permanently disable persistence — proceed without the lock.
+        // A stuck lock must not silence telemetry state forever.
+        operation();
+        return;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+
+  try {
+    operation();
+  } finally {
+    closeSync(lockFd);
+    try {
+      if (readTelemetryLockOwner(TELEMETRY_LOCK)?.token === token) unlinkSync(TELEMETRY_LOCK);
+    } catch { /* best-effort */ }
+  }
+}
+
 function writeState(state: TelemetryState): void {
   try {
-    atomicWriteFileSync(TELEMETRY_FILE, JSON.stringify(mergeState(readState(), state), null, 2));
+    withTelemetryLock(() => {
+      atomicWriteFileSync(TELEMETRY_FILE, JSON.stringify(mergeState(readState(), state), null, 2));
+    });
   } catch {
     // A read-only home or race is non-fatal: telemetry just stays best-effort.
+    // Crucially we never set a permanent "persistence disabled" flag.
   }
 }
 

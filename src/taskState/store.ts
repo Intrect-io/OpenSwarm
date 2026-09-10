@@ -401,31 +401,34 @@ export function listTaskStates(): OpenSwarmTaskState[] {
   return Object.values(ensureStoreLoaded().tasks);
 }
 
-export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
-  return withStoreLock(() => {
-    const store = ensureStoreLoaded();
-    const current = store.tasks[issueId] || createDefaultState(issueId);
-    const { execution, worktree, ...topLevelPatch } = patch;
-    const definedTopLevelPatch = Object.fromEntries(
-      Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
-    ) as Partial<OpenSwarmTaskState>;
-    const merged: OpenSwarmTaskState = {
-      ...current,
-      ...definedTopLevelPatch,
-      issueId,
-      childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
-      dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
-      dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
-      fileScope: patch.fileScope ?? current.fileScope ?? [],
-      execution: { ...current.execution, ...execution },
-      worktree: { ...current.worktree, ...worktree },
-      updatedAt: new Date().toISOString(),
-    };
+/** Mutate the in-memory store. Caller MUST hold `withStoreLock`. */
+function upsertTaskStateUnlocked(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
+  const store = ensureStoreLoaded();
+  const current = store.tasks[issueId] || createDefaultState(issueId);
+  const { execution, worktree, ...topLevelPatch } = patch;
+  const definedTopLevelPatch = Object.fromEntries(
+    Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
+  ) as Partial<OpenSwarmTaskState>;
+  const merged: OpenSwarmTaskState = {
+    ...current,
+    ...definedTopLevelPatch,
+    issueId,
+    childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
+    dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
+    dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
+    fileScope: patch.fileScope ?? current.fileScope ?? [],
+    execution: { ...current.execution, ...execution },
+    worktree: { ...current.worktree, ...worktree },
+    updatedAt: new Date().toISOString(),
+  };
 
-    store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
-    persistStore();
-    return store.tasks[issueId];
-  });
+  store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
+  persistStore();
+  return store.tasks[issueId];
+}
+
+export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
+  return withStoreLock(() => upsertTaskStateUnlocked(issueId, patch));
 }
 
 export function enrichTaskFromState(task: TaskItem): TaskItem {
@@ -508,10 +511,16 @@ export function updateTaskLinearState(issueId: string, linearState: string): Ope
   // stale, downgrade it so dependencies do not stay incorrectly resolved or
   // actively running. This is a local-only update; it never writes back to
   // Linear (preserves R7).
-  const current = getTaskState(issueId);
-  const patch = planLinearStateReconciliation(current, linearState);
-  if (patch === null && current) return current;
-  return upsertTaskState(issueId, patch ?? { linearState });
+  //
+  // Patch planning MUST happen under the write lock: a concurrent upsert can
+  // change execution status between an unlocked read and the write, and the
+  // reconciliation would then commit a stale downgrade (or miss one).
+  return withStoreLock(() => {
+    const current = ensureStoreLoaded().tasks[issueId];
+    const patch = planLinearStateReconciliation(current, linearState);
+    if (patch === null && current) return current;
+    return upsertTaskStateUnlocked(issueId, patch ?? { linearState });
+  });
 }
 
 export function markTaskInProgress(

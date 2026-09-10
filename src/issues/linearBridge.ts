@@ -7,11 +7,136 @@
 
 import type { SqliteIssueStore } from './sqliteStore.js';
 import type { Issue, IssueStatus, IssuePriority } from './schema.js';
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  writeFileSync,
+  readFileSync,
+  unlinkSync,
+  fsyncSync,
+  statSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import {
+  isProofCapableSpace,
+  processAppearsAlive,
+  processNamespaceId,
+  sameProcessNamespace,
+} from '../support/processLiveness.js';
 
 // Linear SDK는 동적 import (Linear 미사용 시 로드 안 함)
 let linearClient: any = null;
 let linearTeamId: string = '';
 let linearInitPromise: Promise<void> | null = null;
+
+/** Per-local-issue in-process queue — serializes createOutboundIssue callers. */
+const outboundQueues = new Map<string, Promise<unknown>>();
+
+const OUTBOUND_CLAIM_DIR = join(homedir(), '.openswarm', 'linear-outbound-claims');
+const CLAIM_STALE_MS = 600_000;
+
+type OutboundClaim = { pid: number; token: string; ns?: string | null; issueId: string; createdAt: string };
+
+function claimPathFor(issueId: string): string {
+  // Sanitize to a single path segment.
+  const safe = issueId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 200);
+  return join(OUTBOUND_CLAIM_DIR, `${safe}.claim`);
+}
+
+function readClaim(path: string): OutboundClaim | null {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<OutboundClaim>;
+    if (!Number.isInteger(value.pid) || (value.pid ?? 0) <= 0 || typeof value.token !== 'string') return null;
+    return {
+      pid: value.pid!,
+      token: value.token,
+      ns: value.ns === null ? null : typeof value.ns === 'string' ? value.ns : undefined,
+      issueId: typeof value.issueId === 'string' ? value.issueId : '',
+      createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function releaseStaleOutboundClaim(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const claim = readClaim(path);
+  if (!claim) {
+    try {
+      if (Date.now() - statSync(path).mtimeMs > 30_000) {
+        unlinkSync(path);
+        return true;
+      }
+    } catch { /* ignore */ }
+    return false;
+  }
+  if (isProofCapableSpace(claim.ns ?? undefined) && sameProcessNamespace(claim.ns ?? undefined)) {
+    if (!processAppearsAlive(claim.pid)) {
+      try { unlinkSync(path); return true; } catch { return false; }
+    }
+    return false;
+  }
+  // Cross-namespace or unknown: age-based reclaim only.
+  try {
+    if (Date.now() - statSync(path).mtimeMs > CLAIM_STALE_MS) {
+      unlinkSync(path);
+      return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
+/**
+ * Acquire a durable claim file for outbound Linear creation. Survives crashes:
+ * a restarted process finds the claim, re-checks local linearId, and either
+ * completes or reclaims after proving the prior owner is gone.
+ */
+async function withOutboundClaim<T>(issueId: string, operation: () => Promise<T>): Promise<T> {
+  mkdirSync(OUTBOUND_CLAIM_DIR, { recursive: true });
+  const path = claimPathFor(issueId);
+  const token = randomUUID();
+  const deadline = Date.now() + 30_000;
+  let acquired = false;
+
+  while (!acquired) {
+    try {
+      const fd = openSync(path, 'wx', 0o600);
+      try {
+        writeFileSync(fd, JSON.stringify({
+          pid: process.pid,
+          token,
+          ns: processNamespaceId() ?? null,
+          issueId,
+          createdAt: new Date().toISOString(),
+        }), 'utf8');
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      acquired = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      releaseStaleOutboundClaim(path);
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for outbound Linear claim: ${issueId}`);
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    try {
+      if (readClaim(path)?.token === token) unlinkSync(path);
+    } catch { /* best-effort */ }
+  }
+}
 
 /**
  * Linear 브릿지 초기화
@@ -91,53 +216,81 @@ export async function syncFromLinear(
 }
 
 /**
- * 로컬 → Linear: 로컬 이슈를 Linear에 생성
+ * 로컬 → Linear: 로컬 이슈를 Linear에 생성 (durable claim + per-issue serialize)
  */
 export async function pushToLinear(
   store: SqliteIssueStore,
   issueId: string,
 ): Promise<string | null> {
-  await waitForLinearBridgeInit();
-  if (!linearClient) {
-    console.warn('[LinearBridge] 클라이언트 미초기화');
-    return null;
-  }
+  return createOutboundIssue(store, issueId);
+}
 
-  const issue = store.getIssue(issueId);
-  if (!issue) return null;
-  if (issue.linearId) return issue.linearId; // 이미 연결됨
+/**
+ * Durable outbound Linear creation for a local issue.
+ *
+ * Two processes can both see `linearId` absent and both call createIssue —
+ * producing duplicates. A claim file (wx) per local issue serializes creators
+ * and survives a crash: a restarted process finds the claim, re-checks the
+ * local row, and either finishes linking or retries under a fresh claim.
+ */
+export async function createOutboundIssue(
+  store: SqliteIssueStore,
+  issueId: string,
+): Promise<string | null> {
+  // In-process serialize: crash-surviving claim file alone does not serialize
+  // two awaits in the same process that both pass the wx race.
+  let unlock!: () => void;
+  const held = new Promise<void>((resolve) => { unlock = resolve; });
+  const prev = outboundQueues.get(issueId) ?? Promise.resolve();
+  outboundQueues.set(issueId, prev.then(() => held, () => held));
+  await prev;
 
   try {
-    const stateId = await resolveLinearStateId(mapStatusToLinear(issue.status));
+    return await withOutboundClaim(issueId, async () => {
+      await waitForLinearBridgeInit();
+      if (!linearClient) {
+        console.warn('[LinearBridge] 클라이언트 미초기화');
+        return null;
+      }
 
-    const created = await linearClient.createIssue({
-      teamId: linearTeamId,
-      title: issue.title,
-      description: issue.description || undefined,
-      priority: mapPriorityToLinear(issue.priority),
-      stateId,
+      const issue = store.getIssue(issueId);
+      if (!issue) return null;
+      if (issue.linearId) return issue.linearId; // 이미 연결됨
+
+      try {
+        const stateId = await resolveLinearStateId(mapStatusToLinear(issue.status));
+
+        const created = await linearClient.createIssue({
+          teamId: linearTeamId,
+          title: issue.title,
+          description: issue.description || undefined,
+          priority: mapPriorityToLinear(issue.priority),
+          stateId,
+        });
+
+        const linearIssue = await created.issue;
+        if (!linearIssue) return null;
+
+        store.updateIssue(issueId, {
+          linearId: linearIssue.id,
+          linearIdentifier: linearIssue.identifier,
+          linearUrl: linearIssue.url,
+        });
+
+        store.addEvent(issueId, 'linked', {
+          content: `Linear에 생성: ${linearIssue.identifier}`,
+          newValue: linearIssue.identifier,
+        });
+
+        console.log(`[LinearBridge] 이슈 ${issueId} → Linear ${linearIssue.identifier}`);
+        return linearIssue.id;
+      } catch (err) {
+        console.error('[LinearBridge] Linear 생성 실패:', err);
+        return null;
+      }
     });
-
-    const linearIssue = await created.issue;
-    if (!linearIssue) return null;
-
-    // 로컬 이슈에 Linear ID 연결
-    store.updateIssue(issueId, {
-      linearId: linearIssue.id,
-      linearIdentifier: linearIssue.identifier,
-      linearUrl: linearIssue.url,
-    });
-
-    store.addEvent(issueId, 'linked', {
-      content: `Linear에 생성: ${linearIssue.identifier}`,
-      newValue: linearIssue.identifier,
-    });
-
-    console.log(`[LinearBridge] 이슈 ${issueId} → Linear ${linearIssue.identifier}`);
-    return linearIssue.id;
-  } catch (err) {
-    console.error('[LinearBridge] Linear 생성 실패:', err);
-    return null;
+  } finally {
+    unlock();
   }
 }
 
