@@ -257,5 +257,5 @@ export function formatSkillDocReport(result: SkillDocumenterResult): string {
     lines.push(`**Error:** ${result.error}`);
   }
 
-  return lines.join('\n');
+  return clampDiscordText(lines.join('\n'), 4000);
 }

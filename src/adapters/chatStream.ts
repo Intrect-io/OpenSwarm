@@ -115,14 +115,22 @@ export async function consumeChatCompletionsStream(
   const reader = res.body?.getReader();
   if (!reader) throw new Error('chat stream: empty response body');
 
+  const MAX_CHAT_CHUNKS = 1024;
+  const MAX_CONTENT_LENGTH = 65536; // 64KB
   const chunks: StreamChunk[] = [];
   const decoder = new TextDecoder();
   let buffer = '';
+  let totalContentLength = 0;
   const handle = (c: StreamChunk | null) => {
     if (!c) return;
     const delta = c.choices?.[0]?.delta?.content;
-    if (onToken && typeof delta === 'string' && delta) onToken(delta);
-    chunks.push(c);
+    if (onToken && typeof delta === 'string' && delta) {
+      totalContentLength += delta.length;
+      if (totalContentLength <= MAX_CONTENT_LENGTH) {
+        onToken(delta);
+      } // Truncate silently if exceeded
+    }
+    if (chunks.length < MAX_CHAT_CHUNKS) chunks.push(c);
   };
   for (;;) {
     const { done, value } = await reader.read();

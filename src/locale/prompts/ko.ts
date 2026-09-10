@@ -37,6 +37,8 @@ function promptInlineData(value: string): string {
     .replaceAll('\n', '\\n');
 }
 
+import { koReviewerChecklistAddon } from './ko_reviewer_checklist_addon';
+
 export const koPrompts: PromptTemplates = {
   systemPrompt: `# OpenSwarm — 코드 동료
 

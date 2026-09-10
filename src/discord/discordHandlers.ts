@@ -30,9 +30,15 @@ import { t, getDateLocale } from '../locale/index.js';
 /**
  * Helper: Reply with Embed for consistent Discord UI
  */
+const DISCORD_EMBED_DESCRIPTION_LIMIT = 4096;
+
 async function replyWithEmbed(msg: Message, content: string, color: number = 0x00ff41): Promise<void> {
+  // Normalize newlines and enforce Discord embed description limit
+  const normalized = content.replace(/\r\n/g, '\n').replace(/\n+/g, ' ').trim();
+  const truncated = normalized.slice(0, DISCORD_EMBED_DESCRIPTION_LIMIT);
+  
   const embed = new EmbedBuilder()
-    .setDescription(content)
+    .setDescription(truncated)
     .setColor(color)
     .setTimestamp();
   await msg.reply({ embeds: [embed] });

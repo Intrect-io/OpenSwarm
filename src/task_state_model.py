@@ -30,7 +30,7 @@ TaskExecutionStatus = Literal[
 if ConfigDict is not None:
 
     class AliasModel(BaseModel):
-        model_config = ConfigDict(populate_by_name=True)
+        model_config = ConfigDict(populate_by_name=True, exclude_none=True)
 
 else:
 

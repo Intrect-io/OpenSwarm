@@ -113,6 +113,7 @@ export async function reviseMemory(
     await updateMemoryRecord(table, revised);
 
     console.log(`[Memory] Revised ${memoryId}`);
+    await transaction.commit();
     return true;
   } catch (error) {
     console.error('[Memory] Revision error:', error);
@@ -403,6 +404,7 @@ export async function consolidateMemories(): Promise<{
   merged: number;
   groups: Array<{ kept: string; merged: string[] }>;
 }> {
+  const transaction = await table.database.transaction();
   try {
     await initDatabase();
     const table = getTable();

@@ -27,6 +27,7 @@ export function migrateAutomationSchema(db: Database.Database): void {
         state_version INTEGER NOT NULL DEFAULT 1,
         attempt_no INTEGER NOT NULL DEFAULT 0,
         owner_instance_id TEXT,
+        owner_namespace_id TEXT,
         lease_token TEXT,
         lease_epoch INTEGER NOT NULL DEFAULT 0,
         lease_expires_at INTEGER,

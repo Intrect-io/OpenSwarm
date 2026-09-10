@@ -3117,7 +3117,7 @@ export class AutonomousRunner {
       },
       reviewer: {
         adapter: reviewerAdapter,
-        model: defaultRoles?.reviewer?.model ?? this.config.reviewerModel
+        model: defaultRoles?.reviewer?.model ?? this.config.reviewerModel ?? defaultRoles?.worker?.model
           ?? await resolveAdapterDefaultModel(reviewerAdapter, this.defaultModelCache),
         enabled: defaultRoles?.reviewer?.enabled !== false,
       },

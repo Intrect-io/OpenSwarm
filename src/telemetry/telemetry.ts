@@ -120,7 +120,9 @@ export function isTelemetryEnabled(): boolean {
 function getInstallId(): string {
   const state = readState();
   if (isValidInstallId(state?.installId)) return state.installId;
-  writeState({ installId: nanoid(), noticeShown: state?.noticeShown });
+  const newId = nanoid();
+  writeState({ installId: newId, noticeShown: state?.noticeShown });
+  return newId;
   // Read back rather than returning the freshly minted id: a concurrent first
   // run may have won, and the event should carry the id the install actually
   // keeps, not the one this process happened to generate.

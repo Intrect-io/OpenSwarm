@@ -12,6 +12,7 @@ import type { Issue, IssueStatus, IssuePriority } from './schema.js';
 let linearClient: any = null;
 let linearTeamId: string = '';
 let linearInitPromise: Promise<void> | null = null;
+let linearInitAttempts = 0;
 
 /**
  * Linear 브릿지 초기화
@@ -23,10 +24,14 @@ export function initLinearBridge(apiKey: string, teamId: string): Promise<void> 
   linearClient = null;
   linearInitPromise = import('@linear/sdk').then(({ LinearClient }) => {
     linearClient = new LinearClient({ apiKey });
+    linearInitAttempts = 0; // Reset on success
     console.log('[LinearBridge] 초기화 완료 — team:', teamId);
   }).catch((err) => {
     linearClient = null;
-    console.warn('[LinearBridge] Linear SDK 로드 실패:', err);
+    linearInitAttempts++;
+    console.warn(`[LinearBridge] Linear SDK 로드 실패 (시도 ${linearInitAttempts}):`, err);
+    // Allow retry on next call by clearing the rejected promise
+    linearInitPromise = null;
   });
   return linearInitPromise;
 }

@@ -70,7 +70,7 @@ export function formatPipelineResult(result: PipelineResult): string {
     lines.push(`  ${emoji} ${stage.stage} (${duration}s) @ ${time}`);
   }
 
-  return lines.join('\n');
+  return clampDiscordText(lines.join('\n'), 4000);
 }
 
 /**
@@ -137,8 +137,11 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     const worker = result.workerResult;
     let workerValue = '';
 
+    import { truncateText } from '../../utils/output/budgets';
+
     if (worker.summary) {
-      workerValue += `${worker.summary.slice(0, 200)}${worker.summary.length > 200 ? '...' : ''}\n\n`;
+      const truncated = truncateText(worker.summary, 200);
+      workerValue += `${truncated}\n\n`;
     }
 
     if (worker.filesChanged && worker.filesChanged.length > 0) {

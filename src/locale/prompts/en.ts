@@ -36,6 +36,8 @@ function promptInlineData(value: string): string {
     .replaceAll('\n', '\\n');
 }
 
+import { enReviewerChecklistAddon } from './en_reviewer_checklist_addon';
+
 export const enPrompts: PromptTemplates = {
   systemPrompt: `# OpenSwarm — Autonomous Code Supervisor
 

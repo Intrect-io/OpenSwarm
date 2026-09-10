@@ -275,6 +275,10 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
  * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
+  const validation = validateWorkflow(workflow);
+  if (!validation.valid) {
+    throw new Error(`Invalid workflow: ${validation.errors.join(', ')}`);
+  }
   const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
   await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');

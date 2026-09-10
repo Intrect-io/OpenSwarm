@@ -415,7 +415,7 @@ export function formatReviewFeedback(result: ReviewResult): string {
     }
   }
 
-  return lines.join('\n');
+  return clampDiscordText(lines.join('\n'), 4000);
 }
 
 /**
