@@ -118,6 +118,30 @@ describe('checkpoint stash identity', () => {
     expect(result.success).toBe(true);
     expect(await readFile(join(repo, 'tracked.txt'), 'utf8')).toBe('committed\n');
   });
+
+  it('exact message match: overlapping execution IDs abc vs abcd restore only abc', async () => {
+    // Prefix-overlapping IDs must not select the wrong stash via includes().
+    const { createCheckpoint, rollbackToCheckpoint } = await loadRollback();
+
+    await writeFile(join(repo, 'tracked.txt'), 'ABC CHECKPOINT\n', 'utf8');
+    const ckAbc = await createCheckpoint('abc', repo);
+    expect(ckAbc.stashId).toBeDefined();
+
+    await writeFile(join(repo, 'tracked.txt'), 'ABCD CHECKPOINT\n', 'utf8');
+    const ckAbcd = await createCheckpoint('abcd', repo);
+    expect(ckAbcd.stashId).toBeDefined();
+
+    // Intervening unrelated stash shifts indices further.
+    await writeFile(join(repo, 'tracked.txt'), 'INTERVENING\n', 'utf8');
+    execFileSync('git', ['-C', repo, 'stash', 'push', '-m', 'intervening', '--include-untracked'], { stdio: 'pipe' });
+
+    const result = await rollbackToCheckpoint(ckAbc.id, 'reset_hard');
+
+    expect(result.success).toBe(true);
+    expect(await readFile(join(repo, 'tracked.txt'), 'utf8')).toBe('ABC CHECKPOINT\n');
+    // abcd's stash must still be present — we must not have popped it by accident.
+    expect(git('stash', 'list')).toContain('openswarm-checkpoint-abcd');
+  });
 });
 
 describe('test harness', () => {

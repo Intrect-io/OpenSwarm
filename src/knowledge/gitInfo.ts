@@ -45,15 +45,59 @@ interface FileChurn {
 }
 
 /**
- * Calculate per-file commit count over the last 30 days using NUL-delimited
- * `git log` output.  The format emits alternating timestamp\0filename\0…
- * tokens; position in the split determines which is which, so a numeric
- * filename like "12345" is never mistaken for a timestamp.
+ * Parse NUL-delimited `git log -z --format=%ct --name-only` output.
+ *
+ * Empty tokens reset to "expecting timestamp" (commit boundary). The first
+ * non-empty token after reset is the timestamp; subsequent non-empty tokens
+ * are filenames and are never parsed as numbers (handles optional leading `\n`).
+ */
+export function parseNulDelimitedChurnOutput(
+  output: string,
+): Map<string, { path: string; commitCount: number; lastCommitDate: number }> {
+  const churns = new Map<string, FileChurn>();
+  let expectingTimestamp = true;
+  let currentTimestamp = 0;
+
+  for (const token of output.split('\0')) {
+    if (!token) {
+      expectingTimestamp = true;
+      continue;
+    }
+
+    if (expectingTimestamp) {
+      const parsed = parseInt(token.trim(), 10);
+      currentTimestamp = Number.isFinite(parsed) ? parsed * 1000 : 0;
+      expectingTimestamp = false;
+      continue;
+    }
+
+    // Filenames are NEVER parsed as numbers — even if named "12345".
+    const filePath = token.startsWith('\n') ? token.slice(1) : token;
+    if (!filePath) continue;
+    const existing = churns.get(filePath);
+    if (existing) {
+      existing.commitCount++;
+      if (currentTimestamp > existing.lastCommitDate) {
+        existing.lastCommitDate = currentTimestamp;
+      }
+    } else {
+      churns.set(filePath, {
+        path: filePath,
+        commitCount: 1,
+        lastCommitDate: currentTimestamp,
+      });
+    }
+  }
+
+  return churns;
+}
+
+/**
+ * Calculate per-file commit count over the last 30 days
  */
 async function getFileChurns(projectPath: string, sinceDays: number = 30): Promise<Map<string, FileChurn>> {
-  const churns = new Map<string, FileChurn>();
-
   try {
+    // git log --since="30 days ago" --name-only --format="%ct"
     const output = await runGitCommand(projectPath, [
       'log',
       `--since=${sinceDays} days ago`,
@@ -62,50 +106,11 @@ async function getFileChurns(projectPath: string, sinceDays: number = 30): Promi
       '--format=%ct',
     ]);
 
-    let currentTimestamp = 0;
-    // `git log --format='%ct' -z --name-only` emits alternating
-    // timestamp\0filename\0timestamp\0filename\0…  Using position in the
-    // split (even = timestamp, odd = filename) avoids misclassifying a
-    // numeric filename like "12345" as a timestamp.
-    const tokens = output.split('\0');
-
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i];
-      if (!token) continue;
-
-      // Even indices (0, 2, 4, …) are commit timestamps
-      if (i % 2 === 0) {
-        const parsed = parseInt(token.trim(), 10);
-        if (isNaN(parsed)) {
-          continue; // Skip invalid timestamps, though they shouldn't occur
-        }
-        currentTimestamp = parsed * 1000; // Convert to ms
-        continue;
-      }
-
-      // `-z` preserves embedded newlines and other whitespace in filenames.
-      // Do not attempt to parse the token as a number; treat as filename unconditionally.
-      const filePath = token.startsWith('\n') ? token.slice(1) : token;
-      if (!filePath) continue;
-      const existing = churns.get(filePath);
-      if (existing) {
-        existing.commitCount++;
-        if (currentTimestamp > existing.lastCommitDate) {
-          existing.lastCommitDate = currentTimestamp;
-        }
-      } else {
-        churns.set(filePath, {
-          path: filePath,
-          commitCount: 1,
-          lastCommitDate: currentTimestamp,
-        });
-      }
-    }
+    return parseNulDelimitedChurnOutput(output);
   } catch (err) {
     console.warn(`[GitInfo] Failed to get file churns:`, err);
+    return new Map();
   }
-
-  return churns;
 }
 
 /**
@@ -129,23 +134,29 @@ export async function enrichWithGitInfo(
   ];
 
   for (const mod of modules) {
-    const path = mod.path || mod.id;
-    const churn = churns.get(path);
-    if (!churn) continue;
-
-    const gitInfo: GitInfo = {
-      churnScore: churn.commitCount / maxCommits,
-      lastCommitDate: churn.lastCommitDate,
-      commitCount: churn.commitCount,
-    };
-
-    mod.setMetadata('gitInfo', gitInfo);
+    const churn = churns.get(mod.path);
+    if (churn) {
+      const gitInfo: GitInfo = {
+        lastCommitDate: churn.lastCommitDate,
+        commitCount30d: churn.commitCount,
+        churnScore: Math.round((churn.commitCount / maxCommits) * 1000) / 1000,
+      };
+      mod.gitInfo = gitInfo;
+    } else {
+      // File not in git history (no changes in 30 days)
+      mod.gitInfo = {
+        lastCommitDate: 0,
+        commitCount30d: 0,
+        churnScore: 0,
+      };
+    }
   }
+
+  console.log(`[GitInfo] Enriched ${modules.length} modules with git data (${churns.size} files had changes in ${sinceDays}d)`);
 }
 
 /**
- * Get recently changed files since a given timestamp
- * (used for incremental update trigger)
+ * List of recently changed files (for incremental update trigger)
  */
 export async function getRecentlyChangedFiles(
   projectPath: string,

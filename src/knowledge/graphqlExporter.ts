@@ -2,7 +2,7 @@
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
@@ -402,22 +402,39 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
   };
 }
 
+function assertSafeOpenswarmDir(projectPath: string, dir: string): void {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    throw new Error(`[security] refusing to export: .openswarm is missing after mkdir`);
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new Error(`[security] refusing to export: .openswarm is not a real directory`);
+  }
+  const expected = join(realpathSync(projectPath), '.openswarm');
+  const actual = realpathSync(dir);
+  if (actual !== expected) {
+    throw new Error(`[security] refusing to export: .openswarm path escapes project (${actual} !== ${expected})`);
+  }
+}
+
 // .openswarm/ 디렉토리에 스키마 + 스냅샷 저장
 export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   schemaPath: string;
   snapshotPath: string;
 } {
   const dir = join(projectPath, '.openswarm');
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
+  mkdirSync(dir, { recursive: true });
+  assertSafeOpenswarmDir(projectPath, dir);
 
-  const tempSchemaPath = join(dir, 'repo.graphql.tmp');
   const schemaPath = join(dir, 'repo.graphql');
   const snapshotPath = join(dir, 'repo-snapshot.json');
 
-  atomicWriteFileSync(tempSchemaPath, REPO_SCHEMA);
-  fs.renameSync(tempSchemaPath, schemaPath);
+  // Re-validate immediately before writes to resist symlink replacement races.
+  assertSafeOpenswarmDir(projectPath, dir);
+
+  atomicWriteFileSync(schemaPath, REPO_SCHEMA);
 
   const snapshot = buildSnapshot(graph, projectPath);
   atomicWriteFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
