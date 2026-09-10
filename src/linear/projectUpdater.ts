@@ -383,6 +383,32 @@ export async function postStatusUpdate(
 const AUTOMATION_SECTION_MARKER = '## Automation Status';
 const PROJECT_OVERVIEW_PAGE_SIZE = 100;
 const PROJECT_OVERVIEW_MAX_PAGES = 10;
+const PROJECT_DESCRIPTION_LIMIT = 255;
+
+/**
+ * Build a Linear project description that always retains the compact automation
+ * summary within the 255-character hard limit (truncates the base text first).
+ */
+export function buildBoundedProjectDescription(
+  baseDesc: string,
+  counts: { done: number; inProgress: number; todo: number },
+): string {
+  const bracketedSummary = `[Done:${counts.done} InProgress:${counts.inProgress} Todo:${counts.todo}]`;
+  const sep = baseDesc ? '\n\n' : '';
+  const baseBudget = PROJECT_DESCRIPTION_LIMIT - bracketedSummary.length - sep.length;
+  let clippedBase = '';
+  if (baseBudget > 0 && baseDesc) {
+    clippedBase = baseDesc.length > baseBudget
+      ? `${baseDesc.slice(0, Math.max(0, baseBudget - 3))}...`
+      : baseDesc;
+  }
+  const finalDesc = clippedBase
+    ? `${clippedBase}${sep}${bracketedSummary}`
+    : bracketedSummary.slice(0, PROJECT_DESCRIPTION_LIMIT);
+  return finalDesc.length > PROJECT_DESCRIPTION_LIMIT
+    ? finalDesc.slice(0, PROJECT_DESCRIPTION_LIMIT)
+    : finalDesc;
+}
 
 interface ProjectOverviewIssueNode {
   priority: number;
@@ -484,19 +510,16 @@ async function refreshProjectOverview(projectId: string, projectPath?: string): 
     // Strip any previously-appended compact summary so it isn't doubled on each call.
     const baseDesc = stripped.replace(/\s*\[Done:\d+ InProgress:\d+ Todo:\d+\]$/, '').trimEnd();
 
-    // Build a compact summary line for description (fits within 255 chars)
+    // Build a compact summary line for description (fits within 255 chars).
+    // Reserve capacity for the summary first so truncation never chops it off.
     const doneCount = stateCounts.get('Done') ?? 0;
     const inProgressCount = stateCounts.get('In Progress') ?? 0;
     const todoCount = stateCounts.get('Todo') ?? 0;
-    const compactSummary = `Done:${doneCount} InProgress:${inProgressCount} Todo:${todoCount}`;
-    const descWithSummary = baseDesc
-      ? `${baseDesc}\n\n[${compactSummary}]`
-      : compactSummary;
-
-    // Truncate to 255 chars (Linear hard limit)
-    const finalDesc = descWithSummary.length > 255
-      ? descWithSummary.slice(0, 252) + '...'
-      : descWithSummary;
+    const finalDesc = buildBoundedProjectDescription(baseDesc, {
+      done: doneCount,
+      inProgress: inProgressCount,
+      todo: todoCount,
+    });
 
     await linear.updateProject(projectId, { description: finalDesc });
     console.log(`[ProjectUpdater] Project overview updated for "${project.name}"`);

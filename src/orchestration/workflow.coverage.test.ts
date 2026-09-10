@@ -217,7 +217,47 @@ describe('workflow storage round trips', () => {
     await saveExecution(execution);
     const loaded = await loadExecution(executionId);
 
+    expect(execution.definitionStamp).toBe('missing');
     expect(loaded).toEqual(execution);
+  });
+
+  it('refuses to persist an execution after the workflow definition is replaced', async () => {
+    const workflowId = uniqueId('cov-wf-fence');
+    const executionId = uniqueId('cov-exec-fence');
+    cleanupWorkflowIds.push(workflowId);
+    cleanupExecutionIds.push(executionId);
+
+    await saveWorkflow({
+      id: workflowId,
+      name: 'Fence me',
+      projectPath: '/tmp/project',
+      steps: [{ id: 'step', name: 'Step', prompt: 'run' }],
+    });
+
+    const execution: WorkflowExecution = {
+      workflowId,
+      executionId,
+      status: 'running',
+      startedAt: Date.now(),
+      stepResults: {},
+    };
+    await saveExecution(execution);
+    expect(execution.definitionStamp).toMatch(/^\d+(\.\d+)?:\d+$/);
+
+    // Replace the definition so mtime/size change under the live execution.
+    await saveWorkflow({
+      id: workflowId,
+      name: 'Fence me — replaced',
+      projectPath: '/tmp/project',
+      steps: [
+        { id: 'step', name: 'Step', prompt: 'run' },
+        { id: 'extra', name: 'Extra', prompt: 'also run' },
+      ],
+    });
+
+    await expect(
+      saveExecution({ ...execution, status: 'completed', completedAt: Date.now() }),
+    ).rejects.toThrow(/Workflow definition changed/);
   });
 
   it('returns null when loading a well-formed but nonexistent execution ID', async () => {

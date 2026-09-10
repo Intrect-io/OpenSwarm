@@ -7,6 +7,7 @@ import { basename, isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import * as yaml from 'yaml';
+import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Types & Interfaces
 
@@ -112,6 +113,12 @@ export interface WorkflowExecution {
   completedAt?: number;
   stepResults: Record<string, StepResult>;
   checkpoint?: string;  // git commit hash for rollback
+  /**
+   * Fence against concurrent workflow-definition replacement.
+   * Format matches filesystem identity: `${mtimeMs}:${size}` or `missing`.
+   * Captured on first persist; later saves refuse if the definition file changed.
+   */
+  definitionStamp?: string;
 }
 
 /**
@@ -277,8 +284,23 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
   const filePath = storageFilePath(WORKFLOW_DIR, workflow.id, '.yaml');
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
-  await fs.writeFile(filePath, yaml.stringify(workflow), 'utf-8');
+  await atomicWriteFile(filePath, yaml.stringify(workflow));
   console.log(`[Workflow] Saved: ${workflow.name} (${workflow.id})`);
+}
+
+/**
+ * Loader-compatible stamp for a workflow definition file (`mtimeMs:size` or `missing`).
+ */
+export async function workflowDefinitionStamp(workflowId: string): Promise<string> {
+  try {
+    const filePath = storageFilePath(WORKFLOW_DIR, workflowId, '.yaml');
+    const st = await fs.stat(filePath);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    // Invalid IDs throw from storageFilePath; propagate those.
+    throw error;
+  }
 }
 
 /**
@@ -323,12 +345,24 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 }
 
 /**
- * Save execution state
+ * Save execution state. Refuses to persist when the linked workflow definition
+ * was replaced under this execution (definitionStamp fence).
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
+  const currentStamp = await workflowDefinitionStamp(execution.workflowId);
+  if (execution.definitionStamp !== undefined && execution.definitionStamp !== currentStamp) {
+    throw new Error(
+      `Workflow definition changed under execution ${execution.executionId} ` +
+      `(expected ${execution.definitionStamp}, found ${currentStamp})`,
+    );
+  }
+
+  // Stamp the caller's object so subsequent in-memory saves keep the fence.
+  execution.definitionStamp = execution.definitionStamp ?? currentStamp;
+
   const filePath = storageFilePath(EXECUTION_DIR, execution.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(execution, null, 2), 'utf-8');
+  await atomicWriteFile(filePath, JSON.stringify(execution, null, 2));
 }
 
 /**

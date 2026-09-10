@@ -129,6 +129,18 @@ describe('SqliteIssueStore', () => {
 
       expect(done?.closedAt).toBeDefined();
     });
+
+    it('event oldValue reflects the status read inside the write transaction', () => {
+      const issue = store.createIssue({ projectId: 'p1', title: 'task' });
+      store.changeStatus(issue.id, 'todo');
+      store.changeStatus(issue.id, 'in_progress');
+
+      const events = store.getEvents(issue.id).filter((e) => e.type === 'status_changed');
+      expect(events.map((e) => [e.oldValue, e.newValue])).toEqual([
+        ['backlog', 'todo'],
+        ['todo', 'in_progress'],
+      ]);
+    });
   });
 
   describe('listIssues', () => {

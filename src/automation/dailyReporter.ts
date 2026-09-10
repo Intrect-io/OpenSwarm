@@ -151,9 +151,16 @@ export async function generateDailyReports(): Promise<void> {
       }
     }
 
+    // Outcome counts must reflect post-retry state so Discord/summary stay accurate.
+    const finalSuccessCount = projectResults.filter(r => r.ok).length;
+    const finalFailCount = projectResults.filter(r => !r.ok).length;
+    if (finalSuccessCount !== successCount || finalFailCount !== failCount) {
+      console.log(`[DailyReporter] After retry: ${finalSuccessCount} success, ${finalFailCount} failed`);
+    }
+
     // Send summary to Discord
-    if (discordReporter && successCount > 0) {
-      await sendDiscordSummary(activeProjects.length, successCount, failCount);
+    if (discordReporter && finalSuccessCount > 0) {
+      await sendDiscordSummary(activeProjects.length, finalSuccessCount, finalFailCount);
     }
   } catch (error) {
     console.error('[DailyReporter] Failed to generate reports:', error);

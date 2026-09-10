@@ -440,7 +440,12 @@ export class SqliteIssueStore implements IIssueStore {
       }
 
       if (patch.status !== undefined) {
-        this.applyStatusChange(id, existing.status, patch.status, 'system');
+        // Re-read inside the write txn so event oldValue matches effective DB state.
+        const current = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+          | { status: IssueStatus }
+          | undefined;
+        if (!current) return;
+        this.applyStatusChange(id, current.status, patch.status, 'system');
       }
     });
 
@@ -532,11 +537,18 @@ export class SqliteIssueStore implements IIssueStore {
   // ============ 상태 전이 ============
 
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null {
-    const existing = this.getIssue(id);
-    if (!existing) return null;
+    const run = this.db.transaction(() => {
+      // Read effective status inside the write transaction so concurrent
+      // transitions cannot stamp a stale oldValue onto the event log.
+      const row = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+        | { status: IssueStatus }
+        | undefined;
+      if (!row) return null;
 
-    this.applyStatusChange(id, existing.status, status, actor ?? 'system');
-    return this.getIssue(id);
+      this.applyStatusChange(id, row.status, status, actor ?? 'system');
+      return this.getIssue(id);
+    });
+    return run();
   }
 
   private applyStatusChange(id: string, oldStatus: IssueStatus, status: IssueStatus, actor: string): void {
