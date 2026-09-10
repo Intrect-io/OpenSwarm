@@ -212,3 +212,113 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     expect(history[0]).toMatchObject({ failureCause: 'timeout', finalStatus: 'infra_error' });
   });
 });
+
+// AGT-4305: AGT-4257's idle_fill exists so free slots do not sit empty, but
+// bypassing the 1h infra_error backoff instantly and forever, on the SAME
+// issue, turns a transient provider hiccup into a worker+tester+reviewer
+// spend loop when that issue is the only candidate around to fill slots with
+// (observed on vela: AX-1272's reviewer call died to the same 360s OpenRouter
+// timeout 9 of ~13 attempts over 4h+, retried within ~90s every time).
+describe('idle-fill must not out-race a repeated infra_error on the same issue (AGT-4305)', () => {
+  type InternalRunner = {
+    scheduler: TaskScheduler;
+    filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[];
+    consecutiveInfraErrorCounts: Map<string, number>;
+    failedTaskRetryTimes: Map<string, number>;
+  };
+
+  const backoffTask = (): TaskItem => ({
+    ...task(),
+    linearState: 'Todo',
+    linearProject: { id: 'project', name: 'Repo' },
+  });
+
+  it('still idle-fills through the real 1h backoff below the threshold (control, unchanged AGT-4257 behavior)', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg()) as unknown as InternalRunner;
+
+    await runN(runner.scheduler, 'infra_error', 2); // below MAX_CONSECUTIVE_INFRA_IDLE_FILL (3)
+    expect(runner.failedTaskRetryTimes.get('ISSUE-1')).toBeGreaterThan(Date.now());
+
+    const filtered = runner.filterAlreadyProcessed([backoffTask()]);
+    expect(filtered.map((t) => t.issueId)).toContain('ISSUE-1');
+  });
+
+  it('stops bypassing the 1h backoff once the same issue has died to infra_error 3 times running', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg()) as unknown as InternalRunner;
+
+    await runN(runner.scheduler, 'infra_error', 3);
+    expect(runner.consecutiveInfraErrorCounts.get('ISSUE-1')).toBe(3);
+    expect(runner.failedTaskRetryTimes.get('ISSUE-1')).toBeGreaterThan(Date.now());
+
+    const filtered = runner.filterAlreadyProcessed([backoffTask()]);
+    expect(filtered.map((t) => t.issueId)).not.toContain('ISSUE-1');
+  });
+
+  it('resets the streak once the same issue reaches a real (non-infra) outcome', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg()) as unknown as InternalRunner;
+
+    await runN(runner.scheduler, 'infra_error', 3);
+    expect(runner.consecutiveInfraErrorCounts.get('ISSUE-1')).toBe(3);
+
+    const approved: PipelineResult = { ...result('approved'), success: true };
+    runner.scheduler.startTask(task(), '/repo', async () => approved);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(runner.consecutiveInfraErrorCounts.has('ISSUE-1')).toBe(false);
+  });
+
+  // The gate above only fires through `legacyIsAuthority` — false whenever a
+  // durable run already exists and the ledger is primary. Any issue that has
+  // ever failed once already has a durable row, so the durable-ledger
+  // idle-fill branch (`idleLiftable`, separate code above) needed its own copy
+  // of this gate. Without it, this whole describe block would be green while
+  // the actual production incident (AX-1272, durable/primary ledger) kept
+  // looping — caught in independent review before this test existed.
+  it('the durable-ledger RETRY_AT idle-fill branch also stops bypassing backoff after 3 consecutive infra_errors', async () => {
+    const LEDGER_TASK: TaskItem = {
+      id: 'ISSUE-1', issueId: 'ISSUE-1', issueIdentifier: 'ISSUE-1',
+      source: 'linear', title: 'reviewer keeps timing out', priority: 2, createdAt: 0,
+      linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
+    };
+    const dbPath = join(tempDir, 'automation.db');
+
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath })) as unknown as InternalRunner & {
+      durableRuns: {
+        observeTask(task: TaskItem, repo: string): void;
+        getRun(id: string): { state: string } | null;
+        close(): void;
+      };
+    };
+    runner.durableRuns.observeTask(LEDGER_TASK, '/repo');
+
+    // Build the legacy-tracked streak the same way production does (the
+    // increment itself is unconditional — see the 'failed' handler).
+    await runN(runner.scheduler, 'infra_error', 3);
+    expect(runner.consecutiveInfraErrorCounts.get('ISSUE-1')).toBe(3);
+
+    // Seed the durable row into RETRY_AT with a future retryAt, the way the
+    // real infra_error ledger transition leaves it (durableRunCoordinator.ts).
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('ISSUE-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'RETRY_AT', {
+      retryAt: Date.now() + 3_600_000, errorCode: 'infra_error',
+    })).toBe(true);
+    ledger.close();
+
+    const filtered = runner.filterAlreadyProcessed([LEDGER_TASK]);
+    expect(filtered.map((t) => t.issueId)).not.toContain('ISSUE-1');
+    expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('RETRY_AT'); // still parked, not lifted
+
+    runner.durableRuns.close(); // this test opens its own primary-mode ledger handle
+  });
+});

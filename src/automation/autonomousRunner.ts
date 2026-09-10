@@ -422,6 +422,17 @@ export class AutonomousRunner {
   private completedTaskIds = new Set<string>();
   private failedTaskCounts = new Map<string, number>();
   private failedTaskRetryTimes = new Map<string, number>(); // issueId → next retry timestamp (ms)
+  // issueId → consecutive infra_error count since its last cleared/terminal
+  // outcome (success, permanent block, operator park, or manual recovery — the
+  // same events that already clear failedTaskRetryTimes for this issueId).
+  // A non-infra failure that is retried again (rejection under the limit,
+  // 'superseded', etc.) leaves this untouched by design: it only needs to be
+  // conservative in one direction, never resetting is safe, silently resetting
+  // on the wrong event is not. Not persisted across restarts — a restart is
+  // itself a reasonable "give it a fresh run" signal, and losing the streak on
+  // restart only ever makes the gate below MORE permissive, never less safe.
+  // (AGT-4305)
+  private consecutiveInfraErrorCounts = new Map<string, number>();
 
   /**
    * Bring a durably backed-off run forward because its answer landed.
@@ -438,6 +449,7 @@ export class AutonomousRunner {
     if (!this.answerArrivedFor(issueId)) return false;
     if (!this.durableRuns.readmitParkedRun(issueId, OPERATOR_PARK_REASON)) return false;
     clearRetryTime(issueId, this.failedTaskRetryTimes);
+    this.consecutiveInfraErrorCounts.delete(issueId);
     return true;
   }
 
@@ -486,6 +498,10 @@ export class AutonomousRunner {
   // the reviewer already called out (INT-2474). Persisted; cleared on success.
   private lastFailureDetails = new Map<string, LastFailureEntry>();
   private static readonly MAX_RETRY_COUNT = 4; // Increased from 2 to allow more retries with backoff
+  // Consecutive infra_error attempts (same issue, no intervening non-infra
+  // outcome) allowed to bypass backoff via idle-fill before the real 1h
+  // backoff is enforced instead. (AGT-4305)
+  private static readonly MAX_CONSECUTIVE_INFRA_IDLE_FILL = 3;
 
   // Rate-limit hold: epoch ms until which all task execution is paused.
   // Set when any adapter returns a 429 / usage_limit_reached response (INT-1906).
@@ -607,6 +623,7 @@ export class AutonomousRunner {
         this.completedTaskIds.add(task.issueId);
         clearRejection(task.issueId); // Clear rejection count on success
         clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry backoff time
+        this.consecutiveInfraErrorCounts.delete(task.issueId);
         this.lastFailureDetails.delete(task.issueId); // Stale feedback must not haunt future work
         this.saveTaskState();
         // Track project-level pace (5h rolling window)
@@ -623,6 +640,7 @@ export class AutonomousRunner {
       }
 
       if (result.success && task.issueId && this.durableRuns.isPrimary) {
+        this.consecutiveInfraErrorCounts.delete(task.issueId);
         await this.drainDurableOutbox().catch((error) =>
           console.error('[Outbox] Completion delivery pass failed:', error));
         const durableState = this.durableRuns.getRun(task.issueId)?.state;
@@ -854,8 +872,10 @@ export class AutonomousRunner {
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.
           const nextRetryTime = setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
+          const infraStreak = (this.consecutiveInfraErrorCounts.get(task.issueId) ?? 0) + 1;
+          this.consecutiveInfraErrorCounts.set(task.issueId, infraStreak);
           this.saveTaskState();
-          console.warn(`[Scheduler] Infra error for ${taskCtx} (NOT counted toward STUCK) — backoff retry ${formatRetryTime(nextRetryTime)}: ${detail}`);
+          console.warn(`[Scheduler] Infra error for ${taskCtx} (NOT counted toward STUCK, consecutive: ${infraStreak}) — backoff retry ${formatRetryTime(nextRetryTime)}: ${detail}`);
         } else {
           console.warn(`[Scheduler] Infra error for ${taskCtx} (NOT counted toward STUCK): ${detail}`);
         }
@@ -892,6 +912,7 @@ export class AutonomousRunner {
         const { code, reason } = result.operatorPark;
         this.completedTaskIds.add(task.issueId); // no retry changes what the fence saw
         clearRetryTime(task.issueId, this.failedTaskRetryTimes);
+        this.consecutiveInfraErrorCounts.delete(task.issueId);
         recordLastFailureDetail(this.taskStateRef, task.issueId, reason);
         this.saveTaskState();
         console.warn(`[Scheduler] ${taskCtx} parked for the operator (${code}): ${reason}`);
@@ -934,6 +955,7 @@ export class AutonomousRunner {
           const attempts = getRejectionCount(task.issueId) + (this.failedTaskCounts.get(task.issueId) ?? 0) + 1;
           this.completedTaskIds.add(task.issueId); // no retry can move an environmental wall
           clearRetryTime(task.issueId, this.failedTaskRetryTimes);
+          this.consecutiveInfraErrorCounts.delete(task.issueId);
           clearRejection(task.issueId);
           recordLastFailureDetail(this.taskStateRef, task.issueId, infeasDetail);
           const ownsRun = parkRunForHuman(
@@ -990,6 +1012,7 @@ export class AutonomousRunner {
           // Max rejections reached - permanently block
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
           clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
+          this.consecutiveInfraErrorCounts.delete(task.issueId);
           const ownsRun = parkRunForHuman(
             this.durableRuns, task.issueId,
             `Reviewer rejected ${rejectionCount} attempts: ${feedback}`,
@@ -1057,6 +1080,7 @@ export class AutonomousRunner {
           // Max retries exceeded - permanently block
           this.completedTaskIds.add(task.issueId); // Prevent re-selection
           clearRetryTime(task.issueId, this.failedTaskRetryTimes); // Clear retry time
+          this.consecutiveInfraErrorCounts.delete(task.issueId);
           const ownsRun = parkRunForHuman(
             this.durableRuns, task.issueId,
             `Autonomous execution failed ${count} times: ${failureDetail}`,
@@ -1227,7 +1251,29 @@ export class AutonomousRunner {
         // without spending budget. WAITING_EXTERNAL is a run whose published
         // effect is still pending, not a park: lifting it re-runs the task on
         // top of its own in-flight publish.
-        const idleLiftable = (durableRun.state === 'RETRY_AT' && (durableRun.retryAt ?? 0) > Date.now())
+        //
+        // A RETRY_AT row can be parked there for infra_error same as any other
+        // reason, and this is the durable-ledger counterpart of the legacy
+        // idle-fill bypass gated below by `consecutiveInfraErrorCounts` — without
+        // it here too, an issue whose durable row already exists (true for
+        // anything that has ever failed once) never reaches that legacy gate at
+        // all, since `legacyIsAuthority` is false whenever this block ran and
+        // left a durable run in place. (AGT-4305 — this is the branch AX-1272
+        // was actually looping through in production.)
+        // Only throttle a RETRY_AT that is CURRENTLY backed off for infra_error —
+        // `consecutiveInfraErrorCounts` does not reset on a later, unrelated
+        // rejection/failure retry for the same issue (by design; see the field
+        // comment), so without the lastErrorCode check a stale infra streak
+        // would keep throttling idle-fill for a RETRY_AT caused by an ordinary
+        // task-level rejection long after the infra episode ended.
+        const infraStreak = durableRun.lastErrorCode === 'infra_error'
+          ? this.consecutiveInfraErrorCounts.get(id) ?? 0
+          : 0;
+        const idleLiftable = (
+          durableRun.state === 'RETRY_AT'
+          && (durableRun.retryAt ?? 0) > Date.now()
+          && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
+        )
           || durableRun.state === 'NEEDS_SPEC'
           || durableRun.state === 'NEEDS_ENV';
         if (idleLiftable && idleFillBudget > 0 && this.durableRuns.markReady(id)) {
@@ -1298,6 +1344,7 @@ export class AutonomousRunner {
         this.failedTaskCounts.delete(id);
         clearRejection(id); // Clear rejection count on recovery
         clearRetryTime(id, this.failedTaskRetryTimes); // Clear retry backoff time
+        this.consecutiveInfraErrorCounts.delete(id);
         if (isStuck) toUnstick.push(id); // strip the stuck label so it is not re-skipped
         recovered++;
         return true;
@@ -1317,6 +1364,7 @@ export class AutonomousRunner {
         this.failedTaskCounts.delete(id);
         clearRejection(id);
         clearRetryTime(id, this.failedTaskRetryTimes);
+        this.consecutiveInfraErrorCounts.delete(id);
         if (isStuck) toUnstick.push(id);
         recovered++;
         return true;
@@ -1369,11 +1417,21 @@ export class AutonomousRunner {
         // an `ask_human` park, so left alone it makes the operator's reply land
         // up to two hours after they sent it.
         if (!canRetryNow(id, this.failedTaskRetryTimes)) {
+          const infraStreak = this.consecutiveInfraErrorCounts.get(id) ?? 0;
           if (this.answerArrivedFor(id)) {
             clearRetryTime(id, this.failedTaskRetryTimes);
+            this.consecutiveInfraErrorCounts.delete(id);
             answered++;
-          } else if (idleFillBudget > 0) {
-            // AGT-4257: free slots chew the backoff instead of sitting idle.
+          } else if (idleFillBudget > 0 && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL) {
+            // AGT-4257: free slots chew the backoff instead of sitting idle — but
+            // not when the same issue has died to infra_error (timeout/CLI
+            // failure, not a task failure) several times running with an idle
+            // fill each time. Retrying instantly with an unchanged payload just
+            // re-hits the same wall (AX-1272, 2026-09-10: same reviewer 360s
+            // timeout, 9 of ~13 attempts over 4h+, ~90s apart every time because
+            // this was the only candidate to fill idle slots with). Past the
+            // threshold, honor the real 1h backoff so a transient provider issue
+            // gets time to actually clear instead of being hammered. (AGT-4305)
             idleFillBudget--;
             clearRetryTime(id, this.failedTaskRetryTimes);
             recovered++;
@@ -1772,6 +1830,7 @@ export class AutonomousRunner {
         this.completedTaskIds.add(issueId);
         clearRejection(issueId);
         clearRetryTime(issueId, this.failedTaskRetryTimes);
+        this.consecutiveInfraErrorCounts.delete(issueId);
         this.lastFailureDetails.delete(issueId);
       }
       if (finalized.size > 0) this.saveTaskState();
