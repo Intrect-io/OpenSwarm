@@ -4,7 +4,7 @@
     "beforeShellExecution": [
       {
         "command": "bash /tmp/d0420-run-tests-hook.sh",
-        "matcher": "ls"
+        "matcher": ".*"
       }
     ]
   }

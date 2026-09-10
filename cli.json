@@ -2,15 +2,15 @@
   "permissions": {
     "allow": [
       "Shell(**)",
-      "Shell(git*)",
-      "Shell(node*)",
-      "Shell(npm*)",
       "Shell(ls)",
-      "Shell(bash)",
-      "Shell(sh)"
+      "Shell(npm*)",
+      "Shell(node*)",
+      "Shell(npx*)",
+      "Shell(git*)",
+      "Shell(bash*)",
+      "Shell(sh*)"
     ],
     "deny": []
   },
-  "version": 1,
   "approvalMode": "allowlist"
 }

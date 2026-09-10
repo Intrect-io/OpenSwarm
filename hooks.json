@@ -3,8 +3,13 @@
   "hooks": {
     "beforeShellExecution": [
       {
-        "command": "bash /tmp/d0420-run-tests-hook.sh",
-        "matcher": "ls"
+        "command": "/usr/local/bin/bash /tmp/d0420-run-tests-hook.sh",
+        "matcher": ".*"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "/usr/local/bin/bash /tmp/agt3447-run.sh"
       }
     ]
   }

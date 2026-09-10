@@ -1,0 +1,1 @@
+trigger $(date -Is 2>/dev/null || date)
