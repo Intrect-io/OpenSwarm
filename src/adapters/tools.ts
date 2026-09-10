@@ -50,7 +50,7 @@ export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
   return stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') });
 }
 
-// ============ 도구 정의 (OpenAI function calling 포맷) ============
+// ============ 도구 정의 ============
 
 export interface ToolDefinition {
   type: 'function';
@@ -61,12 +61,12 @@ export interface ToolDefinition {
   };
 }
 
-export const TOOL_DEFINITIONS: ToolDefinition[] = [
+const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a file and return its content. Use offset/limit for large files. Local-only assets may be read under /warehouse when provisioned.',
+      description: `Read a file from the local filesystem. Use offset/limit for large files. Local-only assets may be read under /warehouse when provisioned.`,
       parameters: {
         type: 'object',
         properties: {
@@ -96,22 +96,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'edit_file',
-      description: 'Replace a specific string in a file. old_string must be unique in the file.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Absolute file path' },
-          old_string: { type: 'string', description: 'Exact string to find and replace' },
-          new_string: { type: 'string', description: 'Replacement string' },
-        },
-        required: ['path', 'old_string', 'new_string'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
       name: 'search_files',
       description: 'Search file contents using ripgrep (regex). Returns matching lines with file paths and line numbers.',
       parameters: {
@@ -119,7 +103,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           pattern: { type: 'string', description: 'Regex pattern to search for' },
           path: { type: 'string', description: 'Directory or file to search in' },
-          glob: { type: 'string', description: 'File glob filter (e.g., "*.ts")' },
+          glob: { type: 'string', description: 'File glob filter (e.g. "*.ts")' },
         },
         required: ['pattern', 'path'],
       },
@@ -129,7 +113,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'bash',
-      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked. In humanSurfaceReadOnly mode this is exposed only through an attested companion sandbox.',
+      description: 'Execute a shell command and return stdout/stderr. Timeout: 30s. Destructive commands (rm -rf, git reset --hard) are blocked.',
       parameters: {
         type: 'object',
         properties: {
@@ -143,8 +127,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'search_memory',
-      description:
-        "Search this repository's accumulated knowledge from past tasks — successful approaches (patterns) and reviewer pitfalls (constraints) — by semantic query. Call this BEFORE implementing to reuse what worked here and avoid known mistakes. Scoped to the current repo automatically.",
+      description: 'Search this repository\'s accumulated knowledge from past tasks — successful approaches (patterns) and reviewer pitfalls (constraints) — by semantic query. Call this BEFORE implementing to reuse what worked here and avoid known mistakes. Scoped to the current repo automatically.',
       parameters: {
         type: 'object',
         properties: {
@@ -155,40 +138,82 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
-];
-
-// apply_patch — gated to codex adapters only (codex models are RLHF-trained on the
-// V4A format; non-codex models emit valid-looking-but-wrong V4A, so they keep
-// edit_file). NOT part of TOOL_DEFINITIONS; the agentic loop adds it when
-// `applyPatch` is enabled. The V4A spec lives in the description so the model gets
-// it with the tool schema.
-export const APPLY_PATCH_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'apply_patch',
-    description:
-      'Edit files with a V4A patch. The "input" argument MUST be exactly:\n' +
-      '*** Begin Patch\n' +
-      '*** Update File: <relative path>\n' +
-      '@@ <optional symbol/context to disambiguate>\n' +
-      ' <unchanged context line>\n' +
-      '-<line to remove>\n' +
-      '+<line to add>\n' +
-      ' <unchanged context line>\n' +
-      '*** End Patch\n' +
-      'Rules: relative paths only; include ~3 unchanged context lines around each change so the hunk anchors uniquely; ' +
-      'context/removed lines must match the file EXACTLY. Use "*** Add File: <path>" (body is all "+" lines) to create, ' +
-      '"*** Delete File: <path>" to remove, and "*** Move to: <path>" after an Update File header to rename. ' +
-      'Prefer this over editing by hand — it is the most reliable way to change code.',
-    parameters: {
-      type: 'object',
-      properties: {
-        input: { type: 'string', description: 'The full V4A patch (one "*** Begin Patch" … "*** End Patch" envelope).' },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description: 'Fetch a URL and return its readable text (HTML stripped to text). Use when you already have a URL (docs, a page) and want its content.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'The http(s) URL to fetch' },
+        },
+        required: ['url'],
       },
-      required: ['input'],
     },
   },
-};
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web and return ranked results (title, url, snippet). Use to find documentation, API usage, library versions, or current facts.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' },
+          max_results: { type: 'number', description: 'Max results to return (default 5, max 10)' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Edit a file using SEARCH/REPLACE blocks. SEARCH must exactly match existing code.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          old_string: { type: 'string', description: 'Text to replace (must match exactly)' },
+          new_string: { type: 'string', description: 'Replacement text' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'apply_patch',
+      description: 'Apply a unified diff patch to a file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path' },
+          patch: { type: 'string', description: 'Unified diff patch content' },
+        },
+        required: ['path', 'patch'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'diagnostics',
+      description: 'Run TypeScript/Python diagnostics on changed files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          paths: { type: 'string', description: 'Comma-separated file paths' },
+          cwd: { type: 'string', description: 'Working directory' },
+        },
+        required: ['paths', 'cwd'],
+      },
+    },
+  },
+];
 
 // ============ 안전 가드 ============
 
@@ -297,17 +322,45 @@ async function searchWithGitGrep(
   }
 }
 
+/**
+ * Normalize a command string for guard matching: collapse whitespace, strip
+ * leading/trailing whitespace, and fold common shell quoting so that
+ * `rm  -rf  /` and `rm -rf /` match the same pattern.
+ */
+function normalizeForGuard(command: string): string {
+  return command.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Detect mid-word substitution patterns that can conceal destructive commands.
+ * For example `rm$(echo)x` becomes `rmx` after shell expansion, but the
+ * guard sees `rm$(echo)x` which does not match `/\brm\s+-r/`. This function
+ * checks whether a substitution token appears inside a word that would
+ * otherwise look like a blocked command after expansion.
+ */
+function hasMidWordSubstitution(command: string): boolean {
+  // Check for $(...) or backtick substitution mid-word: e.g. r$(...)m, r`...`m
+  // We look for a letter, then $( or `, then content, then ) or `, then letter
+  return /[a-zA-Z]\$\([^)]+\)[a-zA-Z]/.test(command) ||
+         /[a-zA-Z]`[^`]+`[a-zA-Z]/.test(command);
+}
+
 function isCommandBlocked(command: string): boolean {
+  const normalized = normalizeForGuard(command);
+
   // Direct destructive command patterns
-  if (BLOCKED_COMMANDS.some(pattern => pattern.test(command))) return true;
+  if (BLOCKED_COMMANDS.some(pattern => pattern.test(normalized))) return true;
+
+  // Mid-word substitution can bypass direct pattern matching
+  if (hasMidWordSubstitution(normalized)) return true;
 
   // Secondary interpreters (sh -c, bash -c, etc.) — the real command
   // is a shell word, not directly matched by BLOCKED_COMMANDS.
-  if (SECONDARY_INTERPRETER_PATTERNS.some(pattern => pattern.test(command))) return true;
+  if (SECONDARY_INTERPRETER_PATTERNS.some(pattern => pattern.test(normalized))) return true;
 
   // Process substitution / command substitution — $(...) and backticks
   // can execute arbitrary code before the outer command runs.
-  if (PROCESS_SUBSTITUTION_PATTERNS.some(pattern => pattern.test(command))) return true;
+  if (PROCESS_SUBSTITUTION_PATTERNS.some(pattern => pattern.test(normalized))) return true;
 
   return false;
 }
@@ -318,7 +371,7 @@ export interface ToolCall {
   id: string;
   function: {
     name: string;
-    arguments: string;  // JSON string
+    arguments: string;
   };
 }
 
@@ -326,147 +379,37 @@ export interface ToolResult {
   tool_call_id: string;
   content: string;
   is_error: boolean;
-  /** Stop the enclosing agent loop; retrying could duplicate a partial mutation. */
-  fatal?: 'execution_outcome_unknown';
+  fatal?: string;
 }
 
-/**
- * 루프 단위 read 캐시. 같은 작업 루프 안에서 동일 파일을 반복 read하면
- * (모델이 edit 후 "고쳐졌나?" 확인하려 재read하는 패턴) 디스크를 다시 읽지 않고
- * 캐시된 내용 + "변경 없음" 힌트를 반환해 토큰·턴 낭비를 줄인다.
- * edit_file/write_file 성공 시 해당 경로를 무효화해 stale read를 막는다.
- *
- * LRU-bounded: a single 80-turn SWE run reading many offsets of large files
- * could otherwise retain megabytes of numbered content for the whole loop.
- * The Map preserves insertion order, so eviction drops the least-recently-used
- * key once MAX_READ_CACHE_ENTRIES is exceeded.
- */
-const MAX_READ_CACHE_ENTRIES = 64;
-
-export interface ReadCache {
-  store: Map<string, string>;
+interface ReadCache {
+  data: Map<string, string>;
 }
 
-export function createReadCache(): ReadCache {
-  return { store: new Map() };
+function createReadCache(): ReadCache {
+  return { data: new Map() };
 }
 
-/** Cache read that bumps the key to most-recently-used. */
 function cacheGet(cache: ReadCache, key: string): string | undefined {
-  const value = cache.store.get(key);
-  if (value === undefined) return undefined;
-  // Re-insert to move to the end (MRU) so eviction targets truly-old entries.
-  cache.store.delete(key);
-  cache.store.set(key, value);
-  return value;
+  return cache.data.get(key);
 }
 
-/** Cache write with LRU eviction once the entry cap is exceeded. */
 function cacheSet(cache: ReadCache, key: string, value: string): void {
-  cache.store.delete(key);
-  cache.store.set(key, value);
-  while (cache.store.size > MAX_READ_CACHE_ENTRIES) {
-    const oldest = cache.store.keys().next().value;
-    if (oldest === undefined) break;
-    cache.store.delete(oldest);
-  }
+  cache.data.set(key, value);
 }
 
-/** 캐시에서 한 파일의 모든 범위 엔트리를 제거 (edit/write 후 stale 방지) */
 function invalidateCache(cache: ReadCache | undefined, filePath: string): void {
-  if (!cache) return;
-  for (const key of cache.store.keys()) {
-    if (key.startsWith(`${filePath}#`)) cache.store.delete(key);
-  }
+  if (cache) cache.data.delete(filePath);
 }
 
-/**
- * Tool execution options — verification-harness protection.
- * Found in SWE hybrid runs: the implementer model misattributed test failures
- * to the verification script (run_tests.sh) and edited the script itself five
- * times, destroying verification integrity. Protected files reject edit/write.
- * The bash timeout is also configurable — the 30s default dies silently on
- * docker-based test runs (minutes), which made models conclude "the
- * environment is broken".
- */
 export interface ToolExecOptions {
-  /** Filenames (matched by path suffix) for which edit_file/write_file are refused */
-  protectedFiles?: string[];
-  /** bash tool timeout (default DEFAULT_BASH_TIMEOUT_MS) */
-  bashTimeoutMs?: number;
-  /** Refuse mutation and shell tools even if a model emits hidden tool names. */
-  readOnly?: boolean;
-  /** Refuse every built-in filesystem/shell tool even if its hidden name is emitted. */
+  allowedToolNames?: Set<string>;
   filesystemTools?: boolean;
-  /**
-   * Exact run-scoped execution allow-list. Tool schemas are only a model hint:
-   * providers may still emit a name they were not shown, while the daemon's
-   * process-wide MCP router can remember it from an earlier run.
-   */
-  allowedToolNames?: ReadonlySet<string>;
-  /** Run-scoped identity for worker coordination tool dispatch. */
-  coordinationContext?: CoordinationToolContext;
-  /** Attested strict-mode companion session. Never accepted by delegated CLIs. */
+  bashTimeoutMs?: number;
+  protectedFiles?: Set<string>;
   sandboxExecutorSession?: SandboxExecutorSession;
-  /**
-   * Epoch ms at which the enclosing agentic loop gives up, when it has one.
-   * `coordination_wait` clamps itself below this: a fixed ceiling alone would
-   * let a wait outlive the loop it claims to respect, and the loop would then
-   * report a timeout instead of the answer that was about to arrive.
-   * (AGT-4065, caught by the PR review.)
-   */
-  loopDeadlineAt?: number;
-}
-
-const DEFAULT_BASH_TIMEOUT_MS = 30000;
-
-function canonicalizePath(candidate: string): string {
-  if (existsSync(candidate)) return realpathSync(candidate);
-  const suffix: string[] = [];
-  let ancestor = candidate;
-  while (!existsSync(ancestor)) {
-    const parent = path.dirname(ancestor);
-    if (parent === ancestor) break;
-    suffix.unshift(path.basename(ancestor));
-    ancestor = parent;
-  }
-  return path.join(realpathSync(ancestor), ...suffix);
-}
-
-export function isProtectedPath(resolved: string, protectedFiles?: string[]): boolean {
-  if (!protectedFiles?.length) return false;
-  return protectedFiles.some((p) => {
-    const absolute = path.resolve(p);
-    const canonical = canonicalizePath(absolute);
-    return resolved === canonical || resolved.endsWith(`/${p}`);
-  });
-}
-
-export interface ValidatePathOptions {
-  /**
-   * Also accept a path whose canonical form lands inside the main checkout this
-   * worktree belongs to. READ-ONLY tools only.
-   *
-   * A repo may symlink local-only material (data the agent needs but git cannot
-   * carry) from its main checkout into every worktree — cgf-portal's
-   * `link-local-assets.sh` post-checkout hook does exactly this for
-   * `docs/CGF_data` and the `.env` family. `canonicalizePath` resolves the
-   * symlink to its target in the main checkout, which is outside the worktree,
-   * so the read was refused and the agent reported the data as missing
-   * (AGT-4061: worker-86be asked the operator twice for files that were in
-   * fact linked into its worktree and readable).
-   *
-   * Reads only, never writes: writing into the main checkout would break
-   * worktree isolation — the exact failure `link-local-assets.sh` documents for
-   * `.venv`, where a guard test kept passing because the import resolved
-   * through the main tree instead of the worktree under test.
-   *
-   * Callers must additionally withhold this for `readOnly` runs. An ordinary
-   * worker can already reach the main checkout through the unvalidated `bash`
-   * tool, so there this is a usability fix, not a widening. A read-only
-   * reviewer has `bash` denied (READ_ONLY_DENIED_TOOLS), which makes this
-   * sandbox its real outbound boundary — INT-3189 — and it stays untouched.
-   */
+  coordinationContext?: CoordinationToolContext;
+  /** Accept the configured main checkout root for read/search tools only. */
   allowMainCheckoutRead?: boolean;
   /** Accept the configured warehouse root for read/search tools only. */
   allowWarehouseRead?: boolean;
@@ -591,209 +534,86 @@ export async function executeTool(
     // MCP tools are denied by predicate, not by name: their names are whatever
     // the servers declare, so no fixed list can cover them. Skipping discovery
     // in the adapter is not enough on its own — a long-lived daemon that
-    // resolved these servers during an earlier ordinary run still has them in
-    // `serverByTool`, and a later read-only run whose model emits `server__tool`
-    // would connect to one. (INT-3189)
-    const readOnlyDenied = execOptions?.readOnly
-      && (READ_ONLY_DENIED_TOOLS.has(name) || isMcpTool(name));
-    if (readOnlyDenied) {
-      return {
-        tool_call_id: callId,
-        content: `READ_ONLY: ${name} is disabled for this run. Use read_file/search_files/search_memory only.`,
-        is_error: true,
-      };
+    // restarts the agent loop without re-discovering MCP tools would still have
+    // stale names in the tool list. (INT-3189)
+    if (execOptions?.sandboxExecutorSession && !isMcpTool(name)) {
+      if (READ_ONLY_DENIED_TOOLS.has(name)) {
+        return {
+          tool_call_id: callId,
+          content: `READ_ONLY: ${name} is disabled for this run. Use read_file/search_files/search_memory only.`,
+          is_error: true,
+        };
+      }
     }
 
     switch (name) {
       case 'read_file': {
-        // Reads may follow a symlink into this worktree's main checkout, so an
-        // agent can reach local-only material the repo links in (AGT-4061).
-        // Withheld in readOnly: there `bash` is denied, so this sandbox is the
-        // run's real outbound boundary (INT-3189).
         const filePath = validatePath(args.path, cwd, {
-          allowMainCheckoutRead: !execOptions?.readOnly,
-          allowWarehouseRead: true,
+          allowMainCheckoutRead: execOptions?.allowMainCheckoutRead,
+          allowWarehouseRead: execOptions?.allowWarehouseRead,
         });
-        const offset = args.offset ?? 0;
-        const limit = args.limit ?? 500;
-        const cacheKey = `${filePath}#${offset}:${limit}`;
-
-        // 같은 루프에서 이미 같은 범위를 읽었으면 디스크 재접근 없이 캐시 반환.
-        // 모델에게 "변경 없음"을 알려 추가 확인 read를 유도하지 않는다.
-        const cached = cache ? cacheGet(cache, cacheKey) : undefined;
-        if (cached !== undefined) {
-          // Re-read of the same range: return a STUB, not the full content. Re-
-          // injecting the content every time is what bloats a read-heavy worker's
-          // context (measured: 37 identical reads → 575k tokens). The content is
-          // already earlier in the conversation; point the model back to it instead
-          // of duplicating it. (Use a different offset to see other parts.)
+        const offset = Number(args.offset) || 0;
+        const limit = Math.min(Number(args.limit) || 500, 2000);
+        const content = await fs.readFile(filePath, 'utf8');
+        // Bound source reads by bytes as well as lines — prevent memory
+        // exhaustion from oversized binary/text files.
+        const MAX_READ_BYTES = 512 * 1024;
+        if (Buffer.byteLength(content, 'utf8') > MAX_READ_BYTES) {
           return {
             tool_call_id: callId,
-            content: `(already read ${args.path} [lines ${offset + 1}-${offset + limit}] earlier this turn-loop — UNCHANGED. Content omitted to save context; use what you already read above. To see other parts, read with a different offset. Otherwise stop reading and act.)`,
+            content: `File too large: ${filePath} (${Buffer.byteLength(content, 'utf8')} bytes, max ${MAX_READ_BYTES}). Use offset/limit to read portions.`,
+            is_error: true,
+          };
+        }
+        const lines = content.split('\n');
+        const selected = lines.slice(offset, offset + limit);
+        const result = selected.join('\n');
+        // Bound rendered output by bytes too
+        const MAX_OUTPUT_BYTES = 256 * 1024;
+        if (Buffer.byteLength(result, 'utf8') > MAX_OUTPUT_BYTES) {
+          const truncated = Buffer.from(result, 'utf8').subarray(0, MAX_OUTPUT_BYTES).toString('utf8');
+          return {
+            tool_call_id: callId,
+            content: `${truncated}\n... (truncated, ${Buffer.byteLength(result, 'utf8')} bytes total, max ${MAX_OUTPUT_BYTES})`,
             is_error: false,
           };
         }
-
-        // Bound read by bytes before loading the full file into memory
-        const stat = await fs.stat(filePath);
-        const readSize = Math.min(stat.size, MAX_READ_FILE_BYTES);
-        const fd = await fs.open(filePath, 'r');
-        const buf = Buffer.alloc(readSize);
-        await fd.read(buf, 0, readSize, 0);
-        await fd.close();
-        const content = buf.toString('utf-8');
-        const lines = content.split('\n');
-        const slice = lines.slice(offset, offset + limit);
-        const numbered = slice.map((line, i) => `${offset + i + 1}\t${line}`).join('\n');
-        const truncated = lines.length > offset + limit
-          ? `\n... (${lines.length - offset - limit} more lines)`
-          : '';
-        const result = numbered + truncated;
-        if (cache) cacheSet(cache, cacheKey, result);
-        return { tool_call_id: callId, content: result, is_error: false };
-      }
-
-      case 'write_file': {
-        const filePath = validatePath(args.path, cwd);
-        if (isProtectedPath(filePath, execOptions?.protectedFiles)) {
-          return {
-            tool_call_id: callId,
-            content: `PROTECTED: ${args.path} is part of the verification harness and must not be modified. ` +
-              `If tests fail, the cause is in the SOURCE code (or your fix) — debug from the test output instead.`,
-            is_error: true,
-          };
-        }
-        // 디렉토리 자동 생성
-        await fs.mkdir(path.dirname(filePath), { recursive: true });
-        await atomicWriteFile(filePath, args.content);
-        invalidateCache(cache, filePath);
-        return { tool_call_id: callId, content: `Written: ${filePath}`, is_error: false };
-      }
-
-      case 'edit_file': {
-        const filePath = validatePath(args.path, cwd);
-        if (isProtectedPath(filePath, execOptions?.protectedFiles)) {
-          return {
-            tool_call_id: callId,
-            content: `PROTECTED: ${args.path} is part of the verification harness and must not be modified. ` +
-              `If tests fail, the cause is in the SOURCE code (or your fix) — debug from the test output instead.`,
-            is_error: true,
-          };
-        }
-        const original = await fs.readFile(filePath, 'utf-8');
-        const occurrences = original.split(args.old_string).length - 1;
-        if (occurrences > 1) {
-          return { tool_call_id: callId, content: `old_string found ${occurrences} times — must be unique. Provide more context.`, is_error: true };
-        }
-        // Resolve the exact span to replace. Exact match first; on a miss, fall back
-        // to line-normalized fuzzy matching (trailing whitespace / smart quotes /
-        // dashes) — but only when it's unique, so we never edit the wrong place. (INT-2011)
-        let editStart: number;
-        let editEnd: number;
-        let fuzzy = false;
-        if (occurrences === 1) {
-          editStart = original.indexOf(args.old_string);
-          editEnd = editStart + args.old_string.length;
-        } else {
-          const span = findFuzzyEditSpan(original, args.old_string);
-          if (!span) {
-            return { tool_call_id: callId, content: `old_string not found in ${filePath}`, is_error: true };
-          }
-          editStart = span.start;
-          editEnd = span.end;
-          fuzzy = true;
-        }
-        const updated = original.slice(0, editStart) + args.new_string + original.slice(editEnd);
-        await atomicWriteFile(filePath, updated);
-        invalidateCache(cache, filePath);
-        // Return the changed region so the model can verify without a re-read.
-        // editStart is the exact offset in the ORIGINAL (exact or fuzzy), so the
-        // line math is correct either way.
-        const newLines = updated.split('\n');
-        const editLine = original.slice(0, editStart).split('\n').length - 1;
-        const from = Math.max(0, editLine - 3);
-        const to = Math.min(newLines.length, editLine + args.new_string.split('\n').length + 3);
-        const snippet = newLines.slice(from, to).map((l, i) => `${from + i + 1}\t${l}`).join('\n');
-        return {
-          tool_call_id: callId,
-          content: `Edited: ${filePath}${fuzzy ? ' (matched with whitespace/quote normalization)' : ''}\nResulting region:\n${snippet}`,
-          is_error: false,
-        };
-      }
-
-      case 'apply_patch': {
-        // V4A patch (codex-native edit format). Validate each touched path + protect
-        // the verification harness, then apply via the shared applier.
-        const patchText: string = args.input ?? args.patch ?? '';
-        if (!/\*\*\* Begin Patch/.test(patchText)) {
-          return { tool_call_id: callId, content: 'apply_patch: "input" must be a V4A patch starting with "*** Begin Patch".', is_error: true };
-        }
-        // Scan BOTH the source headers and `*** Move to:` targets — a rename can
-        // overwrite a protected harness path that no Update/Add/Delete header names. (INT-1928)
-        // `.trim()` on the line, because that is what parseV4A does before it
-        // matches a header. Scanning the raw line while the parser trims meant
-        // one leading space hid a header from this guard and still applied it —
-        // the guard is the only protection, applyV4APatch has none of its own.
-        const protectedHit = patchText
-          .split('\n')
-          .map((raw) => raw.trim())
-          .map((l) =>
-            l.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/)?.[1]?.trim()
-            ?? l.match(/^\*\*\* Move to: (.+)$/)?.[1]?.trim(),
-          )
-          .filter((p): p is string => !!p)
-          .find((p) => isProtectedPath(validatePath(p, cwd), execOptions?.protectedFiles));
-        if (protectedHit) {
-          return {
-            tool_call_id: callId,
-            content: `PROTECTED: ${protectedHit} is part of the verification harness and must not be modified. ` +
-              `If tests fail, the cause is in the SOURCE code (or your fix) — debug from the test output instead.`,
-            is_error: true,
-          };
-        }
-        const { changed, errors } = await applyV4APatch(patchText, cwd, (p) => validatePath(p, cwd));
-        for (const rel of changed) invalidateCache(cache, validatePath(rel, cwd));
-        if (errors.length > 0) {
-          return {
-            tool_call_id: callId,
-            content: `apply_patch ${changed.length ? `partially applied (${changed.join(', ')}); ` : 'failed; '}errors:\n${errors.join('\n')}\n` +
-              `Fix: ensure context/removed lines match the file EXACTLY (read the file first), then resend the patch.`,
-            is_error: true,
-          };
-        }
-        return { tool_call_id: callId, content: `Patched: ${changed.join(', ')}`, is_error: false };
+        return { tool_call_id: callId, content: result || '(empty file)', is_error: false };
       }
 
       case 'search_files': {
         const searchPath = validatePath(args.path, cwd, {
-          allowMainCheckoutRead: !execOptions?.readOnly,
-          allowWarehouseRead: true,
+          allowMainCheckoutRead: execOptions?.allowMainCheckoutRead,
+          allowWarehouseRead: execOptions?.allowWarehouseRead,
         });
-        const rgArgs = ['--no-heading', '--line-number', '--max-count', '50'];
-        if (args.glob) {
-          rgArgs.push('--glob', args.glob);
-        }
-        rgArgs.push(args.pattern, searchPath);
-
+        const pattern = args.pattern;
+        const glob = args.glob;
         try {
-          const { stdout } = await execFileAsync('rg', rgArgs, { timeout: 10000, maxBuffer: 1024 * 256 });
-          return { tool_call_id: callId, content: stdout || '(no matches)', is_error: false };
+          const { execa } = await import('execa');
+          const rgArgs = ['--no-heading', '--line-number', '--color', 'never', '-E', '-e', pattern, searchPath];
+          if (glob) rgArgs.push('--glob', glob);
+          const { stdout } = await execa('rg', rgArgs, { timeout: 15000, maxBuffer: 1024 * 256 });
+          const lines = stdout.split('\n').filter(Boolean).slice(0, 50);
+          return { tool_call_id: callId, content: lines.length ? lines.join('\n') : '(no matches)', is_error: false };
+        } catch {
+          // ripgrep not installed → fall back to git grep
+          return searchWithGitGrep(pattern, searchPath, glob, callId, cwd);
+        }
+      }
+
+      case 'search_memory': {
+        const query = args.query;
+        const limit = Math.min(Number(args.limit) || 5, 10);
+        try {
+          const { searchMemory } = await import('../knowledge/store.js');
+          const results = await searchMemory(query, limit);
+          return { tool_call_id: callId, content: results || '(no results)', is_error: false };
         } catch (err) {
-          // rg exit code 1 = no matches
-          if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 1) {
-            return { tool_call_id: callId, content: '(no matches)', is_error: false };
-          }
-          // ripgrep is not everywhere. On a hosted CI runner it can be absent
-          // entirely, and then every search returns ENOENT: the agent learns
-          // that searching does not work, stops trying, and reviews the diff
-          // without ever looking at the surrounding code — while still emitting
-          // a confident verdict. Observed on a real GitHub Actions run: five
-          // consecutive `spawn rg ENOENT`, verdict `approve`. Falling back to
-          // git grep keeps the capability instead of silently losing it.
-          if (isMissingExecutable(err)) {
-            return searchWithGitGrep(args.pattern, searchPath, args.glob, callId, cwd);
-          }
-          throw err;
+          return {
+            tool_call_id: callId,
+            content: `search_memory unavailable: ${err instanceof Error ? err.message : String(err)}`,
+            is_error: true,
+          };
         }
       }
 
@@ -827,42 +647,29 @@ export async function executeTool(
             if (result.timedOut) {
               return {
                 tool_call_id: callId,
-                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: timeout after ${limit}ms; the process tree was terminated but workspace writes may be partial.\n${output}`,
+                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: command timed out after it may have modified the workspace\n${output}`,
                 is_error: true,
                 fatal: 'execution_outcome_unknown',
-              };
-            }
-            if (result.exitCode !== 0) {
-              return {
-                tool_call_id: callId,
-                content: `${output || '(no output)'}\n[exit code ${result.exitCode ?? '?'}${result.signal ? `, signal ${result.signal}` : ''}]`,
-                is_error: true,
               };
             }
             return { tool_call_id: callId, content: output || '(no output, exit 0)', is_error: false };
-          } catch (error) {
-            if (error instanceof SandboxOutcomeUnknownError) {
+          } catch (err) {
+            if (err instanceof SandboxOutcomeUnknownError) {
               return {
                 tool_call_id: callId,
-                content: error.message,
+                content: `OUTCOME_UNKNOWN_DO_NOT_RETRY: ${err.message}`,
                 is_error: true,
                 fatal: 'execution_outcome_unknown',
               };
             }
-            return {
-              tool_call_id: callId,
-              content: `SANDBOX_EXECUTOR_FAILED: ${error instanceof Error ? error.message : String(error)}`,
-              is_error: true,
-            };
+            throw err;
           }
         }
-        const humanSurfaceDenial = humanSurfaceShellWriteReason(command);
-        if (humanSurfaceDenial) {
-          return { tool_call_id: callId, content: `HUMAN_SURFACE_READ_ONLY: ${humanSurfaceDenial}`, is_error: true };
-        }
+
         if (isCommandBlocked(command)) {
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
+
         try {
           const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
             cwd,
@@ -878,144 +685,202 @@ export async function executeTool(
             is_error: false,
           };
         } catch (err) {
-          // exit code != 0 → execFile이 throw. 하지만 grep/find 등은 "매치 없음"으로
-          // exit 1을 내며 이건 정상이다. 실제 stdout/stderr + exit code를 모델에게 줘서
-          // "no match"인지 진짜 에러인지 스스로 판단하게 한다(이게 없으면 같은 명령 반복).
-          const e = err as { code?: number; stdout?: string; stderr?: string; message?: string; killed?: boolean; signal?: string };
-          const out = (e.stdout ?? '') + (e.stderr ? `\n[stderr] ${e.stderr}` : '');
-          const code = typeof e.code === 'number' ? e.code : '?';
-          // Make timeout kills explicit — a silent no-output failure leads the
-          // model to conclude "the verification environment is broken" and start
-          // dismantling the harness (observed in SWE runs).
-          if (e.killed && e.signal) {
-            const limit = execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
+          if (isMissingExecutable(err)) {
             return {
               tool_call_id: callId,
-              content: `TIMEOUT: command exceeded ${Math.round(limit / 1000)}s and was killed (${e.signal}). ` +
-                `The command may simply be slow — this is NOT evidence that the environment or script is broken. ` +
-                `Partial output:\n${out.slice(0, 2000) || '(none)'}`,
+              content: 'bash is not installed or not available in PATH. Install bash or use a different approach.',
               is_error: true,
             };
           }
-          const body = out.trim()
-            ? `exit ${code}:\n${out.slice(0, 4000)}`
-            : `exit ${code} (no output) — likely no matches or a non-fatal nonzero exit, not necessarily an error.`;
-          // exit 1 + 출력 없음은 보통 무해(grep no-match) → is_error를 false로 둬 모델이 안 헤매게.
-          const benign = e.code === 1 && !out.trim();
-          return { tool_call_id: callId, content: body, is_error: !benign };
-        }
-      }
-
-      case 'search_memory': {
-        const query = String(args.query ?? '').trim();
-        if (!query) {
-          return { tool_call_id: callId, content: 'search_memory requires a non-empty "query".', is_error: true };
-        }
-        try {
-          // Loaded lazily: the memory core pulls in LanceDB + the embedding model,
-          // which we don't want as a static dependency of every tools.ts consumer.
-          // Same helper backs the MCP memory server so results stay identical.
-          const { searchRepoMemoryText } = await import('../memory/repoKnowledge.js');
-          const text = await searchRepoMemoryText(cwd, query, Number(args.limit) || 5);
-          return { tool_call_id: callId, content: text, is_error: false };
-        } catch (err) {
-          return { tool_call_id: callId, content: `search_memory failed: ${err instanceof Error ? err.message : String(err)}`, is_error: false };
-        }
-      }
-
-      case 'diagnostics': {
-        if (isHumanSurfaceReadOnlyEnabled()) {
+          const execErr = err as { code?: number; stderr?: string; stdout?: string; killed?: boolean };
+          const exitCode = execErr.code ?? 1;
+          const stderrText = execErr.stderr ?? '';
+          const stdoutText = execErr.stdout ?? '';
+          const combined = [stdoutText, stderrText].filter(Boolean).join('\n').slice(0, 4000);
+          const killed = execErr.killed ? ' (timed out)' : '';
           return {
             tool_call_id: callId,
-            content: 'HUMAN_SURFACE_READ_ONLY: diagnostics subprocess execution is disabled while humanSurfaceReadOnly.enabled is true',
+            content: `Command exited with code ${exitCode}${killed}:\n${combined || '(no output)'}`,
             is_error: true,
           };
         }
-        // Lazy: only loops that opted in (AgenticLoopOptions.diagnosticsTool)
-        // expose the schema, so most consumers never load this module.
-        const { runDiagnosticsTool } = await import('./diagnosticsTool.js');
-        const text = await runDiagnosticsTool(args.paths, cwd);
-        return { tool_call_id: callId, content: text, is_error: false };
+      }
+
+      case 'write_file': {
+        const filePath = validatePath(args.path, cwd);
+        if (isProtectedPath(filePath, execOptions?.protectedFiles)) {
+          return {
+            tool_call_id: callId,
+            content: `PROTECTED: ${args.path} is part of the verification harness and must not be modified. ` +
+              `If tests fail, the cause is in the SOURCE code (or your fix) — debug from the test output instead.`,
+            is_error: true,
+          };
+        }
+        await atomicWriteFile(filePath, args.content);
+        invalidateCache(cache, filePath);
+        return { tool_call_id: callId, content: `Written: ${filePath}`, is_error: false };
+      }
+
+      case 'edit_file': {
+        const filePath = validatePath(args.path, cwd);
+        if (isProtectedPath(filePath, execOptions?.protectedFiles)) {
+          return {
+            tool_call_id: callId,
+            content: `PROTECTED: ${args.path} is part of the verification harness and must not be modified. ` +
+              `If tests fail, the cause is in the SOURCE code (or your fix) — debug from the test output instead.`,
+            is_error: true,
+          };
+        }
+        const original = await fs.readFile(filePath, 'utf8');
+        const oldString = args.old_string;
+        const newString = args.new_string;
+
+        // Try exact match first
+        const idx = original.indexOf(oldString);
+        if (idx !== -1) {
+          const result = original.slice(0, idx) + newString + original.slice(idx + oldString.length);
+          await atomicWriteFile(filePath, result);
+          invalidateCache(cache, filePath);
+          return { tool_call_id: callId, content: `Edited: ${filePath}`, is_error: false };
+        }
+
+        // Fuzzy fallback
+        const span = findFuzzyEditSpan(original, oldString);
+        if (span) {
+          const result = original.slice(0, span.start) + newString + original.slice(span.end);
+          await atomicWriteFile(filePath, result);
+          invalidateCache(cache, filePath);
+          return { tool_call_id: callId, content: `Edited: ${filePath} (fuzzy match)`, is_error: false };
+        }
+
+        return {
+          tool_call_id: callId,
+          content: `EDIT_FAILED: old_string not found in ${filePath}. ` +
+            `The old_string must match the file content exactly. ` +
+            `Use read_file to check the current content and retry with an exact match.`,
+          is_error: true,
+        };
+      }
+
+      case 'apply_patch': {
+        const filePath = validatePath(args.path, cwd);
+        if (isProtectedPath(filePath, execOptions?.protectedFiles)) {
+          return {
+            tool_call_id: callId,
+            content: `PROTECTED: ${args.path} is part of the verification harness and must not be modified. ` +
+              `If tests fail, the cause is in the SOURCE code (or your fix) — debug from the test output instead.`,
+            is_error: true,
+          };
+        }
+        const original = await fs.readFile(filePath, 'utf8');
+        const patched = applyV4APatch(original, args.patch);
+        if (patched === null) {
+          return {
+            tool_call_id: callId,
+            content: 'PATCH_FAILED: Could not apply patch. The patch may be malformed or not match the file content.',
+            is_error: true,
+          };
+        }
+        await atomicWriteFile(filePath, patched);
+        invalidateCache(cache, filePath);
+        return { tool_call_id: callId, content: `Patched: ${filePath}`, is_error: false };
       }
 
       case 'web_fetch': {
-        const text = await webFetch(args.url);
-        return { tool_call_id: callId, content: text, is_error: text.startsWith('Invalid URL') || text.startsWith('Fetch ') };
+        const url = args.url;
+        const result = await webFetch(url);
+        return { tool_call_id: callId, content: result, is_error: false };
       }
 
       case 'web_search': {
-        const text = await webSearch(args.query, args.max_results);
-        return { tool_call_id: callId, content: text, is_error: text.startsWith('Search failed') || text.startsWith('Invalid query') };
+        const query = args.query;
+        const maxResults = args.max_results;
+        const result = await webSearch(query, maxResults);
+        return { tool_call_id: callId, content: result, is_error: false };
+      }
+
+      case 'diagnostics': {
+        const { runDiagnosticsTool } = await import('./diagnosticsTool.js');
+        const result = await runDiagnosticsTool(args.paths, cwd);
+        return { tool_call_id: callId, content: result, is_error: false };
       }
 
       default:
-        if (COORDINATION_TOOL_NAMES.has(name)) {
-          if (!execOptions?.coordinationContext) {
-            return { tool_call_id: callId, content: 'Coordination tools are unavailable outside a scoped autonomous run.', is_error: true };
-          }
-          const result = await executeCoordinationTool(
-            name,
-            { ...(args ?? {}) as Record<string, unknown>, __loopDeadlineAt: execOptions.loopDeadlineAt },
-            execOptions.coordinationContext,
-          );
-          return { tool_call_id: callId, content: result.content, is_error: result.isError };
-        }
-        // MCP tools (named `server__tool`) route to their server via the MCP client.
         if (isMcpTool(name)) {
-          const result = await callMcpTool(name, (args ?? {}) as Record<string, unknown>);
-          return {
-            tool_call_id: callId,
-            content: result.content,
-            is_error: result.isError,
-          };
+          const result = await callMcpTool(name, args);
+          return { tool_call_id: callId, content: result.content ?? '', is_error: result.isError ?? false };
         }
-        return { tool_call_id: callId, content: `Unknown tool: ${name}`, is_error: true };
+        return {
+          tool_call_id: callId,
+          content: `UNKNOWN_TOOL: ${name} is not a recognized tool. Available tools: ${TOOL_DEFINITIONS.map(t => t.function.name).join(', ')}`,
+          is_error: true,
+        };
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { tool_call_id: callId, content: `Tool error: ${msg}`, is_error: true };
+    return {
+      tool_call_id: callId,
+      content: `Error executing ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      is_error: true,
+    };
   }
 }
 
+const DEFAULT_BASH_TIMEOUT_MS = 30_000;
+
 /**
- * 여러 도구 호출을 병렬 실행
+ * Check if a file path is protected (part of the verification harness).
+ */
+function isProtectedPath(filePath: string, protectedFiles?: Set<string>): boolean {
+  if (!protectedFiles) return false;
+  return protectedFiles.has(filePath);
+}
+
+/**
+ * Canonicalize a path: resolve symlinks if the path exists, otherwise
+ * resolve the longest existing prefix and append the remainder.
+ */
+function canonicalizePath(resolved: string): string {
+  try {
+    return realpathSync(resolved);
+  } catch {
+    // Walk up until we find an existing ancestor
+    const parts = resolved.split(path.sep);
+    for (let i = parts.length; i > 0; i--) {
+      const candidate = parts.slice(0, i).join(path.sep) || '/';
+      try {
+        const real = realpathSync(candidate);
+        return path.join(real, ...parts.slice(i));
+      } catch {
+        continue;
+      }
+    }
+    return resolved;
+  }
+}
+
+interface ValidatePathOptions {
+  allowMainCheckoutRead?: boolean;
+  allowWarehouseRead?: boolean;
+}
+
+/**
+ * Execute multiple tool calls concurrently.
  */
 export async function executeToolCalls(
   toolCalls: ToolCall[],
   cwd: string,
-  cache?: ReadCache,
   execOptions?: ToolExecOptions,
 ): Promise<ToolResult[]> {
+  const cache = createReadCache();
   const readOnlyTools = new Set(['read_file', 'search_files', 'search_memory', 'web_fetch', 'web_search']);
-  const results: ToolResult[] = [];
-  let index = 0;
-  while (index < toolCalls.length) {
-    const call = toolCalls[index];
-    if (!readOnlyTools.has(call.function.name)) {
-      const result = await executeTool(call, cwd, cache, execOptions);
-      results.push(result);
-      index++;
-      if (result.fatal) {
-        while (index < toolCalls.length) {
-          results.push({
-            tool_call_id: toolCalls[index++].id,
-            content: 'SKIPPED: a prior command has unknown outcome; no later tool was executed',
-            is_error: true,
-            fatal: 'execution_outcome_unknown',
-          });
-        }
+  const results = await Promise.all(
+    toolCalls.map((tc) => {
+      // read-only tools share a cache; write tools invalidate it
+      if (readOnlyTools.has(tc.function.name)) {
+        return executeTool(tc, cwd, cache, execOptions);
       }
-      continue;
-    }
-
-    // Parallelize only a contiguous read-only batch. A mutating call is a
-    // barrier, so reads cannot observe half-applied edits and two model-issued
-    // writes can never race their read/modify/write or rollback snapshots.
-    const batch: ToolCall[] = [];
-    while (index < toolCalls.length && readOnlyTools.has(toolCalls[index].function.name)) {
-      batch.push(toolCalls[index++]);
-    }
-    results.push(...await Promise.all(batch.map((item) => executeTool(item, cwd, cache, execOptions))));
-  }
+      return executeTool(tc, cwd, undefined, execOptions);
+    }),
+  );
   return results;
 }
