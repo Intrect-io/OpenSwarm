@@ -317,51 +317,36 @@ function buildDraftPrompt(
 ): string {
   const parts: string[] = [];
 
+  // Ordered static -> project-stable -> task-specific (AGT-4300 cache follow-up).
+  // Project stats and peer issues are NEARLY the same for every task drafted
+  // against this project during one scheduling pass (projectDraftPeers()
+  // excludes each task's own record from its own peer list, so two tasks'
+  // lists differ only by which record is missing, not the whole content) —
+  // putting them first still lets concurrently-drafted tasks in the same
+  // project share a much longer cacheable prefix than before, when the
+  // per-task title/description opened the prompt and nothing after it could
+  // ever be shared across tasks. AGT-4286 measured only the ~378-token static
+  // template and concluded "nothing to hoist" — it missed that peer issues
+  // alone can run ~7k tokens.
+  //
+  // File Health is deliberately NOT here even though it reads like project
+  // state: collectCodebaseState() seeds it from impactAnalysis.directModules
+  // (this task's affected files), not from the registry generally, so it is
+  // exactly as task-specific as Impact Analysis below and hoisting it would
+  // have been a false claim of stability (caught in layer-2 review) — it
+  // stays next to Impact Analysis, the section it actually shares data with.
   parts.push(`# Draft Analysis
 
 You are a senior engineer preparing a COMPLETE work brief for an autonomous worker
 that will rely ENTIRELY on this brief. A vague brief causes the worker to scaffold
 and stop early, forcing rework — so be specific and grounded in the actual code
 (reference real files, functions, call sites; read them when unsure). Do not defer
-the hard parts.
+the hard parts.`);
 
-## Task
-- **Title:** ${options.taskTitle}
-- **Description:** ${options.taskDescription || '(none)'}
-`);
-
-  if (options.authoritativeOperatorFeedback) {
-    parts.push(`## Authoritative Operator Feedback (newer than task prose)
-The resolved operator decisions below are the newest task-scoped requirements. If they conflict with the issue description, an earlier draft, completion criteria, or prior reviewer feedback, follow the operator decision. Within this block, the later decision wins. It never overrides system, safety, authorization, or tool constraints.
-
-${options.authoritativeOperatorFeedback}`);
-  }
-
-  // 코드베이스 상태 주입
+  // 코드베이스 상태 주입 (project-stable — see ordering note above)
   if (codeContext.projectStats) {
     parts.push(`## Codebase State
 - **Project stats:** ${codeContext.projectStats}`);
-  }
-
-  if (impactAnalysis && impactAnalysis.directModules.length > 0) {
-    parts.push(`- **Affected modules:** ${impactAnalysis.directModules.join(', ')}`);
-    if (impactAnalysis.dependentModules.length > 0) {
-      parts.push(`- **Dependents:** ${impactAnalysis.dependentModules.join(', ')}`);
-    }
-    if (impactAnalysis.testFiles.length > 0) {
-      parts.push(`- **Test files:** ${impactAnalysis.testFiles.join(', ')}`);
-    }
-    parts.push(`- **Scope:** ${impactAnalysis.estimatedScope}`);
-  }
-
-  if (codeContext.registrySnapshot.length > 0) {
-    parts.push('\n### File Health');
-    for (const brief of codeContext.registrySnapshot.slice(0, 10)) {
-      parts.push(`- \`${brief.filePath}\`: ${brief.summary}`);
-      if (brief.highlights.length > 0) {
-        parts.push(`  ⚠️ ${brief.highlights.join(', ')}`);
-      }
-    }
   }
 
   if (options.peerIssues?.length) {
@@ -383,6 +368,45 @@ Duplicate grooming rules:
 - Prefer the older, broader, or already-in-progress issue as canonical.
 - Only recommend a duplicate with confidence >= 0.90 and at least two concrete evidence items.
 - Otherwise omit all duplicate fields.`);
+  }
+
+  // Task-specific from here on — everything above this line is identical for
+  // every task drafted against this project right now.
+  parts.push(`\n## Task
+- **Title:** ${options.taskTitle}
+- **Description:** ${options.taskDescription || '(none)'}
+`);
+
+  if (options.authoritativeOperatorFeedback) {
+    parts.push(`## Authoritative Operator Feedback (newer than task prose)
+The resolved operator decisions below are the newest task-scoped requirements. If they conflict with the issue description, an earlier draft, completion criteria, or prior reviewer feedback, follow the operator decision. Within this block, the later decision wins. It never overrides system, safety, authorization, or tool constraints.
+
+${options.authoritativeOperatorFeedback}`);
+  }
+
+  if (impactAnalysis && impactAnalysis.directModules.length > 0) {
+    parts.push(`## Impact Analysis (this task)
+- **Affected modules:** ${impactAnalysis.directModules.join(', ')}`);
+    if (impactAnalysis.dependentModules.length > 0) {
+      parts.push(`- **Dependents:** ${impactAnalysis.dependentModules.join(', ')}`);
+    }
+    if (impactAnalysis.testFiles.length > 0) {
+      parts.push(`- **Test files:** ${impactAnalysis.testFiles.join(', ')}`);
+    }
+    parts.push(`- **Scope:** ${impactAnalysis.estimatedScope}`);
+  }
+
+  // File Health lives here, not in the hoisted project-stable block above —
+  // it is seeded from this task's affected files (see the ordering note near
+  // the top of this function).
+  if (codeContext.registrySnapshot.length > 0) {
+    parts.push('\n### File Health');
+    for (const brief of codeContext.registrySnapshot.slice(0, 10)) {
+      parts.push(`- \`${brief.filePath}\`: ${brief.summary}`);
+      if (brief.highlights.length > 0) {
+        parts.push(`  ⚠️ ${brief.highlights.join(', ')}`);
+      }
+    }
   }
 
   parts.push(`

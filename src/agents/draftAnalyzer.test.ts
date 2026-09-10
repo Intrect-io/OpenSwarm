@@ -230,6 +230,125 @@ describe('runDraftAnalysis fallback', () => {
     expect(adapterModule.getAdapter).toHaveBeenCalledTimes(1);
     expect(adapterModule.spawnCli).toHaveBeenCalledTimes(1);
   });
+
+  it('two different tasks in the same project share a long prefix, with task text only after it', async () => {
+    // The point of the reordering: concurrently-drafted tasks in the same
+    // project should share as much of the prompt as possible, so the
+    // provider's prefix cache actually helps across tasks, not just across
+    // turns of one task. Peer issues are real project-stable content (nearly
+    // the same list for every task drafted against this project in one
+    // scheduling pass — production excludes each task's own record from its
+    // own list via projectDraftPeers(), so two tasks differ only by which
+    // record is missing) and, unlike the registry-store-derived Codebase State
+    // section, are injectable directly via options without fighting the
+    // registry mock. This test uses the identical literal for both calls,
+    // which validates the ordering mechanism, not the exact production overlap.
+    vi.spyOn(adapterModule, 'getDefaultAdapterName').mockReturnValue('codex');
+    vi.spyOn(adapterModule, 'getAdapter').mockReturnValue(makeAdapter('codex'));
+    const prompts: string[] = [];
+    const sufficientBrief = JSON.stringify({ taskType: 'feature', intentSummary: 'Wire the new prefix-cache-friendly ordering', relevantFiles: ['a.ts'], suggestedApproach: 'Reorder buildDraftPrompt sections', completionCriteria: ['prompt ordering verified by test (evidence)'] });
+    vi.spyOn(adapterModule, 'spawnCli').mockImplementation(async (_adapter, options) => {
+      prompts.push(options.prompt);
+      // Accept on the first candidate so the AGT-4300 layer-2 fallback (for
+      // adapters/paths that never got a real finishValidator quota) does not
+      // also fire and add extra prompts unrelated to what this test checks.
+      await options.finishValidator?.(sufficientBrief, 1);
+      return { exitCode: 0, stdout: sufficientBrief, stderr: '', durationMs: 1 } as CliRunResult;
+    });
+
+    const peerIssues = [{
+      issueId: 'peer-1',
+      identifier: 'AGT-1',
+      title: 'Some other issue in this project',
+      description: 'Shared context every task in this project should see identically.',
+      state: 'Backlog',
+      createdAt: '2026-01-01T00:00:00Z',
+    }];
+
+    await runDraftAnalysis({
+      taskTitle: 'First distinct task title',
+      taskDescription: 'First distinct task description, totally different from the second.',
+      projectPath: '/tmp/project',
+      peerIssues,
+    });
+    await runDraftAnalysis({
+      taskTitle: 'Second, unrelated task title',
+      taskDescription: 'Second task description — shares nothing in common with the first.',
+      projectPath: '/tmp/project',
+      peerIssues,
+    });
+
+    expect(prompts).toHaveLength(2);
+    const [promptA, promptB] = prompts;
+
+    // Project-stable content (peer issues) appears before task-specific
+    // content (the task title) in both prompts.
+    const peerIdxA = promptA.indexOf('Some other issue in this project');
+    const peerIdxB = promptB.indexOf('Some other issue in this project');
+    const taskIdxA = promptA.indexOf('First distinct task title');
+    const taskIdxB = promptB.indexOf('Second, unrelated task title');
+    expect(peerIdxA).toBeGreaterThan(-1);
+    expect(peerIdxB).toBeGreaterThan(-1);
+    expect(peerIdxA).toBeLessThan(taskIdxA);
+    expect(peerIdxB).toBeLessThan(taskIdxB);
+
+    // The two prompts share a long common prefix — everything up through the
+    // shared peer-issues block is byte-identical between the two tasks.
+    let shared = 0;
+    const minLen = Math.min(promptA.length, promptB.length);
+    while (shared < minLen && promptA[shared] === promptB[shared]) shared++;
+    expect(shared).toBeGreaterThan(300);
+    // And the divergence point is at or after the shared peer-issues content,
+    // not somewhere in the static header alone (i.e. the reorder actually
+    // moved something substantial ahead of the per-task text).
+    expect(shared).toBeGreaterThanOrEqual(Math.min(peerIdxA, peerIdxB));
+  });
+
+  it('File Health stays in the task-specific section — it is seeded from THIS task\'s impact analysis, not project-wide (layer-2 review finding)', async () => {
+    // collectCodebaseState() builds File Health primarily from
+    // impactAnalysis.directModules (this task's affected files), only falling
+    // back to project-wide highRiskEntities when fewer than 3 files matched.
+    // So unlike projectStats/peerIssues, it is NOT safe to hoist ahead of Task
+    // — two different tasks against the same project will usually get
+    // different File Health content. This exercises the realistic path (an
+    // adapter mock alone can't: /tmp/project with the default beforeEach mocks
+    // gives null impactAnalysis and empty File Health, silently unable to
+    // catch this).
+    vi.spyOn(adapterModule, 'getDefaultAdapterName').mockReturnValue('codex');
+    vi.spyOn(adapterModule, 'getAdapter').mockReturnValue(makeAdapter('codex'));
+    vi.spyOn(knowledgeModule, 'analyzeIssue').mockResolvedValue({
+      directModules: ['src/streaming.ts'],
+      dependentModules: [],
+      testFiles: [],
+      estimatedScope: 'small',
+    });
+    vi.spyOn(registryModule, 'getRegistryStore').mockReturnValue({
+      getStats: vi.fn(() => ({ total: 10, byStatus: [{ status: 'active', count: 10 }], deprecated: 0, untested: 0, withWarnings: 0, highRisk: 0 })),
+      highRiskEntities: vi.fn(() => []),
+      fileBrief: vi.fn(() => ({
+        filePath: 'src/streaming.ts',
+        summary: 'handles the streaming response path',
+        entities: [{ kind: 'function', name: 'resolveTurnModel', signature: '(x) => y', status: 'active', hasTests: true, warnings: [] }],
+      })),
+    } as never);
+
+    let capturedPrompt = '';
+    vi.spyOn(adapterModule, 'spawnCli').mockImplementation(async (_adapter, options) => {
+      capturedPrompt = options.prompt;
+      const sufficientBrief = JSON.stringify({ taskType: 'feature', intentSummary: 'Wire the resolver into the streaming path', relevantFiles: ['src/streaming.ts'], suggestedApproach: 'call resolve_turn_model from build_request', completionCriteria: ['resolve_turn_model invoked (evidence)'] });
+      await options.finishValidator?.(sufficientBrief, 1);
+      return { exitCode: 0, stdout: sufficientBrief, stderr: '', durationMs: 1 } as CliRunResult;
+    });
+
+    await runDraftAnalysis({ taskTitle: 'Fix streaming', taskDescription: 'Fix the streaming resolver', projectPath: '/tmp/project' });
+
+    const taskIdx = capturedPrompt.indexOf('## Task');
+    const fileHealthIdx = capturedPrompt.indexOf('### File Health');
+    expect(taskIdx).toBeGreaterThan(-1);
+    expect(fileHealthIdx).toBeGreaterThan(-1);
+    expect(fileHealthIdx).toBeGreaterThan(taskIdx); // task-specific section, not hoisted
+    expect(capturedPrompt).toContain('handles the streaming response path'); // File Health summary rendered
+  });
 });
 
 describe('isDraftSufficient — drafter hard gate (INT-1917)', () => {
