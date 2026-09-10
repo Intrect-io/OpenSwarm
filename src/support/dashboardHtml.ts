@@ -6,6 +6,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>OpenSwarm :: Supervisor</title>
   <script src="/static/js/themeBoot.js"></script>
+  <script src="/static/js/webToken.js"></script>
   <link rel="stylesheet" href="/static/css/tokens.css">
   <link rel="stylesheet" href="/static/css/shell.css">
   <link rel="stylesheet" href="/static/css/supervisor.css">

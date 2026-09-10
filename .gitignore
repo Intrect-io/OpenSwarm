@@ -85,6 +85,9 @@ openswarm.orb-*.json
 # Subprojects
 openclaw/
 plan.md
+# Agent working plans (§2.5). Scratch, never repo content — and an
+# untracked directory here is exactly what `git add -A` swept into commits.
+.plans/
 
 # Agent-runtime droppings. The daemon runs agents inside each git worktree, and
 # they write their own scratch there: `cli.json`/`cursor/cli.json` are
