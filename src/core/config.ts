@@ -898,10 +898,14 @@ export function validateConfig(config: SwarmConfig): { valid: boolean; errors: s
     }
   }
 
-  // Verify GitHub repo format — a malformed repo string is real misconfiguration.
+  // Verify GitHub repo format — a malformed repo string is real misconfiguration
+  // that otherwise fails obscurely inside `gh` calls. A bare `includes('/')`
+  // accepted "owner/", "/repo", "a/b/c", and whitespace-padded names, so require
+  // exactly `owner/repo` with no empty segments or whitespace.
+  const GITHUB_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
   if (config.githubRepos) {
     for (const repo of config.githubRepos) {
-      if (!repo.includes('/')) {
+      if (!GITHUB_REPO_PATTERN.test(repo)) {
         errors.push(`Invalid GitHub repo format: ${repo} (expected: owner/repo)`);
       }
     }

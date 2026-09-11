@@ -686,6 +686,24 @@ agents:
       expect(result.errors).not.toContainEqual(expect.stringContaining('Invalid GitHub repo format'));
     });
 
+    it('should reject owner-only, repo-only, nested, and whitespace-padded repos', () => {
+      // Regression: the check was `repo.includes('/')`, so every value below
+      // except '' passed validation and failed later inside `gh` calls.
+      for (const repo of ['owner/', '/repo', 'a/b/c', 'owner/repo ', ' owner/repo', 'owner//repo', '/']) {
+        const result = validateConfig({ ...basicConfig, githubRepos: [repo] });
+        expect(result.valid).toBe(false);
+        expect(result.errors.join('\n')).toContain('Invalid GitHub repo format');
+      }
+    });
+
+    it('should accept dotted, dashed, and underscored owner/repo names', () => {
+      const result = validateConfig({
+        ...basicConfig,
+        githubRepos: ['my-org/my.repo-1_2', 'a/b'],
+      });
+      expect(result.errors.join('\n')).not.toContain('Invalid GitHub repo format');
+    });
+
     it('should handle multiple validation errors', () => {
       // Mock existsSync to return false for non-existent paths
       vi.mocked(existsSync).mockReturnValue(false);
