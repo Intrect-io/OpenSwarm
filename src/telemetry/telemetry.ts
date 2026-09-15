@@ -133,16 +133,39 @@ function recoverTelemetryLock(): void {
   if (!existsSync(TELEMETRY_LOCK)) return;
   const owner = readTelemetryLockOwner(TELEMETRY_LOCK);
   try {
-    const age = Date.now() - statSync(TELEMETRY_LOCK).mtimeMs;
+    const judgedMtimeMs = statSync(TELEMETRY_LOCK).mtimeMs;
+    const age = Date.now() - judgedMtimeMs;
     if (!owner) {
-      if (age > LOCK_STALE_MS) unlinkSync(TELEMETRY_LOCK);
+      if (age > LOCK_STALE_MS) {
+        // Reclaim only the lock we judged: re-verify it is still malformed and
+        // still the same file before the unlink.
+        if (readTelemetryLockOwner(TELEMETRY_LOCK) === null && statSync(TELEMETRY_LOCK).mtimeMs === judgedMtimeMs) {
+          unlinkSync(TELEMETRY_LOCK);
+        }
+      }
       return;
     }
     if (isProofCapableSpace(owner.ns ?? undefined) && sameProcessNamespace(owner.ns ?? undefined)) {
-      if (!processAppearsAlive(owner.pid)) unlinkSync(TELEMETRY_LOCK);
+      if (!processAppearsAlive(owner.pid)) {
+        // Reclaim only the lock we judged: between the owner read above and
+        // this unlink the owner can release and a third process can take a
+        // fresh lock. Re-verify token+mtime first (same pattern as
+        // support/fileLock.ts) so we never delete a lock we did not judge.
+        const judged = readTelemetryLockOwner(TELEMETRY_LOCK);
+        const currentMtimeMs = existsSync(TELEMETRY_LOCK) ? statSync(TELEMETRY_LOCK).mtimeMs : undefined;
+        if (judged?.token === owner.token && currentMtimeMs === judgedMtimeMs) {
+          unlinkSync(TELEMETRY_LOCK);
+        }
+      }
       return;
     }
-    if (age > LOCK_ABANDON_MS) unlinkSync(TELEMETRY_LOCK);
+    if (age > LOCK_ABANDON_MS) {
+      const judged = readTelemetryLockOwner(TELEMETRY_LOCK);
+      const currentMtimeMs = existsSync(TELEMETRY_LOCK) ? statSync(TELEMETRY_LOCK).mtimeMs : undefined;
+      if (judged?.token === owner.token && currentMtimeMs === judgedMtimeMs) {
+        unlinkSync(TELEMETRY_LOCK);
+      }
+    }
   } catch {
     // Leave the lock; writeState will retry or degrade gracefully.
   }

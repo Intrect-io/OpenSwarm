@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { processNamespaceId } from '../support/processLiveness.js';
 
 type RunnerStateModule = typeof import('./runnerState.js');
 
@@ -430,5 +431,62 @@ describe('state-file env overrides (INT-2543)', () => {
     vi.stubEnv('USERPROFILE', '/tmp/fake-home-int2543');
     const m = await import('./runnerState.js');
     expect(m.TASK_STATE_FILE).toBe('/tmp/fake-home-int2543/.claude/openswarm-task-state.json');
+  });
+});
+
+describe('releaseStaleLock — ownership-safe reclaim (AGT-3488)', () => {
+  let dir = '';
+
+  beforeEach(async () => {
+    await loadFreshModule();
+    dir = mkdtempSync(join(tmpdir(), 'openswarm-release-lock-'));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A pid that is provably not running: spawn a child, wait for its exit, use its pid. */
+  const deadPid = async (): Promise<number> => {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'process.exit(0)']);
+    await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    return child.pid!;
+  };
+
+  it('reclaims a same-namespace lock whose owner is provably gone', async () => {
+    const pid = await deadPid();
+    const lockPath = join(dir, 'task-state.json.lock');
+    writeFileSync(lockPath, JSON.stringify({ pid, token: 't-dead', ns: processNamespaceId() }));
+    expect(mod.releaseStaleLock(lockPath)).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('never reclaims a lock whose owner pid is alive', () => {
+    const lockPath = join(dir, 'task-state.json.lock');
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 't-alive', ns: processNamespaceId() }));
+    expect(mod.releaseStaleLock(lockPath)).toBe(false);
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('never reclaims a lock recorded in another pid namespace', () => {
+    const lockPath = join(dir, 'task-state.json.lock');
+    writeFileSync(lockPath, JSON.stringify({ pid: 999999999, token: 't-remote', ns: 'proof:other-boot:other-ns' }));
+    expect(mod.releaseStaleLock(lockPath)).toBe(false);
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('reclaims a malformed lock only after the stale window; a fresh malformed lock is left alone', () => {
+    const stalePath = join(dir, 'stale-malformed.json.lock');
+    writeFileSync(stalePath, 'not json');
+    utimesSync(stalePath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    expect(mod.releaseStaleLock(stalePath)).toBe(true);
+    expect(existsSync(stalePath)).toBe(false);
+
+    const freshPath = join(dir, 'fresh-malformed.json.lock');
+    writeFileSync(freshPath, 'not json');
+    expect(mod.releaseStaleLock(freshPath)).toBe(false);
+    expect(existsSync(freshPath)).toBe(true);
   });
 });
