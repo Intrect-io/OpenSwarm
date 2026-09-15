@@ -7,36 +7,23 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { loadShell } from './support/shellFixture.js';
 // @ts-expect-error — browser ESM asset without type declarations
 import {
   startOrchestrationView, edgeKey, nodeRadius, ROLE_COLORS, wireControls,
 } from '../../web/static/js/orchestrationView.mjs';
 
 function shell(): Document {
-  document.body.innerHTML = `
-    <div id="stats"></div>
-    <div id="waiting"></div>
-    <div id="controls">
-      <input id="filter-search" type="search" />
-      <select id="filter-task" data-options=""><option value="">all tasks</option></select>
-      <select id="filter-role">
-        <option value="">all roles</option>
-        <option value="worker">worker</option>
-        <option value="reviewer">reviewer</option>
-      </select>
-      <input id="filter-idle" type="checkbox" />
-      <span id="idle-count"></span>
-    </div>
-    <svg id="graph"></svg>
-    <div id="legend"></div>
-    <div id="detail"></div>
-    <div id="feed"></div>
-    <div id="thread"></div>`;
-  return document;
+  // The real orchestration shell (web/static/orchestration.html): the toolbar
+  // with #controls, #waiting, #stats, and the #detail/#feed/#thread aside.
+  return loadShell('orchestration.html');
 }
 
-/** The controls are optional furniture; some hosts render the graph alone. */
-function bareShell(): Document {
+/**
+ * A host page that ships no controls at all — no shipped page looks like this,
+ * which is the point: the graph must render for bare embeds too.
+ */
+function bareHost(): Document {
   document.body.innerHTML = `
     <div id="stats"></div>
     <svg id="graph"></svg>
@@ -409,6 +396,8 @@ describe('filter and collapse controls (AGT-4066)', () => {
     await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(2));
 
     const select = doc.getElementById('filter-task') as HTMLSelectElement;
+    // renderControls rebuilds the options (lowercase "all tasks" comes from
+    // the view, not the shell) and prefixes them with the live task labels.
     expect([...select.options].map((option) => option.textContent)).toEqual(['all tasks', 'AGT-1', 'AGT-2']);
 
     select.value = 't1';
@@ -537,7 +526,7 @@ describe('filter and collapse controls (AGT-4066)', () => {
   });
 
   it('still renders when the host page ships no controls at all', async () => {
-    const doc = bareShell();
+    const doc = bareHost();
     const view = startOrchestrationView(doc, { fetchImpl: fetchWith(twoTasks()), eventSourceImpl: null, pollMs: 1e9 });
     await vi.waitFor(() => expect(doc.querySelectorAll('.node').length).toBeGreaterThan(2));
     expect(doc.getElementById('feed')!.textContent).toContain('Reuse the auth helper?');

@@ -5,20 +5,14 @@
 // agent or the POST is unroutable. Drive it with a faked fetch, assert DOM.
 
 import { describe, expect, it, vi } from 'vitest';
+import { loadShell } from './support/shellFixture.js';
 // @ts-expect-error — browser ESM asset without type declarations
 import { buildTaskReferenceIndex, startChatView, isNearBottom, renderChatText, renderIssueReference, renderLine, renderMentionText } from '../../web/static/js/chatView.mjs';
 
 function shell(): Document {
-  document.body.innerHTML = `
-    <div id="room"></div>
-    <form id="composer">
-      <input id="composer-file" type="file" multiple hidden />
-      <button type="button" id="composer-attach">📎</button>
-      <input id="composer-text" type="text" />
-      <button type="submit">Send</button>
-    </form>
-    <div id="composer-files"></div>`;
-  return document;
+  // The real chat room shell (web/static/chat.html): <textarea> composer,
+  // #composer-status, #scroll-latest, #room-live, #drop-overlay and all.
+  return loadShell('chat.html');
 }
 
 function boardEvent(over: Record<string, unknown> = {}) {

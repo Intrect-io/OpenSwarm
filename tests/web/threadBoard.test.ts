@@ -1,26 +1,14 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadShell } from './support/shellFixture.js';
 // @ts-expect-error — browser ESM asset without type declarations
 import { renderThreadDetail, renderThreadList, renderThreadMessageBody, startThreadBoard } from '../../web/static/js/threadBoard.mjs';
 
 function shell(): Document {
-  document.body.innerHTML = `
-    <select id="repo"><option value="">Select repository</option></select>
-    <div id="status"></div>
-    <select id="thread-status"><option value="open">open</option><option value="resolved">resolved</option><option value="">all</option></select>
-    <button id="refresh"></button>
-    <div id="threads"></div>
-    <form id="new-thread">
-      <input name="taskId" /><input name="subject" /><textarea name="body"></textarea>
-      <input name="relatedTaskIds" /><input name="relatedFiles" /><button type="submit">create</button>
-    </form>
-    <div id="empty"></div><section id="detail">
-      <h2 id="detail-subject"></h2><div id="detail-meta"></div><button id="follow"></button><button id="resolve"></button>
-      <div id="messages"></div>
-      <form id="reply-form"><textarea name="body"></textarea><button type="submit">reply</button></form>
-    </section>`;
-  return document;
+  // The real threads shell (web/static/threads.html): #repo in the topbar,
+  // the #resolve-confirm card the view wires, #status, #empty and all.
+  return loadShell('threads.html');
 }
 
 function response(body: unknown, status = 200) {
@@ -151,9 +139,14 @@ describe('repository thread board', () => {
     doc.getElementById('reply-form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(doc.getElementById('messages')!.textContent).toContain('Proceed after foundation.'));
 
+    // The shipped shell's confirm card stands between the click and the CAS
+    // POST (§3.2): the first click asks, only the card's button resolves.
     (doc.getElementById('resolve') as HTMLButtonElement).click();
+    expect(doc.getElementById('resolve-confirm')!.hidden).toBe(false);
+    (doc.getElementById('resolve-confirm-btn') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(thread.status).toBe('resolved'));
     expect(calls.findLast((call) => call.path.endsWith('/resolve'))?.body.expectedVersion).toBe(4);
+    expect(doc.getElementById('resolve-confirm')!.hidden).toBe(true);
 
     (doc.querySelector('#new-thread [name="taskId"]') as HTMLInputElement).value = 'AGT-2';
     (doc.querySelector('#new-thread [name="subject"]') as HTMLInputElement).value = 'New decision';
@@ -164,12 +157,8 @@ describe('repository thread board', () => {
 
   it('asks in the page before resolving when the shell offers a confirm card (AGT-4201 §3.2)', async () => {
     const doc = shell();
-    doc.getElementById('detail')!.insertAdjacentHTML('beforeend', `
-      <div id="resolve-confirm" hidden>
-        <p id="resolve-confirm-text"></p>
-        <button id="resolve-cancel" type="button"></button>
-        <button id="resolve-confirm-btn" type="button"></button>
-      </div>`);
+    // The shipped shell itself carries #resolve-confirm (web/static/threads.html);
+    // resolving from the page must walk the card, not fire blind.
     const thread = {
       id: 'thread-1', repository: '/repo', subject: 'Cut the release', status: 'open', version: 7,
       relatedTaskIds: [], relatedFiles: [], messageCount: 0, participantCount: 0, updatedAt: 1,
