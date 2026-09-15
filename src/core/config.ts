@@ -13,6 +13,8 @@ import { c, status } from '../support/colors.js';
 import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
 
+export { validateConfig } from './configValidation.js';
+
 // Constants
 
 const CONFIG_FILENAMES = ['config.yaml', 'config.yml', 'config.json'] as const;
@@ -866,40 +868,6 @@ export function loadConfig(customPath?: string): SwarmConfig {
   }
 
   return config;
-}
-
-/**
- * Validate config (supplementary checks beyond Zod validation)
- */
-export function validateConfig(config: SwarmConfig): { valid: boolean; errors: string[]; warnings: string[] } {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
-  // A missing agent project path is NOT fatal: the runner simply skips that
-  // agent (see index.ts), so the daemon still serves the web/monitor API and
-  // any agents whose paths do exist. Killing the whole daemon over a sample/
-  // placeholder agent path (e.g. ~/dev/my-project from `openswarm init`) was
-  // the cause of "started in background" but "is not running".
-  for (const agent of config.agents) {
-    if (!existsSync(agent.projectPath)) {
-      warnings.push(`Agent "${agent.name}" project path does not exist: ${agent.projectPath} (agent disabled)`);
-    }
-  }
-
-  // Verify GitHub repo format — a malformed repo string is real misconfiguration
-  // that otherwise fails obscurely inside `gh` calls. A bare `includes('/')`
-  // accepted "owner/", "/repo", "a/b/c", and whitespace-padded names, so require
-  // exactly `owner/repo` with no empty segments or whitespace.
-  const GITHUB_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-  if (config.githubRepos) {
-    for (const repo of config.githubRepos) {
-      if (!GITHUB_REPO_PATTERN.test(repo)) {
-        errors.push(`Invalid GitHub repo format: ${repo} (expected: owner/repo)`);
-      }
-    }
-  }
-
-  return { valid: errors.length === 0, errors, warnings };
 }
 
 /**
