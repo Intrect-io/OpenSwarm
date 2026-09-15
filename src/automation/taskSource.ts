@@ -180,6 +180,18 @@ const STATE_TO_STATUS: Record<TaskState, IssueStatus> = {
   'In Progress': 'in_progress', 'In Review': 'in_review', Done: 'done', Backlog: 'backlog', Todo: 'todo',
 };
 
+/**
+ * Page size when draining the eligible local queue. Matches the previous
+ * single-read size; listIssues itself caps a page at 500.
+ */
+export const LOCAL_TASK_PAGE_SIZE = 200;
+/**
+ * Hard cap on eligible tasks returned per fetch. Without it a runaway backlog
+ * would grow the planner's queue (and memory) without bound; 1000 keeps parity
+ * with the Linear-side aggregate caps (AGT-3421).
+ */
+export const LOCAL_TASK_MAX_ITEMS = 1000;
+
 function inlineCode(s: string): string {
   return `\`${s.replaceAll('`', '\\`')}\``;
 }
@@ -207,10 +219,23 @@ export class SqliteTaskSource implements ITaskSource {
   constructor(private readonly store: IIssueStore, private readonly defaultProjectId = 'local') {}
 
   async fetchTasks(): Promise<TaskItem[]> {
-    const { issues } = this.store.listIssues({ status: ['todo', 'in_progress'], limit: 200, offset: 0 });
+    // Drain the eligible queue page by page: a single `limit: 200` read
+    // silently truncated the queue at 200 and everything beyond it never ran.
+    const issues: Issue[] = [];
+    for (let offset = 0; offset < LOCAL_TASK_MAX_ITEMS; offset += LOCAL_TASK_PAGE_SIZE) {
+      const { issues: page } = this.store.listIssues({
+        status: ['todo', 'in_progress'],
+        limit: LOCAL_TASK_PAGE_SIZE,
+        offset,
+      });
+      if (page.length === 0) break; // past the end of the filtered set
+      issues.push(...page);
+      if (page.length < LOCAL_TASK_PAGE_SIZE) break; // last page
+    }
     // Enrich from canonical task state so planner-declared fileScope (plus
     // dependency/topoRank data) reaches the runner — mirrors the Linear path.
-    return issues.map((issue) => enrichTaskFromState(issueToTask(issue)));
+    return issues.slice(0, LOCAL_TASK_MAX_ITEMS)
+      .map((issue) => enrichTaskFromState(issueToTask(issue)));
   }
   async lookupIssueState(issueId: string): Promise<TrackerIssueLookup> {
     const issue = this.store.getIssue(issueId);

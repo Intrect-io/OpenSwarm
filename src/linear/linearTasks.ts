@@ -8,6 +8,7 @@ import { safeConsole as console } from '../support/safeLog.js';
 import { formatAutomationComment } from './format.js';
 import { addComment, effectCommentId, STUCK_LABEL } from './linearComments.js';
 import {
+  LINEAR_RELATED_PAGE_SIZE,
   STUCK_ISSUES_QUERY,
   clearLinearCache,
   fetchRawIssues,
@@ -156,9 +157,11 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
 
     if (!issue) return null;
 
+    // Bounded related-field reads (AGT-3421): a single issue with a huge
+    // comment thread or label set must not hydrate without limit.
     const [comments, labels, project] = await Promise.all([
-      issue.comments(),
-      issue.labels(),
+      issue.comments({ first: LINEAR_RELATED_PAGE_SIZE }),
+      issue.labels({ first: LINEAR_RELATED_PAGE_SIZE }),
       getProjectInfo(issue),
     ]);
 

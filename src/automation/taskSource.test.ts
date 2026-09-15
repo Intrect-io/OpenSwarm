@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { SqliteIssueStore } from '../issues/sqliteStore.js';
-import { SqliteTaskSource, issueToTask } from './taskSource.js';
+import { SqliteTaskSource, issueToTask, LOCAL_TASK_MAX_ITEMS, LOCAL_TASK_PAGE_SIZE } from './taskSource.js';
 
 function freshStore(): SqliteIssueStore {
   return new SqliteIssueStore(':memory:');
@@ -35,6 +35,23 @@ describe('SqliteTaskSource', () => {
     const titles = tasks.map((t) => t.title).sort();
     expect(titles).toEqual(['running', 'todo-one']);
     expect(tasks.every((t) => t.source === 'local')).toBe(true);
+  });
+
+  it('drains the eligible queue past a single page instead of truncating at it (AGT-3421)', async () => {
+    store = freshStore();
+    // One more than the old single-read limit: page 1 (200) + 5 on page 2.
+    const eligible = LOCAL_TASK_PAGE_SIZE + 5;
+    for (let i = 0; i < eligible; i++) {
+      store.createIssue({ projectId: 'p', title: `todo-${i}`, status: 'todo' });
+    }
+    // Noise outside the filter, also past the page boundary.
+    store.createIssue({ projectId: 'p', title: 'backlogged', status: 'backlog' });
+
+    const src = new SqliteTaskSource(store);
+    const tasks = await src.fetchTasks();
+    expect(tasks).toHaveLength(eligible);
+    expect(tasks.every((t) => t.linearState === 'Backlog' || t.linearState === 'Todo' || t.linearState === 'In Progress')).toBe(true);
+    expect(LOCAL_TASK_MAX_ITEMS).toBeGreaterThan(LOCAL_TASK_PAGE_SIZE);
   });
 
   it('updateState transitions the issue status', async () => {

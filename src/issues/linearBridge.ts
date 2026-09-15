@@ -157,6 +157,111 @@ export function initLinearBridge(apiKey: string, teamId: string): Promise<void> 
 }
 
 /**
+ * Page size for the inbound sync cursor loop. Linear reliably serves pages of
+ * 50; the sync limit is applied to the TOTAL across pages, not per page.
+ */
+const LINEAR_SYNC_PAGE_SIZE = 50;
+/**
+ * Hard page cap for one sync run (50 × 20 = 1000 issues). Bounds worst-case
+ * API work when the workspace has far more matching issues than the limit:
+ * the run stops deterministically and reports what it committed.
+ */
+export const LINEAR_SYNC_MAX_PAGES = 20;
+
+/** One page of the Linear issue connection, adapted from the SDK response. */
+export interface LinearIssuePage {
+  nodes: any[];
+  hasNextPage: boolean;
+  endCursor?: string;
+}
+
+/** Durable outcome of an inbound sync run. */
+export interface LinearSyncProgress {
+  created: number;
+  updated: number;
+  /** True when the run stopped at the total limit or page cap with data left. */
+  truncated: boolean;
+  /** The error that aborted the run; everything before it is already committed. */
+  failed?: Error;
+}
+
+/**
+ * Drain a Linear issue connection page by page, applying each issue to the
+ * local store. `maxItems` caps the TOTAL imported count across pages (never
+ * per page). Termination is deterministic: total limit, page cap, or an
+ * exhausted connection. A missing/repeated cursor aborts the run with an
+ * explicit error instead of looping forever.
+ *
+ * Never throws: a per-issue failure (or cursor anomaly) is returned as
+ * `failed` alongside the counts that were durably committed before it.
+ */
+export async function drainLinearIssuesToStore(
+  store: SqliteIssueStore,
+  projectId: string,
+  fetchPage: (after: string | undefined) => Promise<LinearIssuePage>,
+  maxItems: number,
+): Promise<LinearSyncProgress> {
+  let created = 0;
+  let updated = 0;
+  let after: string | undefined;
+
+  try {
+    for (let page = 0; page < LINEAR_SYNC_MAX_PAGES; page++) {
+      const conn = await fetchPage(after);
+      // Cursor sanity BEFORE applying: a response whose endCursor is absent or
+      // identical to the cursor we just used re-served the same window — bail
+      // instead of double-applying its nodes or looping forever. (AGT-3421)
+      if (conn.hasNextPage === true && (!conn.endCursor || conn.endCursor === after)) {
+        throw new Error(
+          `Linear inbound sync pagination returned a ${conn.endCursor ? 'repeated' : 'missing'} cursor on page ${page + 1}`,
+        );
+      }
+      for (const issue of conn.nodes) {
+        // The limit is global: stop as soon as the total across all pages is met.
+        if (created + updated >= maxItems) {
+          return { created, updated, truncated: true };
+        }
+        const existing = findByLinearId(store, issue.id);
+        const linearData = await mapLinearToLocal(issue, projectId);
+
+        if (existing) {
+          // 이미 존재 → 업데이트
+          store.updateIssue(existing.id, linearData);
+          updated++;
+        } else {
+          // 새 이슈 → 생성
+          store.createIssue({
+            ...linearData,
+            source: 'linear',
+            linearId: issue.id,
+            linearIdentifier: issue.identifier,
+            linearUrl: issue.url,
+          });
+          created++;
+        }
+      }
+
+      if (conn.hasNextPage !== true) {
+        return { created, updated, truncated: false };
+      }
+      after = conn.endCursor;
+    }
+
+    // Page cap exhausted while the connection still reported more pages.
+    console.warn(`[LinearBridge] 페이지 상한 ${LINEAR_SYNC_MAX_PAGES}개 도달 — 이번 동기화는 여기서 멈춥니다.`);
+    return { created, updated, truncated: true };
+  } catch (err) {
+    const failed = err instanceof Error ? err : new Error(String(err));
+    // Partial failure: everything applied so far is durable — say so.
+    console.error(
+      `[LinearBridge] 동기화 중단 — 지금까지 커밋됨: created ${created}, updated ${updated}`,
+      failed,
+    );
+    return { created, updated, truncated: false, failed };
+  }
+}
+
+/**
  * Linear → 로컬: Linear 이슈를 로컬 DB에 동기화
  */
 export async function syncFromLinear(
@@ -173,46 +278,36 @@ export async function syncFromLinear(
   const states = options?.states ?? ['In Progress', 'Todo', 'Backlog', 'In Review', 'Done', 'Canceled', 'Cancelled'];
   const limit = options?.limit ?? 50;
 
-  let created = 0;
-  let updated = 0;
+  const progress = await drainLinearIssuesToStore(
+    store,
+    projectId,
+    async (after) => {
+      const conn = await linearClient.issues({
+        filter: {
+          team: { id: { eq: linearTeamId } },
+          state: { name: { in: states } },
+        },
+        first: LINEAR_SYNC_PAGE_SIZE,
+        after,
+        orderBy: 'updatedAt',
+      });
+      return {
+        nodes: conn.nodes,
+        hasNextPage: conn.pageInfo?.hasNextPage === true,
+        endCursor: conn.pageInfo?.endCursor,
+      };
+    },
+    limit,
+  );
 
-  try {
-    const issues = await linearClient.issues({
-      filter: {
-        team: { id: { eq: linearTeamId } },
-        state: { name: { in: states } },
-      },
-      first: limit,
-      orderBy: 'updatedAt',
-    });
-
-    for (const issue of issues.nodes) {
-      const existing = findByLinearId(store, issue.id);
-      const linearData = await mapLinearToLocal(issue, projectId);
-
-      if (existing) {
-        // 이미 존재 → 업데이트
-        store.updateIssue(existing.id, linearData);
-        updated++;
-      } else {
-        // 새 이슈 → 생성
-        store.createIssue({
-          ...linearData,
-          source: 'linear',
-          linearId: issue.id,
-          linearIdentifier: issue.identifier,
-          linearUrl: issue.url,
-        });
-        created++;
-      }
-    }
-
-    console.log(`[LinearBridge] 동기화 완료 — created: ${created}, updated: ${updated}`);
-  } catch (err) {
-    console.error('[LinearBridge] 동기화 실패:', err);
+  if (progress.failed) {
+    console.error('[LinearBridge] 동기화 실패:', progress.failed);
+  } else {
+    const truncatedNote = progress.truncated ? ` (limit ${limit} 도달)` : '';
+    console.log(`[LinearBridge] 동기화 완료 — created: ${progress.created}, updated: ${progress.updated}${truncatedNote}`);
   }
 
-  return { created, updated };
+  return { created: progress.created, updated: progress.updated };
 }
 
 /**

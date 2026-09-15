@@ -10,8 +10,8 @@ vi.mock('@linear/sdk', () => ({ LinearClient: vi.fn() }));
 
 describe('active/backlog inventory bounds', () => {
   function installIssueClient(opts: {
-    nodes: Array<Record<string, unknown>>;
-    fetchNextNodes?: Array<Record<string, unknown>>;
+    /** pages[0] is served by the initial issues() call; the rest via fetchNext(). */
+    pages: Array<Array<Record<string, unknown>>>;
     expectedFirst: number;
   }) {
     clearLinearCache();
@@ -30,11 +30,13 @@ describe('active/backlog inventory bounds', () => {
     });
 
     const connection = {
-      nodes: opts.nodes.map(makeIssue),
-      pageInfo: { hasNextPage: Boolean(opts.fetchNextNodes?.length) },
+      nodes: opts.pages[0].map(makeIssue),
+      pageInfo: { hasNextPage: opts.pages.length > 1, endCursor: 'cursor-0' },
       fetchNext: async () => {
-        connection.nodes.push(...(opts.fetchNextNodes ?? []).map(makeIssue));
-        connection.pageInfo.hasNextPage = false;
+        const next = opts.pages.splice(1, 1)[0];
+        connection.nodes.push(...next.map(makeIssue));
+        connection.pageInfo.hasNextPage = opts.pages.length > 1;
+        connection.pageInfo.endCursor = `cursor-${opts.pages.length}`;
         return connection;
       },
     };
@@ -68,8 +70,7 @@ describe('active/backlog inventory bounds', () => {
       priority: 3,
     }));
     const { fakeClient } = installIssueClient({
-      nodes: page1,
-      fetchNextNodes: page2,
+      pages: [page1, page2],
       expectedFirst: LINEAR_ACTIVE_PAGE_SIZE,
     });
 
@@ -91,7 +92,7 @@ describe('active/backlog inventory bounds', () => {
       priority: i === 0 ? 0 : 1,
     }));
     const { fakeClient } = installIssueClient({
-      nodes,
+      pages: [nodes],
       expectedFirst: LINEAR_BACKLOG_PAGE_SIZE,
     });
     const next = await getNextBacklogIssue('worker');
@@ -99,6 +100,39 @@ describe('active/backlog inventory bounds', () => {
       first: LINEAR_BACKLOG_PAGE_SIZE,
     }));
     expect(next?.identifier).toBe('AGT-BL-1');
+  });
+
+  it('ranks the backlog pick over ALL pages, not just the first (AGT-3421)', async () => {
+    // The globally best issue (priority 1) sits on the LAST page; page one
+    // holds only priority-3 fillers. A first-page-only ranking would miss it.
+    const filler = (i: number) => ({
+      id: `fill-${i}`,
+      identifier: `AGT-F-${i}`,
+      title: `Filler ${i}`,
+      url: `https://linear.app/i/f${i}`,
+      description: null,
+      priority: 3,
+    });
+    const winner = {
+      id: 'winner',
+      identifier: 'AGT-WIN',
+      title: 'Real next issue',
+      url: 'https://linear.app/i/win',
+      description: null,
+      priority: 1,
+    };
+    const { fakeClient } = installIssueClient({
+      pages: [
+        Array.from({ length: LINEAR_BACKLOG_PAGE_SIZE }, (_, i) => filler(i)),
+        Array.from({ length: LINEAR_BACKLOG_PAGE_SIZE }, (_, i) => filler(100 + i)),
+        [winner, filler(200)],
+      ],
+      expectedFirst: LINEAR_BACKLOG_PAGE_SIZE,
+    });
+
+    const next = await getNextBacklogIssue('worker');
+    expect(fakeClient.issues).toHaveBeenCalledTimes(1);
+    expect(next?.identifier).toBe('AGT-WIN');
   });
 });
 
@@ -194,15 +228,17 @@ describe('parseBlockerIdentifiers', () => {
 describe('drainLinearConnection', () => {
   function connection(pages: Array<Array<{ id: string }>>) {
     // Mirrors the SDK contract: fetchNext() appends the next page onto the
-    // same connection's nodes and resolves the connection itself.
+    // same connection's nodes and resolves the connection itself, with an
+    // advancing pagination cursor per page.
     let page = 0;
     const conn = {
       nodes: [...pages[0]],
-      pageInfo: { hasNextPage: pages.length > 1 },
+      pageInfo: { hasNextPage: pages.length > 1, endCursor: 'cursor-0' },
       fetchNext: async () => {
         page += 1;
         conn.nodes.push(...pages[page]);
         conn.pageInfo.hasNextPage = page < pages.length - 1;
+        conn.pageInfo.endCursor = `cursor-${page}`;
         return conn;
       },
     };
@@ -222,13 +258,25 @@ describe('drainLinearConnection', () => {
     await expect(drainLinearConnection(connection([[{ id: 'only' }]]))).resolves.toEqual([{ id: 'only' }]);
   });
 
-  it('stops on a pagination cursor that never terminates', async () => {
+  it('rejects a pagination cursor that never advances (missing cursor)', async () => {
+    // AGT-3421: a page whose endCursor is absent means the API re-served the
+    // same window — bail with an explicit error instead of looping forever.
     const conn = {
       nodes: [{ id: 'x' }],
       pageInfo: { hasNextPage: true },
-      fetchNext: async () => conn,
+      fetchNext: async () => ({ nodes: [{ id: 'x' }], pageInfo: { hasNextPage: true } }),
     };
-    await expect(drainLinearConnection(conn)).resolves.toEqual([{ id: 'x' }]);
+    await expect(drainLinearConnection(conn)).rejects.toThrow(/missing cursor/);
+  });
+
+  it('rejects a pagination cursor that never advances (repeated cursor)', async () => {
+    const page = { nodes: [{ id: 'x' }], pageInfo: { hasNextPage: true, endCursor: 'stuck' } };
+    const conn = {
+      nodes: [{ id: 'first' }],
+      pageInfo: { hasNextPage: true, endCursor: 'stuck' },
+      fetchNext: async () => page,
+    };
+    await expect(drainLinearConnection(conn)).rejects.toThrow(/repeated cursor/);
   });
 
   it('honors an explicit maxPages cap for active-inventory drains', async () => {

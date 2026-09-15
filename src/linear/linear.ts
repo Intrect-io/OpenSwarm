@@ -339,6 +339,14 @@ export const LINEAR_ACTIVE_PAGE_SIZE = 50;
 export const LINEAR_ACTIVE_MAX_PAGES = 4;
 export const LINEAR_ACTIVE_ENRICH_CAP = LINEAR_ACTIVE_PAGE_SIZE * LINEAR_ACTIVE_MAX_PAGES;
 export const LINEAR_BACKLOG_PAGE_SIZE = 10;
+/**
+ * Page cap for the backlog pick. Ranking must see the WHOLE eligible set —
+ * the globally highest-priority issue can sit pages deep while page one holds
+ * only fillers — so we drain bounded pages before ranking (AGT-3421).
+ */
+export const LINEAR_BACKLOG_MAX_PAGES = 20;
+/** Candidate window for the backlog pick: page size × page cap. */
+export const LINEAR_BACKLOG_MAX_CANDIDATES = LINEAR_BACKLOG_PAGE_SIZE * LINEAR_BACKLOG_MAX_PAGES;
 export const LINEAR_RELATED_PAGE_SIZE = 50;
 
 /**
@@ -354,10 +362,21 @@ export async function drainLinearConnection(
   let conn: any = connection;
   // `maxPages` counts the page already present on the connection.
   let pages = 1;
+  // A page whose endCursor is absent or identical to the previous one means the
+  // API re-served the same page — bail explicitly instead of looping (or
+  // duplicating nodes) until the page guard trips. (AGT-3421)
+  let lastCursor: string | undefined = conn?.pageInfo?.endCursor ?? undefined;
   const pageCap = Math.max(1, Math.min(DRAIN_PAGE_GUARD, Math.trunc(maxPages) || DRAIN_PAGE_GUARD));
   while (conn?.pageInfo?.hasNextPage && typeof conn.fetchNext === 'function' && pages < pageCap) {
     conn = await withRateLimit('linear', () => conn.fetchNext());
     pages += 1;
+    const cursor = conn?.pageInfo?.endCursor;
+    if (!cursor || cursor === lastCursor) {
+      throw new Error(
+        `Linear pagination returned a ${cursor ? 'repeated' : 'missing'} cursor after ${pages - 1} fetched page(s)`,
+      );
+    }
+    lastCursor = cursor;
   }
   return conn?.nodes ?? [];
 }
@@ -469,11 +488,16 @@ export async function getNextBacklogIssue(
       state: { name: { in: ['Backlog', 'Todo'] } },
       labels: { name: { eq: agentLabel } },
     },
-    first: LINEAR_BACKLOG_PAGE_SIZE, // Fetch a bounded window and sort by priority
+    first: LINEAR_BACKLOG_PAGE_SIZE, // page size — the pick ranks over every drained page
   }));
 
+  // Rank over ALL pages (bounded): the first page alone can hold only low
+  // priority fillers while the true next issue sits pages deep.
+  const candidates = (await drainLinearConnection(issues, LINEAR_BACKLOG_MAX_PAGES))
+    .slice(0, LINEAR_BACKLOG_MAX_CANDIDATES);
+
   // Sort by priority (lower = higher priority: 1=Urgent, 4=Low, 0=None)
-  const sorted = [...issues.nodes].slice(0, LINEAR_BACKLOG_PAGE_SIZE).sort((a, b) => {
+  const sorted = [...candidates].sort((a, b) => {
     // Push priority 0 (None) to the end
     const pa = a.priority === 0 ? 999 : a.priority;
     const pb = b.priority === 0 ? 999 : b.priority;
@@ -498,8 +522,8 @@ export async function getNextBacklogIssue(
     description: issue.description ?? undefined,
     state: state?.name ?? 'Unknown',
     priority: issue.priority,
-    labels: labels.nodes.map((l) => l.name),
-    comments: comments.nodes.map((c) => ({
+    labels: labels.nodes.map((l: { name: string }) => l.name),
+    comments: comments.nodes.map((c: { id: string; body: string; createdAt: Date }) => ({
       id: c.id,
       body: c.body,
       createdAt: c.createdAt.toISOString(),
