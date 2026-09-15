@@ -81,6 +81,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   if (config.humanSurfaceReadOnly?.enabled === true) enableHumanSurfaceReadOnly();
   wireSandboxExecutorIfEnabled(config.humanSurfaceReadOnly?.sandboxExecutor);
   let postMergeIntegration: PRProcessorConfig['postMergeIntegration'];
+  /** Captured for AGT-4077 merge→Done; lives outside the autonomous block. */
+  let mergeDoneTaskSource: import('../automation/taskSource.js').ITaskSource | undefined;
   // The lifetime SQLite lock above is the atomic single-instance authority.
   // Keep the port probe as a diagnostic for older daemons or unrelated
   // processes that predate/do not own that lock. Refuse to start if another instance — however it was
@@ -263,6 +265,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       });
     });
     autonomous.setTaskSource(selectedTaskSource);
+    mergeDoneTaskSource = selectedTaskSource;
     console.log(`[Service] Task source registered (${linearConfigured ? 'linear' : 'local'})`);
 
     // Register the notifier for the configured channel (Discord/Slack/Telegram/
@@ -387,6 +390,26 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       // PR remediation is an autonomous editing path; inherit the same
       // baseline-diff CodeQL policy as heartbeat-dispatched work.
       securityAudit: config.autonomous?.securityAudit,
+      // Open PR → In Review; merge → Done (AGT-4077).
+      onOwnedPullRequestMerged: async ({ issueIdentifier, prNumber, repo, mergeCommitOid }) => {
+        if (!issueIdentifier || !mergeDoneTaskSource) return;
+        const source = mergeDoneTaskSource;
+        const resolved = source.resolveIssue
+          ? await source.resolveIssue(issueIdentifier)
+          : null;
+        const issueId = resolved?.ok && resolved.issue
+          ? resolved.issue.id
+          : issueIdentifier;
+        const accepted = await source.updateState(issueId, 'Done');
+        if (!accepted) {
+          console.warn(`[Service] Tracker refused Done after merge of ${repo}#${prNumber} (${issueIdentifier})`);
+          return;
+        }
+        await source.addComment(
+          issueId,
+          `Merged ${repo}#${prNumber} (\`${mergeCommitOid.slice(0, 7)}\`). Marking Done.`,
+        ).catch((err: unknown) => console.warn('[Service] merge Done comment failed:', err));
+      },
     });
     prProcessor.start();
     const resolverStatus = config.prProcessor.conflictResolver?.enabled ? ', conflictResolver: ON' : '';

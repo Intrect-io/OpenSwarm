@@ -152,6 +152,11 @@ export async function resolveTaskFileScope(
   if (needsDraft) {
     try {
       const draft = task.preAdmissionDraft ?? await options.draftTask?.();
+      // Keep the analysis even when it is insufficient. Without this the
+      // durable draft cache (AGT-4286) could only ever store successes, so a
+      // failing brief was recomputed on every heartbeat (~$0.0043 each) —
+      // measured 8/20 drafts never reaching the cache on vela (AGT-4288).
+      if (draft) task.preAdmissionDraft = draft;
       if (draft?.sufficient) {
         const relevantFiles = await canonicalExistingRepoFiles(projectPath, draft.relevantFiles);
         if (relevantFiles.length > 0) {

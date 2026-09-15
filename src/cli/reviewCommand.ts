@@ -412,17 +412,8 @@ export interface ReviewCommandOptions {
  * than load config and then discard it.
  *
  * And it must not write to stdout when the caller asked for JSON. `loadConfig`
- * logs where it loaded from and warns about absent Discord/Linear credentials,
- * straight to stdout — which lands in front of the JSON document and makes
- * `openswarm review --json | jq` fail to parse. `cli.ts` already solves this
- * for telemetry by silencing `console` around the call; the same applies here.
- *
- * That fixes THIS call site and not the contract as a whole. `mcpClient.ts`
- * calls `loadConfig()` unguarded during tool auto-discovery, so a review that
- * actually uses tools still prints config lines in front of the JSON — a
- * defect that predates this resolution and is tracked as AGT-4298. The
- * silencing here is a third ad hoc copy of a pattern that belongs in
- * `loadConfig` itself; AGT-4298 collapses all three.
+ * accepts `{ quiet: true }` for that (AGT-4298); before the quiet flag existed
+ * this call site silenced `console` around the import by hand.
  *
  * The restore is not reentrancy-safe: each call captures whatever `console.log`
  * currently is and blind-restores it, so two crossed, non-nested windows would
@@ -442,18 +433,12 @@ async function resolveConfiguredReviewAdapter(flag?: string, quiet = false) {
   }
   let configReview: string | undefined;
   let configDefault: string | undefined;
-  const originalLog = console.log;
-  const originalWarn = console.warn;
   try {
-    if (quiet) { console.log = () => undefined; console.warn = () => undefined; }
     const { loadConfig } = await import('../core/config.js');
-    const config = loadConfig();
+    const config = loadConfig(undefined, { quiet });
     configReview = config.reviewAdapter;
     configDefault = config.adapter;
-  } catch { /* no config, or unreadable — flag and env still apply */ } finally {
-    console.log = originalLog;
-    console.warn = originalWarn;
-  }
+  } catch { /* no config, or unreadable — flag and env still apply */ }
   return resolveReviewAdapter(
     { flag, env, configReview, configDefault }, isConfiguredAdapterName, ADAPTER_NAMES,
   );
@@ -561,7 +546,29 @@ export async function runReviewCommand(
 
   let result: ReviewResult;
   try {
-    result = await review(buildReviewWorkerResult(changed), cwd, onLog, history.context);
+    // Mutating tools are the point of a non-`--read-only` review (prove the
+    // defect). The edits are not. Snapshot the operator's tree and put it
+    // back afterwards so a REVISE cannot leave the reviewer's guess in the
+    // next commit (AGT-4291). `--read-only` already withholds the tools, so
+    // skip the snapshot there. Injected `deps.review` tests own their own
+    // filesystem and must not pay the git tax either.
+    const run = () => review(buildReviewWorkerResult(changed), cwd, onLog, history.context);
+    if (opts.readOnly || deps.review) {
+      result = await run();
+    } else {
+      try {
+        const { withRestoredWorkingTree } = await import('./reviewWorktreeGuard.js');
+        result = await withRestoredWorkingTree(cwd, run, (err) => {
+          log(`Could not restore working tree after review: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      } catch (snapshotErr) {
+        // A failed snapshot must not fail the review: without a snapshot we
+        // cannot guarantee restoration, so run the review unprotected and say
+        // so (degrades the same way a failed restore already does).
+        log(`Could not snapshot working tree before review (${snapshotErr instanceof Error ? snapshotErr.message : String(snapshotErr)}) — running without tree protection`);
+        result = await run();
+      }
+    }
   } finally {
     progress?.stop();
   }

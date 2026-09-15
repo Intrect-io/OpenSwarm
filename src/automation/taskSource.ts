@@ -39,6 +39,11 @@ export interface PairCompleteStats {
   remainingWork?: string;
   /** Hidden marker used by the durable outbox to make comment delivery idempotent. */
   idempotencyMarker?: string;
+  /**
+   * When set, completion means "a PR is up for review", not "shipped".
+   * Terminal Done waits for that PR to merge (AGT-4077).
+   */
+  prUrl?: string;
 }
 
 export type SubIssueResult = { id: string; identifier: string; title: string } | { error: string };
@@ -324,8 +329,11 @@ export class SqliteTaskSource implements ITaskSource {
         : ['(none)'],
     });
 
+    if (stats.prUrl) {
+      sections.push({ label: 'Pull request', body: stats.prUrl });
+    }
     const comment = formatAutomationComment({
-      heading: 'Task complete',
+      heading: stats.prUrl ? 'Ready for review' : 'Task complete',
       summary: formatPairDialogue(stats) ?? stats.workerSummary?.trim() ?? undefined,
       sections,
       meta: {
@@ -337,7 +345,9 @@ export class SqliteTaskSource implements ITaskSource {
       attribution: 'Worker/Reviewer/Tester pipeline',
     }) + (stats.idempotencyMarker ? `\n\n<!-- openswarm-effect:${stats.idempotencyMarker} -->` : '');
     await this.addComment(issueId, comment, stats.idempotencyMarker);
-    const accepted = await this.updateState(issueId, 'Done');
+    // Open PR → In Review; Done waits for merge (AGT-4077).
+    const nextState = stats.prUrl ? 'In Review' : 'Done';
+    const accepted = await this.updateState(issueId, nextState);
     if (!accepted) throw new Error(`Local issue store refused Done transition for ${issueId}`);
   }
   async logBlocked(issueId: string, _sessionName: string, reason: string): Promise<void> {

@@ -104,7 +104,24 @@ describe('SqliteTaskSource', () => {
     const comments = await src.getExecutionComments(issue.id);
     expect(comments.some((comment) =>
       comment.body.includes('<!-- openswarm-effect:complete:issue:attempt:1 -->'))).toBe(true);
+    // No PR → Done is still correct (local / no-publication completions).
     expect(store.getIssue(issue.id)?.status).toBe('done');
+  });
+
+  it('leaves the card In Review when a PR was published (AGT-4077)', async () => {
+    store = freshStore();
+    const issue = store.createIssue({ projectId: 'p', title: 'x', status: 'in_progress' });
+    const src = new SqliteTaskSource(store);
+    await src.logPairComplete(issue.id, 'session', {
+      attempts: 1,
+      duration: 3,
+      filesChanged: ['src/a.ts'],
+      prUrl: 'https://github.com/o/r/pull/169',
+      idempotencyMarker: 'complete:issue:attempt:2',
+    });
+    expect(store.getIssue(issue.id)?.status).toBe('in_review');
+    const comments = await src.getExecutionComments(issue.id);
+    expect(comments.some((c) => c.body.includes('https://github.com/o/r/pull/169'))).toBe(true);
   });
 
   it('deduplicates concurrent/retried local completion comments by marker', async () => {

@@ -97,6 +97,9 @@ export function completionStats(result: PipelineResult): PairCompleteStats {
       coverage: result.testerResult.coverage,
       failedTests: result.testerResult.failedTests,
     } : undefined,
+    // Carry the PR so logPairComplete can leave the card In Review until merge
+    // instead of calling an open PR "Done" (AGT-4077).
+    prUrl: result.prUrl,
   };
 }
 
@@ -212,8 +215,9 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
     // The remote comment may have succeeded immediately before a process crash,
     // while the following state mutation/local ack did not. Reapply the
     // idempotent state transition but never duplicate the completion comment.
-    const accepted = await source.updateState(issueId, 'Done');
-    if (!accepted) throw new Error(`Tracker refused Done reconciliation for ${issueId}`);
+    const nextState = payload.stats.prUrl ? 'In Review' : 'Done';
+    const accepted = await source.updateState(issueId, nextState);
+    if (!accepted) throw new Error(`Tracker refused ${nextState} reconciliation for ${issueId}`);
   } else {
     await source.logPairComplete(issueId, effect.dedupeKey, payload.stats);
   }

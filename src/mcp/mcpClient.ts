@@ -384,7 +384,10 @@ async function loadConfiguredRegistry(): Promise<Record<string, ServerConfig>> {
   let configServers: Record<string, Record<string, unknown>> | undefined;
   try {
     const { loadConfig } = await import('../core/config.js');
-    configServers = loadConfig().mcp?.servers as Record<string, Record<string, unknown>> | undefined;
+    // Quiet: MCP auto-discovery runs mid-review when tools are first needed.
+    // An unmuted loadConfig prints "Config loading from …" straight to stdout
+    // and breaks `openswarm review --json | jq` (AGT-4298).
+    configServers = loadConfig(undefined, { quiet: true }).mcp?.servers as Record<string, Record<string, unknown>> | undefined;
   } catch {
     // No/invalid config → fall back to mcp.json only.
   }

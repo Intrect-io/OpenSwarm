@@ -5,8 +5,6 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { z } from 'zod';
-import { ADAPTER_NAMES } from './adapterNames.js';
 import YAML from 'yaml';
 import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResolverConfig, McpConfig } from './types.js';
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
@@ -15,6 +13,9 @@ import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
 
 export { validateConfig } from './configValidation.js';
+import { RawConfigSchema, DEFAULT_HEARTBEAT_INTERVAL } from './configSchema.js';
+import type { RawConfig } from './configSchema.js';
+export type { RawConfig } from './configSchema.js';
 
 // Constants
 
@@ -45,505 +46,6 @@ function getConfigSearchPaths(): string[] {
   }
   return paths;
 }
-
-const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
-const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const AdapterNameSchema = z.enum(ADAPTER_NAMES);
-
-// Zod Schemas
-
-const AgentSessionSchema = z.object({
-  name: z.string().min(1, 'Agent name is required'),
-  projectPath: z.string().min(1, 'Project path is required'),
-  heartbeatInterval: z.number().positive().optional(),
-  linearLabel: z.string().optional(),
-  enabled: z.boolean().default(true),
-  paused: z.boolean().default(false),
-});
-
-const DiscordConfigSchema = z.object({
-  token: z.string().min(1, 'Discord token is required'),
-  channelId: z.string().min(1, 'Discord channel ID is required'),
-  webhookUrl: z.string().optional(),
-}).optional();
-
-const LinearConfigSchema = z.object({
-  apiKey: z.string().min(1, 'Linear API key is required'),
-  teamId: z.string().min(1, 'Linear team ID is required'),
-}).optional();
-
-const GitHubConfigSchema = z.object({
-  repos: z.array(z.string()).default([]),
-  checkInterval: z.number().positive().default(DEFAULT_GITHUB_CHECK_INTERVAL),
-}).optional();
-
-const TimeRangeSchema = z.object({
-  start: z.string().regex(/^\d{2}:\d{2}$/, 'Format: HH:MM'),
-  end: z.string().regex(/^\d{2}:\d{2}$/, 'Format: HH:MM'),
-});
-
-const TimeWindowConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  allowedWindows: z.array(TimeRangeSchema).default([]),
-  blockedWindows: z.array(TimeRangeSchema).default([]),
-  restrictedDays: z.array(z.number().min(0).max(6)).optional(),
-  timezone: z.string().default('Asia/Seoul'),
-}).optional();
-
-const PairModeConfigSchema = z.object({
-  /** Enable pair mode */
-  enabled: z.boolean().default(false),
-  /** Worker max attempts */
-  maxAttempts: z.number().min(1).max(10).default(3),
-  /** Worker timeout (ms) */
-  workerTimeoutMs: z.number().positive().default(300000), // 5 min
-  /** Reviewer timeout (ms) */
-  reviewerTimeoutMs: z.number().positive().default(300000), // 5 min
-  /** Webhook URL (notification on complete/failure). Empty string allowed so an
-   *  unset `${PAIR_WEBHOOK_URL:-}` substitution validates (matches the other
-   *  optional webhookUrl fields, which don't enforce .url()). */
-  webhookUrl: z.string().url().or(z.literal('')).optional(),
-  /** Auto Linear status update */
-  autoLinearUpdate: z.boolean().default(true),
-}).optional();
-
-const ModelConfigSchema = z.object({
-  /** Worker agent model — lightweight tier (see DefaultRolesConfigSchema). */
-  worker: z.string().default('z-ai/glm-4.7-flash'),
-  /** Reviewer agent model — frontier quality gate. */
-  reviewer: z.string().default('openai/gpt-5'),
-}).optional();
-
-/** Per-role configuration schema */
-const RoleConfigSchema = z.object({
-  /** Whether role is enabled */
-  enabled: z.boolean().default(true),
-  /** CLI adapter */
-  adapter: AdapterNameSchema.optional(),
-  /** Model ID. Omit → resolved dynamically from the role's adapter (getDefaultModel). */
-  model: z.string().optional(),
-  /** Timeout (ms), 0 = unlimited */
-  timeoutMs: z.number().min(0).default(0),
-  /** Model to escalate to on repeated failure */
-  escalateModel: z.string().optional(),
-  /** Escalate after this iteration number (default: 3) */
-  escalateAfterIteration: z.number().min(1).optional(),
-  /** Max agentic turns per CLI invocation */
-  maxTurns: z.number().min(1).optional(),
-  /** Adaptive worker fan-out gate and candidate execution. */
-  fanout: z.object({
-    enabled: z.boolean().optional(),
-    mode: z.enum(['report', 'execute']).optional(),
-    minScore: z.number().min(1).max(10).optional(),
-    concurrency: z.number().int().min(1).max(256).optional(),
-    keepSandboxes: z.boolean().optional(),
-    linkSharedPaths: z.boolean().optional(),
-    candidates: z.array(z.object({
-      id: z.string().min(1),
-      adapter: AdapterNameSchema.optional(),
-      model: z.string().optional(),
-      reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
-      maxTurns: z.number().min(1).optional(),
-      nudgeMaxOnNoEdit: z.number().min(0).optional(),
-      webTools: z.boolean().optional(),
-      memoryTools: z.boolean().optional(),
-    })).optional(),
-  }).optional(),
-});
-
-/** Default roles configuration schema */
-const DefaultRolesConfigSchema = z.object({
-  // Worker = lightweight tier. Benchmark (benchmarks/modelSelect.ts, L0–L3 coding
-  // tasks) ranked z-ai/glm-4.7-flash #1: 100% pass, $0.0021/pass (cheapest), and
-  // 2759 tok/s under ZDR via DeepInfra — ~5× faster than the next candidate. It is
-  // a non-thinking model, so it wastes no reasoning tokens on mechanical edits.
-  // On repeated failure it escalates to the frontier (gpt-5).
-  worker: RoleConfigSchema.default({
-    enabled: true,
-    model: 'z-ai/glm-4.7-flash',
-    timeoutMs: 0,
-    escalateModel: 'openai/gpt-5',
-    // Escalate on the 2nd attempt, not the 3rd. With maxIterations=3, a threshold
-    // of 3 only kicks in on the final pass — too late to help. Retrying the exact
-    // same model after a failure rarely changes the outcome; switch models sooner.
-    escalateAfterIteration: 2,
-  }),
-  // Reviewer = frontier tier, never cheaped out. A weak reviewer that wrongly
-  // approves (bug slips through) or wrongly rejects (worker loops) costs MORE than
-  // the model price difference. The quality gate stays on gpt-5.
-  reviewer: RoleConfigSchema.default({
-    enabled: true,
-    model: 'openai/gpt-5',
-    timeoutMs: 0,
-  }),
-  tester: RoleConfigSchema.optional(),
-  documenter: RoleConfigSchema.optional(),
-  auditor: RoleConfigSchema.optional(),
-  'skill-documenter': RoleConfigSchema.optional(),
-}).optional();
-
-/** Per-project role override schema */
-const ProjectRolesOverrideSchema = z.object({
-  worker: RoleConfigSchema.partial().optional(),
-  reviewer: RoleConfigSchema.partial().optional(),
-  tester: RoleConfigSchema.partial().optional(),
-  documenter: RoleConfigSchema.partial().optional(),
-  auditor: RoleConfigSchema.partial().optional(),
-  'skill-documenter': RoleConfigSchema.partial().optional(),
-}).optional();
-
-/** Per-project agent configuration schema */
-const ProjectAgentConfigSchema = z.object({
-  /** Project path */
-  projectPath: z.string().min(1),
-  /** Linear project ID */
-  linearProjectId: z.string().optional(),
-  /** Per-role configuration override */
-  roles: ProjectRolesOverrideSchema,
-});
-
-/** Task decomposition (Planner) configuration schema */
-const DecompositionConfigSchema = z.object({
-  /** Enable decomposition */
-  enabled: z.boolean().default(false),
-  /** Decomposition threshold (minutes) - tasks exceeding this estimate are decomposed */
-  thresholdMinutes: z.number().min(10).max(120).default(30),
-  /** Max decomposition depth (default: 2) - prevents infinite nesting */
-  maxDepth: z.number().min(1).max(5).default(2).optional(),
-  /** Max children per task (default: 5) - prevents issue explosion.
-   * Shared by the autonomous runner and human `/plan` dispatch (AGT-4123). */
-  maxChildrenPerTask: z.number().min(1).max(20).default(5).optional(),
-  /**
-   * Daily issue creation limit (default: 20) - paces unsupervised automation.
-   * Applies to the autonomous runner only; human `/plan` dispatch
-   * (`POST /api/plan/dispatch`) enforces `maxChildrenPerTask` but is exempt
-   * from this budget so an approved plan is not refused when the daemon
-   * already spent today's slots (AGT-4123 Option 2).
-   */
-  dailyLimit: z.number().min(1).max(100).default(20).optional(),
-  /** Auto-move to backlog if too complex or failing (default: true) */
-  autoBacklog: z.boolean().default(true).optional(),
-  /**
-   * Planner model — frontier tier. Decomposition is high-leverage: a bad split
-   * pollutes every downstream worker, so we never cheap out here.
-   */
-  plannerModel: z.string().default('openai/gpt-5'),
-  /** Planner timeout (ms) - default 600000 (10min) */
-  plannerTimeoutMs: z.number().min(60000).default(600000),
-}).optional();
-
-const BacklogGroomingConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  cadenceHours: z.number().min(1).max(168).default(24).optional(),
-  mode: z.enum(['comment', 'apply']).default('comment').optional(),
-  plannerModel: z.string().optional(),
-  plannerTimeoutMs: z.number().min(60000).default(600000).optional(),
-  maxIssues: z.number().min(1).max(250).default(80).optional(),
-}).optional();
-
-/**
- * Explicit project-level supervisor. These defaults are deliberately frontier
- * tier: this role arbitrates several concurrent workers and is invoked only for
- * actionable board state, not for every ordinary implementation turn.
- */
-const OrchestratorConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  schedule: z.string().min(1).optional(),
-  eventDriven: z.boolean().default(true),
-  eventDebounceMs: z.number().int().min(0).max(60_000).default(1_000),
-  adapter: AdapterNameSchema.default('codex-responses'),
-  model: z.string().min(1).default('gpt-5.6-sol'),
-  reasoningEffort: z.enum(['low', 'medium', 'high']).default('high'),
-  timeoutMs: z.number().int().min(1_000).max(60 * 60_000).default(600_000),
-  maxTurns: z.number().int().min(1).max(50).default(12),
-}).optional();
-
-const PipelineStageSchema = z.enum(['worker', 'reviewer', 'tester', 'documenter', 'auditor', 'skill-documenter']);
-
-const JobProfileSchema = z.object({
-  name: z.string().min(1),
-  minMinutes: z.number().min(0).optional(),
-  maxMinutes: z.number().min(0).optional(),
-  priority: z.number().int().min(1).max(4).optional(),
-  effort: z.enum(['low', 'medium', 'high']).optional(),
-  // partialRecord, not record: a profile overrides only the stages it names
-  // (e.g. worker+reviewer). In Zod v4 `z.record(enum, …)` requires every enum
-  // key, which rejected valid partial profiles and crashed daemon startup.
-  roles: z.partialRecord(PipelineStageSchema, z.string()).optional(),
-});
-
-const PipelineGuardsConfigSchema = z.object({
-  qualityGate: z.boolean().optional(),
-  fakeDataGuard: z.boolean().optional(),
-  conventionalCommits: z.boolean().optional(),
-  branchValidation: z.boolean().optional(),
-  uncertaintyDetection: z.boolean().optional(),
-  haltToLinear: z.boolean().optional(),
-  registryCheck: z.boolean().optional(),
-  bsDetector: z.boolean().optional(),
-  dependencyAntiPatternCheck: z.boolean().optional(),
-  contractEvidenceCheck: z.boolean().optional(),
-  verifiedMetricEvidenceCheck: z.boolean().optional(),
-  deadModuleCheck: z.boolean().optional(),
-  reformatCheck: z.boolean().optional(),
-}).optional();
-
-const VerifyConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  blockOnNewFailures: z.boolean().default(true),
-  maxCommands: z.number().int().min(1).max(20).default(4),
-}).default({ enabled: true, blockOnNewFailures: true, maxCommands: 4 });
-
-const SecurityAuditConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  maxThreads: z.number().int().min(1).max(16).default(2),
-  maxRamMb: z.number().int().min(512).max(65536).default(4096),
-}).default({ enabled: false, maxThreads: 2, maxRamMb: 4096 });
-
-const AutonomousConfigSchema = z.object({
-  /** Auto-enable on service start */
-  enabled: z.boolean().default(false),
-  /** Worker/Reviewer pair mode */
-  pairMode: z.boolean().default(true),
-  /** Execution schedule (cron expression) */
-  schedule: z.string().default('*/30 * * * *'),
-  /** Pair mode max attempts */
-  maxAttempts: z.number().min(1).max(10).default(3),
-  /** Allowed project paths */
-  allowedProjects: z.array(z.string()).default(['~/dev']),
-  /** Treat Linear Backlog as a work queue. Default true so free slots chew parked work (AGT-4257). */
-  includeBacklog: z.boolean().optional().default(true),
-  /** Model configuration (legacy) */
-  models: ModelConfigSchema,
-  /** Worker timeout (ms). 0/unset = use the pipeline's per-stage ceiling
-   *  (stageTimeoutMs) — it is NO LONGER "unlimited": an unbounded stage could hang
-   *  the whole daemon. Set a positive value to override. (INT-2521) */
-  workerTimeoutMs: z.number().min(0).default(0),
-  /** Reviewer timeout (ms). 0/unset = pipeline per-stage ceiling (not unlimited). */
-  reviewerTimeoutMs: z.number().min(0).default(0),
-  /** Operator-controlled global task capacity. Safety comes from scopes and leases, not a hidden low cap. */
-  maxConcurrentTasks: z.number().int().min(1).max(256).default(64),
-  /** Retire stale tracker claims so In Progress means a worker actually owns the task. */
-  stalledInProgressHours: z.number().min(1).max(168).default(6),
-  /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
-  maxConcurrentPerProject: z.number().int().min(1).max(256).optional(),
-  /** SQLite execution-truth rollout. primary is fail-closed; shadow only observes. */
-  automationLedgerMode: z.enum(['off', 'shadow', 'primary']).default('primary'),
-  automationDbPath: z.string().min(1).optional(),
-  /** Linear project the daemon files its own retrospective issues into; unset = lane off. */
-  retrospectiveProjectId: z.string().min(1).optional(),
-  automationLeaseMs: z.number().int().min(60_000).max(24 * 60 * 60_000).default(10 * 60_000),
-  shutdownGraceMs: z.number().int().min(0).max(5 * 60_000).default(30_000),
-  /** Default role configuration */
-  defaultRoles: DefaultRolesConfigSchema,
-  /** Per-project agent configuration */
-  projectAgents: z.array(ProjectAgentConfigSchema).optional(),
-  /** Task decomposition configuration (Planner Agent) */
-  decomposition: DecompositionConfigSchema,
-  /** Whole-backlog grooming planner configuration */
-  backlogGrooming: BacklogGroomingConfigSchema,
-  /** Git worktree mode: each task runs in isolated worktree */
-  worktreeMode: z.boolean().default(false),
-  /** Allow concurrent tasks on the same repo (requires worktreeMode). (INT-1975) */
-  allowSameProjectConcurrent: z.boolean().default(true),
-  /**
-   * 'admit' (default) lets a claim with no resolvable write scope join other
-   * same-repo runs; worktrees isolate live edits and known file-scope overlap
-   * still refuses. 'serialize' is the Codex-era fail-closed holdover.
-   */
-  unknownScopeAdmission: z.enum(['serialize', 'admit']).default('admit'),
-  /**
-   * Consecutive infra_error attempts with one failure fingerprint after which a
-   * run parks for the operator instead of backing off again. 0 disables.
-   */
-  infraFailureCircuit: z.number().int().min(0).max(100).default(6),
-  /** Dynamic job profiles for model selection */
-  jobProfiles: z.array(JobProfileSchema).optional(),
-  /** Pipeline quality guards (bad-edit lint gate, BS detector, etc.) */
-  guards: PipelineGuardsConfigSchema,
-  /** Deterministic baseline-diff verification (default ON). */
-  verify: VerifyConfigSchema,
-  /** CodeQL baseline-diff gate for autonomous code edits (default OFF — too slow to gate PRs). */
-  securityAudit: SecurityAuditConfigSchema,
-  /** Max objective self-repair attempts (lint/bs/test) before giving up */
-  maxReflections: z.number().min(1).max(10).default(3),
-  coordinationBoardIssueId: z.string().min(1).optional(),
-  mcpPolicies: z.record(z.string(), z.object({
-    servers: z.array(z.string()).default([]),
-    allowTools: z.array(z.string()).optional(),
-    writeTools: z.array(z.string()).optional(),
-    destructiveTools: z.array(z.string()).optional(),
-  })).optional(),
-  adapterRouting: z.object({
-    // Must be expressible for anything `adapter:` can select as the worker's
-    // primary — a policy whose primary the schema rejects cannot match the
-    // running adapter, which silently disables routing (README documents the
-    // equality requirement).
-    primary: z.enum(['codex', 'codex-responses', 'cc-router', 'cursor', 'gpt', 'openrouter', 'atlascloud', 'lmstudio', 'local', 'claude']).default('codex'),
-    fallbacks: z.array(z.enum(['cc-router', 'cursor', 'codex', 'codex-responses'])).default(['cc-router', 'cursor']),
-    allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
-  }).optional(),
-  periodicReviews: z.array(z.object({
-    profile: z.enum(['permissions', 'hygiene', 'security', 'review']),
-    schedule: z.string().min(1),
-    adapter: z.enum(['codex', 'cc-router', 'cursor']).optional(),
-  })).optional(),
-  /** High-capability project-level supervisor. */
-  orchestrator: OrchestratorConfigSchema,
-  /** Cron schedule for the MCP-connected orchestrator sweep. Omit to disable. */
-  orchestratorSchedule: z.string().min(1).optional(),
-}).optional();
-
-// Long-Running Monitor schemas
-const CompletionCheckSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('exit-code'), successExitCode: z.number().optional() }),
-  z.object({ type: z.literal('output-regex'), successPattern: z.string(), failurePattern: z.string().optional() }),
-  z.object({ type: z.literal('http-status'), expectedStatus: z.number().optional() }),
-]);
-
-const LongRunningMonitorConfigSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  checkCommand: z.array(z.string().min(1)).min(1),
-  completionCheck: CompletionCheckSchema,
-  issueId: z.string().optional(),
-  checkInterval: z.number().min(1).default(1),
-  maxDurationHours: z.number().min(1).default(48),
-  notify: z.boolean().default(true),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-});
-
-const ConflictResolverConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  ownershipMode: z.enum(['auto', 'all']).default('auto'),
-  maxResolutionAttempts: z.number().min(1).max(10).default(3),
-  cascadeCheck: z.boolean().default(true),
-  workerModel: z.string().optional(),
-  workerTimeoutMs: z.number().min(0).optional(),
-}).optional();
-
-const PRProcessorConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  schedule: z.string().default('*/15 * * * *'),
-  maxIterations: z.number().min(1).max(10).default(3),
-  maxRetries: z.number().min(1).max(10).optional(),
-  ciTimeoutMs: z.number().positive().optional(),
-  ciPollIntervalMs: z.number().positive().optional(),
-  conflictResolver: ConflictResolverConfigSchema,
-  repoMappings: z.record(z.string(), z.string()).optional(),
-}).optional();
-
-const CIWorkerConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  checkIntervalMs: z.number().positive().default(300000),
-  autoRetry: z.boolean().default(false),
-  createIssues: z.boolean().default(true),
-  maxAgeDays: z.number().positive().default(30),
-}).optional();
-
-// Outbound notification channel (INT-1576). Discord stays the default; Slack/
-// Telegram/webhook are BYO. Distinct from the per-job `notify` boolean above.
-const NotificationsSchema = z.object({
-  channel: z.enum(['discord', 'slack', 'telegram', 'webhook', 'none']).default('discord'),
-  slackWebhookUrl: z.string().optional(),
-  telegramBotToken: z.string().optional(),
-  telegramChatId: z.string().optional(),
-  webhookUrl: z.string().optional(),
-}).optional();
-
-const SandboxExecutorConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  socketPath: z.string().refine(
-    (value) => resolve(value) === value && value.startsWith('/run/openswarm-sandbox/'),
-    'Must be a normalized absolute path under /run/openswarm-sandbox',
-  ).default('/run/openswarm-sandbox/executor.sock'),
-  allowedRoots: z.array(z.string().refine((value) => {
-    const canonical = resolve(value);
-    return canonical === value && (canonical === '/work' || canonical.startsWith('/work/'));
-  }, 'Must be /work or a normalized descendant of /work')).min(1).default(['/work']),
-  connectTimeoutMs: z.number().int().min(100).max(10_000).default(1_000),
-  maxRequestBytes: z.number().int().min(4 * 1024).max(1024 * 1024).default(64 * 1024),
-  maxOutputBytes: z.number().int().min(1024).max(4 * 1024 * 1024).default(512 * 1024),
-  maxTimeoutMs: z.number().int().min(1_000).max(60 * 60_000).default(15 * 60_000),
-  maxConcurrent: z.number().int().min(1).max(64).default(8),
-}).optional();
-
-const HumanSurfaceReadOnlySchema = z.object({
-  /**
-   * Strict mode blocks arbitrary agent programs and all OpenSwarm-owned
-   * Slack/Discord/Telegram/webhook sends.  Local web chat remains available.
-   */
-  enabled: z.boolean().default(false),
-  sandboxExecutor: SandboxExecutorConfigSchema,
-}).default({ enabled: false });
-
-// MCP server entry: stdio (`command`/`args`/`env`) or remote (`url`/`headers`).
-// Mirrors the ~/.openswarm/mcp.json shape so config.yaml is a single source. (INT-1949)
-const McpServerSchema = z
-  .object({
-    /** Reference a built-in preset (e.g. `linear`) instead of command/url. (INT-1952) */
-    preset: z.string().optional(),
-    /** Explicit trust-domain label; `human` makes unknown actions fail closed. */
-    surface: z.enum(['human', 'devops', 'data', 'sandbox', 'unknown']).optional(),
-    command: z.string().optional(),
-    args: z.array(z.string()).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-    url: z.string().optional(),
-    headers: z.record(z.string(), z.string()).optional(),
-    transport: z.enum(['stdio', 'http', 'sse']).optional(),
-  })
-  .refine((s) => !!s.preset || !!s.command || !!s.url, {
-    message: 'MCP server needs a `preset`, a `command` (stdio), or a `url` (remote)',
-  });
-
-const McpConfigSchema = z
-  .object({
-    servers: z.record(z.string(), McpServerSchema).default({}),
-  })
-  .optional();
-
-// Anonymous usage telemetry (opt-out). Defaults to enabled; the daemon/CLI also
-// honor OPENSWARM_TELEMETRY=0 / DO_NOT_TRACK / CI env. (INT-1992)
-const TelemetryConfigSchema = z
-  .object({
-    enabled: z.boolean().default(true),
-  })
-  .optional();
-
-const DailyReporterConfigSchema = z.object({
-  enabled: z.boolean().default(false),
-  schedule: z.string().default('0 18 * * *'),
-}).optional();
-
-const RawConfigSchema = z.object({
-  adapter: AdapterNameSchema.default('codex'),
-  /**
-   * Adapter for `openswarm review`, when it should differ from `adapter`.
-   * Review is a second opinion, so running it on the same provider as the work
-   * it checks is a correlated failure — and that provider's quota is the one
-   * already spent. Omit to follow `adapter`. (AGT-4292)
-   */
-  reviewAdapter: AdapterNameSchema.optional(),
-  language: z.enum(['en', 'ko']).default('en'),
-  discord: DiscordConfigSchema,
-  notifications: NotificationsSchema,
-  humanSurfaceReadOnly: HumanSurfaceReadOnlySchema,
-  linear: LinearConfigSchema,
-  github: GitHubConfigSchema,
-  timeWindow: TimeWindowConfigSchema,
-  pairMode: PairModeConfigSchema,
-  autonomous: AutonomousConfigSchema,
-  prProcessor: PRProcessorConfigSchema,
-  ciWorker: CIWorkerConfigSchema,
-  monitors: z.array(LongRunningMonitorConfigSchema).optional(),
-  dailyReporter: DailyReporterConfigSchema,
-  mcp: McpConfigSchema,
-  telemetry: TelemetryConfigSchema,
-  agents: z.array(AgentSessionSchema).min(1, 'At least one agent is required'),
-  defaultHeartbeatInterval: z.number().positive().default(DEFAULT_HEARTBEAT_INTERVAL),
-});
-
-export type RawConfig = z.infer<typeof RawConfigSchema>;
 
 // Environment Variable Substitution
 
@@ -810,10 +312,24 @@ function transformConfig(raw: RawConfig): SwarmConfig {
   };
 }
 
+export interface LoadConfigOptions {
+  /**
+   * Suppress the informational / warning lines `loadConfig` normally prints.
+   * Callers that own stdout for a machine-readable document (e.g.
+   * `openswarm review --json`) must pass this, otherwise MCP discovery and
+   * adapter resolution leak config chatter in front of the JSON and break
+   * `… | jq` (AGT-4298). Side effects (human-surface / sandbox wiring) still run.
+   */
+  quiet?: boolean;
+}
+
 /**
  * Load config (env var substitution + Zod validation)
  */
-export function loadConfig(customPath?: string): SwarmConfig {
+export function loadConfig(customPath?: string, options: LoadConfigOptions = {}): SwarmConfig {
+  const quiet = options.quiet === true;
+  const log = quiet ? () => undefined : console.log.bind(console);
+
   // 1. Find config file
   const configPath = customPath ?? findConfigFile();
 
@@ -825,7 +341,7 @@ export function loadConfig(customPath?: string): SwarmConfig {
     );
   }
 
-  console.log(`${status.info('Config')} ${c.dim('loading from')} ${c.cyan(configPath)}`);
+  log(`${status.info('Config')} ${c.dim('loading from')} ${c.cyan(configPath)}`);
 
   // 2. Parse file
   let rawData: unknown;
@@ -841,12 +357,12 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // 3.5. Optional 블록 정리: 환경변수 미설정 시 빈 문자열이 들어온 블록 제거
   const discordBlock = substituted.discord as Record<string, unknown> | undefined;
   if (discordBlock && (!discordBlock.token || !discordBlock.channelId)) {
-    console.log(status.warn('[Config] Discord credentials not set — disabling Discord integration'));
+    log(status.warn('[Config] Discord credentials not set — disabling Discord integration'));
     delete substituted.discord;
   }
   const linearBlock = substituted.linear as Record<string, unknown> | undefined;
   if (linearBlock && (!linearBlock.apiKey || !linearBlock.teamId)) {
-    console.log(status.warn('[Config] Linear credentials not set — disabling Linear integration'));
+    log(status.warn('[Config] Linear credentials not set — disabling Linear integration'));
     delete substituted.linear;
   }
 
@@ -873,10 +389,10 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // 6. Apply time window config
   if (config.timeWindow) {
     setTimeWindowConfig(config.timeWindow);
-    console.log(`${status.info('[Config] TimeWindow')} ${c.dim('loaded')} ${c.yellow(`enabled: ${config.timeWindow.enabled}`)}`);
+    log(`${status.info('[Config] TimeWindow')} ${c.dim('loaded')} ${c.yellow(`enabled: ${config.timeWindow.enabled}`)}`);
   } else {
     setTimeWindowConfig(DEFAULT_TIME_WINDOW);
-    console.log(`${status.info('[Config] TimeWindow')} ${c.dim('using default config')}`);
+    log(`${status.info('[Config] TimeWindow')} ${c.dim('using default config')}`);
   }
 
   return config;
