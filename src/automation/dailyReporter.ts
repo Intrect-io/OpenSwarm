@@ -6,7 +6,7 @@
 import { Cron } from 'croner';
 import { LinearClient, type Project } from '@linear/sdk';
 import { postStatusUpdate } from '../linear/index.js';
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -22,6 +22,24 @@ let projectPathMapping = new Map<string, string>();
 // A crash or partial failure leaves the previous watermark intact so the next
 // run can retry the same window.
 const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.json');
+
+function readWatermark(): string | null {
+  try {
+    if (!existsSync(WATERMARK_FILE)) return null;
+    const parsed = JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')) as unknown;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'date' in parsed &&
+      typeof parsed.date === 'string'
+    ) {
+      return parsed.date;
+    }
+  } catch {
+    // A corrupt watermark must never suppress a report.
+  }
+  return null;
+}
 
 function writeWatermark(date: string): void {
   const dir = dirname(WATERMARK_FILE);
@@ -116,6 +134,12 @@ export async function generateDailyReports(): Promise<void> {
     return;
   }
 
+  const today = new Date().toISOString().slice(0, 10);
+  if (readWatermark() === today) {
+    console.log(`[DailyReporter] Reports already completed for ${today}, skipping`);
+    return;
+  }
+
   console.log('[DailyReporter] Generating daily reports...');
 
   try {
@@ -162,7 +186,6 @@ export async function generateDailyReports(): Promise<void> {
     // If any failed, the watermark stays at the previous value so the next
     // run retries the same window instead of skipping it.
     if (failCount === 0) {
-      const today = new Date().toISOString().slice(0, 10);
       writeWatermark(today);
       console.log(`[DailyReporter] Watermark persisted: ${today}`);
     } else {
