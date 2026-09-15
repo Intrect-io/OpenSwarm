@@ -182,8 +182,16 @@ export async function runOpenRouterPkceFlow(
 
     server.listen(port, '127.0.0.1', () => {
       console.log(`[Auth] Callback server listening on http://127.0.0.1:${port}`);
-      console.log(`[Auth] 브라우저에서 OpenRouter 로그인 페이지를 엽니다...`);
-      openBrowser(authUrl);
+      if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
+        // No browser on a headless SSH host. The operator opens the URL on
+        // their own machine and forwards the callback port back here.
+        for (const line of formatOpenRouterOauthInstructions(authUrl, port)) {
+          console.log(`[Auth] ${line}`);
+        }
+      } else {
+        console.log(`[Auth] 브라우저에서 OpenRouter 로그인 페이지를 엽니다...`);
+        openBrowser(authUrl);
+      }
     });
 
     server.on('error', (err) => {
@@ -194,6 +202,28 @@ export async function runOpenRouterPkceFlow(
       }
     });
   });
+}
+
+/**
+ * Instructions for completing the PKCE flow from a headless SSH host: open the
+ * authorize URL on the operator's own machine, then forward the callback port
+ * back so the local callback server receives the redirect.
+ */
+export function formatOpenRouterOauthInstructions(
+  authUrl: string,
+  port: number,
+  env: NodeJS.ProcessEnv = process.env,
+  host?: string,
+): string[] {
+  const forwardHost =
+    host ?? env.SSH_CONNECTION?.trim().split(/\s+/)[2] ?? 'this-host';
+  const user = env.USER ?? 'user';
+  return [
+    `Open this authorize URL in a browser on your own machine:`,
+    `  ${authUrl}`,
+    `Then forward the callback port back to this host:`,
+    `  ssh -N -L ${port}:127.0.0.1:${port} ${user}@${forwardHost}`,
+  ];
 }
 
 /**

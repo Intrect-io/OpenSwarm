@@ -39,6 +39,30 @@ function assertProvider(provider: string): asserts provider is Provider {
 export interface AuthLoginOpts {
   clientId?: string;
   port?: number;
+  /** Login path for providers with multiple (openrouter): auto | oauth | key. */
+  method?: 'auto' | 'oauth' | 'key';
+}
+
+export type OpenRouterLoginPath = 'env-key' | 'prompt-key' | 'oauth';
+
+/**
+ * Decide how an OpenRouter login should proceed, without side effects, so the
+ * decision is testable: an env key always wins (keys in argv are forbidden),
+ * an explicit --method overrides the default, and the default asks "can this
+ * session actually open a browser?" — SSH and headless hosts get a hidden key
+ * prompt instead of waiting on a browser that never arrives.
+ */
+export function resolveOpenRouterLoginPath(
+  opts: Pick<AuthLoginOpts, 'method'>,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): OpenRouterLoginPath {
+  if ((env.OPENROUTER_API_KEY ?? env.OPENROUTER_API ?? '').trim()) return 'env-key';
+  if (opts.method === 'oauth') return 'oauth';
+  if (opts.method === 'key') return 'prompt-key';
+  if (env.SSH_CONNECTION || env.SSH_TTY) return 'prompt-key';
+  if (platform === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY) return 'prompt-key';
+  return 'oauth';
 }
 
 /**
@@ -70,18 +94,27 @@ export async function handleAuthLogin(
 }
 
 async function loginOpenRouter(opts: AuthLoginOpts): Promise<void> {
+  const path = resolveOpenRouterLoginPath(opts, process.env);
+
   // API keys must never be supplied through argv because process listings and
   // shell history expose them. Use the environment or hidden prompt instead.
-  const envKey = process.env.OPENROUTER_API_KEY?.trim();
-  if (envKey) {
+  if (path === 'env-key') {
+    const envKey = (process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_API ?? '').trim();
     saveOpenRouterApiKey(envKey);
     console.log(
-      `[Auth] OPENROUTER_API_KEY 환경 변수에서 키를 저장했습니다: ${PROFILE_KEYS.openrouter}`,
+      `[Auth] 환경 변수에서 키를 저장했습니다: ${PROFILE_KEYS.openrouter}`,
     );
     return;
   }
 
-  // PKCE browser flow (primary path).
+  if (path === 'prompt-key') {
+    const manualKey = await promptForApiKey();
+    saveOpenRouterApiKey(manualKey);
+    console.log(`[Auth] OpenRouter API key 저장 완료: ${PROFILE_KEYS.openrouter}`);
+    return;
+  }
+
+  // PKCE browser flow (primary path on a graphical desktop).
   try {
     await loginAndSaveOpenRouterProfile(opts.port);
     return;
