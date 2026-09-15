@@ -51,6 +51,19 @@ describe('formatTokens', () => {
     expect(formatTokens(2_500_000)).toBe('2.5M');
     expect(formatTokens(undefined)).toBe('');
   });
+
+  it('never renders a bare "1000" for a sub-thousand count', () => {
+    // Math.round(999.5) is 1000 — the old `< 1000` branch returned "1000"
+    // while 1000 itself rendered "1.0k", breaking monotonicity.
+    expect(formatTokens(999.5)).toBe('1.0k');
+    expect(formatTokens(999.4)).toBe('999');
+    expect(formatTokens(999)).toBe('999');
+  });
+
+  it('promotes 999999 to M instead of rendering "1000.0k"', () => {
+    expect(formatTokens(999_999)).toBe('1.0M');
+    expect(formatTokens(999_949)).toBe('999.9k');
+  });
 });
 
 describe('shortenPath', () => {

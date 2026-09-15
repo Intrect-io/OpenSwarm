@@ -41,9 +41,15 @@ export function formatCost(usd) {
 /** "1.2k" / "847" — token counts, compact but never misleadingly rounded to 0. */
 export function formatTokens(count) {
   if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) return '';
-  if (count < 1000) return String(Math.round(count));
-  if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k`;
-  return `${(count / 1_000_000).toFixed(1)}M`;
+  const rounded = Math.round(count);
+  if (rounded < 1000) return String(rounded);
+  if (rounded < 1_000_000) {
+    // (999999 / 1000).toFixed(1) is "1000.0" — promote to M so the k/M
+    // boundary cannot render "1000.0k" next to "1.0M" for the next integer.
+    if (rounded >= 999_950) return `${(rounded / 1_000_000).toFixed(1)}M`;
+    return `${(rounded / 1000).toFixed(1)}k`;
+  }
+  return `${(rounded / 1_000_000).toFixed(1)}M`;
 }
 
 /**
