@@ -12,6 +12,8 @@ import type {
   WorkerResult,
   ReviewResult,
 } from './types.js';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import {
   runAgenticLoop,
@@ -32,6 +34,7 @@ import {
   loadModelCatalog,
   parseOpenAiModelList,
   resolveDefaultModel,
+  catalogCacheDir,
   type CatalogSpec,
 } from './modelCatalog.js';
 import { adapterFetch } from './httpDispatcher.js';
@@ -83,7 +86,13 @@ function catalogSpec(): CatalogSpec {
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
       if (!res.ok) return [];
-      return parseOpenAiModelList(await res.json());
+      const body: unknown = await res.json();
+      // The /models response already carries each model's default-endpoint
+      // pricing, which the shared catalog (ids only) throws away — mirror it
+      // to disk so createApiCaller can price-cap requests. Re-written whenever
+      // the live list refreshes; a missing snapshot only fails open (below).
+      writePricingCache(parseOpenRouterPricing(body));
+      return parseOpenAiModelList(body);
     },
   };
 }
@@ -230,6 +239,96 @@ export class OpenRouterCliAdapter implements CliAdapter {
   }
 }
 
+// ----- Provider routing: nitro-grade speed, price-capped (AGT-4258) -----
+// The same model is hosted by many backends with a ~10x speed and multi-x price
+// spread (2026-06-09 benchmark: 2759 tok/s vs 160 for qwen3-coder; AGT-2853
+// traces: one premium backend billed 47% of a month's spend on a single model).
+// Every non-pinned request therefore sorts by throughput, expresses a latency
+// ceiling, and — when a price snapshot exists — caps the unit price.
+
+/**
+ * Soft ceiling on time-to-first-token, in seconds. OpenRouter treats
+ * `preferred_max_latency` as a routing preference, not a hard filter. The 2026-07
+ * or_traces analysis (AGT-2853) measured the premium-fast tier (Cerebras) at
+ * ~2.1s while the cheapest backend needed 54.9s on the same model, so 2s keeps
+ * the fast tier fully eligible without demanding sub-second TTFT nothing meets.
+ */
+const PREFERRED_MAX_LATENCY_S = 2;
+
+/**
+ * `max_price` is the model's cheapest known price times this multiplier, so the
+ * throughput sort cannot wander onto a premium-priced backend (AX-568 measured a
+ * premium backend charging ~10x for the same model and dominating the bill).
+ * x3 rather than x2: AGT-2853 found the /models list price can sit ~2x above the
+ * true cheapest endpoint, so x3 of the known price still leaves headroom while
+ * excluding the multi-x outliers.
+ */
+const MAX_PRICE_MULTIPLIER = 3;
+
+/** Never route through the ":nitro" priority tier — it opens a pricier pool the
+ * max_price cap is designed to exclude. Stripped so routing and the pricing
+ * lookup below see the canonical model id. */
+const NITRO_SUFFIX = /:nitro$/i;
+
+/** USD-per-token price as OpenRouter bills the model's default endpoint. */
+interface ModelPricing {
+  prompt: number;
+  completion: number;
+}
+
+/**
+ * Extract `{ model id → USD/token }` from a /models response body. Listings with
+ * a zero (":free") or missing price are skipped: a zero floor would compute a
+ * $0 cap and starve the request of every paid backend, so free listings fail
+ * open to speed-only routing like any unknown-price model.
+ */
+function parseOpenRouterPricing(body: unknown): Record<string, ModelPricing> {
+  const data = (body as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return {};
+  const pricing: Record<string, ModelPricing> = {};
+  for (const entry of data) {
+    const id = String((entry as { id?: unknown } | null)?.id ?? '');
+    const raw = (entry as { pricing?: Record<string, unknown> } | null)?.pricing;
+    const prompt = Number(raw?.prompt);
+    const completion = Number(raw?.completion);
+    if (!id || !(prompt > 0) || !(completion > 0)) continue;
+    pricing[id] = { prompt, completion };
+  }
+  return pricing;
+}
+
+function pricingCachePath(): string {
+  // Lives next to the shared model-catalog cache; the directory honours
+  // OPENSWARM_MODEL_CATALOG_DIR exactly like modelCatalog.ts.
+  return resolve(catalogCacheDir(), 'openrouter-pricing.json');
+}
+
+/** Best-effort — losing the snapshot only degrades to speed-only routing. */
+function writePricingCache(pricing: Record<string, ModelPricing>): void {
+  if (Object.keys(pricing).length === 0) return;
+  try {
+    mkdirSync(catalogCacheDir(), { recursive: true });
+    writeFileSync(pricingCachePath(), JSON.stringify(pricing));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Price snapshot lookup for the call path — a local-disk read, NEVER a network
+ * call: a run must not block on a price lookup. Missing/corrupt/unpriced model
+ * returns null and the request routes on speed alone (fail-open, no logging).
+ */
+function readPricingCache(model: string): ModelPricing | null {
+  try {
+    const snapshot = JSON.parse(readFileSync(pricingCachePath(), 'utf8')) as Record<string, ModelPricing>;
+    const price = snapshot?.[model];
+    return price && typeof price === 'object' && price.prompt > 0 && price.completion > 0 ? price : null;
+  } catch {
+    return null;
+  }
+}
+
 // ----- API caller -----
 // Streamed chat/completions responses are parsed by consumeChatCompletionsStream.
 
@@ -247,12 +346,35 @@ export interface ApiCallerOptions {
 }
 
 export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOptions = {}) {
+  // Nitro-tier stripping happens here (not in run()) so every caller of this
+  // exported function gets the guarantee.
+  const routedModel = model.replace(NITRO_SUFFIX, '');
+  // The speed/price preference depends only on the model, so resolve the price
+  // cap once: readPricingCache is a local-disk read, never a network call.
+  const price = readPricingCache(routedModel);
+  // The preference every non-pinned request shares (AGT-4258): throughput-first
+  // sort, a soft latency ceiling, and — when the pricing mirror knows the
+  // model — a unit-price cap at floor × MAX_PRICE_MULTIPLIER. max_price is
+  // omitted entirely when no price snapshot exists (fail-open to speed-only
+  // routing); the price cannot become 0 by construction (see parseOpenRouterPricing).
+  const speedPricePreference: Record<string, unknown> = {
+    sort: 'throughput',
+    preferred_max_latency: PREFERRED_MAX_LATENCY_S,
+    ...(price
+      ? {
+          max_price: {
+            prompt: price.prompt * MAX_PRICE_MULTIPLIER,
+            completion: price.completion * MAX_PRICE_MULTIPLIER,
+          },
+        }
+      : {}),
+  };
   return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
     // Per-API-call throttle budget (INT-2907).
     const throttle: ThrottleState = { attempts: 0 };
     const body: Record<string, unknown> = {
-      model,
-      messages: applyPromptCaching(messages, model),
+      model: routedModel,
+      messages: applyPromptCaching(messages, routedModel),
       temperature: 0.2,
       max_tokens: 16384,
       stream: true,
@@ -261,20 +383,24 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     // Explicit provider pin (INT-3105): OPENROUTER_PROVIDER_ONLY routes every
     // request to the named provider slug(s) with no fallback — e.g.
     // `atlas-cloud` to burn sponsorship credits deterministically in tests.
-    // The pin is the caller's explicit intent, so it replaces the ZDR default
-    // below (combining them could leave zero eligible providers).
+    // The pin is the caller's explicit intent, so it REPLACES the speed/price
+    // preference and the ZDR default below (combining them could leave zero
+    // eligible providers) — the pin is the whole provider body, nothing added.
     const pinnedProviders = (process.env.OPENROUTER_PROVIDER_ONLY ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
     if (pinnedProviders.length > 0) {
       body.provider = { only: pinnedProviders, allow_fallbacks: false };
-    } else if (!/^openai\//i.test(model)) {
-      // ZDR(Zero Data Retention) — 데이터를 보존하지 않는 provider로만 라우팅.
-      // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
-      // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
-      // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
-      //
+    } else if (/^openai\//i.test(routedModel)) {
+      // OpenAI-hosted models REJECT data_collection:deny ("Provider returned
+      // error"), and OpenAI does not train on API data anyway, so ZDR forcing
+      // is unnecessary for them — they get the same nitro-grade speed/price
+      // preference without the ZDR flag.
+      body.provider = { ...speedPricePreference };
+    } else {
+      // ZDR(Zero Data Retention) — route only to providers that do not retain
+      // data, plus the shared throughput/latency/price preference above.
       // sort: 'throughput' picks the fastest ZDR-eligible endpoint instead of
       // OpenRouter's default (load-balanced / cheapest-first) order. The
       // 2026-06-09 worker benchmark found the same model 5x slower on one
@@ -282,14 +408,14 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       // Novita) — provider, not model choice, was the dominant speed factor.
       // A slow provider burns a stage's turn/timeout budget for no quality
       // gain, so throughput is worth more here than shaving cents off price.
-      body.provider = { data_collection: 'deny', sort: 'throughput' };
+      body.provider = { data_collection: 'deny', ...speedPricePreference };
     }
     // 추론 불필요 역할은 reasoning 토큰을 끈다. glm-4.7-flash처럼 non-thinking
     // 모델엔 무영향, 추론형 모델(glm-5 등)을 worker로 바꿔도 토큰 낭비를 막는다.
     // 단, OpenAI 추론 모델(gpt-5 등)은 "Reasoning is mandatory"로 이 플래그를
     // 거부하므로 제외한다 — worker escalate 대상이 gpt-5라 이걸 안 빼면 escalation이
     // 항상 깨진다. OpenAI는 단순 작업엔 추론을 자동 최소화하므로 끌 필요도 없다.
-    if (opts.disableReasoning && !/^openai\//i.test(model)) {
+    if (opts.disableReasoning && !/^openai\//i.test(routedModel)) {
       body.reasoning = { enabled: false };
     }
     if (tools.length > 0) {

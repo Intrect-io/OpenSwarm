@@ -6,7 +6,10 @@
 // Test Status: npm run test -- src/adapters/openrouter.test.ts
 // ============================================
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { OpenRouterCliAdapter, createApiCaller, applyPromptCaching } from './openrouter.js';
 import { RateLimitError } from './rateLimitError.js';
 import { getAdapter } from './index.js';
@@ -129,27 +132,110 @@ describe('OpenRouterCliAdapter', () => {
     expect(body.tools[0].function.name).toBe('read_file');
   });
 
-  it('sends ZDR (provider.data_collection: deny) for non-OpenAI models', async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] }), { status: 200 }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-    const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
-    await callApi([{ role: 'user', content: 'hi' }], []);
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.provider).toEqual({ data_collection: 'deny', sort: 'throughput' });
-    expect(body.reasoning).toBeUndefined(); // not disabled unless requested
-  });
+  describe('provider routing (AGT-4258: nitro-grade speed, price-capped)', () => {
+    // Isolate the pricing mirror so no test depends on a real
+    // ~/.openswarm/model-catalogs snapshot on the dev machine.
+    let pricingDir: string;
+    let prevCatalogDir: string | undefined;
 
-  it('does NOT send ZDR for OpenAI models (they reject data_collection:deny)', async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] }), { status: 200 }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
-    const callApi = createApiCaller('sk-or-test', 'openai/gpt-5');
-    await callApi([{ role: 'user', content: 'hi' }], []);
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
-    expect(body.provider).toBeUndefined();
+    const okResponse = () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' }] }), { status: 200 });
+
+    /** Read the JSON body sent on the first (only) fetch. */
+    const sentBody = (fetchMock: ReturnType<typeof vi.fn>) =>
+      JSON.parse(((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body ?? '') as string);
+
+    const stubPricing = (pricing: Record<string, { prompt: number; completion: number }>) =>
+      writeFileSync(join(pricingDir, 'openrouter-pricing.json'), JSON.stringify(pricing));
+
+    beforeEach(() => {
+      pricingDir = mkdtempSync(join(tmpdir(), 'openswarm-or-routing-'));
+      prevCatalogDir = process.env.OPENSWARM_MODEL_CATALOG_DIR;
+      process.env.OPENSWARM_MODEL_CATALOG_DIR = pricingDir;
+    });
+
+    afterEach(() => {
+      if (prevCatalogDir === undefined) delete process.env.OPENSWARM_MODEL_CATALOG_DIR;
+      else process.env.OPENSWARM_MODEL_CATALOG_DIR = prevCatalogDir;
+      rmSync(pricingDir, { recursive: true, force: true });
+    });
+
+    it('prices the cap at floor×3 and prefers low latency for ZDR (non-OpenAI) models', async () => {
+      // floor: $1/Mtok prompt, $2/Mtok completion → cap ×3
+      stubPricing({ 'z-ai/glm-4.7-flash': { prompt: 0.000001, completion: 0.000002 } });
+      const fetchMock = vi.fn(async () => okResponse());
+      vi.stubGlobal('fetch', fetchMock);
+      const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
+      await callApi([{ role: 'user', content: 'hi' }], []);
+      const provider = sentBody(fetchMock).provider as Record<string, unknown>;
+      expect(provider).toEqual({
+        data_collection: 'deny',
+        sort: 'throughput',
+        preferred_max_latency: expect.any(Number),
+        max_price: { prompt: expect.any(Number), completion: expect.any(Number) },
+      });
+      expect(provider.preferred_max_latency).toBe(2);
+      expect(provider.max_price as { prompt: number; completion: number }).toEqual({
+        prompt: expect.closeTo(0.000003),
+        completion: expect.closeTo(0.000006),
+      });
+    });
+
+    it('gives OpenAI models the same speed/price preference WITHOUT data_collection:deny', async () => {
+      stubPricing({ 'openai/gpt-4o': { prompt: 0.000001, completion: 0.000002 } });
+      const fetchMock = vi.fn(async () => okResponse());
+      vi.stubGlobal('fetch', fetchMock);
+      const callApi = createApiCaller('sk-or-test', 'openai/gpt-4o');
+      await callApi([{ role: 'user', content: 'hi' }], []);
+      const provider = sentBody(fetchMock).provider as Record<string, unknown>;
+      expect(provider).toEqual({
+        sort: 'throughput',
+        preferred_max_latency: 2,
+        max_price: { prompt: expect.any(Number), completion: expect.any(Number) },
+      });
+      expect(provider.max_price as { prompt: number; completion: number }).toEqual({
+        prompt: expect.closeTo(0.000003),
+        completion: expect.closeTo(0.000006),
+      });
+    });
+
+    it('omits max_price when no pricing snapshot exists (fail-open to speed-only routing)', async () => {
+      const fetchMock = vi.fn(async () => okResponse());
+      vi.stubGlobal('fetch', fetchMock);
+      const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
+      await callApi([{ role: 'user', content: 'hi' }], []);
+      const provider = sentBody(fetchMock).provider as Record<string, unknown>;
+      expect(provider).toEqual({ data_collection: 'deny', sort: 'throughput', preferred_max_latency: 2 });
+      expect(provider).not.toHaveProperty('max_price');
+    });
+
+    it('never routes the :nitro priority tier — the suffix is stripped before routing/pricing', async () => {
+      stubPricing({ 'z-ai/glm-4.7-flash': { prompt: 0.000001, completion: 0.000002 } });
+      const fetchMock = vi.fn(async () => okResponse());
+      vi.stubGlobal('fetch', fetchMock);
+      const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash:nitro');
+      await callApi([{ role: 'user', content: 'hi' }], []);
+      const body = sentBody(fetchMock);
+      expect(body.model).toBe('z-ai/glm-4.7-flash');
+      // The pricing lookup ran against the stripped id, so the cap is present.
+      expect((body.provider as Record<string, unknown>).max_price).toBeDefined();
+    });
+
+    it('OPENROUTER_PROVIDER_ONLY pin replaces the whole provider body (no sort/latency/price keys)', async () => {
+      stubPricing({ 'z-ai/glm-4.7-flash': { prompt: 0.000001, completion: 0.000002 } });
+      const prevPin = process.env.OPENROUTER_PROVIDER_ONLY;
+      process.env.OPENROUTER_PROVIDER_ONLY = 'atlas-cloud';
+      try {
+        const fetchMock = vi.fn(async () => okResponse());
+        vi.stubGlobal('fetch', fetchMock);
+        const callApi = createApiCaller('sk-or-test', 'z-ai/glm-4.7-flash');
+        await callApi([{ role: 'user', content: 'hi' }], []);
+        expect(sentBody(fetchMock).provider).toEqual({ only: ['atlas-cloud'], allow_fallbacks: false });
+      } finally {
+        if (prevPin === undefined) delete process.env.OPENROUTER_PROVIDER_ONLY;
+        else process.env.OPENROUTER_PROVIDER_ONLY = prevPin;
+      }
+    });
   });
 
   it('disables reasoning for non-OpenAI models when requested', async () => {
