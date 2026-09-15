@@ -13,6 +13,6 @@
     } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
       theme = 'light';
     }
-  } catch (_) { /* storage blocked — stay on the dark default */ }
+  } catch { /* storage blocked — stay on the dark default */ }
   document.documentElement.setAttribute('data-theme', theme);
 })();

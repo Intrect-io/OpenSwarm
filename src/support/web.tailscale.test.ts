@@ -9,8 +9,6 @@
 // literal never comes back.
 
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { isTailscaleAddress } from '../support/tailscaleNetwork';
 
 async function withInterfaces(interfaces: Record<string, unknown[]>) {
   vi.resetModules();

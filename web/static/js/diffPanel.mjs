@@ -38,7 +38,6 @@ export function summarizeFiles(files) {
 export class DiffPanel {
   #el;
   #fetchDiff;
-  #taskId = null;
   /**
    * Only the newest request may paint. A taskId comparison is not enough —
    * re-opening the SAME session starts a second request with the same id, and
@@ -56,7 +55,6 @@ export class DiffPanel {
   }
 
   async load(taskId) {
-    this.#taskId = taskId;
     const requestId = ++this.#requestId;
     this.#message('Loading diff…');
     let payload;
@@ -79,7 +77,6 @@ export class DiffPanel {
   }
 
   clear() {
-    this.#taskId = null;
     // Nothing in flight may paint over a cleared panel either.
     this.#requestId++;
     this.#el.replaceChildren();

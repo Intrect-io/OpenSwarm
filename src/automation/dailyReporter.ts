@@ -25,10 +25,19 @@ const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.j
 
 function readWatermark(): string | null {
   try {
-    if (existsSync(WATERMARK_FILE)) {
-      return JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')).date as string;
+    if (!existsSync(WATERMARK_FILE)) return null;
+    const parsed = JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')) as unknown;
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'date' in parsed &&
+      typeof parsed.date === 'string'
+    ) {
+      return parsed.date;
     }
-  } catch { /* corrupt → treat as no watermark */ }
+  } catch {
+    // A corrupt watermark must never suppress a report.
+  }
   return null;
 }
 
@@ -125,6 +134,12 @@ export async function generateDailyReports(): Promise<void> {
     return;
   }
 
+  const today = new Date().toISOString().slice(0, 10);
+  if (readWatermark() === today) {
+    console.log(`[DailyReporter] Reports already completed for ${today}, skipping`);
+    return;
+  }
+
   console.log('[DailyReporter] Generating daily reports...');
 
   try {
@@ -171,7 +186,6 @@ export async function generateDailyReports(): Promise<void> {
     // If any failed, the watermark stays at the previous value so the next
     // run retries the same window instead of skipping it.
     if (failCount === 0) {
-      const today = new Date().toISOString().slice(0, 10);
       writeWatermark(today);
       console.log(`[DailyReporter] Watermark persisted: ${today}`);
     } else {
