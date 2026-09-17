@@ -388,6 +388,7 @@ program
           concurrency: opts.concurrency,
           maxFilesPerArea: opts.maxFilesPerArea,
           adapter: opts.adapter,
+          debug: opts.debug,
           maxTurns: opts.maxTurns,
           timeoutMs: opts.timeout,
           fileIssue: opts.issues ?? opts.file,

@@ -435,7 +435,7 @@ export interface ReviewCommandOptions {
  * invokes this once per process and `prProcessor.ts` never passes `json` — but
  * a future concurrent caller needs a nesting counter, not this.
  */
-async function resolveConfiguredReviewAdapter(flag?: string, quiet = false) {
+export async function resolveConfiguredReviewAdapter(flag?: string, quiet = false) {
   const { resolveReviewAdapter } = await import('./reviewAdapter.js');
   // A leaf module, not the adapter registry and not config: see adapterNames.ts.
   const { ADAPTER_NAMES, isConfiguredAdapterName } = await import('../core/adapterNames.js');
