@@ -22,7 +22,7 @@ import {
 import { resolveMcpTools } from '../mcp/mcpClient.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { RateLimitError } from './rateLimitError.js';
-import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
+import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import { abortSignalWithDeadline } from './requestDeadline.js';
@@ -297,17 +297,27 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     }
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
       const request = prepareApprovedModelRequest(`${OPENROUTER_API_BASE}/chat/completions`, body);
-      const res = await adapterFetch(request.url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          ...ATTRIBUTION_HEADERS,
-        },
-        body: request.body,
-        // The caller's signal AND this call's own deadline. Either one aborts.
-        signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
-      });
+      let res: Response;
+      try {
+        res = await adapterFetch(request.url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            ...ATTRIBUTION_HEADERS,
+          },
+          body: request.body,
+          // The caller's signal AND this call's own deadline. Either one aborts.
+          signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
+        });
+      } catch (err) {
+        // A dropped socket before any response (undici `fetch failed`) is a
+        // blip, not a verdict — retry the step in place. (AGT-4385)
+        if (await resolveTransientFailure('openrouter', { error: err }, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        throw err;
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
@@ -327,6 +337,10 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
         // swallowing it into a fake empty success → false STUCK (INT-2520).
         // A 429 is pacing, so it is waited out and retried. (INT-2907)
         if (await resolveLimitResponse('openrouter', res.status, res.headers, errText, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        // 5xx / 529: upstream blip, bounded retry before it becomes an infra error. (AGT-4385)
+        if (await resolveTransientFailure('openrouter', { status: res.status }, throttle, { signal: opts.signal }) === 'retry') {
           return attempt();
         }
         throw new Error(`OpenRouter API error (${res.status}): ${errText.slice(0, 500)}`);
