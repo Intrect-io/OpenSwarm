@@ -315,6 +315,10 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       decompositionThresholdMinutes: config.autonomous.decomposition?.thresholdMinutes ?? 30,
       plannerModel: config.autonomous.decomposition?.plannerModel,
       plannerTimeoutMs: config.autonomous.decomposition?.plannerTimeoutMs,
+      // Same trap as AGT-4122 one line up: the schema and the runner both knew
+      // draftModel, this hand-picked mapping did not, and the drafter kept
+      // running the adapter default after the knob shipped. (AGT-4404)
+      draftModel: config.autonomous.draftModel,
       backlogGrooming: config.autonomous.backlogGrooming,
       // Git worktree mode
       worktreeMode: config.autonomous.worktreeMode ?? false,
