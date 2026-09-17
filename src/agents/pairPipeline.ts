@@ -50,6 +50,7 @@ import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js'
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { UNBOUNDED_TURNS } from '../adapters/agenticLoop.js';
 import { safeConsole } from '../support/safeLog.js';
+import { existsSync } from 'node:fs';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
@@ -337,6 +338,15 @@ export class PairPipeline extends EventEmitter {
 
       switch (stage) {
         case 'worker': {
+          // A run whose working directory vanished (superseded and re-dispatched
+          // before its tree was rebuilt, a prune, a hand removal) used to start
+          // the agent anyway; it read "empty repository" and parked an operator
+          // question about data access that was never missing (AGT-4080). The
+          // `worktree-missing:` prefix is an infra pattern, so the runner backs
+          // off and rebuilds the tree on the next attempt instead of counting it.
+          if (!existsSync(context.projectPath)) {
+            throw new Error(`worktree-missing: working directory is gone before the worker started: ${context.projectPath}`);
+          }
           agentPair.updateSessionStatus(context.session.id, 'working');
           const taskId = taskEventKey(context.task);
           const onLog = (line: string) =>

@@ -586,6 +586,24 @@ describe('PairPipeline model selection', () => {
     expect(result.stages[0]).toMatchObject({ stage: 'worker', success: false });
   });
 
+  // AGT-4080: a run whose worktree is gone used to start the agent in the
+  // missing directory; it read "empty repository" and asked the operator for
+  // data access. The stage now refuses before spawning, as infra.
+  it('reports a missing working directory as infra_error before the worker ever runs', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 1,
+      roles: { worker: { enabled: true, model: 'fallback-worker', timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), '/nonexistent/openswarm-worktree/0000-gone');
+
+    expect(result.finalStatus).toBe('infra_error');
+    expect(result.failureDetail).toMatch(/^worker: worktree-missing: working directory is gone/);
+    expect(runWorker).not.toHaveBeenCalled();
+  });
+
   // isInfraError() also classifies a raw (non-Error) rejection — rethrowClassified
   // must not throw a TypeError trying to attach stageResult to a primitive. (INT-2424)
   it('classifies a raw string infra rejection as infra_error, not a plain failure', async () => {
