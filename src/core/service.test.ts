@@ -26,6 +26,12 @@ vi.mock('../auth/index.js', () => ({
   ensureValidToken: vi.fn(),
 }));
 
+const { credentialProbeMock } = vi.hoisted(() => ({ credentialProbeMock: vi.fn(async () => []) }));
+vi.mock('./credentialProbes.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./credentialProbes.js')>()),
+  probeAgentCredentials: credentialProbeMock,
+}));
+
 vi.mock('../linear/index.js', () => ({
   initLinear: vi.fn(),
   getClient: vi.fn(),
@@ -356,34 +362,42 @@ describe('service', () => {
   // Service Lifecycle
   // ============================================
 
-  describe('exported LINEAR_API_KEY probe (AGT-4028)', () => {
+  describe('agent credential probes at boot (AGT-4028 / AGT-4075)', () => {
     afterEach(async () => {
       const { clearDeadWorkerEnvKeys } = await import('../adapters/envPath.js');
+      const { resetCredentialProbeSnapshotForTests } = await import('./credentialProbes.js');
       clearDeadWorkerEnvKeys();
-      delete process.env.LINEAR_API_KEY;
-      vi.doUnmock('../linear/credentialProbe.js');
+      resetCredentialProbeSnapshotForTests();
+      credentialProbeMock.mockReset();
     });
 
-    it('withholds a key Linear rejects from workers and keeps one Linear accepts', async () => {
+    it('withholds a key its service rejects from workers and publishes the verdict on /api/health', async () => {
       const { buildWorkerEnv } = await import('../adapters/envPath.js');
-      process.env.LINEAR_API_KEY = 'dead-key';
-      vi.doMock('../linear/credentialProbe.js', () => ({
-        probeLinearApiKey: vi.fn(async () => ({ ok: false, reason: 'HTTP 401: Authentication required' })),
-        probeCondemnsKey: () => true,
-      }));
+      const { credentialProbeSnapshot } = await import('./credentialProbes.js');
+      credentialProbeMock.mockResolvedValue([
+        { name: 'LINEAR_API_KEY', status: 'dead', reason: 'HTTP 401: Authentication required' },
+        { name: 'OPENROUTER_API_KEY', status: 'ok', identity: 'macstudio' },
+      ]);
       await startService(mockConfig);
-      expect(buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'dead-key' }).LINEAR_API_KEY).toBeUndefined();
+      const env = buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'dead-key', OPENROUTER_API_KEY: 'live' });
+      expect(env.LINEAR_API_KEY).toBeUndefined();
+      expect(env.OPENROUTER_API_KEY).toBe('live');
+      expect(credentialProbeSnapshot()).toEqual({
+        LINEAR_API_KEY: { status: 'dead', reason: 'HTTP 401: Authentication required' },
+        OPENROUTER_API_KEY: { status: 'ok', identity: 'macstudio' },
+      });
     });
 
-    it('leaves the key alone when the probe never reached Linear', async () => {
+    it('leaves a key alone when its probe never reached the service', async () => {
       const { buildWorkerEnv } = await import('../adapters/envPath.js');
-      process.env.LINEAR_API_KEY = 'unknown-key';
-      vi.doMock('../linear/credentialProbe.js', () => ({
-        probeLinearApiKey: vi.fn(async () => ({ ok: false, reason: 'probe did not complete: ENOTFOUND' })),
-        probeCondemnsKey: () => false,
-      }));
+      credentialProbeMock.mockResolvedValueOnce([{ name: 'LINEAR_API_KEY', status: 'unreachable', reason: 'probe did not complete: ENOTFOUND' }]);
       await startService(mockConfig);
       expect(buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'unknown-key' }).LINEAR_API_KEY).toBe('unknown-key');
+    });
+
+    it('never lets a broken probe keep the daemon down', async () => {
+      credentialProbeMock.mockRejectedValueOnce(new Error('probe exploded'));
+      await expect(startService(mockConfig)).resolves.not.toThrow();
     });
   });
 
