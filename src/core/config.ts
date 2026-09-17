@@ -224,6 +224,12 @@ const DecompositionConfigSchema = z.object({
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog: z.boolean().default(true).optional(),
   /**
+   * Failed attempts after which the task is split instead of retried whole,
+   * even on a resumed worktree (default: 3 — the attempt before STUCK at
+   * MAX_RETRY_COUNT=4). 0 disables forcing (AGT-4287).
+   */
+  decomposeAfterFailures: z.number().int().min(0).default(3).optional(),
+  /**
    * Planner model — frontier tier. Decomposition is high-leverage: a bad split
    * pollutes every downstream worker, so we never cheap out here.
    */
@@ -774,6 +780,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
         maxChildrenPerTask: raw.autonomous.decomposition.maxChildrenPerTask ?? 5,
         dailyLimit: raw.autonomous.decomposition.dailyLimit ?? 20,
         autoBacklog: raw.autonomous.decomposition.autoBacklog ?? true,
+        decomposeAfterFailures: raw.autonomous.decomposition.decomposeAfterFailures ?? 3,
         plannerModel: raw.autonomous.decomposition.plannerModel,
         plannerTimeoutMs: raw.autonomous.decomposition.plannerTimeoutMs,
       } : undefined,

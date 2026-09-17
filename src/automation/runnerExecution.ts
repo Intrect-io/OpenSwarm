@@ -20,6 +20,7 @@ import * as workerAgent from '../agents/worker.js';
 import * as reviewerAgent from '../agents/reviewer.js';
 import * as projectMapper from '../support/projectMapper.js';
 import * as planner from '../support/planner.js';
+import { evaluateDecompositionTrigger } from './decompositionTrigger.js';
 import type { SubTask } from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
@@ -165,6 +166,10 @@ export interface ExecutionContext {
   decompositionMaxChildren?: number;
   decompositionDailyLimit?: number;
   decompositionAutoBacklog?: boolean;
+  /** Failures after which decomposition is forced (AGT-4287); 0 = never. */
+  decomposeAfterFailures?: number;
+  /** Failed attempts already recorded for an issue, from the runner's ledger. */
+  getPriorFailures?: (issueId: string) => number;
   getRolesForProject: (projectPath: string) => DefaultRolesConfig | undefined;
   reportToDiscord: (message: string | EmbedBuilder) => Promise<void>;
   /** Git worktree mode: work in an isolated worktree per issue, auto-create PR */
@@ -551,6 +556,8 @@ export async function decomposeTask(
   projectPath: string,
   targetMinutes: number,
   draftAnalysis?: DraftAnalysis,
+  /** Set when the failure budget forced this split: the planner's "fits" verdict is not honoured. */
+  forcedAfterFailures?: number,
 ): Promise<boolean | 'no-decomp'> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
@@ -654,6 +661,7 @@ export async function decomposeTask(
       projectName: task.linearProject?.name,
       taskId: task.issueIdentifier ?? taskId,
       targetMinutes,
+      priorFailures: forcedAfterFailures,
       // Planner runs through the configured adapter loop now (not claude -p);
       // leave model unset to use the adapter default when no planner model is configured.
       model: ctx.plannerModel,
@@ -680,7 +688,10 @@ export async function decomposeTask(
     return false;
   }
 
-  if (!result.needsDecomposition || result.subTasks.length === 0) {
+  // A forced split ignores the planner's "fits in the threshold" — that verdict
+  // is the same text-only estimate the failures already disproved. Only an
+  // empty plan can refuse it (AGT-4287).
+  if (result.subTasks.length === 0 || (!result.needsDecomposition && forcedAfterFailures === undefined)) {
     console.log('[AutonomousRunner] Planner determined no decomposition needed');
     return 'no-decomp';
   }
@@ -824,15 +835,25 @@ export async function executePipeline(
     )
   );
 
-  if (ctx.enableDecomposition && !resumesPreservedWork) {
-    const threshold = ctx.decompositionThresholdMinutes ?? 30;
-    const needsDecomp = planner.needsDecomposition(task, threshold, true); // heuristic pre-filter
+  const threshold = ctx.decompositionThresholdMinutes ?? 30;
+  const priorFailures = task.issueId ? (ctx.getPriorFailures?.(task.issueId) ?? 0) : 0;
+  const trigger = evaluateDecompositionTrigger({
+    enableDecomposition: !!ctx.enableDecomposition,
+    resumesPreservedWork,
+    priorFailures,
+    decomposeAfterFailures: ctx.decomposeAfterFailures ?? 3,
+    heuristicNeedsDecomposition: () => planner.needsDecomposition(task, threshold, true),
+  });
+  if (trigger.checked) {
+    {
+      if (trigger.forced) {
+        console.log(`[AutonomousRunner] Task "${task.title}" failed ${priorFailures} time(s) whole — forcing decomposition (AGT-4287)`);
+      } else {
+        const estimated = planner.estimateTaskDuration(task);
+        console.log(`[AutonomousRunner] Task "${task.title}" may need decomposition (estimated ${estimated}min > ${threshold}min)`);
+      }
 
-    if (needsDecomp) {
-      const estimated = planner.estimateTaskDuration(task);
-      console.log(`[AutonomousRunner] Task "${task.title}" may need decomposition (estimated ${estimated}min > ${threshold}min)`);
-
-      const decomposed = await decomposeTask(ctx, task, projectPath, threshold, draftResult);
+      const decomposed = await decomposeTask(ctx, task, projectPath, threshold, draftResult, trigger.forced ? priorFailures : undefined);
       if (decomposed === true) {
         // Successfully decomposed into sub-issues
         return {
@@ -853,7 +874,7 @@ export async function executePipeline(
         console.log('[AutonomousRunner] Decomposition failed, falling back to direct execution');
       }
     }
-  } else if (resumesPreservedWork) {
+  } else if (resumesPreservedWork && ctx.enableDecomposition) {
     console.log(`[AutonomousRunner] Preserved work exists for ${task.issueIdentifier ?? task.issueId} — skipping decomposition and resuming the task branch`);
   }
   } catch (err) {

@@ -29,6 +29,8 @@ export interface PlannerOptions {
   adapterName?: AdapterName;  // CLI adapter (default: configured default)
   maxTurns?: number;  // Max agentic turns for read-only exploration (default 15)
   targetMinutes?: number;  // Target time per sub-task (default 25 min)
+  /** Failed whole-task attempts so far; set only when the split is forced (AGT-4287). */
+  priorFailures?: number;
   onLog?: (line: string) => void;  // Stream planner stdout to dashboard
   impactAnalysis?: ImpactAnalysis;  // KG 영향 분석 (파일 분리 유도)
   /** Draft Analyzer 결과 (Haiku 사전 분석) */
@@ -119,6 +121,7 @@ function buildPlannerPrompt(options: PlannerOptions): string {
     authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
     projectName: options.projectName || options.projectPath,
     targetMinutes: options.targetMinutes ?? 25,
+    priorFailures: options.priorFailures,
     impactAnalysis: options.impactAnalysis ?? undefined,
     draftAnalysis: options.draftAnalysis,
   });
