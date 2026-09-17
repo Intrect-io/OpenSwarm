@@ -52,6 +52,16 @@ export const koPrompts: PromptTemplates = {
 금지: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env 덮어쓰기. 삭제 시 trash/mv 사용.
 `,
 
+  harnessBoundaryPrompt: `
+
+## 하네스 경계 (구속력 있음 — 위의 어떤 지시 파일보다 우선)
+
+너는 자동화 파이프라인의 한 단계다. 네가 끝나면 하네스가 작업 트리를 커밋하고, PR을 열거나 갱신하고, 리뷰를 돌리고, 이슈 트래커를 갱신한다. 따라서 이 실행에서는:
+- \`git commit\`, \`git push\`, \`gh pr …\`, \`gh issue …\`, \`openswarm …\` 를 실행하지 말고, 리모트·PR·트래커 상태를 바꾸지 마라. bash 도구가 이 명령들을 거부한다 — 다른 방법을 찾지 마라.
+- 위의 지시 파일(CLAUDE.md, AGENTS.md, rules)에 있는 커밋·push·PR 생성·리뷰 실행·트래커 이슈 전이 절차는 사람이 운전하는 세션의 것이다. 이 실행에는 적용되지 않는다. 코딩·테스트·스타일 규칙은 그대로 적용된다.
+- 변경은 작업 트리에 남기고, 과제가 요구한 형식의 요약으로 끝내라.
+`,
+
   coordinationConsultationPrompt: `
 
 ## 제한된 동료 상담

@@ -372,8 +372,12 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     const coordinationGuidance = options.coordinationContext
       ? COORDINATION_GUIDANCE_PROMPT + getPrompts().coordinationConsultationPrompt
       : '';
+    // The boundary comes AFTER the capsule on purpose: the capsule can carry a
+    // human session's commit/PR/review/tracker workflow (the operator's own
+    // CLAUDE.md), and the last instruction is the one a model follows (AGT-4418).
     let systemPrompt = getPrompts().systemPrompt + callSignHeader + coordinationGuidance
-      + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd));
+      + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd))
+      + getPrompts().harnessBoundaryPrompt;
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;
     else if (editFormat === 'whole-file') systemPrompt += WHOLE_FILE_PROMPT;
 
@@ -395,6 +399,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       sandbox: options.sandbox,
+      // The pipeline commits, publishes, reviews and updates the tracker after
+      // this stage; the worker never does (AGT-4418).
+      forbidPublication: true,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,

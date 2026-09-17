@@ -111,6 +111,11 @@ export interface CliRunOptions {
   protectedFiles?: string[];
   /** OS fence for the worker's bash tool (agenticLoop → tools). See ToolExecOptions.sandbox. (AGT-4387) */
   sandbox?: 'on' | 'off';
+  /**
+   * Refuse publication commands in the bash tool (`git push`/`commit`, `gh pr`,
+   * `openswarm …`): the pipeline publishes after the stage returns. (AGT-4418)
+   */
+  forbidPublication?: boolean;
   /** bash tool timeout in ms (default 30s). Raise for docker-based tests that take minutes. */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */
