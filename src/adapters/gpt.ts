@@ -19,7 +19,7 @@ import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
-import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
+import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import {
@@ -223,15 +223,24 @@ export class GptCliAdapter implements CliAdapter {
       }
       const doCall = async (accessToken: string) => {
         const request = prepareApprovedModelRequest(`${OPENAI_API_BASE}/chat/completions`, body);
-        const res = await adapterFetch(request.url, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: request.body,
-          signal,
-        });
+        let res: Response;
+        try {
+          res = await adapterFetch(request.url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: request.body,
+            signal,
+          });
+        } catch (err) {
+          // Dropped socket before any response → bounded in-place retry. (AGT-4385)
+          if (await resolveTransientFailure('openai', { error: err }, throttle, { signal }) === 'retry') {
+            return doCall(accessToken);
+          }
+          throw err;
+        }
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
@@ -249,6 +258,10 @@ export class GptCliAdapter implements CliAdapter {
           // OpenAI pacing us (RPM/TPM): wait it out and retry rather than
           // reporting a usage limit that isn't there. (INT-2907)
           if (await resolveLimitResponse('openai', res.status, res.headers, errText, throttle, { signal }) === 'retry') {
+            return doCall(accessToken);
+          }
+          // 5xx / 529: upstream blip, bounded retry before it becomes an infra error. (AGT-4385)
+          if (await resolveTransientFailure('openai', { status: res.status }, throttle, { signal }) === 'retry') {
             return doCall(accessToken);
           }
 
