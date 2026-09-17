@@ -19,6 +19,9 @@ import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { changeShapeSection } from './publicationChangeShape.js';
 import { loadRepoMetadata } from './repoMetadata.js';
+import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
+import { copyIsolatedPath } from './isolatedPath.js';
+import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
 
 const execFileAsync = promisify(execFile);
@@ -148,56 +151,31 @@ function assertManagedWorktreePath(repoPath: string, worktreePath: string): stri
   return path;
 }
 
-// Shared deps/data linking (INT-2415)
+// Shared deps/data linking (INT-2415, AGT-4043)
 //
 // A worktree is created fresh from origin/main, so it has NO node_modules / .venv
 // and none of the repo's gitignored real data (db/*.db etc.) — a worker there
 // physically cannot run npm/pytest/playwright or real-data verification. We keep
 // the worktree isolating CODE, but SHARE the original repo's gitignored deps/data
-// into it via symlink. The original repo is itself the installed sandbox, and
-// deps/DBs are read-mostly, so parallel workers sharing them is safe.
+// into it. Which paths qualify is decided in sharedPathDetection.ts (root plus
+// workspace manifests, bounded depth); this file owns the side effect.
 
-/** Always-gitignored dependency dirs safe to auto-link without a config. */
-const AUTO_SHARED_CANDIDATES = ['node_modules', '.venv-verify', '.venv', 'venv'];
-
-interface SandboxConfig {
-  sandbox?: { sharedPaths?: string[] } | null;
-}
+export { resolveSharedPaths } from './sharedPathDetection.js';
 
 /**
- * Pure decision: which repo-relative paths should be symlinked into a worktree.
+ * Share the original repo's gitignored deps/data into a fresh worktree.
  *
- * - If openswarm.json declares `sandbox.sharedPaths`, trust that list verbatim
- *   (the repo owner opted in — no gitignore check).
- * - Otherwise auto-detect only the always-gitignored dependency dirs
- *   (node_modules/.venv/venv); never a tracked dir.
+ * Most paths are symlinked: deps are read-mostly and the original checkout is
+ * the installed sandbox. A Python environment that holds an EDITABLE install of
+ * this repository is the exception — its `.pth` points at the original
+ * checkout's source, so a symlinked venv would make `pytest` in the worktree
+ * import the main tree and pass against code the worker never changed. Such an
+ * environment is cloned (APFS clonefile / reflink where available) and its
+ * `.pth` entries rebased onto the worktree instead (AGT-4043).
  *
- * Returns only candidates that actually EXIST at `<repoPath>/<P>` (read-only
- * check). Absolute or parent-escaping (`..`) entries are dropped for safety.
- * The symlink creation itself is the caller's side effect. (INT-2415)
- */
-export function resolveSharedPaths(repoPath: string, openswarmJson?: SandboxConfig | null): string[] {
-  const configured = openswarmJson?.sandbox?.sharedPaths;
-  const candidates = configured && configured.length > 0 ? configured : AUTO_SHARED_CANDIDATES;
-
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of candidates) {
-    const p = (raw ?? '').trim();
-    if (!p) continue;
-    if (isAbsolute(p) || p.split(/[\\/]/).includes('..')) continue; // never escape the repo
-    if (seen.has(p)) continue;
-    seen.add(p);
-    if (existsSync(join(repoPath, p))) out.push(p);
-  }
-  return out;
-}
-
-/**
- * Symlink the original repo's shared gitignored deps/data into a fresh worktree.
  * Best-effort and idempotent: skips paths already present in the worktree (never
  * clobbers a checked-out tracked dir) and swallows per-link failures (a failed
- * symlink degrades to today's no-deps behavior, never breaks worktree creation).
+ * share degrades to today's no-deps behavior, never breaks worktree creation).
  */
 async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<void> {
   let meta: SandboxConfig | null = null;
@@ -208,16 +186,28 @@ async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<
     console.warn(`[Worktree] openswarm.json unreadable; skipping sharedPaths config:`, err);
   }
 
-  for (const rel of resolveSharedPaths(repoPath, meta)) {
+  const shared = resolveSharedPaths(repoPath, meta);
+  if (shared.length === 0 && !(meta?.sandbox?.sharedPaths?.length)) {
+    const warning = emptyDetectionWarning(repoPath, detectSharedPaths(repoPath));
+    if (warning) console.warn(warning);
+  }
+
+  for (const rel of shared) {
     const target = join(repoPath, rel); // absolute source so the link survives any cwd
     const linkPath = join(worktreePath, rel);
     try {
       if (existsSync(linkPath)) continue; // tracked dir already checked out — do not clobber
-      mkdirSync(dirname(linkPath), { recursive: true }); // support nested sharedPaths (e.g. db/x.db)
+      mkdirSync(dirname(linkPath), { recursive: true }); // support nested sharedPaths (e.g. apps/x/.venv)
+      if (await hasEditableInstallInto(repoPath, target)) {
+        await copyIsolatedPath(target, linkPath, worktreePath, rel);
+        await rebasePythonEnvironment(repoPath, worktreePath, rel);
+        console.log(`[Worktree] Cloned editable Python environment: ${rel} (imports rebased onto the worktree)`);
+        continue;
+      }
       symlinkSync(target, linkPath);
       console.log(`[Worktree] Linked shared path: ${rel} -> ${target}`);
     } catch (err) {
-      console.warn(`[Worktree] Failed to link shared path ${rel}:`, err);
+      console.warn(`[Worktree] Failed to share path ${rel}:`, err);
     }
   }
 }

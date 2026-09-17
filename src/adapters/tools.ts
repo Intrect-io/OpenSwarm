@@ -25,6 +25,7 @@ import {
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import { defaultWorkerWritableRoots, looksLikeSandboxDenial, wrapForSandbox } from '../support/osSandbox.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
+import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -866,6 +867,14 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        // A command reaching into another task's worktree is made visible on
+        // both sides: the daemon log for the operator, the tool result for the
+        // model (AGT-4043). Never blocked — a linter pointed at a path is
+        // harmless; the note is what stops the pytest variant.
+        const auditNote = crossWorktreeAuditNote(command, cwd);
+        if (auditNote) console.warn(`[Audit] bash in ${cwd} referenced another worktree: ${command.slice(0, 200)}`);
+        const audited = (result: ToolResult): ToolResult =>
+          auditNote ? { ...result, content: `${auditNote}\n${result.content}` } : result;
         if (isHumanSurfaceReadOnlyEnabled()) {
           if (!execOptions?.sandboxExecutorSession) {
             return {
@@ -943,11 +952,11 @@ export async function executeTool(
           });
           const output = stdout + (stderr ? `\n[stderr] ${stderr}` : '');
           // 출력이 너무 길면 잘라냄
-          return {
+          return audited({
             tool_call_id: callId,
             content: output.length > 8000 ? output.slice(0, 8000) + '\n... (truncated)' : output || '(no output, exit 0)',
             is_error: false,
-          };
+          });
         } catch (err) {
           // exit code != 0 → execFile이 throw. 하지만 grep/find 등은 "매치 없음"으로
           // exit 1을 내며 이건 정상이다. 실제 stdout/stderr + exit code를 모델에게 줘서
@@ -978,7 +987,7 @@ export async function executeTool(
             : `exit ${code} (no output) — likely no matches or a non-fatal nonzero exit, not necessarily an error.`;
           // exit 1 + 출력 없음은 보통 무해(grep no-match) → is_error를 false로 둬 모델이 안 헤매게.
           const benign = e.code === 1 && !out.trim();
-          return { tool_call_id: callId, content: body, is_error: !benign };
+          return audited({ tool_call_id: callId, content: body, is_error: !benign });
         }
       }
 
