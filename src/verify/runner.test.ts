@@ -83,6 +83,39 @@ describe('runVerify', () => {
     expect(git('worktree', 'list', '--porcelain')).not.toContain('openswarm-verify-base-');
   });
 
+  // cgf-portal 2026-09-17 (AGT-4407): a fresh worktree has no virtualenv, so
+  // `python -m pytest` died with the same ModuleNotFoundError at base and head.
+  // "Same failure → not new" was right; "→ tester passed" was not. The evidence
+  // now names the toolchain failure so the tester can refuse the vacuous pass.
+  it('flags a head failure caused by a missing toolchain as an environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('python3 -c "import openswarm_definitely_missing_module_xyz"', 10_000)],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+    expect(evidence.rawOutputTail).toMatch(/ModuleNotFoundError: No module named/);
+  });
+
+  it('treats a uv cache/network failure inside the sandbox as an environment failure, not a verdict', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "error: Failed to initialize cache at /nowhere/.cache/uv\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+  });
+
+  it('does not mark an ordinary head failure as an environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf assertion-failed; exit 1')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false });
+    expect(evidence.environmentFailure).toBeUndefined();
+  });
+
   it('does not expose supervisor secrets or the supervisor home to verification code', async () => {
     const originalSecret = process.env.OPENSWARM_VERIFY_SECRET;
     process.env.OPENSWARM_VERIFY_SECRET = 'must-not-leak';

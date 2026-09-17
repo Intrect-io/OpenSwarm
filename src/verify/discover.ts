@@ -71,6 +71,40 @@ async function ruffCommand(projectPath: string, subdir = ''): Promise<string | u
   return toolFromVenv(projectPath, subdir, candidates);
 }
 
+/**
+ * Whether `uv` can drive this project: a `uv.lock` next to the project's
+ * pyproject. A fresh git worktree has no `.venv` (cgf-portal's post-checkout
+ * hook deliberately never links it — an editable install would import the
+ * main checkout's code), so the venv-based resolution above found nothing,
+ * fell back to the PATH `python`, and `python -m pytest` failed at base AND
+ * head with the same `No module named pytest`. That read as a pre-existing
+ * environment failure and the tester passed in 3 s having run nothing — a
+ * SyntaxError shipped as a ready PR (AGT-4407). `uv run --frozen` builds the
+ * locked environment in the worktree itself, which the worker sandbox allows
+ * (the worktree and `~/.cache/uv` are writable), and is exactly what the
+ * repository's own CI runs.
+ */
+async function uvLockPresent(projectPath: string, subdir: string): Promise<boolean> {
+  return exists(join(projectPath, subdir, 'uv.lock'));
+}
+
+/** A `[project]` / `[tool.uv]` dev dependency on ruff, so `uv run ruff` is the repo's own tool, not an invention. */
+function pyprojectDeclaresRuff(pyproject: string | null): boolean {
+  return !!pyproject && /["']ruff(?:[><=~![]|["'])/.test(pyproject);
+}
+
+/**
+ * Syntax check with nothing but the interpreter: `compileall` needs no
+ * virtualenv, no dependencies and no lockfile, so it runs in any worktree the
+ * daemon can create. It is the cheapest gate that would have caught the
+ * duplicated `@field_validator(` block that opened PR #495 as ready with a
+ * SyntaxError (AGT-4407). Listed first so `verify.maxCommands` never drops it.
+ */
+const COMPILEALL_EXCLUDE = String.raw`(^|/)(\.venv|\.venv-verify|venv|node_modules|build|dist|\.git)(/|$)`;
+function compileallCommand(label: string): VerifyCommand {
+  return command(`syntax${label}`, `python3 -m compileall -q -x '${COMPILEALL_EXCLUDE}' .`, 'lint');
+}
+
 /** pytest (and a repository-installed ruff) for one Python project at `subdir` ('' = repository root). */
 async function discoverPythonCommands(projectPath: string, subdir: string): Promise<VerifyCommand[]> {
   const dir = join(projectPath, subdir);
@@ -94,7 +128,16 @@ async function discoverPythonCommands(projectPath: string, subdir: string): Prom
       setupCfg,
     ].filter((value): value is string => value !== null).join('\n');
     const serialXdist = /(?:^|\s)-n(?:\s|=)/m.test(pytestConfig) ? ' -n 0' : '';
+    commands.push({ ...compileallCommand(label), ...cwd });
     const python = await pythonCommand(projectPath, subdir);
+    const useUv = python === 'python' && await uvLockPresent(projectPath, subdir);
+    if (useUv) {
+      commands.push({ ...command(`pytest${label}`, `uv run --frozen python -m pytest${serialXdist} -x -q`, 'test'), ...cwd });
+      if (pyprojectDeclaresRuff(pyproject)) {
+        commands.push({ ...command(`ruff${label}`, 'uv run --frozen ruff check .', 'lint'), ...cwd });
+      }
+      return commands;
+    }
     if (!subdir || await interpreterHasPytest(projectPath, subdir, python)) {
       commands.push({ ...command(`pytest${label}`, `${python} -m pytest${serialXdist} -x -q`, 'test'), ...cwd });
     }
@@ -107,7 +150,7 @@ async function discoverPythonCommands(projectPath: string, subdir: string): Prom
   // the repository's CI runs `ruff check` and rejected it on arrival.
   // Only alongside a pytest project: a bare virtualenv with ruff in it (a
   // monorepo root, say) is not a Python project of its own.
-  if (commands.length === 0) return commands;
+  if (!commands.some((c) => c.kind === 'test')) return commands.filter((c) => c.kind === 'test');
   const ruff = await ruffCommand(projectPath, subdir);
   if (ruff) commands.push({ ...command(`ruff${label}`, `${ruff} check .`, 'lint'), ...cwd });
   return commands;
