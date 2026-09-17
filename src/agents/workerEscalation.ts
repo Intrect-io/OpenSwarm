@@ -9,6 +9,12 @@
 // - repeated-review-feedback signal (INT-2475): the reviewer said the same
 //   thing twice, proving the current tier can't absorb the feedback; escalate
 //   ONCE (higher model and/or effort bump) before giving up on the session.
+// - reasoning rung (AGT-4402): iteration 1 runs at the task's own effort (none
+//   for an unestimated card, so reasoning is off — cheap and fast); the first
+//   retry reasons at `medium`, and a model escalation reasons at `high`. Depth
+//   is bought only where the loop has already failed once, never up front:
+//   the 2026-09-02 measurement found 0/11 defects were model-intelligence
+//   failures, so a flat-on default would pay latency on every turn for nothing.
 
 import type { RoleConfig } from '../core/types.js';
 import { broadcastEvent } from '../core/eventHub.js';
@@ -16,6 +22,39 @@ import { safeConsole } from '../support/safeLog.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 
 export type WorkerReasoningEffort = 'low' | 'medium' | 'high';
+
+/** Effort for the first retry (iteration 2) when the task itself set nothing higher. */
+export const RETRY_REASONING_EFFORT: WorkerReasoningEffort = 'medium';
+/** Effort once the model itself has been escalated. */
+export const ESCALATED_REASONING_EFFORT: WorkerReasoningEffort = 'high';
+
+const EFFORT_RANK: Record<WorkerReasoningEffort, number> = { low: 0, medium: 1, high: 2 };
+
+/** The higher of two efforts; undefined counts as "no reasoning" (below low). */
+export function maxEffort(
+  a: WorkerReasoningEffort | undefined,
+  b: WorkerReasoningEffort | undefined,
+): WorkerReasoningEffort | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return EFFORT_RANK[a] >= EFFORT_RANK[b] ? a : b;
+}
+
+/**
+ * The reasoning rung for this iteration: the task's own effort on the first
+ * pass, at least `medium` on a retry, `high` once the model was escalated.
+ * Never lowers what a jobProfile already asked for.
+ */
+export function reasoningEffortForIteration(input: {
+  iteration: number;
+  baseEffort: WorkerReasoningEffort | undefined;
+  modelEscalated: boolean;
+}): WorkerReasoningEffort | undefined {
+  const { iteration, baseEffort, modelEscalated } = input;
+  if (modelEscalated) return maxEffort(baseEffort, ESCALATED_REASONING_EFFORT);
+  if (iteration >= 2) return maxEffort(baseEffort, RETRY_REASONING_EFFORT);
+  return baseEffort;
+}
 
 export interface WorkerStageOverrides {
   model?: string;
@@ -41,11 +80,13 @@ export function resolveWorkerStageOverrides(input: {
   workerCfg: RoleConfig | undefined;
   iteration: number;
   baseModel: string | undefined;
+  /** The task's own effort (jobProfile), if any — the floor for the reasoning rung. */
+  baseEffort?: WorkerReasoningEffort;
   signalEscalation: WorkerStageOverrides | undefined;
   taskId: string;
   taskPrefix: string;
 }): WorkerStageOverrides | undefined {
-  const { workerCfg, iteration, baseModel, signalEscalation } = input;
+  const { workerCfg, iteration, baseModel, baseEffort, signalEscalation } = input;
   const escalateThreshold = workerCfg?.escalateAfterIteration ?? 2;
   const escalateModel = workerCfg?.escalateModel;
   const shouldEscalate = iteration >= escalateThreshold && !!escalateModel;
@@ -53,6 +94,14 @@ export function resolveWorkerStageOverrides(input: {
   let overrides: WorkerStageOverrides | undefined = shouldEscalate
     ? { model: escalateModel, modelRole: 'escalate' }
     : (baseModel ? { model: baseModel } : undefined);
+
+  const reasoningEffort = reasoningEffortForIteration({ iteration, baseEffort, modelEscalated: shouldEscalate });
+  if (reasoningEffort) {
+    overrides = { ...overrides, reasoningEffort };
+    if (reasoningEffort !== baseEffort) {
+      safeConsole.log(`[${input.taskPrefix}] Escalating worker reasoning → ${reasoningEffort} (iteration ${iteration})`);
+    }
+  }
 
   if (shouldEscalate && escalateModel) {
     safeConsole.log(`[${input.taskPrefix}] Escalating worker model → ${escalateModel} (iteration ${iteration})`);

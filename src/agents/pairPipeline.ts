@@ -820,6 +820,7 @@ export class PairPipeline extends EventEmitter {
         workerCfg: this.config.roles?.worker,
         iteration: context.currentIteration,
         baseModel: modelForTask(this.config, 'worker', context.task),
+        baseEffort: effortForTask(this.config, context.task),
         signalEscalation: context.workerEscalation,
         taskId: taskEventKey(context.task),
         taskPrefix: context.taskPrefix,

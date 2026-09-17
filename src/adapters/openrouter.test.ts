@@ -329,3 +329,35 @@ describe('OpenRouterCliAdapter', () => {
     await expect(callApi([{ role: 'user', content: 'x' }], [])).rejects.toBeInstanceOf(RateLimitError);
   });
 });
+
+describe('reasoning effort reaches the request (AGT-4402)', () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"ok"}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    'data: [DONE]', '',
+  ].join('\n');
+  const bodyOf = (fetchMock: ReturnType<typeof vi.fn>) =>
+    JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body) as { reasoning?: unknown };
+
+  it('sends reasoning.effort when set, and it wins over disableReasoning', async () => {
+    const fetchMock = vi.fn(async () => new Response(sse, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', { reasoningEffort: 'medium', disableReasoning: true })(
+      [{ role: 'user', content: 'x' }], []);
+    expect(bodyOf(fetchMock).reasoning).toEqual({ effort: 'medium' });
+  });
+
+  it('still disables reasoning when only disableReasoning is set', async () => {
+    const fetchMock = vi.fn(async () => new Response(sse, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', { disableReasoning: true })([{ role: 'user', content: 'x' }], []);
+    expect(bodyOf(fetchMock).reasoning).toEqual({ enabled: false });
+  });
+
+  it('sends nothing about reasoning when neither is set', async () => {
+    const fetchMock = vi.fn(async () => new Response(sse, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', {})([{ role: 'user', content: 'x' }], []);
+    expect(bodyOf(fetchMock).reasoning).toBeUndefined();
+  });
+});

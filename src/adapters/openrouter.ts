@@ -155,6 +155,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
     const model = options.model ?? await this.getDefaultModel();
     const callApi = createApiCaller(apiKey, model, {
       disableReasoning: options.disableReasoning,
+      reasoningEffort: options.reasoningEffort,
       onToken: options.onToken,
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? 300000,
@@ -239,6 +240,13 @@ export class OpenRouterCliAdapter implements CliAdapter {
 export interface ApiCallerOptions {
   /** worker 등 기계적 역할: 추론 토큰 비활성화 (지원 모델 한정) */
   disableReasoning?: boolean;
+  /**
+   * OpenRouter's unified `reasoning.effort`. Wins over disableReasoning when
+   * both are set. Before AGT-4402 this adapter dropped it, so a jobProfile's
+   * `effort` and the escalation ladder's `effort→high` never reached the
+   * request — on openrouter they degraded to "not disabled".
+   */
+  reasoningEffort?: 'low' | 'medium' | 'high';
   /** 스트리밍 토큰 콜백 (chat TUI). 없으면 비스트리밍과 동일하게 동작. */
   onToken?: (delta: string) => void;
   /** 사용자 중단(Esc/Ctrl+C) — fetch에 전달. */
@@ -292,7 +300,11 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     // 단, OpenAI 추론 모델(gpt-5 등)은 "Reasoning is mandatory"로 이 플래그를
     // 거부하므로 제외한다 — worker escalate 대상이 gpt-5라 이걸 안 빼면 escalation이
     // 항상 깨진다. OpenAI는 단순 작업엔 추론을 자동 최소화하므로 끌 필요도 없다.
-    if (opts.disableReasoning && !/^openai\//i.test(model)) {
+    if (opts.reasoningEffort) {
+      // A model that does not take the parameter answers 400; the fallback
+      // below drops `reasoning` and retries, same as for `enabled: false`.
+      body.reasoning = { effort: opts.reasoningEffort };
+    } else if (opts.disableReasoning && !/^openai\//i.test(model)) {
       body.reasoning = { enabled: false };
     }
     if (tools.length > 0) {
