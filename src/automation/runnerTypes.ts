@@ -42,6 +42,8 @@ export interface AutonomousConfig {
   decompositionThresholdMinutes?: number;
   plannerModel?: string;
   plannerTimeoutMs?: number;
+  /** Draft-stage model override (autonomous.draftModel); unset = adapter default. */
+  draftModel?: string;
   decomposition?: import('../core/types.js').DecompositionConfig;
   backlogGrooming?: BacklogGroomingConfig;
   worktreeMode?: boolean;
