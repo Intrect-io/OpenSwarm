@@ -40,6 +40,7 @@ const INFRA_ERROR_PATTERNS = [
   'reviewer-stage:', // reviewer ran but its output couldn't be parsed into a verdict — infra, not a quality reject (INT-2521)
   'agentic-loop:', // the in-process tool loop could not complete a single API call — infra, not a verdict (AGT-4215)
   'verify-runner:', // deterministic verifier could not execute; not a quality failure (INT-2662)
+  'worktree-missing:', // the run's working directory is gone before a stage started — rebuild, do not ask the operator (AGT-4080)
   'throttle-retry:', // a 429/limit throttle survived its retry budget — infra for that call, NOT a spent quota (INT-2907)
   'fetch failed', // undici: the real code hides in error.cause.code (checked below)
   'terminated', // undici mid-stream socket drop
