@@ -317,7 +317,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   }
 
   const startTime = Date.now();
-  const deadline = timeoutMs > 0 ? startTime + timeoutMs : Number.POSITIVE_INFINITY;
+  const { wrapUpAt, softDeadline: deadline } = loopDeadlines(startTime, timeoutMs);
+  let wrapUpNudged = false;
 
   // 메시지 히스토리 구성
   const messages: ChatMessage[] = [];
@@ -478,6 +479,15 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     if (Date.now() > deadline) {
       onLog?.(`⏰ Agentic loop timeout after ${turn} turns`);
       break;
+    }
+    // Wrap-up notice: the model learns the budget is nearly spent while it can
+    // still act on it — commit the edits it has and answer — instead of being
+    // cut mid-exploration and retried from scratch. Once per run. (AGT-4415)
+    if (!wrapUpNudged && Date.now() > wrapUpAt) {
+      wrapUpNudged = true;
+      const minutesLeft = Math.max(1, Math.round((deadline - Date.now()) / 60_000));
+      onLog?.(`⏳ Wrap-up notice: about ${minutesLeft} minute(s) of wall-clock budget left`);
+      messages.push({ role: 'user', content: wrapUpNotice(minutesLeft) });
     }
 
     // 히스토리 압축 — VEGA compaction.py 패턴 이식.
@@ -968,6 +978,43 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
  */
 /** `maxTurns` value that means "no turn ceiling" (AGT-4388). */
 export const UNBOUNDED_TURNS = 0;
+
+/**
+ * Wall-clock shaping for a run of `timeoutMs` (AGT-4415).
+ *
+ * The adapter wrapper (base.ts) aborts the whole run at `start + timeoutMs`,
+ * hard. The loop used to check the SAME instant, so its own timeout path — the
+ * final-answer turn that turns a cut-off run into a result with a summary —
+ * could never execute: whichever turn was in flight at T was killed, and the
+ * attempt failed as `openrouter timeout after 1200000ms`. Measured on the run
+ * ledger: 37 such attempts in 24 h, 17 issues, up to attempt #176.
+ *
+ * - `softDeadline`: where the loop stops calling tools, `headroom` before the
+ *   hard abort so the salvage turn has time to run.
+ * - `wrapUpAt`: where the model is told how much budget is left, `notice`
+ *   before the soft deadline, so it can commit and answer on its own.
+ *
+ * Both scale with the budget and are clamped so a short review run is not
+ * eaten by its own margins.
+ */
+export function loopDeadlines(startTime: number, timeoutMs: number): { wrapUpAt: number; softDeadline: number } {
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) {
+    return { wrapUpAt: Number.POSITIVE_INFINITY, softDeadline: Number.POSITIVE_INFINITY };
+  }
+  const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+  const headroom = Math.min(clamp(timeoutMs * 0.1, 30_000, 120_000), timeoutMs / 2);
+  const notice = Math.min(clamp(timeoutMs * 0.15, 60_000, 180_000), timeoutMs / 4);
+  const softDeadline = startTime + timeoutMs - headroom;
+  return { wrapUpAt: softDeadline - notice, softDeadline };
+}
+
+/** The message injected at `wrapUpAt` (AGT-4415). */
+export function wrapUpNotice(minutesLeft: number): string {
+  return `About ${minutesLeft} minute(s) of wall-clock budget remain for this run. Stop exploring now: `
+    + 'apply the edits you already know you need, run the single quickest relevant check, and then write '
+    + 'your final answer in the format the task asked for. Unfinished parts go in the answer as an explicit list, '
+    + 'not into more tool calls.';
+}
 
 export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
   return {
