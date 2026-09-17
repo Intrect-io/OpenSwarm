@@ -264,6 +264,19 @@ describe('service', () => {
     );
   });
 
+  it('forwards draftModel to the runner (the hand-picked mapping dropped it once) — AGT-4404', async () => {
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+
+    await startService({
+      ...mockAutonomousConfig,
+      autonomous: { ...mockAutonomousConfig.autonomous, draftModel: 'deepseek/deepseek-v4-flash' },
+    } as SwarmConfig);
+
+    expect(vi.mocked(startAutonomous)).toHaveBeenCalledWith(
+      expect.objectContaining({ draftModel: 'deepseek/deepseek-v4-flash' }),
+    );
+  });
+
   it('reapplies a persisted provider override on boot when it differs from config', async () => {
     const { readProviderOverride } = await import('./providerOverride.js');
     const { setDefaultAdapter } = await import('../adapters/index.js');
