@@ -13,6 +13,7 @@ import { getRegistryStore } from '../registry/sqliteStore.js';
 import { scanFile as scanFileForBs } from '../registry/bsDetector.js';
 import { getWorkingDiffDetail } from '../support/gitTracker.js';
 import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
+import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -729,6 +730,31 @@ async function runReformatScopeGuard(projectPath: string): Promise<GuardResult> 
   return { passed: issues.length === 0, guard, issues, blocking: false };
 }
 
+/**
+ * Whole-file rewrite guard (AGT-4406): blocking on an unacknowledged rewrite
+ * of an existing file, advisory on an acknowledged one; restores trailing
+ * newlines the worker stripped, in place.
+ */
+async function runRewriteGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
+  const guard = 'rewrite';
+  const issues: string[] = [];
+  let blocking = false;
+  try {
+    const outcome = await inspectRewrites(projectPath, workerResult.summary ?? '');
+    for (const f of outcome.unacknowledged) issues.push(describeRewrite(f));
+    blocking = outcome.unacknowledged.length > 0;
+    for (const f of outcome.acknowledged) {
+      issues.push(`[${f.file}] acknowledged rewrite (${Math.round(f.ratio * 100)}% deleted) — reviewer: check nothing outside the task was lost.`);
+    }
+    if (outcome.newlineRestored.length > 0) {
+      console.log(`[Guard:rewrite] Restored trailing newline on ${outcome.newlineRestored.length} file(s): ${outcome.newlineRestored.join(', ')}`);
+    }
+  } catch (err) {
+    console.warn('[Guard:rewrite] Error:', err);
+  }
+  return { passed: !blocking, guard, issues, blocking };
+}
+
 // Guard Runner
 
 /**
@@ -790,6 +816,10 @@ export async function runGuards(
 
   if (config.reformatCheck) {
     results.push(await runReformatScopeGuard(projectPath));
+  }
+
+  if (config.rewriteCheck) {
+    results.push(await runRewriteGuard(guardWorkerResult, projectPath));
   }
 
   // conventionalCommits is checked separately (needs commit message)

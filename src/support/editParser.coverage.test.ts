@@ -153,7 +153,8 @@ describe('applyEditBlock', () => {
     expect(result.success).toBe(true);
     expect(result.error).toBeUndefined();
     const written = await fs.readFile(path.join(tmp, 'new/dir/file.txt'), 'utf-8');
-    expect(written).toBe('hello world');
+    // A created file ends with a newline; the block's lines never carry the final one (AGT-4406).
+    expect(written).toBe('hello world\n');
   });
 
   it('returns a failure result with the underlying error when the target file cannot be read', async () => {

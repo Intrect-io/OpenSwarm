@@ -286,6 +286,8 @@ const PipelineGuardsConfigSchema = z.object({
   verifiedMetricEvidenceCheck: z.boolean().optional(),
   deadModuleCheck: z.boolean().optional(),
   reformatCheck: z.boolean().optional(),
+  /** Block an unacknowledged whole-file rewrite; restore stripped trailing newlines (AGT-4406). */
+  rewriteCheck: z.boolean().optional(),
 }).optional();
 
 const VerifyConfigSchema = z.object({

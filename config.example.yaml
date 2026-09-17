@@ -249,6 +249,9 @@ autonomous:
     verifiedMetricEvidenceCheck: true # block verified evidence deletion / metric changes without distributions (INT-2388 #4)
     deadModuleCheck: true   # warn on new modules nothing imports/calls (INT-2388 #5)
     reformatCheck: true     # warn on reformat-only files / oversized diffs (INT-2388 #6)
+    rewriteCheck: true      # block an unacknowledged whole-file rewrite (>30% of a 20+ line file deleted;
+                            # the worker may declare `REWRITE: <path>` in its summary); restores stripped
+                            # trailing newlines in place (AGT-4406)
 
   # Self-repair reflection budget: max objective (lint/bs/test) failures tolerated
   # before the loop gives up on bad edits. Lower it to cap token burn when
