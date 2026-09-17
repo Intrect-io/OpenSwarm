@@ -18,6 +18,7 @@ import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { changeShapeSection } from './publicationChangeShape.js';
+import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
@@ -1174,6 +1175,20 @@ export async function commitAndCreatePRWithHead(
   await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
   console.log(`[Worktree] Pushed branch ${branchName}`);
 
+  // A branch that no longer merges into its base gets no CI from GitHub while
+  // the default CodeQL checks still turn green (AGT-4189). Say so in the body
+  // and keep it a draft; a merely stale base is noted and left ready.
+  const freshness = await probeBaseFreshness(worktreePath, base.ref);
+  const conflicting = freshness.conflictFiles.length > 0;
+  if (conflicting) {
+    console.warn(
+      `[Worktree] ${branchName} conflicts with ${base.ref} in ${freshness.conflictFiles.length} file(s) — draft only: ` +
+      freshness.conflictFiles.join(', '),
+    );
+  } else if (freshness.behindBy > 0) {
+    console.log(`[Worktree] ${branchName} is ${freshness.behindBy} commit(s) behind ${base.ref} at publication`);
+  }
+
   // If PR already exists, just return the URL
   const existing = await findOpenPullRequestUrl(worktreePath, branchName)
     .catch((e) => { console.warn(`[Worktree] PR list check failed for ${branchName}:`, e); return ''; });
@@ -1189,7 +1204,7 @@ export async function commitAndCreatePRWithHead(
     // a duplicate implementation cannot masquerade as the sole one. Promoting on
     // the caller's option alone would defeat that, so the duplicate condition is
     // re-checked here. (Caught by the commit gate, not self-caught.)
-    if (!options.draft) {
+    if (!options.draft && !conflicting) {
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
@@ -1214,11 +1229,14 @@ export async function commitAndCreatePRWithHead(
     );
   }
 
+  const freshnessSection = baseFreshnessSection(freshness, base.branch);
+
   // Create PR
   const prBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
     ...(shapeSection ? ['', shapeSection] : []),
+    ...(freshnessSection ? ['', freshnessSection] : []),
     ...(overlapSection ? ['', overlapSection] : []),
     ...(duplicateSection ? ['', duplicateSection] : []),
     '',
@@ -1233,7 +1251,7 @@ export async function commitAndCreatePRWithHead(
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
-  if (options.draft || duplicates.length > 0) createArgs.push('--draft');
+  if (options.draft || duplicates.length > 0 || conflicting) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();
@@ -1251,7 +1269,7 @@ export async function commitAndCreatePRWithHead(
     // The winner may have opened it as a draft (a parked run does). Losing the
     // race must not turn a reviewed publication into a hidden draft. Reuses the
     // duplicate set already computed above rather than re-querying.
-    if (!options.draft) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
+    if (!options.draft && !conflicting) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
   }
 
   // Register PR ownership for conflict auto-resolution

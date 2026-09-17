@@ -1471,4 +1471,5 @@ esac`);
 
     git(repo, 'worktree', 'remove', '--force', info.worktreePath);
   });
+
 });
