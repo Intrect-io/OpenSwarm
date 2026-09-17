@@ -383,6 +383,13 @@ const AutonomousConfigSchema = z.object({
     fallbacks: z.array(z.enum(['cc-router', 'cursor', 'codex', 'codex-responses'])).default(['cc-router', 'cursor']),
     allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
   }).optional(),
+  /**
+   * OS fence for the worker's bash tool (AGT-4387). 'on' (default) wraps every
+   * bash call in sandbox-exec / bwrap: writes limited to the worktree, temp
+   * and build caches, network open. 'off' restores the pre-AGT-4387 behaviour
+   * (bash as the daemon user, regex denylist only).
+   */
+  workerSandbox: z.enum(['on', 'off']).default('on'),
   periodicReviews: z.array(z.object({
     profile: z.enum(['permissions', 'hygiene', 'security', 'review']),
     schedule: z.string().min(1),
@@ -782,6 +789,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       coordinationBoardIssueId: raw.autonomous.coordinationBoardIssueId,
       mcpPolicies: raw.autonomous.mcpPolicies,
       adapterRouting: raw.autonomous.adapterRouting,
+      workerSandbox: raw.autonomous.workerSandbox,
       periodicReviews: raw.autonomous.periodicReviews,
       orchestrator: raw.autonomous.orchestrator,
       orchestratorSchedule: raw.autonomous.orchestratorSchedule,

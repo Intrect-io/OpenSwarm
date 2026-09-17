@@ -3271,6 +3271,7 @@ export class AutonomousRunner {
       getActiveWorkerIssues: (p) => this.durableRuns.activeWorkerIdentifiers(p),
       mcpPolicies: this.config.mcpPolicies,
       adapterRouting: this.config.adapterRouting,
+      workerSandbox: this.config.workerSandbox,
     };
   }
 

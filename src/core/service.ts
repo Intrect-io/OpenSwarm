@@ -369,6 +369,14 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log(heartbeatEnabled
       ? `[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`
       : `[Service] Autonomous runner ready for explicit dispatch (pairMode: ${config.autonomous.pairMode}${modelInfo})`);
+    // Say which fence the worker's shell runs under, so an unfenced native
+    // daemon is visible in the boot log rather than discovered later. (AGT-4387)
+    const { detectSandboxBackend } = await import('../support/osSandbox.js');
+    const sandboxMode = config.autonomous.workerSandbox ?? 'on';
+    const backend = detectSandboxBackend();
+    console.log(sandboxMode === 'on'
+      ? (backend ? `[Service] Worker sandbox: on (${backend})` : '[Service] Worker sandbox: on, but no sandbox-exec/bwrap on this host — bash runs unfenced')
+      : '[Service] Worker sandbox: off (bash runs as the daemon user)');
   }
 
   // Start PR Auto-Improvement

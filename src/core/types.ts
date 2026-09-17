@@ -638,6 +638,12 @@ export type AutonomousStartupConfig = {
   coordinationBoardIssueId?: string;
   mcpPolicies?: Record<string, { servers: string[]; allowTools?: string[]; writeTools?: string[]; destructiveTools?: string[] }>;
   adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
+  /**
+   * OS fence for the worker's bash tool (AGT-4387): sandbox-exec (macOS) or
+   * bwrap (Linux) with writes limited to the worktree and build caches.
+   * Default 'on'; a host without either binary warns once and runs unfenced.
+   */
+  workerSandbox?: 'on' | 'off';
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */
   orchestrator?: OrchestratorConfig;

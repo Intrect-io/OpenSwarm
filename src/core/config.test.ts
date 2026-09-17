@@ -338,6 +338,7 @@ agents:
       expect(config.autonomous?.adapterRouting?.fallbacks).toEqual(['cc-router', 'cursor']);
       expect(config.autonomous?.mcpPolicies?.orchestrator.servers).toEqual(['github', 'linear']);
       expect(config.autonomous?.periodicReviews?.[0]).toMatchObject({ profile: 'hygiene' });
+      expect(config.autonomous?.workerSandbox).toBe('on'); // default: the fence is on (AGT-4387)
       expect(config.autonomous?.orchestrator).toEqual({
         enabled: true,
         schedule: '17 */2 * * *',

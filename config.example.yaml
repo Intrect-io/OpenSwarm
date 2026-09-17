@@ -196,6 +196,12 @@ autonomous:
       model: gpt-5.6-luna
       timeoutMs: 120000   # 2 minutes
 
+  # OS fence for the worker's bash tool (AGT-4387). on (default): every bash
+  # call runs under sandbox-exec (macOS) / bwrap (Linux) with writes limited to
+  # the worktree, temp dir and package caches; network stays open. off: bash
+  # runs as the daemon user with only the regex denylist (pre-AGT-4387).
+  # workerSandbox: on
+
   # Deterministic baseline-diff verification (enabled by default).
   # Define repo-specific commands in .openswarm/verify.yaml; see templates/verify.example.yaml.
   verify:
