@@ -92,6 +92,27 @@ describe('runDraftAnalysis fallback', () => {
     expect(result.sufficient).toBe(false);
   });
 
+  it('runs the drafter read-only — its cwd is the operator\'s main checkout, not a worktree (AGT-4405)', async () => {
+    // Three stray stubs landed in a user's main checkout in one cgf-portal batch
+    // because the brief ran with the full tool set from the repo root. Every
+    // spawnCli the draft stage issues — first attempt and the fresh retry —
+    // must carry readOnly so write_file/edit_file/bash are denied there.
+    vi.spyOn(adapterModule, 'getDefaultAdapterName').mockReturnValue('codex');
+    vi.spyOn(adapterModule, 'getAdapter').mockImplementation((name) => makeAdapter(name));
+    const spawn = vi.spyOn(adapterModule, 'spawnCli')
+      // First attempt: finish-validator retries are exhausted / unavailable, so the
+      // stage takes its one fresh retry.
+      .mockResolvedValueOnce({ stdout: 'not a brief', stderr: '', exitCode: 0 } as never)
+      .mockResolvedValueOnce({ stdout: 'still not a brief', stderr: '', exitCode: 0 } as never);
+
+    await runDraftAnalysis({ taskTitle: 'Fix edge', taskDescription: 'Test', projectPath: '/tmp/project' });
+
+    expect(spawn.mock.calls.length).toBeGreaterThanOrEqual(1);
+    for (const [, opts] of spawn.mock.calls) {
+      expect(opts).toMatchObject({ cwd: '/tmp/project', readOnly: true });
+    }
+  });
+
   it('re-throws a typed RateLimitError instead of swallowing it into a best-effort draft (INT-2521)', async () => {
     // A rate limit during draft must reach the pipeline so the scheduler pauses,
     // not be swallowed as non-blocking (which lets planner + worker keep hammering).
