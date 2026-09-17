@@ -321,4 +321,64 @@ describe('idle-fill must not out-race a repeated infra_error on the same issue (
 
     runner.durableRuns.close(); // this test opens its own primary-mode ledger handle
   });
+
+  // AGT-4036: a supersession backoff waits for the PR that owns the files to
+  // close. Idle fill lifted it every heartbeat, so the drafter re-ran against
+  // the same open PR 25 s apart — AX-1481 reached attempt #415 on 2026-09-17.
+  it('the durable-ledger RETRY_AT idle-fill branch leaves a supersession backoff alone', async () => {
+    const LEDGER_TASK: TaskItem = {
+      id: 'ISSUE-1', issueId: 'ISSUE-1', issueIdentifier: 'ISSUE-1',
+      source: 'linear', title: 'files owned by an open PR', priority: 2, createdAt: 0,
+      linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
+    };
+    const dbPath = join(tempDir, 'automation-superseded.db');
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath })) as unknown as InternalRunner & {
+      durableRuns: { observeTask(task: TaskItem, repo: string): void; getRun(id: string): { state: string } | null; close(): void };
+    };
+    runner.durableRuns.observeTask(LEDGER_TASK, '/repo');
+
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('ISSUE-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    // The way durableRunCoordinator leaves a superseded result: RETRY_AT with the supersession backoff.
+    expect(ledger.transition(claim!, 'RETRY_AT', { retryAt: Date.now() + 5 * 60_000, errorCode: 'superseded' })).toBe(true);
+    // Control: the same row parked for an ordinary rejection IS lifted by idle fill.
+    ledger.close();
+
+    const filtered = runner.filterAlreadyProcessed([LEDGER_TASK]);
+    expect(filtered.map((t) => t.issueId)).not.toContain('ISSUE-1');
+    expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('RETRY_AT');
+
+    runner.durableRuns.close();
+  });
+
+  it('the durable-ledger RETRY_AT idle-fill branch still lifts an ordinary rejection backoff (control)', async () => {
+    const LEDGER_TASK: TaskItem = {
+      id: 'ISSUE-1', issueId: 'ISSUE-1', issueIdentifier: 'ISSUE-1',
+      source: 'linear', title: 'rejected once', priority: 2, createdAt: 0,
+      linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
+    };
+    const dbPath = join(tempDir, 'automation-rejected.db');
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath })) as unknown as InternalRunner & {
+      durableRuns: { observeTask(task: TaskItem, repo: string): void; getRun(id: string): { state: string } | null; close(): void };
+    };
+    runner.durableRuns.observeTask(LEDGER_TASK, '/repo');
+
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('ISSUE-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(ledger.transition(claim!, 'RETRY_AT', { retryAt: Date.now() + 30 * 60_000, errorCode: 'rejected' })).toBe(true);
+    ledger.close();
+
+    const filtered = runner.filterAlreadyProcessed([LEDGER_TASK]);
+    expect(filtered.map((t) => t.issueId)).toContain('ISSUE-1');
+    expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('READY');
+
+    runner.durableRuns.close();
+  });
 });
