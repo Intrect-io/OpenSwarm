@@ -119,8 +119,16 @@ export interface AgenticLoopOptions {
   onLog?: (line: string) => void;
   /** 도구 사용 허용 여부 (기본: true) */
   enableTools?: boolean;
-  /** 토큰 기반 압축 트리거 임계값 (기본: 24000) */
+  /** 토큰 기반 압축 트리거 임계값 — 모델 창을 모를 때의 폴백 (기본: 60000) */
   compactTokenThreshold?: number;
+  /**
+   * Advertised context window of `model`, when the adapter knows it (catalog
+   * `context_length`). With it the compaction threshold is derived from the
+   * window instead of the fixed fallback — see resolveCompactionThreshold. (AGT-4386)
+   */
+  contextWindowTokens?: number;
+  /** Tokens the request must leave for the model's own output (adapter max_tokens; default 16384). */
+  reservedOutputTokens?: number;
   /** 이 메시지 수를 넘어야 압축 후보 (VEGA compact_threshold, 기본: 24) */
   compactAfterMessages?: number;
   /** 압축 시 항상 원본 유지할 최근 메시지 수 (VEGA keep_recent, 기본: 8) */
@@ -254,6 +262,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     compactTokenThreshold = 60000,
     compactAfterMessages = 60,
     keepRecentMessages = 16,
+    contextWindowTokens,
+    reservedOutputTokens = DEFAULT_RESERVED_OUTPUT_TOKENS,
     nudgeMaxOnNoEdit = 0,
     finishValidator,
     finishValidatorMaxRetries = 0,
@@ -358,6 +368,16 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // registered MCP route (or another built-in withheld for this run).
   const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
+  const compaction = resolveCompactionThreshold(contextWindowTokens, {
+    fallback: compactTokenThreshold,
+    reservedOutputTokens,
+  });
+  const headerCount = systemPrompt ? 2 : 1; // system + first user, or just the first user
+  onLog?.(
+    compaction.source === 'window'
+      ? `📐 Context window ${contextWindowTokens} tokens → compact at ${compaction.compactAt} (0.75 × usable)`
+      : `📐 Context window unknown → compact at ${compaction.compactAt} (fallback)`,
+  );
   let toolCallCount = 0;
   let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
   const executedCommands: string[] = []; // `bash` 도구로 실제 실행한 명령 (검증 증거 ground truth)
@@ -452,10 +472,30 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     // 과거에는 turn>=2부터 매 턴 무조건 압축해 모델이 방금 읽은 파일·작업 맥락을
     // 즉시 잃고 헛돌았다(루프 재발). 이제 정말 길어질 때만 압축하고, 압축해도
     // 최근 keepRecentMessages 블록은 원본 유지한다.
-    if (messages.length > compactAfterMessages) {
+    //
+    // AGT-4386: the threshold is sized to the model's window when the adapter
+    // knows it (0.75 × what the request can carry), and oversized old tool
+    // outputs are trimmed first — cheaper than a whole-history summary and
+    // it keeps the conversation shape, so the model does not re-read what
+    // the summary would have flattened to "→ok".
+    if (countMessageTokens(messages) > compaction.compactAt * TRIM_AT_FRACTION) {
+      const trimmed = trimOversizedToolOutputs(messages, { maxTokens: TOOL_OUTPUT_TRIM_TOKENS, keepRecent: keepRecentMessages });
+      if (trimmed > 0) {
+        onLog?.(`✂ Trimmed ${trimmed} oversized tool output(s) older than the last ${keepRecentMessages} messages`);
+        // Same premise as after compaction: a trimmed read_file body is no
+        // longer "already in the conversation", so the stub cache must not
+        // answer the re-read the trim marker invites. (INT-1929)
+        readCache.store.clear();
+      }
+    }
+    // A window-derived threshold is already the size signal; the message-count
+    // gate only made sense for the fixed fallback (it stopped a 24-message
+    // conversation with one huge file from compacting at once).
+    const compactMessageGate = compaction.source === 'window' ? headerCount + keepRecentMessages : compactAfterMessages;
+    if (messages.length > compactMessageGate) {
       const msgTokens = countMessageTokens(messages);
-      if (msgTokens > compactTokenThreshold) {
-        onLog?.(`📦 Compacting history (${messages.length} msgs, ${msgTokens} tokens > ${compactTokenThreshold})`);
+      if (msgTokens > compaction.compactAt) {
+        onLog?.(`📦 Compacting history (${messages.length} msgs, ${msgTokens} tokens > ${compaction.compactAt})`);
         compactPriorTurns(messages, keepRecentMessages);
         // Compaction drops prior read content from the model's view, so the read
         // cache's premise ("content is already earlier in the conversation") no
@@ -1025,6 +1065,85 @@ export function shouldNudgeCoordinationCheck(
  * 기존 [Prior turns compacted] 요약이 있으면 새 요약에 합산 후 교체.
  * (테스트를 위해 export — 외부에서 직접 호출할 일은 없음)
  */
+/** What the adapters ask for as max_tokens; the request must leave this much of the window free. */
+export const DEFAULT_RESERVED_OUTPUT_TOKENS = 16384;
+/** Compact when history reaches this share of what the request can carry (VEGA 0.75; ori 0.8). */
+export const COMPACT_AT_FRACTION = 0.75;
+/** Start trimming old tool outputs at this share of the compaction threshold. */
+export const TRIM_AT_FRACTION = 0.5;
+/** A tool output older than the recent window and larger than this is trimmed to a marker. */
+export const TOOL_OUTPUT_TRIM_TOKENS = 2000;
+/** Never derive a threshold below this — a smaller one would compact every turn. */
+export const MIN_COMPACT_AT = 4096;
+/** Cost and attention guard: even a 1M window does not get a 750k history. */
+export const MAX_COMPACT_AT = 200_000;
+
+export interface CompactionThreshold {
+  compactAt: number;
+  source: 'window' | 'fallback';
+}
+
+/**
+ * Size the compaction threshold to the model's window when it is known.
+ *
+ * `0.75 × (window − reservedOutput)`, clamped to [MIN_COMPACT_AT, MAX_COMPACT_AT].
+ * Unknown window → the fixed fallback (today's 60k), so a provider that does
+ * not advertise `context_length` behaves exactly as before. A 32k model gets
+ * 12k and is protected for the first time; a 262k model gets 184k instead of
+ * being summarised at 60k and re-reading what it lost. (AGT-4386)
+ */
+export function resolveCompactionThreshold(
+  contextWindowTokens: number | undefined,
+  opts: { fallback: number; reservedOutputTokens?: number },
+): CompactionThreshold {
+  if (!Number.isFinite(contextWindowTokens) || (contextWindowTokens as number) <= 0) {
+    return { compactAt: opts.fallback, source: 'fallback' };
+  }
+  const reserved = opts.reservedOutputTokens ?? DEFAULT_RESERVED_OUTPUT_TOKENS;
+  const usable = Math.max(0, (contextWindowTokens as number) - reserved);
+  const derived = Math.floor(usable * COMPACT_AT_FRACTION);
+  return { compactAt: Math.min(MAX_COMPACT_AT, Math.max(MIN_COMPACT_AT, derived)), source: 'window' };
+}
+
+const TRIM_MARKER_PREFIX = '[tool output trimmed:';
+
+/**
+ * Replace oversized tool outputs older than the last `keepRecent` messages
+ * with a short marker that names the tool and invites a re-read. Assistant
+ * text, tool calls and small outputs stay verbatim, so the conversation keeps
+ * its shape; only the bulk goes. Returns how many outputs were trimmed.
+ * Idempotent: an already-trimmed message is never touched again. (AGT-4386)
+ */
+export function trimOversizedToolOutputs(
+  messages: ChatMessage[],
+  opts: { maxTokens: number; keepRecent: number },
+): number {
+  const headerCount = messages[0]?.role === 'system' ? 2 : 1;
+  const boundary = messages.length - opts.keepRecent;
+  if (boundary <= headerCount) return 0;
+
+  // tool_call_id → tool name, from the assistant turns that issued them.
+  const toolNames = new Map<string, string>();
+  for (const m of messages) {
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) toolNames.set(tc.id, tc.function.name);
+    }
+  }
+
+  let trimmed = 0;
+  for (let i = headerCount; i < boundary; i++) {
+    const m = messages[i];
+    if (m.role !== 'tool' || typeof m.content !== 'string') continue;
+    if (m.content.startsWith(TRIM_MARKER_PREFIX)) continue;
+    const tokens = countTokensApprox(m.content);
+    if (tokens <= opts.maxTokens) continue;
+    const name = toolNames.get(m.tool_call_id) ?? 'tool';
+    m.content = `${TRIM_MARKER_PREFIX} ~${tokens} tokens from "${name}". Read it again if you still need it.]`;
+    trimmed++;
+  }
+  return trimmed;
+}
+
 export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void {
   const headerCount = messages[0]?.role === 'system' ? 2 : 1;
 
