@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildRepeatEscalation, resolveWorkerStageOverrides } from './workerEscalation.js';
+import { buildRepeatEscalation, reasoningEffortForIteration, resolveWorkerStageOverrides } from './workerEscalation.js';
 import type { RoleConfig } from '../core/types.js';
 
 const workerCfg = (extra: Partial<RoleConfig> = {}): RoleConfig => ({
@@ -141,5 +141,51 @@ describe('resolveWorkerStageOverrides', () => {
     expect(overrides).toStrictEqual({
       model: 'bigger-model', modelRole: 'escalate', reasoningEffort: 'high',
     });
+  });
+});
+
+describe('reasoning rung (AGT-4402)', () => {
+  const base = { taskId: 't1', taskPrefix: 'p' };
+
+  it('iteration 1 keeps the task\'s own effort — none for an unestimated card', () => {
+    expect(reasoningEffortForIteration({ iteration: 1, baseEffort: undefined, modelEscalated: false })).toBeUndefined();
+    expect(reasoningEffortForIteration({ iteration: 1, baseEffort: 'low', modelEscalated: false })).toBe('low');
+    const overrides = resolveWorkerStageOverrides({
+      ...base, workerCfg: workerCfg({ escalateModel: 'bigger-model', escalateAfterIteration: 3 }),
+      iteration: 1, baseModel: 'base-model', signalEscalation: undefined,
+    });
+    expect(overrides).toEqual({ model: 'base-model' }); // no reasoningEffort key at all
+  });
+
+  it('the first retry reasons at medium', () => {
+    expect(reasoningEffortForIteration({ iteration: 2, baseEffort: undefined, modelEscalated: false })).toBe('medium');
+    const overrides = resolveWorkerStageOverrides({
+      ...base, workerCfg: workerCfg({ escalateModel: 'bigger-model', escalateAfterIteration: 3 }),
+      iteration: 2, baseModel: 'base-model', signalEscalation: undefined,
+    });
+    expect(overrides).toEqual({ model: 'base-model', reasoningEffort: 'medium' }); // same model, deeper
+  });
+
+  it('a model escalation reasons at high', () => {
+    const overrides = resolveWorkerStageOverrides({
+      ...base, workerCfg: workerCfg({ escalateModel: 'bigger-model', escalateAfterIteration: 2 }),
+      iteration: 2, baseModel: 'base-model', signalEscalation: undefined,
+    });
+    expect(overrides).toEqual({ model: 'bigger-model', modelRole: 'escalate', reasoningEffort: 'high' });
+  });
+
+  it('never lowers a jobProfile effort', () => {
+    expect(reasoningEffortForIteration({ iteration: 2, baseEffort: 'high', modelEscalated: false })).toBe('high');
+    expect(reasoningEffortForIteration({ iteration: 1, baseEffort: 'high', modelEscalated: true })).toBe('high');
+    expect(reasoningEffortForIteration({ iteration: 2, baseEffort: 'low', modelEscalated: false })).toBe('medium');
+  });
+
+  it('a signal escalation still wins over the rung', () => {
+    const overrides = resolveWorkerStageOverrides({
+      ...base, workerCfg: workerCfg({ escalateModel: 'bigger-model', escalateAfterIteration: 9 }),
+      iteration: 2, baseModel: 'base-model',
+      signalEscalation: { reasoningEffort: 'high' },
+    });
+    expect(overrides).toEqual({ model: 'base-model', reasoningEffort: 'high' });
   });
 });
