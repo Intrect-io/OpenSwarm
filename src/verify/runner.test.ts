@@ -650,3 +650,14 @@ describe('runVerify', () => {
     expect(evidence.rawOutputTail).toContain('tail-marker');
   });
 });
+
+describe('git timeout budgets (AGT-4416)', () => {
+  it('gives the sandbox clone ten minutes and every other git call the 30 s default', async () => {
+    const { CLONE_TIMEOUT_MS, gitTimeoutMsFor } = await import('./runner.js');
+    expect(CLONE_TIMEOUT_MS).toBe(10 * 60_000);
+    expect(gitTimeoutMsFor(['clone', '--quiet', '--no-hardlinks', '--no-checkout', '/src', '/dst'])).toBe(CLONE_TIMEOUT_MS);
+    for (const args of [['rev-parse', 'HEAD'], ['checkout', '--quiet', '--detach', 'abc'], ['worktree', 'add', '--detach', '/x', 'abc'], ['merge-base', 'HEAD', 'main']]) {
+      expect(gitTimeoutMsFor(args)).toBe(30_000);
+    }
+  });
+});

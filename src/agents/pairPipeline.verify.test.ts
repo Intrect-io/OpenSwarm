@@ -288,11 +288,13 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
       rawOutputTail: 'timeout after 20ms',
       durationMs: 20,
     }]);
-    const { result } = await runPipeline();
+    const { result, logs } = await runPipeline();
     expect(result).toMatchObject({ success: true, finalStatus: 'approved' });
     expect(result.testerResult?.deterministic).toBeUndefined();
     expect(runTester).toHaveBeenCalledOnce();
     expect(runReviewer).toHaveBeenCalledOnce();
+    // The downgrade is on the stage log, not only stderr (AGT-4416).
+    expect(logs).toEqual(expect.arrayContaining([expect.stringMatching(/^Deterministic verify unavailable; falling back to LLM tester: verify-runner: /)]));
   });
 
   it('downgrades an unavailable baseline comparison to the LLM fallback', async () => {
