@@ -123,6 +123,7 @@ afterEach(() => {
 
 describe('PairPipeline deterministic tester (INT-2662)', () => {
   it('treats CodeQL partial coverage as a known extractor gap, not infrastructure failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // Go/Swift extractors reject --build-mode=none permanently. Baseline and
     // current skip the same languages, so the introduced-findings comparison
     // stays sound; failing closed here parked every Go pipeline (AGT-3841).
@@ -151,6 +152,9 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
     expect(runSecurityAudit).toHaveBeenCalledTimes(2);
     expect(runWorker).toHaveBeenCalled();
     expect(runReviewer).toHaveBeenCalled();
+    // The gap is accepted but never silent: the log names the language (AGT-4098).
+    expect(warn.mock.calls.map((call) => String(call[0])))
+      .toEqual(expect.arrayContaining([expect.stringMatching(/CodeQL coverage is partial — not analysed: swift\. Swift does not support build-mode=none\./)]));
   });
 
   it('blocks new CodeQL findings even when the tester stage is not configured', async () => {
