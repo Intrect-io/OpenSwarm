@@ -97,7 +97,7 @@ export function resolveWorkerStageOverrides(input: {
 
   const reasoningEffort = reasoningEffortForIteration({ iteration, baseEffort, modelEscalated: shouldEscalate });
   if (reasoningEffort) {
-    overrides = { ...(overrides ?? {}), reasoningEffort };
+    overrides = { ...overrides, reasoningEffort };
     if (reasoningEffort !== baseEffort) {
       safeConsole.log(`[${input.taskPrefix}] Escalating worker reasoning → ${reasoningEffort} (iteration ${iteration})`);
     }
