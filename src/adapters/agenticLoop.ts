@@ -111,7 +111,11 @@ export interface AgenticLoopOptions {
   model: string;
   /** API 호출 함수 (어댑터별로 주입) */
   callApi: (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<ChatCompletionResponse>;
-  /** 최대 도구 사용 턴 수 (기본: 20) */
+  /**
+   * 최대 도구 사용 턴 수 (기본: 20). `0` = 상한 없음 (UNBOUNDED_TURNS) — 코딩
+   * 단계는 턴 수가 아니라 벽시계(timeoutMs)·반복 호출 가드(NO_PROGRESS_LIMIT)·
+   * 파이프라인 iteration 상한으로 끝난다. (AGT-4388)
+   */
   maxTurns?: number;
   /** 전체 타임아웃 (ms, 기본: 300000) */
   timeoutMs?: number;
@@ -453,7 +457,13 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     }
   };
 
-  for (let turn = 0; turn < maxTurns + 1; turn++) {
+  // AGT-4388: a turn count is not a property of the task. With the cap the
+  // workers on cgf-portal ended in "Step limit reached" after their analysis,
+  // retried from a fresh context and did the analysis again — five times,
+  // zero edits. `0` lifts the ceiling; the wall-clock deadline above, the
+  // repeated-call guard and the pipeline's iteration cap remain.
+  const turnCap = maxTurns > 0 ? maxTurns : Number.POSITIVE_INFINITY;
+  for (let turn = 0; turn < turnCap + 1; turn++) {
     // 사용자 중단 (Esc/Ctrl+C) — 현재 텍스트가 있으면 유지, 없으면 표시만.
     if (signal?.aborted) {
       onLog?.('■ Stopped by user');
@@ -952,6 +962,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
  * because the loop keeps no price table (it would go stale). Tokens and
  * duration are real measurements either way. (INT-2508, AGT-4178)
  */
+/** `maxTurns` value that means "no turn ceiling" (AGT-4388). */
+export const UNBOUNDED_TURNS = 0;
+
 export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
   return {
     exitCode: 0,

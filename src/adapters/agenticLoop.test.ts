@@ -389,10 +389,15 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
   it('retries once when the first no-tools final answer is empty', async () => {
     const logs: string[] = [];
     let calls = 0;
+    let finalAnswerCalls = 0;
+    // maxTurns: 1 → two tool turns, then the loop is out of budget without a
+    // final message and runs the no-tools final-answer turn. (0 means unbounded
+    // since AGT-4388, so it can no longer be the shortcut here.)
     const callApi = async (_messages: ChatMessage[], tools: unknown[]) => {
       calls++;
       if (tools.length > 0) return toolCallResp('c1', 'read_file', { path: 'missing.ts' });
-      return calls === 2 ? finalResp('   ') : finalResp('Decision: revise\nFix the missing edge-case test.');
+      finalAnswerCalls++;
+      return finalAnswerCalls === 1 ? finalResp('   ') : finalResp('Decision: revise\nFix the missing edge-case test.');
     };
 
     const result = await runAgenticLoop({
@@ -401,21 +406,24 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
       model: 'test',
       callApi: callApi as never,
       webTools: false,
-      maxTurns: 0,
+      maxTurns: 1,
       onLog: (line) => logs.push(line),
     });
 
-    expect(calls).toBe(3);
+    expect(calls).toBe(4);
+    expect(finalAnswerCalls).toBe(2);
     expect(result.text).toContain('Fix the missing edge-case test.');
     expect(logs).toContain('↻ Final answer was empty — retrying once (no tools)');
   });
 
   it('fails explicitly when the retry is also reasoning-only/empty', async () => {
     let calls = 0;
+    let finalAnswerCalls = 0;
     const callApi = async (_messages: ChatMessage[], tools: unknown[]) => {
       calls++;
       if (tools.length > 0) return toolCallResp('c1', 'read_file', { path: 'missing.ts' });
-      return finalResp(calls === 2 ? '' : ' \n ');
+      finalAnswerCalls++;
+      return finalResp(finalAnswerCalls === 1 ? '' : ' \n ');
     };
 
     await expect(
@@ -425,10 +433,11 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
         model: 'test',
         callApi: callApi as never,
         webTools: false,
-        maxTurns: 0,
+        maxTurns: 1,
       }),
     ).rejects.toThrow('Agentic loop produced no final message after one retry');
-    expect(calls).toBe(3);
+    expect(calls).toBe(4);
+    expect(finalAnswerCalls).toBe(2);
   });
 });
 

@@ -67,7 +67,7 @@ export function buildWorkerStartComment(info: WorkerStartInfo): string {
   return formatAutomationComment({
     heading: `${heading} (${attemptLabel})`,
     sections,
-    meta: { Model: info.model, 'Max turns': info.maxTurns },
+    meta: { Model: info.model, 'Max turns': info.maxTurns ? info.maxTurns : 'unbounded' },
     attribution: 'Worker audit log',
   });
 }
