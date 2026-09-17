@@ -24,6 +24,7 @@ import {
 import { buildTaskStateSyncComment } from '../taskState/store.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
+import { postPairVerdictOnPullRequest } from './pairVerdictComment.js';
 
 export interface CompletionEffectPayload {
   version: 1;
@@ -220,6 +221,9 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
   } else {
     await source.logPairComplete(issueId, effect.dedupeKey, payload.stats);
   }
+  // On both branches: the tracker comment above proves nothing about the PR
+  // side, and the PR check inside is what keeps a retry from posting twice.
+  await postPairVerdictOnPullRequest(payload.stats, payload.task, payload.marker);
 
   projectSuccessState(payload.task);
   await reconcileCompletionState(payload.task);

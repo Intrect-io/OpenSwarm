@@ -10,6 +10,11 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { EffectClaim } from './runLedger.js';
 import type { ITaskSource } from './taskSource.js';
 
+// GitHub is a side channel of completion delivery; these tests own the
+// tracker side. The verdict module has its own tests with injected deps.
+const postPairVerdictOnPullRequest = vi.fn(async () => 'posted' as const);
+vi.mock('./pairVerdictComment.js', () => ({ postPairVerdictOnPullRequest: (...args: unknown[]) => postPairVerdictOnPullRequest(...args as []) }));
+
 // The durable outbox is the daemon's DEFAULT completion path: on a primary
 // ledger the runner returns before its inline logPairComplete call, and the
 // Linear comment is rendered from the stats the effect payload carries. A
@@ -90,6 +95,30 @@ describe('completion lands on In Review while the PR is open (AGT-4409)', () => 
     await deliverTrackerEffect(claim, source);
     expect(updateState).toHaveBeenCalledWith('issue-1', 'In Review');
     expect(updateState).not.toHaveBeenCalledWith('issue-1', 'Done');
+    // The retry branch too: the tracker comment having landed says nothing
+    // about the PR side (AGT-4044). The module's own fence stops a double post.
+    expect(postPairVerdictOnPullRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ prUrl: 'https://github.com/o/r/pull/9', reviewerDecision: 'approve', reviewerName: 'Sable' }),
+      expect.objectContaining({ issueIdentifier: 'AGT-1' }),
+      marker,
+    );
+  });
+
+  it('posts the pair verdict on the PR on a first delivery (AGT-4044)', async () => {
+    postPairVerdictOnPullRequest.mockClear();
+    const result = { ...pipelineResult(), prUrl: 'https://github.com/o/r/pull/9' };
+    const claim = claimFor(result);
+    const marker = (claim.payload as { marker: string }).marker;
+    const source = {
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => []),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+    await deliverTrackerEffect(claim, source);
+    expect(source.logPairComplete).toHaveBeenCalledTimes(1);
+    expect(postPairVerdictOnPullRequest).toHaveBeenCalledTimes(1);
+    expect(postPairVerdictOnPullRequest.mock.calls[0][2]).toBe(marker);
   });
 
   it('still reconciles to Done when the run published nothing to merge', async () => {
