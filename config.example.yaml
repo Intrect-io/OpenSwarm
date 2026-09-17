@@ -252,6 +252,8 @@ autonomous:
     rewriteCheck: true      # block an unacknowledged whole-file rewrite (>30% of a 20+ line file deleted;
                             # the worker may declare `REWRITE: <path>` in its summary); restores stripped
                             # trailing newlines in place (AGT-4406)
+    claimEvidenceCheck: true # block a docs-only change that replaces figures the run never printed;
+                            # flag approval claims without a link/date (AGT-4408)
 
   # Self-repair reflection budget: max objective (lint/bs/test) failures tolerated
   # before the loop gives up on bad edits. Lower it to cap token burn when

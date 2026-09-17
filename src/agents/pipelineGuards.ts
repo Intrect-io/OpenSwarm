@@ -14,6 +14,7 @@ import { scanFile as scanFileForBs } from '../registry/bsDetector.js';
 import { getWorkingDiffDetail } from '../support/gitTracker.js';
 import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
 import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
+import { figuresChangedInPlace, unsourcedFigures, uncitedApprovalClaims } from './claimEvidenceGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -755,6 +756,41 @@ async function runRewriteGuard(workerResult: WorkerResult, projectPath: string):
   return { passed: !blocking, guard, issues, blocking };
 }
 
+/**
+ * Claim-evidence guard (AGT-4408). Blocking when a docs-only change replaces
+ * figures the run never produced; advisory for the same in a change that also
+ * touches code, and for approval claims without a citation.
+ */
+async function runClaimEvidenceGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
+  const guard = 'claimEvidence';
+  const issues: string[] = [];
+  let blocking = false;
+  const reportText = `${workerResult.summary}\n${workerResult.output}\n${workerResult.error ?? ''}`;
+  try {
+    const details = await getWorkingDiffDetail(projectPath);
+    const docsOnly = details.length > 0 && details.every((d) => DOC_FILE_RE.test(d.file));
+    for (const d of details) {
+      const added = (await getAddedLinesForFile(projectPath, d.file, d.isNew)).split('\n');
+      if (DOC_FILE_RE.test(d.file) && !d.isNew) {
+        const removed = (await getRemovedLinesForFile(projectPath, d.file)).split('\n');
+        for (const c of unsourcedFigures(figuresChangedInPlace(removed, added), reportText)) {
+          issues.push(
+            `[${d.file}] replaces ${c.before.join('/')} with ${c.after.join('/')} but nothing in this run printed ${c.missing.join(', ')} — `
+            + 'a documented figure comes from a command run in this task (show it and its output), or stays as it was.',
+          );
+          if (docsOnly) blocking = true;
+        }
+      }
+      for (const line of uncitedApprovalClaims(added)) {
+        issues.push(`[${d.file}] claims an approval without citing it (link or date): "${line.slice(0, 120)}"`);
+      }
+    }
+  } catch (err) {
+    console.warn('[Guard:claimEvidence] Error:', err);
+  }
+  return { passed: !blocking, guard, issues, blocking };
+}
+
 // Guard Runner
 
 /**
@@ -820,6 +856,10 @@ export async function runGuards(
 
   if (config.rewriteCheck) {
     results.push(await runRewriteGuard(guardWorkerResult, projectPath));
+  }
+
+  if (config.claimEvidenceCheck) {
+    results.push(await runClaimEvidenceGuard(guardWorkerResult, projectPath));
   }
 
   // conventionalCommits is checked separately (needs commit message)

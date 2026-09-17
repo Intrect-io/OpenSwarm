@@ -584,6 +584,32 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     });
   });
 
+  describe('claimEvidenceCheck (AGT-4408)', () => {
+    it('blocks a docs-only change that replaces a figure the run never printed, and passes once the output shows it', async () => {
+      writeFileSync(join(repo, 'docs.md'), '| 안심뉴타운 | 27행 | 20,706,700 |\n');
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'docs']);
+      writeFileSync(join(repo, 'docs.md'), '| 안심뉴타운 | 27행 | 13,955,000 |\n');
+
+      const silent = await runGuards(mockWorker(['docs.md']), repo, { claimEvidenceCheck: true });
+      expect(guardIssues(silent, 'claimEvidence').some(i => i.includes('13955000'))).toBe(true);
+      expect(silent.allPassed).toBe(false);
+
+      const sourced = { ...mockWorker(['docs.md']), output: '$ uv run b4 --site 안심뉴타운\ntotal=13,955,000 rows=27\n' };
+      const res = await runGuards(sourced, repo, { claimEvidenceCheck: true });
+      expect(guardIssues(res, 'claimEvidence')).toEqual([]);
+    });
+
+    it('only advises when the same figure change ships with code', async () => {
+      writeFileSync(join(repo, 'docs.md'), 'count: 100\n');
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'docs']);
+      writeFileSync(join(repo, 'docs.md'), 'count: 250\n');
+      writeFileSync(join(repo, 'base.ts'), 'export const base = 250;\n');
+      const res = await runGuards(mockWorker(['docs.md', 'base.ts']), repo, { claimEvidenceCheck: true });
+      expect(guardIssues(res, 'claimEvidence').length).toBe(1);
+      expect(res.allPassed).toBe(true);
+    });
+  });
+
   describe('reformatCheck', () => {
     it('flags a whitespace-only change', async () => {
       writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n'); // re-indent only
