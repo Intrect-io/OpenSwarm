@@ -137,6 +137,17 @@ export default defineConfig({
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'tests/**/*.test.ts'],
     exclude: ['node_modules', 'dist'],
     testTimeout: 30000,
+    // Console output is written straight to the process streams instead of
+    // being relayed to the main process per test. The relay is an RPC, and a
+    // log that lands after a test file finishes — the pipeline's async
+    // emitters and the runner's `[FreshContext] Session …` lines do this —
+    // makes the worker's teardown reject with
+    // `EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending`,
+    // which vitest counts as an unhandled error and fails a run whose every
+    // test passed (autonomousRunner.coverage.test.ts on 2026-08-28,
+    // pairPipeline.verify.test.ts on 2026-09-17). Losing the per-test
+    // attribution header is the cost; a green run turning red is not. (AGT-4016)
+    disableConsoleIntercept: true,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
