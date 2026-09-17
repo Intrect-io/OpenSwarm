@@ -33,3 +33,19 @@ describe('buildWorkerEnv human-surface boundary', () => {
     expect(env).not.toHaveProperty('MS_GRAPH_TOKEN');
   });
 });
+
+describe('buildWorkerEnv withholds credentials the daemon found dead (AGT-4028)', () => {
+  it('drops a key marked dead and leaves everything else, until the mark is cleared', async () => {
+    const { buildWorkerEnv, markWorkerEnvKeyDead, clearDeadWorkerEnvKeys, deadWorkerEnvKeyReasons } = await import('./envPath.js');
+    try {
+      markWorkerEnvKeyDead('LINEAR_API_KEY', 'HTTP 401: Authentication required');
+      const env = buildWorkerEnv({ PATH: '/usr/bin', LINEAR_API_KEY: 'dead', OPENROUTER_API_KEY: 'alive' });
+      expect(env.LINEAR_API_KEY).toBeUndefined();
+      expect(env.OPENROUTER_API_KEY).toBe('alive');
+      expect(deadWorkerEnvKeyReasons().get('LINEAR_API_KEY')).toMatch(/401/);
+    } finally {
+      clearDeadWorkerEnvKeys();
+    }
+    expect(buildWorkerEnv({ PATH: '/usr/bin', LINEAR_API_KEY: 'now-fine' }).LINEAR_API_KEY).toBe('now-fine');
+  });
+});
