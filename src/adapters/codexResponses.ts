@@ -409,6 +409,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       enableTools: options.enableTools ?? true,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
+      forbidPublication: options.forbidPublication,
       sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,

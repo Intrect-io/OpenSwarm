@@ -26,6 +26,7 @@ import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sand
 import { defaultWorkerWritableRoots, looksLikeSandboxDenial, wrapForSandbox } from '../support/osSandbox.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
+import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -431,6 +432,8 @@ export interface ToolExecOptions {
    * made that the user's whole home directory.
    */
   sandbox?: 'on' | 'off';
+  /** Refuse publication commands (`git push`/`commit`, `gh pr`, `openswarm …`). (AGT-4418) */
+  forbidPublication?: boolean;
   /** bash tool timeout (default DEFAULT_BASH_TIMEOUT_MS) */
   bashTimeoutMs?: number;
   /** Refuse mutation and shell tools even if a model emits hidden tool names. */
@@ -867,6 +870,12 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        // Checked before every execution path below, including the attested
+        // sandbox one: a worker's job ends at the working tree (AGT-4418).
+        if (execOptions?.forbidPublication) {
+          const what = publicationCommandIn(command);
+          if (what) return { tool_call_id: callId, content: publicationFenceMessage(what), is_error: true };
+        }
         // A command reaching into another task's worktree is made visible on
         // both sides: the daemon log for the operator, the tool result for the
         // model (AGT-4043). Never blocked — a linter pointed at a path is
