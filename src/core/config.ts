@@ -357,6 +357,12 @@ const AutonomousConfigSchema = z.object({
    * run parks for the operator instead of backing off again. 0 disables.
    */
   infraFailureCircuit: z.number().int().min(0).max(100).default(6),
+  /**
+   * Model for the draft (task-brief) stage that runs before every worker.
+   * Unset → the adapter's built-in drafter default (draftAnalyzer.ts
+   * DRAFT_MODELS). Set it to run a single-model fleet.
+   */
+  draftModel: z.string().min(1).optional(),
   /** Dynamic job profiles for model selection */
   jobProfiles: z.array(JobProfileSchema).optional(),
   /** Pipeline quality guards (bad-edit lint gate, BS detector, etc.) */
@@ -779,6 +785,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       allowSameProjectConcurrent: raw.autonomous.allowSameProjectConcurrent,
       unknownScopeAdmission: raw.autonomous.unknownScopeAdmission,
       infraFailureCircuit: raw.autonomous.infraFailureCircuit,
+      draftModel: raw.autonomous.draftModel,
       guards: raw.autonomous.guards,
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,

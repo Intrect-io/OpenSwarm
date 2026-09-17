@@ -465,6 +465,8 @@ export type DecompositionConfig = {
   plannerModel: string;
   /** Planner timeout (ms) - default 600000 (10min) */
   plannerTimeoutMs: number;
+  /** Draft-stage model override; unset = the adapter's built-in drafter default. */
+  draftModel?: string;
 };
 
 export type BacklogGroomingConfig = {
@@ -620,6 +622,8 @@ export type AutonomousStartupConfig = {
   unknownScopeAdmission?: 'serialize' | 'admit';
   /** Identical-fingerprint infra_error attempts that park a run (0 disables, default 6). */
   infraFailureCircuit?: number;
+  /** Draft-stage model override; unset = the adapter's built-in drafter default. */
+  draftModel?: string;
   /** Pipeline guards configuration */
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */

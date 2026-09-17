@@ -3250,6 +3250,9 @@ export class AutonomousRunner {
       allowedProjects: this.config.allowedProjects,
       plannerModel: this.config.plannerModel,
       plannerTimeoutMs: this.config.plannerTimeoutMs,
+      // Was declared on ExecutionContext but never set — the drafter always ran
+      // the adapter's built-in default, so a single-model fleet was impossible.
+      draftModel: this.config.draftModel,
       pairMaxAttempts: this.config.pairMaxAttempts,
       enableDecomposition: this.config.enableDecomposition,
       decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
