@@ -17,6 +17,7 @@
 #   or VEGA_SEARXNG_URL. Optional OPENSWARM_SEARXNG_KEY / VEGA_SEARXNG_KEY for
 #   the public X-VEGA-Key header. TAVILY_KEY / BRAVE_SEARCH_KEY still work.
 adapter: codex-responses
+# reviewAdapter: openrouter   # reviewer for `openswarm review` AND `review --max`; omit to follow `adapter` (AGT-4292/4299)
 
 discord:
   token: ${DISCORD_TOKEN}
