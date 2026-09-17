@@ -78,7 +78,6 @@ import {
 } from './runnerState.js';
 import {
   buildTaskStateSyncComment,
-  completeParentIfChildrenDone,
   markTaskBlocked,
   markTaskBacklog,
   markTaskDecomposed,
@@ -1383,18 +1382,10 @@ export async function reconcileCompletionState(task: TaskItem): Promise<void> {
     }
   }
 
-  const parent = completeParentIfChildrenDone(task.issueId);
-  if (!parent) return;
-
-  try {
-    await taskSource?.updateState(parent.issueId, 'Done');
-    await taskSource?.addComment(
-      parent.issueId,
-      buildTaskStateSyncComment(parent, 'All child tasks completed')
-    );
-  } catch (err) {
-    console.warn(`[AutonomousRunner] Failed to complete parent task ${parent.issueId}:`, err);
-  }
+  // The parent is not closed here. A publication leaves its issue In Review,
+  // and one child's open PR used to close the whole epic (AGT-4409); the merge
+  // sweep closes the parent once every child has MERGED, checked against the
+  // tracker rather than this ledger.
 }
 
 export async function syncFailureState(task: TaskItem, reason: string, retryState?: 'Todo'): Promise<boolean> {

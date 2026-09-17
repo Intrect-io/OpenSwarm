@@ -13,6 +13,7 @@
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { EffectClaim, EffectInput } from './runLedger.js';
+import { completionTargetState } from './taskSource.js';
 import type { ITaskSource, PairCompleteStats } from './taskSource.js';
 import {
   projectCancellationState,
@@ -83,6 +84,7 @@ export function completionStats(result: PipelineResult): PairCompleteStats {
     attempts: result.iterations,
     duration: Math.floor(result.totalDuration / 1000),
     filesChanged: result.workerResult?.filesChanged || [],
+    prUrl: result.prUrl,
     workerSummary: result.workerResult?.summary,
     workerName: result.workerResult?.codename,
     workerUsage: result.workerResult?.costInfo,
@@ -212,8 +214,9 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
     // The remote comment may have succeeded immediately before a process crash,
     // while the following state mutation/local ack did not. Reapply the
     // idempotent state transition but never duplicate the completion comment.
-    const accepted = await source.updateState(issueId, 'Done');
-    if (!accepted) throw new Error(`Tracker refused Done reconciliation for ${issueId}`);
+    const target = completionTargetState(payload.stats);
+    const accepted = await source.updateState(issueId, target);
+    if (!accepted) throw new Error(`Tracker refused ${target} reconciliation for ${issueId}`);
   } else {
     await source.logPairComplete(issueId, effect.dedupeKey, payload.stats);
   }

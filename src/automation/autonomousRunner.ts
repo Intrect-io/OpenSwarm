@@ -112,6 +112,8 @@ import {
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
+import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
+import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import {
   isExplicitAdmissionRetry,
@@ -2373,6 +2375,100 @@ export class AutonomousRunner {
    * task or a live durable lease, never an abandoned claim. The bulk heartbeat
    * fetch already carries updatedAt, so the sweep adds no read-side API calls.
    */
+  /** Last merge sweep, so a 5-minute heartbeat does not pay a `gh` call per In Review issue every tick. */
+  private lastMergedPublicationSweepAt = 0;
+  private static readonly MERGED_PUBLICATION_SWEEP_INTERVAL_MS = 10 * 60_000;
+
+  /**
+   * Done means merged (AGT-4409). A publication leaves the issue In Review;
+   * this moves it on once GitHub says the PR merged (→ Done, unless the
+   * description still has unticked criteria) or closed unmerged (→ Backlog).
+   * Only issues whose PR this daemon published, only from In Review, re-read
+   * right before the write so a person's later move is never overwritten.
+   */
+  private async reconcileMergedPublications(tasks: TaskItem[], now = Date.now()): Promise<void> {
+    const source = getTaskSource();
+    if (source?.kind !== 'linear') return;
+    if (now - this.lastMergedPublicationSweepAt < AutonomousRunner.MERGED_PUBLICATION_SWEEP_INTERVAL_MS) return;
+    this.lastMergedPublicationSweepAt = now;
+
+    const candidates = planMergedPublicationChecks(tasks, {
+      publishedPrUrl: (issueId) => this.durableRuns.getRun(issueId)?.prUrl ?? undefined,
+      isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
+    });
+    if (candidates.length === 0) return;
+
+    const { parsePublishedPullRequest } = await import('./publishedPullRequest.js');
+    const { getPRLifecycleOrThrow } = await import('../github/github.js');
+    let moved = 0;
+    for (const { task, prUrl } of candidates) {
+      const issueId = task.issueId || task.id;
+      const label = task.issueIdentifier ?? issueId;
+      const pr = parsePublishedPullRequest(prUrl);
+      if (!pr) continue;
+      let lifecycle;
+      try {
+        lifecycle = await getPRLifecycleOrThrow(pr.repo, pr.number);
+      } catch (error) {
+        console.warn(`[AutonomousRunner] Could not read ${prUrl} for ${label}:`, error instanceof Error ? error.message : error);
+        continue;
+      }
+      const decision = decideMergedPublication(lifecycle, prUrl, task.description);
+      if (decision.action === 'none') continue;
+
+      const refreshed = await source.lookupIssueState(label).catch(() => null);
+      if (!refreshed || !refreshed.ok || !refreshed.issue || refreshed.issue.state.toLowerCase() !== 'in review') {
+        console.warn(`[AutonomousRunner] Skipping merge reconciliation for ${label}: tracker state changed since the heartbeat`);
+        continue;
+      }
+
+      if (decision.action === 'await-criteria') {
+        const comments = source.getExecutionComments ? await source.getExecutionComments(issueId).catch(() => []) : [];
+        const marker = `<!-- openswarm-effect:${decision.marker} -->`;
+        if (comments.some((c) => c.body.includes(marker))) continue;
+        await source.addComment(issueId, `${decision.comment}\n\n${marker}`, decision.marker).catch((error) => {
+          console.warn(`[AutonomousRunner] Could not note open criteria on ${label}:`, error);
+        });
+        this.syslog(`⏸ ${label}: PR merged, waiting on unticked completion criteria`);
+        continue;
+      }
+
+      const targetState = decision.action === 'done' ? 'Done' : 'Backlog';
+      const accepted = await source.updateState(issueId, targetState).catch((error) => {
+        console.warn(`[AutonomousRunner] Failed to move ${label} → ${targetState}:`, error);
+        return false;
+      });
+      if (!accepted) continue;
+      task.linearState = targetState;
+      updateTaskLinearState(issueId, targetState);
+      await source.addComment(issueId, decision.comment).catch(() => undefined);
+      moved++;
+      this.syslog(`${targetState === 'Done' ? '✓' : '↩'} ${label}: PR ${lifecycle.state.toLowerCase()} → ${targetState}`);
+
+      // A parent closes when its last child has MERGED, checked against the
+      // tracker — the local ledger marks children done at publication.
+      if (targetState === 'Done') await this.completeParentIfChildrenMerged(issueId, source);
+    }
+    if (moved > 0) this.syslog(`✓ Reconciled ${moved} merged/closed publication(s)`);
+  }
+
+  private async completeParentIfChildrenMerged(childIssueId: string, source: NonNullable<ReturnType<typeof getTaskSource>>): Promise<void> {
+    const parentState = getTaskState(childIssueId)?.parentIssueId
+      ? getTaskState(getTaskState(childIssueId)!.parentIssueId!)
+      : undefined;
+    if (!parentState || parentState.childIssueIds.length === 0) return;
+    for (const childId of parentState.childIssueIds) {
+      const lookup = await source.lookupIssueState(childId).catch(() => null);
+      if (!lookup || !lookup.ok || !lookup.issue || lookup.issue.state.toLowerCase() !== 'done') return;
+    }
+    const parent = completeParentLocally(childIssueId);
+    if (!parent) return;
+    const accepted = await source.updateState(parent.issueId, 'Done').catch(() => false);
+    if (!accepted) return;
+    await source.addComment(parent.issueId, buildTaskStateSyncComment(parent, 'All child tasks merged')).catch(() => undefined);
+    this.syslog(`✓ ${parent.issueIdentifier ?? parent.issueId}: all children merged → Done`);
+  }
+
   private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
     const source = getTaskSource();
     if (source?.kind !== 'linear') return tasks;
@@ -2538,6 +2634,9 @@ export class AutonomousRunner {
         return;
       }
       let tasks = await this.reconcileStalledInProgress(fetchResult.tasks);
+      await this.reconcileMergedPublications(tasks).catch((error) => {
+        console.warn('[AutonomousRunner] Merge reconciliation failed:', error);
+      });
       const trackerReconcile = await reconcileTrackerTerminalRuns({
         durableRuns: this.durableRuns,
         source: getTaskSource(),

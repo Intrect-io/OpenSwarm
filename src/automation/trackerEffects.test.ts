@@ -64,6 +64,49 @@ describe('completion effect carries the dialogue identity fields (AGT-4019)', ()
   });
 });
 
+describe('completion lands on In Review while the PR is open (AGT-4409)', () => {
+  function claimFor(result: PipelineResult) {
+    const input = buildCompletionEffect(task, result, 1);
+    return {
+      id: 3, issueId: 'issue-1', attemptNo: 1, kind: input.kind, dedupeKey: input.dedupeKey,
+      payload: input.payload, status: 'in_flight', attempts: 1, availableAt: 0,
+      ownerInstanceId: 'daemon', deliveryToken: 'token', leaseEpoch: 1, leaseExpiresAt: 10_000,
+      createdAt: 0, updatedAt: 0,
+    } as EffectClaim;
+  }
+
+  it('carries the PR URL and, on a retry after the comment landed, reconciles to In Review not Done', async () => {
+    const result = { ...pipelineResult(), prUrl: 'https://github.com/o/r/pull/9' };
+    expect(completionStats(result).prUrl).toBe('https://github.com/o/r/pull/9');
+    const claim = claimFor(result);
+    const marker = (claim.payload as { marker: string }).marker;
+    const updateState = vi.fn(async () => true);
+    const source = {
+      updateState,
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => [{ body: `done <!-- openswarm-effect:${marker} -->`, createdAt: '' }]),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+    await deliverTrackerEffect(claim, source);
+    expect(updateState).toHaveBeenCalledWith('issue-1', 'In Review');
+    expect(updateState).not.toHaveBeenCalledWith('issue-1', 'Done');
+  });
+
+  it('still reconciles to Done when the run published nothing to merge', async () => {
+    const claim = claimFor(pipelineResult());
+    const marker = (claim.payload as { marker: string }).marker;
+    const updateState = vi.fn(async () => true);
+    const source = {
+      updateState,
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => [{ body: `done <!-- openswarm-effect:${marker} -->`, createdAt: '' }]),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+    await deliverTrackerEffect(claim, source);
+    expect(updateState).toHaveBeenCalledWith('issue-1', 'Done');
+  });
+});
+
 describe('integration requeue effect (AGT-4078)', () => {
   it('delivers Todo plus marker-deduped conflict evidence', async () => {
     const marker = 'integration-conflict:owner/repo#8@abc';

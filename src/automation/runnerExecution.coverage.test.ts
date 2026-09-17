@@ -1481,20 +1481,12 @@ describe('reconcileCompletionState', () => {
     expect(taskSourceMock.updateState).toHaveBeenCalledTimes(2);
   });
 
-  it('marks the parent Done when all children have completed', async () => {
+  it('never closes the parent at publication — one open child PR used to close the epic (AGT-4409)', async () => {
     completeParentIfChildrenDone.mockReturnValueOnce({ issueId: 'parent-1' });
 
     await reconcileCompletionState(task());
 
-    expect(taskSourceMock.updateState).toHaveBeenCalledWith('parent-1', 'Done');
-    expect(taskSourceMock.addComment).toHaveBeenCalledWith('parent-1', 'sync comment');
-  });
-
-  it('tolerates a parent-completion update failure', async () => {
-    completeParentIfChildrenDone.mockReturnValueOnce({ issueId: 'parent-1' });
-    (taskSourceMock.updateState as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('linear down'));
-
-    await expect(reconcileCompletionState(task())).resolves.toBeUndefined();
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to complete parent task'), expect.any(Error));
+    expect(completeParentIfChildrenDone).not.toHaveBeenCalled();
+    expect(taskSourceMock.updateState).not.toHaveBeenCalledWith('parent-1', 'Done');
   });
 });
