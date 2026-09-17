@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, formatToolErrorLog, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, formatToolErrorLog, loopDeadlines, wrapUpNotice, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError } from '../sandboxExecutor/protocol.js';
@@ -248,6 +248,55 @@ describe('runAgenticLoop nudge budgets (INT-1925)', () => {
     // would have left the guard exhausted → no "No-edit guard" log.)
     expect(logs.some((l) => l.includes('Read-loop nudge'))).toBe(true);
     expect(logs.some((l) => l.includes('No-edit guard'))).toBe(true);
+  });
+});
+
+describe('wall-clock shaping (AGT-4415)', () => {
+  it('stops the loop before the adapter hard-aborts, and warns the model before that', () => {
+    const start = 1_000_000;
+    // A 20-minute worker: 2 min of salvage headroom, 3 min of notice.
+    const worker = loopDeadlines(start, 20 * 60_000);
+    expect(worker.softDeadline).toBe(start + 18 * 60_000);
+    expect(worker.wrapUpAt).toBe(start + 15 * 60_000);
+    // A 6-minute reviewer: 36 s headroom, 60 s notice (the clamps' floors apply).
+    const reviewer = loopDeadlines(start, 6 * 60_000);
+    expect(reviewer.softDeadline).toBe(start + 6 * 60_000 - 36_000);
+    expect(reviewer.wrapUpAt).toBe(reviewer.softDeadline - 60_000);
+    // A tiny budget is never eaten by its own margins.
+    const tiny = loopDeadlines(start, 1_000);
+    expect(tiny.softDeadline).toBe(start + 500);
+    expect(tiny.wrapUpAt).toBe(start + 250);
+    // No budget → no deadlines.
+    expect(loopDeadlines(start, 0)).toEqual({ wrapUpAt: Number.POSITIVE_INFINITY, softDeadline: Number.POSITIVE_INFINITY });
+  });
+
+  it('injects the wrap-up notice once and still reaches the final-answer turn before the budget ends', async () => {
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const callApi = async (messages: ChatMessage[], tools: unknown[]) => {
+      call++;
+      seen.push(messages.map((m) => ({ ...m })));
+      if ((tools as unknown[]).length === 0) return finalResp('salvaged answer'); // the final-answer turn
+      await sleep(320); // each tool turn burns past the 250 ms wrap-up mark, then the 500 ms soft deadline
+      return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
+    };
+    const logs: string[] = [];
+    const result = await runAgenticLoop({
+      prompt: 'work', cwd: process.cwd(), model: 'test', callApi,
+      maxTurns: 0, timeoutMs: 1_000, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+    const noticeCount = (messages: ChatMessage[]) => messages.filter((m) => m.role === 'user' && String(m.content).startsWith('About ')).length;
+    expect(logs.some((l) => l.includes('Wrap-up notice'))).toBe(true);
+    // Turn 1 had no notice; every later call carries exactly one.
+    expect(noticeCount(seen[0])).toBe(0);
+    expect(seen.slice(1).every((messages) => noticeCount(messages) === 1)).toBe(true);
+    expect(seen.slice(1).length).toBeGreaterThan(0);
+    expect(wrapUpNotice(3)).toContain('About 3 minute(s)');
+    // The loop broke on its own deadline and the salvage turn produced the answer.
+    expect(logs.some((l) => l.includes('Agentic loop timeout'))).toBe(true);
+    expect(result.text).toBe('salvaged answer');
   });
 });
 
