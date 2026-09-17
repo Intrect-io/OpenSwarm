@@ -138,6 +138,24 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     } else {
       console.log('⏭ Linear not configured — skipping');
     }
+    // Workers inherit LINEAR_API_KEY whether or not the daemon used it. Probe
+    // it once; a key Linear itself rejects is withheld from every worker so an
+    // agent is told it has no credential instead of handed one that 401s
+    // (AGT-4028). A probe that could not reach Linear condemns nothing.
+    const exportedKey = process.env.LINEAR_API_KEY?.trim();
+    if (exportedKey) {
+      const { probeLinearApiKey, probeCondemnsKey } = await import('../linear/credentialProbe.js');
+      const { markWorkerEnvKeyDead } = await import('../adapters/envPath.js');
+      const probe = await probeLinearApiKey(exportedKey);
+      if (probe.ok) {
+        console.log(`✅ LINEAR_API_KEY answers as ${probe.viewer} — workers may use it`);
+      } else if (probeCondemnsKey(probe)) {
+        markWorkerEnvKeyDead('LINEAR_API_KEY', probe.reason);
+        console.warn(`⚠️ LINEAR_API_KEY is rejected by Linear (${probe.reason}) — withheld from workers; mint a new key and replace it in .env`);
+      } else {
+        console.warn(`⚠️ LINEAR_API_KEY could not be probed (${probe.reason}) — left in place`);
+      }
+    }
   } else {
     console.log('⏭ Linear not configured — skipping');
   }

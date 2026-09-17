@@ -356,6 +356,37 @@ describe('service', () => {
   // Service Lifecycle
   // ============================================
 
+  describe('exported LINEAR_API_KEY probe (AGT-4028)', () => {
+    afterEach(async () => {
+      const { clearDeadWorkerEnvKeys } = await import('../adapters/envPath.js');
+      clearDeadWorkerEnvKeys();
+      delete process.env.LINEAR_API_KEY;
+      vi.doUnmock('../linear/credentialProbe.js');
+    });
+
+    it('withholds a key Linear rejects from workers and keeps one Linear accepts', async () => {
+      const { buildWorkerEnv } = await import('../adapters/envPath.js');
+      process.env.LINEAR_API_KEY = 'dead-key';
+      vi.doMock('../linear/credentialProbe.js', () => ({
+        probeLinearApiKey: vi.fn(async () => ({ ok: false, reason: 'HTTP 401: Authentication required' })),
+        probeCondemnsKey: () => true,
+      }));
+      await startService(mockConfig);
+      expect(buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'dead-key' }).LINEAR_API_KEY).toBeUndefined();
+    });
+
+    it('leaves the key alone when the probe never reached Linear', async () => {
+      const { buildWorkerEnv } = await import('../adapters/envPath.js');
+      process.env.LINEAR_API_KEY = 'unknown-key';
+      vi.doMock('../linear/credentialProbe.js', () => ({
+        probeLinearApiKey: vi.fn(async () => ({ ok: false, reason: 'probe did not complete: ENOTFOUND' })),
+        probeCondemnsKey: () => false,
+      }));
+      await startService(mockConfig);
+      expect(buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'unknown-key' }).LINEAR_API_KEY).toBe('unknown-key');
+    });
+  });
+
   describe('service lifecycle', () => {
     it('should start service without errors', async () => {
       await expect(startService(mockConfig)).resolves.not.toThrow();
