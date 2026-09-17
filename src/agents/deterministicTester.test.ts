@@ -97,6 +97,31 @@ describe('deterministic verification trust inputs', () => {
     )).rejects.toThrow(/verify-runner: pytest could not run in this checkout/);
   });
 
+  it('still refuses when base and head fail on the environment with different words (AX-1542)', async () => {
+    // Live 2026-09-18: uv's first failed download was `jiter` at base and
+    // `fastapi` at head, the fingerprints differed, and a checkout that could
+    // not run anything was reported as "a blocking new failure" — the task
+    // burned three attempts on it. Not a verdict: fall back to the LLM tester.
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-unrunnable-'));
+    const repo = join(root, 'repo');
+    await mkdir(repo);
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+    await writeFile(join(repo, 'README.md'), 'base\n');
+    execFileSync('git', ['-C', repo, 'add', 'README.md']);
+    execFileSync('git', ['-C', repo, 'commit', '-m', 'base'], { stdio: 'pipe' });
+    execFileSync('git', ['clone', '--bare', '-q', repo, join(root, 'origin.git')], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', join(root, 'origin.git')]);
+    execFileSync('git', ['-C', repo, 'fetch', '-q', 'origin'], { stdio: 'pipe' });
+
+    await expect(runDeterministicTester(
+      repo,
+      { enabled: true, blockOnNewFailures: true, maxCommands: 1 },
+      [{ name: 'pytest', run: 'printf "error: Failed to download pkg-$$\\n"; exit 2', kind: 'test', timeoutMs: 10_000 }],
+    )).rejects.toThrow(/verify-runner: pytest could not run in this checkout/);
+  });
+
   it('keeps strict companion failures blocking when ordinary test regressions are non-blocking', async () => {
     root = await mkdtemp(join(tmpdir(), 'openswarm-verify-strict-'));
     const repo = join(root, 'repo');

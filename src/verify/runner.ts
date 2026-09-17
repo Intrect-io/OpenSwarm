@@ -875,15 +875,22 @@ export async function runVerify(options: RunVerifyOptions): Promise<VerifyEviden
         .subarray(-OUTPUT_TAIL_BYTES)
         .toString('utf8');
       const sameFailure = base.status === 'fail' && hasSameFailure(base, head);
-      const sameEnvironmentFailure = !!(sameFailure && base.environmentFailure && head.environmentFailure);
+      // The toolchain could not run on either side. That is not a verdict about
+      // the change even when the two outputs differ: the first package uv fails
+      // to download depends on resolution order, so base said `jiter` and head
+      // said `fastapi` (cgf-portal AX-1542, 2026-09-18) and the fingerprint
+      // mismatch was read as a new regression. The tester turns this into an
+      // infra error and falls back to the LLM tester (AGT-4407).
+      const environmentFailureOnBothSides = base.status === 'fail'
+        && !!base.environmentFailure && !!head.environmentFailure;
       evidence.push({
         command,
         baseStatus: base.status,
         headStatus: 'fail',
         securityFailure: base.securityFailure || undefined,
         environmentFailure: head.environmentFailure || undefined,
-        newFailure: base.status === 'pass'
-          || (base.status === 'fail' && (!sameFailure || (!!base.baselineEnvironmentChanged && !sameEnvironmentFailure))),
+        newFailure: !environmentFailureOnBothSides && (base.status === 'pass'
+          || (base.status === 'fail' && (!sameFailure || !!base.baselineEnvironmentChanged))),
         rawOutputTail,
         durationMs: Date.now() - started,
       });
