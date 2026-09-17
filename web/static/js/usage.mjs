@@ -39,9 +39,8 @@ export function timeAxisFor(since) {
  * A bucket key as a reader's clock shows it.
  *
  * `2026-09-10T14` is a UTC hour and carries no minutes, which `Date.parse`
- * rejects on its own — so it is completed before parsing. A day key is left
- * alone: converting it would shift it by the UTC offset and relabel the day,
- * which is AGT-4293's business, not this change's.
+ * rejects on its own — so it is completed before parsing. A day key is already
+ * a local day (`localDayKey` built it from UTC hours), so it is shown as is.
  */
 export function formatBucket(key) {
   const text = String(key ?? '');
@@ -49,6 +48,74 @@ export function formatBucket(key) {
   const at = new Date(`${text}:00:00Z`);
   if (Number.isNaN(at.getTime())) return text;
   return at.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', hour12: false });
+}
+
+/** `YYYY-MM-DD` of a UTC hour key (`2026-09-10T14`) on the reader's clock. */
+export function localDayKey(hourKey) {
+  const at = new Date(`${String(hourKey)}:00:00Z`);
+  if (Number.isNaN(at.getTime())) return String(hourKey);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+}
+
+function zeroRow(key) {
+  return { key, calls: 0, meteredCalls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, reasoningTokens: 0, costUsd: 0 };
+}
+
+function addRow(into, row) {
+  for (const field of ['calls', 'meteredCalls', 'promptTokens', 'completionTokens', 'cachedTokens', 'reasoningTokens', 'costUsd']) {
+    into[field] += row?.[field] ?? 0;
+  }
+}
+
+/**
+ * The day series, built on the reader's clock from the server's UTC hours.
+ *
+ * The server's `day` axis buckets on UTC midnight while the `기준` line beside
+ * it is local time. In KST that put every call between 00:00 and 09:00 into
+ * yesterday's bar, so a morning reading of "today" was missing nine hours.
+ * Re-bucketing the hour axis client-side keeps the ledger and the API UTC and
+ * needs no new server surface. (AGT-4293)
+ */
+export function daysFromHours(hourAggregate) {
+  const byDay = new Map();
+  for (const row of hourAggregate?.rows ?? []) {
+    const key = localDayKey(row.key);
+    if (!byDay.has(key)) byDay.set(key, zeroRow(key));
+    addRow(byDay.get(key), row);
+  }
+  const rows = [...byDay.values()].sort((a, b) => a.key.localeCompare(b.key));
+  const total = zeroRow('total');
+  for (const row of rows) addRow(total, row);
+  return { by: 'day', rows, total };
+}
+
+/**
+ * Every bucket between `since` and `until`, zero-filled where the ledger has
+ * no row. The aggregate only creates rows for buckets with calls, so a day
+ * the daemon sat idle simply vanished and its neighbours read as adjacent —
+ * a week-long gap in a 30d view drew as none. (AGT-4293)
+ */
+export function fillTimeGaps(aggregate, axis, since, until) {
+  const start = new Date(since);
+  const end = new Date(until);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return aggregate;
+  const present = new Map((aggregate?.rows ?? []).map(r => [String(r.key), r]));
+  const keys = [];
+  if (axis === 'hour') {
+    const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate(), start.getUTCHours()));
+    for (; cursor <= end; cursor.setUTCHours(cursor.getUTCHours() + 1)) keys.push(cursor.toISOString().slice(0, 13));
+  } else {
+    const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const pad = (n) => String(n).padStart(2, '0');
+    for (; cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+      keys.push(`${cursor.getFullYear()}-${pad(cursor.getMonth() + 1)}-${pad(cursor.getDate())}`);
+    }
+  }
+  const rows = keys.map(key => present.get(key) ?? zeroRow(key));
+  // Keys outside the window (clock skew, a wider ledger read) are kept, not dropped.
+  for (const [key, row] of present) if (!keys.includes(key)) rows.push(row);
+  return { ...aggregate, rows };
 }
 
 /**
@@ -197,7 +264,11 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
     table.append(body);
     return { rows: 0, drawn: 0, hidden: { count: 0, costUsd: 0 } };
   }
+  // Both orders are made here, not inherited: the API happens to return rows by
+  // cost today, and a truncation note computed on an unsorted slice once
+  // reported $0.05 hidden for $50.00 (AGT-4293).
   if (sortBy === 'calls') rows.sort((a, b) => (b.calls ?? 0) - (a.calls ?? 0));
+  else rows.sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0));
 
   const head = document.createElement('thead');
   const headRow = document.createElement('tr');
@@ -239,7 +310,8 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
 export function renderDays(container, aggregate) {
   container.replaceChildren();
   const rows = [...(aggregate?.rows ?? [])].sort((a, b) => String(a.key).localeCompare(String(b.key)));
-  if (rows.length === 0) {
+  // Zero-filled gaps are rows too (fillTimeGaps); "nothing recorded" means no calls at all.
+  if (rows.length === 0 || rows.every(r => (r.calls ?? 0) === 0)) {
     const p = document.createElement('p');
     p.className = 'usage-empty';
     p.textContent = '이 기간에 기록된 사용량이 없습니다.';
@@ -273,7 +345,9 @@ export function renderDays(container, aggregate) {
     fill.className = 'bar-fill';
     const fraction = peak > 0 ? (row.costUsd ?? 0) / peak : 0;
     fill.style.width = `${fraction * 100}%`;
-    if (fraction === 0) fill.classList.add('bar-fill-unmetered');
+    // A zero-filled gap draws an empty track on purpose; only a day that ran
+    // calls without a price gets the "present, unmetered" marker.
+    if (fraction === 0 && (row.calls ?? 0) > 0) fill.classList.add('bar-fill-unmetered');
     track.append(fill);
 
     const value = document.createElement('span');
@@ -339,14 +413,17 @@ export function renderSummary(root, { model, task }) {
  */
 export async function loadUsage(since, fetchImpl = globalThis.fetch) {
   const timeAxis = timeAxisFor(since);
-  const results = await Promise.all([timeAxis, ...AXES].map(async (by) => {
+  // The hour axis is fetched for every window: a day series is built from it
+  // on the reader's clock (daysFromHours), never from the server's UTC days.
+  const results = await Promise.all(['hour', ...AXES].map(async (by) => {
     const res = await fetchImpl(`/api/usage?since=${encodeURIComponent(since)}&by=${by}`);
     if (!res.ok) throw new Error(`/api/usage?by=${by} → ${res.status}`);
     return [by, await res.json()];
   }));
   const data = Object.fromEntries(results);
+  const series = timeAxis === 'day' ? daysFromHours(data.hour) : data.hour;
   // `time` is whichever axis was chosen, so the renderer need not know which.
-  data.time = data[timeAxis];
+  data.time = fillTimeGaps(series, timeAxis, data.hour?.since, data.hour?.until);
   data.timeAxis = timeAxis;
   return data;
 }

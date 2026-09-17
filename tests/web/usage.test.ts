@@ -16,7 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, 
 // @ts-expect-error — browser ESM asset without type declarations
 import {
   attributedTasks, cacheRate, costPerCall, formatCost, formatPercent, formatTokens,
-  formatBucket, loadUsage, rateClass, renderDays, renderSummary, renderTable, share,
+  daysFromHours, fillTimeGaps, formatBucket, loadUsage, localDayKey, rateClass, renderDays, renderSummary, renderTable, share,
   timeAxisFor, WINDOWS,
   rowShare, startUsageView, truncationNote, UNATTRIBUTED, windowFromSearch,
 } from '../../web/static/js/usage.mjs';
@@ -321,6 +321,56 @@ describe('day series', () => {
   });
 });
 
+describe('day axis on the reader\'s clock (AGT-4293)', () => {
+  // TZ is pinned to Asia/Seoul for this file (UTC+9).
+  it('puts a KST-morning call and the previous UTC-evening call into the same local day', () => {
+    expect(localDayKey('2026-09-09T23')).toBe('2026-09-10'); // 08:00 KST on the 10th
+    expect(localDayKey('2026-09-10T00')).toBe('2026-09-10'); // 09:00 KST
+    expect(localDayKey('2026-09-09T14')).toBe('2026-09-09'); // 23:00 KST on the 9th
+    const days = daysFromHours({
+      rows: [row('2026-09-09T23', { costUsd: 1, calls: 3 }), row('2026-09-10T00', { costUsd: 2, calls: 4 }), row('2026-09-09T14', { costUsd: 5, calls: 1 })],
+      total: row('total'),
+    });
+    expect(days.rows.map(r => [r.key, r.costUsd, r.calls])).toEqual([['2026-09-09', 5, 1], ['2026-09-10', 3, 7]]);
+    expect(days.total.costUsd).toBe(8);
+  });
+
+  it('draws a zero-height bar for a day with no calls instead of collapsing the series', () => {
+    const filled = fillTimeGaps(
+      { by: 'day', rows: [row('2026-09-08', { costUsd: 4, calls: 2 }), row('2026-09-10', { costUsd: 2, calls: 1 })], total: row('total') },
+      'day', '2026-09-08T00:00:00+09:00', '2026-09-10T12:00:00+09:00',
+    );
+    expect(filled.rows.map(r => [r.key, r.calls])).toEqual([['2026-09-08', 2], ['2026-09-09', 0], ['2026-09-10', 1]]);
+    document.body.innerHTML = '<div id="days"></div>';
+    const days = document.querySelector('#days')!;
+    renderDays(days, filled);
+    const fills = [...days.querySelectorAll('.bar-fill')] as HTMLElement[];
+    expect(fills.map(f => f.style.width)).toEqual(['100%', '0%', '50%']);
+    // A gap is empty, not "unmetered".
+    expect(fills[1].classList.contains('bar-fill-unmetered')).toBe(false);
+  });
+
+  it('fills hour gaps on UTC hour keys', () => {
+    const filled = fillTimeGaps(
+      { by: 'hour', rows: [row('2026-09-10T02', { calls: 1 })], total: row('total') },
+      'hour', '2026-09-10T01:30:00Z', '2026-09-10T03:10:00Z',
+    );
+    expect(filled.rows.map(r => r.key)).toEqual(['2026-09-10T01', '2026-09-10T02', '2026-09-10T03']);
+  });
+
+  it('sorts by cost itself instead of inheriting the API order, and the truncation note follows', () => {
+    document.body.innerHTML = '<table id="t"></table>';
+    const table = document.querySelector('#t')!;
+    const drew = renderTable(table, {
+      rows: [row('cheap', { costUsd: 0.05 }), row('dear', { costUsd: 50 }), row('mid', { costUsd: 5 })],
+      total: row('total', { costUsd: 55.05 }),
+    }, { limit: 2, label: 'x' });
+    const keys = [...table.querySelectorAll('tbody tr td:first-child')].map(td => td.textContent);
+    expect(keys).toEqual(['dear', 'mid']);
+    expect(drew.hidden).toEqual({ count: 1, costUsd: 0.05 });
+  });
+});
+
 describe('attributed tasks (AGT-4288 number)', () => {
   it('excludes the unattributed bucket from both the count and the calls', () => {
     // `usageLedger` buckets every call with no taskId under one key. Counting
@@ -402,8 +452,11 @@ describe('loading', () => {
     const data = await loadUsage('7d', fetchImpl as never);
 
     const asked = fetchImpl.mock.calls.map(([url]) => new URL(url as string, 'http://x').searchParams.get('by'));
-    // 7d is past the hourly ceiling, so the time axis is still `day`.
-    expect(asked.sort()).toEqual(['adapter', 'day', 'model', 'project', 'stage', 'task']);
+    // 7d is past the hourly ceiling, so the series is drawn by day — but the
+    // day series is built client-side from UTC hours (AGT-4293), so the server's
+    // `day` axis is never asked for.
+    expect(asked.sort()).toEqual(['adapter', 'hour', 'model', 'project', 'stage', 'task']);
+    expect(data.timeAxis).toBe('day');
     expect(fetchImpl.mock.calls.every(([url]) => (url as string).includes('since=7d'))).toBe(true);
     expect(data.model.rows[0].key).toBe('model-a');
   });
@@ -414,8 +467,11 @@ describe('loading', () => {
 
     expect(document.querySelector('#table-model tbody td')?.textContent).toBe('model-a');
     expect(document.querySelector('#table-stage tbody td')?.textContent).toBe('stage-a');
-    // The default window is 24h, so the series comes off the hour axis.
-    expect(document.querySelector('#days .bar-day')?.textContent).toBe('hour-a');
+    // The default window is 24h, so the series comes off the hour axis; the
+    // fixture's key is not a real hour, so it is kept after the zero-filled
+    // window rather than dropped (AGT-4293).
+    const labels = [...document.querySelectorAll('#days .bar-day')].map(el => el.textContent);
+    expect(labels).toContain('hour-a');
     expect(document.querySelector('#days-title')?.textContent).toBe('시간별');
     expect(document.querySelector('#status')?.textContent).toContain('기준');
   });
@@ -675,7 +731,9 @@ describe('windows and the time axis (AGT-4296)', () => {
     expect(asked).toContain('hour');
     expect(asked).not.toContain('day');
     expect(data.timeAxis).toBe('hour');
-    expect(data.time).toBe(data.hour);
+    // The series is the hour axis, zero-filled across the window (AGT-4293).
+    expect(data.time.rows.map((r: { key: string }) => r.key)).toContain('hour-a');
+    expect(data.time.rows.length).toBeGreaterThan(1);
   });
 
   it("renders a UTC hour bucket on the reader's clock, and leaves a day alone", () => {
