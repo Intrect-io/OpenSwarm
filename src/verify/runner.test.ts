@@ -106,6 +106,19 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
   });
 
+  it('is not a new failure when both sides fail on the environment with different words (AX-1542)', async () => {
+    // `$$` differs between the base and head sandboxes, as uv's first failed
+    // download did — the fingerprints must not decide this case.
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "error: Failed to download pkg-$$\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+    const [baseTail, headTail] = evidence.rawOutputTail.split('[head]');
+    expect(baseTail).not.toBe(headTail);
+  });
+
   it('does not mark an ordinary head failure as an environment failure', async () => {
     const [evidence] = await runVerify({
       projectPath: repo,
