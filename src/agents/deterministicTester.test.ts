@@ -71,6 +71,32 @@ describe('deterministic verification trust inputs', () => {
     expect(plan.packageJsonByDirectory).toEqual({ 'packages/api': nestedPackage });
   });
 
+  it('refuses to pass when the only verdict is a toolchain that could not run (AGT-4407)', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-unrunnable-'));
+    const repo = join(root, 'repo');
+    await mkdir(repo);
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', repo, 'config', 'user.name', 'Test']);
+    await writeFile(join(repo, 'README.md'), 'base\n');
+    execFileSync('git', ['-C', repo, 'add', 'README.md']);
+    execFileSync('git', ['-C', repo, 'commit', '-m', 'base'], { stdio: 'pipe' });
+    // The base ref is origin/<default>; give the fixture a remote so the base
+    // run really executes instead of failing to resolve (which is its own,
+    // already-handled infra path).
+    execFileSync('git', ['clone', '--bare', '-q', repo, join(root, 'origin.git')], { stdio: 'pipe' });
+    execFileSync('git', ['-C', repo, 'remote', 'add', 'origin', join(root, 'origin.git')]);
+    execFileSync('git', ['-C', repo, 'fetch', '-q', 'origin'], { stdio: 'pipe' });
+
+    // Same ModuleNotFoundError at base and head — before AGT-4407 this returned
+    // success: true with zero tests run (cgf-portal's 3-second green tester).
+    await expect(runDeterministicTester(
+      repo,
+      { enabled: true, blockOnNewFailures: true, maxCommands: 1 },
+      [{ name: 'pytest', run: 'python3 -c "import openswarm_definitely_missing_module_xyz"', kind: 'test', timeoutMs: 10_000 }],
+    )).rejects.toThrow(/verify-runner: pytest could not run in this checkout/);
+  });
+
   it('keeps strict companion failures blocking when ordinary test regressions are non-blocking', async () => {
     root = await mkdtemp(join(tmpdir(), 'openswarm-verify-strict-'));
     const repo = join(root, 'repo');

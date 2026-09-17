@@ -35,6 +35,14 @@ export interface VerifyEvidence {
   newFailure: boolean;
   /** A containment/attestation failure that policy must never make non-blocking. */
   securityFailure?: boolean;
+  /**
+   * The head run failed because the toolchain is missing (ModuleNotFoundError
+   * for pytest, `Cannot find module`, no Cargo manifest …), not because of
+   * the change. Reported separately so a caller can refuse to count it as a
+   * verified pass: when base fails the same way this used to be "pre-existing
+   * failure → not new → success" — a green tester that ran nothing (AGT-4407).
+   */
+  environmentFailure?: boolean;
   rawOutputTail: string;
   durationMs: number;
 }
@@ -225,6 +233,14 @@ function isEnvironmentFailure(output: string): boolean {
     /ModuleNotFoundError:\s*No module named\b/i,
     /ImportError:\s*No module named\b/i,
     /Cannot find module ['"]/i,
+    // uv / pip driven from inside the network-less verification sandbox: the
+    // environment cannot be built, so neither run is a verdict. (AGT-4407)
+    /Failed to initialize cache at/i,
+    /error: Failed to (?:download|fetch|prepare|sync)/i,
+    /No solution found when resolving dependencies/i,
+    /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,
+    /No virtual environment found/i,
+    /command not found:? (?:uv|python3?|pytest|ruff|npm|cargo|go)\b/i,
     /could not find [`']?Cargo\.toml/i,
     /failed to (?:load|read) manifest for workspace member/i,
     /Cargo\.toml.*(?:No such file or directory|os error 2)/i,
@@ -865,6 +881,7 @@ export async function runVerify(options: RunVerifyOptions): Promise<VerifyEviden
         baseStatus: base.status,
         headStatus: 'fail',
         securityFailure: base.securityFailure || undefined,
+        environmentFailure: head.environmentFailure || undefined,
         newFailure: base.status === 'pass'
           || (base.status === 'fail' && (!sameFailure || (!!base.baselineEnvironmentChanged && !sameEnvironmentFailure))),
         rawOutputTail,
