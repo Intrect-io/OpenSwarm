@@ -28,6 +28,7 @@ import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol
 import type { CoordinatorResolution } from './coordinatorResolution.js';
 import { processNamespaceId } from '../support/processLiveness.js';
 import { ownerVerdict, type OwnerVerdict } from './ownerLiveness.js';
+import { isReviewRollbackDetail, PR_REVIEW_ROLLBACK_CODE } from './draftPullRequestCause.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -702,11 +703,16 @@ export class DurableRunCoordinator {
     const now = Date.now();
 
     if (publishedNeedsReconcile) {
+      // A PR-time review rollback is one of these too, and the reconciler has
+      // to tell it from a crash or a duplicate: only a rejected publication is
+      // fixed by re-running the work (AGT-4272). Keep the rollback's own code
+      // and the reviewer's words instead of the generic reconcile label.
+      const rolledBack = isReviewRollbackDetail(result.failureDetail);
       const reason = 'Published PR requires artifact reconciliation before tracker completion';
       return this.ledger.transition(claim, 'NEEDS_RECONCILE', {
         prUrl: result.prUrl,
-        errorCode: 'publication_reconcile',
-        errorMessage: reason,
+        errorCode: rolledBack ? PR_REVIEW_ROLLBACK_CODE : 'publication_reconcile',
+        errorMessage: rolledBack ? result.failureDetail ?? reason : reason,
         eventData: {
           sessionId: result.sessionId,
           finalStatus: result.finalStatus,

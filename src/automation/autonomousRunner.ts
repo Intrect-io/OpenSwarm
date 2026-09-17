@@ -70,6 +70,8 @@ import {
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
 import { publishStuckWork } from './publishOnPark.js';
+import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
+import { draftPullRequestCause } from './draftPullRequestCause.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
@@ -1673,29 +1675,45 @@ export class AutonomousRunner {
             this.durableRuns.markNeedsHuman(run.issueId, `Published PR was closed without merge: ${pr.url}`);
             continue;
           }
-          // A draft is the branch saying it is not finished — the run parked
-          // and published for visibility, a sibling PR already closes the
-          // issue (INT-2544), or the PR-time review rejected it and moved it
-          // back (AGT-4270). Recovering any of those as 'approved' would
-          // close the issue on work nobody accepted, and the draft flag means
-          // no human is prompted to look either. Send it back to be worked;
-          // the commits stay on the branch, so the next attempt continues
-          // instead of starting over.
+          // A draft is the branch saying it is not finished, and recovering
+          // one as 'approved' would close the issue on work nobody accepted
+          // with no human prompted to look (AGT-4270). But the three reasons a
+          // PR is a draft want three different things (AGT-4272):
           //
-          // Unlike the recovery below, this RE-RUNS work, so it needs the
-          // live tracker card the note at the top of this loop describes: an
-          // issue that already reached Done is invisible to the heartbeat
-          // fetch, and re-queueing one would pay a whole worker attempt for a
-          // card nobody can see. (AGT-4094)
+          // - the PR-time review rejected it and moved it back: re-run. The
+          //   commits stay on the branch, so the next attempt fixes rather
+          //   than restarts. Unlike the recovery below this RE-RUNS work, so
+          //   it needs the live tracker card the note at the top of this loop
+          //   describes — re-queueing an issue the heartbeat cannot see pays
+          //   a worker attempt for a card nobody can see (AGT-4094);
+          // - a sibling PR already closes the issue (INT-2544): the draft is
+          //   deliberate and survives every republish, so a re-run can never
+          //   make it ready — it only burns attempts. The work is delivered;
+          //   record it as such;
+          // - anything else is a publication a human has to judge: park it
+          //   with the draft in the reason instead of re-running it.
           if (pr.isDraft) {
-            if (!task) {
-              console.warn(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) but no live tracker card — leaving it for the terminal-run reconciler`);
+            const siblings = run.identifier
+              ? await findDuplicateIssuePRs(run.projectPath, run.identifier, run.branchName)
+              : [];
+            const cause = draftPullRequestCause(run.lastErrorCode, siblings.length);
+            if (cause === 'review_rollback') {
+              if (!task) {
+                console.warn(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) rolled back by review but no live tracker card — leaving it for the terminal-run reconciler`);
+                continue;
+              }
+              if (this.durableRuns.markReady(run.issueId)) {
+                console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) rolled back by review — returned to the queue rather than completed`);
+              }
               continue;
             }
-            if (this.durableRuns.markReady(run.issueId)) {
-              console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) — returned to the queue rather than completed`);
+            if (cause === 'parked_publication') {
+              if (this.durableRuns.markNeedsHuman(run.issueId, `Draft PR needs a human: ${pr.url} — not a review rollback and no sibling PR closes the issue`)) {
+                console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) of no recorded cause — parked for a human rather than re-run`);
+              }
+              continue;
             }
-            continue;
+            console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) because ${siblings.length} sibling PR(s) already close the issue — recording it as delivered`);
           }
           const publishedTask = task ?? runRecordToTask(run);
           const recoveredResult: PipelineResult = {
