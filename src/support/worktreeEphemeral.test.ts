@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { citedPathsAreEphemeral, ephemeralPathspecRoots, isEphemeralWorktreeArtifact } from './worktreeEphemeral.js';
+import { citedPathsAreEphemeral, ephemeralPathspecRoots, isEphemeralWorktreeArtifact, isAgentScratchFile } from './worktreeEphemeral.js';
 
 describe('isEphemeralWorktreeArtifact', () => {
   // cgf-portal#207 (2026-09-02) shipped `apps/pipelines/.coverage`: the repo
@@ -151,4 +151,40 @@ describe('agent-runtime scratch (2026-09-10)', () => {
     expect(isEphemeralWorktreeArtifact('docs/tmp-run-guide.txt')).toBe(false);
   });
 
+});
+
+describe('isAgentScratchFile (AGT-4410)', () => {
+  it('names the two shapes that reached cgf-portal PRs and their neighbours', () => {
+    for (const file of [
+      '_apply_edit.py',
+      'apps/pipelines/_apply_fix.sh',
+      'scripts/check_migration_immutability.py.bak',
+      'src/a.ts.orig',
+      'src/a.ts.rej',
+      'docs/notes.md~',
+      '.DS_Store',
+      'apps/portal/.DS_Store',
+    ]) {
+      expect(isAgentScratchFile(file), file).toBe(true);
+    }
+  });
+
+  it('leaves source that merely resembles scratch alone', () => {
+    for (const file of [
+      'src/apply_edit.py',            // no leading underscore
+      'src/backup.ts',                // "bak" is not an extension here
+      'fixtures/original.json',
+      'apps/portal/src/rejected_orders.py',
+      'scripts/_apply_edit.md',       // not a script
+      'src/tilde~/x.ts',              // ~ mid-path, not a trailing backup marker
+    ]) {
+      expect(isAgentScratchFile(file), file).toBe(false);
+    }
+  });
+
+  it('is not folded into the runtime-artifact predicate, which also purges tracked files', () => {
+    // A repository may legitimately track a .bak; the purge on a resumed branch
+    // must not delete it. Only additions are filtered, by the staging step.
+    expect(isEphemeralWorktreeArtifact('config/prod.yaml.bak')).toBe(false);
+  });
 });

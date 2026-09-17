@@ -179,6 +179,7 @@ import {
   type IntegrationSiblingResult,
 } from './integrationCoordinator.js';
 import { getOwnedPRsForRepo } from './prOwnership.js';
+import { publicationReviewBudget } from './publicationReviewBudget.js';
 
 // Types
 
@@ -490,10 +491,9 @@ export class PRProcessor {
       const review = await runReviewCommand({
         path: scratchWorktree,
         base: mergeBase,
-        // The scratch checkout is the reviewed repository, not OpenSwarm, so
-        // config discovery there falls back to the unavailable `codex` CLI.
-        // Preserve the daemon's explicitly configured PR reviewer adapter.
-        adapter: this.config.roles?.reviewer?.adapter,
+        // Adapter, model, wall clock and turn ceiling of the reviewer role —
+        // not the CLI's 300s/20-turn defaults, which killed half the reviews.
+        ...publicationReviewBudget(this.config.roles?.reviewer, `${pr.repo}#${pr.number}`),
         // The checked-out content is another PR's diff — untrusted the same
         // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
         // including bash, keeps a malicious PR from using the reviewer's
