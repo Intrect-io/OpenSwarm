@@ -107,6 +107,16 @@ describe('SqliteTaskSource', () => {
     expect(store.getIssue(issue.id)?.status).toBe('done');
   });
 
+  it('leaves the issue in review while its pull request is open (AGT-4409)', async () => {
+    store = freshStore();
+    const issue = store.createIssue({ projectId: 'p', title: 'x', status: 'todo' });
+    const src = new SqliteTaskSource(store);
+    await src.logPairComplete(issue.id, 'session', {
+      attempts: 1, duration: 3, filesChanged: ['src/a.ts'], prUrl: 'https://github.com/o/r/pull/9',
+    });
+    expect(store.getIssue(issue.id)?.status).toBe('in_review');
+  });
+
   it('deduplicates concurrent/retried local completion comments by marker', async () => {
     store = freshStore();
     const issue = store.createIssue({ projectId: 'p', title: 'x', status: 'todo' });

@@ -6,7 +6,7 @@ import { LinearClient } from '@linear/sdk';
 import { createHash } from 'node:crypto';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
 import { formatAutomationComment, formatPairDialogue, type CommentSection } from './format.js';
-import type { PairCompleteStats } from '../automation/taskSource.js';
+import { completionTargetState, type PairCompleteStats } from '../automation/taskSource.js';
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
 import { c, status } from '../support/colors.js';
@@ -1320,6 +1320,10 @@ export async function logPairComplete(
     sections.push({ label: 'Remaining work', body: stats.remainingWork.trim() });
   }
 
+  if (stats.prUrl) {
+    sections.push({ label: 'Pull request', body: `${stats.prUrl} — the issue moves to Done when it merges.` });
+  }
+
   sections.push({
     label: 'Changed files',
     body: stats.filesChanged.length > 0
@@ -1345,8 +1349,10 @@ export async function logPairComplete(
     attribution: 'Worker/Reviewer/Tester pipeline',
   }) + (stats.idempotencyMarker ? `\n\n<!-- openswarm-effect:${stats.idempotencyMarker} -->` : '');
   await addComment(issueId, comment, stats.idempotencyMarker ? effectCommentId(stats.idempotencyMarker) : undefined);
-  const accepted = await updateIssueState(issueId, 'Done');
-  if (!accepted) throw new Error(`Linear refused Done transition for ${issueId}`);
+  // In Review while the PR is open; the merge sweep grants Done (AGT-4409).
+  const target = completionTargetState(stats);
+  const accepted = await updateIssueState(issueId, target);
+  if (!accepted) throw new Error(`Linear refused ${target} transition for ${issueId}`);
 }
 
 /**
