@@ -28,7 +28,8 @@ import type { ToolDefinition } from './tools.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import {
   loadModelCatalog,
-  parseOpenAiModelList,
+  parseOpenAiModelListing,
+  contextWindowFor,
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
@@ -72,7 +73,7 @@ function catalogSpec(): CatalogSpec {
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
       if (!res.ok) return [];
-      return parseOpenAiModelList(await res.json());
+      return parseOpenAiModelListing(await res.json()); // ids + context windows (AGT-4386)
     },
   };
 }
@@ -146,6 +147,8 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       model,
       callApi,
       maxTurns: options.maxTurns ?? 20,
+      // Size compaction to the advertised window when the catalog has it. (AGT-4386)
+      contextWindowTokens: contextWindowFor('atlascloud', model),
       timeoutMs: options.timeoutMs ?? 300000,
       onLog: options.onLog,
       enableTools: options.enableTools ?? true,

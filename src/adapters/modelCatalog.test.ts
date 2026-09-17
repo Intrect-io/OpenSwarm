@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   catalogCacheDir,
   loadModelCatalog,
+  contextWindowFor,
   parseOpenAiModelList,
+  parseOpenAiModelListing,
+  parseOpenAiModelWindows,
   readCachedCatalog,
   resolveDefaultModel,
   writeCachedCatalog,
@@ -154,5 +157,56 @@ describe('resolveDefaultModel', () => {
     const onWarn = vi.fn();
     expect(await resolveDefaultModel(s, 'anything/at-all', { cacheDir: tmp(), onWarn })).toBe('anything/at-all');
     expect(onWarn).not.toHaveBeenCalled();
+  });
+});
+
+describe('context windows (AGT-4386)', () => {
+  const body = {
+    data: [
+      { id: 'deepseek/deepseek-v4-flash', context_length: 262144 },
+      { id: 'qwen/qwen3-235b-a22b-2507', context_length: 262144 },
+      { id: 'no-window/model' },
+      { id: 'bad-window/model', context_length: '128k' },
+      { id: 'lmstudio/model', context_window: 32768 },
+    ],
+  };
+
+  it('parses context_length (and context_window) per id, skipping unusable values', () => {
+    expect(parseOpenAiModelWindows(body)).toEqual({
+      'deepseek/deepseek-v4-flash': 262144,
+      'qwen/qwen3-235b-a22b-2507': 262144,
+      'lmstudio/model': 32768,
+    });
+    expect(parseOpenAiModelWindows({})).toEqual({});
+    expect(parseOpenAiModelWindows(null)).toEqual({});
+  });
+
+  it('keeps the windows through the cache and serves them to contextWindowFor', async () => {
+    const dir = tmp();
+    const s = spec({ fetchLive: async () => parseOpenAiModelListing(body) });
+    const live = await loadModelCatalog(s, { cacheDir: dir });
+    expect(live.origin).toBe('live');
+    expect(live.windows?.['deepseek/deepseek-v4-flash']).toBe(262144);
+    expect(contextWindowFor('testprovider', 'deepseek/deepseek-v4-flash', dir)).toBe(262144);
+    expect(contextWindowFor('testprovider', 'no-window/model', dir)).toBeUndefined();
+
+    const cached = await loadModelCatalog(spec({ fetchLive: async () => { throw new Error('offline'); } }), { cacheDir: dir });
+    expect(cached.origin).toBe('cache');
+    expect(cached.windows?.['lmstudio/model']).toBe(32768);
+  });
+
+  it('reads a pre-AGT-4386 cache file (ids only) as windows unknown, not as corrupt', () => {
+    const dir = tmp();
+    writeFileSync(resolve(dir, 'testprovider.json'), JSON.stringify({ models: ['a/b'], fetchedAt: new Date().toISOString() }));
+    expect(readCachedCatalog('testprovider', dir)?.models).toEqual(['a/b']);
+    expect(contextWindowFor('testprovider', 'a/b', dir)).toBeUndefined();
+  });
+
+  it('a string[] fetchLive still works (no windows)', async () => {
+    const dir = tmp();
+    const live = await loadModelCatalog(spec(), { cacheDir: dir });
+    expect(live.models).toEqual(['live/x', 'live/y']);
+    expect(live.windows).toBeUndefined();
+    expect(contextWindowFor('testprovider', 'live/x', dir)).toBeUndefined();
   });
 });
