@@ -974,11 +974,11 @@ describe('DurableRunCoordinator', () => {
     const ledger = new RunLedger(path);
     ledger.registerRun({ issueId: 'DEAD-OWNER', source: 'linear', projectPath: '/repo' }, 1_000);
     const stale = ledger.claimRun('DEAD-OWNER', {
-      ownerInstanceId: '424242-dead-owner', leaseMs: 3_000, now: 1_000,
+      ownerInstanceId: '424242-dead-owner', ownerPidSpace: 'pidns:test', leaseMs: 3_000, now: 1_000,
     })!;
     expect(ledger.transition(stale, 'EXECUTING', {}, 1_100)).toBe(true);
     const replacement = new DurableRunCoordinator({
-      mode: 'primary', ledger, instanceId: 'replacement', processIsAlive: () => false,
+      mode: 'primary', ledger, instanceId: 'replacement', pidSpace: 'pidns:test', processIsAlive: () => false,
     });
 
     expect(replacement.reconcile(4_001)).toHaveLength(1);
@@ -997,11 +997,11 @@ describe('DurableRunCoordinator', () => {
     const liveLedger = new RunLedger(livePath);
     liveLedger.registerRun({ issueId: 'LIVE-PID', source: 'linear', projectPath: '/live-repo' }, 1_000);
     const liveClaim = liveLedger.claimRun('LIVE-PID', {
-      ownerInstanceId: `${process.pid}-live-owner`, leaseMs: 3_000, now: 1_000,
+      ownerInstanceId: `${process.pid}-live-owner`, ownerPidSpace: 'pidns:test', leaseMs: 3_000, now: 1_000,
     })!;
     expect(liveLedger.transition(liveClaim, 'EXECUTING', {}, 1_100)).toBe(true);
     const liveReplacement = new DurableRunCoordinator({
-      mode: 'primary', ledger: liveLedger, instanceId: 'live-replacement',
+      mode: 'primary', ledger: liveLedger, instanceId: 'live-replacement', pidSpace: 'pidns:test',
     });
 
     expect(liveReplacement.reconcile(4_001)).toHaveLength(1);
@@ -1017,14 +1017,14 @@ describe('DurableRunCoordinator', () => {
     const deadLedger = new RunLedger(deadPath);
     deadLedger.registerRun({ issueId: 'DEAD-PID', source: 'linear', projectPath: '/dead-repo' }, 1_000);
     const deadClaim = deadLedger.claimRun('DEAD-PID', {
-      ownerInstanceId: '999999-dead-owner', leaseMs: 3_000, now: 1_000,
+      ownerInstanceId: '999999-dead-owner', ownerPidSpace: 'pidns:test', leaseMs: 3_000, now: 1_000,
     })!;
     expect(deadLedger.transition(deadClaim, 'EXECUTING', {}, 1_100)).toBe(true);
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('missing process'), { code: 'ESRCH' });
     });
     const deadReplacement = new DurableRunCoordinator({
-      mode: 'primary', ledger: deadLedger, instanceId: 'dead-replacement',
+      mode: 'primary', ledger: deadLedger, instanceId: 'dead-replacement', pidSpace: 'pidns:test',
     });
 
     expect(deadReplacement.reconcile(4_001)).toHaveLength(1);

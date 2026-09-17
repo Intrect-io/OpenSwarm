@@ -27,6 +27,7 @@ export function migrateAutomationSchema(db: Database.Database): void {
         state_version INTEGER NOT NULL DEFAULT 1,
         attempt_no INTEGER NOT NULL DEFAULT 0,
         owner_instance_id TEXT,
+        owner_pid_space TEXT,
         lease_token TEXT,
         lease_epoch INTEGER NOT NULL DEFAULT 0,
         lease_expires_at INTEGER,
@@ -161,6 +162,11 @@ export function migrateAutomationSchema(db: Database.Database): void {
       if (!runColumns.has('tracker_checked_at')) db.exec('ALTER TABLE automation_runs ADD COLUMN tracker_checked_at INTEGER');
       db.exec(`CREATE INDEX IF NOT EXISTS idx_automation_runs_tracker_reconcile
         ON automation_runs(source, state, tracker_checked_at, updated_at)`);
+      // v4 -> v5: the pid space the claiming process lived in. A pid is unique
+      // only within one pid namespace, so "this owner's pid is mine" proves the
+      // owner exited only when the row says the numbering is ours. Rows from
+      // before this column stay NULL and fall back to the age timer (AGT-4072).
+      if (!runColumns.has('owner_pid_space')) db.exec('ALTER TABLE automation_runs ADD COLUMN owner_pid_space TEXT');
 
       const current = db.prepare('SELECT value FROM automation_meta WHERE key = ?').get('schema_version') as { value: string } | undefined;
       if (current && Number(current.value) > AUTOMATION_SCHEMA_VERSION) {

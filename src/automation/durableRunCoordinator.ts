@@ -26,6 +26,8 @@ import {
 } from '../coordination/operatorAnswers.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import type { CoordinatorResolution } from './coordinatorResolution.js';
+import { processNamespaceId } from '../support/processLiveness.js';
+import { ownerVerdict, type OwnerVerdict } from './ownerLiveness.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -37,6 +39,11 @@ export interface DurableRunCoordinatorConfig {
   maxActiveForProject?: number;
   /** Test seam for crash recovery; production probes the owner PID. */
   processIsAlive?: (pid: number) => boolean;
+  /**
+   * Test seam for the pid space stamped on claims and compared in reconcile();
+   * production uses `processNamespaceId()` (AGT-4072).
+   */
+  pidSpace?: string;
   /**
    * How long a NEEDS_RECONCILE row's stale owner is trusted once a pid probe
    * alone can't disprove it (container pid reuse — see reconcile()). Default
@@ -145,13 +152,6 @@ export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): 
   return now + 30 * 60_000;
 }
 
-function ownerProcessId(instanceId: string): number | null {
-  const match = instanceId.match(/^(\d+)-/);
-  if (!match) return null;
-  const pid = Number(match[1]);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-}
-
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -239,6 +239,7 @@ export class DurableRunCoordinator {
   private readonly maxActiveForProject: number;
   private readonly infraFailureCircuit: number;
   private readonly processIsAlive: (pid: number) => boolean;
+  private readonly pidSpace: string | undefined;
   private readonly reconcileAbandonMs: number;
   private readonly exitedClaims = new Map<string, RunClaim>();
   private closed = false;
@@ -252,6 +253,7 @@ export class DurableRunCoordinator {
     this.maxActiveForProject = Math.max(1, Math.floor(config.maxActiveForProject ?? 1));
     this.infraFailureCircuit = Math.max(0, Math.floor(config.infraFailureCircuit ?? DEFAULT_INFRA_FAILURE_CIRCUIT));
     this.processIsAlive = config.processIsAlive ?? processIsAlive;
+    this.pidSpace = 'pidSpace' in config ? config.pidSpace : processNamespaceId();
     this.reconcileAbandonMs = config.reconcileAbandonMs ?? this.leaseMs;
     if (this.leaseMs < 3_000) throw new Error('Durable run lease must be at least 3000ms');
     // A negative value would make `now - run.updatedAt >= reconcileAbandonMs`
@@ -500,6 +502,7 @@ export class DurableRunCoordinator {
 
     let claim = this.ledger.claimRun(issueId, {
       ownerInstanceId: this.instanceId,
+      ownerPidSpace: this.pidSpace,
       leaseMs: this.leaseMs,
       maxActiveForProject: options.admission?.maxConcurrent ?? this.maxActiveForProject,
       conflictScope: options.admission?.conflictScope,
@@ -841,14 +844,15 @@ export class DurableRunCoordinator {
     for (const claim of this.exitedClaims.values()) this.confirmExitedClaim(claim, now);
     for (const run of this.ledger.listRuns(['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING'])) {
       if (!run.ownerInstanceId || !run.leaseToken) continue;
-      const pid = ownerProcessId(run.ownerInstanceId);
       // Docker commonly gives a replacement daemon the same container PID.
       // The PID probe then finds *this* process even though the persisted UUID
       // belongs to the daemon generation that was just stopped. A PID cannot
-      // belong to two generations, so this exact mismatch proves the recorded
-      // executor exited and avoids idling the repository for a full lease.
-      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
-      if (pid != null && this.processIsAlive(pid) && !samePidDifferentGeneration) continue;
+      // belong to two generations IN ONE PID SPACE, so that mismatch proves the
+      // recorded executor exited — but only when the row's recorded space is
+      // ours; a peer container on the same ledger also runs as pid 7 and is
+      // very much alive (AGT-4072). Rows that cannot be judged wait for the
+      // lease to expire and then for the age timer below.
+      if (this.judgeOwner(run) !== 'gone') continue;
       const ownership = {
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -886,10 +890,13 @@ export class DurableRunCoordinator {
         }
         continue;
       }
-      const pid = ownerProcessId(run.ownerInstanceId);
       // A container assigns the daemon the same pid every start, so a row
       // orphaned by a restart reads as "alive" forever — the new daemon's
-      // own pid probe hits itself. Age is the only signal that survives that
+      // own pid probe hits itself. The row's recorded pid space resolves
+      // that without a clock: our pid under another instance id, in our own
+      // space, is a prior generation (judgeOwner → 'gone'). Age remains the
+      // fallback for rows that cannot be judged — legacy rows without a
+      // space, a writer that could not name its space, or a foreign space
       // (see reference_container_pid_reuse_lock.md; same trap already fixed
       // once in taskState/store.ts's LOCK_ABANDON_MS).
       //
@@ -902,8 +909,7 @@ export class DurableRunCoordinator {
       // renewal (multiple consecutive misses, not one) before this frees the
       // row, purely as a fallback for when the pid probe can't be trusted.
       const abandonedByAge = now - run.updatedAt >= this.reconcileAbandonMs;
-      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
-      if (!abandonedByAge && !samePidDifferentGeneration && (pid == null || this.processIsAlive(pid))) continue;
+      if (!abandonedByAge && this.judgeOwner(run) !== 'gone') continue;
       this.confirmExitedClaim({
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -914,6 +920,18 @@ export class DurableRunCoordinator {
       }, now);
     }
     return reconciled;
+  }
+
+  /** Whether a run's recorded owner is provably gone, alive, or unjudgeable from here. */
+  private judgeOwner(run: Pick<RunRecord, 'ownerInstanceId' | 'ownerPidSpace'>): OwnerVerdict {
+    return ownerVerdict({
+      ownerInstanceId: run.ownerInstanceId ?? '',
+      ownerPidSpace: run.ownerPidSpace,
+      ourInstanceId: this.instanceId,
+      ourPidSpace: this.pidSpace,
+      ourPid: process.pid,
+      processIsAlive: this.processIsAlive,
+    });
   }
 
   /**
