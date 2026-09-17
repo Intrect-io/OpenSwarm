@@ -17,6 +17,7 @@ import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
+import { changeShapeSection } from './publicationChangeShape.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
 
@@ -1201,6 +1202,9 @@ export async function commitAndCreatePRWithHead(
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
   const overlapSection = await buildFileOverlapSection(worktreePath, branchName);
+  const shapeSection = changeShapeSection(
+    (await git(worktreePath, 'diff', '--name-only', `${base.ref}..HEAD`).catch(() => '')).split('\n').filter(Boolean),
+  );
 
   // Another branch may already close this same Linear issue (INT-2544) — never
   // block on it (the work is done and worth keeping visible), but never let it
@@ -1218,6 +1222,7 @@ export async function commitAndCreatePRWithHead(
   const prBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
+    ...(shapeSection ? ['', shapeSection] : []),
     ...(overlapSection ? ['', overlapSection] : []),
     ...(duplicateSection ? ['', duplicateSection] : []),
     '',

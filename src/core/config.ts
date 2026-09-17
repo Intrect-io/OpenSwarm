@@ -288,6 +288,8 @@ const PipelineGuardsConfigSchema = z.object({
   reformatCheck: z.boolean().optional(),
   /** Block an unacknowledged whole-file rewrite; restore stripped trailing newlines (AGT-4406). */
   rewriteCheck: z.boolean().optional(),
+  /** Block a docs-only change that replaces figures the run never produced; flag uncited approval claims (AGT-4408). */
+  claimEvidenceCheck: z.boolean().optional(),
 }).optional();
 
 const VerifyConfigSchema = z.object({

@@ -549,6 +549,8 @@ export interface PipelineGuardsConfig {
   reformatCheck?: boolean;
   /** Block an unacknowledged whole-file rewrite; restore stripped trailing newlines (AGT-4406). */
   rewriteCheck?: boolean;
+  /** Block a docs-only change that replaces figures the run never produced; flag uncited approval claims (AGT-4408). */
+  claimEvidenceCheck?: boolean;
   /**
    * When the reviewer approves, file its recommendedActions as follow-up
    * sub-issues (INT-1611 / INT-1704). Optional, default OFF. (INT-1704)
