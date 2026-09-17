@@ -393,13 +393,12 @@ describe('AutonomousRunner durable completion race', () => {
     internal.durableRuns.close();
   });
 
-  it('returns a run whose PR is a draft to the queue instead of completing it (AGT-4270)', async () => {
-    // A draft is the branch saying it is not finished — either the run parked
-    // and published for visibility, or the PR-time review rejected it and
-    // moved it back. `pr list` reports a draft's state as OPEN, so the
-    // recovery below would otherwise read it as delivery and close the issue
-    // Done on work nobody accepted — with the draft flag meaning no human is
-    // prompted to look either.
+  /**
+   * A NEEDS_RECONCILE row whose branch has a draft PR, with a `gh` stub that
+   * answers `pr list --head` with the draft and `pr list --search` with the
+   * sibling PRs. Returns the seams a test asserts on.
+   */
+  async function draftReconcileFixture(input: { errorCode?: string; siblings: string[] }) {
     const [{ AutonomousRunner }, execution] = await Promise.all([
       import('./autonomousRunner.js'),
       import('./runnerExecution.js'),
@@ -408,9 +407,11 @@ describe('AutonomousRunner durable completion race', () => {
     const repo = join(root, 'draft-repo');
     mkdirSync(bin, { recursive: true });
     mkdirSync(repo, { recursive: true });
+    const siblings = JSON.stringify(input.siblings.map((url, i) => ({ number: 100 + i, url, headRefName: `other-${i}` })));
     writeFileSync(join(bin, 'gh'), `#!/bin/sh
 case "$*" in
   *"pr list --head"*) echo '[{"url":"https://github.com/acme/repo/pull/92","state":"OPEN","isDraft":true,"headRefOid":"abc92"}]';;
+  *"pr list --search"*) echo '${siblings}';;
 esac
 `);
     chmodSync(join(bin, 'gh'), 0o755);
@@ -432,33 +433,87 @@ esac
     });
     const internal = runner as unknown as InternalRunner;
     internal.durableRuns.importLegacyRun({
-      issueId: 'drafted', source: 'linear', identifier: 'INT-92', title: 'rejected at PR time',
+      issueId: 'drafted', source: 'linear', identifier: 'INT-92', title: 'published as a draft',
       projectPath: repo, state: 'NEEDS_RECONCILE', branchName: 'swarm/INT-92',
+      errorCode: input.errorCode,
     });
     internal.executePipeline = vi.fn(async () => resultFixture());
-
     const draftedTask: TaskItem = {
       id: 'drafted', issueId: 'drafted', issueIdentifier: 'INT-92', source: 'linear',
-      title: 'rejected at PR time', priority: 2, createdAt: Date.now(), linearState: 'In Progress',
+      title: 'published as a draft', priority: 2, createdAt: Date.now(), linearState: 'In Progress',
       linearProject: { id: 'project', name: 'Repo' },
     };
     const previousPath = process.env.PATH;
     process.env.PATH = `${bin}:${previousPath}`;
-    try {
-      // No live card: re-queueing would pay a worker attempt for an issue the
-      // heartbeat fetch cannot even see (it asks only for the non-terminal
-      // states), so this path leaves the row alone. (AGT-4094)
-      await internal.reconcileDurableArtifacts([]);
-      expect(internal.durableRuns.getRun('drafted')).toMatchObject({ state: 'NEEDS_RECONCILE' });
+    const reconcile = async (tasks: TaskItem[]) => {
+      try {
+        await internal.reconcileDurableArtifacts(tasks);
+      } finally {
+        process.env.PATH = previousPath;
+      }
+    };
+    return { internal, draftedTask, logPairComplete, reconcile };
+  }
 
-      await internal.reconcileDurableArtifacts([draftedTask]);
-    } finally {
-      process.env.PATH = previousPath;
-    }
+  it('returns a run whose PR the review rolled back to draft to the queue instead of completing it (AGT-4270)', async () => {
+    // `pr list` reports a draft's state as OPEN, so the recovery below would
+    // otherwise read it as delivery and close the issue Done on work the
+    // reviewer rejected — with the draft flag meaning no human is prompted
+    // to look either. The rollback's own code on the row is what says so.
+    const { PR_REVIEW_ROLLBACK_CODE } = await import('./draftPullRequestCause.js');
+    const { internal, draftedTask, logPairComplete, reconcile } = await draftReconcileFixture({
+      errorCode: PR_REVIEW_ROLLBACK_CODE, siblings: [],
+    });
+
+    // No live card: re-queueing would pay a worker attempt for an issue the
+    // heartbeat fetch cannot even see (it asks only for the non-terminal
+    // states), so this path leaves the row alone. (AGT-4094)
+    await internal.reconcileDurableArtifacts([]);
+    expect(internal.durableRuns.getRun('drafted')).toMatchObject({ state: 'NEEDS_RECONCILE' });
+
+    await reconcile([draftedTask]);
 
     // Back in the queue, not completed: the issue stays open and the commits
     // stay on the branch, so the next attempt continues rather than restarting.
     expect(internal.durableRuns.getRun('drafted')).toMatchObject({ state: 'READY' });
+    expect(logPairComplete).not.toHaveBeenCalled();
+    internal.durableRuns.close();
+  });
+
+  it('records a draft that a sibling PR keeps a draft as delivered instead of re-running it (AGT-4272)', async () => {
+    // INT-2544 opens the PR as a draft when another branch already closes the
+    // issue, and keeps it one on every republish — so a re-run can never make
+    // it ready. Before this, the reconciler sent it back to the queue every
+    // pass and the run burned its whole retry budget against a PR that could
+    // not change.
+    const { internal, draftedTask, logPairComplete, reconcile } = await draftReconcileFixture({
+      errorCode: 'lease_expired', siblings: ['https://github.com/acme/repo/pull/90'],
+    });
+
+    await reconcile([draftedTask]);
+
+    expect(internal.durableRuns.getRun('drafted')).toMatchObject({
+      state: 'DONE', prUrl: 'https://github.com/acme/repo/pull/92',
+    });
+    expect(logPairComplete).toHaveBeenCalledTimes(1);
+    internal.durableRuns.close();
+  });
+
+  it('parks a draft with no recorded cause for a human instead of re-running it (AGT-4272)', async () => {
+    // Not rolled back by review, no sibling closes the issue: a publication
+    // parked for visibility, or a PR held as a draft for a base conflict.
+    // Nobody accepted it and nobody rejected it, so a re-run would build on
+    // a decision a human has not made yet — and needs no live card to park.
+    const { internal, logPairComplete, reconcile } = await draftReconcileFixture({
+      errorCode: 'lease_expired', siblings: [],
+    });
+
+    await reconcile([]);
+
+    expect(internal.durableRuns.getRun('drafted')).toMatchObject({
+      state: 'NEEDS_HUMAN',
+      lastErrorMessage: expect.stringContaining('https://github.com/acme/repo/pull/92'),
+    });
     expect(logPairComplete).not.toHaveBeenCalled();
     internal.durableRuns.close();
   });
