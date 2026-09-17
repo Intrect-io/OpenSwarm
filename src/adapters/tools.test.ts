@@ -1136,3 +1136,44 @@ describe.skipIf(!hasRelativeWorktrees)('worktrees that record their links as rel
     expect(r.content).toContain('CGF ROWS');
   });
 });
+
+// ──────────────────────────────────────────────
+// bash under the OS fence (AGT-4387)
+// ──────────────────────────────────────────────
+const hasMacSandbox = process.platform === 'darwin' && (await import('node:fs')).existsSync('/usr/bin/sandbox-exec');
+describe.runIf(hasMacSandbox)('bash tool with sandbox: on (live sandbox-exec)', () => {
+  it('runs the command fenced: worktree writable, home refused with the fence named', async () => {
+    const wt = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-fence-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-outside-'));
+    // The default writable set includes the temp dir, so target the parent of
+    // a temp dir is not enough — use a path under $HOME that is not a cache.
+    const homeTarget = path.join(homedir(), `.osw-fence-probe-${process.pid}`);
+    try {
+      const ok = await executeTool(makeCall('bash', { command: `touch inside && ls inside` }), wt, createReadCache(), { sandbox: 'on' });
+      expect(ok.is_error).toBe(false);
+      expect(ok.content).toContain('inside');
+      const denied = await executeTool(makeCall('bash', { command: `touch "${homeTarget}"` }), wt, createReadCache(), { sandbox: 'on' });
+      expect(denied.is_error).toBe(true);
+      expect(denied.content).toMatch(/Operation not permitted/);
+      expect(denied.content).toContain('[sandbox] Writes are limited');
+      expect((await import('node:fs')).existsSync(homeTarget)).toBe(false);
+    } finally {
+      await fs.rm(wt, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+      await fs.rm(homeTarget, { force: true });
+    }
+  });
+
+  it('sandbox: off (or unset) keeps the old unfenced behaviour', async () => {
+    const wt = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-nofence-'));
+    const homeTarget = path.join(homedir(), `.osw-nofence-probe-${process.pid}`);
+    try {
+      const r = await executeTool(makeCall('bash', { command: `touch "${homeTarget}" && echo wrote` }), wt, createReadCache(), { sandbox: 'off' });
+      expect(r.is_error).toBe(false);
+      expect(r.content).toContain('wrote');
+    } finally {
+      await fs.rm(wt, { recursive: true, force: true });
+      await fs.rm(homeTarget, { force: true });
+    }
+  });
+});

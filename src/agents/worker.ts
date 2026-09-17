@@ -55,6 +55,8 @@ export interface WorkerOptions {
   nudgeMaxOnNoEdit?: number;
   /** Verification-harness file protection — listed files reject edit/write */
   protectedFiles?: string[];
+  /** OS fence for the bash tool; the pipeline sets it from `autonomous.workerSandbox`. (AGT-4387) */
+  sandbox?: 'on' | 'off';
   /** Planner-declared files/modules this task may edit. */
   fileScope?: string[];
   /** Task-owned files restored from preserveWorktree WIP commits. */
@@ -392,6 +394,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       reasoningEffort: options.reasoningEffort,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
+      sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,

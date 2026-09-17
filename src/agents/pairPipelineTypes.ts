@@ -55,6 +55,8 @@ export interface PipelineConfig {
   instructionCapsule?: InstructionCapsule;
   roleMcpTools?: { worker?: ToolDefinition[]; reviewer?: ToolDefinition[] };
   adapterRouting?: AdapterRoutePolicy;
+  /** OS fence for the worker's bash tool (autonomous.workerSandbox). Unset = off, as before AGT-4387. */
+  workerSandbox?: 'on' | 'off';
   draftAnalysis?: {
     taskType: string;
     intentSummary: string;

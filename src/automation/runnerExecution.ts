@@ -192,6 +192,8 @@ export interface ExecutionContext {
   getActiveWorkerIssues?: (projectPath: string) => string[] | undefined;
   mcpPolicies?: import('../automation/runnerTypes.js').AutonomousConfig['mcpPolicies'];
   adapterRouting?: import('../automation/runnerTypes.js').AutonomousConfig['adapterRouting'];
+  /** OS fence for the worker's bash tool (AGT-4387). */
+  workerSandbox?: 'on' | 'off';
 }
 
 export function prepareTaskExecutionContext(task: TaskItem): Promise<TaskItem> {
@@ -972,6 +974,7 @@ export async function executePipeline(
       instructionCapsule,
       roleMcpTools,
       normalizeAdapterRouting(ctx.adapterRouting),
+      ctx.workerSandbox,
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);

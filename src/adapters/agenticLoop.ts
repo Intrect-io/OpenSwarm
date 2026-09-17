@@ -160,6 +160,8 @@ export interface AgenticLoopOptions {
   finishValidatorMaxRetries?: number;
   /** Verification-harness files for which edit/write are refused (see tools.ts ToolExecOptions) */
   protectedFiles?: string[];
+  /** OS fence for the bash tool — see ToolExecOptions.sandbox (AGT-4387). */
+  sandbox?: 'on' | 'off';
   /** bash tool timeout — docker-based tests need minutes (default 30s) */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Disabled e.g. for SWE-bench integrity. */
@@ -272,6 +274,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     finishValidator,
     finishValidatorMaxRetries = 0,
     protectedFiles,
+    sandbox,
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
@@ -735,6 +738,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 
     const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, {
       protectedFiles,
+      sandbox,
       bashTimeoutMs,
       readOnly,
       filesystemTools,

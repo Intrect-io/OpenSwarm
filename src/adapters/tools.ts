@@ -22,9 +22,17 @@ import {
   stripHumanSurfaceEnv,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
+import { defaultWorkerWritableRoots, looksLikeSandboxDenial, wrapForSandbox } from '../support/osSandbox.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 
 const execFileAsync = promisify(execFile);
+
+let sandboxUnavailableWarned = false;
+function warnSandboxUnavailableOnce(): void {
+  if (sandboxUnavailableWarned) return;
+  sandboxUnavailableWarned = true;
+  console.warn('[Tools] workerSandbox is on but this host has no sandbox-exec/bwrap — bash runs unfenced');
+}
 
 /**
  * The daemon's launchd PATH is minimal (/usr/bin:/bin:/opt/homebrew/bin, no
@@ -413,6 +421,14 @@ function invalidateCache(cache: ReadCache | undefined, filePath: string): void {
 export interface ToolExecOptions {
   /** Filenames (matched by path suffix) for which edit_file/write_file are refused */
   protectedFiles?: string[];
+  /**
+   * OS-level fence for the bash tool (AGT-4387): 'on' runs the command under
+   * sandbox-exec / bwrap with writes limited to the worktree and build caches
+   * (see support/osSandbox.ts); 'off' or unset runs it as the daemon user,
+   * which is what every worker did before a native (non-container) daemon
+   * made that the user's whole home directory.
+   */
+  sandbox?: 'on' | 'off';
   /** bash tool timeout (default DEFAULT_BASH_TIMEOUT_MS) */
   bashTimeoutMs?: number;
   /** Refuse mutation and shell tools even if a model emits hidden tool names. */
@@ -894,8 +910,12 @@ export async function executeTool(
         if (isCommandBlocked(command)) {
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
+        const fenced = execOptions?.sandbox === 'on'
+          ? wrapForSandbox(['bash', '-c', command], { writableRoots: defaultWorkerWritableRoots(cwd), allowNetwork: true })
+          : null;
+        if (execOptions?.sandbox === 'on' && !fenced) warnSandboxUnavailableOnce();
         try {
-          const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
+          const { stdout, stderr } = await execFileAsync(fenced?.file ?? 'bash', fenced?.args ?? ['-c', command], {
             cwd,
             timeout: execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
             maxBuffer: 1024 * 512,
@@ -928,8 +948,13 @@ export async function executeTool(
               is_error: true,
             };
           }
+          // Name the fence when it is what refused the write, so the model fixes
+          // its target instead of concluding the filesystem is broken.
+          const fenceHint = fenced && looksLikeSandboxDenial(out)
+            ? '\n[sandbox] Writes are limited to this worktree, the temp dir and build caches; this command tried to write elsewhere.'
+            : '';
           const body = out.trim()
-            ? `exit ${code}:\n${out.slice(0, 4000)}`
+            ? `exit ${code}:\n${out.slice(0, 4000)}${fenceHint}`
             : `exit ${code} (no output) — likely no matches or a non-fatal nonzero exit, not necessarily an error.`;
           // exit 1 + 출력 없음은 보통 무해(grep no-match) → is_error를 false로 둬 모델이 안 헤매게.
           const benign = e.code === 1 && !out.trim();

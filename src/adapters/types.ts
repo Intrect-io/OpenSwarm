@@ -109,6 +109,8 @@ export interface CliRunOptions {
    * rewriting the verification script when tests fail.
    */
   protectedFiles?: string[];
+  /** OS fence for the worker's bash tool (agenticLoop → tools). See ToolExecOptions.sandbox. (AGT-4387) */
+  sandbox?: 'on' | 'off';
   /** bash tool timeout in ms (default 30s). Raise for docker-based tests that take minutes. */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */

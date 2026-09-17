@@ -410,6 +410,7 @@ export class PairPipeline extends EventEmitter {
             adapterName: this.config.roles?.worker?.adapter,
             reasoningEffort: overrides?.reasoningEffort ?? effortForTask(this.config, context.task),
             bashTimeoutMs: await workerAgent.resolveWorkerBashTimeout(context.projectPath, overrides?.reasoningEffort ?? effortForTask(this.config, context.task)), // INT-2415
+            sandbox: this.config.workerSandbox,
             // No-edit guard (re-applied from stranded feat/v0.7.0 commit 2eea3bc):
             // reasoning workers frequently end with analysis only and never call
             // edit_file. Without this the guard defaults to 0 (disabled) — measured:
@@ -1394,6 +1395,7 @@ export function createPipelineFromConfig(
   instructionCapsule?: PipelineConfig['instructionCapsule'],
   roleMcpTools?: PipelineConfig['roleMcpTools'],
   adapterRouting?: PipelineConfig['adapterRouting'],
+  workerSandbox?: PipelineConfig['workerSandbox'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1431,6 +1433,7 @@ export function createPipelineFromConfig(
     instructionCapsule,
     roleMcpTools,
     adapterRouting,
+    workerSandbox,
   });
 }
 
