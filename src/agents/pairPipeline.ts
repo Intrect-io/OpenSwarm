@@ -181,6 +181,13 @@ export class PairPipeline extends EventEmitter {
       if (this.config.securityAudit?.enabled) {
         context.securityBaseline = await captureSecurityAuditBaseline(projectPath, this.config.securityAudit);
         safeConsole.log(`[${context.taskPrefix}] CodeQL baseline: ${context.securityBaseline.status}, ${context.securityBaseline.findings.length} finding(s)`);
+        // A partial audit is accepted (the gap is permanent — see securityAuditGate),
+        // but the reduced coverage must be readable from the log, not only from
+        // a status word: name the languages CodeQL could not analyse (AGT-4098).
+        if (context.securityBaseline.status === 'partial') {
+          const skipped = context.securityBaseline.skippedCodeqlLanguages.join(', ') || 'unknown';
+          safeConsole.warn(`[${context.taskPrefix}] CodeQL coverage is partial — not analysed: ${skipped}. ${context.securityBaseline.detail ?? ''}`.trimEnd());
+        }
       }
       const iterationResult = await this.runFullIterationLoop(context, stages);
 
