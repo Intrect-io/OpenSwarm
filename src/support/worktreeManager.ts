@@ -103,6 +103,7 @@ export { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOv
 import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
 import { guardUnsafeBinaryStaging, unsafeBinaryDataOnBranch, UNRESOLVED_BASE } from './unsafeBinaryData.js';
+import { assertNoSensitiveDataOnBranch, sensitiveDataOnBranch } from './sensitiveDataFence.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -632,8 +633,12 @@ async function removePreservedWorktreeAtUnlocked(
     // .duckdb/.parquet/.pkl/.pt keeps it locally and simply is not published.
     // Fail closed: an unresolvable base means the branch cannot be judged, and
     // publication would fail on the same lookup anyway.
+    // Same fail-closed shape for customer credentials / financial PII (AGT-4188).
     const unsafe = await resolveBaseRef(worktreePath)
-      .then((base) => unsafeBinaryDataOnBranch(worktreePath, base.ref))
+      .then(async (base) => [
+        ...(await unsafeBinaryDataOnBranch(worktreePath, base.ref)),
+        ...(await sensitiveDataOnBranch(worktreePath, base.ref)).map((f) => `${f.file} [${f.kind}]`),
+      ])
       .catch(() => [UNRESOLVED_BASE]);
     if (unsafe.length > 0) {
       console.warn(
@@ -1175,6 +1180,7 @@ export async function commitAndCreatePRWithHead(
   if (!headSha) throw new Error(`Cannot publish ${branchName}: HEAD identity is unavailable`);
 
   await assertBranchWithinWriteScope(worktreePath, base.ref, options.fileScope);
+  await assertNoSensitiveDataOnBranch(worktreePath, base.ref); // AGT-4188 — before anything leaves this machine
   await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
   console.log(`[Worktree] Pushed branch ${branchName}`);
 
