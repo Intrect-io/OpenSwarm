@@ -654,6 +654,35 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     );
   });
 
+  it('runs the review on the reviewer role\'s model, wall clock and turn ceiling, tagged pr-review in the ledger (AGT-4410)', async () => {
+    // Measured before this: 20 of 41 PR-time reviews cut at the CLI's 300s
+    // default while `roles.reviewer.timeoutMs` sat unused. 0 turns is the
+    // agentic loop's "no ceiling" and must pass through as 0, not be dropped.
+    const processor = newProcessor({
+      roles: { reviewer: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-flash', timeoutMs: 900_000, maxTurns: 0 } },
+    } as never);
+    await processor.freshReview(pr, '/tmp/proj');
+    expect(runReviewCommandImpl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapter: 'openrouter',
+        model: 'deepseek/deepseek-v4-flash',
+        timeoutMs: 900_000,
+        maxTurns: 0,
+        processContext: { taskId: 'o/r#9', stage: 'pr-review' },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('keeps the CLI\'s diff-scaled wall clock when the reviewer role says 0 (unlimited) or nothing', async () => {
+    const processor = newProcessor({ roles: { reviewer: { adapter: 'openrouter', timeoutMs: 0 } } } as never);
+    await processor.freshReview(pr, '/tmp/proj');
+    const [opts] = runReviewCommandImpl.mock.calls.at(-1)!;
+    expect(opts).toEqual(expect.objectContaining({ adapter: 'openrouter' }));
+    expect((opts as { timeoutMs?: number }).timeoutMs).toBeUndefined();
+    expect((opts as { maxTurns?: number }).maxTurns).toBeUndefined();
+  });
+
   it('reports a REVISE/reject verdict as a failure with the reviewer feedback as the error', async () => {
     runReviewCommandImpl.mockResolvedValue({ decision: 'reject', feedback: 'null deref in x.ts' });
     const processor = newProcessor();

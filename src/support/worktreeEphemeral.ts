@@ -80,6 +80,27 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     || /(?:^|\/)\.cursor-review-[^/]+$/.test(file);
 }
 
+/**
+ * The agent's own working files, as opposed to runtime artifacts: an editor or
+ * patch backup left beside the file it edited, or a one-off script the worker
+ * wrote to apply an edit and never removed. Two reached open PRs on cgf-portal
+ * 2026-09-17 in daemon-made commits — `_apply_edit.py` at the repository root
+ * (#488, a 40-line string-replace script) and
+ * `scripts/check_migration_immutability.py.bak` (#489, the whole original) —
+ * and a person removed each in a follow-up commit (AGT-4410).
+ *
+ * Deliberately NOT part of `isEphemeralWorktreeArtifact`: that predicate also
+ * drives the purge of files already tracked on a resumed branch, and a
+ * repository is entitled to track a `.bak` or `.orig` of its own. This one is
+ * consulted only for files the staging step would ADD.
+ */
+export function isAgentScratchFile(file: string): boolean {
+  return /\.(?:bak|orig|rej)$/i.test(file)
+    || file.endsWith('~')
+    || /(?:^|\/)\.DS_Store$/.test(file)
+    || /(?:^|\/)_apply_[^/]*\.(?:py|sh|mjs|js|ts)$/.test(file);
+}
+
 
 const GUARD_PATH_RE = /\[(?:WARNING|CRITICAL|MINOR)\]\s+([^:\s]+):/g;
 const SCOPE_LIST_RE = /outside reserved write scope:\s*(.+)$/m;

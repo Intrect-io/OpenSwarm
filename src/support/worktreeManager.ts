@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
+import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
 
@@ -1136,9 +1137,9 @@ export async function commitAndCreatePRWithHead(
 
       const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
       if (stillStaged.trim()) {
-        const commitMsg = [
-          `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
-        ].join('\n');
+        // Type from the title's own prefix or from the staged files — not a
+        // blanket `feat` that double-prefixed typed titles (AGT-4410).
+        const commitMsg = publicationCommitSubject(issueIdentifier, title, stillStaged.split('\n').filter(Boolean));
 
         // Validate conventional commit format (warning only)
         const commitCheck = runConventionalCommitGuard(commitMsg);

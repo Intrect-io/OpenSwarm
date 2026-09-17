@@ -179,6 +179,11 @@ autonomous:
     reviewer:
       enabled: true
       model: gpt-5.6-sol               # Correctness gate; light profile lowers this to Terra
+      # model / timeoutMs / maxTurns also budget the PR-time fresh review that
+      # runs against every publication (even with `enabled: false`, when that
+      # review is the only semantic review). timeoutMs 0 there keeps the CLI's
+      # diff-scaled default (300s base); a slow model needs more — measured
+      # 2026-09-17: half the reviews died at 300s. maxTurns 0 = no ceiling.
       timeoutMs: 600000
     tester:
       enabled: false

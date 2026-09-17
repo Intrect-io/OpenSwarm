@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { isEphemeralWorktreeArtifact, ephemeralPathspecRoots } from './worktreeEphemeral.js';
+import { isEphemeralWorktreeArtifact, isAgentScratchFile, ephemeralPathspecRoots } from './worktreeEphemeral.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -44,6 +44,7 @@ export async function forceRemoveFromIndex(worktreePath: string, files: string[]
 export async function stagePreservableWorktreeChanges(worktreePath: string): Promise<void> {
   await stripRuntimeMarkerFromGit(worktreePath);
   await git(worktreePath, 'add', '-A');
+  await unstageAgentScratchAdditions(worktreePath);
   const staged = (await git(worktreePath, 'diff', '--cached', '--name-only'))
     .split('\n').filter(Boolean);
   const artifacts = staged.filter(isEphemeralWorktreeArtifact);
@@ -60,6 +61,31 @@ export async function stagePreservableWorktreeChanges(worktreePath: string): Pro
     }
   }
   await forceRemoveFromIndex(worktreePath, trackedInHead);
+}
+
+/**
+ * Drop the agent's scratch files from what `add -A` just staged — additions
+ * only. A scratch-shaped path the branch already tracks is the repository's
+ * own file and stays exactly as staged (AGT-4410).
+ */
+export async function unstageAgentScratchAdditions(worktreePath: string): Promise<string[]> {
+  // `-z`: NUL-separated `status\0path\0` records, so a non-ASCII path (cgf-portal
+  // tracks Korean file names) is not returned quoted and escaped, which a
+  // pathspec built from it would then fail to match.
+  const records = (await git(worktreePath, 'diff', '--cached', '--name-status', '--diff-filter=A', '-z'))
+    .split('\0');
+  const added: string[] = [];
+  for (let i = 0; i + 1 < records.length; i += 2) {
+    const file = records[i + 1];
+    if (file && isAgentScratchFile(file)) added.push(file);
+  }
+  if (added.length === 0) return [];
+  console.warn(
+    `[Worktree] Leaving ${added.length} agent scratch file(s) out of the commit — a backup or `
+    + `one-off edit script is not task source (AGT-4410): ${added.join(', ')}`,
+  );
+  await git(worktreePath, 'reset', '-q', '--', ...added);
+  return added;
 }
 
 /** Remove legacy runtime artifacts from a previously preserved branch before it can publish. */
