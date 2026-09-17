@@ -1,4 +1,4 @@
-export const AUTOMATION_SCHEMA_VERSION = 4;
+export const AUTOMATION_SCHEMA_VERSION = 5;
 
 export const RUN_STATES = [
   'DISCOVERED',
@@ -82,6 +82,13 @@ export interface RunRecord {
   stateVersion: number;
   attemptNo: number;
   ownerInstanceId?: string;
+  /**
+   * The pid space `ownerInstanceId`'s pid belongs to, as `processNamespaceId()`
+   * named it when the claim was written. Absent when the writer could not name
+   * its space or the row predates the column — both fail closed to the age
+   * timer in `reconcile()` (AGT-4072).
+   */
+  ownerPidSpace?: string;
   leaseToken?: string;
   leaseEpoch: number;
   leaseExpiresAt?: number;
@@ -142,6 +149,8 @@ export interface IntegrationReservationOptions {
 
 export interface ClaimOptions {
   ownerInstanceId: string;
+  /** The claimer's pid space (`processNamespaceId()`); omitted when unknown. */
+  ownerPidSpace?: string;
   leaseMs: number;
   now?: number;
   /** Atomic repository admission cap. Defaults to one active run per repository. */

@@ -16,6 +16,7 @@ export interface RunRow {
   state_version: number;
   attempt_no: number;
   owner_instance_id: string | null;
+  owner_pid_space: string | null;
   lease_token: string | null;
   lease_epoch: number;
   lease_expires_at: number | null;
@@ -56,7 +57,7 @@ export interface EffectRow {
   applied_at: number | null;
 }
 
-function parseJson(value: string | null): unknown {
+export function parseJson(value: string | null): unknown {
   if (value == null) return undefined;
   try {
     return JSON.parse(value);
@@ -65,7 +66,7 @@ function parseJson(value: string | null): unknown {
   }
 }
 
-function assertRunState(value: string): asserts value is RunState {
+export function assertRunState(value: string): asserts value is RunState {
   if (!(RUN_STATES as readonly string[]).includes(value)) {
     throw new Error(`Unknown automation run state: ${value}`);
   }
@@ -83,6 +84,7 @@ export function toRunRecord(row: RunRow): RunRecord {
     stateVersion: row.state_version,
     attemptNo: row.attempt_no,
     ownerInstanceId: row.owner_instance_id ?? undefined,
+    ownerPidSpace: row.owner_pid_space ?? undefined,
     leaseToken: row.lease_token ?? undefined,
     leaseEpoch: row.lease_epoch,
     leaseExpiresAt: row.lease_expires_at ?? undefined,

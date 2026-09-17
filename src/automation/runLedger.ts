@@ -31,7 +31,7 @@ import {
   readLedgerMetrics,
   type TrackerTerminalState,
 } from './runLedgerTrackerCache.js';
-import { toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
+import { assertRunState, parseJson, toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
 import type {
   AttemptResultInput,
   ClaimOptions,
@@ -77,15 +77,6 @@ export type {
   TransitionPatch,
 } from './runLedgerTypes.js';
 
-function parseJson(value: string | null): unknown {
-  if (value == null) return undefined;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
-}
-
 function stringifyJson(value: unknown): string | null {
   return value === undefined ? null : JSON.stringify(value);
 }
@@ -97,12 +88,6 @@ function placeholders(values: readonly unknown[]): string {
 function assertPositiveDuration(value: number, label: string): void {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive finite number`);
-  }
-}
-
-function assertRunState(value: string): asserts value is RunState {
-  if (!(RUN_STATES as readonly string[]).includes(value)) {
-    throw new Error(`Unknown automation run state: ${value}`);
   }
 }
 
@@ -557,13 +542,14 @@ export class RunLedger {
       const updated = this.db.prepare(`
         UPDATE automation_runs
         SET state = 'CLAIMED', state_version = state_version + 1,
-            attempt_no = ?, owner_instance_id = ?, lease_token = ?,
+            attempt_no = ?, owner_instance_id = ?, owner_pid_space = ?, lease_token = ?,
             lease_epoch = ?, lease_expires_at = ?, retry_at = NULL,
             started_at = COALESCE(started_at, ?), updated_at = ?, completed_at = NULL
         WHERE issue_id = ? AND state = ? AND state_version = ?
       `).run(
         attemptNo,
         options.ownerInstanceId,
+        options.ownerPidSpace ?? null,
         token,
         epoch,
         leaseExpiresAt,

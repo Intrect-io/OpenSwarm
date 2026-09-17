@@ -1011,8 +1011,8 @@ describe('RunLedger schema migration', () => {
     const attemptColumns = (verify.pragma('table_info(automation_attempts)') as Array<{ name: string }>).map((row) => row.name);
     const runColumns = (verify.pragma('table_info(automation_runs)') as Array<{ name: string }>).map((row) => row.name);
     expect(attemptColumns).toEqual(expect.arrayContaining(['result_status', 'success', 'cost_usd']));
-    expect(runColumns).toEqual(expect.arrayContaining(['tracker_state', 'tracker_state_type', 'tracker_checked_at']));
-    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('4');
+    expect(runColumns).toEqual(expect.arrayContaining(['tracker_state', 'tracker_state_type', 'tracker_checked_at', 'owner_pid_space']));
+    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('5');
     verify.close();
   });
 });
