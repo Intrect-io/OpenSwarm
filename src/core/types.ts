@@ -461,6 +461,8 @@ export type DecompositionConfig = {
   dailyLimit?: number;
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog?: boolean;
+  /** Failed attempts after which a split is forced, resume or not; 0 = never (AGT-4287). */
+  decomposeAfterFailures?: number;
   /** Planner model */
   plannerModel: string;
   /** Planner timeout (ms) - default 600000 (10min) */

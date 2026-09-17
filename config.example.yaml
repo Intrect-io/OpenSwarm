@@ -151,6 +151,12 @@ autonomous:
     # dailyLimit: paces unsupervised automation only. `/plan` enforces the
     # child cap above but does not reserve against this budget (AGT-4123).
     dailyLimit: 20
+    # decomposeAfterFailures: a task that failed this many times whole is split
+    # on its next attempt — even when it resumes a preserved worktree, where the
+    # size check used to be skipped — and the planner's "fits the budget" answer
+    # is not honoured (the failures already disproved it). 3 = the attempt
+    # before STUCK at 4 retries. 0 never forces (AGT-4287).
+    decomposeAfterFailures: 3
     plannerModel: gpt-5.6-sol         # High-leverage decomposition stays on Sol
 
   # Backlog grooming (Planner compares fetched open queue states against the repo).

@@ -3359,6 +3359,8 @@ export class AutonomousRunner {
       decompositionMaxChildren: this.config.decomposition?.maxChildrenPerTask ?? 5,
       decompositionDailyLimit: this.config.decomposition?.dailyLimit ?? 20,
       decompositionAutoBacklog: this.config.decomposition?.autoBacklog ?? true,
+      decomposeAfterFailures: this.config.decomposition?.decomposeAfterFailures ?? 3,
+      getPriorFailures: (issueId) => this.failedTaskCounts.get(issueId) ?? 0,
       jobProfiles: this.config.jobProfiles,
       getRolesForProject: (p) => this.getRolesForProject(p),
       reportToDiscord,

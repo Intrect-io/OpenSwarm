@@ -563,6 +563,8 @@ export interface PromptTemplates {
     projectName: string;
     targetMinutes: number;
     authoritativeOperatorFeedback?: string;
+    /** Whole-task attempts that failed; when set, the split is required, not optional (AGT-4287). */
+    priorFailures?: number;
     impactAnalysis?: {
       directModules: string[];
       dependentModules: string[];

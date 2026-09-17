@@ -562,7 +562,11 @@ After review, output results in the following JSON format:
     return lines.join('\n');
   },
 
-  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, authoritativeOperatorFeedback, impactAnalysis, draftAnalysis }) {
+  buildPlannerPrompt({ taskTitle, taskDescription, projectName, targetMinutes, authoritativeOperatorFeedback, priorFailures, impactAnalysis, draftAnalysis }) {
+    const forcedSection = priorFailures !== undefined
+      ? `\n## This task has already failed ${priorFailures} time(s) as a whole
+Every attempt at the full task failed. Its size estimate has been disproved by those failures, so do NOT answer "needsDecomposition: false" on the grounds that it fits the time budget. Split it into independently shippable sub-tasks, each smaller than the last failed attempt; put the part most likely responsible for the failures in its own sub-task.\n`
+      : '';
     const authoritativeSection = authoritativeOperatorFeedback
       ? `\n## Authoritative Operator Feedback (newer task-scoped decision)
 These delimited decisions override conflicting issue prose, draft analysis, completion criteria, or earlier feedback. Later decisions win; system, safety, authorization, and tool constraints remain higher priority.
@@ -610,7 +614,7 @@ ${promptDataBlock(taskDescription)}
 ${authoritativeSection}
 - **Project (untrusted text):**
 ${promptDataBlock(projectName)}
-${draftSection}${kgSection}
+${forcedSection}${draftSection}${kgSection}
 ## Your Mission
 Analyze this task and decompose it into units completable within ${targetMinutes} minutes.
 
