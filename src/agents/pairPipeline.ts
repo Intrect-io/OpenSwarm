@@ -48,6 +48,7 @@ import * as auditorAgent from './auditor.js';
 import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
+import { UNBOUNDED_TURNS } from '../adapters/agenticLoop.js';
 import { safeConsole } from '../support/safeLog.js';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
@@ -293,7 +294,9 @@ export class PairPipeline extends EventEmitter {
         taskTitle: context.task.title, taskDescription: context.task.description || '',
         workerResult: context.workerResult!, projectPath: context.projectPath,
         timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model), maxTurns: this.config.roles?.tester?.maxTurns,
+        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model),
+        // Coding stages run without a turn ceiling unless configured (AGT-4388).
+        maxTurns: this.config.roles?.tester?.maxTurns ?? UNBOUNDED_TURNS,
         adapterName: this.config.roles?.tester?.adapter,
       }),
     });
@@ -400,7 +403,10 @@ export class PairPipeline extends EventEmitter {
             // display value — is the one that reaches the agent. (AGT-4273)
             model: compatibleStageModel(this.config, 'worker', overrides?.model, overrides?.modelRole ?? 'worker')
               ?? modelForTask(this.config, 'worker', context.task),
-            maxTurns: this.config.roles?.worker?.maxTurns,
+            // Coding stages run without a turn ceiling unless configured; the
+            // wall-clock, the repeated-call guard and maxIterations bound them.
+            // Read-only stages below keep their adapter defaults. (AGT-4388)
+            maxTurns: this.config.roles?.worker?.maxTurns ?? UNBOUNDED_TURNS,
             adapterName: this.config.roles?.worker?.adapter,
             reasoningEffort: overrides?.reasoningEffort ?? effortForTask(this.config, context.task),
             bashTimeoutMs: await workerAgent.resolveWorkerBashTimeout(context.projectPath, overrides?.reasoningEffort ?? effortForTask(this.config, context.task)), // INT-2415

@@ -172,6 +172,10 @@ autonomous:
       escalateModel: gpt-5.6-sol       # Repeated failure earns the frontier tier
       escalateAfterIteration: 2
       timeoutMs: 1800000  # 30 minutes
+      # Turn ceiling for the agentic loop. Omitted or 0 = none (AGT-4388): a coding
+      # run ends on completion, the repeated-tool-call guard, or timeoutMs — a turn
+      # count is not a property of the task. Set a number only to cap cost hard.
+      # maxTurns: 0
     reviewer:
       enabled: true
       model: gpt-5.6-sol               # Correctness gate; light profile lowers this to Terra

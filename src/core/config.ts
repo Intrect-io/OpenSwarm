@@ -128,8 +128,8 @@ const RoleConfigSchema = z.object({
   escalateModel: z.string().optional(),
   /** Escalate after this iteration number (default: 3) */
   escalateAfterIteration: z.number().min(1).optional(),
-  /** Max agentic turns per CLI invocation */
-  maxTurns: z.number().min(1).optional(),
+  /** Max agentic turns per CLI invocation; 0 = no ceiling (the default for worker/tester since AGT-4388) */
+  maxTurns: z.number().int().min(0).optional(),
   /** Adaptive worker fan-out gate and candidate execution. */
   fanout: z.object({
     enabled: z.boolean().optional(),
@@ -143,7 +143,7 @@ const RoleConfigSchema = z.object({
       adapter: AdapterNameSchema.optional(),
       model: z.string().optional(),
       reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
-      maxTurns: z.number().min(1).optional(),
+      maxTurns: z.number().int().min(0).optional(), // 0 = no ceiling (AGT-4388)
       nudgeMaxOnNoEdit: z.number().min(0).optional(),
       webTools: z.boolean().optional(),
       memoryTools: z.boolean().optional(),
