@@ -1271,10 +1271,17 @@ export class AutonomousRunner {
         const infraStreak = durableRun.lastErrorCode === 'infra_error'
           ? this.consecutiveInfraErrorCounts.get(id) ?? 0
           : 0;
+        // A supersession backoff is not a slot going to waste: the run was
+        // refused because an open PR still owns its files, and that PR does not
+        // close because a slot is free. Lifting it re-runs the drafter against
+        // the same PR every heartbeat — AX-1481 reached attempt #415 that way,
+        // 25 s apart, on 2026-09-17 (AGT-4036). The exponential supersession
+        // backoff (retryAtFor) is the recheck cadence; idle fill leaves it alone.
         const idleLiftable = (
           durableRun.state === 'RETRY_AT'
           && (durableRun.retryAt ?? 0) > Date.now()
           && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
+          && durableRun.lastErrorCode !== 'superseded'
         )
           || durableRun.state === 'NEEDS_SPEC'
           || durableRun.state === 'NEEDS_ENV';
