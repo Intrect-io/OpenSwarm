@@ -4,6 +4,7 @@
 // ============================================
 
 import { Cron } from 'croner';
+import { prRemote } from './prRemote.js';
 import { homedir, tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -440,7 +441,8 @@ export class PRProcessor {
       // documented to specifically pick `origin` when a repo has multiple
       // remotes configured, which would let this check pass against one
       // remote while `git fetch origin` below reads from another.
-      const originUrl = (await gitExec(projectPath, 'remote', 'get-url', 'origin')).trim();
+      const remote = await prRemote(projectPath);
+      const originUrl = (await gitExec(projectPath, 'remote', 'get-url', remote)).trim();
       const localRepo = await ghRepoView(projectPath, originUrl);
       if (localRepo !== pr.repo) {
         throw new Error(
@@ -471,7 +473,7 @@ export class PRProcessor {
       // default for whatever repo it's pointed at, and (b) is ambiguous
       // between a branch and a same-named tag (`refs/heads/<base>` pins it).
       await gitExec(
-        projectPath, 'fetch', 'origin',
+        projectPath, 'fetch', remote,
         `pull/${pr.number}/head:${prHeadRef}`, `refs/heads/${base}:${baseRef}`,
       );
 
@@ -864,7 +866,7 @@ export class PRProcessor {
       }
 
       // 3. git fetch + checkout PR branch
-      await gitExec(projectPath, 'fetch', 'origin', pr.branch);
+      await gitExec(projectPath, 'fetch', await prRemote(projectPath), pr.branch);
 
       // Stash local changes before checkout
       autoStash = await stashLocalChanges(
@@ -944,7 +946,7 @@ export class PRProcessor {
         console.log(`[PRProcessor] ${key}: Pipeline succeeded, pushing changes...`);
         const publishedHeadSha = (await gitExec(projectPath, 'rev-parse', 'HEAD')).trim();
         if (!publishedHeadSha) throw new Error('Cannot publish CI remediation: HEAD identity is unavailable');
-        await gitExec(projectPath, 'push', 'origin', pr.branch);
+        await gitExec(projectPath, 'push', await prRemote(projectPath), pr.branch);
         console.log(`[PRProcessor] ${key}: Waiting for CI checks...`);
         const ciStatus = await waitForCICompletion(pr.repo, pr.number, {
           timeoutMs: ciTimeoutMs,
@@ -1007,7 +1009,7 @@ export class PRProcessor {
 
           // Fetch latest PR state before retry
           console.log(`[PRProcessor] ${key}: Retrying due to CI failure...`);
-          await gitExec(projectPath, 'pull', 'origin', pr.branch);
+          await gitExec(projectPath, 'pull', await prRemote(projectPath), pr.branch);
           continue;
 
         } else if (ciStatus.status === 'unknown') {
@@ -1094,7 +1096,7 @@ export class PRProcessor {
 
     try {
       // git fetch + checkout PR branch
-      await gitExec(projectPath, 'fetch', 'origin', pr.branch);
+      await gitExec(projectPath, 'fetch', await prRemote(projectPath), pr.branch);
 
       // Stash local changes before checkout
       autoStash = await stashLocalChanges(
@@ -1272,7 +1274,7 @@ export class PRProcessor {
 
       // Push changes
       console.log(`[PRProcessor] ${key}: Pushing review feedback changes...`);
-      await gitExec(projectPath, 'push', 'origin', pr.branch);
+      await gitExec(projectPath, 'push', await prRemote(projectPath), pr.branch);
 
       // Comment on PR
       const summary = result.workerResult?.summary || 'Review feedback addressed';
