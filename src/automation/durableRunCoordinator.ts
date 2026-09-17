@@ -621,9 +621,15 @@ export class DurableRunCoordinator {
         maxFailuresPerHour: options.admission?.maxFailuresPerHour,
         circuitCooldownMs: options.admission?.circuitCooldownMs,
       });
+      // Labelled `infra_error`, the same word the returned-result path uses:
+      // the attempt above is already recorded as infra_error, and the
+      // scheduler's idle-fill gate reads `lastErrorCode === 'infra_error'` to
+      // keep a repeatedly failing row parked. Under the old `executor_throw`
+      // label a thrown adapter timeout was lifted every heartbeat, the AX-1272
+      // shape AGT-4305 had closed for returned results only (AGT-4307).
       this.ledger.transition(claim, 'RETRY_AT', {
         retryAt: Date.now() + 15 * 60_000,
-        errorCode: 'executor_throw',
+        errorCode: 'infra_error',
         errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;

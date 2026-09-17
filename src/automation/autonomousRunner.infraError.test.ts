@@ -381,4 +381,40 @@ describe('idle-fill must not out-race a repeated infra_error on the same issue (
 
     runner.durableRuns.close();
   });
+
+  // AGT-4307: a pipeline that THROWS reaches the runner through the
+  // scheduler's 'error' event, not 'failed'. The ledger already records that
+  // as infra_error; the in-memory streak did not, so the gate above never saw
+  // it and idle fill lifted the 15-minute park every heartbeat.
+  it('a thrown executor counts toward the same infra streak, and the durable gate holds it after 3', async () => {
+    const LEDGER_TASK: TaskItem = {
+      id: 'ISSUE-1', issueId: 'ISSUE-1', issueIdentifier: 'ISSUE-1',
+      source: 'linear', title: 'adapter keeps throwing', priority: 2, createdAt: 0,
+      linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
+    };
+    const dbPath = join(tempDir, 'automation-thrown.db');
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath })) as unknown as InternalRunner & {
+      durableRuns: { observeTask(task: TaskItem, repo: string): void; getRun(id: string): { state: string; lastErrorCode?: string } | null; close(): void };
+    };
+    runner.durableRuns.observeTask(LEDGER_TASK, '/repo');
+
+    for (let i = 0; i < 3; i++) {
+      runner.scheduler.startTask(task(), '/repo', async () => { throw new Error('openrouter timeout after 360000ms'); });
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    expect(runner.consecutiveInfraErrorCounts.get('ISSUE-1')).toBe(3);
+
+    // The row the coordinator leaves behind a throw: RETRY_AT, 15 min, labelled infra_error.
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('ISSUE-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(ledger.transition(claim!, 'RETRY_AT', { retryAt: Date.now() + 15 * 60_000, errorCode: 'infra_error' })).toBe(true);
+    ledger.close();
+
+    expect(runner.filterAlreadyProcessed([LEDGER_TASK]).map((t) => t.issueId)).not.toContain('ISSUE-1');
+    expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('RETRY_AT');
+    runner.durableRuns.close();
+  });
 });

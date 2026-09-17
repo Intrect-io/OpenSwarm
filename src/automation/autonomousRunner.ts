@@ -57,6 +57,7 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
+import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
@@ -1140,6 +1141,17 @@ export class AutonomousRunner {
       const taskCtx = this.formatTaskContext(task);
       console.error(`[Scheduler] Task error: ${taskCtx} ${task.title}`, error);
       const timeout = isTimeoutError(error);
+      // A thrown executor is an infra_error to the ledger (durableRunCoordinator
+      // records it so and parks the row 15 min). Keep the same in-memory streak
+      // the 'failed' handler keeps, or a task whose failures arrive as
+      // exceptions never reaches the idle-fill gate that AGT-4305 added for
+      // returned results (AGT-4307).
+      if (task.issueId) {
+        const infraStreak = (this.consecutiveInfraErrorCounts.get(task.issueId) ?? 0) + 1;
+        this.consecutiveInfraErrorCounts.set(task.issueId, infraStreak);
+        setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
+        this.saveTaskState();
+      }
       this.recordPipelineHistory(task, {
         success: false, sessionId: `scheduler-error-${task.id}-${Date.now()}`, stages: [],
         finalStatus: timeout ? 'infra_error' : 'failed', failureSignal: timeout ? 'timeout' : undefined,
@@ -1233,7 +1245,13 @@ export class AutonomousRunner {
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
           }
         }
-        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0) {
+        // The same-fingerprint infra circuit parks a run so that an operator
+        // changes something before it runs again; a free slot changes nothing.
+        // Resuming it by idle fill re-runs a known-broken environment every
+        // heartbeat (AGT-4306). Only an explicit dispatch or a tracker Todo
+        // lifts that park — the resume paths that carry an operator's hand.
+        const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON;
+        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark) {
           const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
           if (idleResumed) {
             idleFillBudget--;

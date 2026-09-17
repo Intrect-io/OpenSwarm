@@ -428,7 +428,7 @@ describe('DurableRunCoordinator', () => {
     })).rejects.toThrow('worker crashed');
     expect(coordinator.getRun('EXECUTOR-THROW')).toMatchObject({
       state: 'RETRY_AT',
-      lastErrorCode: 'executor_throw',
+      lastErrorCode: 'infra_error',
       lastErrorMessage: 'worker crashed',
     });
     coordinator.close();
