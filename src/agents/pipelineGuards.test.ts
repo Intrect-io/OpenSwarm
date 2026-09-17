@@ -560,6 +560,30 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     });
   });
 
+  describe('rewriteCheck (AGT-4406)', () => {
+    const lines = (n: number, prefix = 'field') => Array.from({ length: n }, (_, i) => `${prefix}_${i} = ${i}`).join('\n') + '\n';
+
+    it('blocks an unacknowledged whole-file rewrite and names the escape hatch', async () => {
+      writeFileSync(join(repo, 'config.py'), lines(40));
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'config']);
+      writeFileSync(join(repo, 'config.py'), lines(28, 'other'));
+      const res = await runGuards(mockWorker(['config.py']), repo, { rewriteCheck: true });
+      const issues = guardIssues(res, 'rewrite');
+      expect(issues.some(i => i.includes('config.py') && i.includes('REWRITE: config.py'))).toBe(true);
+      expect(res.allPassed).toBe(false);
+    });
+
+    it('passes the same rewrite once the worker declares it, as an advisory', async () => {
+      writeFileSync(join(repo, 'config.py'), lines(40));
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'config']);
+      writeFileSync(join(repo, 'config.py'), lines(28, 'other'));
+      const worker = { ...mockWorker(['config.py']), summary: 'Rebuilt per the issue. REWRITE: config.py' };
+      const res = await runGuards(worker, repo, { rewriteCheck: true });
+      expect(res.allPassed).toBe(true);
+      expect(guardIssues(res, 'rewrite').some(i => i.includes('acknowledged rewrite'))).toBe(true);
+    });
+  });
+
   describe('reformatCheck', () => {
     it('flags a whitespace-only change', async () => {
       writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n'); // re-indent only

@@ -15,6 +15,7 @@ import { webFetch, webSearch } from './webTools.js';
 import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
+import { preserveTrailingNewline, pythonSyntaxError, wholeFileRewriteVerdict } from './writeGuards.js';
 import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import {
   humanSurfaceShellWriteReason,
@@ -710,9 +711,23 @@ export async function executeTool(
             is_error: true,
           };
         }
+        // An existing file: refuse a rewrite that drops a large share of it,
+        // keep its trailing newline, and do not write Python that cannot parse
+        // (AGT-4406). A new file is written as given.
+        let content: string = args.content;
+        const original = await fs.readFile(filePath, 'utf-8').catch(() => null);
+        if (original !== null) {
+          const refusal = wholeFileRewriteVerdict(original, content);
+          if (refusal) return { tool_call_id: callId, content: refusal, is_error: true };
+          content = preserveTrailingNewline(original, content);
+        }
+        const syntaxError = await pythonSyntaxError(filePath, content);
+        if (syntaxError) {
+          return { tool_call_id: callId, content: `REFUSED: ${path.basename(filePath)} would not parse — ${syntaxError}. Nothing was written.`, is_error: true };
+        }
         // 디렉토리 자동 생성
         await fs.mkdir(path.dirname(filePath), { recursive: true });
-        await atomicWriteFile(filePath, args.content);
+        await atomicWriteFile(filePath, content);
         invalidateCache(cache, filePath);
         return { tool_call_id: callId, content: `Written: ${filePath}`, is_error: false };
       }
@@ -750,9 +765,12 @@ export async function executeTool(
           editEnd = span.end;
           fuzzy = true;
         }
-        const updated = original.slice(0, editStart) + args.new_string + original.slice(editEnd);
+        const updated = preserveTrailingNewline(original, original.slice(0, editStart) + args.new_string + original.slice(editEnd));
         await atomicWriteFile(filePath, updated);
         invalidateCache(cache, filePath);
+        // Applied, but say so: an edit can legitimately be one of several that
+        // only parse together, so this warns instead of refusing (AGT-4406).
+        const parseWarning = await pythonSyntaxError(filePath, updated);
         // Return the changed region so the model can verify without a re-read.
         // editStart is the exact offset in the ORIGINAL (exact or fuzzy), so the
         // line math is correct either way.
@@ -763,7 +781,9 @@ export async function executeTool(
         const snippet = newLines.slice(from, to).map((l, i) => `${from + i + 1}\t${l}`).join('\n');
         return {
           tool_call_id: callId,
-          content: `Edited: ${filePath}${fuzzy ? ' (matched with whitespace/quote normalization)' : ''}\nResulting region:\n${snippet}`,
+          content: `Edited: ${filePath}${fuzzy ? ' (matched with whitespace/quote normalization)' : ''}`
+            + `${parseWarning ? `\n⚠ The file no longer parses: ${parseWarning}. Fix it before finishing.` : ''}`
+            + `\nResulting region:\n${snippet}`,
           is_error: false,
         };
       }

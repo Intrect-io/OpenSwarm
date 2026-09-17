@@ -547,6 +547,8 @@ export interface PipelineGuardsConfig {
   deadModuleCheck?: boolean;
   /** Flag reformat-only files and oversized diffs — scope creep (INT-2388 #6). */
   reformatCheck?: boolean;
+  /** Block an unacknowledged whole-file rewrite; restore stripped trailing newlines (AGT-4406). */
+  rewriteCheck?: boolean;
   /**
    * When the reviewer approves, file its recommendedActions as follow-up
    * sub-issues (INT-1611 / INT-1704). Optional, default OFF. (INT-1704)

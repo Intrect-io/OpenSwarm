@@ -440,10 +440,20 @@ export async function applyEditBlock(
 
   try {
     if (block.isNewFile) {
-      // Create new file
+      // An empty SEARCH creates a file. On a file that already exists it would
+      // replace the whole thing — the #501 rewrite path — so it is refused
+      // there (AGT-4406). A created file ends with a newline like any other.
+      const exists = await fs.access(filePath).then(() => true, () => false);
+      if (exists) {
+        return {
+          success: false,
+          error: `${block.filePath} already exists — an empty SEARCH only creates files. Copy the exact text to replace into SEARCH.`,
+        };
+      }
       const dir = path.dirname(filePath);
       await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(filePath, block.replace);
+      const created = block.replace.length > 0 && !block.replace.endsWith('\n') ? `${block.replace}\n` : block.replace;
+      await fs.writeFile(filePath, created);
       return { success: true };
     }
 
