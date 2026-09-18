@@ -217,13 +217,23 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
     ? `- **Automated guard warnings (deterministic pre-checks — verify each, don't dismiss):**\n${options.guardWarnings.map(w => `  - ${w}`).join('\n')}\n`
     : '';
 
+  // The diff, when the caller supplied one. Same reason as 'direct' mode: a
+  // read-only reviewer has no bash, and reading a file shows the result, never
+  // the change (INT-3101). Appended as plain text on purpose — the template
+  // already wraps the whole report in its untrusted-data block, which escapes
+  // the closing marker and code fences, so a second fence here would be
+  // escaped by that one and add noise without the protection it appears to
+  // give. Last in the report so a template-level cut takes the diff's tail
+  // rather than the verdict-bearing fields above it. (AGT-4443)
+  const diffSection = options.diff ? `- **Diff under review:**\n${options.diff}\n` : '';
+
   const workerReport = `
 - **Success:** ${options.workerResult.success}
 - **Summary:** ${options.workerResult.summary}
 - **Files Changed (${files.length}):** ${filesSummary}
 - **Commands:** ${cmdsSummary}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
-${guardSection}`;
+${guardSection}${diffSection}`;
 
   return getPrompts().buildReviewerPrompt({
     taskTitle: options.taskTitle,

@@ -82,6 +82,7 @@ export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
 import { ITERATION_BUDGET_PARK_REASON, canStartAnotherIteration } from '../orchestration/taskBudget.js';
+import { buildReviewerStageOptions } from './reviewerStageOptions.js';
 
 
 /**
@@ -522,44 +523,9 @@ export class PairPipeline extends EventEmitter {
           // removed (INT-1914): worker confidence is self-reported, so a confidently
           // scaffolded task was getting LESS review — exactly the wrong incentive. The
           // completion-criteria hard gate is the real check now.
-          const reviewerMaxTurns = this.config.roles?.reviewer?.maxTurns;
-          const reviewerOptions = {
-            taskTitle: context.task.title,
-            taskDescription: context.task.description || '',
-            authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
-            workerResult: context.workerResult,
-            projectPath: context.projectPath,
-            timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
-            // jobProfile model precedence (see worker stage above). (INT-1599)
-            // `overrides.modelRole` (not the stage) so an escalation resolves as
-            // an escalation. This call — not the `stageModel` above, which is the
-            // display value — is the one that reaches the agent. (AGT-4273)
-            model: compatibleStageModel(this.config, 'reviewer', overrides?.model, overrides?.modelRole ?? 'reviewer')
-              ?? modelForTask(this.config, 'reviewer', context.task),
-            maxTurns: reviewerMaxTurns,
-            adapterName: this.config.roles?.reviewer?.adapter,
-            reasoningEffort: effortForTask(this.config, context.task),
-            completionCriteria: this.config.draftAnalysis?.completionCriteria,
-            verificationEvidence: context.testerResult?.verificationEvidence,
-            // Surface non-blocking guard warnings (dead-module, reformat/scope)
-            // so the reviewer verifies them instead of them dying in a log. (INT-2388)
-            guardWarnings: context.guardsResult?.results
-              .filter(r => !r.passed && !r.blocking)
-              .flatMap(r => r.issues),
-            processContext: { taskId: taskEventKey(context.task), stage: 'reviewer' },
-            // runReviewer has always accepted onLog; nothing passed one, so the
-            // reviewer's turns never reached the dashboard/desktop console the
-            // way the worker's do. (INT-3397)
-            onLog: (line: string) =>
-              broadcastEvent({
-                type: 'log',
-                data: { taskId: taskEventKey(context.task), stage: 'reviewer', line: `[${prefix}] ${line}` },
-              }),
-            signal: this.abortSignal,
-            instructionCapsule: this.config.instructionCapsule,
-            mcpTools: this.config.roleMcpTools?.reviewer,
-            coordinationContext: coordinationContextFor(context, 'reviewer'),
-          };
+          const reviewerOptions = await buildReviewerStageOptions({
+            config: this.config, context, prefix, overrides, abortSignal: this.abortSignal,
+          });
 
           safeConsole.log(`[${prefix}] Running full review...`);
           result = await reviewerAgent.runReviewer(reviewerOptions);
