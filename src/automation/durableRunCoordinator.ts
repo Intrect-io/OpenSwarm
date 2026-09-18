@@ -694,6 +694,11 @@ export class DurableRunCoordinator {
         totalDuration: result.totalDuration,
         iterations: result.iterations,
         prUrl: result.prUrl,
+        // A non-blocking guard has no other reader: the reviewer it was given
+        // to is disabled by default and the `log` event has no subscriber in
+        // the daemon. Without this the row could not say what `bsDetector`
+        // objected to on three cgf-portal tasks (AGT-4439).
+        guardWarnings: result.guardWarnings,
       },
       maxFailuresPerHour: options.admission?.maxFailuresPerHour,
       circuitCooldownMs: options.admission?.circuitCooldownMs,
