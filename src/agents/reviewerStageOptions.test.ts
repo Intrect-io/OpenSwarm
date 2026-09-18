@@ -149,6 +149,16 @@ describe('the in-loop reviewer stage (AGT-4443)', () => {
     expect(options.guardWarnings).toEqual(['service.py:1058 magic number']);
     expect(options.projectPath).toBe(repo);
   });
+
+  it('attributes its transcript and cost to the identifier, not the issue UUID (AGT-4445)', async () => {
+    const repo = repoWithWorkerEdits();
+    const ctx = context(repo);
+    ctx.task.issueId = '12a014e9-f901-493d-8097-371918daf503';
+    const options = await buildReviewerStageOptions({ config, context: ctx, prefix: 'p' });
+    // The draft stage already files under the identifier; this stage filed
+    // under the UUID, so one task's transcripts and cost split in two.
+    expect(options.processContext).toEqual({ taskId: 'AX-1556', stage: 'reviewer' });
+  });
 });
 
 describe('the change-mode prompt shows the diff (AGT-4443)', () => {

@@ -10,7 +10,7 @@
 import { broadcastEvent } from '../core/eventHub.js';
 import { getDiffText } from '../support/gitTracker.js';
 import { refusedUntrackedPaths } from '../support/worktreeEphemeralOps.js';
-import { taskEventKey } from '../orchestration/decisionEngine.js';
+import { taskAttributionKey, taskEventKey } from '../orchestration/decisionEngine.js';
 import { coordinationContextFor } from './pipelineCoordination.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
@@ -102,7 +102,7 @@ export async function buildReviewerStageOptions(input: {
     guardWarnings: context.guardsResult?.results
       .filter((r) => !r.passed && !r.blocking)
       .flatMap((r) => r.issues),
-    processContext: { taskId: taskEventKey(context.task), stage: 'reviewer' },
+    processContext: { taskId: taskAttributionKey(context.task), stage: 'reviewer' },
     // runReviewer has always accepted onLog; nothing passed one, so the
     // reviewer's turns never reached the dashboard/desktop console the way the
     // worker's do. (INT-3397)

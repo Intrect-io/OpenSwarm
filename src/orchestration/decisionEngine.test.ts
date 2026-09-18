@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { composeDispatchScope, isAllowedProjectPath, pathIsUnderAny, isUmbrellaIssue, selectTasksRoundRobin, type TaskItem } from './decisionEngine.js';
+import { composeDispatchScope, isAllowedProjectPath, pathIsUnderAny, isUmbrellaIssue, selectTasksRoundRobin, type TaskItem, taskAttributionKey, taskEventKey } from './decisionEngine.js';
 
 // INT-1810 R2: parent/EPIC issues are umbrellas, not executable work. INT-1702 (tracking,
 // decomposed into sub-issues) and KT-300 ([EPIC] …) were wrongly picked for the worker.
@@ -169,3 +169,22 @@ describe('selectTasksRoundRobin (INT-2318)', () => {
     expect(selected.map((s) => s.task.id)).toEqual(['p1', 'keyless']);
   });
 });
+
+describe('taskAttributionKey (AGT-4445)', () => {
+  it('files work under the identifier a person reads', () => {
+    expect(taskAttributionKey({ id: 'task-1', issueId: '12a014e9-f901', issueIdentifier: 'AX-1556' }))
+      .toBe('AX-1556');
+  });
+
+  it('falls back to the issue id and then the task id when there is no identifier', () => {
+    expect(taskAttributionKey({ id: 'task-1', issueId: '12a014e9-f901' })).toBe('12a014e9-f901');
+    expect(taskAttributionKey({ id: 'task-1' })).toBe('task-1');
+  });
+
+  it('is not the event key, which stays the UUID the run rows are correlated on', () => {
+    const task = { id: 'task-1', issueId: '12a014e9-f901', issueIdentifier: 'AX-1556' };
+    expect(taskEventKey(task)).toBe('12a014e9-f901');
+    expect(taskAttributionKey(task)).not.toBe(taskEventKey(task));
+  });
+});
+

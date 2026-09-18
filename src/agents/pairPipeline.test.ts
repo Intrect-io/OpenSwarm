@@ -104,6 +104,26 @@ describe('PairPipeline model selection', () => {
     };
   }
 
+  it('sends the worker stage the identifier a person reads, not the issue UUID (AGT-4445)', async () => {
+    // The draft stage files under `AX-1556` and this one used to file under
+    // `12a014e9-…`, so a task's transcripts landed in two directories and its
+    // cost in two ledger keys — $0.0775 under one, the rest under the other.
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 1,
+      roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
+    });
+
+    await pipeline.run(
+      task({ issueId: '12a014e9-f901-493d-8097-371918daf503', issueIdentifier: 'AX-1556' }),
+      process.cwd(),
+    );
+
+    const options = runWorker.mock.calls.at(-1)?.[0] as { processContext?: unknown };
+    expect(options?.processContext).toEqual({ taskId: 'AX-1556', stage: 'worker' });
+  });
+
   function initRepo(dir: string): void {
     execFileSync('git', ['init', '-q'], { cwd: dir });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
