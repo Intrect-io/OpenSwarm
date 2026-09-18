@@ -28,6 +28,7 @@ import {
 } from '../coordination/routingPolicy.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
+import { acceptWorkerPaths, noteRejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 
 // Types
 
@@ -463,6 +464,16 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       const { outsideScope } = reconcileWorkerFiles(freshChangedFiles, options.fileScope);
       const filesChanged = gitChangedFiles;
       parsedResult.filesChanged = filesChanged;
+
+      // Carry the fence's verdict forward to the preserve commit. Rejecting
+      // the iteration does not remove what it wrote: the file stays on disk
+      // and the next WIP commit stages it onto the branch, and nothing
+      // downstream can recognise it by name or mode. Accept first, so a path
+      // rejected on an earlier iteration and written legitimately inside
+      // scope on this one is not dropped as stale. (AGT-4440)
+      const rejectedSet = new Set(outsideScope);
+      acceptWorkerPaths(cwd, freshChangedFiles.filter((file) => !rejectedSet.has(file)));
+      noteRejectedWorkerPaths(cwd, outsideScope);
 
       if (gitChangedFiles.length > 0) {
         emitWorkerStatus(options, formatWorkerGitChangeStatus(gitChangedFiles));
