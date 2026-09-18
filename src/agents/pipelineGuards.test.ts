@@ -124,6 +124,39 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(res.allPassed).toBe(true);
     });
 
+    // AX-1521, 2026-09-18: a correct fix — the test imports and calls the
+    // production handler directly, exercising a route matched by prefix
+    // inside it — was blocked for two iterations because the regex above
+    // captures a backtick template literal's `${...}` interpolation as if it
+    // were literal text, and that text can never appear verbatim in HEAD.
+    it('checks a template literal route by its static prefix, not its interpolated id', async () => {
+      writeFileSync(join(repo, 'handler.ts'), 'export const prefix = "/api/a2/account-master/";\n');
+      execFileSync('git', ['add', 'handler.ts'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'add real route prefix'], { cwd: repo });
+
+      writeFileSync(
+        join(repo, 'contract.test.ts'),
+        "import { expect, it } from 'vitest';\nconst ENTITY_ID = 'e1';\nit('patches the real route', () => "
+        + "expect(`/api/a2/account-master/${encodeURIComponent(ENTITY_ID)}`).toBeTruthy());\n",
+      );
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      const issues = guardIssues(res, 'contractEvidence');
+      expect(issues.some(i => i.includes('/api/a2/account-master/'))).toBe(false);
+      expect(res.allPassed).toBe(true);
+    });
+
+    it('still blocks a template literal route whose static prefix is not a real route', async () => {
+      writeFileSync(
+        join(repo, 'contract.test.ts'),
+        "import { expect, it } from 'vitest';\nconst ENTITY_ID = 'e1';\nit('invents an endpoint', () => "
+        + "expect(`/api/totally-fake-endpoint/${encodeURIComponent(ENTITY_ID)}`).toBeTruthy());\n",
+      );
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      const issues = guardIssues(res, 'contractEvidence');
+      expect(issues.some(i => i.includes('/api/totally-fake-endpoint/'))).toBe(true);
+      expect(res.allPassed).toBe(false);
+    });
+
     it('allows a contract literal that already exists in HEAD producer code', async () => {
       writeFileSync(join(repo, 'publisher.ts'), "export const KEY_PREFIX = 'stockapi:foreign_summary:';\n");
       execFileSync('git', ['add', 'publisher.ts'], { cwd: repo });
