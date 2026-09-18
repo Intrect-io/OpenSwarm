@@ -19,6 +19,7 @@
 /** Epoch ms at which THIS process started. `process.uptime()` counts from
  * process start, so sampling it at module load is both cheap and accurate. */
 import { readFileSync, readlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { hostname } from 'node:os';
 
 export const PROCESS_STARTED_AT_MS = Date.now() - Math.round(process.uptime() * 1000);
@@ -88,7 +89,23 @@ export function resolveNamespaceId(
   platform: string,
   readNamespaceLink: () => string,
   readBootId: () => string,
+  readBootSessionId: () => string = () => '',
 ): string | undefined {
+  if (platform === 'darwin') {
+    // macOS has exactly one pid space per boot, and the kernel names that boot:
+    // `kern.bootsessionuuid` is a fresh random UUID every start, the same idea
+    // as Linux's boot id with no namespace inode to add. Two Macs sharing a
+    // state directory therefore never match, and a match means the same pid
+    // table — so unlike the host name below this is a real proof (AGT-4069).
+    // Measured: `sysctl -n kern.bootsessionuuid` costs ~3 ms once, lazily.
+    // If the sysctl cannot be read, the host-name hint below still applies.
+    try {
+      const boot = readBootSessionId().trim();
+      if (boot) return `${PROOF_PREFIX}boot:${boot}`;
+    } catch {
+      // fall through to the hint
+    }
+  }
   if (platform !== 'linux') {
     // A machine HINT, not a pid-space proof — and the prefix says which.
     //
@@ -103,10 +120,11 @@ export function resolveNamespaceId(
     // A MAC was tried instead and is worse: this developer's Mac reports
     // `7a:83:be:1b:ed:d5`, whose locally-administered bit is set because macOS
     // randomises Wi-Fi addresses per network, and Docker and VPN adapters are
-    // software-assigned too. Closing the same-host-name case honestly needs an
-    // OS identity call (AGT-4069). (Caught by the fresh PR review, three times
-    // — the first two rejected the host name as a proof, which it is not used
-    // as here.)
+    // software-assigned too. macOS is closed above by its boot-session UUID;
+    // Windows keeps the hint (`csproduct UUID` costs hundreds of ms through
+    // WMI and is not a deployment target). (Caught by the fresh PR review,
+    // three times — the first two rejected the host name as a proof, which it
+    // is not used as here.)
     return `${HINT_PREFIX}${hostname()}`;
   }
   try {
@@ -134,6 +152,7 @@ export function processNamespaceId(): string | undefined {
       process.platform,
       () => readlinkSync('/proc/self/ns/pid'),
       () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8'),
+      () => execFileSync('sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8', timeout: 2_000, stdio: ['ignore', 'pipe', 'ignore'] }),
     );
   }
   return namespaceId;
