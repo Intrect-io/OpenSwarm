@@ -39,3 +39,10 @@ process.env.OPENSWARM_AUTOMATION_DB = join(tmpdir(), 'openswarm-test-automation'
 // operator's live ~/.openswarm/usage/. Per worker: ledger tests read the whole
 // directory back. (AGT-4178)
 process.env.OPENSWARM_USAGE_DIR = join(tmpdir(), 'openswarm-test-usage', workerScope);
+
+// Same shape as the usage ledger above: the agentic loop now opens a session
+// recorder per invocation, so every loop test would otherwise leave a JSONL
+// transcript in the operator's live ~/.openswarm/sessions/. Redirected rather
+// than disabled, so the wiring stays exercised by those tests. Per worker
+// because pruning reads the whole directory back. (AGT-4442)
+process.env.OPENSWARM_SESSION_LOG_DIR = join(tmpdir(), 'openswarm-test-sessions', workerScope);

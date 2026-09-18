@@ -55,6 +55,7 @@ import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import * as execution from './runnerExecution.js';
 import { pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
+import { pruneSessionLogs } from '../support/sessionLog.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
@@ -2609,6 +2610,12 @@ export class AutonomousRunner {
     // for, so without this the table keeps every task the daemon ever drafted.
     const pruned = pruneDraftCache();
     if (pruned > 0) this.syslog(`  Pruned ${pruned} expired draft cache entr${pruned === 1 ? 'y' : 'ies'}`);
+    // Session transcripts are written per agent invocation, so the directory
+    // grows with every iteration of every attempt. Swept on the same cadence,
+    // and the sweep itself skips anything a live recorder is still appending
+    // to. (AGT-4442)
+    const prunedSessions = pruneSessionLogs();
+    if (prunedSessions > 0) this.syslog(`  Pruned ${prunedSessions} expired session log(s)`);
 
     try {
       const expiredLeases = this.durableRuns.reconcile();

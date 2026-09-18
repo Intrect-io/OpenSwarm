@@ -15,6 +15,7 @@ import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../su
 import type { CliRunResult, FinishValidation } from './types.js';
 import type { ChatUsage } from './chatStream.js';
 import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
+import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
@@ -254,7 +255,44 @@ export interface AgenticLoopResult {
  * 2. 응답에 tool_calls가 있으면 → 도구 실행 → 결과를 메시지에 추가 → 2로
  * 3. 응답에 tool_calls가 없으면 (finish_reason = 'stop') → 최종 텍스트 반환
  */
+/**
+ * Run one agent invocation, recording what it did.
+ *
+ * The record is opened here rather than inside the loop so that a thrown rate
+ * limit, infra error or timeout still closes it. A loop that ends by throwing
+ * is exactly the one whose transcript is worth reading (AGT-4442).
+ */
 export async function runAgenticLoop(options: AgenticLoopOptions): Promise<AgenticLoopResult> {
+  const session = createSessionRecorder({
+    taskId: options.usageAttribution?.taskId,
+    stage: options.usageAttribution?.stage,
+    adapter: options.usageAttribution?.adapter,
+    model: options.model,
+    cwd: options.cwd,
+  });
+  try {
+    const result = await runAgenticLoopInner({ ...options, session });
+    session?.close({
+      outcome: 'returned',
+      toolCallCount: result.toolCallCount,
+      apiCallCount: result.apiCallCount,
+      totalTokens: result.totalTokens,
+      costUsd: result.costUsd,
+      text: result.text,
+    });
+    return result;
+  } catch (error) {
+    session?.close({
+      outcome: 'threw',
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+    throw error;
+  }
+}
+
+async function runAgenticLoopInner(
+  options: AgenticLoopOptions & { session?: SessionRecorder },
+): Promise<AgenticLoopResult> {
   const {
     systemPrompt,
     prompt,
@@ -339,6 +377,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     `Local-only data, credentials, and cross-repository artifacts may be available read-only under /warehouse. ` +
     `Read /warehouse/INDEX.md before asking the operator for missing material, and never print secret values.\n\n`;
   messages.push({ role: 'user', content: cwdNote + prompt });
+
+  // Owned by the wrapper so every exit path — including a thrown rate limit
+  // or infra error — still closes the record (AGT-4442).
+  const session = options.session;
+  session?.record({ type: 'notice', note: 'prompt', systemPrompt, prompt: cwdNote + prompt });
 
   // In search-replace / whole-file mode the model edits via response-text blocks
   // (S/R) or whole write_file calls, so the structured edit_file tool is hidden to
@@ -620,6 +663,15 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     }
 
     const assistantMsg = choice.message;
+    // Recorded here, not in the tool-call branch below: a response that ends
+    // the loop — or one the finish gate rejects and replays — is exactly what
+    // an operator needs to read back, and that path never reaches the branch.
+    session?.record({
+      type: 'assistant',
+      turn,
+      content: assistantMsg.content ?? '',
+      toolCalls: (assistantMsg.tool_calls ?? []).map((tc) => `${tc.function.name} ${tc.function.arguments}`),
+    });
 
     // 도구 호출이 없으면 최종 응답
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
@@ -729,7 +781,6 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       content: assistantMsg.content,
       tool_calls: assistantMsg.tool_calls,
     });
-
     // 도구 실행
     const toolCalls: ToolCall[] = assistantMsg.tool_calls.map(tc => ({
       id: tc.id,
@@ -760,6 +811,17 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       coordinationContext,
       sandboxExecutorSession,
       loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
+    });
+    toolCalls.forEach((tc, i) => {
+      const result = results[i];
+      session?.record({
+        type: 'tool',
+        turn,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+        isError: result?.is_error ?? false,
+        output: result?.content ?? '',
+      });
     });
     toolCallCount += toolCalls.length;
     // Count only SUCCESSFUL edits — a model whose edit_file calls all fail
