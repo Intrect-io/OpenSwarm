@@ -512,6 +512,45 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).not.toContain('search_memory');
   });
 
+  it('withholds the scratch tools when the run has no scratchpad', async () => {
+    let toolNames: string[] = [];
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).not.toContain('scratch_write');
+    expect(toolNames).not.toContain('scratch_read');
+  });
+
+  it('offers the scratch tools once a run owns a scratchpad', async () => {
+    let toolNames: string[] = [];
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      scratchpadRunId: 'AX-1556',
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toContain('scratch_write');
+    expect(toolNames).toContain('scratch_read');
+  });
+
   it('withholds bash when shellTools=false while leaving the path-checked file tools', async () => {
     let toolNames: string[] = [];
 

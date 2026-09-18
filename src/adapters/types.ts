@@ -109,6 +109,8 @@ export interface CliRunOptions {
    * rewriting the verification script when tests fail.
    */
   protectedFiles?: string[];
+  /** Run whose scratchpad the scratch_* tools address (AGT-4459). */
+  scratchpadRunId?: string;
   /** OS fence for the worker's bash tool (agenticLoop → tools). See ToolExecOptions.sandbox. (AGT-4387) */
   sandbox?: 'on' | 'off';
   /**

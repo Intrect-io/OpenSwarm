@@ -56,6 +56,7 @@ import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import * as execution from './runnerExecution.js';
 import { pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
+import { pruneScratchpads } from '../support/scratchpad.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
@@ -2616,6 +2617,11 @@ export class AutonomousRunner {
     // to. (AGT-4442)
     const prunedSessions = pruneSessionLogs();
     if (prunedSessions > 0) this.syslog(`  Pruned ${prunedSessions} expired session log(s)`);
+    // A task that finishes clears its own notes; this catches the ones that
+    // never got there — killed, abandoned, or parked and then forgotten.
+    // (AGT-4459)
+    const prunedScratch = pruneScratchpads();
+    if (prunedScratch > 0) this.syslog(`  Pruned ${prunedScratch} expired scratchpad(s)`);
 
     try {
       const expiredLeases = this.durableRuns.reconcile();

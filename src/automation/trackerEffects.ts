@@ -23,6 +23,8 @@ import {
 } from './runnerExecution.js';
 import { buildTaskStateSyncComment } from '../taskState/store.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
+import { clearScratchpad } from '../support/scratchpad.js';
+import { workerScratchpadRunId } from '../agents/workerScratchpad.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { postPairVerdictOnPullRequest } from './pairVerdictComment.js';
 
@@ -235,6 +237,12 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
       iterations: payload.stats.attempts,
     });
   }
+  // The task is done, so its working notes have nothing left to inform. Only
+  // the success path clears them: a parked or failed task keeps its notes for
+  // whoever picks it up, and the sweep in autonomousRunner collects the rest.
+  // (AGT-4459)
+  const scratchRunId = workerScratchpadRunId(payload.task);
+  if (scratchRunId) await clearScratchpad(scratchRunId);
   if (payload.task.linearProject) {
     await updateProjectAfterTask(payload.task.linearProject.id, payload.task.linearProject.name, {
       title: payload.task.title,

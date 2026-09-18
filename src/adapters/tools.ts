@@ -23,7 +23,8 @@ import {
   stripHumanSurfaceEnv,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
-import { defaultWorkerWritableRoots, looksLikeSandboxDenial, wrapForSandbox } from '../support/osSandbox.js';
+import { looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
+import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
@@ -166,6 +167,42 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'scratch_write',
+      description:
+        'Save a note for yourself, outside the repository. Use it for what you worked out and '
+        + 'what you ruled out — a later iteration of this same task is shown these notes and '
+        + 'otherwise starts with no memory of what you tried. Writing the same name again '
+        + 'replaces that note. Never put working files in the repository for this: anything '
+        + 'under the worktree is reviewed and can reach the pull request.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Short name for the note, e.g. "approach" or "ruled-out"' },
+          content: { type: 'string', description: 'The note, in Markdown' },
+        },
+        required: ['name', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'scratch_read',
+      description:
+        'Read back one of your notes by name, or list them all when called without a name. '
+        + 'The most recent notes are already in your prompt; use this to fetch an older one '
+        + 'that was left out of it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Note name. Omit to list every note.' },
+        },
+      },
+    },
+  },
 ];
 
 // apply_patch — gated to codex adapters only (codex models are RLHF-trained on the
@@ -228,6 +265,7 @@ const BLOCKED_COMMANDS = [
  * under review, with the full environment. (INT-3189, INT-2961)
  */
 const READ_ONLY_DENIED_TOOLS = new Set([
+  'scratch_write',
   'write_file',
   'edit_file',
   'apply_patch',
@@ -458,6 +496,13 @@ export interface ToolExecOptions {
    * (AGT-4065, caught by the PR review.)
    */
   loopDeadlineAt?: number;
+  /**
+   * Which run's scratchpad `scratch_write`/`scratch_read` address. Absent means
+   * the stage has no scratchpad and both tools refuse rather than inventing one:
+   * a note written to a run id nobody reads back is worse than no note, because
+   * the agent believes it recorded something.
+   */
+  scratchpadRunId?: string;
 }
 
 const DEFAULT_BASH_TIMEOUT_MS = 30000;
@@ -949,7 +994,10 @@ export async function executeTool(
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
         const fenced = execOptions?.sandbox === 'on'
-          ? wrapForSandbox(['bash', '-c', command], { writableRoots: defaultWorkerWritableRoots(cwd), allowNetwork: true })
+          ? wrapForSandbox(['bash', '-c', command], {
+            writableRoots: workerWritableRoots(cwd, execOptions.scratchpadRunId),
+            allowNetwork: true,
+          })
           : null;
         if (execOptions?.sandbox === 'on' && !fenced) warnSandboxUnavailableOnce();
         try {
@@ -1017,6 +1065,46 @@ export async function executeTool(
         }
       }
 
+      case 'scratch_write':
+      case 'scratch_read': {
+        const runId = execOptions?.scratchpadRunId;
+        if (!runId) {
+          return {
+            tool_call_id: callId,
+            content: `NO_SCRATCHPAD: ${name} is unavailable in this run.`,
+            is_error: true,
+          };
+        }
+        if (name === 'scratch_read') {
+          const noteName = typeof args.name === 'string' ? args.name.trim() : '';
+          if (!noteName) {
+            const notes = await listNotes(runId);
+            const listing = notes.length === 0
+              ? 'No notes yet.'
+              : notes.map((note) => `- ${note.name} (${note.bytes} bytes)`).join('\n');
+            return { tool_call_id: callId, content: listing, is_error: false };
+          }
+          const body = await readNote(runId, noteName);
+          return body === undefined
+            ? { tool_call_id: callId, content: `No note named "${noteName}".`, is_error: true }
+            : { tool_call_id: callId, content: body, is_error: false };
+        }
+        const noteName = String(args.name ?? '').trim();
+        const content = typeof args.content === 'string' ? args.content : '';
+        if (!noteName) {
+          return { tool_call_id: callId, content: 'scratch_write requires a non-empty "name".', is_error: true };
+        }
+        try {
+          const { bytes } = await writeNote(runId, noteName, content);
+          return { tool_call_id: callId, content: `Saved note "${noteName}" (${bytes} bytes).`, is_error: false };
+        } catch (err) {
+          // A budget refusal is the model's to act on — it can shorten the note
+          // or drop one — so it comes back as a tool error, not an exception.
+          const reason = err instanceof Error ? err.message : String(err);
+          return { tool_call_id: callId, content: `scratch_write refused: ${reason}`, is_error: true };
+        }
+      }
+
       case 'diagnostics': {
         if (isHumanSurfaceReadOnlyEnabled()) {
           return {
@@ -1080,7 +1168,7 @@ export async function executeToolCalls(
   cache?: ReadCache,
   execOptions?: ToolExecOptions,
 ): Promise<ToolResult[]> {
-  const readOnlyTools = new Set(['read_file', 'search_files', 'search_memory', 'web_fetch', 'web_search']);
+  const readOnlyTools = new Set(['read_file', 'search_files', 'search_memory', 'scratch_read', 'web_fetch', 'web_search']);
   const results: ToolResult[] = [];
   let index = 0;
   while (index < toolCalls.length) {

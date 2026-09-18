@@ -64,10 +64,17 @@ afterAll(async () => {
 // ──────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  const expectedNames = ['read_file', 'write_file', 'edit_file', 'search_files', 'bash', 'search_memory'];
+  const expectedNames = [
+    'read_file', 'write_file', 'edit_file', 'search_files', 'bash', 'search_memory',
+    'scratch_write', 'scratch_read',
+  ];
 
-  it('exports exactly 6 tool definitions', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(6);
+  it('exports exactly the tools it names, and no more', () => {
+    // The count is the point: a tool added without being listed above is a tool
+    // no test describes, and this list is what the withholding filters in
+    // agenticLoop are written against.
+    expect(TOOL_DEFINITIONS.map((t) => t.function.name).sort()).toEqual([...expectedNames].sort());
+    expect(TOOL_DEFINITIONS).toHaveLength(expectedNames.length);
   });
 
   it.each(expectedNames)('includes "%s" tool', (name) => {
