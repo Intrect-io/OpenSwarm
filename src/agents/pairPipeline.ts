@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
+import { captureBeforeIteration, createSnapshotState, rollbackStagnantIteration } from './iterationSnapshot.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -13,8 +14,9 @@ import type { DocumenterResult } from './documenter.js';
 import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
 import { summarizeStageResult } from './stageSummary.js';
+import { composePipelineResult } from './pairPipelineResult.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
-import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
+import { type CostInfo, formatCost } from '../support/costTracker.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { t } from '../locale/index.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
@@ -42,7 +44,6 @@ import type {
   PipelineRunMetadata,
   StageResult,
 } from './pairPipelineTypes.js';
-import { WORKER_NO_CHANGES_PARK_REASON } from './pairPipelineTypes.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
 import * as documenterAgent from './documenter.js';
@@ -83,7 +84,7 @@ export type {
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
-import { ITERATION_BUDGET_PARK_REASON, canStartAnotherIteration } from '../orchestration/taskBudget.js';
+import { canStartAnotherIteration } from '../orchestration/taskBudget.js';
 import { buildReviewerStageOptions } from './reviewerStageOptions.js';
 
 
@@ -170,6 +171,7 @@ export class PairPipeline extends EventEmitter {
 
     const taskPrefix = buildTaskPrefix(task, projectPath);
     const context: PipelineContext = {
+      snapshots: createSnapshotState(task),
       task,
       projectPath,
       session,
@@ -837,6 +839,7 @@ export class PairPipeline extends EventEmitter {
       }
       const iterationStartedAt = Date.now();
       context.currentIteration++;
+      await captureBeforeIteration(context);
 
       // Stuck detection check (before iteration starts)
       const stuckCheck = this.stuckDetector.check();
@@ -982,7 +985,10 @@ export class PairPipeline extends EventEmitter {
           });
           agentPair.updateSessionStatus(context.session.id, 'revising');
 
-          if (this.shouldAbortSelfRepair(context, progressed, source)) {
+          // Stagnation built on an edit that was not working: restore instead
+          // of abandoning the run on top of it (AGT-4460).
+          const rolledBack = await rollbackStagnantIteration(context, progressed);
+          if (!rolledBack && this.shouldAbortSelfRepair(context, progressed, source)) {
             return { success: false };
           }
           longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
@@ -1329,75 +1335,8 @@ export class PairPipeline extends EventEmitter {
     stages: StageResult[],
     startTime: number
   ): PipelineResult {
-    // Use context.session directly — do NOT re-fetch from store.
-    // updateSessionStatus('approved') archives the session (deletes from Map),
-    // so getPairSession() would return undefined → finalStatus = 'failed'.
-    const session = context.session;
-    const finalStatus = session.status as PipelineResult['finalStatus'] || 'failed';
-    const success = finalStatus === 'approved';
-    // Aggregate costs from all stages
-    const stageCosts: (CostInfo | undefined)[] = [];
-    if (context.workerResult?.costInfo) stageCosts.push(context.workerResult.costInfo);
-    if (context.reviewResult?.costInfo) stageCosts.push(context.reviewResult.costInfo);
-    if (context.testerResult?.costInfo) stageCosts.push(context.testerResult.costInfo);
-    if (context.documenterResult?.costInfo) stageCosts.push(context.documenterResult.costInfo);
-    if (context.auditorResult?.costInfo) stageCosts.push(context.auditorResult.costInfo);
-    if (context.skillDocumenterResult?.costInfo) stageCosts.push(context.skillDocumenterResult.costInfo);
-    const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
-    if (totalCost) {
-      safeConsole.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
-      broadcastEvent({ type: 'task:cost', data: { taskId: taskEventKey(context.task), cost: totalCost } });
-    }
-    const result: PipelineResult = {
-      success,
-      sessionId: context.session.id,
-      stages,
-      finalStatus,
-      failureSignal: context.stuckReason ? 'stuck'
-        : context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
-      stuckReason: context.stuckReason,
-      // The session stopped because the worker claimed success, changed
-      // nothing and gave no reason — three times, across a model escalation
-      // and a fresh context. A new attempt runs the same prompt into the same
-      // silence: cgf-portal AX-868 reached attempt 27 and AGT-3844 attempt 53
-      // that way on 2026-09-02, each attempt ~900k tokens, and the operator
-      // was never told the agent had produced nothing at all.
-      operatorPark: context.stuckReason && context.workerResult?.zeroDiffWithoutReason
-        ? {
-          code: WORKER_NO_CHANGES_PARK_REASON,
-          reason: `Worker claimed success without changing a file and without a noChangesReason (${context.stuckReason.toLowerCase()}). The issue needs a human: either it asks for something the agent cannot express as a diff, or its description does not say what to change.`,
-        }
-        // Budget spent, not work rejected: park so the branch is published as a
-        // draft instead of stranded (AGT-4430).
-        : context.budgetParkReason
-          ? { code: ITERATION_BUDGET_PARK_REASON, reason: context.budgetParkReason }
-          : undefined,
-      totalDuration: Date.now() - startTime,
-      iterations: context.currentIteration,
-      // Final iteration's non-blocking warnings; see guardWarningRecord.ts.
-      guardWarnings: guardWarningsForResult(context.guardsResult?.results),
-      workerResult: context.workerResult,
-      reviewResult: context.reviewResult,
-      lastReviewFeedback: context.lastReviseFeedback,
-      testerResult: context.testerResult,
-      documenterResult: context.documenterResult,
-      auditorResult: context.auditorResult,
-      skillDocumenterResult: context.skillDocumenterResult,
-      taskContext: {
-        issueIdentifier: context.task.issueIdentifier || context.task.issueId,
-        projectName: context.task.linearProject?.name,
-        projectPath: context.projectPath,
-        taskTitle: context.task.title,
-      },
-      totalCost,
-    };
-
-    if (success) {
-      this.emit('pipeline:complete', result);
-    } else {
-      this.emit('pipeline:fail', result);
-    }
-
+    const result = composePipelineResult(context, stages, startTime);
+    this.emit(result.success ? 'pipeline:complete' : 'pipeline:fail', result);
     return result;
   }
 }

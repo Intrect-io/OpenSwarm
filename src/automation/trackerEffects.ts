@@ -24,6 +24,8 @@ import {
 import { buildTaskStateSyncComment } from '../taskState/store.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { clearScratchpad } from '../support/scratchpad.js';
+import { clearSnapshots } from '../support/worktreeSnapshot.js';
+import { taskAttributionKey } from '../orchestration/decisionEngine.js';
 import { workerScratchpadRunId } from '../agents/workerScratchpad.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { postPairVerdictOnPullRequest } from './pairVerdictComment.js';
@@ -243,6 +245,13 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
   // (AGT-4459)
   const scratchRunId = workerScratchpadRunId(payload.task);
   if (scratchRunId) await clearScratchpad(scratchRunId);
+  // Same boundary for the rollback snapshots: a finished task has nothing left
+  // to undo. Keyed directly rather than through the scratchpad's id, which is
+  // undefined when the scratchpad is switched off — that would leave snapshot
+  // stores uncollected for a reason that has nothing to do with them. And not
+  // `?? ''`: an empty run id sanitises to the shared `adhoc` directory, so the
+  // fallback would delete another run's snapshots. (AGT-4460)
+  await clearSnapshots(taskAttributionKey(payload.task)).catch(() => undefined);
   if (payload.task.linearProject) {
     await updateProjectAfterTask(payload.task.linearProject.id, payload.task.linearProject.name, {
       title: payload.task.title,
