@@ -105,6 +105,7 @@ import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOv
 import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
 import { guardUnsafeBinaryStaging, unsafeBinaryDataOnBranch, UNRESOLVED_BASE } from './unsafeBinaryData.js';
 import { assertNoSensitiveDataOnBranch, sensitiveDataOnBranch } from './sensitiveDataFence.js';
+import { releaseRejectedWorkerPaths } from './rejectedWorkerPaths.js';
 // The open-PR ownership preflight lives in openPullRequestOverlaps.ts for the
 // same reason; callers keep importing it from here.
 export { findOpenPRFileOverlaps, type OpenPRFileOverlap } from './openPullRequestOverlaps.js';
@@ -1339,6 +1340,9 @@ export async function removeWorktree(info: WorktreeInfo): Promise<void> {
     console.log(`[Worktree] Force removed: ${worktreePath}`);
   }
   await clearActiveWorktreeMarker(info);
+  // The fence verdicts belong to the run that just ended. A recycled worktree
+  // path must not inherit them, or a later run's real file is refused. (AGT-4440)
+  releaseRejectedWorkerPaths(worktreePath);
 }
 
 /** Clean up dangling worktrees.

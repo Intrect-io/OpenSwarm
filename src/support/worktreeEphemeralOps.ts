@@ -7,6 +7,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isEphemeralWorktreeArtifact, isAgentScratchFile, ephemeralPathspecRoots } from './worktreeEphemeral.js';
 import { isSymlinkMode, symlinkTargetEscapes } from './escapingSymlink.js';
+import { rejectedWorkerPaths } from './rejectedWorkerPaths.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -48,6 +49,7 @@ export async function stagePreservableWorktreeChanges(worktreePath: string): Pro
   await git(worktreePath, 'add', '-A');
   await unstageAgentScratchAdditions(worktreePath);
   await unstageEscapingSymlinkAdditions(worktreePath);
+  await unstageRejectedWorkerAdditions(worktreePath);
   const staged = (await git(worktreePath, 'diff', '--cached', '--name-only'))
     .split('\n').filter(Boolean);
   const artifacts = staged.filter(isEphemeralWorktreeArtifact);
@@ -64,6 +66,41 @@ export async function stagePreservableWorktreeChanges(worktreePath: string): Pro
     }
   }
   await forceRemoveFromIndex(worktreePath, trackedInHead);
+}
+
+/**
+ * Drop what the worker-scope fence rejected from what `add -A` just staged —
+ * additions only.
+ *
+ * The fence discards the iteration; the file it wrote stays on disk and lands
+ * on the branch at the next preserve commit. Nothing downstream can tell that
+ * file apart by name or mode, so the verdict has to be carried forward — see
+ * `rejectedWorkerPaths.ts` for why it is carried in-process (AGT-4440).
+ *
+ * Additions only, by the AGT-4410 rule: a path the branch already tracks is
+ * the repository's own file, not this iteration's leftover, and unstaging it
+ * would silently revert a real edit. Index-only — never deleted from disk,
+ * because a later iteration may be mid-write on the same path.
+ */
+export async function unstageRejectedWorkerAdditions(worktreePath: string): Promise<string[]> {
+  const rejected = new Set(rejectedWorkerPaths(worktreePath));
+  if (rejected.size === 0) return [];
+  // `-z` for the same reason as the scratch filter: cgf-portal tracks Korean
+  // file names, and a quoted path builds a pathspec that matches nothing.
+  const records = (await git(worktreePath, 'diff', '--cached', '--name-status', '--diff-filter=A', '-z'))
+    .split('\0');
+  const added: string[] = [];
+  for (let i = 0; i + 1 < records.length; i += 2) {
+    const file = records[i + 1];
+    if (file && rejected.has(file)) added.push(file);
+  }
+  if (added.length === 0) return [];
+  console.warn(
+    `[Worktree] Leaving ${added.length} file(s) the worker-scope fence rejected out of the commit `
+    + `— a discarded iteration's leftovers are not task source (AGT-4440): ${added.join(', ')}`,
+  );
+  await git(worktreePath, 'reset', '-q', '--', ...added);
+  return added;
 }
 
 /**
