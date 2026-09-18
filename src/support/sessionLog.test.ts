@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import {
   SESSION_LOG_BYTE_CAP,
   SESSION_LOG_FIELD_CHARS,
+  SESSION_LOG_NOTICE_FIELD_CHARS,
+  SESSION_LOG_TRUNCATION_MARKER,
   createSessionRecorder,
   pruneSessionLogs,
   sessionLogDir,
@@ -72,9 +74,66 @@ describe('createSessionRecorder (AGT-4442)', () => {
     rec.close();
 
     const log = events(rec.path);
-    expect((log[1].output as string).length).toBe(SESSION_LOG_FIELD_CHARS);
+    expect((log[1].output as string).length).toBeLessThanOrEqual(SESSION_LOG_FIELD_CHARS);
     expect(log[1].truncated).toBe(true);
     expect(log[2]).toMatchObject({ truncatedEvents: 1 });
+  });
+
+  it('keeps both ends of a clipped field, because the tail is where the evidence is', () => {
+    // The shape that started this: a reviewer prompt renders the diff under
+    // review last, so head-only truncation kept the boilerplate and dropped the
+    // change being judged. (AGT-4446)
+    const head = 'REVIEWER INSTRUCTIONS';
+    const tail = 'Diff under review\n+    if "sensitive" in a:';
+    const rec = createSessionRecorder({ taskId: 't', stage: 'reviewer' })!;
+    rec.record({
+      type: 'notice',
+      note: 'prompt',
+      prompt: head + 'z'.repeat(SESSION_LOG_NOTICE_FIELD_CHARS * 2) + tail,
+    });
+    rec.close();
+
+    const clipped = events(rec.path)[1].prompt as string;
+    // Truncation has to have happened, or this asserts nothing.
+    expect(events(rec.path)[1].truncated).toBe(true);
+    expect(clipped.startsWith(head)).toBe(true);
+    expect(clipped.endsWith(tail)).toBe(true);
+    expect(clipped.length).toBeLessThanOrEqual(SESSION_LOG_NOTICE_FIELD_CHARS);
+  });
+
+  it('gives the prompt notice more room than a tool output, and enough for a diff-bearing prompt', () => {
+    // A reviewer prompt measured at ~15k with a 6k diff and ~25k once the diff
+    // reaches its own 16k ceiling; the shared cap could not hold it. (AGT-4446)
+    expect(SESSION_LOG_NOTICE_FIELD_CHARS).toBeGreaterThan(25_100);
+
+    const rec = createSessionRecorder({ taskId: 't', stage: 'reviewer' })!;
+    const body = 'q'.repeat(30_000);
+    rec.record({ type: 'notice', note: 'prompt', prompt: body });
+    rec.record({ type: 'tool', name: 'bash', output: body });
+    rec.close();
+
+    const log = events(rec.path);
+    // Same payload, two caps: the once-per-invocation notice survives whole.
+    expect(log[1].prompt).toBe(body);
+    expect(log[1].truncated).toBeUndefined();
+    expect(log[2].truncated).toBe(true);
+    expect((log[2].output as string).length).toBeLessThanOrEqual(SESSION_LOG_FIELD_CHARS);
+  });
+
+  it('names how much it dropped, so a reader is not left inferring it from a boolean', () => {
+    const original = 'a'.repeat(SESSION_LOG_FIELD_CHARS * 2);
+    const rec = createSessionRecorder({ taskId: 't', stage: 'worker' })!;
+    rec.record({ type: 'tool', name: 'bash', output: original });
+    rec.close();
+
+    const clipped = events(rec.path)[1].output as string;
+    const marker = clipped.match(/\[session-log: (\d+) chars omitted\]/);
+    expect(marker).not.toBeNull();
+    expect(clipped).toContain(SESSION_LOG_TRUNCATION_MARKER);
+    // The count is the real remainder: what survived plus what it claims to
+    // have dropped is the field that went in.
+    const kept = clipped.length - marker![0].length - 2; // the marker's own newlines
+    expect(kept + Number(marker![1])).toBe(original.length);
   });
 
   it('stops growing past the session cap but keeps counting what it dropped', () => {
