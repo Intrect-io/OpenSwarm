@@ -32,6 +32,12 @@ export interface PipelineConfig {
   continueOnTestFail?: boolean;
   skipDocumenterIfNoChange?: boolean;
   maxIterations?: number;
+  /**
+   * Wall-clock budget for the whole task — the SAME number the scheduler's
+   * watchdog uses (resolveHardTaskTimeoutMs). The loop stops before it rather
+   * than being killed mid-iteration (AGT-4430).
+   */
+  taskBudgetMs?: number;
   maxReflections?: number;
   roles?: {
     worker?: RoleConfig;
@@ -181,6 +187,8 @@ export interface PipelineContext {
   newSecurityFindings?: import('../verify/securityAudit.js').SecurityFinding[];
   /** Pair-level stagnation detector reason, preserved so the scheduler does not rerun the same loop. */
   stuckReason?: string;
+  /** Wall-clock budget spent before another iteration could fit (AGT-4430). */
+  budgetParkReason?: string;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

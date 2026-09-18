@@ -79,6 +79,7 @@ export type {
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
+import { ITERATION_BUDGET_PARK_REASON, canStartAnotherIteration } from '../orchestration/taskBudget.js';
 
 
 /**
@@ -800,6 +801,7 @@ export class PairPipeline extends EventEmitter {
     stages: StageResult[]
   ): Promise<{ success: boolean }> {
     const maxIterations = this.config.maxIterations ?? 3;
+    const loopStartedAt = Date.now();
     const hasWorker = this.hasStage('worker');
     const hasReviewer = this.hasStage('reviewer');
     const hasTester = this.hasStage('tester');
@@ -810,8 +812,31 @@ export class PairPipeline extends EventEmitter {
       return { success: false };
     }
 
+    // The watchdog used to fire mid-iteration and the run ended "cancelled, PR
+    // not created" with finished work stranded on a branch (AGT-4430). Stop on
+    // our own terms instead: an iteration is only started when the longest one
+    // observed so far still fits in what is left of the same budget.
+    const taskBudgetMs = this.config.taskBudgetMs ?? 0;
+    const workerTimeoutMs = stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs);
+    let longestIterationMs = 0;
+
     while (context.currentIteration < maxIterations) {
       this.throwIfAborted(); // bail before starting another iteration
+      const budget = canStartAnotherIteration({
+        elapsedMs: Date.now() - loopStartedAt,
+        budgetMs: taskBudgetMs,
+        iterationsUsed: context.currentIteration,
+        maxIterations,
+        longestIterationMs,
+        workerTimeoutMs,
+      });
+      if (!budget.start && budget.reason) {
+        context.budgetParkReason = budget.reason;
+        safeConsole.warn(`[${context.taskPrefix}] Stopping before iteration ${context.currentIteration + 1}: ${budget.reason}`);
+        agentPair.updateSessionStatus(context.session.id, 'failed');
+        return { success: false };
+      }
+      const iterationStartedAt = Date.now();
       context.currentIteration++;
 
       // Stuck detection check (before iteration starts)
@@ -961,6 +986,7 @@ export class PairPipeline extends EventEmitter {
           if (this.shouldAbortSelfRepair(context, progressed, source)) {
             return { success: false };
           }
+          longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
           continue;
         }
 
@@ -1287,6 +1313,7 @@ export class PairPipeline extends EventEmitter {
         agentPair.updateSessionStatus(context.session.id, 'failed');
         return { success: false };
       }
+      longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
       safeConsole.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
       this.emit('iteration:complete', {
         iteration: context.currentIteration,
@@ -1346,7 +1373,11 @@ export class PairPipeline extends EventEmitter {
           code: WORKER_NO_CHANGES_PARK_REASON,
           reason: `Worker claimed success without changing a file and without a noChangesReason (${context.stuckReason.toLowerCase()}). The issue needs a human: either it asks for something the agent cannot express as a diff, or its description does not say what to change.`,
         }
-        : undefined,
+        // Budget spent, not work rejected: park so the branch is published as a
+        // draft instead of stranded (AGT-4430).
+        : context.budgetParkReason
+          ? { code: ITERATION_BUDGET_PARK_REASON, reason: context.budgetParkReason }
+          : undefined,
       totalDuration: Date.now() - startTime,
       iterations: context.currentIteration,
       workerResult: context.workerResult,
@@ -1420,6 +1451,7 @@ export function createPipelineFromConfig(
   roleMcpTools?: PipelineConfig['roleMcpTools'],
   adapterRouting?: PipelineConfig['adapterRouting'],
   workerSandbox?: PipelineConfig['workerSandbox'],
+  taskBudgetMs?: number,
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1445,6 +1477,7 @@ export function createPipelineFromConfig(
   return new PairPipeline({
     stages,
     maxIterations,
+    taskBudgetMs,
     maxReflections,
     roles,
     guards,

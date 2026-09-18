@@ -87,6 +87,9 @@ import {
   releaseDependentTasks,
   upsertTaskState,
 } from '../taskState/store.js';
+import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
+import { stageTimeoutMs } from '../agents/stageTimeouts.js';
+import { getEnabledStages, otherStageTimeoutsMs } from './runnerStageBudget.js';
 
 // Notifier (outbound notifications — Discord/Slack/Telegram/webhook, INT-1576)
 
@@ -995,6 +998,14 @@ export async function executePipeline(
       roleMcpTools,
       normalizeAdapterRouting(ctx.adapterRouting),
       ctx.workerSandbox,
+      // The same wall-clock budget the scheduler's watchdog was given, so the
+      // loop stops on its own terms instead of being killed mid-iteration
+      // (AGT-4430).
+      resolveHardTaskTimeoutMs({
+        maxIterations: ctx.pairMaxAttempts ?? 3,
+        workerTimeoutMs: stageTimeoutMs('worker', roles?.worker?.timeoutMs),
+        otherStagesTimeoutMs: otherStageTimeoutsMs(roles, ctx.verify),
+      }),
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
@@ -1260,15 +1271,6 @@ export async function executePipeline(
       await cleanup.catch((err) => console.warn('[Worktree] Cleanup failed:', err));
     }
   }
-}
-
-function getEnabledStages(roles?: DefaultRolesConfig, verify?: import('../core/types.js').VerifyConfig): PipelineStage[] {
-  const stages: PipelineStage[] = [];
-  if (roles?.worker?.enabled !== false) stages.push('worker');
-  if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
-  if (roles?.tester?.enabled || verify?.enabled) stages.push('tester');
-  if (roles?.documenter?.enabled) stages.push('documenter');
-  return stages;
 }
 
 // Reporting

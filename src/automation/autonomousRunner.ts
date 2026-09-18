@@ -51,6 +51,8 @@ import {
   formatPipelineResultEmbed,
 } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig } from '../core/types.js';
+import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
+import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import * as execution from './runnerExecution.js';
 import { pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
@@ -572,7 +574,17 @@ export class AutonomousRunner {
     // Initialize TaskScheduler
     // Same-repo parallelism is opt-in via config (default true) but the scheduler
     // force-disables it unless worktreeMode is on — see TaskScheduler guard. (INT-1975)
+    // One budget, two readers: the watchdog below and the pipeline's iteration
+    // loop get the same number, so a task can no longer be promised five
+    // attempts and given time for three and a half (AGT-4430).
+    const hardTaskTimeoutMs = resolveHardTaskTimeoutMs({
+      maxIterations: config.pairMaxAttempts ?? 3,
+      workerTimeoutMs: stageTimeoutMs('worker', config.defaultRoles?.worker?.timeoutMs),
+      otherStagesTimeoutMs: enabledStageTimeoutsMs(config.defaultRoles, config.verify),
+    });
+    console.log(`[Scheduler] Task wall-clock budget: ${Math.round(hardTaskTimeoutMs / 60_000)}min for ${config.pairMaxAttempts ?? 3} iteration(s)`);
     this.scheduler = initScheduler({
+      hardTaskTimeoutMs,
       maxConcurrent: config.maxConcurrentTasks ?? 1,
       allowSameProjectConcurrent: config.allowSameProjectConcurrent ?? true,
       // Preserve omission for TaskScheduler: undefined activates its weighted,
@@ -3970,4 +3982,16 @@ export async function stopAutonomous(): Promise<void> {
     await stoppingRunner.stop();
     if (runnerInstance === stoppingRunner) runnerInstance = null;
   }
+}
+
+/** Per-iteration wall clock of every enabled stage except the worker (AGT-4430). */
+function enabledStageTimeoutsMs(
+  roles?: import('../core/types.js').DefaultRolesConfig,
+  verify?: import('../core/types.js').VerifyConfig,
+): number {
+  const stages: Array<'reviewer' | 'tester' | 'documenter'> = [];
+  if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
+  if (roles?.tester?.enabled || verify?.enabled) stages.push('tester');
+  if (roles?.documenter?.enabled) stages.push('documenter');
+  return stages.reduce((total, stage) => total + stageTimeoutMs(stage, roles?.[stage]?.timeoutMs), 0);
 }
