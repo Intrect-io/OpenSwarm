@@ -416,6 +416,52 @@ describe('PairPipeline model selection', () => {
     expect(runReviewer).not.toHaveBeenCalled();
   });
 
+  // AGT-4430: the 60min watchdog fired mid-iteration-4 on cgf-portal AX-1556
+  // and the run ended "cancelled / PR not created", stranding 1,320 lines on a
+  // branch. The loop now stops on its own terms and parks, so the publication
+  // path (shouldPublishParkedWork) opens a draft PR for the work.
+  it('stops before an iteration that does not fit the wall-clock budget and parks for a human', async () => {
+    runWorker.mockResolvedValue({
+      success: false, summary: 'revise me', filesChanged: ['a.ts'], commands: [], output: '',
+      error: 'worker-scope: changed files outside declared fileScope: docs/X.md',
+    });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 5,
+      // Smaller than the wrap-up reserve, so iteration 2 can never fit.
+      taskBudgetMs: 1,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(false);
+    expect(result.iterations).toBe(1);
+    expect(result.operatorPark?.code).toBe('iteration_budget_spent');
+    expect(result.operatorPark?.reason).toContain('wall-clock budget spent');
+    expect(runWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses every iteration when the budget is generous', async () => {
+    runWorker.mockResolvedValue({
+      success: false, summary: 'revise me', filesChanged: ['a.ts'], commands: [], output: '',
+      error: 'worker-scope: changed files outside declared fileScope: docs/X.md',
+    });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 3,
+      taskBudgetMs: 90 * 60_000,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.operatorPark?.code).toBeUndefined();
+    expect(runWorker).toHaveBeenCalledTimes(3);
+  });
+
   it('passes planner fileScope to the worker enforcement boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
     const pipeline = new PairPipeline({

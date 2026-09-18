@@ -1,4 +1,6 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
+import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -199,14 +201,24 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     expect(history[0].failureCause).toBe('rate-limit');
   });
 
+  // AGT-4430: the watchdog is derived from the iteration budget it guards, so
+  // this asserts the intent (a hung executor is recorded as a timeout) without
+  // re-encoding the old hard-coded hour that contradicted the 5-iteration cap.
   it('records the scheduler hard watchdog as a timeout', async () => {
     vi.useFakeTimers();
     const runner = new AutonomousRunner(cfg());
     const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    const budgetMs = resolveHardTaskTimeoutMs({
+      maxIterations: 3,
+      workerTimeoutMs: stageTimeoutMs('worker', undefined),
+      otherStagesTimeoutMs: stageTimeoutMs('reviewer', undefined),
+    });
 
     scheduler.startTask(task(), '/repo', async () => await new Promise<PipelineResult>(() => {}));
-    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    await vi.advanceTimersByTimeAsync(budgetMs - 1);
+    expect(existsSync(join(tempDir, 'runner-pipeline-history.json'))).toBe(false);
 
+    await vi.advanceTimersByTimeAsync(1);
     const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
     expect(history).toHaveLength(1);
     expect(history[0]).toMatchObject({ failureCause: 'timeout', finalStatus: 'infra_error' });
