@@ -4,6 +4,7 @@
 // ============================================
 import { EventEmitter } from 'node:events';
 import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
+import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -414,8 +415,32 @@ export class PairPipeline extends EventEmitter {
                 + 'A prior run of this task did not pass. Address these points first and do not repeat them:\n'
                 + context.task.priorAttemptFeedback
               : undefined;
+          // The write-scope fence rejected these paths on an earlier iteration of
+          // this worktree. Without saying so, the loop cannot escape a demand it
+          // is structurally unable to satisfy: on AX-1556 the reviewer asked for
+          // a change to a file outside the worker's scope, and three successive
+          // workers tried to comply and were each failed by the fence — the last
+          // of them having otherwise addressed every point the reviewer raised.
+          // The task then ran out of iterations with the real blocker untouched.
+          //
+          // Sourced from the rejected-path registry rather than the conversation
+          // on purpose: a repeat failure triggers a fresh-context retry, which
+          // wipes exactly the memory that would have let the worker learn this.
+          // The registry survives that wipe, so the guidance reaches the worker
+          // the retry was about to send in blind. (AGT-4451)
+          const fenced = rejectedWorkerPaths(context.projectPath);
+          const scopeFencePart = fenced.length > 0
+            ? '## Outside your write scope — do not edit these\n'
+              + 'An earlier iteration changed these paths and the write-scope fence '
+              + 'rejected the whole result for it:\n'
+              + fenced.map((file) => `- ${file}`).join('\n') + '\n\n'
+              + 'Editing any of them fails this iteration no matter what else you get right. '
+              + 'If the review above asks for a change there, do not make it — say so in your '
+              + 'summary instead, naming the path and what was asked, so it reaches the pull '
+              + 'request as a known gap rather than being silently dropped.'
+            : undefined;
           const combinedFeedback =
-            [priorSessionPart, reflectionPart, reviewPart].filter(Boolean).join('\n\n') || undefined;
+            [priorSessionPart, reflectionPart, reviewPart, scopeFencePart].filter(Boolean).join('\n\n') || undefined;
 
           const workerOptions: WorkerOptions = {
             taskTitle: context.task.title,
