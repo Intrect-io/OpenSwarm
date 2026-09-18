@@ -3,8 +3,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rmSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isEphemeralWorktreeArtifact, isAgentScratchFile, ephemeralPathspecRoots } from './worktreeEphemeral.js';
+import { isSymlinkMode, symlinkTargetEscapes } from './escapingSymlink.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -45,6 +47,7 @@ export async function stagePreservableWorktreeChanges(worktreePath: string): Pro
   await stripRuntimeMarkerFromGit(worktreePath);
   await git(worktreePath, 'add', '-A');
   await unstageAgentScratchAdditions(worktreePath);
+  await unstageEscapingSymlinkAdditions(worktreePath);
   const staged = (await git(worktreePath, 'diff', '--cached', '--name-only'))
     .split('\n').filter(Boolean);
   const artifacts = staged.filter(isEphemeralWorktreeArtifact);
@@ -86,6 +89,52 @@ export async function unstageAgentScratchAdditions(worktreePath: string): Promis
   );
   await git(worktreePath, 'reset', '-q', '--', ...added);
   return added;
+}
+
+/**
+ * Drop newly added symlinks whose target escapes the worktree — additions only.
+ *
+ * `git add -A` stages a link the same way it stages a file, and a worktree is
+ * set up with local-asset links: cgf-portal's `post-checkout` hook runs
+ * `scripts/dev/link-local-assets.sh`, and this harness links `node_modules`
+ * from the main checkout. Whether git ignores such a link is an accident of
+ * the repository's own pattern — `node_modules` matches a link, `node_modules/`
+ * matches only a directory — so cgf-portal staged
+ * `apps/portal/node_modules` → `/Users/unohee/dev/cgf-portal/apps/portal/node_modules`
+ * into the AX-1556 branch and the publication fence then refused the branch
+ * (AGT-4431). The operator had already stripped this class of link out of one
+ * hand PR.
+ *
+ * A link the branch already tracks is the repository's own file and stays, by
+ * the AGT-4410 rule. The target is read from the staged blob rather than from
+ * disk, so the decision holds even after a later cleanup removed the link.
+ */
+export async function unstageEscapingSymlinkAdditions(worktreePath: string): Promise<string[]> {
+  const root = await realpath(worktreePath).catch(() => worktreePath);
+  // `--raw -z`: `:<old-mode> <new-mode> <old-sha> <new-sha> <status>\0<path>\0`.
+  // The mode comes from the index, so a link is identified without a stat, and
+  // `-z` keeps a non-ASCII path unquoted (cgf-portal tracks Korean names).
+  const records = (await git(worktreePath, 'diff', '--cached', '--raw', '-z', '--diff-filter=A'))
+    .split('\0');
+  const escaping: string[] = [];
+  for (let i = 0; i + 1 < records.length; i += 2) {
+    const meta = records[i];
+    const file = records[i + 1];
+    if (!meta || !file) continue;
+    const newMode = meta.split(' ')[1];
+    if (!newMode || !isSymlinkMode(newMode)) continue;
+    const target = (await git(worktreePath, 'show', `:${file}`).catch(() => '')).trim();
+    if (!target) continue;
+    if (symlinkTargetEscapes({ root, linkPath: join(root, file), target })) escaping.push(file);
+  }
+  if (escaping.length === 0) return [];
+  console.warn(
+    `[Worktree] Leaving ${escaping.length} escaping symlink(s) out of the commit — the target is `
+    + `outside this worktree, so the branch would carry a dangling link on any other machine `
+    + `(AGT-4431): ${escaping.join(', ')}`,
+  );
+  await git(worktreePath, 'reset', '-q', '--', ...escaping);
+  return escaping;
 }
 
 /** Remove legacy runtime artifacts from a previously preserved branch before it can publish. */

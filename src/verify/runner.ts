@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { describeLinuxSandbox, formatSandboxUnavailable, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
+import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
@@ -623,8 +624,7 @@ async function validateSandboxSymlinks(
       if (omitVerificationSource(path, sharedPaths)) continue;
       if (entry.isSymbolicLink()) {
         const target = await readlink(source);
-        const resolvedTarget = resolve(dirname(source), target);
-        if (isAbsolute(target) || (resolvedTarget !== projectRoot && !resolvedTarget.startsWith(`${projectRoot}${sep}`))) {
+        if (symlinkTargetEscapes({ root: projectRoot, linkPath: source, target })) {
           await rejectOrOmit(path);
           continue;
         }
