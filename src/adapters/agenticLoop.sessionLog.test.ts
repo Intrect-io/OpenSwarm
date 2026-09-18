@@ -10,7 +10,7 @@
 // ============================================
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAgenticLoop } from './agenticLoop.js';
@@ -169,6 +169,29 @@ describe('runAgenticLoop session transcript (AGT-4442)', () => {
     const tool = transcript().find((e) => e.type === 'tool');
     expect(tool?.isError).toBe(true);
     expect(String(tool?.output)).toMatch(/ENOENT|not found|no such file/i);
+  });
+
+  it('still returns its result when the log directory cannot be written', async () => {
+    // A log that can fail a run is worse than no log. The recorder declines,
+    // every `session?.` call becomes a no-op, and the work is unaffected.
+    const locked = join(root, 'locked');
+    mkdirSync(locked);
+    chmodSync(locked, 0o400);
+    process.env.OPENSWARM_SESSION_LOG_DIR = join(locked, 'sessions');
+    try {
+      const result = await runAgenticLoop({
+        prompt: 'work anyway',
+        cwd: process.cwd(),
+        model: 'test-model',
+        webTools: false,
+        maxTurns: 2,
+        usageAttribution: { adapter: 'openrouter', taskId: 'AX-1560', stage: 'worker' },
+        callApi: async () => finalResp('finished regardless'),
+      });
+      expect(result.text).toBe('finished regardless');
+    } finally {
+      chmodSync(locked, 0o700);
+    }
   });
 
   it('files an unattributed run under adhoc rather than losing it', async () => {
