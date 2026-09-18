@@ -553,6 +553,8 @@ export interface PipelineGuardsConfig {
   rewriteCheck?: boolean;
   /** Block a docs-only change that replaces figures the run never produced; flag uncited approval claims (AGT-4408). */
   claimEvidenceCheck?: boolean;
+  /** A run that claims to add a gate must assert every value it newly reports (AGT-3107). */
+  gateClaimEvidenceCheck?: boolean;
   /**
    * When the reviewer approves, file its recommendedActions as follow-up
    * sub-issues (INT-1611 / INT-1704). Optional, default OFF. (INT-1704)

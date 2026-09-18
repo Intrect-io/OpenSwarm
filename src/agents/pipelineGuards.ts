@@ -15,6 +15,7 @@ import { getWorkingDiffDetail } from '../support/gitTracker.js';
 import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
 import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
 import { figuresChangedInPlace, unsourcedFigures, uncitedApprovalClaims } from './claimEvidenceGuard.js';
+import { claimsGate, unassertedReportedKeys, gateClaimIssue } from './gateClaimGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -791,6 +792,46 @@ async function runClaimEvidenceGuard(workerResult: WorkerResult, projectPath: st
   return { passed: !blocking, guard, issues, blocking };
 }
 
+/**
+ * Lines anywhere in the tracked tree that mention `key`. One `git grep` per
+ * key, bounded by the caller; a key asserted by code this change did not
+ * touch must not be flagged, and a false negative here is the cheap error.
+ */
+async function treeMentions(projectPath: string, key: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', ['grep', '-h', '-F', '-e', key, '--', '.'], { cwd: projectPath, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
+    return stdout;
+  } catch {
+    return '';
+  }
+}
+
+/** At most this many reported keys are checked against the tree per run. */
+const GATE_CLAIM_TREE_LOOKUPS = 12;
+
+async function runGateClaimGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
+  const guard = 'gateClaim';
+  const issues: string[] = [];
+  const reportText = `${workerResult.summary}\n${workerResult.output}\n${workerResult.error ?? ''}`;
+  if (!claimsGate(reportText)) return { passed: true, guard, issues, blocking: true };
+  try {
+    const details = await getWorkingDiffDetail(projectPath);
+    const files: Array<{ file: string; added: string }> = [];
+    for (const d of details) {
+      files.push({ file: d.file, added: await getAddedLinesForFile(projectPath, d.file, d.isNew) });
+    }
+    const mentions = new Map<string, string>();
+    for (const key of unassertedReportedKeys(files, () => '').slice(0, GATE_CLAIM_TREE_LOOKUPS)) {
+      mentions.set(key, await treeMentions(projectPath, key));
+    }
+    const unasserted = unassertedReportedKeys(files, (key) => mentions.get(key) ?? '');
+    if (unasserted.length > 0) issues.push(gateClaimIssue(unasserted));
+  } catch (err) {
+    console.warn('[Guard:gateClaim] Error:', err);
+  }
+  return { passed: issues.length === 0, guard, issues, blocking: true };
+}
+
 // Guard Runner
 
 /**
@@ -860,6 +901,10 @@ export async function runGuards(
 
   if (config.claimEvidenceCheck) {
     results.push(await runClaimEvidenceGuard(guardWorkerResult, projectPath));
+  }
+
+  if (config.gateClaimEvidenceCheck) {
+    results.push(await runGateClaimGuard(guardWorkerResult, projectPath));
   }
 
   // conventionalCommits is checked separately (needs commit message)
