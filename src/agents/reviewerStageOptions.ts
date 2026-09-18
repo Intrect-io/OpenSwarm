@@ -9,6 +9,7 @@
 
 import { broadcastEvent } from '../core/eventHub.js';
 import { getDiffText } from '../support/gitTracker.js';
+import { refusedUntrackedPaths } from '../support/worktreeEphemeralOps.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
 import { coordinationContextFor } from './pipelineCoordination.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
@@ -47,6 +48,11 @@ async function reviewerDiff(projectPath: string): Promise<string | undefined> {
   try {
     const diff = await getDiffText(projectPath, undefined, REVIEWER_DIFF_MAX_BYTES, {
       includeUntracked: true,
+      // Untracked pulls in whatever `add -A` would stage, and that is more than
+      // the worker wrote: a worktree mount leaves a machine-local `node_modules`
+      // symlink behind, and a live reviewer spent turns judging it. Refuse here
+      // exactly what the commit path refuses. (AGT-4447)
+      excludePaths: await refusedUntrackedPaths(projectPath),
     });
     return diff.trim() ? diff : undefined;
   } catch {

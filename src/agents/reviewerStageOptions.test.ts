@@ -7,7 +7,7 @@
 // sees only the resulting files, and reading a file shows the result, never the
 // change (INT-3101). (AGT-4443)
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -90,6 +90,26 @@ describe('the in-loop reviewer stage (AGT-4443)', () => {
     // with no patch behind it.
     expect(options.diff).toContain('adapter.py');
     expect(options.diff).toContain('+class A2FixedExpense:');
+  });
+
+  it('leaves out untracked material the commit path refuses, and keeps the worker\'s own new file', async () => {
+    // A worktree mount leaves a machine-local `node_modules` symlink behind and
+    // an agent leaves `.bak` files; neither is the change under review, and a
+    // live reviewer spent 4 of 71 tool calls chasing the symlink. (AGT-4447)
+    const repo = repoWithWorkerEdits();
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'osw-reviewer-outside-')));
+    repos.push(outside);
+    mkdirSync(join(outside, 'node_modules'), { recursive: true });
+    symlinkSync(join(outside, 'node_modules'), join(repo, 'node_modules'));
+    writeFileSync(join(repo, 'adapter.py.bak'), 'stale copy\n');
+
+    const options = await buildReviewerStageOptions({ config, context: context(repo), prefix: 'p' });
+
+    // The worker's genuinely new file is why untracked is included at all.
+    expect(options.diff).toContain('adapter.py');
+    expect(options.diff).toContain('+class A2FixedExpense:');
+    expect(options.diff).not.toContain('node_modules');
+    expect(options.diff).not.toContain('adapter.py.bak');
   });
 
   it('leaves the diff undefined on a clean tree rather than sending an empty string', async () => {

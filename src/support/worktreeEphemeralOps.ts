@@ -3,7 +3,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rmSync } from 'node:fs';
-import { realpath } from 'node:fs/promises';
+import { lstat, readlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isEphemeralWorktreeArtifact, isAgentScratchFile, ephemeralPathspecRoots } from './worktreeEphemeral.js';
 import { isSymlinkMode, symlinkTargetEscapes } from './escapingSymlink.js';
@@ -101,6 +101,48 @@ export async function unstageRejectedWorkerAdditions(worktreePath: string): Prom
   );
   await git(worktreePath, 'reset', '-q', '--', ...added);
   return added;
+}
+
+/**
+ * Untracked paths the commit path would refuse, so a viewer can leave them out.
+ *
+ * The reviewer's diff includes untracked files, because a worker's brand-new
+ * file stays untracked until the preserve commit and a changed-file list with
+ * no patch behind it tells a reviewer nothing (AGT-4443). That also pulled in
+ * material nobody authored: the machine-local `node_modules` symlink a worktree
+ * mount creates appeared as a change, and a live reviewer spent 4 of its 71
+ * tool calls chasing it. The wasted turns are the cheap part — the risk is a
+ * REVISE against a worker for a link the worktree layer made.
+ *
+ * The judgement here is the staging path's, not a second opinion: the same
+ * three predicates that keep a path out of the commit keep it out of the diff,
+ * so the two cannot drift into disagreeing about what counts as the worker's
+ * work. (AGT-4447)
+ */
+export async function refusedUntrackedPaths(worktreePath: string): Promise<string[]> {
+  const root = await realpath(worktreePath).catch(() => worktreePath);
+  // `--exclude-standard` honours .gitignore, so this is the same set `add -A`
+  // would stage; `-z` keeps a non-ASCII path unquoted (cgf-portal tracks
+  // Korean file names).
+  const listed = await git(worktreePath, 'ls-files', '--others', '--exclude-standard', '-z')
+    .catch(() => '');
+  const files = listed.split('\0').filter(Boolean);
+  if (files.length === 0) return [];
+  const rejected = new Set(rejectedWorkerPaths(worktreePath));
+  const refused: string[] = [];
+  for (const file of files) {
+    if (isAgentScratchFile(file) || rejected.has(file)) {
+      refused.push(file);
+      continue;
+    }
+    // Untracked, so there is no index mode to read: ask the filesystem.
+    const linkPath = join(root, file);
+    const stat = await lstat(linkPath).catch(() => undefined);
+    if (!stat?.isSymbolicLink()) continue;
+    const target = await readlink(linkPath).catch(() => '');
+    if (target && symlinkTargetEscapes({ root, linkPath, target })) refused.push(file);
+  }
+  return refused;
 }
 
 /**
