@@ -3,7 +3,7 @@
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 import { EventEmitter } from 'node:events';
-import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
+import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -454,7 +454,7 @@ export class PairPipeline extends EventEmitter {
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
-            processContext: { taskId: taskEventKey(context.task), stage: 'worker' },
+            processContext: { taskId: taskAttributionKey(context.task), stage: 'worker' },
             workerContext,
             signal: this.abortSignal,
             instructionCapsule: this.config.instructionCapsule,

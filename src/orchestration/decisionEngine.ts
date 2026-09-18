@@ -107,6 +107,24 @@ export function taskEventKey(task: Pick<TaskItem, 'id' | 'issueId'>): string {
   return task.issueId || task.id;
 }
 
+/**
+ * The key a person reads work under: transcripts on disk, cost in the ledger.
+ *
+ * Deliberately not `taskEventKey`. That one is correlated against
+ * `automation_runs.issue_id` and must stay the UUID; this one is only ever
+ * grouped and displayed, so it should be the identifier a person recognises.
+ * The pipeline used to call `taskEventKey` for both, which filed one task's
+ * draft under `AX-1556` and its worker and reviewer under
+ * `12a014e9-f901-…` — in `~/.openswarm/sessions/` and in the cost ledger
+ * alike. Opening the identifier-named directory then showed only the draft,
+ * which reads as "the worker was never recorded". (AGT-4445)
+ */
+export function taskAttributionKey(
+  task: Pick<TaskItem, 'id' | 'issueId' | 'issueIdentifier'>,
+): string {
+  return task.issueIdentifier || task.issueId || task.id;
+}
+
 export function isUmbrellaIssue(task: TaskItem, parentIds: Set<string>): boolean {
   const isEpicTitle = /\[\s*epic\s*\]/i.test(task.title) || /^\s*epic[:\s]/i.test(task.title);
   const isParent = !!task.issueId && parentIds.has(task.issueId);
