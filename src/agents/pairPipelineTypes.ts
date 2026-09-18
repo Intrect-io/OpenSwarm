@@ -195,6 +195,8 @@ export interface PipelineContext {
   stuckReason?: string;
   /** Wall-clock budget spent before another iteration could fit (AGT-4430). */
   budgetParkReason?: string;
+  /** Per-iteration worktree snapshots and whether this run has already rolled back (AGT-4460). */
+  snapshots?: import('./iterationSnapshot.js').IterationSnapshotState;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

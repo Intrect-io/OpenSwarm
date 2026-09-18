@@ -5,6 +5,10 @@
 // propagation, worker-context collection edge cases, and the pipeline factory
 // helpers. Mocking conventions mirror pairPipeline.test.ts (partial mocks via
 // vi.importActual, keeping the real pure helpers).
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkerOptions } from './worker.js';
 import type { ReviewerOptions } from './reviewer.js';
@@ -457,9 +461,58 @@ describe('PairPipeline coverage extension', () => {
     // Iteration 1: guard fails (first occurrence → "progressed"), continues.
     // Iteration 2: identical issue → stagnation → shouldAbortSelfRepair() returns
     // true and the loop stops WITHOUT reaching the configured max of 5.
+    // Snapshots are off here (vitest.setup.ts), so stagnation aborts straight
+    // away; the test below covers what happens when a rollback is available.
     expect(runWorker).toHaveBeenCalledTimes(2);
     expect(runGuards).toHaveBeenCalledTimes(2);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+  });
+
+  it('spends one more iteration on clean ground before abandoning a stagnating run', async () => {
+    runGuards.mockResolvedValue({
+      allPassed: false,
+      results: [{ guard: 'qualityGate', passed: false, blocking: true, issues: ['TS2322: type mismatch in cache.ts'] }],
+      combinedIssues: ['TS2322: type mismatch in cache.ts'],
+    } satisfies GuardsRunResult);
+
+    // A real worktree, and never `process.cwd()`: a rollback writes to
+    // projectPath, so pointing this at the checkout would revert it.
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'pipeline-rollback-')));
+    const main = join(base, 'main');
+    const worktree = join(base, 'wt');
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    mkdirSync(main);
+    git(main, 'init', '--quiet', '.');
+    git(main, 'config', 'user.email', 't@t');
+    git(main, 'config', 'user.name', 't');
+    writeFileSync(join(main, 'edit.txt'), 'orig\n');
+    git(main, 'add', '-A');
+    git(main, 'commit', '--quiet', '-m', 'base');
+    git(main, 'worktree', 'add', '--quiet', worktree, '-b', 'feature');
+    delete process.env.OPENSWARM_SNAPSHOT;
+
+    try {
+      const { PairPipeline } = await import('./pairPipeline.js');
+      const pipeline = new PairPipeline({
+        stages: ['worker'],
+        maxIterations: 5,
+        guards: { qualityGate: true },
+        roles: { worker: { enabled: true, timeoutMs: 0 } },
+      });
+
+      await pipeline.run(task(), worktree);
+
+      // 1: first failure. 2: identical → roll back, keep going. 3: identical
+      // again → this is not an accumulation problem, so abandon. Still short of
+      // the configured 5, which is the property the test above protects.
+      expect(runWorker).toHaveBeenCalledTimes(3);
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Rolled back to the start of iteration 2'));
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+    } finally {
+      process.env.OPENSWARM_SNAPSHOT = '0';
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('surfaces non-blocking guard warnings to the reviewer without retrying', async () => {

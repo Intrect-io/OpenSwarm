@@ -52,3 +52,18 @@ process.env.OPENSWARM_SESSION_LOG_DIR = join(tmpdir(), 'openswarm-test-sessions'
 // in the operator's live ~/.openswarm/scratch/. Per worker because the prune
 // sweep reads the whole directory back. (AGT-4459)
 process.env.OPENSWARM_SCRATCHPAD_DIR = join(tmpdir(), 'openswarm-test-scratch', workerScope);
+
+// Two settings, for two different hazards (AGT-4460).
+//
+// The directory redirect is the same story as the two above: without it a test
+// leaves a snapshot store in the operator's live ~/.openswarm/snapshots/. That
+// is worse here than elsewhere — a store is keyed by run id, and a fixture
+// using a real identifier writes trees of the TEST's checkout under that run's
+// name. A later rollback of the real run would restore the wrong repository
+// into it. Observed exactly once, before this line existed.
+process.env.OPENSWARM_SNAPSHOT_DIR = join(tmpdir(), 'openswarm-test-snapshots', workerScope);
+// Off by default because a rollback writes to `projectPath`, and pipeline tests
+// pass `process.cwd()` — a stagnating test could revert the developer's working
+// tree. Tests that exercise snapshots delete this in their own beforeEach and
+// point projectPath at a temporary worktree.
+process.env.OPENSWARM_SNAPSHOT = '0';
