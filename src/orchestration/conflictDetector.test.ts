@@ -239,3 +239,21 @@ describe('fileScopesConflict (compatibility wrapper)', () => {
     expect(fileScopesConflict(['src/a.ts'], ['src/b.ts'])).toBe(false);
   });
 });
+
+describe('describeScopeConflict ignores documentation entries (AGT-4422)', () => {
+  const ledger = 'docs/REQUIREMENTS-LEDGER.md';
+
+  it('two tasks sharing only the requirements ledger do not conflict', () => {
+    expect(describeScopeConflict([ledger, 'apps/a.py'], [ledger, 'apps/b.py'], 'serialize')).toBeNull();
+  });
+
+  it('a shared code file still conflicts, and the reason names only the code', () => {
+    expect(describeScopeConflict([ledger, 'apps/a.py'], [ledger, 'apps/a.py'], 'serialize'))
+      .toEqual({ kind: 'overlap', shared: ['apps/a.py'] });
+  });
+
+  it('a docs-only scope stays a KNOWN scope — it is not "unknown" under serialize', () => {
+    expect(describeScopeConflict([ledger], ['apps/a.py'], 'serialize')).toBeNull();
+    expect(describeScopeConflict(['apps/a.py'], [ledger], 'serialize')).toBeNull();
+  });
+});
