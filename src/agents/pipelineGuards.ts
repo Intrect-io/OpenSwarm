@@ -409,9 +409,28 @@ function extractStringLiterals(text: string): string[] {
   const re = /['"`]([^'"`\n]{3,120})['"`]/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(text))) {
-    literals.add(match[1]);
+    literals.add(normalizeTemplateLiteral(match[1]));
   }
   return [...literals];
+}
+
+// A backtick template literal's ${...} interpolation is source code the regex
+// above captures as if it were literal text — it can never appear verbatim in
+// HEAD, so a route like `/api/a2/account-master/${encodeURIComponent(id)}`
+// was unescapable even though the route itself (matched by prefix in the
+// handler) is real. AX-1521, 2026-09-18: a correct fix — the test imports and
+// calls the production handler directly — was blocked for two iterations by
+// the interpolation syntax, not by anything wrong with the endpoint. Checking
+// the static prefix up to the first `${` preserves the guard's actual job
+// (is the ROUTE real?) without asking a dynamic segment to match literally.
+// A prefix under 3 chars is not enough to search for or trust, so leave those
+// literals as the whole interpolated text (still flagged) — a bare `${x}`
+// route is not a case this narrowing needs to rescue.
+function normalizeTemplateLiteral(literal: string): string {
+  const interpolationIndex = literal.indexOf('${');
+  if (interpolationIndex === -1) return literal;
+  const prefix = literal.slice(0, interpolationIndex);
+  return prefix.length >= 3 ? prefix : literal;
 }
 
 // A literal a test needs in order to *be* a test, not a contract it invents
