@@ -98,9 +98,6 @@ async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
 
 // Branch & Path Utilities
 
-// The naming convention lives in its own module (branchNaming.ts) so the one
-// rule that decides "is this branch mine?" is not buried in lifecycle code.
-import { isBranchForIssue, isSwarmBranch } from './branchNaming.js';
 // Overlap set arithmetic and rendering live in fileOverlap.ts — pure, and this
 // file is at the pre-commit LOC cap. Re-exported so callers keep one import.
 export { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
@@ -108,6 +105,8 @@ import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOv
 import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
 import { guardUnsafeBinaryStaging, unsafeBinaryDataOnBranch, UNRESOLVED_BASE } from './unsafeBinaryData.js';
 import { assertNoSensitiveDataOnBranch, sensitiveDataOnBranch } from './sensitiveDataFence.js';
+// The open-PR ownership preflight lives in openPullRequestOverlaps.ts for the
+// same reason; callers keep importing it from here.
 export { findOpenPRFileOverlaps, type OpenPRFileOverlap } from './openPullRequestOverlaps.js';
 
 function isPathInside(parent: string, child: string): boolean {
