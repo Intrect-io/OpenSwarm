@@ -965,12 +965,25 @@ async function runAgenticLoopInner(
   // 올려 보내 reviewer/worker 호출자가 명시적으로 처리하게 한다. (INT-1442, INT-2879)
   if (!finalText && apiCallCount > 0) {
     const maxFinalAnswerAttempts = 2;
-    messages.push({
-      role: 'user',
-      content:
-        "You've reached this turn's step limit, so stop calling tools now. Using everything " +
-        'above, write a non-empty final answer now. Follow the output format requested in the ' +
-        'original task exactly. Do not mention step/tool limits or "budget" to the user.',
+    const stepLimitPrompt =
+      "You've reached this turn's step limit, so stop calling tools now. Using everything " +
+      'above, write a non-empty final answer now. Follow the output format requested in the ' +
+      'original task exactly. Do not mention step/tool limits or "budget" to the user.';
+    messages.push({ role: 'user', content: stepLimitPrompt });
+    // Salvage is where a cut-short run gets the answer that becomes its verdict,
+    // and it used to leave no trace at all: the transcript ended on a tool
+    // result, and the reviewer's entire REVISE — evidence table, three named
+    // problems, decision JSON — existed only inside the `end` summary. Reading
+    // the events, the run looked like it simply stopped. Worse, nothing said the
+    // loop had run out of turns; establishing that meant counting API calls
+    // against recorded events. Record the reason, the injected prompt and every
+    // attempt, so a salvaged run explains itself. (AGT-4450)
+    session?.record({
+      type: 'notice',
+      note: 'salvage',
+      reason: 'the loop ended without a final message; asking for an answer with no tools',
+      attempts: maxFinalAnswerAttempts,
+      prompt: stepLimitPrompt,
     });
 
     for (let attempt = 1; attempt <= maxFinalAnswerAttempts && !finalText; attempt++) {
@@ -978,12 +991,11 @@ async function runAgenticLoopInner(
         onLog?.('▸ Final answer turn (no tools) — loop ended without a final message');
       } else {
         onLog?.('↻ Final answer was empty — retrying once (no tools)');
-        messages.push({
-          role: 'user',
-          content:
-            'Your previous final-answer attempt returned no user-visible text. Respond now with ' +
-            'the complete, non-empty final answer in the exact format requested by the original task.',
-        });
+        const retryPrompt =
+          'Your previous final-answer attempt returned no user-visible text. Respond now with ' +
+          'the complete, non-empty final answer in the exact format requested by the original task.';
+        messages.push({ role: 'user', content: retryPrompt });
+        session?.record({ type: 'notice', note: 'salvage-retry', attempt, prompt: retryPrompt });
       }
 
       try {
@@ -993,7 +1005,21 @@ async function runAgenticLoopInner(
         apiCallCount++;
         const content = response.choices?.[0]?.message?.content;
         finalText = typeof content === 'string' && content.trim() ? content : '';
+        // Recorded even when empty, so recorded assistant events reconcile with
+        // `apiCallCount` and an empty salvage is visible rather than inferred.
+        session?.record({
+          type: 'assistant',
+          salvage: attempt,
+          content: typeof content === 'string' ? content : '',
+          toolCalls: [],
+        });
       } catch (err) {
+        session?.record({
+          type: 'notice',
+          note: 'salvage-failed',
+          attempt,
+          error: err instanceof Error ? err.message : String(err),
+        });
         // A rate limit on a salvage call must still propagate — swallowing it
         // here would return an empty result the scheduler reads as a plain failure
         // instead of pausing. Mirror the main call path: preserve a typed
@@ -1009,6 +1035,11 @@ async function runAgenticLoopInner(
 
     if (!finalText) {
       onLog?.('✖ Final answer remained empty after one retry');
+      session?.record({
+        type: 'notice',
+        note: 'salvage-exhausted',
+        reason: 'every final-answer attempt came back empty; the run ends with no answer',
+      });
       throw new Error('Agentic loop produced no final message after one retry');
     }
   }

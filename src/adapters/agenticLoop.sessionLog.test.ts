@@ -205,4 +205,71 @@ describe('runAgenticLoop session transcript (AGT-4442)', () => {
     });
     expect(readdirSync(root)).toEqual(['adhoc']);
   });
+
+  it('records the salvage turn, so a cut-short run explains itself instead of stopping mid-tool (AGT-4450)', async () => {
+    // The loop hits its step limit and asks once more with no tools. That call
+    // produced the reviewer's entire REVISE verdict on AX-1556 and left no
+    // trace: the transcript ended on a tool result. (AGT-4450)
+    let call = 0;
+    const result = await runAgenticLoop({
+      systemPrompt: 'You are a reviewer.',
+      prompt: 'judge the diff',
+      cwd: process.cwd(),
+      model: 'test-model',
+      webTools: false,
+      maxTurns: 2,
+      usageAttribution: { adapter: 'openrouter', taskId: 'AX-1556', stage: 'reviewer' },
+      callApi: async (_messages: unknown, tools: unknown[]) => {
+        call += 1;
+        // The salvage call is the one made with no tools.
+        if (Array.isArray(tools) && tools.length === 0) return finalResp('decision: revise');
+        return toolCallResp(`c${call}`, 'read_file', { path: 'package.json' });
+      },
+    });
+
+    expect(result.text).toBe('decision: revise');
+    const log = transcript();
+
+    const salvage = log.find((e) => e.type === 'notice' && e.note === 'salvage');
+    expect(salvage).toBeDefined();
+    // The operator learns the run was cut short without counting API calls.
+    expect(String(salvage?.reason)).toContain('without a final message');
+    expect(String(salvage?.prompt)).toContain('step limit');
+
+    const assistants = log.filter((e) => e.type === 'assistant');
+    expect(assistants[assistants.length - 1]).toMatchObject({
+      salvage: 1,
+      content: 'decision: revise',
+    });
+
+    // The signature that exposed this: a salvaged run recorded one fewer
+    // assistant event than it made API calls.
+    const end = log[log.length - 1];
+    expect(assistants.length).toBe(end.apiCallCount);
+  });
+
+  it('records both empty salvage attempts and why the run ended with no answer (AGT-4450)', async () => {
+    const empty = { choices: [{ message: { role: 'assistant', content: '' }, finish_reason: 'stop' }] };
+    let call = 0;
+    await expect(runAgenticLoop({
+      systemPrompt: 'You are a worker.',
+      prompt: 'do the thing',
+      cwd: process.cwd(),
+      model: 'test-model',
+      webTools: false,
+      maxTurns: 2,
+      usageAttribution: { adapter: 'openrouter', taskId: 'AX-1557', stage: 'worker' },
+      callApi: async (_messages: unknown, tools: unknown[]) => {
+        call += 1;
+        if (Array.isArray(tools) && tools.length === 0) return empty;
+        return toolCallResp(`c${call}`, 'read_file', { path: 'package.json' });
+      },
+    })).rejects.toThrow(/no final message/);
+
+    const log = transcript();
+    expect(log.find((e) => e.note === 'salvage-retry')).toMatchObject({ attempt: 2 });
+    expect(String(log.find((e) => e.note === 'salvage-exhausted')?.reason)).toContain('empty');
+    // Both attempts are present, empty content and all.
+    expect(log.filter((e) => e.type === 'assistant' && e.salvage !== undefined)).toHaveLength(2);
+  });
 });
