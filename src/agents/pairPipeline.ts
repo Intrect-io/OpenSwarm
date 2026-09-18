@@ -58,6 +58,7 @@ import type { ModelRole } from '../adapters/modelCompat.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
+import { testerReflectionErrors, testerRevisionFeedback } from './testerFailureFeedback.js';
 import { repoNameFromPath, worktreeNameFromPath } from './repoPathNames.js';
 import { assignedAgentName, coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
@@ -1141,30 +1142,26 @@ export class PairPipeline extends EventEmitter {
         stages.push(testerResult);
 
         const hasNewSecurityFindings = (context.newSecurityFindings?.length ?? 0) > 0;
-        const reviewerShouldJudgeFailure = context.testerResult?.deterministic === true && !hasNewSecurityFindings;
+        // Only a configured reviewer can judge a deterministic verdict; without
+        // one the deferral had no recipient and the run ended instead of
+        // self-repairing. See `testerFailureFeedback.ts` (AGT-4438).
+        const reviewerShouldJudgeFailure = hasReviewer
+          && context.testerResult?.deterministic === true
+          && !hasNewSecurityFindings;
         if (!testerResult.success && !this.config.continueOnTestFail && !reviewerShouldJudgeFailure) {
           // Test failure is objective ground truth → record into the reflection
           // trail and drive a bounded self-repair retry (INT-1679).
           safeConsole.log(`[${context.taskPrefix}] Tester failed, retrying...`);
           agentPair.trackFailure(context.session.id); // Track for fresh context decision
 
-          const failedTests = context.testerResult?.failedTests ?? [];
-          const testErrors = failedTests.length > 0
-            ? failedTests
-            : [context.testerResult?.error || `Tests failed (${context.testerResult?.testsFailed ?? 0} failing)`];
           const { progressed } = recordReflection(context.reflection, {
             iteration: context.currentIteration,
             source: 'test',
-            errors: testErrors,
+            errors: testerReflectionErrors(context.testerResult),
           });
 
           if (context.testerResult) {
-            context.reviewResult = {
-              decision: 'revise',
-              feedback: testerAgent.buildTestFixPrompt(context.testerResult),
-              issues: context.testerResult.failedTests,
-              suggestions: context.testerResult.suggestions,
-            };
+            context.reviewResult = testerRevisionFeedback(context.testerResult);
           }
           context.feedbackSource = 'objective';
 
