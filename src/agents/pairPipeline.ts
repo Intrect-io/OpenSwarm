@@ -59,6 +59,7 @@ import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVeri
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
 import { testerReflectionErrors, testerRevisionFeedback } from './testerFailureFeedback.js';
+import { formatGuardWarningLine, guardWarningsForResult } from './guardWarningRecord.js';
 import { repoNameFromPath, worktreeNameFromPath } from './repoPathNames.js';
 import { assignedAgentName, coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
@@ -260,6 +261,8 @@ export class PairPipeline extends EventEmitter {
           : undefined,
         totalDuration: Date.now() - startTime,
         iterations: context.currentIteration,
+        // A crashed run still knows what the guards objected to (AGT-4439).
+        guardWarnings: guardWarningsForResult(context.guardsResult?.results),
         workerResult: context.workerResult,
         reviewResult: context.reviewResult,
         testerResult: context.testerResult,
@@ -991,13 +994,12 @@ export class PairPipeline extends EventEmitter {
           continue;
         }
 
-        // Log non-blocking guard warnings
-        const warnings = guardsResult.results.filter(r => !r.passed && !r.blocking);
-        if (warnings.length > 0) {
-          safeConsole.log(`[${context.taskPrefix}] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
-          this.emit('log', {
-            line: `⚠️ Guard warnings: ${warnings.flatMap(w => w.issues).join('; ')}`,
-          });
+        // Carries the issues, not just the guard's name: stdout is the last
+        // reader left. Why, in guardWarningRecord.ts (AGT-4439).
+        const warningLine = formatGuardWarningLine(guardsResult.results);
+        if (warningLine) {
+          safeConsole.log(`[${context.taskPrefix}] ${warningLine}`);
+          this.emit('log', { line: `⚠️ ${warningLine}` });
         }
       }
 
@@ -1377,6 +1379,8 @@ export class PairPipeline extends EventEmitter {
           : undefined,
       totalDuration: Date.now() - startTime,
       iterations: context.currentIteration,
+      // Final iteration's non-blocking warnings; see guardWarningRecord.ts.
+      guardWarnings: guardWarningsForResult(context.guardsResult?.results),
       workerResult: context.workerResult,
       reviewResult: context.reviewResult,
       lastReviewFeedback: context.lastReviseFeedback,

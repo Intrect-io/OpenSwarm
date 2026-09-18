@@ -89,6 +89,12 @@ export interface PipelineResult {
   success: boolean;
   sessionId: string;
   stages: StageResult[];
+  /**
+   * Non-blocking guard warnings from the final guards run, kept so the
+   * durable record answers "what did the guards object to?" without a
+   * reviewer and without re-running them (AGT-4439).
+   */
+  guardWarnings?: import('./guardWarningRecord.js').GuardWarningRecord[];
   finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'superseded' | 'deferred' | 'rate_limited' | 'infra_error' | 'waiting_on_operator';
   /**
    * Set only when `finalStatus === 'infra_error'` and the cause is the
