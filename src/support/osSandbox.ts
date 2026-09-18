@@ -17,6 +17,7 @@
 
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import { scratchpadDir } from './scratchpad.js';
 import { join } from 'node:path';
 
 export interface SandboxSpec {
@@ -106,6 +107,26 @@ export function wrapForSandbox(
  * Directories that do not exist are dropped: bwrap fails on a missing bind
  * source, and a cache the host has never created needs no exception yet.
  */
+/**
+ * Every directory a worker's `bash` may write to, including its scratchpad.
+ *
+ * The scratchpad grant is the run's OWN directory and never its parent.
+ * `~/.openswarm` also holds `automation.db` and the session transcripts, so a
+ * grant one level up would let a worker edit the ledger and rewrite the record
+ * of what it did — the audit trail is only worth having if the thing being
+ * audited cannot reach it. (AGT-4459)
+ */
+export function workerWritableRoots(
+  worktreeRoot: string,
+  scratchpadRunId?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string[] {
+  const roots = defaultWorkerWritableRoots(worktreeRoot, env, home);
+  if (!scratchpadRunId) return roots;
+  return [...roots, scratchpadDir(scratchpadRunId)];
+}
+
 export function defaultWorkerWritableRoots(
   worktreeRoot: string,
   env: NodeJS.ProcessEnv = process.env,

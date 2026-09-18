@@ -172,6 +172,14 @@ export interface AgenticLoopOptions {
   /** Expose search_memory (default true). Disabled for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
   /**
+   * Run whose scratchpad `scratch_write`/`scratch_read` address (AGT-4459).
+   * Absent means no scratchpad: the two tools are withheld from the model and
+   * refused if it emits them anyway. Notes are the only thing an agent writes
+   * to itself that survives an iteration boundary, so this is threaded from the
+   * pipeline rather than derived here — a loop cannot know which run it serves.
+   */
+  scratchpadRunId?: string;
+  /**
    * Expose the `bash` tool. Default true.
    *
    * `bash` is not path-confined the way the file tools are, so an agent that
@@ -319,6 +327,7 @@ async function runAgenticLoopInner(
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
+    scratchpadRunId,
     shellTools: requestedShellTools = true,
     sandboxExecutorSessionFactory,
     filesystemTools = true,
@@ -394,9 +403,12 @@ async function runAgenticLoopInner(
   const memoryFilteredTools = memoryTools
     ? baseTools
     : baseTools.filter((t) => t.function.name !== 'search_memory');
-  const shellFilteredTools = shellTools
+  const scratchFilteredTools = scratchpadRunId
     ? memoryFilteredTools
-    : memoryFilteredTools.filter((t) => t.function.name !== 'bash');
+    : memoryFilteredTools.filter((t) => !t.function.name.startsWith('scratch_'));
+  const shellFilteredTools = shellTools
+    ? scratchFilteredTools
+    : scratchFilteredTools.filter((t) => t.function.name !== 'bash');
   const visibleBaseTools = readOnly
     ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash'].includes(t.function.name))
     : shellFilteredTools;
@@ -811,6 +823,7 @@ async function runAgenticLoopInner(
       coordinationContext,
       sandboxExecutorSession,
       loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
+      scratchpadRunId,
     });
     toolCalls.forEach((tc, i) => {
       const result = results[i];

@@ -46,3 +46,9 @@ process.env.OPENSWARM_USAGE_DIR = join(tmpdir(), 'openswarm-test-usage', workerS
 // than disabled, so the wiring stays exercised by those tests. Per worker
 // because pruning reads the whole directory back. (AGT-4442)
 process.env.OPENSWARM_SESSION_LOG_DIR = join(tmpdir(), 'openswarm-test-sessions', workerScope);
+
+// Same reason as the session log above: pipeline tests build worker options
+// that carry a scratchpad id, and a tool test that writes a note would land it
+// in the operator's live ~/.openswarm/scratch/. Per worker because the prune
+// sweep reads the whole directory back. (AGT-4459)
+process.env.OPENSWARM_SCRATCHPAD_DIR = join(tmpdir(), 'openswarm-test-scratch', workerScope);

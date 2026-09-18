@@ -5,6 +5,7 @@
 import { EventEmitter } from 'node:events';
 import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
+import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -439,8 +440,10 @@ export class PairPipeline extends EventEmitter {
               + 'summary instead, naming the path and what was asked, so it reaches the pull '
               + 'request as a known gap rather than being silently dropped.'
             : undefined;
+          const scratchNotesPart = await scratchNotesSection(context.task);
           const combinedFeedback =
-            [priorSessionPart, reflectionPart, reviewPart, scopeFencePart].filter(Boolean).join('\n\n') || undefined;
+            [scratchNotesPart, priorSessionPart, reflectionPart, reviewPart, scopeFencePart]
+              .filter(Boolean).join('\n\n') || undefined;
 
           const workerOptions: WorkerOptions = {
             taskTitle: context.task.title,
@@ -448,6 +451,7 @@ export class PairPipeline extends EventEmitter {
             authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
             projectPath: context.projectPath,
             previousFeedback: combinedFeedback,
+            scratchpadRunId: workerScratchpadRunId(context.task),
             timeoutMs: stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs),
             // getModelForRole gives the matched jobProfile's model precedence (config's
             // light/heavy → gpt-5.5/5.4), falling back to roles.worker.model. Reading

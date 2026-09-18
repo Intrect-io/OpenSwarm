@@ -156,6 +156,7 @@ export class GptCliAdapter implements CliAdapter {
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
+      scratchpadRunId: options.scratchpadRunId,
       forbidPublication: options.forbidPublication,
       sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,
