@@ -75,7 +75,7 @@ export function reportedKeys(files: ReadonlyArray<{ file: string; added: string 
  * comparison, a shell test, a `jq -e`, a branch that throws or exits.
  */
 const ASSERT_TOKEN_RE =
-  /\b(?:assert\w*|expect|XCTAssert\w*|precondition|toBe\w*|toEqual|toStrictEqual|toContain\w*|toMatch\w*|toHave\w*|jq\s+-e|grep\s+-q|fail|panic|throw|exit\s+[1-9]|guard|unless)\b|\s-(?:eq|ne|lt|le|gt|ge)\s|===|!==|==|!=|<=|>=|\bif\s*[(\[]|\btest\s+-/;
+  /\b(?:assert\w*|expect|XCTAssert\w*|precondition|toBe\w*|toEqual|toStrictEqual|toContain\w*|toMatch\w*|toHave\w*|jq\s+-e|grep\s+-q|fail|panic|throw|exit\s+[1-9]|guard|unless)\b|\s-(?:eq|ne|lt|le|gt|ge)\s|===|!==|==|!=|<=|>=|\bif\s*[([]|\btest\s+-/;
 
 /** How many lines above a mention of the key an enclosing assertion may open (a multi-line `expect(...).toEqual({...})`). */
 const ASSERT_LOOKBACK_LINES = 12;
