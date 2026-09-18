@@ -31,4 +31,32 @@ esac
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // cgf-portal #552 shared one of AX-1526's 24 planned files — the job-schedule
+  // registry every scheduling issue appends to — and superseded the task.
+  it('a human PR reserves the plan only when it shares at least half of it; a held swarm PR reserves on any file', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'openswarm-pr-threshold-'));
+    const bin = join(root, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh
+case "$*" in
+  *"pr list --state open"*) echo '[{"number":552,"url":"https://example.test/552","headRefName":"ax-1486-b3-mail-intake-2","files":[{"path":"infra/nas/schedules.json"},{"path":"apps/b3.py"}]},{"number":553,"url":"https://example.test/553","headRefName":"ax-1499-a2-half","files":[{"path":"infra/nas/schedules.json"},{"path":"apps/a2_fixed.py"}]},{"number":180,"url":"https://example.test/180","headRefName":"swarm/AX-999-x","files":[{"path":"infra/nas/schedules.json"}]}]';;
+esac
+`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}:${previous}`;
+    try {
+      const plan = ['infra/nas/schedules.json', 'apps/a2_fixed.py', 'apps/a2_sheet.py', 'apps/service.py'];
+      // #552 shares 1 of 4 (below half) — proceeds; #553 shares 2 of 4 — reserves;
+      // the held swarm PR shares 1 of 4 — still reserves.
+      await expect(findOpenPRFileOverlaps(root, plan, { activeIssueIdentifiers: ['AX-999'] })).resolves.toEqual([
+        expect.objectContaining({ number: 553, files: ['infra/nas/schedules.json', 'apps/a2_fixed.py'] }),
+        expect.objectContaining({ number: 180, files: ['infra/nas/schedules.json'] }),
+      ]);
+    } finally {
+      process.env.PATH = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
