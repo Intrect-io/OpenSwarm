@@ -610,6 +610,42 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     });
   });
 
+  describe('gateClaimEvidenceCheck (AGT-3107)', () => {
+    // A new host script reports a value into the QC JSON; the run claims a gate.
+    const HOST = 'report["present_preset_number"] = presetNumber\n';
+    const CLAIM = { summary: 'test(au-qc): gate on PresentPreset — regression class' };
+
+    it('blocks a gate claim whose reported value nothing asserts, naming the key', async () => {
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      const res = await runGuards({ ...mockWorker(['host.swift']), ...CLAIM }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim').some(i => i.includes('`present_preset_number`'))).toBe(true);
+      expect(res.allPassed).toBe(false);
+    });
+
+    it('passes the same change once a sibling file in the change asserts the value', async () => {
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      writeFileSync(join(repo, 'qc.sh'), '[ "$(jq -r .present_preset_number "$out")" != "-1" ] && exit 1\n');
+      const res = await runGuards({ ...mockWorker(['host.swift', 'qc.sh']), ...CLAIM }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim')).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
+    it('passes when a committed, untouched file already asserts the value', async () => {
+      writeFileSync(join(repo, 'qc.sh'), '[ "$(jq -r .present_preset_number "$out")" != "-1" ] && exit 1\n');
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'gate']);
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      const res = await runGuards({ ...mockWorker(['host.swift']), ...CLAIM }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim')).toEqual([]);
+    });
+
+    it('never touches a run that claims no gate', async () => {
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      const res = await runGuards({ ...mockWorker(['host.swift']), summary: 'report the preset number' }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim')).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+  });
+
   describe('reformatCheck', () => {
     it('flags a whitespace-only change', async () => {
       writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n'); // re-indent only

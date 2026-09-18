@@ -296,6 +296,8 @@ const PipelineGuardsConfigSchema = z.object({
   rewriteCheck: z.boolean().optional(),
   /** Block a docs-only change that replaces figures the run never produced; flag uncited approval claims (AGT-4408). */
   claimEvidenceCheck: z.boolean().optional(),
+  /** A run that claims to add a gate must assert every value it newly reports (AGT-3107). */
+  gateClaimEvidenceCheck: z.boolean().optional(),
 }).optional();
 
 const VerifyConfigSchema = z.object({
