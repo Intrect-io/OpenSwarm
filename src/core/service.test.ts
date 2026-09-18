@@ -428,6 +428,29 @@ describe('service', () => {
       );
     });
 
+    it('stays up when Discord cannot connect, because the daemon is willing to run without it (AGT-4453)', async () => {
+      // 2026-09-18: a rotated bot token made `login` throw TokenInvalid inside
+      // startServiceLocked, before the web server, the scheduler and the
+      // autonomous runner. 22 crash-loop restarts, /api/health answering
+      // nothing, launchd reporting `state = running` throughout.
+      const { initDiscord } = await import('../discord/index.js');
+      const { startWebServer } = await import('../support/web.js');
+      const { startAutonomous } = await import('../automation/autonomousRunner.js');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.mocked(initDiscord).mockRejectedValueOnce(new Error('An invalid token was provided.'));
+
+      await startService(mockAutonomousConfig as SwarmConfig);
+
+      // The lanes that make the daemon a daemon are up.
+      expect(startWebServer).toHaveBeenCalledWith(3847);
+      expect(vi.mocked(startAutonomous)).toHaveBeenCalled();
+      // And the degradation is named rather than swallowed.
+      const warned = warn.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(warned).toContain('Discord did not start');
+      expect(warned).toContain('An invalid token was provided.');
+      warn.mockRestore();
+    });
+
     it('keeps local web serving but never initializes Discord in strict human-surface mode', async () => {
       const { initDiscord, stopDiscord } = await import('../discord/index.js');
       const { startWebServer } = await import('../support/web.js');

@@ -55,6 +55,27 @@ export function getPRProcessor(): PRProcessor | null {
 }
 
 /**
+ * Start a surface the service is willing to run without.
+ *
+ * Returns whether it came up. A surface that is merely *absent* already had a
+ * branch here; one that is present but broken did not, and took the whole
+ * service with it. Anything whose absence would make the daemon pointless —
+ * the web server, which is also what answers /api/health — stays a bare
+ * `await` on purpose, so a real outage still fails loudly instead of running
+ * hollow. (AGT-4453)
+ */
+async function startOptionalSurface(name: string, start: () => Promise<void>): Promise<boolean> {
+  try {
+    await start();
+    return true;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️ ${name} did not start — the service continues without it: ${reason}`);
+    return false;
+  }
+}
+
+/**
  * Start the service
  */
 export async function startService(config: SwarmConfig): Promise<void> {
@@ -157,8 +178,23 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log('⏭ Discord disabled by humanSurfaceReadOnly policy');
   } else if (config.discordToken && config.discordChannelId) {
     console.log('🤖 Connecting Discord bot...');
-    await discord.initDiscord(config.discordToken, config.discordChannelId);
-    console.log('✅ Discord bot connected successfully');
+    // Optional surface, so its failure degrades the surface and not the
+    // service. This `await` used to be bare: on 2026-09-18 a rotated bot token
+    // made `login` throw `TokenInvalid`, which left `startServiceLocked` before
+    // the web server, the scheduler and the autonomous runner — 22 crash-loop
+    // restarts with every lane down, while launchd reported `state = running`
+    // the whole time and /api/health answered nothing. A chat bot the operator
+    // had stopped using could stop the daemon. (AGT-4453)
+    //
+    // Safe to continue after a failure: `initDiscord` destroys the client and
+    // leaves the module-level `client` null before rethrowing, and every send
+    // path is guarded by `if (!client) return`, so the surface goes quiet
+    // rather than half-connected.
+    const connected = await startOptionalSurface(
+      'Discord',
+      () => discord.initDiscord(config.discordToken!, config.discordChannelId!),
+    );
+    if (connected) console.log('✅ Discord bot connected successfully');
   } else {
     console.log('⏭ Discord not configured — skipping');
   }
