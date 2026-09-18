@@ -108,6 +108,7 @@ import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOv
 import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
 import { guardUnsafeBinaryStaging, unsafeBinaryDataOnBranch, UNRESOLVED_BASE } from './unsafeBinaryData.js';
 import { assertNoSensitiveDataOnBranch, sensitiveDataOnBranch } from './sensitiveDataFence.js';
+import { isDocumentationPath } from '../orchestration/conflictScope.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -974,8 +975,11 @@ export async function findOpenPRFileOverlaps(
     activeIssueIdentifiers?: readonly string[];
   } = {},
 ): Promise<OpenPRFileOverlap[]> {
-  if (plannedFiles.length === 0) return [];
-  const planned = new Set(plannedFiles.map((f) => f.replace(/^\.\//, '')));
+  // A documentation path is never ownership (AGT-4422): the requirements
+  // ledger every cgf-portal PR updates made one open hand PR supersede every
+  // task in the repository.
+  const planned = new Set(plannedFiles.map((f) => f.replace(/^\.\//, '')).filter((f) => !isDocumentationPath(f)));
+  if (planned.size === 0) return [];
   try {
     // `files` is available on `gh pr list --json`; fetch every scope in one API
     // request instead of running an unbounded `gh pr diff` loop.
