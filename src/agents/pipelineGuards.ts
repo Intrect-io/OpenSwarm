@@ -414,7 +414,22 @@ function extractStringLiterals(text: string): string[] {
   return [...literals];
 }
 
+// A literal a test needs in order to *be* a test, not a contract it invents
+// (AGT-4427). cgf-portal AX-1556 lost three worker iterations — 44 minutes —
+// to "2000-01-01T00:00:00" (the fixture timestamp for an updated_at
+// concurrency check), "test://" and "file:///test/test.xlsx". The colon rule
+// below matches an ISO 8601 timestamp exactly, and a fixture path or sentinel
+// scheme is never going to appear in HEAD producer code, so the guard was
+// unescapable for any test that names a time or a file.
+const ISO_DATE_LITERAL_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+const TEST_SENTINEL_LITERAL_RE = /^(?:test|example|dummy|fake|mock|localhost|file):\/\/|^file:\/\/\/|(?:^|\/)(?:tmp|test|tests|fixtures?)\//i;
+
+function isTestOnlyLiteral(literal: string): boolean {
+  return ISO_DATE_LITERAL_RE.test(literal) || TEST_SENTINEL_LITERAL_RE.test(literal);
+}
+
 function isContractLiteral(literal: string, addedLines: string): boolean {
+  if (isTestOnlyLiteral(literal)) return false;
   if (literal.startsWith('/api/')) return true;
   if (/^[a-zA-Z0-9_.-]{3,}:/.test(literal)) return true;
   if (

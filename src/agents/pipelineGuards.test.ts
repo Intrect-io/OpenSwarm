@@ -109,6 +109,21 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(res.allPassed).toBe(false);
     });
 
+    // AGT-4427: cgf-portal AX-1556 lost three worker iterations to a fixture
+    // timestamp, a "test://" sentinel and a "file:///test/…" path. None can
+    // ever appear in HEAD producer code, so the block was unescapable.
+    it.each([
+      ['a fixture timestamp', "it('stale write', () => expect(row.updated_at).toBe('2000-01-01T00:00:00'));", '2000-01-01T00:00:00'],
+      ['a sentinel scheme', "it('source', () => expect(f.source).toBe('test://a2/master'));", 'test://'],
+      ['a fixture file url', "it('reads', () => expect(load('file:///test/test.xlsx')).toBeTruthy());", 'file:///test/test.xlsx'],
+      ['a fixture path', "it('reads', () => expect(load('apps/pipelines/tests/data.xlsx')).toBeTruthy());", 'tests/data.xlsx'],
+    ])('does not read %s as a contract literal', async (_name, body, literal) => {
+      writeFileSync(join(repo, 'contract.test.ts'), `import { expect, it } from 'vitest';\n${body}\n`);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').filter(i => i.includes(literal))).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
     it('allows a contract literal that already exists in HEAD producer code', async () => {
       writeFileSync(join(repo, 'publisher.ts'), "export const KEY_PREFIX = 'stockapi:foreign_summary:';\n");
       execFileSync('git', ['add', 'publisher.ts'], { cwd: repo });
