@@ -45,6 +45,26 @@ export interface SessionRecorder {
 
 /** Per string field. A single tool output can be megabytes. */
 export const SESSION_LOG_FIELD_CHARS = 20_000;
+/**
+ * The prompt notice gets more room than the rest, because there is exactly one
+ * per invocation and it is what an audit is anchored to.
+ *
+ * Measured on a real review (2026-09-18): the prompt runs 15k chars with a 6k
+ * diff, and reaches ~25k once the diff hits its own 16k ceiling — so the shared
+ * 20k cap could not hold the evidence even after this file stopped cutting the
+ * tail. One measured worker invocation wrote 1 notice against 153 tool events,
+ * so raising this cap alone barely moves a session's size. (AGT-4446)
+ */
+export const SESSION_LOG_NOTICE_FIELD_CHARS = 64_000;
+/**
+ * Greppable opener of the notice a clipped field carries in place of its middle.
+ *
+ * An operator reading a transcript sees the cut rather than inferring it from a
+ * `truncated: true` sitting elsewhere in the record.
+ */
+export const SESSION_LOG_TRUNCATION_MARKER = '[session-log:';
+/** Head room for the marker text plus its count, so a clip stays under the cap. */
+const TRUNCATION_MARKER_RESERVE = 80;
 /** Per session. One measured worker invocation carried 7.3M input tokens. */
 export const SESSION_LOG_BYTE_CAP = 8 * 1024 * 1024;
 /** Files older than this are pruned. */
@@ -75,20 +95,44 @@ function safeSegment(value: string | undefined, fallback: string): string {
   return cleaned || fallback;
 }
 
+/**
+ * Keep both ends of an over-long field and say what went missing.
+ *
+ * Cutting only the head looks harmless until you ask what lives at the tail.
+ * The reviewer prompt renders the diff under review last, deliberately, so that
+ * a template-level cut eats the diff rather than the verdict-bearing fields
+ * (AGT-4443) — and this recorder cut from the opposite end, so a review
+ * transcript kept the boilerplate and threw away the change under review. That
+ * is the one thing an operator opens a review transcript to audit: reading one,
+ * I concluded the diff wiring had never fired in production when it had. A
+ * transparency record that argues for a wrong conclusion is worse than one that
+ * admits it does not know. (AGT-4446)
+ */
+function clipString(value: string, cap: number): string {
+  const budget = cap - TRUNCATION_MARKER_RESERVE;
+  // Only reachable if the cap is configured smaller than the marker itself.
+  if (budget < 2) return value.slice(0, cap);
+  const head = Math.ceil(budget / 2);
+  const tail = budget - head;
+  const dropped = value.length - head - tail;
+  return `${value.slice(0, head)}\n${SESSION_LOG_TRUNCATION_MARKER} ${dropped} chars omitted]\n${value.slice(value.length - tail)}`;
+}
+
 /** Clip every string in the payload, one level deep plus arrays of strings. */
 function clipEvent(event: SessionLogEvent): SessionLogEvent {
   const out: SessionLogEvent = { type: event.type };
+  const cap = event.type === 'notice' ? SESSION_LOG_NOTICE_FIELD_CHARS : SESSION_LOG_FIELD_CHARS;
   let truncated = false;
   for (const [key, value] of Object.entries(event)) {
     if (key === 'type') continue;
-    if (typeof value === 'string' && value.length > SESSION_LOG_FIELD_CHARS) {
-      out[key] = value.slice(0, SESSION_LOG_FIELD_CHARS);
+    if (typeof value === 'string' && value.length > cap) {
+      out[key] = clipString(value, cap);
       truncated = true;
     } else if (Array.isArray(value)) {
       out[key] = value.map((item) => {
-        if (typeof item === 'string' && item.length > SESSION_LOG_FIELD_CHARS) {
+        if (typeof item === 'string' && item.length > cap) {
           truncated = true;
-          return item.slice(0, SESSION_LOG_FIELD_CHARS);
+          return clipString(item, cap);
         }
         return item;
       });
