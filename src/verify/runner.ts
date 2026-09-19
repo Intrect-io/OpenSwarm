@@ -18,7 +18,7 @@ import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import type { VerifyCommand } from './manifest.js';
 import { rebasePythonEnvironment } from './pythonEnvironment.js';
-import { resourceAwareTestCommand, withTestResourceBudget } from '../support/testResourceBudget.js';
+import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -326,6 +326,7 @@ async function runWithSandboxExecutor(
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
       // disposable checkout; neither admits its parent /work directory.
       ...(vegaWorkspace ? ['export VEGA_HEADLESS=1', `export VEGA_CWD=${shellQuote(vegaWorkspace)}`] : []),
+      testResourceShellPrefix().slice(0, -1),
       command.run,
     ].join(' && '), timeoutMs);
     let status: CommandResult['status'];

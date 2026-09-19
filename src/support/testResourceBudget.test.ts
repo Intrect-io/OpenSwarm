@@ -26,9 +26,9 @@ describe('test resource budget', () => {
       { logicalCpus: 8, load1: 3, freeMemoryBytes: 8 * 1024 ** 3 },
     );
     expect(env.OPENSWARM_TEST_PARALLELISM).toBe('2');
-    expect(env.PYTEST_XDIST_AUTO_NUM_WORKERS).toBe('4');
+    expect(env.PYTEST_XDIST_AUTO_NUM_WORKERS).toBe('2');
     expect(env.CARGO_BUILD_JOBS).toBe('1');
-    expect(env.RAYON_NUM_THREADS).toBe('4');
+    expect(env.RAYON_NUM_THREADS).toBe('2');
   });
 
   it('builds a numeric-only export prefix for sandbox executors', () => {

@@ -77,7 +77,7 @@ describe('runVerify', () => {
     });
 
     expect(execute).toHaveBeenCalledWith(
-      expect.stringMatching(/npm test -- --maxWorkers=\d+$/),
+      expect.stringMatching(/export OPENSWARM_TEST_PARALLELISM=\d+ .* && npm test -- --maxWorkers=\d+$/),
       2_000,
     );
   });

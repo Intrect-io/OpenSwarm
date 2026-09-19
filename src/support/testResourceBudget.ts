@@ -50,7 +50,7 @@ export function withTestResourceBudget(
   base: NodeJS.ProcessEnv,
   snapshot = currentHostResourceSnapshot(),
 ): NodeJS.ProcessEnv {
-  const budget = effectiveTestParallelism(snapshot);
+  const budget = effectiveTestParallelism(snapshot, base);
   const capped = (key: string): string => clampExisting(base[key], budget);
   return {
     ...base,
@@ -128,7 +128,7 @@ async function resourceAwareSimpleTestCommand(
   cwd: string,
   snapshot: HostResourceSnapshot,
 ): Promise<string> {
-  const budget = computeTestParallelism(snapshot);
+  const budget = effectiveTestParallelism(snapshot);
   if (/--runInBand\b/.test(command)) return command;
   let hadExplicitCap = false;
   const boundedExplicit = command.replace(
