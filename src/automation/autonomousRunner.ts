@@ -1162,6 +1162,14 @@ export class AutonomousRunner {
       const taskCtx = this.formatTaskContext(task);
       console.error(`[Scheduler] Task error: ${taskCtx} ${task.title}`, error);
       const timeout = isTimeoutError(error);
+      const watchdogBudget = /^Task timed out after (\d+)ms \(scheduler hard watchdog\)$/.exec(error.message);
+      if (watchdogBudget) {
+        this.durableRuns.recordWatchdogTimeout(
+          task.issueId || task.id,
+          Number(watchdogBudget[1]),
+          Math.max(0, Date.now() - startedAt),
+        );
+      }
       // A thrown executor is an infra_error to the ledger (durableRunCoordinator
       // records it so and parks the row 15 min). Keep the same in-memory streak
       // the 'failed' handler keeps, or a task whose failures arrive as

@@ -4,6 +4,7 @@ import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import Database from 'better-sqlite3';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskScheduler } from '../orchestration/taskScheduler.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
@@ -206,15 +207,27 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
   // re-encoding the old hard-coded hour that contradicted the 5-iteration cap.
   it('records the scheduler hard watchdog as a timeout', async () => {
     vi.useFakeTimers();
-    const runner = new AutonomousRunner(cfg());
-    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    const dbPath = join(tempDir, 'automation.db');
+    const runner = new AutonomousRunner(cfg({
+      dryRun: false,
+      automationLedgerMode: 'primary',
+      automationDbPath: dbPath,
+    }));
+    const internal = runner as unknown as {
+      scheduler: TaskScheduler;
+      executeDurably: (task: TaskItem, projectPath: string, signal?: AbortSignal) => Promise<PipelineResult>;
+      executePipeline: () => Promise<PipelineResult>;
+    };
+    const scheduler = internal.scheduler;
     const budgetMs = resolveHardTaskTimeoutMs({
       maxIterations: 3,
       workerTimeoutMs: stageTimeoutMs('worker', undefined),
       otherStagesTimeoutMs: stageTimeoutMs('reviewer', undefined),
     });
 
-    scheduler.startTask(task(), '/repo', async () => await new Promise<PipelineResult>(() => {}));
+    vi.spyOn(internal, 'executePipeline').mockImplementation(async () => await new Promise<PipelineResult>(() => {}));
+    const timedOutTask = task();
+    scheduler.startTask(timedOutTask, '/repo', (signal) => internal.executeDurably(timedOutTask, '/repo', signal));
     await vi.advanceTimersByTimeAsync(budgetMs - 1);
     expect(existsSync(join(tempDir, 'runner-pipeline-history.json'))).toBe(false);
 
@@ -222,6 +235,16 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
     expect(history).toHaveLength(1);
     expect(history[0]).toMatchObject({ failureCause: 'timeout', finalStatus: 'infra_error' });
+    const reader = new Database(dbPath, { readonly: true });
+    try {
+      expect(reader.prepare('SELECT error_code, error_message FROM automation_attempts WHERE issue_id = ?').get('ISSUE-1'))
+        .toEqual({
+          error_code: 'watchdog_timeout',
+          error_message: `scheduler hard watchdog: budget ${Math.round(budgetMs / 60_000)}min (${budgetMs}ms), elapsed ${budgetMs}ms`,
+        });
+    } finally {
+      reader.close();
+    }
   });
 });
 
