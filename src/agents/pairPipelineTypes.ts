@@ -197,6 +197,8 @@ export interface PipelineContext {
   budgetParkReason?: string;
   /** Per-iteration worktree snapshots and whether this run has already rolled back (AGT-4460). */
   snapshots?: import('./iterationSnapshot.js').IterationSnapshotState;
+  /** Same out-of-scope write rejected twice: retrying cannot alter the fence. */
+  repeatedScopeRejection?: string;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

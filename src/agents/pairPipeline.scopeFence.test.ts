@@ -99,4 +99,26 @@ describe('the worker is told what the write-scope fence already refused (AGT-445
   it('says nothing about scope when the fence has rejected nothing', async () => {
     expect(await runWorkerStage()).not.toContain('Outside your write scope');
   });
+
+  it('parks a second identical scope rejection instead of spending a fresh-context retry', async () => {
+    runWorker.mockResolvedValue({
+      success: false, summary: 'could not comply', filesChanged: [], commands: [], output: '',
+      error: 'worker-scope: changed files outside declared fileScope: docs/DATA-CATALOG.md',
+    });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'], maxIterations: 3,
+      roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
+    } as unknown as ConstructorParameters<typeof PairPipeline>[0]);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(result.finalStatus).toBe('waiting_on_operator');
+    expect(result.workerResult?.haltReason).toContain('docs/DATA-CATALOG.md');
+    const lines = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(lines).toContain('Repeated write-scope rejection; stopped instead of retrying');
+    expect(lines).not.toContain('Using fresh context');
+  });
 });

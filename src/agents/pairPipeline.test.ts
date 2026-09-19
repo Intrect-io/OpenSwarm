@@ -469,7 +469,7 @@ describe('PairPipeline model selection', () => {
   it('uses every iteration when the budget is generous', async () => {
     runWorker.mockResolvedValue({
       success: false, summary: 'revise me', filesChanged: ['a.ts'], commands: [], output: '',
-      error: 'worker-scope: changed files outside declared fileScope: docs/X.md',
+      error: 'temporary worker failure',
     });
     const { PairPipeline } = await import('./pairPipeline.js');
     const pipeline = new PairPipeline({

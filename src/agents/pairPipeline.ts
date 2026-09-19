@@ -948,6 +948,20 @@ export class PairPipeline extends EventEmitter {
           ?? failedWorker.haltReason
           ?? failedWorker.noChangesReason
           ?? failedWorker.summary;
+        // A second identical scope rejection is structural, not a worker-quality
+        // failure.  Retrying would only consume the next iteration with the same
+        // fence (and otherwise triggers fresh-context / reasoning escalation).
+        // Park it explicitly so the operator sees the incompatible demand and
+        // scope rather than receiving a PR that silently dropped the request.
+        if (detail?.startsWith('worker-scope:') && context.repeatedScopeRejection === detail) {
+          const reason = `Repeated write-scope rejection; stopped instead of retrying: ${detail}`;
+          safeConsole.log(`[${context.taskPrefix}] ${reason}`);
+          context.workerResult = { ...failedWorker, haltReason: reason };
+          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
+          this.emit('halt', { confidence: failedWorker.confidencePercent ?? 0, haltReason: reason, sessionId: context.session.id, iteration: context.currentIteration, context });
+          return { success: false };
+        }
+        if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
         safeConsole.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
         agentPair.trackFailure(context.session.id); // Track for fresh context decision
         this.emit('iteration:fail', {
