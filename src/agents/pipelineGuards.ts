@@ -479,11 +479,19 @@ const TEST_SENTINEL_LITERAL_RE = /^(?:test|example|dummy|fake|mock|localhost|fil
 const URL_LITERAL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 const NUMBERED_INSTANCE_LITERAL_RE = /^[A-Za-z0-9_.-]+:\d+$/;
 const TEST_SCOPED_IDENTIFIER_RE = /^(?:i?tests?|fake|dummy|mock|fixture|sample|example)_/i;
+// Node's own reserved built-in module namespace (AX-1447, 2026-09-19): a new
+// test file's own `import ... from 'node:test'` / `require('node:assert/strict')`
+// specifier matched isContractLiteral's colon rule below because it has no
+// `//` after the colon (URL_LITERAL_RE requires one). No application diff
+// could ever "define" or dispute a node: specifier — it's the runtime's, not
+// the app's — so it can never need or be given producer evidence.
+const NODE_BUILTIN_MODULE_RE = /^node:[a-z][a-z0-9_/-]*$/i;
 
 function isTestOnlyLiteral(literal: string): boolean {
   return ISO_DATE_LITERAL_RE.test(literal)
     || TEST_SENTINEL_LITERAL_RE.test(literal)
     || URL_LITERAL_RE.test(literal)
+    || NODE_BUILTIN_MODULE_RE.test(literal)
     || NUMBERED_INSTANCE_LITERAL_RE.test(literal)
     || TEST_SCOPED_IDENTIFIER_RE.test(literal);
 }
