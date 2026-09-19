@@ -28,6 +28,7 @@ import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
+import { testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -59,7 +60,7 @@ export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
   ];
   const current = (base.PATH ?? '').split(':').filter(Boolean);
   const merged = [...extra.filter((p) => !current.includes(p)), ...current];
-  return stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') });
+  return withTestResourceBudget(stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') }));
 }
 
 // ============ 도구 정의 (OpenAI function calling 포맷) ============
@@ -942,7 +943,7 @@ export async function executeTool(
           }
           const limit = execOptions.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
           try {
-            const result = await execOptions.sandboxExecutorSession.execute(command, limit);
+            const result = await execOptions.sandboxExecutorSession.execute(`${testResourceShellPrefix()} ${command}`, limit);
             const output = result.output.length > 8000
               ? `...[sandbox output tail]\n${result.output.slice(-8000)}`
               : result.output;

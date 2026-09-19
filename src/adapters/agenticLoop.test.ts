@@ -632,7 +632,10 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(firstToolNames).toContain('bash');
     expect(firstToolNames).not.toContain('diagnostics');
     expect(sessionFactory).toHaveBeenCalledWith(process.cwd());
-    expect(execute).toHaveBeenCalledWith('npm test', 30_000);
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringMatching(/^export OPENSWARM_TEST_PARALLELISM=\d+ .*; npm test$/),
+      30_000,
+    );
     expect(result.executedCommands).toEqual(['npm test']);
     expect(result.executionOutcomeUnknown).toBe(false);
   });

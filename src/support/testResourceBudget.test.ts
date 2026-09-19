@@ -1,0 +1,31 @@
+import { describe, expect, it } from 'vitest';
+import { computeTestParallelism, testResourceShellPrefix, withTestResourceBudget } from './testResourceBudget.js';
+
+describe('test resource budget', () => {
+  it('allows bounded parallelism on an idle capable host', () => {
+    expect(computeTestParallelism({ logicalCpus: 12, load1: 0.5, freeMemoryBytes: 32 * 1024 ** 3 })).toBe(4);
+  });
+
+  it('falls back to one worker when CPU or memory is pressured', () => {
+    expect(computeTestParallelism({ logicalCpus: 10, load1: 12, freeMemoryBytes: 16 * 1024 ** 3 })).toBe(1);
+    expect(computeTestParallelism({ logicalCpus: 10, load1: 0, freeMemoryBytes: 0.5 * 1024 ** 3 })).toBe(1);
+  });
+
+  it('exports runtime caps without raising a stricter operator limit', () => {
+    const env = withTestResourceBudget(
+      { CARGO_BUILD_JOBS: '1', PYTEST_XDIST_AUTO_NUM_WORKERS: '99' },
+      { logicalCpus: 8, load1: 3, freeMemoryBytes: 8 * 1024 ** 3 },
+    );
+    expect(env.OPENSWARM_TEST_PARALLELISM).toBe('4');
+    expect(env.PYTEST_XDIST_AUTO_NUM_WORKERS).toBe('4');
+    expect(env.CARGO_BUILD_JOBS).toBe('1');
+    expect(env.RAYON_NUM_THREADS).toBe('4');
+  });
+
+  it('builds a numeric-only export prefix for sandbox executors', () => {
+    const prefix = testResourceShellPrefix({ logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 });
+    expect(prefix).toContain('OPENSWARM_TEST_PARALLELISM=1');
+    expect(prefix).toContain('PYTEST_XDIST_AUTO_NUM_WORKERS=1');
+    expect(prefix).toMatch(/^export [A-Z0-9_= ]+;$/);
+  });
+});

@@ -482,7 +482,10 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     });
 
     expect(result).toMatchObject({ is_error: false, content: 'green\n' });
-    expect(execute).toHaveBeenCalledWith('npm test', 12_345);
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringMatching(/^export OPENSWARM_TEST_PARALLELISM=\d+ .*; npm test$/),
+      12_345,
+    );
   });
 
   it.each([

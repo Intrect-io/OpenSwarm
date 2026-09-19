@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripHumanSurfaceEnv } from '../mcp/humanSurfacePolicy.js';
+import { withTestResourceBudget } from '../support/testResourceBudget.js';
 
 /**
  * Resolve OpenSwarm's bundled `node_modules/.bin` directory.
@@ -39,17 +40,17 @@ export function getBundledBinDir(): string | null {
  */
 export function buildWorkerEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const binDir = getBundledBinDir();
-  if (binDir === null) return withoutDeadKeys(stripHumanSurfaceEnv(base));
+  if (binDir === null) return withTestResourceBudget(withoutDeadKeys(stripHumanSurfaceEnv(base)));
 
   const existingPath = base.PATH ?? base.Path ?? '';
   // Avoid duplicate entries if this env is reused across spawns.
   const parts = existingPath.split(delimiter).filter(Boolean);
   if (parts[0] === binDir) {
-    return withoutDeadKeys(stripHumanSurfaceEnv(base));
+    return withTestResourceBudget(withoutDeadKeys(stripHumanSurfaceEnv(base)));
   }
   const nextPath = [binDir, ...parts.filter((p) => p !== binDir)].join(delimiter);
 
-  return withoutDeadKeys(stripHumanSurfaceEnv({ ...base, PATH: nextPath }));
+  return withTestResourceBudget(withoutDeadKeys(stripHumanSurfaceEnv({ ...base, PATH: nextPath })));
 }
 
 /**
