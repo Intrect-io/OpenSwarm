@@ -15,7 +15,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
-
+import { withFreshReviewLock } from './freshReviewLock.js';
 const execFileAsync = promisify(execFile);
 /** Safe git command execution (no shell) */
 async function gitExec(cwd: string, ...args: string[]): Promise<string> {
@@ -464,32 +464,34 @@ export class PRProcessor {
       // ref names and could hand each other a mid-update or wrong-generation
       // SHA.
       const scratchId = randomUUID();
-      prHeadRef = `refs/openswarm/pr-${pr.number}-review-${scratchId}`;
-      baseRef = `refs/openswarm/pr-${pr.number}-base-${scratchId}`;
+      const reviewHeadRef = `refs/openswarm/pr-${pr.number}-review-${scratchId}`;
+      const reviewBaseRef = `refs/openswarm/pr-${pr.number}-base-${scratchId}`;
+      prHeadRef = reviewHeadRef;
+      baseRef = reviewBaseRef;
       // Both sides fetched into explicit local refs via `<src>:<dst>`, not a
       // bare branch name for the base — a bare name (a) updates the
       // `origin/<base>` remote-tracking ref only via the remote's configured
       // fetch refspec, which this method has no way to confirm is the normal
       // default for whatever repo it's pointed at, and (b) is ambiguous
       // between a branch and a same-named tag (`refs/heads/<base>` pins it).
-      await gitExec(
-        projectPath, 'fetch', remote,
-        `pull/${pr.number}/head:${prHeadRef}`, `refs/heads/${base}:${baseRef}`,
-      );
-
-      const reviewedSha = (await gitExec(projectPath, 'rev-parse', prHeadRef)).trim();
+      const { reviewedSha, mergeBase, scratchWorktree } = await withFreshReviewLock(projectPath, async () => {
+        await gitExec(
+          projectPath, 'fetch', remote,
+          `pull/${pr.number}/head:${reviewHeadRef}`, `refs/heads/${base}:${reviewBaseRef}`,
+        );
+        const reviewedSha = (await gitExec(projectPath, 'rev-parse', reviewHeadRef)).trim();
+        const mergeBase = (await gitExec(projectPath, 'merge-base', reviewHeadRef, reviewBaseRef)).trim();
+        const scratchWorktree = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
+        await gitExec(projectPath, 'worktree', 'add', '--detach', scratchWorktree, reviewedSha);
+        return { reviewedSha, mergeBase, scratchWorktree };
+      });
       // The merge-base, not the base branch's current tip: the base branch
       // may have moved since the PR diverged, and a two-dot diff (what
       // getDiffText runs under the hood) against its tip would list every
       // commit merged into base since then as if the PR had made those
       // changes too. Same reasoning as review-gate.yml's `Resolve the PR
       // base` step.
-      const mergeBase = (await gitExec(projectPath, 'merge-base', prHeadRef, baseRef)).trim();
-
-      const scratchWorktree = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
       worktreePath = scratchWorktree;
-      await gitExec(projectPath, 'worktree', 'add', '--detach', scratchWorktree, reviewedSha);
-
       const review = await runReviewCommand({
         path: scratchWorktree,
         base: mergeBase,
@@ -566,7 +568,7 @@ export class PRProcessor {
     } finally {
       if (worktreePath) {
         try {
-          await gitExec(projectPath, 'worktree', 'remove', '--force', worktreePath);
+          await withFreshReviewLock(projectPath, () => gitExec(projectPath, 'worktree', 'remove', '--force', worktreePath!));
         } catch (cleanupErr) {
           console.error(`[PRProcessor] Failed to remove scratch worktree ${worktreePath}:`, cleanupErr);
         }
@@ -576,7 +578,7 @@ export class PRProcessor {
       for (const ref of [prHeadRef, baseRef]) {
         if (!ref) continue;
         try {
-          await gitExec(projectPath, 'update-ref', '-d', ref);
+          await withFreshReviewLock(projectPath, () => gitExec(projectPath, 'update-ref', '-d', ref));
         } catch (cleanupErr) {
           console.error(`[PRProcessor] Failed to remove scratch ref ${ref}:`, cleanupErr);
         }
