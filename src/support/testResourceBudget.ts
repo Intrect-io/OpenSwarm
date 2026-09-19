@@ -128,7 +128,11 @@ async function resourceAwareSimpleTestCommand(
   cwd: string,
   snapshot: HostResourceSnapshot,
 ): Promise<string> {
-  const budget = effectiveTestParallelism(snapshot);
+  let budget = effectiveTestParallelism(snapshot);
+  const localCeiling = /(?:^|\s)OPENSWARM_TEST_PARALLELISM=(?:'([^']*)'|"([^"]*)"|([^\s]+))/.exec(command);
+  if (localCeiling) {
+    budget = Number(clampExisting(localCeiling[1] ?? localCeiling[2] ?? localCeiling[3], budget));
+  }
   const budgetKeys = new Set([
     'OPENSWARM_TEST_PARALLELISM', 'PYTEST_XDIST_AUTO_NUM_WORKERS', 'CARGO_BUILD_JOBS',
     'RAYON_NUM_THREADS', 'CMAKE_BUILD_PARALLEL_LEVEL', 'GOMAXPROCS', 'UV_CONCURRENT_BUILDS',

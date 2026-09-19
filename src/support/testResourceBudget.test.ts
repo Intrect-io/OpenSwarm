@@ -73,6 +73,10 @@ describe('test resource budget', () => {
       .toBe('CI=1 npm test -- --maxWorkers=1');
     expect(await resourceAwareTestCommand('NODE_ENV=test vitest run --maxWorkers 99', cwd, pressured))
       .toBe('NODE_ENV=test vitest run --maxWorkers 1');
+    const idle = { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand(
+      'OPENSWARM_TEST_PARALLELISM=1 vitest run --maxWorkers=8', cwd, idle,
+    )).toBe('OPENSWARM_TEST_PARALLELISM=1 vitest run --maxWorkers=1');
     expect(await resourceAwareTestCommand('env CI=1 npm test -- --maxWorkers=99', cwd, pressured))
       .toBe('env CI=1 npm test -- --maxWorkers=1');
     expect(await resourceAwareTestCommand('timeout 5m vitest run --maxWorkers=99', cwd, pressured))
