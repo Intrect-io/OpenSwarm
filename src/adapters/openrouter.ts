@@ -47,6 +47,7 @@ const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 // short answer (measured: 20 tokens → content null, 500 tokens → "OK"). The
 // reasoning-mandatory handling added for that lives further down in this file.
 export const DEFAULT_MODEL = 'deepseek/deepseek-v4-flash';
+export const DEEPSEEK_FALLBACK_MODEL = 'z-ai/glm-5.3-flash';
 const PROFILE_KEY = 'openrouter:default';
 
 /** OPENROUTER_API_KEY env var (legacy: OPENROUTER_API) → immediate API key (no PKCE needed). */
@@ -62,7 +63,7 @@ const MODEL_LIST_TIMEOUT_MS = 10_000;
  * models; this is deliberately just enough to start, since live discovery
  * replaces it whenever a key is present.
  */
-const CURATED_MODELS = [DEFAULT_MODEL, 'deepseek/deepseek-v4-pro', 'openai/gpt-5', 'anthropic/claude-sonnet-4'];
+const CURATED_MODELS = [DEFAULT_MODEL, DEEPSEEK_FALLBACK_MODEL, 'deepseek/deepseek-v4-pro', 'openai/gpt-5', 'anthropic/claude-sonnet-4'];
 
 function catalogSpec(): CatalogSpec {
   return {
@@ -215,9 +216,19 @@ export class OpenRouterCliAdapter implements CliAdapter {
       if (cli.costInfo) cli.costInfo.model = model;
       return cli;
     } catch (err) {
-      // Rate-limit AND infra/capacity errors must propagate (pause / infra_error),
-      // not be buried in a fake failed result the worker reads as an empty success. (INT-1906, INT-2520)
+      // A model-family fallback is stronger than retrying the same endpoint:
+      // OpenRouter already exhausted transient retries inside createApiCaller,
+      // so a remaining v4-flash failure gets one clean GLM run with the exact
+      // same tool/sandbox/reasoning policy. Account quota errors and operator
+      // cancellation cannot be repaired by changing models and must propagate.
       if (err instanceof RateLimitError) throw err;
+      if (options.signal?.aborted) throw err;
+      if (model === DEFAULT_MODEL) {
+        options.onLog?.(`[OpenRouter] ${DEFAULT_MODEL} failed; escalating to ${DEEPSEEK_FALLBACK_MODEL}: ${err instanceof Error ? err.message : String(err)}`);
+        return this.run({ ...options, model: DEEPSEEK_FALLBACK_MODEL });
+      }
+      // Infra/capacity errors on the fallback still propagate so the scheduler
+      // classifies them as infrastructure instead of fake task failure.
       if (isInfraError(err)) throw err;
       return {
         exitCode: 1,

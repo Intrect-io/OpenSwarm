@@ -23,6 +23,7 @@ import {
 import { raceWithAbort } from './abortRace.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { assertAdapterCanRunUnderHumanSurfaceBoundary } from './humanSurfaceBoundary.js';
+import { applyReasoningEffortOverride } from '../support/reasoningEffortOverride.js';
 
 export { terminateCliProcessTree } from './processTree.js';
 
@@ -35,6 +36,7 @@ export async function spawnCli(
   adapter: CliAdapter,
   requestedOptions: CliRunOptions,
 ): Promise<CliRunResult> {
+  requestedOptions = applyReasoningEffortOverride(requestedOptions);
   const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
   assertAdapterCanRunUnderHumanSurfaceBoundary(adapter);
   const options: CliRunOptions = strictHumanSurfaceBoundary

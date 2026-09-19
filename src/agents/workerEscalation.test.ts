@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildRepeatEscalation, reasoningEffortForIteration, resolveWorkerStageOverrides } from './workerEscalation.js';
+import { buildRepeatEscalation, reasoningEffortForIteration, resolveWorkerStageOverrides, GLM_5_3_FLASH_MODEL } from './workerEscalation.js';
 import type { RoleConfig } from '../core/types.js';
 
 const workerCfg = (extra: Partial<RoleConfig> = {}): RoleConfig => ({
@@ -74,6 +74,16 @@ describe('buildRepeatEscalation', () => {
 
 describe('resolveWorkerStageOverrides', () => {
   const base = { taskId: 't1', taskPrefix: 'p' };
+
+  it('uses GLM 5.3 Flash as the built-in second attempt for v4-flash', () => {
+    expect(resolveWorkerStageOverrides({
+      ...base,
+      workerCfg: workerCfg({ model: 'deepseek/deepseek-v4-flash', escalateModel: undefined }),
+      iteration: 2,
+      baseModel: 'deepseek/deepseek-v4-flash',
+      signalEscalation: undefined,
+    })).toMatchObject({ model: GLM_5_3_FLASH_MODEL, modelRole: 'escalate', reasoningEffort: 'high' });
+  });
 
   it('labels an iteration-count escalation as an escalation', () => {
     // The worker twin of the reviewer escalation. Without the label the stage

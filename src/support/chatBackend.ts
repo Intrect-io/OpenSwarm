@@ -23,6 +23,7 @@ import {
 import { raceWithAbort } from '../adapters/abortRace.js';
 import { buildWorkerEnv } from '../adapters/envPath.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { applyReasoningEffortOverride } from './reasoningEffortOverride.js';
 
 export interface ChatCompletionOptions {
   prompt: string;
@@ -308,7 +309,7 @@ async function runChatViaAdapter(
 
   let streamed = false;
   const raw = await raceWithAbort(
-    adapter.run!({
+    adapter.run!(applyReasoningEffortOverride({
       prompt: options.prompt,
       cwd,
       model,
@@ -343,7 +344,7 @@ async function runChatViaAdapter(
           }
         : undefined,
       signal: runSignal,
-    }),
+    })),
     runSignal,
     'Chat response cancelled',
   );

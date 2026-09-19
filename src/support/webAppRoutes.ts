@@ -78,6 +78,11 @@ export async function tryHandleAppRoutes(
   readBody: (req: IncomingMessage) => Promise<string>,
 ): Promise<boolean> {
   {
+    const { tryHandleReasoningEffortRoutes } = await import('./reasoningEffortRoutes.js');
+    if (await tryHandleReasoningEffortRoutes(req, res, url, () => {})) return true;
+  }
+
+  {
     const { tryHandleWarehouseRoutes } = await import('./warehouseRoutes.js');
     if (await tryHandleWarehouseRoutes(req, res, url, requestUrl)) return true;
   }

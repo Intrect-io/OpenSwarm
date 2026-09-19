@@ -27,6 +27,8 @@ export type WorkerReasoningEffort = 'low' | 'medium' | 'high';
 export const RETRY_REASONING_EFFORT: WorkerReasoningEffort = 'medium';
 /** Effort once the model itself has been escalated. */
 export const ESCALATED_REASONING_EFFORT: WorkerReasoningEffort = 'high';
+export const DEEPSEEK_V4_FLASH_MODEL = 'deepseek/deepseek-v4-flash';
+export const GLM_5_3_FLASH_MODEL = 'z-ai/glm-5.3-flash';
 
 const EFFORT_RANK: Record<WorkerReasoningEffort, number> = { low: 0, medium: 1, high: 2 };
 
@@ -88,7 +90,11 @@ export function resolveWorkerStageOverrides(input: {
 }): WorkerStageOverrides | undefined {
   const { workerCfg, iteration, baseModel, baseEffort, signalEscalation } = input;
   const escalateThreshold = workerCfg?.escalateAfterIteration ?? 2;
-  const escalateModel = workerCfg?.escalateModel;
+  // v4-flash gets a model-family second opinion even when an older config
+  // deliberately omitted escalateModel. This makes the requested fallback a
+  // runtime invariant rather than depending on one machine's config.yaml.
+  const escalateModel = workerCfg?.escalateModel
+    ?? (baseModel === DEEPSEEK_V4_FLASH_MODEL ? GLM_5_3_FLASH_MODEL : undefined);
   const shouldEscalate = iteration >= escalateThreshold && !!escalateModel;
 
   let overrides: WorkerStageOverrides | undefined = shouldEscalate
