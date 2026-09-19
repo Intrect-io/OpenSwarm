@@ -1,4 +1,6 @@
 import { availableParallelism, freemem, loadavg } from 'node:os';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 const GIB = 1024 ** 3;
 const MAX_TEST_WORKERS = 4;
@@ -68,4 +70,32 @@ export function testResourceShellPrefix(snapshot = currentHostResourceSnapshot()
     'UV_CONCURRENT_BUILDS',
   ];
   return `export ${keys.map((key) => `${key}=${env[key]}`).join(' ')};`;
+}
+
+/** Apply the budget to JS runners that do not consume the generic env caps. */
+export async function resourceAwareTestCommand(
+  command: string,
+  cwd: string,
+  snapshot = currentHostResourceSnapshot(),
+): Promise<string> {
+  if (/--maxWorkers(?:=|\s)/.test(command)) return command;
+
+  const budget = computeTestParallelism(snapshot);
+  if (/^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(command.trim())) {
+    return `${command} --maxWorkers=${budget}`;
+  }
+
+  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)\s*$/.test(command.trim());
+  if (!packageTest) return command;
+
+  try {
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
+      scripts?: { test?: unknown };
+    };
+    const script = typeof manifest.scripts?.test === 'string' ? manifest.scripts.test : '';
+    if (!/\b(?:vitest|jest)\b/.test(script)) return command;
+    return `${command} -- --maxWorkers=${budget}`;
+  } catch {
+    return command;
+  }
 }

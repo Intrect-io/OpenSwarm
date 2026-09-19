@@ -1,5 +1,8 @@
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { computeTestParallelism, testResourceShellPrefix, withTestResourceBudget } from './testResourceBudget.js';
+import { computeTestParallelism, resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from './testResourceBudget.js';
 
 describe('test resource budget', () => {
   it('allows bounded parallelism on an idle capable host', () => {
@@ -27,5 +30,24 @@ describe('test resource budget', () => {
     expect(prefix).toContain('OPENSWARM_TEST_PARALLELISM=1');
     expect(prefix).toContain('PYTEST_XDIST_AUTO_NUM_WORKERS=1');
     expect(prefix).toMatch(/^export [A-Z0-9_= ]+;$/);
+  });
+
+  it('caps the actual Vitest worker count behind npm test', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    const bounded = await resourceAwareTestCommand(
+      'npm test', cwd, { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 },
+    );
+    expect(bounded).toBe('npm test -- --maxWorkers=1');
+  });
+
+  it('does not inject flags into an unrelated npm test script', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node test.js' } }));
+    expect(await resourceAwareTestCommand('npm test', cwd)).toBe('npm test');
+  });
+
+  it('preserves an explicit Vitest worker cap', async () => {
+    expect(await resourceAwareTestCommand('vitest run --maxWorkers=1', '/tmp')).toBe('vitest run --maxWorkers=1');
   });
 });

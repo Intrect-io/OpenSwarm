@@ -28,7 +28,7 @@ import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
-import { testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
+import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -916,6 +916,7 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        const boundedCommand = await resourceAwareTestCommand(command, cwd);
         // Checked before every execution path below, including the attested
         // sandbox one: a worker's job ends at the working tree (AGT-4418).
         if (execOptions?.forbidPublication) {
@@ -943,7 +944,7 @@ export async function executeTool(
           }
           const limit = execOptions.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
           try {
-            const result = await execOptions.sandboxExecutorSession.execute(`${testResourceShellPrefix()} ${command}`, limit);
+            const result = await execOptions.sandboxExecutorSession.execute(`${testResourceShellPrefix()} ${boundedCommand}`, limit);
             const output = result.output.length > 8000
               ? `...[sandbox output tail]\n${result.output.slice(-8000)}`
               : result.output;
@@ -995,14 +996,14 @@ export async function executeTool(
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
         const fenced = execOptions?.sandbox === 'on'
-          ? wrapForSandbox(['bash', '-c', command], {
+          ? wrapForSandbox(['bash', '-c', boundedCommand], {
             writableRoots: workerWritableRoots(cwd, execOptions.scratchpadRunId),
             allowNetwork: true,
           })
           : null;
         if (execOptions?.sandbox === 'on' && !fenced) warnSandboxUnavailableOnce();
         try {
-          const { stdout, stderr } = await execFileAsync(fenced?.file ?? 'bash', fenced?.args ?? ['-c', command], {
+          const { stdout, stderr } = await execFileAsync(fenced?.file ?? 'bash', fenced?.args ?? ['-c', boundedCommand], {
             cwd,
             timeout: execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
             maxBuffer: 1024 * 512,

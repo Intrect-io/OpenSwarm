@@ -633,7 +633,7 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(firstToolNames).not.toContain('diagnostics');
     expect(sessionFactory).toHaveBeenCalledWith(process.cwd());
     expect(execute).toHaveBeenCalledWith(
-      expect.stringMatching(/^export OPENSWARM_TEST_PARALLELISM=\d+ .*; npm test$/),
+      expect.stringMatching(/^export OPENSWARM_TEST_PARALLELISM=\d+ .*; npm test -- --maxWorkers=\d+$/),
       30_000,
     );
     expect(result.executedCommands).toEqual(['npm test']);
