@@ -81,6 +81,9 @@ describe('test resource budget', () => {
       .toBe('env CI=1 npm test -- --maxWorkers=1');
     expect(await resourceAwareTestCommand('timeout 5m vitest run --maxWorkers=99', cwd, pressured))
       .toBe('timeout 5m vitest run --maxWorkers=1');
+    expect(await resourceAwareTestCommand(
+      'node --experimental-vm-modules node_modules/vitest/vitest.mjs run', cwd, pressured,
+    )).toBe('node --experimental-vm-modules node_modules/vitest/vitest.mjs run --maxWorkers=1');
   });
 
   it('caps the test subcommand inside a shell sequence using its changed directory', async () => {

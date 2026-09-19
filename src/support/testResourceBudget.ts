@@ -166,7 +166,7 @@ async function resourceAwareSimpleTestCommand(
       .replace(/^(?:timeout|gtimeout)\s+(?:(?:-[^\s]+)\s+)*(?:\d+(?:\.\d+)?[smhd]?\s+)/, '')
       .replace(/^nice\s+(?:-n\s+\d+\s+)?/, '');
   }
-  const directRunner = /^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(executableCommand);
+  const directRunner = /^(?:(?:npx\s+)?(?:vitest|jest)\b|node(?:\s+--\S+)*\s+\S*vitest(?:[/\\]\S+|\S*\.m?js)\b)/.test(executableCommand);
   const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(executableCommand);
   let packageRunner = false;
   let packageSerial = false;
