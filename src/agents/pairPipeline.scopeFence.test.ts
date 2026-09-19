@@ -112,9 +112,11 @@ describe('the worker is told what the write-scope fence already refused (AGT-445
     } as unknown as ConstructorParameters<typeof PairPipeline>[0]);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    await pipeline.run(task(), process.cwd());
+    const result = await pipeline.run(task(), process.cwd());
 
     expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(result.finalStatus).toBe('waiting_on_operator');
+    expect(result.workerResult?.haltReason).toContain('docs/DATA-CATALOG.md');
     const lines = log.mock.calls.map((call) => String(call[0])).join('\n');
     expect(lines).toContain('Repeated write-scope rejection; stopped instead of retrying');
     expect(lines).not.toContain('Using fresh context');
