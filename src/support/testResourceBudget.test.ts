@@ -121,9 +121,10 @@ describe('test resource budget', () => {
 
   it('clamps exported resource overrides for following test commands', async () => {
     const idle = { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 };
+    const budget = effectiveTestParallelism(idle);
     expect(await resourceAwareTestCommand(
       'export PYTEST_XDIST_AUTO_NUM_WORKERS=99; pytest -n auto', '/tmp', idle,
-    )).toBe('export PYTEST_XDIST_AUTO_NUM_WORKERS=4; pytest -n auto');
+    )).toBe(`export PYTEST_XDIST_AUTO_NUM_WORKERS=${budget}; pytest -n auto`);
     expect(await resourceAwareTestCommand(
       'export OPENSWARM_TEST_PARALLELISM=1; vitest run --maxWorkers=99', '/tmp', idle,
     )).toBe('export OPENSWARM_TEST_PARALLELISM=1; vitest run --maxWorkers=1');
