@@ -159,6 +159,8 @@ export function createSessionRecorder(input: {
   adapter?: string;
   model?: string;
   cwd?: string;
+  /** CLI adapters can only observe their process boundary, not inner turns. */
+  recordingLevel?: 'cli';
 }): SessionRecorder | undefined {
   if (!sessionLogEnabled()) return undefined;
 
@@ -203,6 +205,7 @@ export function createSessionRecorder(input: {
     model: input.model,
     taskId: input.taskId,
     cwd: input.cwd,
+    ...(input.recordingLevel ? { recordingLevel: input.recordingLevel } : {}),
   });
 
   return {
