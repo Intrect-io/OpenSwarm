@@ -1,0 +1,148 @@
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { computeTestParallelism, effectiveTestParallelism, resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from './testResourceBudget.js';
+
+describe('test resource budget', () => {
+  it('allows bounded parallelism on an idle capable host', () => {
+    expect(computeTestParallelism({ logicalCpus: 12, load1: 0.5, freeMemoryBytes: 32 * 1024 ** 3 })).toBe(4);
+  });
+
+  it('falls back to one worker when CPU or memory is pressured', () => {
+    expect(computeTestParallelism({ logicalCpus: 10, load1: 12, freeMemoryBytes: 16 * 1024 ** 3 })).toBe(1);
+    expect(computeTestParallelism({ logicalCpus: 10, load1: 0, freeMemoryBytes: 0.5 * 1024 ** 3 })).toBe(1);
+  });
+
+  it('treats the operator setting as a ceiling on the host budget', () => {
+    const idle = { logicalCpus: 12, load1: 0, freeMemoryBytes: 32 * 1024 ** 3 };
+    expect(effectiveTestParallelism(idle, { OPENSWARM_TEST_PARALLELISM: '2' })).toBe(2);
+    expect(effectiveTestParallelism(idle, { OPENSWARM_TEST_PARALLELISM: '99' })).toBe(4);
+  });
+
+  it('exports runtime caps without raising a stricter operator limit', () => {
+    const env = withTestResourceBudget(
+      { CARGO_BUILD_JOBS: '1', PYTEST_XDIST_AUTO_NUM_WORKERS: '99', OPENSWARM_TEST_PARALLELISM: '2' },
+      { logicalCpus: 8, load1: 3, freeMemoryBytes: 8 * 1024 ** 3 },
+    );
+    expect(env.OPENSWARM_TEST_PARALLELISM).toBe('2');
+    expect(env.PYTEST_XDIST_AUTO_NUM_WORKERS).toBe('2');
+    expect(env.CARGO_BUILD_JOBS).toBe('1');
+    expect(env.RAYON_NUM_THREADS).toBe('2');
+  });
+
+  it('builds a numeric-only export prefix for sandbox executors', () => {
+    const prefix = testResourceShellPrefix({ logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 });
+    expect(prefix).toContain('OPENSWARM_TEST_PARALLELISM=1');
+    expect(prefix).toContain('PYTEST_XDIST_AUTO_NUM_WORKERS=1');
+    expect(prefix).toMatch(/^export [A-Z0-9_= ]+;$/);
+  });
+
+  it('builds a sandbox prefix from the supplied verification environment', () => {
+    const prefix = testResourceShellPrefix(
+      { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 },
+      { OPENSWARM_TEST_PARALLELISM: '2' },
+    );
+    expect(prefix).toContain('OPENSWARM_TEST_PARALLELISM=2');
+    expect(prefix).toContain('PYTEST_XDIST_AUTO_NUM_WORKERS=2');
+  });
+
+  it('caps the actual Vitest worker count behind npm test', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    const bounded = await resourceAwareTestCommand(
+      'npm test', cwd, { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 },
+    );
+    expect(bounded).toBe('npm test -- --maxWorkers=1');
+  });
+
+  it('does not inject flags into an unrelated npm test script', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node test.js' } }));
+    expect(await resourceAwareTestCommand('npm test', cwd)).toBe('npm test');
+    expect(await resourceAwareTestCommand('node tool.js --maxWorkers=99', cwd))
+      .toBe('node tool.js --maxWorkers=99');
+  });
+
+  it('preserves an explicit Vitest worker cap', async () => {
+    expect(await resourceAwareTestCommand('vitest run --maxWorkers=1', '/tmp')).toBe('vitest run --maxWorkers=1');
+  });
+
+  it('clamps explicit direct and npm worker counts to the host budget', async () => {
+    const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    expect(await resourceAwareTestCommand('vitest run --maxWorkers=99', '/tmp', pressured))
+      .toBe('vitest run --maxWorkers=1');
+    expect(await resourceAwareTestCommand('npm test -- --maxWorkers 99', cwd, pressured))
+      .toBe('npm test -- --maxWorkers 1');
+    expect(await resourceAwareTestCommand('jest --maxWorkers=50%', '/tmp', pressured))
+      .toBe('jest --maxWorkers=1');
+    expect(await resourceAwareTestCommand('CI=1 npm test -- --maxWorkers=99', cwd, pressured))
+      .toBe('CI=1 npm test -- --maxWorkers=1');
+    expect(await resourceAwareTestCommand('NODE_ENV=test vitest run --maxWorkers 99', cwd, pressured))
+      .toBe('NODE_ENV=test vitest run --maxWorkers 1');
+    const idle = { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand(
+      'OPENSWARM_TEST_PARALLELISM=1 vitest run --maxWorkers=8', cwd, idle,
+    )).toBe('OPENSWARM_TEST_PARALLELISM=1 vitest run --maxWorkers=1');
+    expect(await resourceAwareTestCommand('env CI=1 npm test -- --maxWorkers=99', cwd, pressured))
+      .toBe('env CI=1 npm test -- --maxWorkers=1');
+    expect(await resourceAwareTestCommand('timeout 5m vitest run --maxWorkers=99', cwd, pressured))
+      .toBe('timeout 5m vitest run --maxWorkers=1');
+    expect(await resourceAwareTestCommand(
+      'node --experimental-vm-modules node_modules/vitest/vitest.mjs run', cwd, pressured,
+    )).toBe('node --experimental-vm-modules node_modules/vitest/vitest.mjs run --maxWorkers=1');
+    expect(await resourceAwareTestCommand('npm test # focused run', cwd, pressured))
+      .toBe('npm test -- --maxWorkers=1 # focused run');
+  });
+
+  it('caps the test subcommand inside a shell sequence using its changed directory', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    const app = path.join(root, 'app');
+    await mkdir(app);
+    await writeFile(path.join(app, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand('cd app && npm test && echo done', root, pressured))
+      .toBe('cd app && npm test -- --maxWorkers=1 && echo done');
+  });
+
+  it('clamps command-local resource overrides before Python and build commands', async () => {
+    const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand(
+      'PYTEST_XDIST_AUTO_NUM_WORKERS=99 pytest -n auto', '/tmp', pressured,
+    )).toBe('PYTEST_XDIST_AUTO_NUM_WORKERS=1 pytest -n auto');
+    expect(await resourceAwareTestCommand(
+      'CI=1 CARGO_BUILD_JOBS="8" cargo test', '/tmp', pressured,
+    )).toBe('CI=1 CARGO_BUILD_JOBS=1 cargo test');
+    expect(await resourceAwareTestCommand(
+      'env PYTEST_XDIST_AUTO_NUM_WORKERS=99 pytest -n auto', '/tmp', pressured,
+    )).toBe('env PYTEST_XDIST_AUTO_NUM_WORKERS=1 pytest -n auto');
+    expect(await resourceAwareTestCommand('pytest -q -n 99', '/tmp', pressured))
+      .toBe('pytest -q -n 1');
+    expect(await resourceAwareTestCommand('uv run pytest --numprocesses=99', '/tmp', pressured))
+      .toBe('uv run pytest --numprocesses=1');
+    expect(await resourceAwareTestCommand('cargo test -j99', '/tmp', pressured))
+      .toBe('cargo test -j1');
+    expect(await resourceAwareTestCommand('timeout 5m cargo test --jobs 99', '/tmp', pressured))
+      .toBe('timeout 5m cargo test --jobs 1');
+  });
+
+  it('clamps exported resource overrides for following test commands', async () => {
+    const idle = { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 };
+    const budget = effectiveTestParallelism(idle);
+    expect(await resourceAwareTestCommand(
+      'export PYTEST_XDIST_AUTO_NUM_WORKERS=99; pytest -n auto', '/tmp', idle,
+    )).toBe(`export PYTEST_XDIST_AUTO_NUM_WORKERS=${budget}; pytest -n auto`);
+    expect(await resourceAwareTestCommand(
+      'export OPENSWARM_TEST_PARALLELISM=1; vitest run --maxWorkers=99', '/tmp', idle,
+    )).toBe('export OPENSWARM_TEST_PARALLELISM=1; vitest run --maxWorkers=1');
+  });
+
+  it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --runInBand' } }));
+    expect(await resourceAwareTestCommand('npm test', cwd)).toBe('npm test');
+    expect(await resourceAwareTestCommand('jest --runInBand', cwd)).toBe('jest --runInBand');
+  });
+});

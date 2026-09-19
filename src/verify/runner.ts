@@ -18,6 +18,7 @@ import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import type { VerifyCommand } from './manifest.js';
 import { rebasePythonEnvironment } from './pythonEnvironment.js';
+import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -308,6 +309,7 @@ async function runWithSandboxExecutor(
   cwd: string,
   isolatedHome: string,
   isolatedTmp: string,
+  env: NodeJS.ProcessEnv,
   createSession: (workspace: string) => Promise<SandboxExecutorSession>,
 ): Promise<CommandResult> {
   const timeoutMs = command.timeoutMs ?? 300_000;
@@ -325,6 +327,7 @@ async function runWithSandboxExecutor(
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
       // disposable checkout; neither admits its parent /work directory.
       ...(vegaWorkspace ? ['export VEGA_HEADLESS=1', `export VEGA_CWD=${shellQuote(vegaWorkspace)}`] : []),
+      testResourceShellPrefix(undefined, env).slice(0, -1),
       command.run,
     ].join(' && '), timeoutMs);
     let status: CommandResult['status'];
@@ -385,11 +388,12 @@ async function runCommand(
   } catch (error) {
     return { status: 'infra', output: error instanceof Error ? error.message : String(error) };
   }
+  const boundedCommand = { ...command, run: await resourceAwareTestCommand(command.run, cwd, undefined, env) };
   const isolatedHome = join(dirname(root), 'home');
   const isolatedTmp = join(dirname(root), 'tmp');
   await Promise.all([mkdir(isolatedHome, { recursive: true }), mkdir(isolatedTmp, { recursive: true })]);
   const processMarker = `openswarm-verify-${randomUUID()}`;
-  const safeEnv: NodeJS.ProcessEnv = {
+  const safeEnv: NodeJS.ProcessEnv = withTestResourceBudget({
     PATH: env.PATH,
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
@@ -400,7 +404,14 @@ async function runCommand(
     TMP: isolatedTmp,
     TEMP: isolatedTmp,
     OPENSWARM_VERIFY_PROCESS_MARKER: processMarker,
-  };
+    OPENSWARM_TEST_PARALLELISM: env.OPENSWARM_TEST_PARALLELISM,
+    PYTEST_XDIST_AUTO_NUM_WORKERS: env.PYTEST_XDIST_AUTO_NUM_WORKERS,
+    CARGO_BUILD_JOBS: env.CARGO_BUILD_JOBS,
+    RAYON_NUM_THREADS: env.RAYON_NUM_THREADS,
+    CMAKE_BUILD_PARALLEL_LEVEL: env.CMAKE_BUILD_PARALLEL_LEVEL,
+    GOMAXPROCS: env.GOMAXPROCS,
+    UV_CONCURRENT_BUILDS: env.UV_CONCURRENT_BUILDS,
+  }, undefined);
   for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (env[key] !== undefined) safeEnv[key] = env[key];
   }
@@ -412,17 +423,17 @@ async function runCommand(
   }
   if (sandboxExecutorSessionFactory) {
     return await runWithSandboxExecutor(
-      command, root, cwd, isolatedHome, isolatedTmp, sandboxExecutorSessionFactory,
+      boundedCommand, root, cwd, isolatedHome, isolatedTmp, safeEnv, sandboxExecutorSessionFactory,
     );
   }
   const shell = process.env.SHELL || '/bin/sh';
   let executable = shell;
-  let invocationArgs = ['-lc', command.run];
+  let invocationArgs = ['-lc', boundedCommand.run];
   if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
     const writableRoot = (await realpath(dirname(root))).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
     const profile = `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath "${writableRoot}") (literal "/dev/null") (literal "/dev/tty"))`;
     executable = '/usr/bin/sandbox-exec';
-    invocationArgs = ['-p', profile, shell, '-lc', command.run];
+    invocationArgs = ['-p', profile, shell, '-lc', boundedCommand.run];
   } else if (process.platform === 'linux') {
     // Still fails closed — running a worker's code unsandboxed to decide whether
     // to trust it defeats the point. What changed is that the message now names
@@ -433,7 +444,7 @@ async function runCommand(
     if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
     executable = sandbox.executable;
     const writableRoot = dirname(root);
-    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', command.run];
+    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
   } else if (process.platform === 'win32') {
     return { status: 'fail', output: '[security] OS verification sandbox is unavailable on this Windows host' };
   }

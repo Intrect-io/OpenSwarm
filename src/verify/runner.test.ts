@@ -59,6 +59,29 @@ describe('runVerify', () => {
     expect(execute).toHaveBeenCalledWith(expect.stringContaining('must-not-run-in-main-container'), 2_000);
   });
 
+  it('applies the host worker budget to deterministic JavaScript verification', async () => {
+    await writeFile(join(repo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    git('add', 'package.json');
+    git('commit', '-m', 'add test script');
+    const execute = vi.fn(async () => ({
+      output: 'pass', exitCode: 0, signal: null, timedOut: false,
+      truncated: false, outputLimitExceeded: false,
+    }));
+
+    await runVerify({
+      projectPath: repo,
+      commands: [verify('npm test')],
+      baseRef: 'HEAD',
+      sandboxExecutorSessionFactory: async () => ({ execute }),
+      sandboxScratchRoot: root,
+    });
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringMatching(/export OPENSWARM_TEST_PARALLELISM=\d+ .* && npm test -- --maxWorkers=\d+$/),
+      2_000,
+    );
+  });
+
   it('fails closed when the strict companion cannot attest instead of falling back to host execution', async () => {
     const createSession = vi.fn(async () => {
       throw new Error('socket unavailable');
