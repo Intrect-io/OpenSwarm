@@ -141,11 +141,27 @@ async function resourceAwareSimpleTestCommand(
       return `${key}=${clampExisting(single ?? double ?? bare, budget)}`;
     },
   );
-  const boundedCommand = boundedPrefix + command.slice(assignmentPrefix.length);
-  const executableCommand = boundedCommand.trim().replace(
+  let boundedCommand = boundedPrefix + command.slice(assignmentPrefix.length);
+  if (/^\s*env\s/.test(boundedCommand)) {
+    boundedCommand = boundedCommand.replace(
+      /\b(OPENSWARM_TEST_PARALLELISM|PYTEST_XDIST_AUTO_NUM_WORKERS|CARGO_BUILD_JOBS|RAYON_NUM_THREADS|CMAKE_BUILD_PARALLEL_LEVEL|GOMAXPROCS|UV_CONCURRENT_BUILDS)=(?:'([^']*)'|"([^"]*)"|([^\s]+))/g,
+      (_full, key: string, single: string | undefined, double: string | undefined, bare: string | undefined) =>
+        `${key}=${clampExisting(single ?? double ?? bare, budget)}`,
+    );
+  }
+  let executableCommand = boundedCommand.trim().replace(
     /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s]+)\s+)+/,
     '',
   );
+  let previous = '';
+  while (executableCommand !== previous) {
+    previous = executableCommand;
+    executableCommand = executableCommand
+      .replace(/^(?:command|exec)\s+/, '')
+      .replace(/^env\s+(?:(?:-[^\s]+|[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s]+))\s+)*/, '')
+      .replace(/^(?:timeout|gtimeout)\s+(?:(?:-[^\s]+)\s+)*(?:\d+(?:\.\d+)?[smhd]?\s+)/, '')
+      .replace(/^nice\s+(?:-n\s+\d+\s+)?/, '');
+  }
   const directRunner = /^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(executableCommand);
   const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(executableCommand);
   let packageRunner = false;

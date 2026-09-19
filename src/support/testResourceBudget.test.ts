@@ -73,6 +73,10 @@ describe('test resource budget', () => {
       .toBe('CI=1 npm test -- --maxWorkers=1');
     expect(await resourceAwareTestCommand('NODE_ENV=test vitest run --maxWorkers 99', cwd, pressured))
       .toBe('NODE_ENV=test vitest run --maxWorkers 1');
+    expect(await resourceAwareTestCommand('env CI=1 npm test -- --maxWorkers=99', cwd, pressured))
+      .toBe('env CI=1 npm test -- --maxWorkers=1');
+    expect(await resourceAwareTestCommand('timeout 5m vitest run --maxWorkers=99', cwd, pressured))
+      .toBe('timeout 5m vitest run --maxWorkers=1');
   });
 
   it('caps the test subcommand inside a shell sequence using its changed directory', async () => {
@@ -93,6 +97,9 @@ describe('test resource budget', () => {
     expect(await resourceAwareTestCommand(
       'CI=1 CARGO_BUILD_JOBS="8" cargo test', '/tmp', pressured,
     )).toBe('CI=1 CARGO_BUILD_JOBS=1 cargo test');
+    expect(await resourceAwareTestCommand(
+      'env PYTEST_XDIST_AUTO_NUM_WORKERS=99 pytest -n auto', '/tmp', pressured,
+    )).toBe('env PYTEST_XDIST_AUTO_NUM_WORKERS=1 pytest -n auto');
   });
 
   it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
