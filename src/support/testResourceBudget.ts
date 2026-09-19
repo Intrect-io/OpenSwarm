@@ -87,6 +87,7 @@ export async function resourceAwareTestCommand(
 ): Promise<string> {
   const parts = splitShellSequence(command);
   let effectiveCwd = cwd;
+  let sequenceCeiling = effectiveTestParallelism(snapshot);
   for (let index = 0; index < parts.length; index += 2) {
     const part = parts[index];
     const trimmed = part.trim();
@@ -95,7 +96,19 @@ export async function resourceAwareTestCommand(
       effectiveCwd = path.resolve(effectiveCwd, cd[2].trim());
       continue;
     }
-    const bounded = await resourceAwareSimpleTestCommand(trimmed, effectiveCwd, snapshot);
+    if (/^export\s+/.test(trimmed)) {
+      const boundedExport = trimmed.replace(
+        /\b(OPENSWARM_TEST_PARALLELISM|PYTEST_XDIST_AUTO_NUM_WORKERS|CARGO_BUILD_JOBS|RAYON_NUM_THREADS|CMAKE_BUILD_PARALLEL_LEVEL|GOMAXPROCS|UV_CONCURRENT_BUILDS)=(?:'([^']*)'|"([^"]*)"|([^\s]+))/g,
+        (_full, key: string, single: string | undefined, double: string | undefined, bare: string | undefined) => {
+          const value = clampExisting(single ?? double ?? bare, sequenceCeiling);
+          if (key === 'OPENSWARM_TEST_PARALLELISM') sequenceCeiling = Number(value);
+          return `${key}=${value}`;
+        },
+      );
+      parts[index] = part.replace(trimmed, boundedExport);
+      continue;
+    }
+    const bounded = await resourceAwareSimpleTestCommand(trimmed, effectiveCwd, snapshot, sequenceCeiling);
     parts[index] = part.replace(trimmed, bounded);
   }
   return parts.join('');
@@ -127,14 +140,15 @@ async function resourceAwareSimpleTestCommand(
   command: string,
   cwd: string,
   snapshot: HostResourceSnapshot,
+  sequenceCeiling: number,
 ): Promise<string> {
   const commentIndex = shellCommentIndex(command);
   if (commentIndex >= 0) {
     const executable = command.slice(0, commentIndex).trimEnd();
     if (!executable) return command;
-    return `${await resourceAwareSimpleTestCommand(executable, cwd, snapshot)}${command.slice(executable.length)}`;
+    return `${await resourceAwareSimpleTestCommand(executable, cwd, snapshot, sequenceCeiling)}${command.slice(executable.length)}`;
   }
-  let budget = effectiveTestParallelism(snapshot);
+  let budget = Math.min(effectiveTestParallelism(snapshot), sequenceCeiling);
   const localCeiling = /(?:^|\s)OPENSWARM_TEST_PARALLELISM=(?:'([^']*)'|"([^"]*)"|([^\s]+))/.exec(command);
   if (localCeiling) {
     budget = Number(clampExisting(localCeiling[1] ?? localCeiling[2] ?? localCeiling[3], budget));

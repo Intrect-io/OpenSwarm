@@ -119,6 +119,16 @@ describe('test resource budget', () => {
       .toBe('timeout 5m cargo test --jobs 1');
   });
 
+  it('clamps exported resource overrides for following test commands', async () => {
+    const idle = { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand(
+      'export PYTEST_XDIST_AUTO_NUM_WORKERS=99; pytest -n auto', '/tmp', idle,
+    )).toBe('export PYTEST_XDIST_AUTO_NUM_WORKERS=4; pytest -n auto');
+    expect(await resourceAwareTestCommand(
+      'export OPENSWARM_TEST_PARALLELISM=1; vitest run --maxWorkers=99', '/tmp', idle,
+    )).toBe('export OPENSWARM_TEST_PARALLELISM=1; vitest run --maxWorkers=1');
+  });
+
   it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --runInBand' } }));
