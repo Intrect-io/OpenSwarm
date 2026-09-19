@@ -849,7 +849,13 @@ export async function createWorktree(
       );
       baseRef = base.ref;
     }
-    await git(repoPath, 'worktree', 'add', '-b', branchName, worktreePath, baseRef);
+    // --no-track: branching from a remote ref makes git record an upstream in
+    // the repository's shared .git/config. The lifecycle lock is per issue, so
+    // two issues of one repo reach this line together and the loser fails with
+    // "could not lock config file .git/config: File exists" — leaving a branch
+    // with no worktree and costing the issue an attempt. Nothing reads that
+    // upstream before publication, where `push -u` sets the real one.
+    await git(repoPath, 'worktree', 'add', '--no-track', '-b', branchName, worktreePath, baseRef);
   }
   console.log(`[Worktree] Created: ${worktreePath} (branch: ${branchName}, base: ${baseRef})`);
 
