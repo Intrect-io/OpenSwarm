@@ -33,6 +33,7 @@ import {
   type TrackerTerminalState,
 } from './runLedgerTrackerCache.js';
 import { assertRunState, parseJson, toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
+import { assertPositiveDuration, placeholders, stringifyJson } from './runLedgerUtils.js';
 import type {
   AttemptResultInput,
   ClaimOptions,
@@ -77,20 +78,6 @@ export type {
   TrackerStateObservation,
   TransitionPatch,
 } from './runLedgerTypes.js';
-
-function stringifyJson(value: unknown): string | null {
-  return value === undefined ? null : JSON.stringify(value);
-}
-
-function placeholders(values: readonly unknown[]): string {
-  return values.map(() => '?').join(', ');
-}
-
-function assertPositiveDuration(value: number, label: string): void {
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} must be a positive finite number`);
-  }
-}
 
 export { defaultAutomationDbPath } from './automationDbPath.js';
 
