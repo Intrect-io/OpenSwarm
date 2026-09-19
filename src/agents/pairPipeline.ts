@@ -97,6 +97,17 @@ import { buildReviewerStageOptions } from './reviewerStageOptions.js';
  * inbox nobody reads. Role is part of the key so the worker and the reviewer on
  * one task never answer to the same name.
  */
+/**
+ * A test verdict describes the diff it ran against. Left in place, a run that
+ * ends before the tester — on a guard, a worker failure — is recorded with the
+ * previous iteration's test output as its reason (AX-1585, AGT-4468). A function
+ * rather than an inline assignment so the loop's later reads are not narrowed
+ * to `undefined`.
+ */
+function dropStaleTestVerdict(context: { testerResult?: TesterResult }): void {
+  context.testerResult = undefined;
+}
+
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
@@ -839,6 +850,7 @@ export class PairPipeline extends EventEmitter {
       }
       const iterationStartedAt = Date.now();
       context.currentIteration++;
+      dropStaleTestVerdict(context);
       await captureBeforeIteration(context);
 
       // Stuck detection check (before iteration starts)

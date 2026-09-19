@@ -609,6 +609,42 @@ describe('PairPipeline coverage extension', () => {
     }));
   });
 
+  it('does not report an earlier iteration\'s test failure when the run ended on a guard', async () => {
+    // AX-1585, 2026-09-19: iteration 3 failed its tests, iteration 4 rewrote the
+    // diff and was stopped by a guard before the tester ran. The ledger recorded
+    // iteration 3's pytest output as the reason, and the retry was handed a
+    // failure that no longer existed in the branch.
+    runTester.mockResolvedValueOnce({
+      success: false, testsPassed: 2, testsFailed: 1,
+      output: 'FAIL src/cache.test.ts', failedTests: ['cache.test.ts > stale'],
+    } satisfies TesterResult);
+    runGuards
+      .mockResolvedValueOnce({ allPassed: true, results: [], combinedIssues: [] } satisfies GuardsRunResult)
+      .mockResolvedValueOnce({
+        allPassed: false,
+        results: [{ guard: 'contractEvidence', passed: false, blocking: true, issues: ['literal "x" has no evidence'] }],
+        combinedIssues: ['literal "x" has no evidence'],
+      } as GuardsRunResult);
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'tester'],
+      maxIterations: 2,
+      guards: { qualityGate: true },
+      roles: {
+        worker: { enabled: true, timeoutMs: 0 },
+        tester: { enabled: true, timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(false);
+    expect(runTester).toHaveBeenCalledTimes(1);
+    expect(result.testerResult).toBeUndefined();
+    expect(result.reviewResult?.feedback).toContain('literal "x" has no evidence');
+  });
+
   it('aborts self-repair when the tester keeps failing with the identical error', async () => {
     // Same failure every call → recordReflection() sees identical errors on the
     // 2nd objective 'test' entry → progressed:false → shouldAbortSelfRepair()
