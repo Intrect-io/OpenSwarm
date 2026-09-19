@@ -149,9 +149,18 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     const authStore = new AuthProfileStore();
     if (authStore.getProfile('linear:default')) {
       console.log('🔗 Initializing Linear client (OAuth)...');
-      const token = await ensureValidToken(authStore, 'linear:default');
-      linear.initLinear(token, config.linearTeamId, true);
-      console.log('✅ Linear client connected (OAuth)');
+      try {
+        const token = await ensureValidToken(authStore, 'linear:default');
+        linear.initLinear(token, config.linearTeamId, true);
+        console.log('✅ Linear client connected (OAuth)');
+      } catch (error) {
+        // OAuth is optional integration state. Do not silently fall through to
+        // the API key: that may be a different Linear actor. Keeping Linear
+        // unavailable is explicit, while the web server and local runner can
+        // still start and expose the degraded state in their boot log.
+        console.warn('[Linear] OAuth profile rejected; Linear integration is disabled for this service run. '
+          + 'API-key fallback was intentionally not used because it may act as a different identity:', error);
+      }
     } else if (config.linearApiKey) {
       console.log('🔗 Initializing Linear client...');
       linear.initLinear(config.linearApiKey, config.linearTeamId);
