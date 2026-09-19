@@ -3079,6 +3079,9 @@ export class AutonomousRunner {
           }
           await resolveTaskFileScope(c.task, projPath, {
             draftTask: () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath),
+            generatedOutputRules: this.config.projectAgents?.find(
+              pa => projPath.includes(pa.projectPath.replace('~', '')),
+            )?.generatedOutputRules,
           });
           if (c.task.fileScopeSource === 'drafted' && c.task.preAdmissionDraft) {
             const entry = {

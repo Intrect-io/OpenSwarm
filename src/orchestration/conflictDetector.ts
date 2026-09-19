@@ -83,6 +83,14 @@ const UNKNOWN_SCOPE = 'unknown-file-scope';
 export interface FileScopeResolutionOptions {
   /** Expensive pre-admission analysis, invoked only for unknown/broad direct scope. */
   draftTask?: () => Promise<TaskItem['preAdmissionDraft'] | undefined>;
+  /** Repository-owned command/output declarations. Task prose cannot add paths. */
+  generatedOutputRules?: ReadonlyArray<{ command: string; outputs: readonly string[] }>;
+}
+
+function generatedOutputsNamedByTask(task: TaskItem, rules: FileScopeResolutionOptions['generatedOutputRules']): string[] {
+  if (!rules?.length) return [];
+  const text = `${task.title}\n${task.description ?? ''}`;
+  return rules.flatMap((rule) => text.includes(rule.command) ? rule.outputs : []);
 }
 
 export interface ConflictDetectionOptions {
@@ -153,7 +161,8 @@ export async function resolveTaskFileScope(
     try {
       const draft = task.preAdmissionDraft ?? await options.draftTask?.();
       if (draft?.sufficient) {
-        const relevantFiles = await canonicalExistingRepoFiles(projectPath, draft.relevantFiles);
+        const generated = generatedOutputsNamedByTask(task, options.generatedOutputRules);
+        const relevantFiles = await canonicalExistingRepoFiles(projectPath, [...draft.relevantFiles, ...generated]);
         if (relevantFiles.length > 0) {
           task.preAdmissionDraft = { ...draft, relevantFiles };
           task.fileScope = relevantFiles;

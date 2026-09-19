@@ -198,6 +198,10 @@ const ProjectAgentConfigSchema = z.object({
   projectPath: z.string().min(1),
   /** Linear project ID */
   linearProjectId: z.string().optional(),
+  generatedOutputRules: z.array(z.object({
+    command: z.string().min(1),
+    outputs: z.array(z.string().min(1)).min(1),
+  })).optional(),
   /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });

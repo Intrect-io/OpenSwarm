@@ -214,3 +214,34 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
     }
   });
 });
+
+describe('generated output scope declarations (AGT-4428)', () => {
+  it('adds only repository-declared outputs when the task names its generator', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'openswarm-generated-scope-'));
+    try {
+      mkdirSync(join(project, 'src')); mkdirSync(join(project, 'docs'));
+      writeFileSync(join(project, 'src/drafted.ts'), ''); writeFileSync(join(project, 'docs/DATA-CATALOG.md'), '');
+      const candidate = task('CATALOG', 2);
+      candidate.description = 'Regenerate with uv run cgf-pipelines catalog.';
+      const scope = await resolveTaskFileScope(candidate, project, {
+        draftTask: async () => ({ sufficient: true, relevantFiles: ['src/drafted.ts'], taskType: 'bugfix', intentSummary: 'x'.repeat(12), suggestedApproach: 'x'.repeat(12), completionCriteria: ['run catalog'], durationMs: 1 }),
+        generatedOutputRules: [{ command: 'uv run cgf-pipelines catalog', outputs: ['docs/DATA-CATALOG.md'] }],
+      });
+      expect(scope).toEqual(['docs/data-catalog.md', 'src/drafted.ts']);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+
+  it('does not allow a declared output when its generator is absent from the task', async () => {
+    const project = mkdtempSync(join(tmpdir(), 'openswarm-generated-scope-'));
+    try {
+      mkdirSync(join(project, 'src')); mkdirSync(join(project, 'docs'));
+      writeFileSync(join(project, 'src/drafted.ts'), ''); writeFileSync(join(project, 'docs/DATA-CATALOG.md'), '');
+      const candidate = task('OTHER', 2);
+      const scope = await resolveTaskFileScope(candidate, project, {
+        draftTask: async () => ({ sufficient: true, relevantFiles: ['src/drafted.ts'], taskType: 'bugfix', intentSummary: 'x'.repeat(12), suggestedApproach: 'x'.repeat(12), completionCriteria: ['verify'], durationMs: 1 }),
+        generatedOutputRules: [{ command: 'uv run cgf-pipelines catalog', outputs: ['docs/DATA-CATALOG.md'] }],
+      });
+      expect(scope).toEqual(['src/drafted.ts']);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+});

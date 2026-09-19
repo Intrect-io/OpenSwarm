@@ -418,6 +418,9 @@ export type ProjectAgentConfig = {
   projectPath: string;
   /** Linear project ID (optional) */
   linearProjectId?: string;
+  /** Trusted command-to-output declarations for generated files. A task must
+   * name the command before its outputs join the binding worker write scope. */
+  generatedOutputRules?: Array<{ command: string; outputs: string[] }>;
   /** Per-role configuration override */
   roles?: {
     worker?: Partial<RoleConfig>;

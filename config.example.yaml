@@ -268,6 +268,14 @@ autonomous:
   # (identical errors twice in a row). Default: 3.
   maxReflections: 3
 
+  # Optional repository-owned generator declarations. An output enters a
+  # binding worker write scope only if the task explicitly names the command.
+  # projectAgents:
+  #   - projectPath: ~/dev/example
+  #     generatedOutputRules:
+  #       - command: npm run generate:catalog
+  #         outputs: [docs/DATA-CATALOG.md]
+
   # Job profiles override the default Worker/Reviewer pair by task estimate.
   jobProfiles:
     - name: light
