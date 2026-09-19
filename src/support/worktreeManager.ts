@@ -16,6 +16,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
+import type { VerifyConfig } from '../core/types.js';
+import { regressedAgainstFreshBase } from './publicationRegressionProbe.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { changeShapeSection } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
@@ -1040,6 +1042,7 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
     '--json', 'url', '--jq', '.[0].url',
   )).trim();
 }
+
 /** PR URL plus the immutable commit this publication call pushed. */
 export type PublishedPullRequest = { prUrl: string; headSha: string };
 export async function commitAndCreatePRWithHead(
@@ -1047,9 +1050,17 @@ export async function commitAndCreatePRWithHead(
   title: string,
   issueIdentifier: string,
   description: string,
-  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[] } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
+
+  // A daemon restart mid-`regressedAgainstFreshBase` (below) is killed with
+  // MERGE_HEAD still set — its own try/finally only restores on a JS
+  // exception, never on the process itself dying between the merge and the
+  // finally block. Every other resume path in this codebase already expects
+  // to find committed-or-clean state, not a merge in progress, so clear a
+  // stray one before anything else touches this worktree.
+  await git(worktreePath, 'merge', '--abort').catch(() => {});
 
   // A parked/stuck branch can be published without a subsequent resume, so the
   // resume-time cleanup above is not sufficient. Repair legacy generated
@@ -1134,6 +1145,27 @@ export async function commitAndCreatePRWithHead(
     console.log(`[Worktree] ${branchName} is ${freshness.behindBy} commit(s) behind ${base.ref} at publication`);
   }
 
+  // A base that moved with no textual conflict still shipped ready without
+  // ever being retested against the merged result (AGT-4465) — do that now,
+  // before ANY ready/draft decision, including reusing an already-open PR. A
+  // parked run resumes on the same branch, and that is exactly the branch
+  // most likely to have gone stale against a moved base while it sat parked
+  // — computing this only for the fresh-create path below left the
+  // parked-then-approved flow, the scenario this exists for, unprotected.
+  // Cheap: it reuses the tester stage's own deterministic verifier, never an
+  // LLM call, and only runs when the caller supplied a verify config (the
+  // reviewed/approved-publish path does; a parked/unreviewed draft publish
+  // has no reviewer to protect and skips this).
+  const regressed = !conflicting && freshness.behindBy > 0 && options.verify
+    ? await regressedAgainstFreshBase(worktreePath, base.ref, headSha, options.verify)
+    : false;
+  if (regressed) {
+    console.warn(
+      `[Worktree] ${branchName} passes its own base but fails against the CURRENT ${base.ref} ` +
+      `(merged-result revalidation) — draft only`,
+    );
+  }
+
   // If PR already exists, just return the URL
   const existing = await findOpenPullRequestUrl(worktreePath, branchName)
     .catch((e) => { console.warn(`[Worktree] PR list check failed for ${branchName}:`, e); return ''; });
@@ -1148,8 +1180,9 @@ export async function commitAndCreatePRWithHead(
     // when another branch already closes this issue (INT-2544), deliberately, so
     // a duplicate implementation cannot masquerade as the sole one. Promoting on
     // the caller's option alone would defeat that, so the duplicate condition is
-    // re-checked here. (Caught by the commit gate, not self-caught.)
-    if (!options.draft && !conflicting) {
+    // re-checked here. (Caught by the commit gate, not self-caught.) A merged-
+    // result regression (AGT-4465) is a third such reason, checked above.
+    if (!options.draft && !conflicting && !regressed) {
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
@@ -1196,7 +1229,7 @@ export async function commitAndCreatePRWithHead(
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
-  if (options.draft || duplicates.length > 0 || conflicting) createArgs.push('--draft');
+  if (options.draft || duplicates.length > 0 || conflicting || regressed) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();
@@ -1213,8 +1246,11 @@ export async function commitAndCreatePRWithHead(
     console.warn(`[Worktree] PR create raced with another publisher; using existing PR: ${url}`);
     // The winner may have opened it as a draft (a parked run does). Losing the
     // race must not turn a reviewed publication into a hidden draft. Reuses the
-    // duplicate set already computed above rather than re-querying.
-    if (!options.draft && !conflicting) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
+    // duplicate set already computed above rather than re-querying. `regressed`
+    // was computed above too, before this branch even knew whether it would
+    // create or reuse a PR — a merged-result regression (AGT-4465) must block
+    // promotion here exactly as it does on the non-raced path.
+    if (!options.draft && !conflicting && !regressed) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
   }
 
   // Register PR ownership for conflict auto-resolution
@@ -1239,7 +1275,7 @@ export async function commitAndCreatePRWithHead(
 /** Backwards-compatible URL-only publication surface. */
 export async function commitAndCreatePR(
   info: WorktreeInfo, title: string, issueIdentifier: string, description: string,
-  options: { draft?: boolean; committedOnly?: boolean } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
 ): Promise<string> {
   return (await commitAndCreatePRWithHead(info, title, issueIdentifier, description, options)).prUrl;
 }

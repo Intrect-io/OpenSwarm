@@ -19,6 +19,7 @@ import { SensitiveDataError } from '../support/sensitiveDataFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
+import type { VerifyConfig } from '../core/types.js';
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
@@ -291,6 +292,7 @@ export async function publishApprovedWork(
   result: PublishableResult & Pick<PipelineResult, 'failureDetail' | 'operatorPark'> & { success?: boolean; finalStatus?: string; prUrl?: string },
   durability: ExecutionDurabilityHooks | undefined,
   afterPublication?: ApprovedPublicationHook,
+  verify?: VerifyConfig,
 ): Promise<void> {
   // Create PR (worktree mode + pipeline success = finalStatus 'approved')
   if (worktreeInfo && result.success && result.finalStatus === 'approved') {
@@ -313,7 +315,7 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
-          { fileScope: enforcedFileScope(task) },
+          { fileScope: enforcedFileScope(task), verify },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
