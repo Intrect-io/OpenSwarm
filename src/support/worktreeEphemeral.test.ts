@@ -108,6 +108,7 @@ describe('agent-runtime scratch (2026-09-10)', () => {
   // swept in by a worker's `git add -A`.
   it.each([
     ['node_modules', 'symlink to the shared install; a checkout that gets it cannot npm ci'],
+    ['apps/portal/node_modules', 'the same, in a monorepo package — cgf-portal AX-1485 (2026-09-19)'],
     ['cli.json', 'cursor-agent permission allow-list granting Shell(**)'],
     ['cursor/cli.json', 'the same, under its own directory'],
     ['.run-tests.sh', 'generated runner with a hardcoded container worktree UUID'],

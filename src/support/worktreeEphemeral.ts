@@ -67,7 +67,17 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     // #606), but it only protects repositories that carry the pattern. This
     // predicate is the daemon's own staging step, so it holds for every project
     // the daemon touches, including ones it has never committed to before.
-    || file === 'node_modules'
+    // Any depth, not just the repo root: cgf-portal is a monorepo whose
+    // installs live at `apps/portal/node_modules`, and the exact-string form
+    // this used to be never matched that path. A node_modules symlink
+    // committed before this fix stays poisoned forever, because
+    // `purgeTrackedEphemeralArtifacts` (the only cleanup a resumed branch
+    // gets) filters through this same predicate — AX-1485, 2026-09-19,
+    // carried an absolute-target `apps/portal/node_modules` symlink from a
+    // 2026-09-18 07:29 preserve commit into a fresh PR eleven hours after
+    // AGT-4431 shipped the escaping-symlink check that would have caught it
+    // as a NEW addition, because it was never new again after that.
+    || /(?:^|\/)node_modules$/.test(file)
     || /(?:^|\/)cli\.json$/.test(file)
     || /(?:^|\/)\.run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
     || /(?:^|\/)\.tmp-run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
