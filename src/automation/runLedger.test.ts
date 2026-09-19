@@ -45,6 +45,33 @@ afterEach(() => {
 });
 
 describe('RunLedger state machine', () => {
+  it('clears a missing worktree only when the observed row is still unowned and unchanged', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'MISSING-TREE');
+    const runClaim = claim(ledger, 'MISSING-TREE', 'daemon');
+    expect(ledger.attachWorktree(runClaim, '/repo/worktree/MISSING-TREE', 'swarm/MISSING-TREE', 2_100)).toBe(true);
+    expect(ledger.transition(runClaim, 'RETRY_AT', { retryAt: 3_000 }, 2_200)).toBe(true);
+    const observed = ledger.getRun('MISSING-TREE')!;
+
+    expect(ledger.reconcileMissingWorktree(observed, 'clear', 'worktree gone; branch remains on origin', false, 2_300)).toBe(true);
+    expect(ledger.getRun('MISSING-TREE')).toMatchObject({ state: 'RETRY_AT', worktreePath: undefined });
+    expect(ledger.reconcileMissingWorktree(observed, 'clear', 'stale observation', false, 2_400)).toBe(false);
+    ledger.close();
+  });
+
+  it('routes a missing worktree with a published branch through durable PR recovery', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'PUBLISHED-TREE');
+    const runClaim = claim(ledger, 'PUBLISHED-TREE', 'daemon');
+    expect(ledger.attachWorktree(runClaim, '/repo/worktree/PUBLISHED-TREE', 'swarm/PUBLISHED-TREE', 2_100)).toBe(true);
+    expect(ledger.transition(runClaim, 'RETRY_AT', { retryAt: 3_000 }, 2_200)).toBe(true);
+    const observed = ledger.getRun('PUBLISHED-TREE')!;
+
+    expect(ledger.reconcileMissingWorktree(observed, 'published', 'worktree gone; open PR exists', false, 2_300)).toBe(true);
+    expect(ledger.getRun('PUBLISHED-TREE')).toMatchObject({ state: 'NEEDS_RECONCILE', worktreePath: undefined, lastErrorCode: 'missing_worktree_published' });
+    ledger.close();
+  });
+
   it('does not rewind a run when discovery sees the same issue again', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'INT-1');

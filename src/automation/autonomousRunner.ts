@@ -83,7 +83,9 @@ import { STUCK_LABEL } from '../linear/index.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import { readFileSync, existsSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import {
   describeScopeConflict,
@@ -95,6 +97,8 @@ import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export { pickPipelineFailureDetail } from './runnerState.js';
 import type { AdapterName } from '../adapters/types.js';
+
+const execFileAsync = promisify(execFile);
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
@@ -1658,6 +1662,54 @@ export class AutonomousRunner {
     );
   }
 
+  /** Sweep stale ledger pointers before artifact recovery or pruning can act on them. */
+  private async reconcileMissingWorktreePointers(): Promise<void> {
+    if (!this.durableRuns.isPrimary || this.stopping) return;
+    const terminal = new Set(['DONE', 'DECOMPOSED', 'CANCELLED']);
+    for (const run of this.durableRuns.listRuns()) {
+      if (this.stopping) return;
+      if (terminal.has(run.state) || !run.worktreePath || existsSync(run.worktreePath)) continue;
+      if (!['READY', 'RETRY_AT', 'NEEDS_HUMAN'].includes(run.state)) continue;
+
+      let branchOnOrigin = false;
+      let branchProbeFailed = false;
+      if (run.branchName) {
+        try {
+          const { stdout } = await execFileAsync('git', [
+            '-C', run.projectPath, 'ls-remote', 'origin', `refs/heads/${run.branchName}`,
+          ], { timeout: 30_000 });
+          branchOnOrigin = Boolean(stdout.trim());
+        } catch {
+          branchProbeFailed = true;
+        }
+      }
+      if (branchProbeFailed) {
+        console.warn(`[Reconciler] Origin branch lookup failed for missing worktree ${run.identifier ?? run.issueId}; retaining pointer`);
+        continue;
+      }
+
+      let pr;
+      if (run.branchName) {
+        try {
+          pr = await findPullRequestForBranch(run.projectPath, run.branchName);
+        } catch (error) {
+          console.warn(`[Reconciler] GitHub lookup failed for missing worktree ${run.identifier ?? run.issueId}; retaining pointer:`, error);
+          continue;
+        }
+      }
+      const prefix = `Worktree gone before publication; branch \`${run.branchName ?? '(none)'}\` ${branchOnOrigin ? 'is on origin' : 'is not on origin'}`;
+      const disposition = pr ? 'published' : run.state === 'READY' ? 'needs_human' : 'clear';
+      if (this.durableRuns.reconcileMissingWorktree(
+        run,
+        disposition,
+        pr ? `${prefix}; PR exists: ${pr.url}` : prefix,
+        !branchOnOrigin,
+      )) {
+        console.log(`[Reconciler] ${run.identifier ?? run.issueId}: cleared missing worktree pointer (${disposition})`);
+      }
+    }
+  }
+
   private async reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void> {
     if (!this.durableRuns.isPrimary || this.stopping) return;
     const taskById = new Map(tasks.map((task) => [task.issueId || task.id, task]));
@@ -2664,6 +2716,10 @@ export class AutonomousRunner {
             console.error(`[AutonomousRunner] Worktree sweep failed for ${resolvedPath}:`, e),
           );
         }
+        // Pruning may have removed a tree whose durable row was still pointing
+        // at it. Reconcile in this heartbeat, before admission sees it.
+        await this.reconcileMissingWorktreePointers();
+        if (this.stopping) return;
       }
 
       // 0.5 Long-running monitor passive check (before time window)
@@ -2745,6 +2801,8 @@ export class AutonomousRunner {
       }
 
       await this.migrateLegacyRunState(tasks);
+      if (this.stopping) return;
+      await this.reconcileMissingWorktreePointers();
       if (this.stopping) return;
       await this.reconcileDurableArtifacts(tasks);
       if (this.stopping) return;

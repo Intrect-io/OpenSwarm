@@ -437,6 +437,17 @@ export class DurableRunCoordinator {
     return this.ledger?.markNeedsHuman(issueId, reason, now) ?? false;
   }
 
+  reconcileMissingWorktree(
+    expected: Pick<RunRecord, 'issueId' | 'state' | 'stateVersion' | 'worktreePath'>,
+    disposition: 'published' | 'needs_human' | 'clear',
+    reason: string,
+    clearHeadSha: boolean,
+    now = Date.now(),
+  ): boolean {
+    if (!this.ledger || !this.isPrimary) return false;
+    return this.ledger.reconcileMissingWorktree(expected, disposition, reason, clearHeadSha, now);
+  }
+
   markNeedsHumanForQuestions(
     issueId: string,
     correlationIds: readonly string[],
