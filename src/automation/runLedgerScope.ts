@@ -21,7 +21,8 @@ export { normalizeConflictScope } from '../orchestration/conflictScope.js';
 /** Read the scope a live run recorded in its metadata blob. */
 export function metadataConflictScope(metadata: unknown): Set<string> {
   if (!metadata || typeof metadata !== 'object') return new Set();
-  return normalizeConflictScope((metadata as { fileScope?: unknown }).fileScope);
+  const scopes = metadata as { pinnedFileScope?: unknown; fileScope?: unknown };
+  return normalizeConflictScope(scopes.pinnedFileScope ?? scopes.fileScope);
 }
 
 export function scopesOverlap(left: Set<string>, right: Set<string>): boolean {

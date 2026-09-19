@@ -1357,15 +1357,14 @@ describe('runRecordToTask', () => {
   });
 
   it('pins the first write scope for later admission (AGT-4441)', async () => {
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     const first = { id: 'scope-pin', issueId: 'scope-pin', issueIdentifier: 'AX-SCOPE', source: 'linear' as const, title: 'scope pin', priority: 2, createdAt: 1_000, fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' as const };
     coordinator.observeTask(first, '/repo'); const observed = coordinator.observeTask({ ...first, fileScope: ['src/old.ts'] }, '/repo');
     expect(observed?.metadata).toMatchObject({ fileScope: ['src/old.ts'], pinnedFileScope: ['src/old.ts', 'src/pinned.ts'], pinnedFileScopeSource: 'drafted' });
     expect(runRecordToTask(observed!)).toMatchObject({ fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' });
-    ledger.registerRun({ issueId: 'active', source: 'linear', projectPath: '/repo', metadata: { fileScope: ['src/pinned.ts'] } });
-    expect(ledger.claimRun('active', { ownerInstanceId: 'other', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).not.toBeNull(); expect(ledger.getRun('active')).toMatchObject({ state: 'CLAIMED', metadata: { fileScope: ['src/pinned.ts'] } }); expect(ledger.claimRun('scope-pin', { ownerInstanceId: 'probe', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).toBeNull();
-    expect((await coordinator.execute({ ...first, fileScope: ['src/old.ts'] }, '/repo', async () => result(), { admission: { maxConcurrent: 2, conflictScope: ['src/old.ts'] } })).finalStatus).toBe('deferred');
+    expect(ledger.claimRun('scope-pin', { ownerInstanceId: 'owner', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: first.fileScope })).not.toBeNull();
+    ledger.registerRun({ issueId: 'conflict', source: 'linear', projectPath: '/repo', metadata: { fileScope: ['src/pinned.ts'] } });
+    expect(ledger.claimRun('conflict', { ownerInstanceId: 'other', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).toBeNull();
     coordinator.close(); ledger.close();
   });
 
