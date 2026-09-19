@@ -311,7 +311,7 @@ const ALLOWED_EVENTS = new Set(['invoke', 'complete', 'error', 'start', 'stop', 
  */
 const ALLOWED_COMMANDS = new Set([
   'add', 'annotate', 'attach', 'auth', 'board', 'chat', 'check', 'cost', 'dash', 'design-pipeline',
-  'doctor', 'exec', 'fix', 'init', 'login', 'logout', 'mcp', 'memory', 'models', 'openswarm',
+  'doctor', 'drain-parks', 'exec', 'fix', 'init', 'login', 'logout', 'mcp', 'memory', 'models', 'openswarm',
   'pr', 'projects', 'provider', 'remove', 'resume', 'review', 'run', 'schedule', 'start',
   'status', 'stop', 'threads', 'upgrade', 'validate', 'version', 'work',
 ]);
