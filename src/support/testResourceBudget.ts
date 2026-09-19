@@ -47,7 +47,7 @@ export function withTestResourceBudget(
   const capped = (key: string): string => clampExisting(base[key], budget);
   return {
     ...base,
-    OPENSWARM_TEST_PARALLELISM: String(budget),
+    OPENSWARM_TEST_PARALLELISM: capped('OPENSWARM_TEST_PARALLELISM'),
     PYTEST_XDIST_AUTO_NUM_WORKERS: capped('PYTEST_XDIST_AUTO_NUM_WORKERS'),
     CARGO_BUILD_JOBS: capped('CARGO_BUILD_JOBS'),
     RAYON_NUM_THREADS: capped('RAYON_NUM_THREADS'),
@@ -59,7 +59,7 @@ export function withTestResourceBudget(
 
 /** Prefix for executors whose protocol cannot receive a per-command env map. */
 export function testResourceShellPrefix(snapshot = currentHostResourceSnapshot()): string {
-  const env = withTestResourceBudget({}, snapshot);
+  const env = withTestResourceBudget(process.env, snapshot);
   const keys = [
     'OPENSWARM_TEST_PARALLELISM',
     'PYTEST_XDIST_AUTO_NUM_WORKERS',
@@ -77,6 +77,49 @@ export async function resourceAwareTestCommand(
   command: string,
   cwd: string,
   snapshot = currentHostResourceSnapshot(),
+): Promise<string> {
+  const parts = splitShellSequence(command);
+  let effectiveCwd = cwd;
+  for (let index = 0; index < parts.length; index += 2) {
+    const part = parts[index];
+    const trimmed = part.trim();
+    const cd = /^cd\s+(['"]?)([^'";&|]+)\1$/.exec(trimmed);
+    if (cd) {
+      effectiveCwd = path.resolve(effectiveCwd, cd[2].trim());
+      continue;
+    }
+    const bounded = await resourceAwareSimpleTestCommand(trimmed, effectiveCwd, snapshot);
+    parts[index] = part.replace(trimmed, bounded);
+  }
+  return parts.join('');
+}
+
+function splitShellSequence(command: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\' && quote !== "'") { escaped = true; continue; }
+    if (quote) { if (char === quote) quote = ''; continue; }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    const two = command.slice(index, index + 2);
+    const separatorLength = two === '&&' || two === '||' ? 2 : (char === ';' || char === '|' ? 1 : 0);
+    if (!separatorLength) continue;
+    parts.push(command.slice(start, index), command.slice(index, index + separatorLength));
+    index += separatorLength - 1;
+    start = index + 1;
+  }
+  parts.push(command.slice(start));
+  return parts;
+}
+
+async function resourceAwareSimpleTestCommand(
+  command: string,
+  cwd: string,
+  snapshot: HostResourceSnapshot,
 ): Promise<string> {
   const budget = computeTestParallelism(snapshot);
   if (/--runInBand\b/.test(command)) return command;
@@ -97,7 +140,7 @@ export async function resourceAwareTestCommand(
     return `${command} --maxWorkers=${budget}`;
   }
 
-  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)\s*$/.test(command.trim());
+  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(command);
   if (!packageTest) return command;
 
   try {
@@ -107,7 +150,9 @@ export async function resourceAwareTestCommand(
     const script = typeof manifest.scripts?.test === 'string' ? manifest.scripts.test : '';
     if (!/\b(?:vitest|jest)\b/.test(script)) return command;
     if (/--runInBand\b/.test(script)) return command;
-    return `${command} -- --maxWorkers=${budget}`;
+    return command.includes(' -- ')
+      ? `${command} --maxWorkers=${budget}`
+      : `${command} -- --maxWorkers=${budget}`;
   } catch {
     return command;
   }

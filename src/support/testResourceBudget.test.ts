@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -16,10 +16,10 @@ describe('test resource budget', () => {
 
   it('exports runtime caps without raising a stricter operator limit', () => {
     const env = withTestResourceBudget(
-      { CARGO_BUILD_JOBS: '1', PYTEST_XDIST_AUTO_NUM_WORKERS: '99' },
+      { CARGO_BUILD_JOBS: '1', PYTEST_XDIST_AUTO_NUM_WORKERS: '99', OPENSWARM_TEST_PARALLELISM: '2' },
       { logicalCpus: 8, load1: 3, freeMemoryBytes: 8 * 1024 ** 3 },
     );
-    expect(env.OPENSWARM_TEST_PARALLELISM).toBe('4');
+    expect(env.OPENSWARM_TEST_PARALLELISM).toBe('2');
     expect(env.PYTEST_XDIST_AUTO_NUM_WORKERS).toBe('4');
     expect(env.CARGO_BUILD_JOBS).toBe('1');
     expect(env.RAYON_NUM_THREADS).toBe('4');
@@ -59,6 +59,16 @@ describe('test resource budget', () => {
       .toBe('npm test -- --maxWorkers 1');
     expect(await resourceAwareTestCommand('jest --maxWorkers=50%', '/tmp', pressured))
       .toBe('jest --maxWorkers=1');
+  });
+
+  it('caps the test subcommand inside a shell sequence using its changed directory', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    const app = path.join(root, 'app');
+    await mkdir(app);
+    await writeFile(path.join(app, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand('cd app && npm test && echo done', root, pressured))
+      .toBe('cd app && npm test -- --maxWorkers=1 && echo done');
   });
 
   it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
