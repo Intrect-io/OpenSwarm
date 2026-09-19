@@ -250,6 +250,7 @@ export class DurableRunCoordinator {
   private readonly processIsAlive: (pid: number) => boolean;
   private readonly pidSpace: string | undefined;
   private readonly reconcileAbandonMs: number;
+  private readonly activeClaims = new Map<string, RunClaim>();
   private readonly exitedClaims = new Map<string, RunClaim>();
   private closed = false;
 
@@ -285,6 +286,27 @@ export class DurableRunCoordinator {
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     return this.ledger?.listRuns(states) ?? [];
+  }
+
+  /** Records the scheduler's outer watchdog before its aborted executor exits. */
+  recordWatchdogTimeout(issueId: string, budgetMs: number, elapsedMs: number, now = Date.now()): boolean {
+    const claim = this.activeClaims.get(issueId);
+    if (!claim || !this.ledger || !this.isPrimary) return false;
+    const detail = `scheduler hard watchdog: budget ${Math.round(budgetMs / 60_000)}min (${budgetMs}ms), elapsed ${elapsedMs}ms`;
+    if (!this.ledger.recordAttemptResult(claim, {
+      success: false,
+      finalStatus: 'infra_error',
+      result: { failureCause: 'watchdog_timeout', budgetMs, elapsedMs },
+    }, now)) return false;
+    const transitioned = this.ledger.transition(claim, 'RETRY_AT', {
+      retryAt: now + 15 * 60_000,
+      errorCode: 'watchdog_timeout',
+      errorMessage: detail,
+      eventKind: 'watchdog_timeout',
+      eventData: { budgetMs, elapsedMs },
+    }, now);
+    if (transitioned) this.activeClaims.delete(issueId);
+    return transitioned;
   }
 
   cacheTrackerObservation(
@@ -614,6 +636,8 @@ export class DurableRunCoordinator {
       return executor(this.noopHooks(), new AbortController().signal);
     }
 
+    this.activeClaims.set(issueId, claim);
+
     let leaseLost = false;
     const leaseAbortController = new AbortController();
     const loseLease = (): void => {
@@ -693,6 +717,7 @@ export class DurableRunCoordinator {
       throw error;
     } finally {
       clearInterval(renewTimer);
+      if (this.activeClaims.get(issueId)?.leaseToken === claim.leaseToken) this.activeClaims.delete(issueId);
       try {
         if (!this.ledger.isClaimCurrent(claim)) loseLease();
       } catch {
