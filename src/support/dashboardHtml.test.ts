@@ -16,6 +16,14 @@ describe('buildDashboardHtml (INT-3284)', () => {
     expect(html.match(/class="provider-btn"/g)?.length).toBe(providers.length);
   });
 
+  it('renders a persistent fleet-wide thinking effort control', () => {
+    const html = buildDashboardHtml(['openrouter']);
+    expect(html).toContain('id="reasoning-effort"');
+    expect(html).toContain('setReasoningEffort(this.value)');
+    expect(html).toContain('/api/reasoning-effort');
+    expect(html).toContain('<option value="high">High</option>');
+  });
+
   it('highlights any active provider via class toggle script (not Claude/Codex-only)', () => {
     const html = buildDashboardHtml(['openrouter', 'claude']);
     expect(html).toContain('querySelectorAll(".provider-btn")');

@@ -42,6 +42,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div class="provider-toggle" id="provider-toggle" role="group" aria-label="Default provider">
         <!--PROVIDER_BUTTONS-->
       </div>
+      <label class="control-label" for="reasoning-effort">Thinking</label>
+      <select class="input effort-select" id="reasoning-effort" aria-label="Fleet-wide thinking effort" onchange="setReasoningEffort(this.value)">
+        <option value="">Default</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+      </select>
       <button class="btn btn-danger btn-sm" id="svc-stop-btn" type="button" onclick="svcAction('stop')">⏸ Stop</button>
       <button class="btn btn-secondary btn-sm" id="svc-restart-btn" type="button" onclick="svcAction('restart')">↻ Restart</button>
     </div>
@@ -562,6 +569,35 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         updateStats(stats);
       } catch (e) {
         addLogLine({ taskId: "system", stage: "error", line: "Provider switch failed: " + e.message });
+      }
+    }
+
+    async function fetchReasoningEffort() {
+      try {
+        const res = await fetch("/api/reasoning-effort");
+        if (!res.ok) return;
+        const data = await res.json();
+        document.getElementById("reasoning-effort").value = data.effort || "";
+      } catch {}
+    }
+
+    async function setReasoningEffort(value) {
+      const select = document.getElementById("reasoning-effort");
+      select.disabled = true;
+      try {
+        const res = await fetch("/api/reasoning-effort", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ effort: value || null })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "Failed to update thinking effort");
+        addLogLine({ taskId: "system", stage: "reasoning", line: "Thinking effort set to " + (data.effort || "default") });
+      } catch (e) {
+        addLogLine({ taskId: "system", stage: "error", line: "Thinking effort update failed: " + e.message });
+        await fetchReasoningEffort();
+      } finally {
+        select.disabled = false;
       }
     }
 
@@ -1774,6 +1810,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       fetchKnowledgeData();
       fetchMonitors();
       fetchProcesses();
+      fetchReasoningEffort();
     }, 3000);
 
     // 렌더링 성능: 스테이지 업데이트 폴링 제거 (SSE 이벤트 활용)

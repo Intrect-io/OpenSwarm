@@ -7,7 +7,7 @@
 // ============================================
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OpenRouterCliAdapter, createApiCaller, applyPromptCaching } from './openrouter.js';
+import { OpenRouterCliAdapter, createApiCaller, applyPromptCaching, DEEPSEEK_FALLBACK_MODEL } from './openrouter.js';
 import { RateLimitError } from './rateLimitError.js';
 import { getAdapter } from './index.js';
 import type { ChatMessage } from './agenticLoop.js';
@@ -97,6 +97,40 @@ describe('OpenRouterCliAdapter', () => {
       expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/transient failure \(HTTP 503\).*retry 1\/5/);
     } finally {
       vi.useRealTimers();
+      if (prevKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = prevKey;
+    }
+  });
+
+  it('replays a failed v4-flash run once on GLM 5.3 Flash', async () => {
+    const prevKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    const bodies: Array<{ model?: string }> = [];
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"fallback ok"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}',
+      'data: [DONE]', '',
+    ].join('\n');
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body)) as { model?: string };
+      bodies.push(body);
+      return bodies.length === 1
+        ? new Response('model unavailable', { status: 400 })
+        : new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }));
+    try {
+      const result = await new OpenRouterCliAdapter().run({
+        prompt: 'x', cwd: process.cwd(), model: 'deepseek/deepseek-v4-flash',
+        webTools: false, memoryTools: false, mcpTools: [], enableTools: false, maxTurns: 1,
+      } as never);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('fallback ok');
+      expect(bodies.map((body) => body.model)).toEqual([
+        'deepseek/deepseek-v4-flash',
+        DEEPSEEK_FALLBACK_MODEL,
+      ]);
+      expect(result.costInfo?.model).toBe(DEEPSEEK_FALLBACK_MODEL);
+    } finally {
       if (prevKey === undefined) delete process.env.OPENROUTER_API_KEY;
       else process.env.OPENROUTER_API_KEY = prevKey;
     }
