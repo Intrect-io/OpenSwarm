@@ -209,6 +209,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     projectName?: string;
     fileScope?: string[];
     fileScopeSource?: TaskItem['fileScopeSource'];
+    pinnedFileScope?: string[];
+    pinnedFileScopeSource?: TaskItem['fileScopeSource'];
     explicitDispatch?: boolean;
   };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
@@ -226,8 +228,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     linearProject: metadata.projectId
       ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
       : undefined,
-    fileScope: metadata.fileScope,
-    fileScopeSource: metadata.fileScopeSource,
+    fileScope: metadata.pinnedFileScope ?? metadata.fileScope,
+    fileScopeSource: metadata.pinnedFileScopeSource ?? metadata.fileScopeSource,
     explicitDispatch: metadata.explicitDispatch === true,
     createdAt: run.discoveredAt,
   };
@@ -489,6 +491,8 @@ export class DurableRunCoordinator {
         projectName: task.linearProject?.name,
         fileScope: task.fileScope,
         fileScopeSource: task.fileScopeSource,
+        pinnedFileScope: task.fileScope,
+        pinnedFileScopeSource: task.fileScopeSource,
         explicitDispatch: task.explicitDispatch === true,
       },
     }, now);
@@ -520,7 +524,18 @@ export class DurableRunCoordinator {
     if (!this.ledger) return executor(this.noopHooks(), new AbortController().signal);
 
     const issueId = task.issueId || task.id;
-    this.observeTask(task, projectPath);
+    const observed = this.observeTask(task, projectPath);
+    const pinned = (observed?.metadata ?? {}) as {
+      pinnedFileScope?: string[];
+      pinnedFileScopeSource?: TaskItem['fileScopeSource'];
+    };
+    if (pinned.pinnedFileScope !== undefined) {
+      task = {
+        ...task,
+        fileScope: [...pinned.pinnedFileScope],
+        fileScopeSource: pinned.pinnedFileScopeSource,
+      };
+    }
     // Shadow is projection-only: it may populate discovery records for rollout
     // comparison, but must never claim, fence, enqueue effects, or alter tracker
     // delivery. Otherwise the observer itself becomes a second control plane.

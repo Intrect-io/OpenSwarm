@@ -1226,8 +1226,7 @@ describe('DurableRunCoordinator dead marker owners', () => {
 
   it('names released prior-generation owners by marker id and never itself or the live owner', async () => {
     const { getInstanceId } = await import('../support/healthEndpoint.js');
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     ledger.registerRun({ issueId: 'GEN-1', source: 'linear', projectPath: '/repo' }, 1_000);
 
     // A prior generation claimed, went silent, and the ledger released it.
@@ -1244,8 +1243,7 @@ describe('DurableRunCoordinator dead marker owners', () => {
     expect(ledger.transition(ours, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
     expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
     expect(coordinator.deadMarkerOwners('unknown')).toEqual([]);
-    coordinator.close();
-    ledger.close();
+    coordinator.close(); ledger.close();
   });
 });
 
@@ -1356,6 +1354,17 @@ describe('runRecordToTask', () => {
     expect(rebuilt.linearProject).toEqual(original.linearProject);
     expect(rebuilt.fileScope).toEqual(original.fileScope);
     expect(rebuilt.explicitDispatch).toBe(true);
+    coordinator.close();
+    ledger.close();
+  });
+
+  it('pins the first write scope across a later narrower observation (AGT-4441)', () => {
+    const ledger = new RunLedger(dbPath());
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const first = { id: 'scope-pin', issueId: 'scope-pin', issueIdentifier: 'AX-SCOPE', source: 'linear' as const, title: 'scope pin', priority: 2, createdAt: 1_000, fileScope: ['src/old.ts', 'docs/DATA-CATALOG.md'], fileScopeSource: 'drafted' as const };
+    coordinator.observeTask(first, '/repo'); const observed = coordinator.observeTask({ ...first, fileScope: ['src/old.ts'] }, '/repo');
+    expect(observed?.metadata).toMatchObject({ fileScope: ['src/old.ts'], pinnedFileScope: ['src/old.ts', 'docs/DATA-CATALOG.md'], pinnedFileScopeSource: 'drafted' });
+    expect(runRecordToTask(observed!)).toMatchObject({ fileScope: ['src/old.ts', 'docs/DATA-CATALOG.md'], fileScopeSource: 'drafted' });
     coordinator.close();
     ledger.close();
   });

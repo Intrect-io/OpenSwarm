@@ -151,6 +151,16 @@ export class RunLedger {
       if (inserted.changes === 1) {
         this.insertEvent(input.issueId, 0, 'registered', null, initialState, input.metadata, now);
       } else {
+        const previous = this.db.prepare('SELECT metadata_json FROM automation_runs WHERE issue_id = ?').get(input.issueId) as Pick<RunRow, 'metadata_json'>;
+        const priorMetadata = parseJson(previous.metadata_json) as Record<string, unknown>; const incomingMetadata = (input.metadata ?? {}) as Record<string, unknown>;
+        // A resumed branch is checked against every commit it carries; preserve its first scope. (AGT-4441)
+        const metadata = {
+          ...incomingMetadata,
+          ...(priorMetadata.pinnedFileScope !== undefined ? {
+            pinnedFileScope: priorMetadata.pinnedFileScope,
+            pinnedFileScopeSource: priorMetadata.pinnedFileScopeSource,
+          } : {}),
+        };
         // Discovery may refresh descriptive fields, but never rewinds execution.
         this.db.prepare(`
           UPDATE automation_runs
@@ -166,7 +176,7 @@ export class RunLedger {
           input.identifier ?? null,
           input.title ?? null,
           input.projectPath,
-          stringifyJson(input.metadata),
+          stringifyJson(metadata),
           now,
           input.issueId,
         );
