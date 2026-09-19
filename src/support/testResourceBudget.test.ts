@@ -50,4 +50,11 @@ describe('test resource budget', () => {
   it('preserves an explicit Vitest worker cap', async () => {
     expect(await resourceAwareTestCommand('vitest run --maxWorkers=1', '/tmp')).toBe('vitest run --maxWorkers=1');
   });
+
+  it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --runInBand' } }));
+    expect(await resourceAwareTestCommand('npm test', cwd)).toBe('npm test');
+    expect(await resourceAwareTestCommand('jest --runInBand', cwd)).toBe('jest --runInBand');
+  });
 });

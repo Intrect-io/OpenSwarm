@@ -78,7 +78,7 @@ export async function resourceAwareTestCommand(
   cwd: string,
   snapshot = currentHostResourceSnapshot(),
 ): Promise<string> {
-  if (/--maxWorkers(?:=|\s)/.test(command)) return command;
+  if (/--maxWorkers(?:=|\s)|--runInBand\b/.test(command)) return command;
 
   const budget = computeTestParallelism(snapshot);
   if (/^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(command.trim())) {
@@ -94,6 +94,7 @@ export async function resourceAwareTestCommand(
     };
     const script = typeof manifest.scripts?.test === 'string' ? manifest.scripts.test : '';
     if (!/\b(?:vitest|jest)\b/.test(script)) return command;
+    if (/--runInBand\b/.test(script)) return command;
     return `${command} -- --maxWorkers=${budget}`;
   } catch {
     return command;
