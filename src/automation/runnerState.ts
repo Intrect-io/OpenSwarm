@@ -397,14 +397,24 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     ? `${failedStage.stage}: ${failedStage.result.error}`
     : undefined;
 
+  // An approval is never why a run failed. With the reviewer satisfied, the
+  // cause is a later stage, and reporting the approval instead told the retry
+  // its prior failure was "All hard-gate criteria are evidenced and passing".
+  const reviewFeedback = result.reviewResult?.decision === 'approve'
+    ? []
+    : [result.lastReviewFeedback, result.reviewResult?.feedback];
+  // An infrastructure failure is identified by the stage that died, not by an
+  // earlier revise: the same-fingerprint circuit reads this string, and
+  // reviewer prose differs on every attempt, so led by prose it never trips.
+  const causes = result.finalStatus === 'infra_error'
+    ? [workerFailure, stageError, ...reviewFeedback]
+    : [...reviewFeedback, workerFailure, stageError];
+
   return pickFailureDetail([
     // Publication failed after every stage passed: nothing below describes it.
     result.failureDetail,
     testerFailure,
-    result.lastReviewFeedback,
-    result.reviewResult?.feedback,
-    workerFailure,
-    stageError,
+    ...causes,
     result.stuckReason,
   ]);
 }
