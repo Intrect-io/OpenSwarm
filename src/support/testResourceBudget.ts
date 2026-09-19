@@ -129,7 +129,20 @@ async function resourceAwareSimpleTestCommand(
   snapshot: HostResourceSnapshot,
 ): Promise<string> {
   const budget = effectiveTestParallelism(snapshot);
-  const executableCommand = command.trim().replace(
+  const budgetKeys = new Set([
+    'OPENSWARM_TEST_PARALLELISM', 'PYTEST_XDIST_AUTO_NUM_WORKERS', 'CARGO_BUILD_JOBS',
+    'RAYON_NUM_THREADS', 'CMAKE_BUILD_PARALLEL_LEVEL', 'GOMAXPROCS', 'UV_CONCURRENT_BUILDS',
+  ]);
+  const assignmentPrefix = /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s]+)\s+)+/.exec(command)?.[0] ?? '';
+  const boundedPrefix = assignmentPrefix.replace(
+    /([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"]*)"|([^\s]+))/g,
+    (full, key: string, single: string | undefined, double: string | undefined, bare: string | undefined) => {
+      if (!budgetKeys.has(key)) return full;
+      return `${key}=${clampExisting(single ?? double ?? bare, budget)}`;
+    },
+  );
+  const boundedCommand = boundedPrefix + command.slice(assignmentPrefix.length);
+  const executableCommand = boundedCommand.trim().replace(
     /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s]+)\s+)+/,
     '',
   );
@@ -149,11 +162,11 @@ async function resourceAwareSimpleTestCommand(
       return command;
     }
   }
-  if (!directRunner && !packageRunner) return command;
-  if (/--runInBand\b/.test(command) || packageSerial) return command;
+  if (!directRunner && !packageRunner) return boundedCommand;
+  if (/--runInBand\b/.test(boundedCommand) || packageSerial) return boundedCommand;
 
   let hadExplicitCap = false;
-  const boundedExplicit = command.replace(
+  const boundedExplicit = boundedCommand.replace(
     /--maxWorkers(=|\s+)(\d+)(%)?/g,
     (_match, separator: string, raw: string, percent: string | undefined) => {
       hadExplicitCap = true;
@@ -166,9 +179,9 @@ async function resourceAwareSimpleTestCommand(
   if (hadExplicitCap) return boundedExplicit;
 
   if (directRunner) {
-    return `${command} --maxWorkers=${budget}`;
+    return `${boundedCommand} --maxWorkers=${budget}`;
   }
-  return command.includes(' -- ')
-    ? `${command} --maxWorkers=${budget}`
-    : `${command} -- --maxWorkers=${budget}`;
+  return boundedCommand.includes(' -- ')
+    ? `${boundedCommand} --maxWorkers=${budget}`
+    : `${boundedCommand} -- --maxWorkers=${budget}`;
 }

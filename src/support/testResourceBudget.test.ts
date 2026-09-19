@@ -85,6 +85,16 @@ describe('test resource budget', () => {
       .toBe('cd app && npm test -- --maxWorkers=1 && echo done');
   });
 
+  it('clamps command-local resource overrides before Python and build commands', async () => {
+    const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand(
+      'PYTEST_XDIST_AUTO_NUM_WORKERS=99 pytest -n auto', '/tmp', pressured,
+    )).toBe('PYTEST_XDIST_AUTO_NUM_WORKERS=1 pytest -n auto');
+    expect(await resourceAwareTestCommand(
+      'CI=1 CARGO_BUILD_JOBS="8" cargo test', '/tmp', pressured,
+    )).toBe('CI=1 CARGO_BUILD_JOBS=1 cargo test');
+  });
+
   it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --runInBand' } }));
