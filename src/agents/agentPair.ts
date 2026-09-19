@@ -134,9 +134,7 @@ export interface PairSession {
     result?: WorkerResult;
     attempts: number;
     maxAttempts: number;
-    freshContextAfter?: number; // Use fresh context after N failures (default: 2)
     failureStreak: number; // Consecutive failures
-    useFreshContext?: boolean; // Flag to use fresh context on next attempt
   };
   reviewer: {
     feedback?: ReviewResult;
@@ -194,9 +192,7 @@ export function createPairSession(options: CreatePairSessionOptions): PairSessio
     worker: {
       attempts: 0,
       maxAttempts: options.maxAttempts ?? 3,
-      freshContextAfter: 2, // Use fresh context after 2 failures
       failureStreak: 0,
-      useFreshContext: false,
     },
     reviewer: {},
     messages: [],
@@ -632,10 +628,8 @@ export function getConfidenceSummary(sessionId: string): string {
   ].join(' | ');
 }
 
-// Fresh Context Retry Strategy
-
 /**
- * Track failure and decide if fresh context is needed
+ * Track consecutive failures.
  * Call this when worker/reviewer iteration fails
  */
 export function trackFailure(sessionId: string): void {
@@ -644,14 +638,7 @@ export function trackFailure(sessionId: string): void {
 
   session.worker.failureStreak += 1;
 
-  console.log(`[FreshContext] Session ${sessionId}: failure streak = ${session.worker.failureStreak}`);
-
-  // Check if fresh context threshold reached
-  const threshold = session.worker.freshContextAfter ?? 2;
-  if (session.worker.failureStreak >= threshold) {
-    session.worker.useFreshContext = true;
-    console.log(`[FreshContext] Session ${sessionId}: Fresh context triggered after ${session.worker.failureStreak} failures`);
-  }
+  console.log(`[FailureStreak] Session ${sessionId}: ${session.worker.failureStreak}`);
 }
 
 /**
@@ -662,26 +649,4 @@ export function resetFailureStreak(sessionId: string): void {
   if (!session) return;
 
   session.worker.failureStreak = 0;
-  session.worker.useFreshContext = false;
-}
-
-/**
- * Check if fresh context should be used
- */
-export function shouldUseFreshContext(sessionId: string): boolean {
-  const session = sessions.get(sessionId);
-  if (!session) return false;
-
-  return session.worker.useFreshContext ?? false;
-}
-
-/**
- * Mark that fresh context was consumed (reset flag)
- */
-export function consumeFreshContext(sessionId: string): void {
-  const session = sessions.get(sessionId);
-  if (!session) return;
-
-  session.worker.useFreshContext = false;
-  // Don't reset failure streak - keep tracking
 }

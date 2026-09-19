@@ -388,14 +388,6 @@ export class PairPipeline extends EventEmitter {
           const onLog = (line: string) =>
             broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line: `[${prefix}] ${line}` } });
 
-          // Check if fresh context should be used (after N failures)
-          const useFreshContext = agentPair.shouldUseFreshContext(context.session.id);
-          if (useFreshContext) {
-            safeConsole.log(`[${prefix}] Using fresh context for worker (retry with clean slate)`);
-            agentPair.consumeFreshContext(context.session.id);
-            onLog('🔄 Using fresh context (previous attempts failed)');
-          }
-
           // 코드 컨텍스트 수집 (첫 시도 정확도 향상 목적)
           const workerContext = await collectWorkerContext(context, this.config.draftAnalysis);
           if (workerContext && this.config.verbose) {
@@ -406,13 +398,9 @@ export class PairPipeline extends EventEmitter {
           }
 
           // Self-repair feedback: objective lint/test errors (reflection trail)
-          // are always carried forward — ground truth that survives a fresh-context
-          // reset. The reviewer's revision prompt is ALSO preserved across fresh
-          // context (INT-1705): it carries the task requirement (e.g. "wire it into
-          // the heartbeat / add the call site"), not chat pollution — dropping it
-          // made the worker repeat the same partial impl forever. Fresh context
-          // still clears the worker's own chat history; only the reviewer's task
-          // signal is kept.
+          // and the reviewer's revision prompt are always carried forward. The
+          // worker is stateless per iteration, so there is no context to reset;
+          // dropping this task signal made workers repeat partial implementations.
           const reflectionPart = buildReflectionFeedback(context.reflection);
           const includeReview =
             context.feedbackSource === 'review' && !!context.reviewResult;
@@ -438,11 +426,9 @@ export class PairPipeline extends EventEmitter {
           // of them having otherwise addressed every point the reviewer raised.
           // The task then ran out of iterations with the real blocker untouched.
           //
-          // Sourced from the rejected-path registry rather than the conversation
-          // on purpose: a repeat failure triggers a fresh-context retry, which
-          // wipes exactly the memory that would have let the worker learn this.
-          // The registry survives that wipe, so the guidance reaches the worker
-          // the retry was about to send in blind. (AGT-4451)
+          // Sourced from the rejected-path registry rather than a prior turn so
+          // every stateless worker iteration receives the structural constraint.
+          // (AGT-4451)
           const fenced = rejectedWorkerPaths(context.projectPath);
           const scopeFencePart = fenced.length > 0
             ? '## Outside your write scope — do not edit these\n'
@@ -963,7 +949,7 @@ export class PairPipeline extends EventEmitter {
         }
         if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
         safeConsole.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
-        agentPair.trackFailure(context.session.id); // Track for fresh context decision
+        agentPair.trackFailure(context.session.id);
         this.emit('iteration:fail', {
           iteration: context.currentIteration,
           stage: 'worker',
@@ -1204,7 +1190,7 @@ export class PairPipeline extends EventEmitter {
           // Test failure is objective ground truth → record into the reflection
           // trail and drive a bounded self-repair retry (INT-1679).
           safeConsole.log(`[${context.taskPrefix}] Tester failed, retrying...`);
-          agentPair.trackFailure(context.session.id); // Track for fresh context decision
+          agentPair.trackFailure(context.session.id);
 
           const { progressed } = recordReflection(context.reflection, {
             iteration: context.currentIteration,
@@ -1338,10 +1324,10 @@ export class PairPipeline extends EventEmitter {
           context.lastReviseFeedback = reviseFeedback;
 
           // revise = next iteration. Reviewer feedback is subjective → it travels
-          // through the reviewer channel and is dropped on a fresh-context reset.
+          // through the reviewer channel and is kept for the next worker iteration.
           safeConsole.log(`[${context.taskPrefix}] Reviewer requested revision`);
           context.feedbackSource = 'review';
-          agentPair.trackFailure(context.session.id); // Track for fresh context decision
+          agentPair.trackFailure(context.session.id);
           this.emit('iteration:fail', {
             iteration: context.currentIteration,
             stage: 'reviewer',
