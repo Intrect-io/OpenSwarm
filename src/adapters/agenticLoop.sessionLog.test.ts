@@ -79,6 +79,7 @@ describe('runAgenticLoop session transcript (AGT-4442)', () => {
     expect(log[0]).toMatchObject({
       type: 'start', adapter: 'openrouter', taskId: 'AX-1556', stage: 'worker', model: 'test-model',
     });
+    expect(log[0].recordingLevel).toBeUndefined();
 
     const prompt = log.find((e) => e.type === 'notice' && e.note === 'prompt');
     expect(prompt?.systemPrompt).toBe('You are a worker.');

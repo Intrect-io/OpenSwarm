@@ -7,6 +7,7 @@ import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 import type { ToolDefinition } from './tools.js';
 import type { CostInfo } from '../support/costTracker.js';
 import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
+import type { UsageAttribution } from '../support/usageLedger.js';
 
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
@@ -84,6 +85,8 @@ export interface CliRunOptions {
   maxTurns?: number;
   onLog?: (line: string) => void;
   processContext?: ProcessContext;
+  /** Identity stamped on usage and session records for this invocation. */
+  usageAttribution?: UsageAttribution;
   /** 시스템 프롬프트 (GPT/Local 에이전틱 루프에서 사용) */
   systemPrompt?: string;
   /**

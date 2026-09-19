@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CliAdapter } from './types.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
+const savedSessionLogEnabled = process.env.OPENSWARM_SESSION_LOG;
 vi.mock('node:child_process', async (importOriginal) => ({
   ...await importOriginal<typeof import('node:child_process')>(),
   spawn: spawnMock,
@@ -19,10 +20,17 @@ import {
 } from './processTree.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
-beforeEach(() => spawnMock.mockReset());
+beforeEach(() => {
+  spawnMock.mockReset();
+  // Most spawn tests do not assert observability; keep their fake invocations
+  // from writing under the operator's real session directory.
+  process.env.OPENSWARM_SESSION_LOG = '0';
+});
 afterEach(() => {
   resetHumanSurfaceReadOnlyForTests();
   vi.restoreAllMocks();
+  if (savedSessionLogEnabled === undefined) delete process.env.OPENSWARM_SESSION_LOG;
+  else process.env.OPENSWARM_SESSION_LOG = savedSessionLogEnabled;
 });
 
 describe('CLI process tree termination', () => {
@@ -188,6 +196,50 @@ describe('CLI process tree termination', () => {
 });
 
 describe('argv-safe adapter spawning', () => {
+  it('writes a CLI-level transcript with the prompt, raw output, and exit result', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'osw-cli-session-'));
+    const saved = process.env.OPENSWARM_SESSION_LOG_DIR;
+    process.env.OPENSWARM_SESSION_LOG_DIR = root;
+    process.env.OPENSWARM_SESSION_LOG = '1';
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 121,
+      stdout: new PassThrough(), stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }), kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        proc.stdout.end('raw CLI result');
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    const adapter: CliAdapter = {
+      name: 'claude', capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: true, managedGit: false, supportedSkills: [] },
+      isAvailable: async () => true, getDefaultModel: async () => 'sonnet',
+      buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+      parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+      parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+    };
+
+    try {
+      await expect(spawnCli(adapter, {
+        prompt: 'repair the session log', cwd: process.cwd(), model: 'sonnet',
+        usageAttribution: { adapter: 'claude', taskId: 'AGT-4456', stage: 'worker' },
+      })).resolves.toMatchObject({ exitCode: 0 });
+      const taskDir = join(root, 'AGT-4456');
+      const [file] = readdirSync(taskDir);
+      const log = readFileSync(join(taskDir, file), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+      expect(log[0]).toMatchObject({ type: 'start', recordingLevel: 'cli', adapter: 'claude', taskId: 'AGT-4456', stage: 'worker' });
+      expect(log).toContainEqual(expect.objectContaining({ type: 'notice', note: 'prompt', prompt: 'repair the session log' }));
+      expect(log).toContainEqual(expect.objectContaining({ type: 'assistant', rawStdout: 'raw CLI result' }));
+      expect(log.at(-1)).toMatchObject({ type: 'end', outcome: 'returned', exitCode: 0 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      if (saved === undefined) delete process.env.OPENSWARM_SESSION_LOG_DIR;
+      else process.env.OPENSWARM_SESSION_LOG_DIR = saved;
+    }
+  });
+
   it('passes metacharacters as one argv value with shell disabled', async () => {
     const proc = Object.assign(new EventEmitter(), {
       pid: 123,
