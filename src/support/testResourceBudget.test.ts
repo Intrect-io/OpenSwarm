@@ -107,6 +107,14 @@ describe('test resource budget', () => {
     expect(await resourceAwareTestCommand(
       'env PYTEST_XDIST_AUTO_NUM_WORKERS=99 pytest -n auto', '/tmp', pressured,
     )).toBe('env PYTEST_XDIST_AUTO_NUM_WORKERS=1 pytest -n auto');
+    expect(await resourceAwareTestCommand('pytest -q -n 99', '/tmp', pressured))
+      .toBe('pytest -q -n 1');
+    expect(await resourceAwareTestCommand('uv run pytest --numprocesses=99', '/tmp', pressured))
+      .toBe('uv run pytest --numprocesses=1');
+    expect(await resourceAwareTestCommand('cargo test -j99', '/tmp', pressured))
+      .toBe('cargo test -j1');
+    expect(await resourceAwareTestCommand('timeout 5m cargo test --jobs 99', '/tmp', pressured))
+      .toBe('timeout 5m cargo test --jobs 1');
   });
 
   it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {

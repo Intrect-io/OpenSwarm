@@ -166,6 +166,18 @@ async function resourceAwareSimpleTestCommand(
       .replace(/^(?:timeout|gtimeout)\s+(?:(?:-[^\s]+)\s+)*(?:\d+(?:\.\d+)?[smhd]?\s+)/, '')
       .replace(/^nice\s+(?:-n\s+\d+\s+)?/, '');
   }
+  const pytestRunner = /^(?:pytest\b|python(?:\d+(?:\.\d+)?)?\s+-m\s+pytest\b|uv\s+run\s+pytest\b)/.test(executableCommand);
+  if (pytestRunner) {
+    return boundedCommand
+      .replace(/(-n(?:=|\s+)|--numprocesses(?:=|\s+))(\d+)/g, (_full, flag: string, raw: string) =>
+        `${flag}${Math.max(1, Math.min(Number(raw), budget))}`);
+  }
+  const cargoTest = /^cargo\s+test\b/.test(executableCommand);
+  if (cargoTest) {
+    return boundedCommand
+      .replace(/(-j(?:=|\s*)|--jobs(?:=|\s+))(\d+)/g, (_full, flag: string, raw: string) =>
+        `${flag}${Math.max(1, Math.min(Number(raw), budget))}`);
+  }
   const directRunner = /^(?:(?:npx\s+)?(?:vitest|jest)\b|node(?:\s+--\S+)*\s+\S*vitest(?:[/\\]\S+|\S*\.m?js)\b)/.test(executableCommand);
   const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(executableCommand);
   let packageRunner = false;
