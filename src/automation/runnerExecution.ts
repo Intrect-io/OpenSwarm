@@ -1250,7 +1250,7 @@ export async function executePipeline(
 
     const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
 
-    await publishApprovedWork(worktreeInfo, task, result, ctx.durability, reviewHook(true));
+    await publishApprovedWork(worktreeInfo, task, result, ctx.durability, reviewHook(true), ctx.verify);
     if (!parkedPublished) {
       await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
     }
