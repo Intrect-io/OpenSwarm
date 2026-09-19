@@ -815,7 +815,12 @@ export class DurableRunCoordinator {
       return this.ledger.transition(claim, 'RETRY_AT', {
         retryAt: retryAtFor(result, now, this.ledger.consecutiveSupersessions(issueId) + 1),
         errorCode: result.finalStatus,
-        eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
+        errorMessage: result.failureDetail,
+        eventData: {
+          sessionId: result.sessionId,
+          finalStatus: result.finalStatus,
+          failureDetail: result.failureDetail,
+        },
       }, now) ? result : fencedResult(result);
     }
 
