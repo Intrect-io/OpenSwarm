@@ -182,6 +182,28 @@ describe('isAgentScratchFile (AGT-4410)', () => {
     }
   });
 
+  // cgf-portal#572, 2026-09-19: the worker's own one-off `fix_cafe24.py` and
+  // `fix_tests.py` (string-replace apply scripts, never imported) landed in a
+  // new top-level `scratchpad/` directory and reached the real PR — a
+  // constitution gate rejected the new top-level directory, and a person
+  // removed them by hand in a follow-up commit. `_apply_*` did not match this
+  // shape: the worker did not use that name.
+  it('names a one-off script the worker left in its own scratchpad directory', () => {
+    for (const file of [
+      'scratchpad/fix_cafe24.py',
+      'scratchpad/fix_tests.py',
+      'apps/pipelines/scratchpad/patch.sh',
+    ]) {
+      expect(isAgentScratchFile(file), file).toBe(true);
+    }
+  });
+
+  it('leaves non-script content in a scratchpad directory alone', () => {
+    // Real, useful content the worker meant to keep — just filed in the wrong
+    // place. Not junk on its own; a scope/placement concern, not a scratch one.
+    expect(isAgentScratchFile('scratchpad/land_records_survey.md')).toBe(false);
+  });
+
   it('is not folded into the runtime-artifact predicate, which also purges tracked files', () => {
     // A repository may legitimately track a .bak; the purge on a resumed branch
     // must not delete it. Only additions are filtered, by the staging step.
