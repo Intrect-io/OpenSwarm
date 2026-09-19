@@ -128,6 +128,12 @@ async function resourceAwareSimpleTestCommand(
   cwd: string,
   snapshot: HostResourceSnapshot,
 ): Promise<string> {
+  const commentIndex = shellCommentIndex(command);
+  if (commentIndex >= 0) {
+    const executable = command.slice(0, commentIndex).trimEnd();
+    if (!executable) return command;
+    return `${await resourceAwareSimpleTestCommand(executable, cwd, snapshot)}${command.slice(executable.length)}`;
+  }
   let budget = effectiveTestParallelism(snapshot);
   const localCeiling = /(?:^|\s)OPENSWARM_TEST_PARALLELISM=(?:'([^']*)'|"([^"]*)"|([^\s]+))/.exec(command);
   if (localCeiling) {
@@ -216,4 +222,18 @@ async function resourceAwareSimpleTestCommand(
   return boundedCommand.includes(' -- ')
     ? `${boundedCommand} --maxWorkers=${budget}`
     : `${boundedCommand} -- --maxWorkers=${budget}`;
+}
+
+function shellCommentIndex(command: string): number {
+  let quote = '';
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\' && quote !== "'") { escaped = true; continue; }
+    if (quote) { if (char === quote) quote = ''; continue; }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === '#' && (index === 0 || /\s/.test(command[index - 1]))) return index;
+  }
+  return -1;
 }

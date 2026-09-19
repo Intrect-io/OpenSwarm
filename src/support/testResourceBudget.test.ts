@@ -84,6 +84,8 @@ describe('test resource budget', () => {
     expect(await resourceAwareTestCommand(
       'node --experimental-vm-modules node_modules/vitest/vitest.mjs run', cwd, pressured,
     )).toBe('node --experimental-vm-modules node_modules/vitest/vitest.mjs run --maxWorkers=1');
+    expect(await resourceAwareTestCommand('npm test # focused run', cwd, pressured))
+      .toBe('npm test -- --maxWorkers=1 # focused run');
   });
 
   it('caps the test subcommand inside a shell sequence using its changed directory', async () => {
