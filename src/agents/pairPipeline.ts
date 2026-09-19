@@ -22,6 +22,7 @@ import { t } from '../locale/index.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
 import { runGuards } from './pipelineGuards.js';
+import { adjudicateContractEvidenceStagnation } from './guardArbiter.js';
 import {
   type ReflectionSource,
   createReflectionState,
@@ -970,29 +971,51 @@ export class PairPipeline extends EventEmitter {
             errors: blockingIssues,
           });
 
-          context.reviewResult = {
-            decision: 'revise',
-            feedback: `Pipeline guard failed: ${blockingIssues.join('; ')}`,
-            issues: blockingIssues,
-            suggestions: ['Fix the issues flagged by quality guards'],
-          };
-          context.feedbackSource = 'objective';
-          agentPair.trackFailure(context.session.id);
-          this.emit('iteration:fail', {
-            iteration: context.currentIteration,
-            stage: 'worker',
-            context,
-          });
-          agentPair.updateSessionStatus(context.session.id, 'revising');
+          // Confirmed stagnation (identical block twice) on contractEvidence
+          // ALONE — not mixed with another guard — gets one arbiter
+          // adjudication before the mechanical retry/abort below (AGT-4462):
+          // the guard's own evidence check cannot accept a literal this same
+          // diff newly defines, so retrying never helps that specific case.
+          const arbiterOutcome = !progressed && blocking.length === 1 && blocking[0].guard === 'contractEvidence'
+            ? await adjudicateContractEvidenceStagnation({
+                issues: blockingIssues,
+                projectPath: context.projectPath,
+                adapter: this.config.roles?.reviewer?.adapter,
+                model: this.config.roles?.reviewer?.model,
+              })
+            : undefined;
+          if (arbiterOutcome) safeConsole.log(`[${context.taskPrefix}] ${arbiterOutcome.summary}`);
 
-          // Stagnation built on an edit that was not working: restore instead
-          // of abandoning the run on top of it (AGT-4460).
-          const rolledBack = await rollbackStagnantIteration(context, progressed);
-          if (!rolledBack && this.shouldAbortSelfRepair(context, progressed, source)) {
-            return { success: false };
+          if (!arbiterOutcome?.overridden) {
+            context.reviewResult = {
+              decision: 'revise',
+              feedback: `Pipeline guard failed: ${blockingIssues.join('; ')}`
+                + (arbiterOutcome ? `\n\n${arbiterOutcome.summary}` : ''),
+              issues: blockingIssues,
+              suggestions: ['Fix the issues flagged by quality guards'],
+            };
+            context.feedbackSource = 'objective';
+            agentPair.trackFailure(context.session.id);
+            this.emit('iteration:fail', {
+              iteration: context.currentIteration,
+              stage: 'worker',
+              context,
+            });
+            agentPair.updateSessionStatus(context.session.id, 'revising');
+
+            // Stagnation built on an edit that was not working: restore instead
+            // of abandoning the run on top of it (AGT-4460).
+            const rolledBack = await rollbackStagnantIteration(context, progressed);
+            if (!rolledBack && this.shouldAbortSelfRepair(context, progressed, source)) {
+              return { success: false };
+            }
+            longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
+            continue;
           }
+          this.emit('log', { line: '🔓 Guard arbiter override: contractEvidence literal(s) confirmed self-defining by this diff — proceeding.' });
           longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
-          continue;
+          // No `continue` here: fall through past this guard block and treat
+          // the iteration as if guards had passed.
         }
 
         // Carries the issues, not just the guard's name: stdout is the last
