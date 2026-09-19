@@ -30,6 +30,12 @@ export function composePipelineResult(
   const session = context.session;
   const finalStatus = session.status as PipelineResult['finalStatus'] || 'failed';
   const success = finalStatus === 'approved';
+  // A terminal stop is not the same thing as the last stage that happened to
+  // fail. Preserve the stop decision ahead of old worker/reviewer feedback so
+  // the durable ledger tells an operator why another iteration never began.
+  const stopReason = context.budgetParkReason
+    ?? context.stuckReason
+    ?? (finalStatus === 'waiting_on_operator' ? context.workerResult?.haltReason : undefined);
   // Aggregate costs from all stages
   const stageCosts: (CostInfo | undefined)[] = [];
   if (context.workerResult?.costInfo) stageCosts.push(context.workerResult.costInfo);
@@ -48,6 +54,7 @@ export function composePipelineResult(
     sessionId: context.session.id,
     stages,
     finalStatus,
+    failureDetail: stopReason ? `pipeline stopped early: ${stopReason}` : undefined,
     failureSignal: context.stuckReason ? 'stuck'
       : context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
     stuckReason: context.stuckReason,

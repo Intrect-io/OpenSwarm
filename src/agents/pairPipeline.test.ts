@@ -225,6 +225,7 @@ describe('PairPipeline model selection', () => {
     expect(result.success).toBe(false);
     expect(result.finalStatus).toBe('waiting_on_operator');
     expect(result.workerResult?.blockedOnOperator).toBe(true);
+    expect(result.failureDetail).toBe('pipeline stopped early: Blocked on an operator decision (ask_human posted to Discord)');
     expect(runWorker).toHaveBeenCalledTimes(1);
     expect(runReviewer).not.toHaveBeenCalled();
   });
@@ -460,6 +461,8 @@ describe('PairPipeline model selection', () => {
     expect(result.iterations).toBe(1);
     expect(result.operatorPark?.code).toBe('iteration_budget_spent');
     expect(result.operatorPark?.reason).toContain('wall-clock budget spent');
+    expect(result.failureDetail).toContain('pipeline stopped early:');
+    expect(result.failureDetail).toContain('wall-clock budget spent');
     expect(runWorker).toHaveBeenCalledTimes(1);
   });
 
