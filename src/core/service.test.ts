@@ -451,6 +451,27 @@ describe('service', () => {
       warn.mockRestore();
     });
 
+    it('keeps the daemon up but leaves Linear disabled when its OAuth profile is revoked (AGT-4455)', async () => {
+      const { AuthProfileStore, ensureValidToken } = await import('../auth/index.js');
+      const { initLinear } = await import('../linear/index.js');
+      const { startWebServer } = await import('../support/web.js');
+      const { startAutonomous } = await import('../automation/autonomousRunner.js');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(AuthProfileStore.prototype, 'getProfile').mockReturnValue({} as never);
+      vi.mocked(ensureValidToken).mockRejectedValueOnce(new Error('Token refresh failed (400): revoked'));
+
+      await expect(startService(mockAutonomousConfig)).resolves.not.toThrow();
+
+      // The service is available, but its Linear actor is deliberately absent.
+      expect(startWebServer).toHaveBeenCalledWith(3847);
+      expect(vi.mocked(startAutonomous)).toHaveBeenCalled();
+      expect(initLinear).not.toHaveBeenCalled();
+      const warned = warn.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(warned).toContain('OAuth profile rejected');
+      expect(warned).toContain('API-key fallback was intentionally not used');
+      warn.mockRestore();
+    });
+
     it('keeps local web serving but never initializes Discord in strict human-surface mode', async () => {
       const { initDiscord, stopDiscord } = await import('../discord/index.js');
       const { startWebServer } = await import('../support/web.js');
