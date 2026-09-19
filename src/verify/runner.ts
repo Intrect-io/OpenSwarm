@@ -309,6 +309,7 @@ async function runWithSandboxExecutor(
   cwd: string,
   isolatedHome: string,
   isolatedTmp: string,
+  env: NodeJS.ProcessEnv,
   createSession: (workspace: string) => Promise<SandboxExecutorSession>,
 ): Promise<CommandResult> {
   const timeoutMs = command.timeoutMs ?? 300_000;
@@ -326,7 +327,7 @@ async function runWithSandboxExecutor(
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
       // disposable checkout; neither admits its parent /work directory.
       ...(vegaWorkspace ? ['export VEGA_HEADLESS=1', `export VEGA_CWD=${shellQuote(vegaWorkspace)}`] : []),
-      testResourceShellPrefix().slice(0, -1),
+      testResourceShellPrefix(undefined, env).slice(0, -1),
       command.run,
     ].join(' && '), timeoutMs);
     let status: CommandResult['status'];
@@ -387,7 +388,7 @@ async function runCommand(
   } catch (error) {
     return { status: 'infra', output: error instanceof Error ? error.message : String(error) };
   }
-  const boundedCommand = { ...command, run: await resourceAwareTestCommand(command.run, cwd) };
+  const boundedCommand = { ...command, run: await resourceAwareTestCommand(command.run, cwd, undefined, env) };
   const isolatedHome = join(dirname(root), 'home');
   const isolatedTmp = join(dirname(root), 'tmp');
   await Promise.all([mkdir(isolatedHome, { recursive: true }), mkdir(isolatedTmp, { recursive: true })]);
@@ -422,7 +423,7 @@ async function runCommand(
   }
   if (sandboxExecutorSessionFactory) {
     return await runWithSandboxExecutor(
-      boundedCommand, root, cwd, isolatedHome, isolatedTmp, sandboxExecutorSessionFactory,
+      boundedCommand, root, cwd, isolatedHome, isolatedTmp, safeEnv, sandboxExecutorSessionFactory,
     );
   }
   const shell = process.env.SHELL || '/bin/sh';

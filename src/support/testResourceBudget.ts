@@ -65,8 +65,11 @@ export function withTestResourceBudget(
 }
 
 /** Prefix for executors whose protocol cannot receive a per-command env map. */
-export function testResourceShellPrefix(snapshot = currentHostResourceSnapshot()): string {
-  const env = withTestResourceBudget(process.env, snapshot);
+export function testResourceShellPrefix(
+  snapshot = currentHostResourceSnapshot(),
+  base: NodeJS.ProcessEnv = process.env,
+): string {
+  const env = withTestResourceBudget(base, snapshot);
   const keys = [
     'OPENSWARM_TEST_PARALLELISM',
     'PYTEST_XDIST_AUTO_NUM_WORKERS',
@@ -84,10 +87,11 @@ export async function resourceAwareTestCommand(
   command: string,
   cwd: string,
   snapshot = currentHostResourceSnapshot(),
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<string> {
   const parts = splitShellSequence(command);
   let effectiveCwd = cwd;
-  let sequenceCeiling = effectiveTestParallelism(snapshot);
+  let sequenceCeiling = effectiveTestParallelism(snapshot, env);
   for (let index = 0; index < parts.length; index += 2) {
     const part = parts[index];
     const trimmed = part.trim();
@@ -108,7 +112,7 @@ export async function resourceAwareTestCommand(
       parts[index] = part.replace(trimmed, boundedExport);
       continue;
     }
-    const bounded = await resourceAwareSimpleTestCommand(trimmed, effectiveCwd, snapshot, sequenceCeiling);
+    const bounded = await resourceAwareSimpleTestCommand(trimmed, effectiveCwd, snapshot, sequenceCeiling, env);
     parts[index] = part.replace(trimmed, bounded);
   }
   return parts.join('');
@@ -141,14 +145,15 @@ async function resourceAwareSimpleTestCommand(
   cwd: string,
   snapshot: HostResourceSnapshot,
   sequenceCeiling: number,
+  env: NodeJS.ProcessEnv,
 ): Promise<string> {
   const commentIndex = shellCommentIndex(command);
   if (commentIndex >= 0) {
     const executable = command.slice(0, commentIndex).trimEnd();
     if (!executable) return command;
-    return `${await resourceAwareSimpleTestCommand(executable, cwd, snapshot, sequenceCeiling)}${command.slice(executable.length)}`;
+    return `${await resourceAwareSimpleTestCommand(executable, cwd, snapshot, sequenceCeiling, env)}${command.slice(executable.length)}`;
   }
-  let budget = Math.min(effectiveTestParallelism(snapshot), sequenceCeiling);
+  let budget = Math.min(effectiveTestParallelism(snapshot, env), sequenceCeiling);
   const localCeiling = /(?:^|\s)OPENSWARM_TEST_PARALLELISM=(?:'([^']*)'|"([^"]*)"|([^\s]+))/.exec(command);
   if (localCeiling) {
     budget = Number(clampExisting(localCeiling[1] ?? localCeiling[2] ?? localCeiling[3], budget));

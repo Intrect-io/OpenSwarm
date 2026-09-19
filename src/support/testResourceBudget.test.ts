@@ -38,6 +38,15 @@ describe('test resource budget', () => {
     expect(prefix).toMatch(/^export [A-Z0-9_= ]+;$/);
   });
 
+  it('builds a sandbox prefix from the supplied verification environment', () => {
+    const prefix = testResourceShellPrefix(
+      { logicalCpus: 10, load1: 0, freeMemoryBytes: 16 * 1024 ** 3 },
+      { OPENSWARM_TEST_PARALLELISM: '2' },
+    );
+    expect(prefix).toContain('OPENSWARM_TEST_PARALLELISM=2');
+    expect(prefix).toContain('PYTEST_XDIST_AUTO_NUM_WORKERS=2');
+  });
+
   it('caps the actual Vitest worker count behind npm test', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
