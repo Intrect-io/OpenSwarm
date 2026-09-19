@@ -129,8 +129,12 @@ async function resourceAwareSimpleTestCommand(
   snapshot: HostResourceSnapshot,
 ): Promise<string> {
   const budget = effectiveTestParallelism(snapshot);
-  const directRunner = /^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(command.trim());
-  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(command);
+  const executableCommand = command.trim().replace(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s]+)\s+)+/,
+    '',
+  );
+  const directRunner = /^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(executableCommand);
+  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(executableCommand);
   let packageRunner = false;
   let packageSerial = false;
   if (packageTest) {

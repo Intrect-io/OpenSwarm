@@ -69,6 +69,10 @@ describe('test resource budget', () => {
       .toBe('npm test -- --maxWorkers 1');
     expect(await resourceAwareTestCommand('jest --maxWorkers=50%', '/tmp', pressured))
       .toBe('jest --maxWorkers=1');
+    expect(await resourceAwareTestCommand('CI=1 npm test -- --maxWorkers=99', cwd, pressured))
+      .toBe('CI=1 npm test -- --maxWorkers=1');
+    expect(await resourceAwareTestCommand('NODE_ENV=test vitest run --maxWorkers 99', cwd, pressured))
+      .toBe('NODE_ENV=test vitest run --maxWorkers 1');
   });
 
   it('caps the test subcommand inside a shell sequence using its changed directory', async () => {
