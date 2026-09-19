@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
+import { discardStagedMemoriesFrom } from './stagedMemory.js';
 import { captureBeforeIteration, createSnapshotState, rollbackStagnantIteration } from './iterationSnapshot.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
@@ -452,6 +453,7 @@ export class PairPipeline extends EventEmitter {
             projectPath: context.projectPath,
             previousFeedback: combinedFeedback,
             scratchpadRunId: workerScratchpadRunId(context.task),
+            memoryContext: { taskId: taskAttributionKey(context.task), iteration: context.currentIteration },
             timeoutMs: stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs),
             // getModelForRole gives the matched jobProfile's model precedence (config's
             // light/heavy → gpt-5.5/5.4), falling back to roles.worker.model. Reading
@@ -1018,6 +1020,7 @@ export class PairPipeline extends EventEmitter {
             // Stagnation built on an edit that was not working: restore instead
             // of abandoning the run on top of it (AGT-4460).
             const rolledBack = await rollbackStagnantIteration(context, progressed);
+            if (rolledBack) await discardStagedMemoriesFrom(taskAttributionKey(context.task), rolledBack.iteration);
             if (!rolledBack && this.shouldAbortSelfRepair(context, progressed, source)) {
               return { success: false };
             }

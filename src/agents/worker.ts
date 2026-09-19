@@ -58,6 +58,7 @@ export interface WorkerOptions {
   protectedFiles?: string[];
   /** Run whose scratchpad this worker writes notes to (AGT-4459). */
   scratchpadRunId?: string;
+  memoryContext?: { taskId: string; iteration: number };
   /** OS fence for the bash tool; the pipeline sets it from `autonomous.workerSandbox`. (AGT-4387) */
   sandbox?: 'on' | 'off';
   /** Planner-declared files/modules this task may edit. */
@@ -402,6 +403,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
       sandbox: options.sandbox,
       // The pipeline commits, publishes, reviews and updates the tracker after
       // this stage; the worker never does (AGT-4418).

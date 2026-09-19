@@ -14,6 +14,7 @@ import path from 'node:path';
 import { saveMemory, searchMemorySafe } from './memoryCore.js';
 import { isTransientReviewerFailure } from './memoryFilters.js';
 import type { WorkerResult, RecommendedAction } from '../agents/agentPair.js';
+import { readStagedMemories } from '../agents/stagedMemory.js';
 
 /**
  * Normalize a project path into a stable repo key. The LanceDB repo filter is
@@ -194,6 +195,25 @@ export async function recordTaskOutcome(
     // Memory write failures must never stop the pipeline
     console.warn('[RepoKnowledge] recordTaskOutcome failed (non-critical):', err);
   }
+}
+
+/** Promote only the lessons staged by a green run; failures never call this. */
+export async function promoteStagedMemories(
+  projectPath: string,
+  runId: string,
+  provenance: { attempt: number; taskId: string },
+): Promise<number> {
+  const entries = await readStagedMemories(runId);
+  for (const entry of entries) {
+    await saveMemory(entry.kind === 'pattern' ? 'system_pattern' : 'constraint', repoKey(projectPath), entry.title.slice(0, 120), entry.content, {
+      derivedFrom: entry.taskId,
+      confidence: 0.78,
+      importance: 0.72,
+      skipDistillation: true,
+      metadata: { kind: 'agent_remember', taskId: provenance.taskId, attempt: provenance.attempt, iteration: entry.iteration },
+    });
+  }
+  return entries.length;
 }
 
 /**

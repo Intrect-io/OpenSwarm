@@ -25,6 +25,7 @@ import {
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import { looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
 import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
+import { stageMemory, type RememberKind } from '../agents/stagedMemory.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
@@ -89,6 +90,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         required: ['path'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remember',
+      description: 'Stage one durable lesson for this repository. It is NOT shared yet: it stays in this run\'s scratchpad and is promoted only if the whole run succeeds. Record a specific reusable pattern or constraint, never secrets or a guess.',
+      parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['pattern', 'constraint'] }, title: { type: 'string' }, content: { type: 'string' } }, required: ['kind', 'title', 'content'] },
     },
   },
   {
@@ -267,6 +276,7 @@ const BLOCKED_COMMANDS = [
  */
 const READ_ONLY_DENIED_TOOLS = new Set([
   'scratch_write',
+  'remember',
   'write_file',
   'edit_file',
   'apply_patch',
@@ -504,6 +514,8 @@ export interface ToolExecOptions {
    * the agent believes it recorded something.
    */
   scratchpadRunId?: string;
+  /** Provenance attached to a staged remember entry. */
+  memoryContext?: { taskId: string; iteration: number };
 }
 
 const DEFAULT_BASH_TIMEOUT_MS = 30000;
@@ -1105,6 +1117,20 @@ export async function executeTool(
           const reason = err instanceof Error ? err.message : String(err);
           return { tool_call_id: callId, content: `scratch_write refused: ${reason}`, is_error: true };
         }
+      }
+
+      case 'remember': {
+        const runId = execOptions?.scratchpadRunId;
+        const context = execOptions?.memoryContext;
+        if (!runId || !context) return { tool_call_id: callId, content: 'NO_SCRATCHPAD: remember is unavailable in this run.', is_error: true };
+        const kind = args.kind as RememberKind;
+        const title = typeof args.title === 'string' ? args.title.trim() : '';
+        const content = typeof args.content === 'string' ? args.content.trim() : '';
+        if ((kind !== 'pattern' && kind !== 'constraint') || !title || !content) return { tool_call_id: callId, content: 'remember requires kind (pattern or constraint), title, and content.', is_error: true };
+        try {
+          await stageMemory(runId, { kind, title, content, taskId: context.taskId, iteration: context.iteration });
+          return { tool_call_id: callId, content: 'Staged this lesson in the scratchpad. It will be promoted only if this run succeeds.', is_error: false };
+        } catch (err) { return { tool_call_id: callId, content: `remember refused: ${err instanceof Error ? err.message : String(err)}`, is_error: true }; }
       }
 
       case 'diagnostics': {
