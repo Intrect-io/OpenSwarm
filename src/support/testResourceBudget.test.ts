@@ -51,6 +51,8 @@ describe('test resource budget', () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node test.js' } }));
     expect(await resourceAwareTestCommand('npm test', cwd)).toBe('npm test');
+    expect(await resourceAwareTestCommand('node tool.js --maxWorkers=99', cwd))
+      .toBe('node tool.js --maxWorkers=99');
   });
 
   it('preserves an explicit Vitest worker cap', async () => {
@@ -59,9 +61,11 @@ describe('test resource budget', () => {
 
   it('clamps explicit direct and npm worker counts to the host budget', async () => {
     const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
     expect(await resourceAwareTestCommand('vitest run --maxWorkers=99', '/tmp', pressured))
       .toBe('vitest run --maxWorkers=1');
-    expect(await resourceAwareTestCommand('npm test -- --maxWorkers 99', '/tmp', pressured))
+    expect(await resourceAwareTestCommand('npm test -- --maxWorkers 99', cwd, pressured))
       .toBe('npm test -- --maxWorkers 1');
     expect(await resourceAwareTestCommand('jest --maxWorkers=50%', '/tmp', pressured))
       .toBe('jest --maxWorkers=1');

@@ -129,7 +129,25 @@ async function resourceAwareSimpleTestCommand(
   snapshot: HostResourceSnapshot,
 ): Promise<string> {
   const budget = effectiveTestParallelism(snapshot);
-  if (/--runInBand\b/.test(command)) return command;
+  const directRunner = /^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(command.trim());
+  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(command);
+  let packageRunner = false;
+  let packageSerial = false;
+  if (packageTest) {
+    try {
+      const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
+        scripts?: { test?: unknown };
+      };
+      const script = typeof manifest.scripts?.test === 'string' ? manifest.scripts.test : '';
+      packageRunner = /\b(?:vitest|jest)\b/.test(script);
+      packageSerial = /--runInBand\b/.test(script);
+    } catch {
+      return command;
+    }
+  }
+  if (!directRunner && !packageRunner) return command;
+  if (/--runInBand\b/.test(command) || packageSerial) return command;
+
   let hadExplicitCap = false;
   const boundedExplicit = command.replace(
     /--maxWorkers(=|\s+)(\d+)(%)?/g,
@@ -143,24 +161,10 @@ async function resourceAwareSimpleTestCommand(
   );
   if (hadExplicitCap) return boundedExplicit;
 
-  if (/^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(command.trim())) {
+  if (directRunner) {
     return `${command} --maxWorkers=${budget}`;
   }
-
-  const packageTest = /^(?:npm\s+(?:run\s+)?test|pnpm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test)(?:\s|$)/.test(command);
-  if (!packageTest) return command;
-
-  try {
-    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
-      scripts?: { test?: unknown };
-    };
-    const script = typeof manifest.scripts?.test === 'string' ? manifest.scripts.test : '';
-    if (!/\b(?:vitest|jest)\b/.test(script)) return command;
-    if (/--runInBand\b/.test(script)) return command;
-    return command.includes(' -- ')
-      ? `${command} --maxWorkers=${budget}`
-      : `${command} -- --maxWorkers=${budget}`;
-  } catch {
-    return command;
-  }
+  return command.includes(' -- ')
+    ? `${command} --maxWorkers=${budget}`
+    : `${command} -- --maxWorkers=${budget}`;
 }
