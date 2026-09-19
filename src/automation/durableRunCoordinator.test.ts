@@ -1335,8 +1335,7 @@ describe('runRecordToTask', () => {
   });
 
   it('round-trips what observeTask wrote, so the two mappings cannot drift apart', () => {
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     const original: TaskItem = {
       id: 'issue-1', issueId: 'issue-1', issueIdentifier: 'AX-1', source: 'linear',
       title: 'round trip', priority: 2, createdAt: 1_000,
@@ -1354,19 +1353,20 @@ describe('runRecordToTask', () => {
     expect(rebuilt.linearProject).toEqual(original.linearProject);
     expect(rebuilt.fileScope).toEqual(original.fileScope);
     expect(rebuilt.explicitDispatch).toBe(true);
-    coordinator.close();
-    ledger.close();
+    coordinator.close(); ledger.close();
   });
 
-  it('pins the first write scope across a later narrower observation (AGT-4441)', () => {
+  it('pins the first write scope for later admission (AGT-4441)', async () => {
     const ledger = new RunLedger(dbPath());
     const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
-    const first = { id: 'scope-pin', issueId: 'scope-pin', issueIdentifier: 'AX-SCOPE', source: 'linear' as const, title: 'scope pin', priority: 2, createdAt: 1_000, fileScope: ['src/old.ts', 'docs/DATA-CATALOG.md'], fileScopeSource: 'drafted' as const };
+    const first = { id: 'scope-pin', issueId: 'scope-pin', issueIdentifier: 'AX-SCOPE', source: 'linear' as const, title: 'scope pin', priority: 2, createdAt: 1_000, fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' as const };
     coordinator.observeTask(first, '/repo'); const observed = coordinator.observeTask({ ...first, fileScope: ['src/old.ts'] }, '/repo');
-    expect(observed?.metadata).toMatchObject({ fileScope: ['src/old.ts'], pinnedFileScope: ['src/old.ts', 'docs/DATA-CATALOG.md'], pinnedFileScopeSource: 'drafted' });
-    expect(runRecordToTask(observed!)).toMatchObject({ fileScope: ['src/old.ts', 'docs/DATA-CATALOG.md'], fileScopeSource: 'drafted' });
-    coordinator.close();
-    ledger.close();
+    expect(observed?.metadata).toMatchObject({ fileScope: ['src/old.ts'], pinnedFileScope: ['src/old.ts', 'src/pinned.ts'], pinnedFileScopeSource: 'drafted' });
+    expect(runRecordToTask(observed!)).toMatchObject({ fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' });
+    ledger.registerRun({ issueId: 'active', source: 'linear', projectPath: '/repo', metadata: { fileScope: ['src/pinned.ts'] } });
+    expect(ledger.claimRun('active', { ownerInstanceId: 'other', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).not.toBeNull(); expect(ledger.getRun('active')).toMatchObject({ state: 'CLAIMED', metadata: { fileScope: ['src/pinned.ts'] } }); expect(ledger.claimRun('scope-pin', { ownerInstanceId: 'probe', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).toBeNull();
+    expect((await coordinator.execute({ ...first, fileScope: ['src/old.ts'] }, '/repo', async () => result(), { admission: { maxConcurrent: 2, conflictScope: ['src/old.ts'] } })).finalStatus).toBe('deferred');
+    coordinator.close(); ledger.close();
   });
 
   it('names an unrecognized source instead of asserting it into the union', () => {
