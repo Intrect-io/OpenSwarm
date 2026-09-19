@@ -238,13 +238,20 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
       derivedFrom: payload.task.issueIdentifier ?? issueId,
       iterations: payload.stats.attempts,
     });
-    const scratchRunId = workerScratchpadRunId(payload.task);
-    if (scratchRunId) {
-      const attempt = Number(payload.marker.match(/:attempt:(\d+)$/)?.[1] ?? 0);
-      await promoteStagedMemories(payload.projectPath, scratchRunId, {
-        taskId: payload.task.issueIdentifier ?? issueId,
-        attempt,
-      }).catch((error) => console.warn('[RepoKnowledge] staged memory promotion failed (non-critical):', error));
+    // Staged lessons improve later work but cannot make a tracker completion
+    // retry forever: every part of this best-effort promotion stays outside
+    // the durable outbox's success boundary.
+    try {
+      const scratchRunId = workerScratchpadRunId(payload.task);
+      if (scratchRunId) {
+        const attempt = Number(payload.marker.match(/:attempt:(\d+)$/)?.[1] ?? 0);
+        await promoteStagedMemories(payload.projectPath, scratchRunId, {
+          taskId: payload.task.issueIdentifier ?? issueId,
+          attempt,
+        });
+      }
+    } catch (error) {
+      console.warn('[RepoKnowledge] staged memory promotion failed (non-critical):', error);
     }
   }
   // The task is done, so its working notes have nothing left to inform. Only
