@@ -179,6 +179,7 @@ export interface AgenticLoopOptions {
    * pipeline rather than derived here — a loop cannot know which run it serves.
    */
   scratchpadRunId?: string;
+  memoryContext?: { taskId: string; iteration: number };
   /**
    * Expose the `bash` tool. Default true.
    *
@@ -405,12 +406,12 @@ async function runAgenticLoopInner(
     : baseTools.filter((t) => t.function.name !== 'search_memory');
   const scratchFilteredTools = scratchpadRunId
     ? memoryFilteredTools
-    : memoryFilteredTools.filter((t) => !t.function.name.startsWith('scratch_'));
+    : memoryFilteredTools.filter((t) => !t.function.name.startsWith('scratch_') && t.function.name !== 'remember');
   const shellFilteredTools = shellTools
     ? scratchFilteredTools
     : scratchFilteredTools.filter((t) => t.function.name !== 'bash');
   const visibleBaseTools = readOnly
-    ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash'].includes(t.function.name))
+    ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash', 'remember'].includes(t.function.name))
     : shellFilteredTools;
   const tools = enableTools
     ? [
@@ -824,6 +825,7 @@ async function runAgenticLoopInner(
       sandboxExecutorSession,
       loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
       scratchpadRunId,
+      memoryContext: options.memoryContext,
     });
     toolCalls.forEach((tc, i) => {
       const result = results[i];

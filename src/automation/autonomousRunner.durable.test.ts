@@ -11,7 +11,10 @@ import type { TaskScheduler } from '../orchestration/taskScheduler.js';
 
 vi.mock('../core/providerOverride.js', () => ({ writeProviderOverride: vi.fn() }));
 vi.mock('../agents/stageModelResolver.js', () => ({ resolveAdapterDefaultModel: vi.fn(async () => 'model') }));
-vi.mock('../memory/repoKnowledge.js', () => ({ recordTaskOutcome: vi.fn(async () => {}) }));
+vi.mock('../memory/repoKnowledge.js', () => ({
+  recordTaskOutcome: vi.fn(async () => {}),
+  promoteStagedMemories: vi.fn(async () => 0),
+}));
 vi.mock('../linear/projectUpdater.js', () => ({ updateProjectAfterTask: vi.fn(async () => {}) }));
 
 type InternalRunner = {

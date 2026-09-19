@@ -1,4 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { stageMemory } from '../agents/stagedMemory.js';
 
 const mocks = vi.hoisted(() => ({
   saveMemory: vi.fn(async () => 'memory-id'),
@@ -18,7 +22,7 @@ vi.mock('./memoryCore.js', () => ({
   },
 }));
 
-import { recordTaskOutcome, searchRepoMemoryText, repoKey } from './repoKnowledge.js';
+import { promoteStagedMemories, recordTaskOutcome, searchRepoMemoryText, repoKey } from './repoKnowledge.js';
 
 describe('repoKey', () => {
   it('normalizes a per-issue worktree path back to the repo', () => {
@@ -90,5 +94,24 @@ describe('recordTaskOutcome', () => {
         actionable: true,
       },
     });
+  });
+});
+
+describe('promoteStagedMemories', () => {
+  it('promotes staged lessons only when the green completion path calls it, with provenance', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'repo-memory-stage-'));
+    const previous = process.env.OPENSWARM_SCRATCHPAD_DIR;
+    process.env.OPENSWARM_SCRATCHPAD_DIR = root;
+    try {
+      mocks.saveMemory.mockClear();
+      await stageMemory('AX-1', { kind: 'pattern', title: 'migration order', content: 'run reader first', taskId: 'AX-1', iteration: 2 });
+      await promoteStagedMemories('/repo', 'AX-1', { taskId: 'AX-1', attempt: 4 });
+      expect(mocks.saveMemory).toHaveBeenCalledWith('system_pattern', '/repo', 'migration order', 'run reader first', expect.objectContaining({
+        metadata: expect.objectContaining({ kind: 'agent_remember', taskId: 'AX-1', attempt: 4, iteration: 2 }),
+      }));
+    } finally {
+      if (previous === undefined) delete process.env.OPENSWARM_SCRATCHPAD_DIR; else process.env.OPENSWARM_SCRATCHPAD_DIR = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

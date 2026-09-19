@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TOOL_DEFINITIONS, executeTool, type ToolCall } from './tools.js';
 import { readNote, writeNote, SCRATCHPAD_NOTE_BYTE_CAP } from '../support/scratchpad.js';
+import { readStagedMemories } from '../agents/stagedMemory.js';
 
 const makeCall = (name: string, args: unknown): ToolCall => ({
   id: `call-${name}`,
@@ -29,6 +30,7 @@ describe('scratch tools', () => {
     const names = TOOL_DEFINITIONS.map((t) => t.function.name);
     expect(names).toContain('scratch_write');
     expect(names).toContain('scratch_read');
+    expect(names).toContain('remember');
   });
 
   it('writes and reads a note back', async () => {
@@ -94,6 +96,12 @@ describe('scratch tools', () => {
     );
     expect(read.is_error).toBe(false);
     expect(read.content).toBe('kept');
+
+    const remember = await executeTool(
+      makeCall('remember', { kind: 'pattern', title: 'no', content: 'write' }),
+      '/work', undefined, { scratchpadRunId: 'AX-1', memoryContext: { taskId: 'AX-1', iteration: 1 }, readOnly: true },
+    );
+    expect(remember.is_error).toBe(true);
   });
 
   it('keeps one run out of another run’s notes', async () => {
@@ -103,5 +111,14 @@ describe('scratch tools', () => {
       '/work', undefined, { scratchpadRunId: 'AX-2' },
     );
     expect(read.is_error).toBe(true);
+  });
+
+  it('stages a remember entry with iteration provenance', async () => {
+    const result = await executeTool(
+      makeCall('remember', { kind: 'constraint', title: 'migration order', content: 'run the reader first' }),
+      '/work', undefined, { scratchpadRunId: 'AX-1', memoryContext: { taskId: 'AX-1', iteration: 3 } },
+    );
+    expect(result.is_error).toBe(false);
+    expect(await readStagedMemories('AX-1')).toEqual([expect.objectContaining({ taskId: 'AX-1', iteration: 3 })]);
   });
 });

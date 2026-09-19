@@ -191,6 +191,7 @@ export class LocalModelAdapter implements CliAdapter {
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
       scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
       forbidPublication: options.forbidPublication,
       sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,

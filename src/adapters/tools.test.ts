@@ -66,7 +66,7 @@ afterAll(async () => {
 describe('TOOL_DEFINITIONS', () => {
   const expectedNames = [
     'read_file', 'write_file', 'edit_file', 'search_files', 'bash', 'search_memory',
-    'scratch_write', 'scratch_read',
+    'scratch_write', 'scratch_read', 'remember',
   ];
 
   it('exports exactly the tools it names, and no more', () => {

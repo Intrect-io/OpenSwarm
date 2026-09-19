@@ -111,6 +111,7 @@ export interface CliRunOptions {
   protectedFiles?: string[];
   /** Run whose scratchpad the scratch_* tools address (AGT-4459). */
   scratchpadRunId?: string;
+  memoryContext?: { taskId: string; iteration: number };
   /** OS fence for the worker's bash tool (agenticLoop → tools). See ToolExecOptions.sandbox. (AGT-4387) */
   sandbox?: 'on' | 'off';
   /**

@@ -410,6 +410,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
       forbidPublication: options.forbidPublication,
       sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,

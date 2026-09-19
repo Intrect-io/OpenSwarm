@@ -14,6 +14,11 @@ import type { ITaskSource } from './taskSource.js';
 // tracker side. The verdict module has its own tests with injected deps.
 const postPairVerdictOnPullRequest = vi.fn(async () => 'posted' as const);
 vi.mock('./pairVerdictComment.js', () => ({ postPairVerdictOnPullRequest: (...args: unknown[]) => postPairVerdictOnPullRequest(...args as []) }));
+const promoteStagedMemories = vi.fn(async () => 0);
+vi.mock('../memory/repoKnowledge.js', () => ({
+  recordTaskOutcome: vi.fn(async () => {}),
+  promoteStagedMemories: (...args: unknown[]) => promoteStagedMemories(...args as []),
+}));
 
 // The durable outbox is the daemon's DEFAULT completion path: on a primary
 // ledger the runner returns before its inline logPairComplete call, and the
@@ -119,6 +124,26 @@ describe('completion lands on In Review while the PR is open (AGT-4409)', () => 
     expect(source.logPairComplete).toHaveBeenCalledTimes(1);
     expect(postPairVerdictOnPullRequest).toHaveBeenCalledTimes(1);
     expect(postPairVerdictOnPullRequest.mock.calls[0][2]).toBe(marker);
+  });
+
+  it('promotes staged lessons only after the completion effect succeeds (AGT-4461)', async () => {
+    vi.stubEnv('OPENSWARM_SCRATCHPAD', '1');
+    promoteStagedMemories.mockClear();
+    const claim = claimFor(pipelineResult());
+    (claim.payload as { projectPath?: string }).projectPath = '/repo';
+    const source = {
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => []),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+
+    await deliverTrackerEffect(claim, source);
+
+    expect(promoteStagedMemories).toHaveBeenCalledWith('/repo', 'AGT-1', {
+      taskId: 'AGT-1', attempt: 1,
+    });
+    vi.unstubAllEnvs();
   });
 
   it('still reconciles to Done when the run published nothing to merge', async () => {
