@@ -33,6 +33,13 @@ export function computeTestParallelism(snapshot: HostResourceSnapshot): number {
   return Math.max(1, Math.min(MAX_TEST_WORKERS, cpuCapacity, cpuHeadroom, memoryCapacity));
 }
 
+export function effectiveTestParallelism(
+  snapshot: HostResourceSnapshot,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return Number(clampExisting(env.OPENSWARM_TEST_PARALLELISM, computeTestParallelism(snapshot)));
+}
+
 function clampExisting(value: string | undefined, budget: number): string {
   const parsed = Number.parseInt(value ?? '', 10);
   return String(Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, budget) : budget);
@@ -43,7 +50,7 @@ export function withTestResourceBudget(
   base: NodeJS.ProcessEnv,
   snapshot = currentHostResourceSnapshot(),
 ): NodeJS.ProcessEnv {
-  const budget = computeTestParallelism(snapshot);
+  const budget = effectiveTestParallelism(snapshot);
   const capped = (key: string): string => clampExisting(base[key], budget);
   return {
     ...base,

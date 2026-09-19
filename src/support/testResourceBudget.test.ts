@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { computeTestParallelism, resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from './testResourceBudget.js';
+import { computeTestParallelism, effectiveTestParallelism, resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from './testResourceBudget.js';
 
 describe('test resource budget', () => {
   it('allows bounded parallelism on an idle capable host', () => {
@@ -12,6 +12,12 @@ describe('test resource budget', () => {
   it('falls back to one worker when CPU or memory is pressured', () => {
     expect(computeTestParallelism({ logicalCpus: 10, load1: 12, freeMemoryBytes: 16 * 1024 ** 3 })).toBe(1);
     expect(computeTestParallelism({ logicalCpus: 10, load1: 0, freeMemoryBytes: 0.5 * 1024 ** 3 })).toBe(1);
+  });
+
+  it('treats the operator setting as a ceiling on the host budget', () => {
+    const idle = { logicalCpus: 12, load1: 0, freeMemoryBytes: 32 * 1024 ** 3 };
+    expect(effectiveTestParallelism(idle, { OPENSWARM_TEST_PARALLELISM: '2' })).toBe(2);
+    expect(effectiveTestParallelism(idle, { OPENSWARM_TEST_PARALLELISM: '99' })).toBe(4);
   });
 
   it('exports runtime caps without raising a stricter operator limit', () => {
