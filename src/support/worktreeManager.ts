@@ -21,6 +21,7 @@ import { regressedAgainstFreshBase } from './publicationRegressionProbe.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { changeShapeSection } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
+import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
@@ -1210,7 +1211,7 @@ export async function commitAndCreatePRWithHead(
   const freshnessSection = baseFreshnessSection(freshness, base.branch);
 
   // Create PR
-  const prBody = [
+  const basePrBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
     ...(shapeSection ? ['', shapeSection] : []),
@@ -1224,12 +1225,14 @@ export async function commitAndCreatePRWithHead(
     '---',
     '🤖 Generated with [OpenSwarm](https://github.com/Intrect-io/OpenSwarm)',
   ].join('\n');
+  const claimEvidence = publicationClaimEvidence(basePrBody, headSha);
+  const prBody = claimEvidence.section ? `${basePrBody}\n\n${claimEvidence.section}` : basePrBody;
 
   const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
-  if (options.draft || duplicates.length > 0 || conflicting || regressed) createArgs.push('--draft');
+  if (options.draft || duplicates.length > 0 || conflicting || regressed || !claimEvidence.ready) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();
@@ -1250,7 +1253,7 @@ export async function commitAndCreatePRWithHead(
     // was computed above too, before this branch even knew whether it would
     // create or reuse a PR — a merged-result regression (AGT-4465) must block
     // promotion here exactly as it does on the non-raced path.
-    if (!options.draft && !conflicting && !regressed) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
+    if (!options.draft && !conflicting && !regressed && claimEvidence.ready) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
   }
 
   // Register PR ownership for conflict auto-resolution
