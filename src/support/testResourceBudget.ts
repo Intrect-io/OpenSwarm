@@ -78,9 +78,21 @@ export async function resourceAwareTestCommand(
   cwd: string,
   snapshot = currentHostResourceSnapshot(),
 ): Promise<string> {
-  if (/--maxWorkers(?:=|\s)|--runInBand\b/.test(command)) return command;
-
   const budget = computeTestParallelism(snapshot);
+  if (/--runInBand\b/.test(command)) return command;
+  let hadExplicitCap = false;
+  const boundedExplicit = command.replace(
+    /--maxWorkers(=|\s+)(\d+)(%)?/g,
+    (_match, separator: string, raw: string, percent: string | undefined) => {
+      hadExplicitCap = true;
+      const requested = percent
+        ? Math.max(1, Math.ceil(Math.max(1, snapshot.logicalCpus) * Number(raw) / 100))
+        : Number(raw);
+      return `--maxWorkers${separator}${Math.min(requested, budget)}`;
+    },
+  );
+  if (hadExplicitCap) return boundedExplicit;
+
   if (/^(?:node\s+\S*vitest\S*|(?:npx\s+)?vitest|(?:npx\s+)?jest)\b/.test(command.trim())) {
     return `${command} --maxWorkers=${budget}`;
   }

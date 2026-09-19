@@ -51,6 +51,16 @@ describe('test resource budget', () => {
     expect(await resourceAwareTestCommand('vitest run --maxWorkers=1', '/tmp')).toBe('vitest run --maxWorkers=1');
   });
 
+  it('clamps explicit direct and npm worker counts to the host budget', async () => {
+    const pressured = { logicalCpus: 10, load1: 20, freeMemoryBytes: 16 * 1024 ** 3 };
+    expect(await resourceAwareTestCommand('vitest run --maxWorkers=99', '/tmp', pressured))
+      .toBe('vitest run --maxWorkers=1');
+    expect(await resourceAwareTestCommand('npm test -- --maxWorkers 99', '/tmp', pressured))
+      .toBe('npm test -- --maxWorkers 1');
+    expect(await resourceAwareTestCommand('jest --maxWorkers=50%', '/tmp', pressured))
+      .toBe('jest --maxWorkers=1');
+  });
+
   it('preserves Jest serial mode instead of adding a conflicting worker cap', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'openswarm-test-budget-'));
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'jest --runInBand' } }));
