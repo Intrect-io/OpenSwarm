@@ -9,13 +9,15 @@
 [![SWE-bench Lite](https://img.shields.io/badge/SWE--bench_Lite-hybrid_3%2F3_resolved-2ea44f)](benchmarks/RUBRIC.md)
 [![GitHub Discussions](https://img.shields.io/github/discussions/unohee/OpenSwarm?logo=github&label=discussions)](https://github.com/unohee/OpenSwarm/discussions)
 
-> Autonomous AI agent orchestrator — Codex, GPT, **OpenRouter (any model)**, local models (Ollama/LM Studio), and Claude Code (`claude -p`)
+> Agentic CI/CD gate — review, fix, re-review, and deterministic verification for pull requests and local changes
 
 > 💬 **Help shape OpenSwarm.** Share feature ideas, vote on the roadmap, and ask questions in [**GitHub Discussions**](https://github.com/unohee/OpenSwarm/discussions). The roadmap is built in the open — your feedback decides what ships next.
 
 ---
 
-OpenSwarm orchestrates multiple AI agents as autonomous code workers. It picks up issues from **Linear or a built-in local tracker**, runs Worker/Reviewer pair pipelines, reports through a pluggable notifier (Discord, Slack, Telegram, webhook), and retains long-term memory via LanceDB. Workers run on **OpenAI Codex/GPT**, **any OpenRouter model**, **local open-source models** (Ollama, LM Studio), or **Claude Code** (`claude -p`, opt-in) — with cost-aware routing measured on an L0–L6 benchmark ladder.
+OpenSwarm is an **agentic CI/CD gate** for the change path that matters: it reviews a committed or working-tree diff, can group and fix confirmed findings in isolated sandboxes, re-reviews the result, then requires deterministic repository checks before it publishes a PR. It runs with **OpenAI Codex/GPT**, **any OpenRouter model**, **local open-source models** (Ollama, LM Studio), or **Claude Code** (`claude -p`, opt-in) — with cost-aware routing measured on an L0–L6 benchmark ladder.
+
+Use it locally before a commit or from the included GitHub Action on a pull request. The Linear-backed autonomous daemon, notifications, and long-term repository memory remain available as an optional orchestration layer; they are not required to use the merge gate.
 
 **Verified on real GitHub issues**: the agentic harness solves SWE-bench Lite instances graded by the official harness. Hybrid mode — a frontier model diagnoses read-only, a lightweight model implements with a verification loop — resolved **3/3 attempted instances** that every single lightweight model had failed, at a fraction of frontier-only cost. Workers also **learn each repository over time**: task outcomes are stored as per-repo knowledge and recalled into future prompts. ([benchmark rubric & results](benchmarks/RUBRIC.md))
 
@@ -25,16 +27,16 @@ OpenSwarm is proudly supported by **[Atlas Cloud](https://www.atlascloud.ai)** �
 
 As an **official provider sponsor**, Atlas Cloud ships as the built-in `atlascloud` adapter (OpenAI-compatible Chat Completions, `ATLASCLOUD_API_KEY`) and provides ongoing monthly API credits that keep the project's autonomous runs going. To run OpenSwarm on Atlas Cloud, grab a key at [atlascloud.ai](https://www.atlascloud.ai/console/api-keys), set `ATLASCLOUD_API_KEY`, and select `adapter: atlascloud`.
 
-## Quick Start
+## Quick Start: Review Gate
 
 ```bash
 npm install -g @intrect/openswarm
-openswarm init         # interactive setup wizard — provider auth + Linear OAuth + config
-openswarm doctor       # verify your environment (runtime, native deps, providers, ports)
-openswarm              # launches the TUI chat
+export OPENROUTER_API_KEY=…              # or use an authenticated codex/claude/local provider
+openswarm review --path . --read-only    # review the current diff without mutation
+openswarm review --max --fix --path .    # fix confirmed findings, re-review, then verify
 ```
 
-`openswarm init` walks you through provider authentication, optional Linear OAuth (team/project picker), and writes a validated `config.yaml`. Prefer wiring a provider by hand? You need **one** first: `openswarm auth login` (ChatGPT OAuth, used by `codex`/`gpt`), `openswarm auth login --provider openrouter` (or `export OPENROUTER_API_KEY=…`), or just have an authenticated `claude` on PATH. Check what's wired with `openswarm auth status`, and diagnose any gaps with `openswarm doctor`.
+For CI, use the [GitHub Action](#running-the-gate-in-ci). For a provider setup wizard, optional Linear connection, TUI chat, or autonomous daemon, run `openswarm init` and continue with [Full Daemon Setup](#full-daemon-setup). Prefer wiring a provider by hand? You need **one** first: `openswarm auth login` (ChatGPT OAuth, used by `codex`/`gpt`), `openswarm auth login --provider openrouter` (or `export OPENROUTER_API_KEY=…`), or just have an authenticated `claude` on PATH. Check what's wired with `openswarm auth status`, and diagnose any gaps with `openswarm doctor`.
 
 ### What `openswarm init` sets up
 
