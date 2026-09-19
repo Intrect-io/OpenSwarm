@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { DurableRunCoordinator } from './durableRunCoordinator.js';
@@ -32,6 +33,29 @@ function ended(finalStatus: PipelineResult['finalStatus']): PipelineResult {
 // six-hour wait, and an explicit redispatch that met the same PR pushed the
 // retry to 20:07. The backoff must count supersessions in a row, not history.
 describe('supersession backoff', () => {
+  it('persists the open-PR overlap reason for the dashboard and event timeline', async () => {
+    const path = dbPath();
+    const ledger = new RunLedger(path);
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const reader = new Database(path, { readonly: true });
+    const detail = 'Existing open PR owns planned files — skipping duplicate worker: https://github.test/42: `src/hot.ts`';
+
+    try {
+      await coordinator.execute(task('overlap'), '/repo', async () => ({
+        ...ended('superseded'), success: true, failureDetail: detail,
+      }));
+      expect(ledger.getRun('overlap')).toMatchObject({
+        state: 'RETRY_AT', lastErrorCode: 'superseded', lastErrorMessage: detail,
+      });
+      expect(reader.prepare("SELECT data_json FROM automation_events WHERE issue_id = ? AND kind = 'transition' ORDER BY sequence DESC LIMIT 1").get('overlap'))
+        .toEqual({ data_json: expect.stringContaining(detail) });
+    } finally {
+      reader.close();
+      coordinator.close();
+      ledger.close();
+    }
+  });
+
   it('backs off on the streak of supersessions, ignoring earlier failures of other kinds', async () => {
     const ledger = new RunLedger(dbPath());
     const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });

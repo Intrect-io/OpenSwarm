@@ -1,4 +1,5 @@
 import type { DraftAnalysis, DraftPeerIssue } from '../agents/draftAnalyzer.js';
+import { createHash } from 'node:crypto';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { findOpenPRFileOverlaps } from '../support/worktreeManager.js';
@@ -66,14 +67,35 @@ export async function applyDraftGates(options: {
       },
     );
     if (overlaps.length > 0) {
-      const lines = overlaps.map(overlap => `- ${overlap.url}: ${overlap.files.map(file => `\`${file}\``).join(', ')}`);
-      console.warn(`[AutonomousRunner] Existing open PR owns planned files — skipping duplicate worker: ${lines.join(' ')}`);
-      return supersededResult('superseded', draft.durationMs);
+      const reason = formatOpenPullRequestOverlap(overlaps);
+      console.warn(`[AutonomousRunner] ${reason}`);
+      // A recurring overlap is operational information, not a new finding on
+      // every heartbeat. Linear's stable comment id makes this one comment per
+      // exact PR/file fingerprint while a changed owner or file set is visible.
+      if (task.issueId && source?.kind === 'linear') {
+        const marker = `draft-overlap:${createHash('sha256').update(reason).digest('hex').slice(0, 24)}`;
+        await source.addComment(
+          task.issueId,
+          `Draft grooming deferred this task because an open pull request owns its planned files.\n\n${reason}`,
+          marker,
+        );
+      }
+      return supersededResult('superseded', draft.durationMs, reason);
     }
   }
   return null;
 }
 
-function supersededResult(kind: string, durationMs: number): PipelineResult {
-  return { success: true, sessionId: `${kind}-${Date.now()}`, iterations: 0, totalDuration: durationMs, finalStatus: 'superseded', stages: [] };
+function supersededResult(kind: string, durationMs: number, failureDetail?: string): PipelineResult {
+  return {
+    success: true, sessionId: `${kind}-${Date.now()}`, iterations: 0, totalDuration: durationMs,
+    finalStatus: 'superseded', stages: [], failureDetail,
+  };
+}
+
+function formatOpenPullRequestOverlap(overlaps: Array<{ url: string; files: string[] }>): string {
+  const owners = overlaps
+    .map(({ url, files }) => `${url}: ${[...files].sort().map(file => `\`${file}\``).join(', ')}`)
+    .sort();
+  return `Existing open PR owns planned files — skipping duplicate worker: ${owners.join('; ')}`;
 }
