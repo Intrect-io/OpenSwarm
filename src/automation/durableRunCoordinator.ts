@@ -1,5 +1,11 @@
 import { getInstanceId } from '../support/healthEndpoint.js';
-import { DEFAULT_INFRA_FAILURE_CIRCUIT, INFRA_CIRCUIT_PARK_REASON, infraFailureFingerprint } from './infraFailureCircuit.js';
+import {
+  DEFAULT_INFRA_FAILURE_CIRCUIT,
+  INFRA_CIRCUIT_PARK_REASON,
+  REPEATED_VERDICT_IDLE_COOLDOWN_MS,
+  REPEATED_VERDICT_STREAK,
+  infraFailureFingerprint,
+} from './infraFailureCircuit.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
@@ -436,6 +442,25 @@ export class DurableRunCoordinator {
     now = Date.now(),
   ): boolean {
     return this.ledger?.markNeedsHumanForQuestions(issueId, correlationIds, reason, now) ?? false;
+  }
+
+  /**
+   * True while a free slot has nothing to offer this run: its last verdicts
+   * were the same verdict, and the cooldown since the latest has not passed.
+   *
+   * Idle fill exists so a parked run is not left idle beside an empty slot,
+   * but a deterministic gate gives the same answer to the same branch. Every
+   * one of the 28 publication-scope parks and 6 no-change parks on 2026-09-17
+   * was lifted by idle fill within two minutes and parked again for the same
+   * reason; cgf-portal AX-1027 went round 36 times in ten hours. The cooldown
+   * rather than a permanent hold keeps a fix deployed in the meantime from
+   * needing an operator to release what it fixed. An explicit dispatch, a
+   * tracker Todo and a backoff that elapses on its own are all unaffected.
+   */
+  idleFillWouldRepeatVerdict(issueId: string, now = Date.now()): boolean {
+    const run = this.ledger?.getRun(issueId);
+    if (!run || now - run.updatedAt >= REPEATED_VERDICT_IDLE_COOLDOWN_MS) return false;
+    return (this.ledger?.consecutiveIdenticalVerdicts(issueId) ?? 0) >= REPEATED_VERDICT_STREAK;
   }
 
   resumeNeedsHuman(issueId: string, now = Date.now(), trigger: ParkResumeTrigger = 'unspecified'): RunState | null {

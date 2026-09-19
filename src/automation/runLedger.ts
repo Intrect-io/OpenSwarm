@@ -15,7 +15,7 @@ import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import { listClaimOwnersInDb } from './runLedgerOwners.js';
-import { consecutiveIdenticalInfraFailuresInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
+import { consecutiveIdenticalInfraFailuresInDb, consecutiveIdenticalVerdictsInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
 import {
   markNeedsHumanForQuestionsInDb,
   resumeNeedsHumanForQuestionsInDb,
@@ -255,6 +255,10 @@ export class RunLedger {
   /** Finished attempts, newest first, that ended as infra_error with this fingerprint before anything else. */
   consecutiveIdenticalInfraFailures(issueId: string, fingerprint: string): number {
     return consecutiveIdenticalInfraFailuresInDb(this.db, issueId, fingerprint);
+  }
+
+  consecutiveIdenticalVerdicts(issueId: string): number {
+    return consecutiveIdenticalVerdictsInDb(this.db, issueId);
   }
 
   /** Finished attempts, newest first, that ended superseded before anything else. */

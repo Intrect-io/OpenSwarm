@@ -1268,7 +1268,10 @@ export class AutonomousRunner {
         // heartbeat (AGT-4306). Only an explicit dispatch or a tracker Todo
         // lifts that park — the resume paths that carry an operator's hand.
         const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON;
-        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark) {
+        // Nor does a free slot change a verdict that has already come back
+        // twice; see idleFillWouldRepeatVerdict.
+        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark
+            && !this.durableRuns.idleFillWouldRepeatVerdict(id)) {
           const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
           if (idleResumed) {
             idleFillBudget--;
@@ -1317,6 +1320,7 @@ export class AutonomousRunner {
           && (durableRun.retryAt ?? 0) > Date.now()
           && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
           && durableRun.lastErrorCode !== 'superseded'
+          && !this.durableRuns.idleFillWouldRepeatVerdict(id)
         )
           || durableRun.state === 'NEEDS_SPEC'
           || durableRun.state === 'NEEDS_ENV';
