@@ -404,12 +404,39 @@ async function getRemovedLinesForFile(projectPath: string, filePath: string): Pr
   }
 }
 
-function extractStringLiterals(text: string): string[] {
+// A backtick delimits a string only where the language says so. In a Python
+// docstring it is markdown: "`test_update_through_registry` creates a row…" made
+// the name of a sibling test a contract literal (AX-1556, AGT-4462).
+const BACKTICK_STRING_FILE_RE = /\.(?:[cm]?[jt]sx?|go)$/;
+const MIN_LITERAL_CHARS = 3;
+const MAX_LITERAL_CHARS = 120;
+
+/**
+ * Scans quote to matching quote, one line at a time. The single regex this
+ * replaces accepted any quote character as the close of any other, and skipped
+ * strings under three characters without consuming them — so the closing quote
+ * of `'k'` opened a "literal" that ran to the next string and swallowed it. A
+ * two-letter test name hid a fabricated key from the guard, and an apostrophe
+ * could invent one.
+ */
+function extractStringLiterals(text: string, file: string): string[] {
+  const quotes = BACKTICK_STRING_FILE_RE.test(file) ? '\'"`' : '\'"';
   const literals = new Set<string>();
-  const re = /['"`]([^'"`\n]{3,120})['"`]/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text))) {
-    literals.add(normalizeTemplateLiteral(match[1]));
+  for (const line of text.split('\n')) {
+    let i = 0;
+    while (i < line.length) {
+      const quote = line[i];
+      if (!quotes.includes(quote)) { i++; continue; }
+      let j = i + 1;
+      while (j < line.length && line[j] !== quote) j += line[j] === '\\' ? 2 : 1;
+      // No close on this line: an apostrophe or a multi-line string, not a literal.
+      if (j >= line.length) { i++; continue; }
+      const body = line.slice(i + 1, j);
+      if (body.length >= MIN_LITERAL_CHARS && body.length <= MAX_LITERAL_CHARS) {
+        literals.add(normalizeTemplateLiteral(body));
+      }
+      i = j + 1;
+    }
   }
   return [...literals];
 }
@@ -443,14 +470,29 @@ function normalizeTemplateLiteral(literal: string): string {
 const ISO_DATE_LITERAL_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
 const TEST_SENTINEL_LITERAL_RE = /^(?:test|example|dummy|fake|mock|localhost|file):\/\/|^file:\/\/\/|(?:^|\/)(?:tmp|test|tests|fixtures?)\//i;
 
+// Labels a test invents for itself (AGT-4462). Each shape blocked a real run and
+// none can be given producer evidence, because no producer holds it:
+//  - "postgresql://x/y": any scheme://, not only the sentinel schemes above.
+//  - "row:1": a numbered instance. A producer holds the template (`row:${n}`),
+//    never the instance, so the literal cannot appear in HEAD even when real.
+//  - "itest_q9": an identifier that says it belongs to the test.
+const URL_LITERAL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const NUMBERED_INSTANCE_LITERAL_RE = /^[A-Za-z0-9_.-]+:\d+$/;
+const TEST_SCOPED_IDENTIFIER_RE = /^(?:i?tests?|fake|dummy|mock|fixture|sample|example)_/i;
+
 function isTestOnlyLiteral(literal: string): boolean {
-  return ISO_DATE_LITERAL_RE.test(literal) || TEST_SENTINEL_LITERAL_RE.test(literal);
+  return ISO_DATE_LITERAL_RE.test(literal)
+    || TEST_SENTINEL_LITERAL_RE.test(literal)
+    || URL_LITERAL_RE.test(literal)
+    || NUMBERED_INSTANCE_LITERAL_RE.test(literal)
+    || TEST_SCOPED_IDENTIFIER_RE.test(literal);
 }
 
 function isContractLiteral(literal: string, addedLines: string): boolean {
   if (isTestOnlyLiteral(literal)) return false;
   if (literal.startsWith('/api/')) return true;
-  if (/^[a-zA-Z0-9_.-]{3,}:/.test(literal)) return true;
+  // A key has no whitespace; "AX-1486: " is the start of a sentence.
+  if (/^[a-zA-Z0-9_.-]{3,}:\S*$/.test(literal)) return true;
   if (
     /^[a-z][a-z0-9]+(?:_[a-z0-9]+)+$/.test(literal) &&
     /\b(expect|assert|field|schema|payload|json|contract)\b/i.test(addedLines)
@@ -659,7 +701,7 @@ async function runContractEvidenceGuard(
 
     for (const d of changedTests) {
       const addedLines = await getAddedLinesForFile(projectPath, d.file, d.isNew);
-      const literals = extractStringLiterals(addedLines)
+      const literals = extractStringLiterals(addedLines, d.file)
         .filter(literal => isContractLiteral(literal, addedLines));
 
       for (const literal of literals) {

@@ -124,6 +124,61 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(res.allPassed).toBe(true);
     });
 
+    // AGT-4462: labels a test invents for itself. Each of these blocked a real
+    // cgf-portal run on 2026-09-18/19 (AX-1554, AX-1560, AX-1556), and none can
+    // be given "producer evidence": a producer holds a template or nothing at
+    // all, never the instance a test made up.
+    it.each([
+      ['a numbered instance id', "it('row', () => expect(label(r)).toBe('row:1'));", 'row:1'],
+      ['prose ending in a colon', "it('msg', () => expect(msg).toContain('AX-1486: '));", 'AX-1486: '],
+      ['a connection string', "it('conn', () => expect(connect('postgresql://x/y')).toBeTruthy());", 'postgresql://x/y'],
+      ['a test-scoped identifier', "it('ident', () => expect(payload.id).toBe('itest_q9'));", 'itest_q9'],
+    ])('does not read %s as a contract literal', async (_name, body, literal) => {
+      writeFileSync(join(repo, 'contract.test.ts'), `import { expect, it } from 'vitest';\n${body}\n`);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').filter(i => i.includes(literal))).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
+    it('does not read markdown backticks in a Python docstring as a string literal', async () => {
+      // AX-1556: a docstring said "`test_update_through_registry` creates a row
+      // without these fields", and the name of a sibling test became a contract.
+      writeFileSync(join(repo, 'test_master.py'), [
+        'def test_partial_update(payload):',
+        '    """An update names the fields it changes.',
+        '',
+        '    Nothing in the suite caught this: `test_update_through_registry` creates a row without',
+        '    these fields, so there was never anything to lose.',
+        '    """',
+        '    assert payload is not None',
+        '',
+      ].join('\n'));
+      const res = await runGuards(mockWorker(['test_master.py']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence')).toEqual([]);
+    });
+
+    it('finds a literal that follows a string too short to be one', async () => {
+      // The old single regex paired the closing quote of 'k' with the opening
+      // quote of the next string and swallowed the literal between them, so a
+      // two-letter test name was enough to hide a fabricated key from the guard.
+      writeFileSync(
+        join(repo, 'contract.test.ts'),
+        "import { expect, it } from 'vitest';\nit('k', () => expect(key()).toBe('foreign_summary:'));\n",
+      );
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').some(i => i.includes('foreign_summary:'))).toBe(true);
+    });
+
+    it.each([
+      ['a namespaced key', "it('key', () => expect(k).toBe('foreign_summary:'));", 'foreign_summary:'],
+      ['a multi-segment key', "it('key', () => expect(k).toBe('swarm:queue:pending'));", 'swarm:queue:pending'],
+      ['a snake_case field under an assertion', "it('field', () => expect(payload).toHaveProperty('settlement_total'));", 'settlement_total'],
+    ])('still blocks %s nobody produces', async (_name, body, literal) => {
+      writeFileSync(join(repo, 'contract.test.ts'), `import { expect, it } from 'vitest';\n${body}\n`);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').some(i => i.includes(literal))).toBe(true);
+    });
+
     // AX-1521, 2026-09-18: a correct fix — the test imports and calls the
     // production handler directly, exercising a route matched by prefix
     // inside it — was blocked for two iterations because the regex above
