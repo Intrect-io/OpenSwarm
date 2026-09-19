@@ -15,6 +15,7 @@ import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import { listClaimOwnersInDb } from './runLedgerOwners.js';
+import { reconcileMissingWorktreeInDb, type MissingWorktreeDisposition } from './runLedgerMissingWorktree.js';
 import { consecutiveIdenticalInfraFailuresInDb, consecutiveIdenticalVerdictsInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
 import {
   markNeedsHumanForQuestionsInDb,
@@ -821,7 +822,6 @@ export class RunLedger {
     });
     return transition.immediate();
   }
-
   attachWorktree(claim: RunClaim, worktreePath: string, branchName: string, now = Date.now()): boolean {
     const result = this.db.prepare(`
       UPDATE automation_runs
@@ -839,6 +839,16 @@ export class RunLedger {
       now,
     );
     return result.changes === 1;
+  }
+  reconcileMissingWorktree(
+    expected: Pick<RunRecord, 'issueId' | 'state' | 'stateVersion' | 'worktreePath'>,
+    disposition: MissingWorktreeDisposition,
+    reason: string,
+    clearHeadSha: boolean,
+    now = Date.now(),
+  ): boolean {
+    return reconcileMissingWorktreeInDb(this.db, expected, disposition, reason, clearHeadSha, now,
+      (issueId, attemptNo, kind, from, to, data, at) => this.insertEvent(issueId, attemptNo, kind, from, to, data, at));
   }
 
   attachPublication(claim: RunClaim, patch: Pick<TransitionPatch, 'prUrl' | 'headSha'>, now = Date.now()): boolean {
