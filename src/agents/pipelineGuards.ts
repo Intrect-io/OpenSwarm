@@ -317,7 +317,7 @@ async function runBsDetectorGuard(
 }
 
 const SOURCE_FILE_RE = /\.(ts|tsx|js|jsx|py)$/;
-const TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.py$/;
+export const TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.py$/;
 const DEPENDENCY_FAILURE_RE =
   /\b(ModuleNotFoundError|ImportError|Cannot find module|ERR_MODULE_NOT_FOUND|No module named|PackageNotFoundError|missing dependency|not installed)\b/i;
 const VERSION_SPOOF_RE =
@@ -326,7 +326,7 @@ const PACKAGE_SCAFFOLD_RE =
   /(^|\/)(package\.json|pyproject\.toml|setup\.py|setup\.cfg)$/;
 const EVIDENCE_FILE_REF_RE =
   /((?:\/|\.\/)?[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|yaml|yml|json)):(\d+)\b/g;
-const CONTRACT_EVIDENCE_FILE_RE =
+export const CONTRACT_EVIDENCE_FILE_RE =
   /\.(ts|tsx|js|jsx|py|go|rs|java|yaml|yml|json)$/;
 const DOC_FILE_RE = /\.(md|mdx|txt|rst)$/;
 const VERIFIED_STATEMENT_RE = /\b(verified|confirmed|measured)\b/i;
@@ -362,7 +362,7 @@ function hasFileScopedBeforeAfterEvidence(reportText: string, filePath: string):
     );
 }
 
-async function getAddedLinesForFile(projectPath: string, filePath: string, isNew: boolean): Promise<string> {
+export async function getAddedLinesForFile(projectPath: string, filePath: string, isNew: boolean): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       'git',
