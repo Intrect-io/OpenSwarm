@@ -209,6 +209,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     projectName?: string;
     fileScope?: string[];
     fileScopeSource?: TaskItem['fileScopeSource'];
+    pinnedFileScope?: string[];
+    pinnedFileScopeSource?: TaskItem['fileScopeSource'];
     explicitDispatch?: boolean;
   };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
@@ -226,8 +228,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     linearProject: metadata.projectId
       ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
       : undefined,
-    fileScope: metadata.fileScope,
-    fileScopeSource: metadata.fileScopeSource,
+    fileScope: metadata.pinnedFileScope ?? metadata.fileScope,
+    fileScopeSource: metadata.pinnedFileScopeSource ?? metadata.fileScopeSource,
     explicitDispatch: metadata.explicitDispatch === true,
     createdAt: run.discoveredAt,
   };
@@ -489,6 +491,8 @@ export class DurableRunCoordinator {
         projectName: task.linearProject?.name,
         fileScope: task.fileScope,
         fileScopeSource: task.fileScopeSource,
+        pinnedFileScope: task.fileScope,
+        pinnedFileScopeSource: task.fileScopeSource,
         explicitDispatch: task.explicitDispatch === true,
       },
     }, now);
@@ -520,7 +524,24 @@ export class DurableRunCoordinator {
     if (!this.ledger) return executor(this.noopHooks(), new AbortController().signal);
 
     const issueId = task.issueId || task.id;
-    this.observeTask(task, projectPath);
+    const observed = this.observeTask(task, projectPath);
+    const pinned = (observed?.metadata ?? {}) as {
+      pinnedFileScope?: string[];
+      pinnedFileScopeSource?: TaskItem['fileScopeSource'];
+    };
+    if (pinned.pinnedFileScope !== undefined) {
+      task = {
+        ...task,
+        fileScope: [...pinned.pinnedFileScope],
+        fileScopeSource: pinned.pinnedFileScopeSource,
+      };
+    }
+    // The persisted scope is the safety contract for this run.  Admission must
+    // use it too; otherwise a rediscovery can narrow a scope just long enough
+    // to pass the atomic conflict check before execution restores the pin.
+    const admission = options.admission?.conflictScope === undefined
+      ? options.admission
+      : { ...options.admission, conflictScope: task.fileScope ?? [] };
     // Shadow is projection-only: it may populate discovery records for rollout
     // comparison, but must never claim, fence, enqueue effects, or alter tracker
     // delivery. Otherwise the observer itself becomes a second control plane.
@@ -530,13 +551,13 @@ export class DurableRunCoordinator {
       ownerInstanceId: this.instanceId,
       ownerPidSpace: this.pidSpace,
       leaseMs: this.leaseMs,
-      maxActiveForProject: options.admission?.maxConcurrent ?? this.maxActiveForProject,
-      conflictScope: options.admission?.conflictScope,
-      unknownScopeAdmission: options.admission?.unknownScopeAdmission,
-      maxAttemptsPerHour: options.admission?.maxAttemptsPerHour,
-      maxFailuresPerHour: options.admission?.maxFailuresPerHour,
-      maxCostUsdPerDay: options.admission?.maxCostUsdPerDay,
-      circuitCooldownMs: options.admission?.circuitCooldownMs,
+      maxActiveForProject: admission?.maxConcurrent ?? this.maxActiveForProject,
+      conflictScope: admission?.conflictScope,
+      unknownScopeAdmission: admission?.unknownScopeAdmission,
+      maxAttemptsPerHour: admission?.maxAttemptsPerHour,
+      maxFailuresPerHour: admission?.maxFailuresPerHour,
+      maxCostUsdPerDay: admission?.maxCostUsdPerDay,
+      circuitCooldownMs: admission?.circuitCooldownMs,
     });
     if (!claim) {
       if (this.isPrimary) {

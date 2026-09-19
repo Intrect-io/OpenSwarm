@@ -1226,8 +1226,7 @@ describe('DurableRunCoordinator dead marker owners', () => {
 
   it('names released prior-generation owners by marker id and never itself or the live owner', async () => {
     const { getInstanceId } = await import('../support/healthEndpoint.js');
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     ledger.registerRun({ issueId: 'GEN-1', source: 'linear', projectPath: '/repo' }, 1_000);
 
     // A prior generation claimed, went silent, and the ledger released it.
@@ -1244,8 +1243,7 @@ describe('DurableRunCoordinator dead marker owners', () => {
     expect(ledger.transition(ours, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
     expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
     expect(coordinator.deadMarkerOwners('unknown')).toEqual([]);
-    coordinator.close();
-    ledger.close();
+    coordinator.close(); ledger.close();
   });
 });
 
@@ -1337,8 +1335,7 @@ describe('runRecordToTask', () => {
   });
 
   it('round-trips what observeTask wrote, so the two mappings cannot drift apart', () => {
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     const original: TaskItem = {
       id: 'issue-1', issueId: 'issue-1', issueIdentifier: 'AX-1', source: 'linear',
       title: 'round trip', priority: 2, createdAt: 1_000,
@@ -1356,8 +1353,19 @@ describe('runRecordToTask', () => {
     expect(rebuilt.linearProject).toEqual(original.linearProject);
     expect(rebuilt.fileScope).toEqual(original.fileScope);
     expect(rebuilt.explicitDispatch).toBe(true);
-    coordinator.close();
-    ledger.close();
+    coordinator.close(); ledger.close();
+  });
+
+  it('pins the first write scope for later admission (AGT-4441)', async () => {
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const first = { id: 'scope-pin', issueId: 'scope-pin', issueIdentifier: 'AX-SCOPE', source: 'linear' as const, title: 'scope pin', priority: 2, createdAt: 1_000, fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' as const };
+    coordinator.observeTask(first, '/repo'); const observed = coordinator.observeTask({ ...first, fileScope: ['src/old.ts'] }, '/repo');
+    expect(observed?.metadata).toMatchObject({ fileScope: ['src/old.ts'], pinnedFileScope: ['src/old.ts', 'src/pinned.ts'], pinnedFileScopeSource: 'drafted' });
+    expect(runRecordToTask(observed!)).toMatchObject({ fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' });
+    expect(ledger.claimRun('scope-pin', { ownerInstanceId: 'owner', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: first.fileScope })).not.toBeNull();
+    ledger.registerRun({ issueId: 'conflict', source: 'linear', projectPath: '/repo', metadata: { fileScope: ['src/pinned.ts'] } });
+    expect(ledger.claimRun('conflict', { ownerInstanceId: 'other', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).toBeNull();
+    coordinator.close(); ledger.close();
   });
 
   it('names an unrecognized source instead of asserting it into the union', () => {
