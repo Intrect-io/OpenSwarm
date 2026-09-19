@@ -140,6 +140,24 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(res.allPassed).toBe(true);
     });
 
+    // AX-1447, 2026-09-19: cgf-portal lost a full 5-iteration budget because a
+    // brand-new test file's own `node:test` import specifiers were read as
+    // fabricated contract literals. `node:*` is Node's own reserved built-in
+    // module namespace — no application diff could ever "define" it, and no
+    // application could ever legitimately dispute that it's real, so it can
+    // never be given (or need) producer evidence.
+    it.each([
+      ['node:test', "import { it } from 'node:test';\nit('x', () => {});\n"],
+      ['node:assert/strict', "import assert from 'node:assert/strict';\nassert.ok(true);\n"],
+      ['node:fs/promises', "import { readFile } from 'node:fs/promises';\nvoid readFile;\n"],
+      ['node:child_process', "const { execFile } = require('node:child_process');\nvoid execFile;\n"],
+    ])('does not read the builtin specifier %s as a contract literal', async (literal, body) => {
+      writeFileSync(join(repo, 'contract.test.ts'), body);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').filter(i => i.includes(literal))).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
     it('does not read markdown backticks in a Python docstring as a string literal', async () => {
       // AX-1556: a docstring said "`test_update_through_registry` creates a row
       // without these fields", and the name of a sibling test became a contract.
