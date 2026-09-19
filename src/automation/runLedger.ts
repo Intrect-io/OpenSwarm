@@ -152,7 +152,7 @@ export class RunLedger {
         this.insertEvent(input.issueId, 0, 'registered', null, initialState, input.metadata, now);
       } else {
         const previous = this.db.prepare('SELECT metadata_json FROM automation_runs WHERE issue_id = ?').get(input.issueId) as Pick<RunRow, 'metadata_json'>;
-        const priorMetadata = parseJson(previous.metadata_json) as Record<string, unknown>; const incomingMetadata = (input.metadata ?? {}) as Record<string, unknown>;
+        const priorMetadata = (parseJson(previous.metadata_json) ?? {}) as Record<string, unknown>; const incomingMetadata = (input.metadata ?? {}) as Record<string, unknown>;
         // A resumed branch is checked against every commit it carries; preserve its first scope. (AGT-4441)
         const metadata = {
           ...incomingMetadata,
