@@ -98,7 +98,15 @@ export function isAgentScratchFile(file: string): boolean {
   return /\.(?:bak|orig|rej)$/i.test(file)
     || file.endsWith('~')
     || /(?:^|\/)\.DS_Store$/.test(file)
-    || /(?:^|\/)_apply_[^/]*\.(?:py|sh|mjs|js|ts)$/.test(file);
+    || /(?:^|\/)_apply_[^/]*\.(?:py|sh|mjs|js|ts)$/.test(file)
+    // A one-off script filed under its own `scratchpad/` directory rather than
+    // named `_apply_*`. cgf-portal#572, 2026-09-19: `fix_cafe24.py` and
+    // `fix_tests.py` (string-replace apply scripts, never imported) reached
+    // the real PR under a new top-level `scratchpad/`; a constitution gate
+    // caught the new directory and a person removed them by hand. Script
+    // extensions only — real content a worker means to keep (a report, notes)
+    // is a placement concern the reviewer should catch, not scratch.
+    || /(?:^|\/)scratchpad\/[^/]+\.(?:py|sh|mjs|js|ts)$/.test(file);
 }
 
 
