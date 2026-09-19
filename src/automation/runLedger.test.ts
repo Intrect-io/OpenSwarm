@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { RunLedger, type RunClaim } from './runLedger.js';
+import { attachParkedPublication, recordParkedPublicationSkip } from './runLedgerParkedPublication.js';
 import Database from 'better-sqlite3';
 
 const roots: string[] = [];
@@ -979,6 +980,41 @@ describe('RunLedger claim and fencing races', () => {
       ownerInstanceId: 'daemon', leaseMs: 1_000, now: 2_200,
       maxAttemptsPerHour: 1, maxFailuresPerHour: 1,
     })).not.toBeNull();
+    ledger.close();
+  });
+});
+
+describe('RunLedger parked publication backfill', () => {
+  function parkedLedger() {
+    const ledger = new RunLedger(createDbPath());
+    const { record } = ledger.importRun({
+      issueId: 'PARKED-PR', source: 'linear', identifier: 'AX-1',
+      projectPath: '/repo', state: 'NEEDS_HUMAN', branchName: 'swarm/AX-1',
+    }, 1_000);
+    return { ledger, record };
+  }
+
+  it('attaches a backfilled draft only to the unchanged unowned parked row', () => {
+    const { ledger, record } = parkedLedger();
+    expect(attachParkedPublication(ledger, record, { prUrl: 'https://github.test/pull/7', headSha: 'beef' }, 1_100)).toBe(true);
+    expect(ledger.getRun('PARKED-PR')).toMatchObject({
+      state: 'NEEDS_HUMAN', prUrl: 'https://github.test/pull/7', headSha: 'beef', stateVersion: record.stateVersion + 1,
+    });
+    expect(attachParkedPublication(ledger, record, { prUrl: 'https://github.test/pull/8', headSha: 'cafe' }, 1_200)).toBe(false);
+    ledger.close();
+  });
+
+  it('records a no-commit skip without changing the park state', () => {
+    const { ledger, record } = parkedLedger();
+    expect(recordParkedPublicationSkip(ledger, record, 'no commits ahead of base', 1_100)).toBe(true);
+    expect(ledger.getRun('PARKED-PR')).toMatchObject({ state: 'NEEDS_HUMAN', stateVersion: record.stateVersion, prUrl: undefined });
+    ledger.close();
+  });
+
+  it('refuses a row that has been resumed or claimed since the scan', () => {
+    const { ledger, record } = parkedLedger();
+    expect(ledger.markReady('PARKED-PR', 1_050)).toBe(true);
+    expect(attachParkedPublication(ledger, record, { prUrl: 'https://github.test/pull/7', headSha: 'beef' }, 1_100)).toBe(false);
     ledger.close();
   });
 });

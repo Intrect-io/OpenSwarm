@@ -572,6 +572,24 @@ program
     }
   });
 
+program
+  .command('drain-parks')
+  .description('Backfill draft PRs for committed NEEDS_HUMAN branches created before publish-on-park')
+  .option('--path <path>', 'Repository path whose parked branches to inspect (default: current directory)')
+  .option('--dry-run', 'Report eligible parked branches without creating PRs or updating the ledger')
+  .option('--json', 'Emit the final summary as JSON')
+  .action(async (opts: { path?: string; dryRun?: boolean; json?: boolean }) => {
+    const { formatDrainParksSummary, runDrainParksCommand } = await import('./cli/drainParksCommand.js');
+    try {
+      const summary = await runDrainParksCommand(opts);
+      safeConsole.log(opts.json ? JSON.stringify(summary) : formatDrainParksSummary(summary));
+      if (summary.failed.length > 0) process.exitCode = 1;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    }
+  });
+
 // openswarm exec <prompt>
 
 program
