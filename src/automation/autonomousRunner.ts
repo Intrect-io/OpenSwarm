@@ -908,7 +908,7 @@ export class AutonomousRunner {
       }
 
       // Pair-level stagnation only proves that the CURRENT session stopped
-      // making progress. A fresh outer attempt gets a new model context and can
+      // making progress. A new outer attempt gets a new model context and can
       // resume the preserved worktree, which is often enough to escape a repeated
       // output/error loop. Let this flow through the normal bounded failure budget
       // below; only MAX_RETRY_COUNT consecutive outer attempts may require a human.
@@ -917,7 +917,7 @@ export class AutonomousRunner {
           ?? pickFailureDetail([result.lastReviewFeedback, result.reviewResult?.feedback, result.workerResult?.error])
           ?? 'Pair pipeline detected repeated non-progress.';
         recordLastFailureDetail(this.taskStateRef, task.issueId, failureDetail);
-        console.warn(`[Scheduler] Pair session stagnated for ${taskCtx}; retrying with fresh context: ${failureDetail}`);
+        console.warn(`[Scheduler] Pair session stagnated for ${taskCtx}; scheduling a new outer attempt: ${failureDetail}`);
       }
 
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);

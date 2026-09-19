@@ -60,7 +60,7 @@ export function composePipelineResult(
     stuckReason: context.stuckReason,
     // The session stopped because the worker claimed success, changed
     // nothing and gave no reason — three times, across a model escalation
-    // and a fresh context. A new attempt runs the same prompt into the same
+    // and a new stateless worker iteration. A new attempt runs the same prompt into the same
     // silence: cgf-portal AX-868 reached attempt 27 and AGT-3844 attempt 53
     // that way on 2026-09-02, each attempt ~900k tokens, and the operator
     // was never told the agent had produced nothing at all.
