@@ -95,7 +95,7 @@
   "overrides": {
     "protobufjs": "^7.6.3",
     "undici": "^6.28.0",
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "sharp": "^0.35.0"
   }
 }
