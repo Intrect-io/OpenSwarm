@@ -165,6 +165,7 @@ steps:
     with:
       adapter: openrouter   # a hosted runner has no config; without this the CLI
                             # falls back to its `codex` default
+      model: deepseek/deepseek-v4-flash  # optional explicit cost cap
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
   - if: always() && steps.review.outputs.sarif-file != ''
@@ -173,7 +174,8 @@ steps:
 ```
 
 Inputs: `path` (which checkout to review), `base` (defaults to the merge base of
-the PR head and its base branch), `adapter`, `read-only`, `version`,
+the PR head and its base branch), `adapter`, `model` (optional reviewer model
+override), `read-only`, `version`,
 `sarif-file`, and `fail-on-gate-not-run` — the last defaults to `true` because a
 review that did not happen must not read as a pass.
 
