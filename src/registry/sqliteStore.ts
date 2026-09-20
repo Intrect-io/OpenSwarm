@@ -674,7 +674,7 @@ export class SqliteRegistryStore {
        WHERE ${conditions.join(' AND ')} ORDER BY
         CASE w.severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END,
         w.created_at DESC LIMIT ? OFFSET ?`
-    ).all(...params, clampInteger(limit, 200, 200), clampInteger(offset, 0)) as WarningRow[]).map(this.rowToWarning);
+    ).all(...params, clampInteger(limit, 200, 200), clampInteger(offset, 0, 200)) as WarningRow[]).map(this.rowToWarning);
   }
 
   // ============ 관계 ============
@@ -882,7 +882,7 @@ export class SqliteRegistryStore {
     if (projectId) params.push(projectId);
 
     const rows = this.db.prepare(`${query} ORDER BY e.file_path, e.line_start NULLS LAST, e.name LIMIT ? OFFSET ?`)
-      .all(...params, clampInteger(limit, 200, 200), clampInteger(offset, 0)) as EntityRow[];
+      .all(...params, clampInteger(limit, 200, 200), clampInteger(offset, 0, 200)) as EntityRow[];
     return this.rowsToEntities(rows);
   }
 

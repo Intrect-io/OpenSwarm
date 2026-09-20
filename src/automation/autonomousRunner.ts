@@ -2336,6 +2336,12 @@ export class AutonomousRunner {
       this.registryScanAt.set(resolvedPath, Date.now());
       void scanRepository(resolvedPath, projectId, { timeoutMs: 180_000 })
         .then((result) => {
+          if (result.incomplete) {
+            this.syslog(
+              `Registry scan ${projectId} was INCOMPLETE after ${result.durationMs}ms: `
+              + result.incompleteReasons.slice(0, 5).join('; '),
+            );
+          }
           this.syslog(
             `Registry scan ${projectId}: ${result.extracted} entities `
             + `(+${result.registered}/~${result.updated}) in ${result.durationMs}ms`,
