@@ -145,18 +145,65 @@ export async function getRecentlyChangedFiles(
   projectPath: string,
   sinceTimestamp: number,
 ): Promise<string[]> {
+  const files = new Set<string>();
   try {
     const sinceDate = new Date(sinceTimestamp).toISOString();
-    const output = await runGitCommand(projectPath, [
+    const committed = await runGitCommand(projectPath, [
       'log',
       `--since=${sinceDate}`,
       '--name-only',
       '--format=',
     ]);
-
-    const files = new Set<string>();
-    for (const line of output.split('\n')) {
+    for (const line of committed.split('\n')) {
       const trimmed = line.trim();
+      if (trimmed) files.add(trimmed);
+    }
+
+    const untracked = await runGitCommand(projectPath, [
+      'ls-files',
+      '--others',
+      '--exclude-standard',
+      '-z',
+    ]);
+    for (const token of untracked.split('\0')) {
+      const trimmed = token.trim();
+      if (trimmed) files.add(trimmed);
+    }
+
+    return Array.from(files);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Older form kept for callers that already have a since-date string.
+ */
+export async function getFilesChangedSince(
+  projectPath: string,
+  sinceDate: string,
+): Promise<string[]> {
+  const files = new Set<string>();
+  try {
+    const committed = await runGitCommand(projectPath, [
+      'log',
+      `--since=${sinceDate}`,
+      '--name-only',
+      '--format=',
+    ]);
+    for (const line of committed.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed) files.add(trimmed);
+    }
+
+    const untracked = await runGitCommand(projectPath, [
+      'ls-files',
+      '--others',
+      '--exclude-standard',
+      '-z',
+    ]);
+    for (const token of untracked.split('\0')) {
+      const trimmed = token.trim();
       if (trimmed) files.add(trimmed);
     }
 

@@ -17,6 +17,7 @@ const MAX_SEARCH_LIMIT = 100;
 const DEFAULT_EVENT_LIMIT = 20;
 const MAX_EVENT_LIMIT = 200;
 const MAX_BULK_REGISTER_ENTITIES = 100;
+const MAX_ENTITY_WARNINGS_RESULTS = 200;
 
 function clampLimit(limit: number | undefined, defaultLimit: number, maxLimit: number): number {
   if (limit === undefined || !Number.isInteger(limit)) return defaultLimit;
@@ -129,11 +130,18 @@ export const registryResolvers = {
     entityWarnings: (_: unknown, { severity, projectId, limit, offset }: {
       severity?: WarningSeverity; projectId?: string; limit?: number; offset?: number;
     }) => {
+      const offsetValue = clampOffset(offset);
+      const pageSize = clampLimit(limit, DEFAULT_ENTITY_LIMIT, MAX_ENTITY_LIMIT);
+      if (offsetValue + pageSize > MAX_ENTITY_WARNINGS_RESULTS) {
+        throw new Error(
+          `entityWarnings result window exceeds the request budget of ${MAX_ENTITY_WARNINGS_RESULTS} (offset ${offsetValue} + limit ${pageSize})`,
+        );
+      }
       return getRegistryStore().getUnresolvedWarnings(
         severity,
         projectId,
-        clampLimit(limit, DEFAULT_ENTITY_LIMIT, MAX_ENTITY_LIMIT),
-        clampOffset(offset),
+        pageSize,
+        offsetValue,
       );
     },
 

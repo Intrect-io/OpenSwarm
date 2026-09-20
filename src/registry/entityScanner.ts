@@ -663,6 +663,8 @@ export interface ScanResult {
   updated: number;
   removed: number;
   testsMapped: number;
+  incomplete: boolean;
+  incompleteReasons: string[];
   errors: string[];
   durationMs: number;
   languageBreakdown: Record<string, number>;
@@ -700,10 +702,17 @@ export async function scanRepository(
   const languageBreakdown: Record<string, number> = {};
   const scannedSourceFiles = new Set<string>();
   let scannedFiles = 0;
+  const incompleteReasons: string[] = [];
 
   async function walk(dirPath: string, relPath: string, depth: number): Promise<void> {
-    if (depth > maxDepth) return;
-    if (Date.now() - startTime > timeoutMs) return;
+    if (depth > maxDepth) {
+      incompleteReasons.push(`${relPath || '.'}: depth limit ${maxDepth} reached`);
+      return;
+    }
+    if (Date.now() - startTime > timeoutMs) {
+      incompleteReasons.push(`${relPath || '.'}: scan timeout ${timeoutMs}ms reached`);
+      return;
+    }
 
     let entries;
     try {
@@ -715,7 +724,10 @@ export async function scanRepository(
     }
 
     for (const entry of entries) {
-      if (Date.now() - startTime > timeoutMs) return;
+      if (Date.now() - startTime > timeoutMs) {
+        incompleteReasons.push(`${relPath || '.'}: scan timeout ${timeoutMs}ms reached`);
+        return;
+      }
 
       const fullPath = join(dirPath, entry.name);
       const entryRelPath = relPath ? `${relPath}/${entry.name}` : entry.name;
@@ -748,6 +760,9 @@ export async function scanRepository(
           }
         } catch (err) {
           errors.push(`${entryRelPath}: ${err instanceof Error ? err.message : String(err)}`);
+          if (err instanceof Error && err.message.startsWith('Source file exceeds')) {
+            incompleteReasons.push(`${entryRelPath}: source file excluded by size limit`);
+          }
         }
       }
     }
@@ -880,6 +895,8 @@ export async function scanRepository(
     updated,
     removed,
     testsMapped,
+    incomplete: incompleteReasons.length > 0,
+    incompleteReasons: Array.from(new Set(incompleteReasons)).slice(0, 50),
     errors,
     durationMs: Date.now() - startTime,
     languageBreakdown,
