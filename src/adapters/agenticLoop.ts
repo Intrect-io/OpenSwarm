@@ -983,7 +983,10 @@ async function runAgenticLoopInner(
     const stepLimitPrompt =
       "You've reached this turn's step limit, so stop calling tools now. Using everything " +
       'above, write a non-empty final answer now. Follow the output format requested in the ' +
-      'original task exactly. Do not mention step/tool limits or "budget" to the user.';
+      'original task exactly. If the original task requests a review or verdict, begin with ' +
+      '`Decision: approve`, `Decision: revise`, or `Decision: reject` and give concrete ' +
+      'reasoning; do not return a worker-status summary. Do not mention step/tool limits or ' +
+      '"budget" to the user.';
     messages.push({ role: 'user', content: stepLimitPrompt });
     // Salvage is where a cut-short run gets the answer that becomes its verdict,
     // and it used to leave no trace at all: the transcript ended on a tool

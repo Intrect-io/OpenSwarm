@@ -465,6 +465,28 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
     expect(logs).toContain('↻ Final answer was empty — retrying once (no tools)');
   });
 
+  it('requires an explicit review verdict from a tool-exhausted reviewer (AGT-4484)', async () => {
+    let salvagePrompt = '';
+    const result = await runAgenticLoop({
+      prompt: 'Review this change and return a verdict.',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      maxTurns: 1,
+      callApi: async (messages, tools) => {
+        if (tools.length > 0) return toolCallResp('read', 'read_file', { path: 'package.json' });
+        salvagePrompt = String(messages.at(-1)?.content ?? '');
+        // This is the conclusion the historical reviewer omitted after using
+        // its full tool budget: a verdict, not a worker-style status report.
+        return finalResp('Decision: approve\nNo actionable issues found.');
+      },
+    });
+
+    expect(salvagePrompt).toContain('Decision: approve');
+    expect(salvagePrompt).toContain('worker-status summary');
+    expect(result.text).toContain('Decision: approve');
+  });
+
   it('fails explicitly when the retry is also reasoning-only/empty', async () => {
     let calls = 0;
     let finalAnswerCalls = 0;
