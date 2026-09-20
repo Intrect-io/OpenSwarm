@@ -113,6 +113,9 @@ jobs:
           # to its `codex` default and never reach OpenRouter no matter which key
           # is exported.
           adapter: openrouter
+          # Keep this manually-triggered dogfood run inside the flash-model
+          # budget; the Action forwards this to `openswarm review --model`.
+          model: deepseek/deepseek-v4-flash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           # Pin routing to the sponsor's capacity. Without it the account's own

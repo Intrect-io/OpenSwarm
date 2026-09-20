@@ -31,6 +31,12 @@ inputs:
       not by itself enough to select that provider.
     required: false
     default: ''
+  model:
+    description: >-
+      Optional model override for the reviewer. Set this explicitly when a CI
+      workflow needs a bounded-cost model instead of the configured default.
+    required: false
+    default: ''
   read-only:
     description: >-
       Deny the reviewer every mutating tool, including bash. Default true, and
@@ -106,6 +112,7 @@ runs:
         REVIEW_PATH: ${{ inputs.path }}
         OPENSWARM_BASE: ${{ inputs.base }}
         OPENSWARM_ADAPTER: ${{ inputs.adapter }}
+        REVIEW_MODEL: ${{ inputs.model }}
         READ_ONLY: ${{ inputs.read-only }}
         SARIF_FILE: ${{ inputs.sarif-file }}
         FAIL_ON_GATE_NOT_RUN: ${{ inputs.fail-on-gate-not-run }}
@@ -156,6 +163,15 @@ runs:
               ;;
           esac
         done
+        if [ -n "${REVIEW_MODEL:-}" ]; then
+          case "$HELP" in
+            *"--model"*) ;;
+            *)
+              echo "::error::The installed @intrect/openswarm does not support 'review --model'. Pin a newer 'version' input." >&2
+              exit 2
+              ;;
+          esac
+        fi
 
         BASE="${OPENSWARM_BASE:-}"
         if [ -z "$BASE" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
@@ -200,6 +216,7 @@ runs:
         ARGS=(review --path "$REPO_DIR" --json --sarif "$SARIF_PATH")
         if [ -n "$BASE" ]; then ARGS+=(--base "$BASE"); fi
         if [ -n "${OPENSWARM_ADAPTER:-}" ]; then ARGS+=(--adapter "$OPENSWARM_ADAPTER"); fi
+        if [ -n "${REVIEW_MODEL:-}" ]; then ARGS+=(--model "$REVIEW_MODEL"); fi
         if [ "${READ_ONLY:-true}" = "true" ]; then ARGS+=(--read-only); fi
 
         # stdout is the JSON document; diagnostics go to stderr and stay on the
