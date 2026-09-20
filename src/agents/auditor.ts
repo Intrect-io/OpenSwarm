@@ -116,13 +116,26 @@ export async function runAuditor(options: AuditorOptions): Promise<AuditorResult
 
 // Output Parsing
 
-function parseAuditorOutput(output: string): AuditorResult {
+export function parseAuditorOutput(output: string): AuditorResult {
   try {
     const costInfo = extractCostFromStreamJson(output);
     if (costInfo) {
       console.log(`[Auditor] Cost: ${formatCost(costInfo)}`);
     }
 
+    if (typeof output !== 'string') {
+      // A non-string payload is a transport-level defect, not review prose —
+      // parse only string outputs so downstream JSON assumptions hold. (AGT-3487)
+      return {
+        success: false,
+        criticalCount: 0,
+        warningCount: 0,
+        minorCount: 0,
+        issues: [],
+        summary: 'Auditor output was not a string',
+        error: `expected string output, got ${typeof output}`,
+      };
+    }
     // Extract result entry from NDJSON
     let resultText = '';
     for (const line of output.split('\n')) {

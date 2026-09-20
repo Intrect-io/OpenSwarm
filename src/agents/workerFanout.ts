@@ -102,7 +102,8 @@ export interface BaselinePatch {
   skippedUntracked: string[];
 }
 
-/** A baseline that seeds nothing — clean worktree, or capture failed. */
+/** A baseline that seeds nothing — a clean worktree. Capture failure is an
+ *  explicit fan-out fallback, never this. */
 export function emptyBaselinePatch(): BaselinePatch {
   return { path: '', skippedUntracked: [] };
 }
@@ -789,9 +790,22 @@ export async function runWorkerFanout(options: RunWorkerFanoutOptions): Promise<
     // A dirty worktree is expected on self-repair retries (the gate scores fan-out
     // mainly on retry signals). Rather than bail, snapshot the uncommitted state
     // and seed it into each sandbox so candidates continue from it and only the
-    // incremental winner diff is promoted back. Falls back to clean on error.
-    const baseline = await captureBaselinePatch(options.projectPath, join(root, 'baseline.patch'))
-      .catch(() => emptyBaselinePatch());
+    // incremental winner diff is promoted back.
+    //
+    // Baseline capture is NOT free to fail silently: an empty fallback is only
+    // safe when the worktree really was clean, not when capture itself broke
+    // (git broken, index race, FS error) — otherwise the winner's diff would be
+    // base+delta and promotion would double-apply the dirty state. So capture
+    // failure is an explicit fan-out fallback, not a quiet clean-seed. (AGT-3487)
+    let baseline: BaselinePatch;
+    try {
+      baseline = await captureBaselinePatch(options.projectPath, join(root, 'baseline.patch'));
+    } catch (error) {
+      return {
+        candidates: [],
+        fallbackReason: `baseline capture failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     if (baseline.skippedUntracked.length > 0) {
       options.onLog?.(
         `[fanout] baseline skipped ${baseline.skippedUntracked.length} untracked file(s) over ` +

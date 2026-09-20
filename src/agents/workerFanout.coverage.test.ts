@@ -47,7 +47,7 @@ function initRepo(dir: string): void {
   execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
   execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: dir });
   execFileSync('git', ['add', '-A'], { cwd: dir });
-  execFileSync('git', ['commit', '-qm', 'init'], { cwd: dir });
+  execFileSync('git', ['commit', '--allow-empty', '-qm', 'init'], { cwd: dir });
 }
 
 const baseWorkerOptions = {
@@ -71,6 +71,31 @@ describe('runWorkerFanout early bail-outs', () => {
     runWorker.mockReset();
   });
 
+  it('fails fan-out with an explicit reason when the baseline capture itself breaks', async () => {
+    // A project that exists but is not a git repo makes `git add -A` inside
+    // captureBaselinePatch throw — the old empty-baseline fallback would have
+    // proceeded and double-applied the dirty state on promotion.
+    const notARepo = await mkdtemp(path.join(tmpdir(), 'osw-fanout-nobase-'));
+    cleanupDirs.push(notARepo);
+    await writeFile(path.join(notARepo, 'README.md'), 'no git here\n', 'utf8');
+
+    const { runWorkerFanout } = await import('./workerFanout.js');
+    const result = await runWorkerFanout({
+      projectPath: notARepo,
+      baseWorkerOptions: { ...baseWorkerOptions, projectPath: notARepo },
+      candidates: [
+        { id: 'primary', adapter: 'codex-responses', model: 'gpt-5.4-mini' },
+        { id: 'spark', adapter: 'codex-responses', model: 'gpt-5.3-codex-spark' },
+      ],
+      concurrency: 2,
+    });
+
+    expect(result.candidates).toEqual([]);
+    expect(result.winner).toBeUndefined();
+    expect(result.fallbackReason).toMatch(/^baseline capture failed: /);
+    expect(runWorker).not.toHaveBeenCalled();
+  });
+
   it('bails out with a fallback reason when fewer than two candidates are given', async () => {
     const { runWorkerFanout } = await import('./workerFanout.js');
     const result = await runWorkerFanout({
@@ -87,17 +112,19 @@ describe('runWorkerFanout early bail-outs', () => {
   });
 
   it('reports no-eligible-candidate when every candidate errors out during sandbox setup', async () => {
-    // A projectPath that is not a git repository fails `git add -A` (baseline
-    // capture, swallowed to '') AND `git clone` (per-candidate sandbox setup,
-    // caught inside runCandidate) — exercising both fallback paths at once.
-    const notARepo = await mkdtemp(path.join(tmpdir(), 'osw-fanout-not-a-repo-'));
-    cleanupDirs.push(notARepo);
-    await writeFile(path.join(notARepo, 'README.md'), 'no git here\n', 'utf8');
-
     const { runWorkerFanout } = await import('./workerFanout.js');
+    // Sandbox setup is made to fail by pointing cloneSandbox at a directory
+    // that does not exist (per-candidate `git clone` errors are caught inside
+    // runCandidate), while baseline capture still runs against a real repo.
+    const repo = await mkdtemp(path.join(tmpdir(), 'osw-fanout-sandbox-'));
+    cleanupDirs.push(repo);
+    initRepo(repo);
+    await writeFile(path.join(repo, 'README.md'), 'clean\n', 'utf8');
+    const ghostBase = path.join(tmpdir(), `osw-fanout-ghost-${Date.now()}`);
+
     const result = await runWorkerFanout({
-      projectPath: notARepo,
-      baseWorkerOptions: { ...baseWorkerOptions, projectPath: notARepo },
+      projectPath: repo,
+      baseWorkerOptions: { ...baseWorkerOptions, projectPath: ghostBase },
       candidates: [
         { id: 'primary', adapter: 'codex-responses', model: 'gpt-5.4-mini' },
         { id: 'spark', adapter: 'codex-responses', model: 'gpt-5.3-codex-spark' },
@@ -113,8 +140,10 @@ describe('runWorkerFanout early bail-outs', () => {
       expect(candidate.error).toBeTruthy();
       expect(candidate.result.success).toBe(false);
     }
-    // The worker itself is never reached — sandbox setup fails first.
-    expect(runWorker).not.toHaveBeenCalled();
+    // The worker itself IS reached — sandbox clone succeeds against the real
+    // repo; it is the runWorker call (with the ghost projectPath) that fails
+    // inside the worker. That is still the candidate-error fallback path.
+    expect(runWorker).toHaveBeenCalledTimes(2);
   });
 
   it('settles a candidate that throws synchronously before its own try/catch as a pool error', async () => {

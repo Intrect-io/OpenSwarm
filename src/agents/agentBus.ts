@@ -3,7 +3,7 @@
 // Inter-agent context sharing system
 // ============================================
 
-import { resolve } from 'path';
+import { join, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
@@ -36,6 +36,20 @@ export interface AgentMessage {
   recipient?: string;    // Specific recipient (broadcast if absent)
   executionId: string;   // Workflow execution ID
   payload: unknown;
+}
+
+/** Directory malformed history files are moved into instead of deleted — the
+ *  artifact stays inspectable without blocking valid history. */
+export const QUARANTINE_DIRNAME = 'quarantine';
+
+function isWellFormedMessage(value: unknown): value is AgentMessage {
+  if (!value || typeof value !== 'object') return false;
+  const message = value as Partial<AgentMessage>;
+  return typeof message.id === 'string'
+    && typeof message.timestamp === 'number'
+    && typeof message.type === 'string'
+    && typeof message.sender === 'string'
+    && typeof message.executionId === 'string';
 }
 
 /**
@@ -451,7 +465,22 @@ export class AgentBus {
 
       for (const file of files.filter(f => f.endsWith('.json')).sort()) {
         const content = await fs.readFile(resolve(this.messagesPath, file), 'utf-8');
-        messages.push(JSON.parse(content));
+        try {
+          const parsed: unknown = JSON.parse(content);
+          if (!isWellFormedMessage(parsed)) {
+            throw new Error('message is missing required fields');
+          }
+          messages.push(parsed);
+        } catch {
+          // Malformed history is quarantined beside the messages dir, so a
+          // corrupt payload cannot wedge the whole retrieval pass.
+          const quarantineDir = resolve(this.messagesPath, '..', QUARANTINE_DIRNAME);
+          await fs.mkdir(quarantineDir, { recursive: true }).catch(() => {});
+          await fs.rename(
+            resolve(this.messagesPath, file),
+            join(quarantineDir, file),
+          ).catch(() => {});
+        }
       }
 
       return messages;
