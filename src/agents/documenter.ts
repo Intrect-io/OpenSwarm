@@ -139,13 +139,24 @@ export async function runDocumenter(options: DocumenterOptions): Promise<Documen
 /**
  * Parse Documenter output
  */
-function parseDocumenterOutput(output: string): DocumenterResult {
+export function parseDocumenterOutput(output: string): DocumenterResult {
   try {
     const costInfo = extractCostFromStreamJson(output);
     if (costInfo) {
       console.log(`[Documenter] Cost: ${formatCost(costInfo)}`);
     }
 
+    if (typeof output !== 'string') {
+      // A non-string payload is a transport-level defect, not documentation —
+      // parse only string outputs so downstream JSON assumptions hold. (AGT-3487)
+      return {
+        success: false,
+        updatedFiles: [],
+        apiDocsUpdated: false,
+        summary: 'Documenter output was not a string',
+        error: `expected string output, got ${typeof output}`,
+      };
+    }
     // Extract result entry from NDJSON
     let resultText = '';
     for (const line of output.split('\n')) {
