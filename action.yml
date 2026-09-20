@@ -219,8 +219,10 @@ runs:
         if [ -n "${REVIEW_MODEL:-}" ]; then ARGS+=(--model "$REVIEW_MODEL"); fi
         if [ "${READ_ONLY:-true}" = "true" ]; then ARGS+=(--read-only); fi
 
-        # stdout is the JSON document; diagnostics go to stderr and stay on the
-        # job log.
+        # The CLI's JSON contract puts diagnostics on stderr. A dependency can
+        # still emit a late stdout diagnostic from a background task, so parse
+        # the one review document into a clean runner-temp file before trusting
+        # it for outputs or the exit contract below.
         set +e
         openswarm "${ARGS[@]}" > "$REVIEW_JSON"
         STATUS=$?
@@ -228,9 +230,30 @@ runs:
 
         DECISION=""
         GATE_RAN="false"
-        if [ -s "$REVIEW_JSON" ]; then
-          DECISION=$(REVIEW_JSON="$REVIEW_JSON" node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON,"utf8")).decision??""))}catch{}')
-          GATE_RAN=$(REVIEW_JSON="$REVIEW_JSON" node -e 'try{process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON,"utf8")).gateRan??false))}catch{process.stdout.write("false")}')
+        PARSED_REVIEW_JSON="$RUNNER_TEMP/openswarm-review-parsed.json"
+        if [ -s "$REVIEW_JSON" ] && REVIEW_JSON="$REVIEW_JSON" PARSED_REVIEW_JSON="$PARSED_REVIEW_JSON" node -e '
+          const fs = require("fs");
+          const raw = fs.readFileSync(process.env.REVIEW_JSON, "utf8");
+          let review;
+          try { review = JSON.parse(raw); } catch {
+            // A review document is emitted at the start of a line. Keep the
+            // first complete JSON document with the required gate fields,
+            // rather than treating a diagnostic prefix as a successful pass.
+            for (const match of raw.matchAll(/^[ \t]*\{/gm)) {
+              try {
+                const candidate = JSON.parse(raw.slice(match.index));
+                if (typeof candidate?.gateRan === "boolean") { review = candidate; break; }
+              } catch {}
+            }
+          }
+          if (!review || typeof review.gateRan !== "boolean") process.exit(1);
+          fs.writeFileSync(process.env.PARSED_REVIEW_JSON, JSON.stringify(review));
+        '; then
+          REVIEW_JSON="$PARSED_REVIEW_JSON"
+          DECISION=$(REVIEW_JSON="$REVIEW_JSON" node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON,"utf8")).decision??""))')
+          GATE_RAN=$(REVIEW_JSON="$REVIEW_JSON" node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.env.REVIEW_JSON,"utf8")).gateRan))')
+        elif [ -s "$REVIEW_JSON" ]; then
+          echo "::warning::OpenSwarm produced output but no parseable review document"
         fi
 
         echo "decision=$DECISION" >> "$GITHUB_OUTPUT"
@@ -278,7 +301,7 @@ runs:
         # an unknown option, a crash, output that is not the JSON document — is
         # a gate that did not run, and calling that a reject both misreports the
         # change and hides the real failure.
-        if [ "$STATUS" != "0" ] && [ "$GATE_RAN" != "true" ]; then
+        if [ "$GATE_RAN" != "true" ]; then
           echo "::error::OpenSwarm exited $STATUS without producing a verdict — the gate did not run"
           if [ "$FAIL_ON_GATE_NOT_RUN" = "true" ]; then exit 2; fi
           exit 0
