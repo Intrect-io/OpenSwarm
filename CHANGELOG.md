@@ -6,6 +6,16 @@
 
 - **Human `/plan` respects `maxChildrenPerTask` but not `dailyLimit` (AGT-4123).** `POST /api/plan/dispatch` now refuses with `decomposition_child_cap` when an approved plan would leave more children than `autonomous.decomposition.maxChildrenPerTask` on the new parent (sharing `refuseForChildCap` with the autonomous path). The automation-pacing `dailyLimit` / `reserveDailyCreations` budget remains runner-only — an explicitly confirmed plan is not refused because the daemon already spent today's slots.
 
+## 0.24.2 — 2026-09-20
+
+### Fixed
+
+- **Reviewer salvage now preserves a real verdict (AGT-4484).** When a reviewer
+  exhausts its tool turns, the final no-tools turn explicitly requires
+  `Decision: approve`, `Decision: revise`, or `Decision: reject` with concrete
+  reasoning instead of returning a worker-status summary that the reviewer
+  parser must discard.
+
 ## 0.24.1 — 2026-09-20
 
 ### Added
