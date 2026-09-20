@@ -164,6 +164,13 @@ export async function handleCheck(
       console.log(`  Tests mapped:   ${c.cyan(String(result.testsMapped))}`);
       console.log(`  Duration:       ${c.dim(`${result.durationMs}ms`)}`);
 
+      if (result.incomplete) {
+        console.log(`\n  ${c.yellow('Incomplete coverage — the scan was truncated:')}`);
+        for (const reason of result.incompleteReasons) {
+          console.log(`    ${c.yellow(reason)}`);
+        }
+      }
+
       if (Object.keys(result.languageBreakdown).length > 0) {
         console.log(`\n  ${c.dim('By language:')}`);
         for (const [lang, count] of Object.entries(result.languageBreakdown).sort((a, b) => b[1] - a[1])) {
@@ -211,6 +218,13 @@ export async function handleCheck(
       console.log(`  CRITICAL:      ${(result.critical > 0 ? c.red : c.green)(String(result.critical))}`);
       console.log(`  WARNING:       ${(result.warning > 0 ? c.yellow : c.green)(String(result.warning))}`);
       console.log(`  MINOR:         ${(result.minor > 0 ? c.dim : c.green)(String(result.minor))}`);
+
+      if (result.incomplete) {
+        console.log(`  ${c.yellow('INCOMPLETE — the scan was truncated:')}`);
+        for (const reason of result.incompleteReasons.slice(0, 5)) {
+          console.log(`    ${c.dim(reason)}`);
+        }
+      }
 
       if (result.issues.length > 0) {
         // CRITICAL 먼저
