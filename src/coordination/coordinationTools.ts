@@ -164,7 +164,14 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
       description: 'Page the operator on Discord ONLY for a true operator decision: secret/credential value, production access, irreversible external action, or product/policy choice a human must own. Do NOT use this for Definition-of-Done scope, acceptance criteria, missing files you have not searched, flaky tests, or implementation approach — those are agent-owned: revise the work, publish a coordination note to the draft/orchestrator peer, or report a concrete blocker with evidence. Returns a correlation ID; the operator answers later, so stop this run after calling. Before calling, prove WHY with ls -la / readlink -f, command -v, and KEY NAMES ONLY from .env (never values).',
       parameters: {
         type: 'object',
-        properties: { question: { type: 'string' } },
+        properties: {
+          question: { type: 'string' },
+          class: {
+            type: 'string',
+            enum: ['clarification', 'approval'],
+            description: "What kind of decision this is. 'clarification' = an informational question an automated responder may answer; 'approval' = a decision only a human may own (credentials, spend, production access, irreversible external action). Omit only when it is approval: anything that is not exactly 'clarification' is treated as human-only.",
+          },
+        },
         required: ['question'],
       },
     },
@@ -416,6 +423,10 @@ export async function executeCoordinationTool(
       actorName: context.actorName,
       actorRole: context.actorRole,
       question: args.question,
+      // `args` is unvalidated model output, so this is a narrowing, not a cast:
+      // anything but the two known values is dropped, and `resolveQuestionClass`
+      // then reads the omission as `approval`.
+      questionClass: args.class === 'clarification' || args.class === 'approval' ? args.class : undefined,
       notify: context.notifyOperator,
     });
     // A question the operator already answered is returned rather than asked
