@@ -334,6 +334,20 @@ describe('coordination tools', () => {
     expect(getCoordinationStore().exchange(correlationId)[0].metadata?.questionClass).toBe('clarification');
     expect((await h.answerHumanQuestion(correlationId, 'staging-dsn', 'hermes-connector')).accepted).toBe(true);
   });
+
+  // AGT-4516: an advisor answer reaches the agent marked as automated advice.
+  it('marks an advisor answer as automated when ask_human returns it', async () => {
+    const mod = await tools();
+    const h = await import('./humanQuestions.js');
+    const context = { repository: '/repo', taskId: 't-adv', actor: 'magos-test', notifyOperator: async () => true };
+    const args = { question: 'Which test runner?', class: 'clarification' };
+    const first = JSON.parse((await mod.executeCoordinationTool('ask_human', args, context)).content);
+    expect((await h.answerHumanQuestion(first.correlationId, 'vitest', 'advisor:hermes', 'advisor')).accepted).toBe(true);
+
+    const again = JSON.parse((await mod.executeCoordinationTool('ask_human', args, context)).content);
+    expect(again).toMatchObject({ blocked: false, answer: 'vitest', answeredBy: 'advisor:hermes' });
+    expect(again.note).toContain('not a human');
+  });
 });
 
 // An agent that waited for a reply used to be killed for waiting: three checks

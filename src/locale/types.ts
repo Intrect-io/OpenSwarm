@@ -315,6 +315,7 @@ export interface LocaleMessages {
       operatorPaged: string;
       humanAnswered: string;
       supervisorAnswered: string;
+      advisorAnswered: string;
       siblingAnswered: string;
     };
     periodicReview: {

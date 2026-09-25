@@ -14,6 +14,14 @@ import { getCoordinationStore, type CoordinationEvent } from './coordinationStor
 import { t } from '../locale/index.js';
 import { answerHint } from './answerHint.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import {
+  HERMES_ADVISOR_ACTOR,
+  consultHermesAdvisor,
+  formatAdvisorAnswer,
+  isHermesAdvisorEnabled,
+  type AdvisorQuestion,
+  type AdvisorVerdict,
+} from './hermesAdvisor.js';
 
 export interface HumanQuestionInput {
   repository: string;
@@ -36,6 +44,12 @@ export interface HumanQuestionInput {
   questionClass?: HumanQuestionClass;
   /** Overridable for tests; defaults to the configured Discord channel. */
   notify?: (message: string) => Promise<boolean>;
+  /**
+   * Automated advisor consulted on `clarification` questions before the
+   * operator is paged (AGT-4516). Overridable for tests; defaults to the Hermes
+   * bridge when `OPENSWARM_HERMES_ADVISOR=1`, otherwise no advisor.
+   */
+  advisor?: (question: AdvisorQuestion) => Promise<AdvisorVerdict>;
 }
 
 /**
@@ -78,10 +92,27 @@ export function resolveQuestionClass(value: unknown): HumanQuestionClass {
  * (`orchestratorTrackerTools.ts`), which answers with the authority the
  * operator delegated to it. (AGT-4514)
  */
-function isHumanSurfaceActor(actor: string, actorRole: 'human' | 'orchestrator'): boolean {
+function isHumanSurfaceActor(actor: string, actorRole: AnswerActorRole): boolean {
+  // `advisor` is a declaration of automation and wins over any actor name, so
+  // an advisor bridge cannot inherit a human surface's authority by reusing
+  // its identifier.
+  if (actorRole === 'advisor') return false;
   return actorRole === 'orchestrator'
     || actor.startsWith('discord:')
     || actor === 'operator-dashboard';
+}
+
+/**
+ * Who is answering. `advisor` is a clearly non-human automated responder
+ * (e.g. the Hermes advisor bridge): it may answer `clarification` questions
+ * only, and its answer is never labelled as a human's.
+ */
+export type AnswerActorRole = 'human' | 'orchestrator' | 'advisor';
+
+function answerSummaryKey(actorRole: AnswerActorRole) {
+  if (actorRole === 'human') return 'coordination.humanQuestion.humanAnswered' as const;
+  if (actorRole === 'advisor') return 'coordination.humanQuestion.advisorAnswered' as const;
+  return 'coordination.humanQuestion.supervisorAnswered' as const;
 }
 
 export function humanQuestionCorrelation(
@@ -113,8 +144,10 @@ export interface HumanQuestionPost {
   correlationId: string;
   /** False when Discord is unconfigured or unreachable — the board still has it. */
   delivered: boolean;
-  /** Set when the operator already answered this exact question. */
+  /** Set when the operator — or, for a clarification, the advisor — already answered. */
   answer?: string;
+  /** Board actor that supplied `answer` when it was the automated advisor. */
+  answeredBy?: string;
   /**
    * How many open (unanswered) questions this task has asked, this one
    * included. 1 on a first ask; higher when a re-dispatch rephrased the same
@@ -148,7 +181,13 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
 
   const answered = prior.find((event) => event.kind === 'human-answer' && event.status === 'completed');
   if (answered) {
-    return { correlationId, delivered: true, answer: answered.detail ?? answered.summary, openAskCount: 0 };
+    return {
+      correlationId,
+      delivered: true,
+      answer: answered.detail ?? answered.summary,
+      ...(answered.actorRole === 'advisor' ? { answeredBy: answered.actor } : {}),
+      openAskCount: 0,
+    };
   }
 
   const alreadyWaiting = prior.some((event) => event.kind === 'human-question' && event.status === 'waiting');
@@ -168,6 +207,13 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
       summary: input.question,
       metadata: { questionClass },
     });
+
+    // First ask only: a retry of a question the advisor already declined goes
+    // straight to the operator path instead of paying for the same refusal.
+    const advised = questionClass === 'clarification'
+      ? await consultAdvisor(input, correlationId)
+      : undefined;
+    if (advised) return advised;
   }
 
   // Task-scoped, not question-scoped. A re-dispatched task is a fresh worker
@@ -240,11 +286,40 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
   return { correlationId, delivered, openAskCount };
 }
 
+function resolveAdvisor(input: HumanQuestionInput): HumanQuestionInput['advisor'] {
+  if (input.advisor) return input.advisor;
+  return isHermesAdvisorEnabled() ? (question) => consultHermesAdvisor(question) : undefined;
+}
+
+/**
+ * Let the automated advisor answer a clarification question. Returns the post
+ * result when it did; `undefined` sends the caller on to page the operator —
+ * on a decline, on any advisor failure, and when the answer gate refuses it.
+ */
+async function consultAdvisor(input: HumanQuestionInput, correlationId: string): Promise<HumanQuestionPost | undefined> {
+  const advisor = resolveAdvisor(input);
+  if (!advisor) return undefined;
+  const verdict = await advisor({ repository: input.repository, taskLabel: input.taskLabel, question: input.question });
+  const origin = [verdict.provenance?.model, verdict.provenance?.sessionId].filter(Boolean).join(' ');
+  if (verdict.status !== 'answered' || !verdict.answer) {
+    console.log(`[Coordination] advisor ${verdict.status} on ${correlationId}${origin ? ` (${origin})` : ''}: ${verdict.reason ?? ''} — paging operator`);
+    return undefined;
+  }
+  const answer = formatAdvisorAnswer(verdict);
+  const result = await answerHumanQuestion(correlationId, answer, HERMES_ADVISOR_ACTOR, 'advisor');
+  if (!result.accepted) {
+    console.warn(`[Coordination] advisor answer refused on ${correlationId}: ${result.reason ?? ''} — paging operator`);
+    return undefined;
+  }
+  console.log(`[Coordination] advisor answered ${correlationId}${origin ? ` (${origin})` : ''}`);
+  return { correlationId, delivered: true, answer, answeredBy: HERMES_ADVISOR_ACTOR, openAskCount: 0 };
+}
+
 export async function answerHumanQuestion(
   correlationId: string,
   answer: string,
   actor: string,
-  actorRole: 'human' | 'orchestrator' = 'human',
+  actorRole: AnswerActorRole = 'human',
 ): Promise<{ accepted: boolean; event?: CoordinationEvent; reason?: string }> {
   const store = getCoordinationStore();
   // findQuestion scans the whole retained board, not a recency window: on a
@@ -286,9 +361,7 @@ export async function answerHumanQuestion(
     kind: 'human-answer',
     status: 'completed',
     correlationId,
-    summary: t(actorRole === 'human'
-      ? 'coordination.humanQuestion.humanAnswered'
-      : 'coordination.humanQuestion.supervisorAnswered'),
+    summary: t(answerSummaryKey(actorRole)),
     detail: answer,
     metadata: { answerSetId: correlationId },
   });
@@ -303,9 +376,18 @@ export async function answerHumanQuestion(
   // out of the board's own retention window would otherwise leave it
   // permanently unanswered in the trace, and `allQuestionsAnswered` would
   // never see that task as answered again.
+  //
+  // An automated responder settles only siblings it could have answered
+  // directly — otherwise answering one clarification would close an approval
+  // question of the same task and walk around the class gate above. The class
+  // is re-read from the sibling's own `waiting` event: the open-set entry can
+  // be the operator-paged marker, which carries no metadata.
+  const automated = !isHumanSurfaceActor(actor, actorRole);
   const siblings = store
     .openQuestions(question.repository, question.taskId)
-    .filter((e) => e.correlationId !== correlationId);
+    .filter((e) => e.correlationId !== correlationId)
+    .filter((e) => !automated
+      || resolveQuestionClass(store.findQuestion(e.correlationId)?.metadata?.questionClass) === 'clarification');
   const seenSiblingIds = new Set<string>();
   for (const sibling of siblings) {
     if (seenSiblingIds.has(sibling.correlationId)) continue;

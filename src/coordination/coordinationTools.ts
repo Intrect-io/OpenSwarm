@@ -433,7 +433,17 @@ export async function executeCoordinationTool(
     // again, so a retry of the same task does not page them twice.
     if (posted.answer !== undefined) {
       return {
-        content: JSON.stringify({ blocked: false, correlationId: posted.correlationId, answer: posted.answer }),
+        content: JSON.stringify({
+          blocked: false,
+          correlationId: posted.correlationId,
+          answer: posted.answer,
+          // Automated advice is advice: the agent must not report it as an
+          // operator decision (AGT-4516).
+          ...(posted.answeredBy ? {
+            answeredBy: posted.answeredBy,
+            note: 'Answered by an automated advisor, not a human. Verify it against the repository; it grants no approval.',
+          } : {}),
+        }),
         isError: false,
       };
     }

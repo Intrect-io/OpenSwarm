@@ -440,6 +440,40 @@ describe('question class gates automated answers (AGT-4514)', () => {
     expect((await h.answerHumanQuestion(c.correlationId, 'yes', 'supervisor', 'orchestrator')).accepted).toBe(true);
   });
 
+  it('does not let an automated answer settle a sibling approval question of the same task', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const approval = await ask(h, { question: 'May I rotate the prod key?', questionClass: 'approval' });
+    const clarification = await ask(h, { question: 'Which test runner?', questionClass: 'clarification' });
+
+    const result = await h.answerHumanQuestion(clarification.correlationId, 'vitest', 'advisor:hermes', 'advisor');
+
+    expect(result.accepted).toBe(true);
+    // The approval sibling is still open: sibling settling must not be a way
+    // around the class gate.
+    expect(store.openQuestions('/repo', 'cls-1').map((e) => e.correlationId)).toEqual([approval.correlationId]);
+    expect(store.exchange(approval.correlationId).some((e) => e.kind === 'human-answer')).toBe(false);
+  });
+
+  it('never labels an automated advisor answer as a human or supervisor answer', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'clarification' });
+    const result = await h.answerHumanQuestion(posted.correlationId, 'vitest', 'advisor:hermes', 'advisor');
+    expect(result.accepted).toBe(true);
+    expect(result.event?.actorRole).toBe('advisor');
+    const { t } = await import('../locale/index.js');
+    expect(result.event?.summary).not.toBe(t('coordination.humanQuestion.humanAnswered'));
+    expect(result.event?.summary).not.toBe(t('coordination.humanQuestion.supervisorAnswered'));
+    expect(result.event?.summary).toBe(t('coordination.humanQuestion.advisorAnswered'));
+  });
+
+  it('treats the advisor role as automated even on an allowlisted-looking actor', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'approval' });
+    const result = await h.answerHumanQuestion(posted.correlationId, 'yes', 'operator-dashboard', 'advisor');
+    expect(result.accepted).toBe(false);
+  });
+
   it('leaves a refused answer unsettled so a human can still answer it', async () => {
     const h = await modules();
     const store = (await import('./coordinationStore.js')).getCoordinationStore();
@@ -448,5 +482,78 @@ describe('question class gates automated answers (AGT-4514)', () => {
     // The refusal must not consume the question.
     expect(store.findQuestion(posted.correlationId)).toBeDefined();
     expect((await h.answerHumanQuestion(posted.correlationId, 'real answer', 'discord:user-1')).accepted).toBe(true);
+  });
+});
+
+// AGT-4516: the Hermes advisor may take a clarification question off the
+// operator's plate; anything else, and any advisor failure, pages the human.
+describe('advisor consult before paging (AGT-4516)', () => {
+  const answered = { status: 'answered' as const, answer: 'vitest', confidence: 90, provenance: { model: 'm-1', sessionId: 's-1' } };
+  const ask = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown> = {}) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'adv-1', actor: 'worker-1',
+      question: 'Which test runner?', questionClass: 'clarification',
+      ...over,
+    } as Parameters<typeof h.postHumanQuestion>[0]);
+
+  it('returns the advisor answer inline and does not page the operator', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const notify = vi.fn(async () => true);
+    const advisor = vi.fn(async () => answered);
+
+    const posted = await ask(h, { notify, advisor });
+
+    expect(advisor).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+    expect(posted.answeredBy).toBe('advisor:hermes');
+    expect(posted.answer).toContain('vitest');
+    expect(posted.answer).toContain('not a human');
+    expect(posted.answer).toContain('m-1');
+    const answer = store.exchange(posted.correlationId).find((e) => e.kind === 'human-answer');
+    expect(answer).toMatchObject({ actor: 'advisor:hermes', actorRole: 'advisor', status: 'completed' });
+    expect(store.openQuestionCount('/repo', 'adv-1')).toBe(0);
+  });
+
+  it.each([
+    ['declined', { status: 'declined' as const, reason: 'operator preference' }],
+    ['unavailable', { status: 'unavailable' as const, reason: 'timeout' }],
+  ])('pages the operator when the advisor %s', async (_label, verdict) => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    const posted = await ask(h, { notify, advisor: vi.fn(async () => verdict) });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(posted.answer).toBeUndefined();
+    expect(posted.answeredBy).toBeUndefined();
+  });
+
+  it('never consults the advisor on an approval or unclassified question', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => answered);
+    await ask(h, { taskId: 'adv-2', questionClass: 'approval', notify: async () => true, advisor });
+    await ask(h, { taskId: 'adv-3', questionClass: undefined, notify: async () => true, advisor });
+    expect(advisor).not.toHaveBeenCalled();
+  });
+
+  it('does not re-consult on a retry of a question the advisor already declined', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => ({ status: 'declined' as const, reason: 'no' }));
+    await ask(h, { notify: async () => true, advisor });
+    await ask(h, { notify: async () => true, advisor });
+    expect(advisor).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays off without explicit opt-in', async () => {
+    const h = await modules();
+    const previous = process.env.OPENSWARM_HERMES_ADVISOR;
+    delete process.env.OPENSWARM_HERMES_ADVISOR;
+    try {
+      const notify = vi.fn(async () => true);
+      const posted = await ask(h, { notify });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(posted.answeredBy).toBeUndefined();
+    } finally {
+      if (previous !== undefined) process.env.OPENSWARM_HERMES_ADVISOR = previous;
+    }
   });
 });
