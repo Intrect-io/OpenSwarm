@@ -557,3 +557,70 @@ describe('advisor consult before paging (AGT-4516)', () => {
     }
   });
 });
+
+// Independent review of the AGT-4516 bridge found these paths around the gate.
+describe('advisor answers stay advice (AGT-4516 review)', () => {
+  const answered = { status: 'answered' as const, answer: 'vitest', confidence: 90, provenance: { model: 'm-1' } };
+  const post = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown>) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'rv-1', actor: 'worker-1', question: 'Which test runner?',
+      notify: async () => true, ...over,
+    } as Parameters<typeof h.postHumanQuestion>[0]);
+
+  it('keeps advisor answers out of the authoritative operator feedback', async () => {
+    const h = await modules();
+    const { loadAuthoritativeOperatorFeedback } = await import('./operatorGuidance.js');
+    await post(h, { questionClass: 'clarification', advisor: async () => answered });
+    expect(loadAuthoritativeOperatorFeedback('rv-1')).toBeUndefined();
+
+    const human = await post(h, { question: 'Ship it?', questionClass: 'approval' });
+    await h.answerHumanQuestion(human.correlationId, 'yes, ship', 'discord:op');
+    const feedback = loadAuthoritativeOperatorFeedback('rv-1') ?? '';
+    expect(feedback).toContain('yes, ship');
+    expect(feedback).not.toContain('vitest');
+  });
+
+  it('does not hand an advisor answer to the same text asked as approval', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => answered);
+    await post(h, { questionClass: 'clarification', advisor });
+    const asApproval = await post(h, { questionClass: 'approval', advisor });
+    expect(asApproval.answer).toBeUndefined();
+    expect(asApproval.answeredBy).toBeUndefined();
+    expect(advisor).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps legacy approval correlation ids stable', async () => {
+    const h = await modules();
+    const legacy = h.humanQuestionCorrelation({ repository: '/repo', taskId: 't', question: 'q' });
+    expect(h.humanQuestionCorrelation({ repository: '/repo', taskId: 't', question: 'q', questionClass: 'approval' })).toBe(legacy);
+    expect(h.humanQuestionCorrelation({ repository: '/repo', taskId: 't', question: 'q', questionClass: 'clarification' })).not.toBe(legacy);
+  });
+
+  it('returns the existing answer instead of paging when the question was answered during the consult', async () => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    const advisor = vi.fn(async () => {
+      // The operator answers on the dashboard while Hermes is still thinking.
+      const q = (await import('./coordinationStore.js')).getCoordinationStore()
+        .openQuestions('/repo', 'rv-1')[0];
+      await h.answerHumanQuestion(q.correlationId, 'use jest', 'operator-dashboard');
+      return answered;
+    });
+    const posted = await post(h, { questionClass: 'clarification', advisor, notify });
+    expect(notify).not.toHaveBeenCalled();
+    expect(posted.answer).toBe('use jest');
+    expect(posted.answeredBy).toBeUndefined();
+  });
+
+  it('settles no sibling question, clarification or not, on an automated answer', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const paged = await post(h, { question: 'Which runner (v1)?', questionClass: 'clarification', advisor: async () => ({ status: 'declined' as const }) });
+    const reworded = await post(h, { question: 'Which runner (v2)?', questionClass: 'clarification', advisor: async () => answered });
+    expect(reworded.answeredBy).toBe('advisor:hermes');
+    expect(store.openQuestions('/repo', 'rv-1').map((e) => e.correlationId)).toEqual([paged.correlationId]);
+    // The operator can still answer the question they were paged about.
+    expect((await h.answerHumanQuestion(paged.correlationId, 'vitest', 'discord:op')).accepted).toBe(true);
+  });
+});

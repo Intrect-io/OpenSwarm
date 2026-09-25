@@ -110,3 +110,38 @@ describe('consultHermesAdvisor', () => {
     expect(verdict.answer).toBeUndefined();
   });
 });
+
+describe('advisorEnvironment', () => {
+  it('passes only what a CLI needs, never OpenSwarm credentials', async () => {
+    const { advisorEnvironment } = await import('./hermesAdvisor.js');
+    const env = advisorEnvironment({
+      PATH: '/bin', HOME: '/h', LC_ALL: 'C', HERMES_HOME: '/hh',
+      OLLAMA_API_KEY: 'k', OPENROUTER_API_KEY: 'k', LINEAR_API_KEY: 'k', GITHUB_TOKEN: 't',
+    });
+    expect(env).toEqual({ PATH: '/bin', HOME: '/h', LC_ALL: 'C', HERMES_HOME: '/hh' });
+  });
+});
+
+describe('runHermesProcess', () => {
+  it('returns on timeout even when a grandchild keeps stdout open', async () => {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { runHermesProcess } = await import('./hermesAdvisor.js');
+    const dir = mkdtempSync(join(tmpdir(), 'hermes-fake-'));
+    const bin = join(dir, 'fake-hermes');
+    // The backgrounded sleep inherits stdout; killing only the direct child
+    // would leave the pipe open and the promise pending forever.
+    writeFileSync(bin, '#!/bin/sh\nsleep 30 &\necho started\nsleep 30\n');
+    chmodSync(bin, 0o755);
+    try {
+      const started = Date.now();
+      const run = await runHermesProcess([], { timeoutMs: 1_500, bin });
+      expect(run.timedOut).toBe(true);
+      expect(run.stdout).toContain('started');
+      expect(Date.now() - started).toBeLessThan(6_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+});

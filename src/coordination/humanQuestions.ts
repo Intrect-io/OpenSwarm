@@ -116,9 +116,15 @@ function answerSummaryKey(actorRole: AnswerActorRole) {
 }
 
 export function humanQuestionCorrelation(
-  input: Pick<HumanQuestionInput, 'repository' | 'taskId' | 'question'>,
+  input: Pick<HumanQuestionInput, 'repository' | 'taskId' | 'question' | 'questionClass'>,
 ): string {
-  return `hq-${createHash('sha256').update(`${input.repository}\0${input.taskId}\0${input.question}`).digest('hex').slice(0, 16)}`;
+  // The class is part of the identity only for `clarification`, so every id
+  // minted before classes existed — all of them read as approval — is
+  // unchanged. Without it, the same text asked once as clarification (and
+  // answered by the advisor) and again as approval would share one exchange,
+  // and the approval ask would be handed the machine's answer (AGT-4516).
+  const classPart = resolveQuestionClass(input.questionClass) === 'clarification' ? '\0clarification' : '';
+  return `hq-${createHash('sha256').update(`${input.repository}\0${input.taskId}\0${input.question}${classPart}`).digest('hex').slice(0, 16)}`;
 }
 
 /**
@@ -308,6 +314,20 @@ async function consultAdvisor(input: HumanQuestionInput, correlationId: string):
   const answer = formatAdvisorAnswer(verdict);
   const result = await answerHumanQuestion(correlationId, answer, HERMES_ADVISOR_ACTOR, 'advisor');
   if (!result.accepted) {
+    // The consult can take minutes; someone may have answered meanwhile (the
+    // operator on the dashboard, or a concurrent ask of the same question).
+    // That answer is the one to return — paging for it would be a stale page.
+    const existing = getCoordinationStore().exchange(correlationId)
+      .find((event) => event.kind === 'human-answer' && event.status === 'completed');
+    if (existing) {
+      return {
+        correlationId,
+        delivered: true,
+        answer: existing.detail ?? existing.summary,
+        ...(existing.actorRole === 'advisor' ? { answeredBy: existing.actor } : {}),
+        openAskCount: 0,
+      };
+    }
     console.warn(`[Coordination] advisor answer refused on ${correlationId}: ${result.reason ?? ''} — paging operator`);
     return undefined;
   }
@@ -377,17 +397,15 @@ export async function answerHumanQuestion(
   // permanently unanswered in the trace, and `allQuestionsAnswered` would
   // never see that task as answered again.
   //
-  // An automated responder settles only siblings it could have answered
-  // directly — otherwise answering one clarification would close an approval
-  // question of the same task and walk around the class gate above. The class
-  // is re-read from the sibling's own `waiting` event: the open-set entry can
-  // be the operator-paged marker, which carries no metadata.
+  // Only a human surface settles siblings. An automated answer was written
+  // for one exact question: settling an approval sibling would walk around
+  // the class gate above, and settling a clarification sibling the operator
+  // was already paged about would refuse the operator's own reply to it as
+  // "already completed" (AGT-4516).
   const automated = !isHumanSurfaceActor(actor, actorRole);
-  const siblings = store
+  const siblings = automated ? [] : store
     .openQuestions(question.repository, question.taskId)
-    .filter((e) => e.correlationId !== correlationId)
-    .filter((e) => !automated
-      || resolveQuestionClass(store.findQuestion(e.correlationId)?.metadata?.questionClass) === 'clarification');
+    .filter((e) => e.correlationId !== correlationId);
   const seenSiblingIds = new Set<string>();
   for (const sibling of siblings) {
     if (seenSiblingIds.has(sibling.correlationId)) continue;

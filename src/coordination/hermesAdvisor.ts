@@ -165,14 +165,47 @@ export function parseAdvisorVerdict(text: string): AdvisorVerdictShape | undefin
   return { decision, answer: answer.trim(), confidence };
 }
 
-const defaultRunner: HermesRunner = (args, { timeoutMs, bin }) => new Promise((resolve, reject) => {
-  const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+/**
+ * Environment Hermes is started with. Hermes reads its own credentials from
+ * ~/.hermes; OpenSwarm's provider keys and tokens have no business in the
+ * advisor's process, so only what a CLI needs to run is passed through.
+ */
+export function advisorEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const passthrough = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'TERM', 'TZ'];
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (passthrough.includes(key) || key.startsWith('LC_') || key.startsWith('HERMES_')) out[key] = value;
+  }
+  return out;
+}
+
+/** After a kill, stop waiting for pipes a surviving descendant may hold open. */
+const POST_KILL_SETTLE_MS = 2_000;
+
+export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin }) => new Promise((resolve, reject) => {
+  // Own process group, so a timeout kills Hermes and anything it started.
+  const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: advisorEnvironment() });
   let stdout = '';
   let stderr = '';
   let timedOut = false;
+  let settled = false;
+  const finish = (exitCode: number | null) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    clearTimeout(settleTimer);
+    resolve({ exitCode, stdout, stderr, timedOut });
+  };
+  let settleTimer: NodeJS.Timeout | undefined;
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGKILL');
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+    } catch { // cxt-ignore: error_swallow — group already gone; fall back to the direct child
+      child.kill('SIGKILL');
+    }
+    settleTimer = setTimeout(() => finish(null), POST_KILL_SETTLE_MS);
   }, timeoutMs);
   child.stdout.on('data', (chunk: Buffer) => {
     if (stdout.length < MAX_STDOUT_BYTES) stdout += chunk.toString('utf8');
@@ -181,13 +214,13 @@ const defaultRunner: HermesRunner = (args, { timeoutMs, bin }) => new Promise((r
     if (stderr.length < 64_000) stderr += chunk.toString('utf8');
   });
   child.on('error', (error) => {
+    if (settled) return;
+    settled = true;
     clearTimeout(timer);
+    clearTimeout(settleTimer);
     reject(error);
   });
-  child.on('close', (code) => {
-    clearTimeout(timer);
-    resolve({ exitCode: code, stdout, stderr, timedOut });
-  });
+  child.on('close', (code) => finish(code));
 });
 
 export interface ConsultOptions {
@@ -200,7 +233,7 @@ export async function consultHermesAdvisor(
   input: AdvisorQuestion,
   options: ConsultOptions = {},
 ): Promise<AdvisorVerdict> {
-  const runner = options.runner ?? defaultRunner;
+  const runner = options.runner ?? runHermesProcess;
   const bin = options.bin ?? process.env.OPENSWARM_HERMES_BIN ?? 'hermes';
   const runBudgetSeconds = options.runBudgetSeconds ?? DEFAULT_RUN_BUDGET_SECONDS;
   let workDir: string | undefined;
