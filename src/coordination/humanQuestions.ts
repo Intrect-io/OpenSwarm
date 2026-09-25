@@ -29,8 +29,59 @@ export interface HumanQuestionInput {
   actorName?: string;
   actorRole?: string;
   question: string;
+  /**
+   * Which kind of question this is (AGT-4514). Absent is treated as
+   * `'approval'` everywhere it matters — see `resolveQuestionClass`.
+   */
+  questionClass?: HumanQuestionClass;
   /** Overridable for tests; defaults to the configured Discord channel. */
   notify?: (message: string) => Promise<boolean>;
+}
+
+/**
+ * Whether a question is one another machine may answer.
+ *
+ * `clarification` — informational; the answer is a fact the asker could not
+ * look up, and an automated responder may supply it.
+ *
+ * `approval` — the asker needs a human to own the decision (credentials,
+ * spend, production access, an irreversible external action). Nothing but a
+ * human may answer it.
+ *
+ * Agents supply this, so it is a *claim*, not proof: the answer-side gate in
+ * `answerHumanQuestion` is what makes the distinction load-bearing, and it
+ * fails closed in the direction that denies automation (AGT-4514).
+ */
+export type HumanQuestionClass = 'clarification' | 'approval';
+
+/**
+ * Resolve a question's class, failing closed.
+ *
+ * Anything that is not exactly `'clarification'` — absent, misspelled, a stale
+ * enum value from an older agent — is `'approval'`. Guessing in the other
+ * direction would let a caller that omits the field (every agent that existed
+ * before this field did) be answered by a machine.
+ */
+export function resolveQuestionClass(value: unknown): HumanQuestionClass {
+  return value === 'clarification' ? 'clarification' : 'approval';
+}
+
+/**
+ * Does this answer come from a surface the operator owns?
+ *
+ * Allowlisted rather than denylisted, so an unknown actor — a connector, a
+ * script, a future integration — is automated by default and has to be refused
+ * before it can answer anything a human must own. The three surfaces below are
+ * the ones that answer today: the dashboard route
+ * (`coordinationRoutes.ts`), the Discord reply path (`discordCore.ts`), and
+ * OpenSwarm's own supervisor
+ * (`orchestratorTrackerTools.ts`), which answers with the authority the
+ * operator delegated to it. (AGT-4514)
+ */
+function isHumanSurfaceActor(actor: string, actorRole: 'human' | 'orchestrator'): boolean {
+  return actorRole === 'orchestrator'
+    || actor.startsWith('discord:')
+    || actor === 'operator-dashboard';
 }
 
 export function humanQuestionCorrelation(
@@ -83,6 +134,7 @@ export interface HumanQuestionPost {
 export async function postHumanQuestion(input: HumanQuestionInput): Promise<HumanQuestionPost> {
   const store = getCoordinationStore();
   const correlationId = humanQuestionCorrelation(input);
+  const questionClass = resolveQuestionClass(input.questionClass);
   // The whole exchange, from the durable trace as well as the board: reading a
   // recency window would lose sight of this task's own answer once it has talked
   // enough, and it would ask again — spending an attempt to arrive back at the
@@ -114,6 +166,7 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
       status: 'waiting',
       correlationId,
       summary: input.question,
+      metadata: { questionClass },
     });
   }
 
@@ -200,6 +253,21 @@ export async function answerHumanQuestion(
   // not exist.
   const question = store.findQuestion(correlationId);
   if (!question) return { accepted: false, reason: 'No pending question with that correlation ID' };
+
+  // An automated responder may only answer a question classed `clarification`.
+  // The class comes from the asking agent, so it is a claim; this gate is what
+  // turns it into a boundary. Membership of the human surfaces is recognised by
+  // the actor itself, not by a caller-supplied role — an automated connector
+  // that omits the role, or claims `'human'`, is still treated as automated.
+  // Absent metadata fails closed: an event published before this field existed
+  // reads `approval` and refuses the machine (AGT-4514).
+  if (!isHumanSurfaceActor(actor, actorRole)
+    && resolveQuestionClass(question.metadata?.questionClass) !== 'clarification') {
+    return {
+      accepted: false,
+      reason: 'This question requires a human decision and cannot be answered by an automated responder',
+    };
+  }
   // Same reach as `findQuestion` above: a recency window here would stop seeing
   // the answer this question already has and let the operator answer it twice.
   const terminal = store.exchange(correlationId)

@@ -381,3 +381,72 @@ describe('the operator is told which issue is asking (AGT-4074)', () => {
     expect(latest.status).toBe('running');
   });
 });
+
+// AGT-4514: an automated responder must not be able to answer a question a
+// human has to own. The class is supplied by the asking agent, so it is a
+// claim; the answer-side gate is what makes it a boundary.
+describe('question class gates automated answers (AGT-4514)', () => {
+  const ask = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown> = {}) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'cls-1', actor: 'worker-1',
+      question: 'What is the staging DSN?', notify: async () => true,
+      ...over,
+    });
+
+  it('defaults a question with no class to approval', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const posted = await ask(h);
+    expect(store.exchange(posted.correlationId)[0].metadata?.questionClass).toBe('approval');
+    expect(h.resolveQuestionClass(undefined)).toBe('approval');
+    expect(h.resolveQuestionClass('Clarification')).toBe('approval'); // case matters: fail closed
+    expect(h.resolveQuestionClass('')).toBe('approval');
+  });
+
+  it('refuses an automated responder on an approval question', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'approval' });
+    const result = await h.answerHumanQuestion(posted.correlationId, 'use the prod DSN', 'hermes-connector');
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain('human decision');
+  });
+
+  it('refuses an automated responder that omits or claims a human role', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'approval' });
+    // Omitting the role and claiming 'human' must both still read as automated.
+    const noRole = await h.answerHumanQuestion(posted.correlationId, 'x', 'hermes-connector');
+    expect(noRole.accepted).toBe(false);
+  });
+
+  it('allows an automated responder on a clarification question', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'clarification' });
+    const result = await h.answerHumanQuestion(posted.correlationId, 'the staging DSN', 'hermes-connector');
+    expect(result.accepted).toBe(true);
+    expect(result.event?.detail).toBe('the staging DSN');
+    expect(result.event?.actor).toBe('hermes-connector');
+  });
+
+  it('keeps every existing human surface able to answer an approval question', async () => {
+    const h = await modules();
+    const a = await ask(h, { questionClass: 'approval' });
+    expect((await h.answerHumanQuestion(a.correlationId, 'yes', 'discord:user-1')).accepted).toBe(true);
+
+    const b = await ask(h, { taskId: 'cls-2', questionClass: 'approval' });
+    expect((await h.answerHumanQuestion(b.correlationId, 'yes', 'operator-dashboard')).accepted).toBe(true);
+
+    const c = await ask(h, { taskId: 'cls-3', questionClass: 'approval' });
+    expect((await h.answerHumanQuestion(c.correlationId, 'yes', 'supervisor', 'orchestrator')).accepted).toBe(true);
+  });
+
+  it('leaves a refused answer unsettled so a human can still answer it', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const posted = await ask(h, { questionClass: 'approval' });
+    await h.answerHumanQuestion(posted.correlationId, 'leaked', 'hermes-connector');
+    // The refusal must not consume the question.
+    expect(store.findQuestion(posted.correlationId)).toBeDefined();
+    expect((await h.answerHumanQuestion(posted.correlationId, 'real answer', 'discord:user-1')).accepted).toBe(true);
+  });
+});

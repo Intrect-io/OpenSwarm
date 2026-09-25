@@ -308,6 +308,32 @@ describe('coordination tools', () => {
     expect(payload.delivered).toBe(false);
     expect(payload.instruction).toContain('nobody has been paged');
   });
+
+  // AGT-4514: the class the agent supplies decides whether an automated
+  // responder may answer, so it has to survive the tool boundary intact.
+  it('stamps approval on ask_human when no class is supplied', async () => {
+    const mod = await tools();
+    const { getCoordinationStore } = await import('./coordinationStore.js');
+    const result = await mod.executeCoordinationTool('ask_human', { question: 'Ship v4?' }, {
+      repository: '/repo', taskId: 't-cls', actor: 'magos-test', notifyOperator: async () => true,
+    });
+    const { correlationId } = JSON.parse(result.content);
+    expect(getCoordinationStore().exchange(correlationId)[0].metadata?.questionClass).toBe('approval');
+  });
+
+  it('stamps clarification through the tool and admits an automated answer to it', async () => {
+    const mod = await tools();
+    const { getCoordinationStore } = await import('./coordinationStore.js');
+    const h = await import('./humanQuestions.js');
+    const result = await mod.executeCoordinationTool('ask_human', {
+      question: 'Which staging DSN?', class: 'clarification',
+    }, {
+      repository: '/repo', taskId: 't-cls2', actor: 'magos-test', notifyOperator: async () => true,
+    });
+    const { correlationId } = JSON.parse(result.content);
+    expect(getCoordinationStore().exchange(correlationId)[0].metadata?.questionClass).toBe('clarification');
+    expect((await h.answerHumanQuestion(correlationId, 'staging-dsn', 'hermes-connector')).accepted).toBe(true);
+  });
 });
 
 // An agent that waited for a reply used to be killed for waiting: three checks
