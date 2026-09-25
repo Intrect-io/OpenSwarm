@@ -423,4 +423,23 @@ describe('OllamaCloudAdapter', () => {
     expect(Date.now() - started).toBeLessThan(15_000);
     expect(chatCalls).toBeLessThanOrEqual(3);
   }, 30_000);
+
+  // AGT-4534, run base4: a worker request stayed open 11+ min with no content.
+  // deepseek-v4.1-flash streams `reasoning` deltas separately from content, so
+  // the stream looked alive; with no max_tokens nothing ended it. Ollama
+  // applies max_tokens to reasoning too (measured: finish_reason=length).
+  it('caps generation length on the direct transport, as the other native adapters do', async () => {
+    process.env.OLLAMA_API_KEY = 'test-key';
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/chat/completions')) bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        'data: {"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n\n' + 'data: [DONE]\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      );
+    }));
+    await new OllamaCloudAdapter().run({ prompt: 'x', cwd: process.cwd(), model: 'deepseek-v4.1-flash', enableTools: false, maxTurns: 1 });
+    expect(bodies[0]?.max_tokens).toBe(16384);
+  });
 });
