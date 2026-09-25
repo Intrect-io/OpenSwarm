@@ -18,7 +18,7 @@ import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
-import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
+import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { approvedLocalModelEndpoint, prepareApprovedLocalModelRequest } from '../support/approvedEgress.js';
 
@@ -190,6 +190,10 @@ export class LocalModelAdapter implements CliAdapter {
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
+      scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
+      forbidPublication: options.forbidPublication,
+      sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
@@ -296,12 +300,22 @@ export class LocalModelAdapter implements CliAdapter {
 
       const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
         const request = prepareApprovedLocalModelRequest(baseUrl, body);
-        const res = await fetch(request.url, {
-          method: 'POST',
-          headers: this.buildHeaders(),
-          body: request.body,
-          signal,
-        });
+        let res: Response;
+        try {
+          res = await fetch(request.url, {
+            method: 'POST',
+            headers: this.buildHeaders(),
+            body: request.body,
+            signal,
+          });
+        } catch (err) {
+          // ECONNREFUSED / reset while a local server restarts → bounded
+          // in-place retry instead of failing the whole run. (AGT-4385)
+          if (await resolveTransientFailure('local', { error: err }, throttle, { signal }) === 'retry') {
+            return attempt();
+          }
+          throw err;
+        }
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
@@ -319,6 +333,10 @@ export class LocalModelAdapter implements CliAdapter {
           // the old `Local API error (429)` string was re-promoted to a rate
           // limit downstream and paused the scheduler. (INT-2907)
           if (await resolveLimitResponse('local', res.status, res.headers, errText, throttle, { signal }) === 'retry') {
+            return attempt();
+          }
+          // 5xx: server hiccup, bounded retry before it becomes an infra error. (AGT-4385)
+          if (await resolveTransientFailure('local', { status: res.status }, throttle, { signal }) === 'retry') {
             return attempt();
           }
 

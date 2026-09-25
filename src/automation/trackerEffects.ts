@@ -13,6 +13,7 @@
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { EffectClaim, EffectInput } from './runLedger.js';
+import { completionTargetState } from './taskSource.js';
 import type { ITaskSource, PairCompleteStats } from './taskSource.js';
 import {
   projectCancellationState,
@@ -21,8 +22,13 @@ import {
   syncCancellationState,
 } from './runnerExecution.js';
 import { buildTaskStateSyncComment } from '../taskState/store.js';
-import { recordTaskOutcome } from '../memory/repoKnowledge.js';
+import { promoteStagedMemories, recordTaskOutcome } from '../memory/repoKnowledge.js';
+import { clearScratchpad } from '../support/scratchpad.js';
+import { clearSnapshots } from '../support/worktreeSnapshot.js';
+import { taskAttributionKey } from '../orchestration/decisionEngine.js';
+import { workerScratchpadRunId } from '../agents/workerScratchpad.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
+import { postPairVerdictOnPullRequest } from './pairVerdictComment.js';
 
 export interface CompletionEffectPayload {
   version: 1;
@@ -83,6 +89,7 @@ export function completionStats(result: PipelineResult): PairCompleteStats {
     attempts: result.iterations,
     duration: Math.floor(result.totalDuration / 1000),
     filesChanged: result.workerResult?.filesChanged || [],
+    prUrl: result.prUrl,
     workerSummary: result.workerResult?.summary,
     workerName: result.workerResult?.codename,
     workerUsage: result.workerResult?.costInfo,
@@ -212,11 +219,15 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
     // The remote comment may have succeeded immediately before a process crash,
     // while the following state mutation/local ack did not. Reapply the
     // idempotent state transition but never duplicate the completion comment.
-    const accepted = await source.updateState(issueId, 'Done');
-    if (!accepted) throw new Error(`Tracker refused Done reconciliation for ${issueId}`);
+    const target = completionTargetState(payload.stats);
+    const accepted = await source.updateState(issueId, target);
+    if (!accepted) throw new Error(`Tracker refused ${target} reconciliation for ${issueId}`);
   } else {
     await source.logPairComplete(issueId, effect.dedupeKey, payload.stats);
   }
+  // On both branches: the tracker comment above proves nothing about the PR
+  // side, and the PR check inside is what keeps a retry from posting twice.
+  await postPairVerdictOnPullRequest(payload.stats, payload.task, payload.marker);
 
   projectSuccessState(payload.task);
   await reconcileCompletionState(payload.task);
@@ -227,7 +238,35 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
       derivedFrom: payload.task.issueIdentifier ?? issueId,
       iterations: payload.stats.attempts,
     });
+    // Staged lessons improve later work but cannot make a tracker completion
+    // retry forever: every part of this best-effort promotion stays outside
+    // the durable outbox's success boundary.
+    try {
+      const scratchRunId = workerScratchpadRunId(payload.task);
+      if (scratchRunId) {
+        const attempt = Number(payload.marker.match(/:attempt:(\d+)$/)?.[1] ?? 0);
+        await promoteStagedMemories(payload.projectPath, scratchRunId, {
+          taskId: payload.task.issueIdentifier ?? issueId,
+          attempt,
+        });
+      }
+    } catch (error) {
+      console.warn('[RepoKnowledge] staged memory promotion failed (non-critical):', error);
+    }
   }
+  // The task is done, so its working notes have nothing left to inform. Only
+  // the success path clears them: a parked or failed task keeps its notes for
+  // whoever picks it up, and the sweep in autonomousRunner collects the rest.
+  // (AGT-4459)
+  const scratchRunId = workerScratchpadRunId(payload.task);
+  if (scratchRunId) await clearScratchpad(scratchRunId);
+  // Same boundary for the rollback snapshots: a finished task has nothing left
+  // to undo. Keyed directly rather than through the scratchpad's id, which is
+  // undefined when the scratchpad is switched off — that would leave snapshot
+  // stores uncollected for a reason that has nothing to do with them. And not
+  // `?? ''`: an empty run id sanitises to the shared `adhoc` directory, so the
+  // fallback would delete another run's snapshots. (AGT-4460)
+  await clearSnapshots(taskAttributionKey(payload.task)).catch(() => undefined);
   if (payload.task.linearProject) {
     await updateProjectAfterTask(payload.task.linearProject.id, payload.task.linearProject.name, {
       title: payload.task.title,

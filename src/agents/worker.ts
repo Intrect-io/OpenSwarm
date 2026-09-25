@@ -28,6 +28,7 @@ import {
 } from '../coordination/routingPolicy.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
+import { acceptWorkerPaths, noteRejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 
 // Types
 
@@ -55,6 +56,11 @@ export interface WorkerOptions {
   nudgeMaxOnNoEdit?: number;
   /** Verification-harness file protection — listed files reject edit/write */
   protectedFiles?: string[];
+  /** Run whose scratchpad this worker writes notes to (AGT-4459). */
+  scratchpadRunId?: string;
+  memoryContext?: { taskId: string; iteration: number };
+  /** OS fence for the bash tool; the pipeline sets it from `autonomous.workerSandbox`. (AGT-4387) */
+  sandbox?: 'on' | 'off';
   /** Planner-declared files/modules this task may edit. */
   fileScope?: string[];
   /** Task-owned files restored from preserveWorktree WIP commits. */
@@ -370,8 +376,12 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     const coordinationGuidance = options.coordinationContext
       ? COORDINATION_GUIDANCE_PROMPT + getPrompts().coordinationConsultationPrompt
       : '';
+    // The boundary comes AFTER the capsule on purpose: the capsule can carry a
+    // human session's commit/PR/review/tracker workflow (the operator's own
+    // CLAUDE.md), and the last instruction is the one a model follows (AGT-4418).
     let systemPrompt = getPrompts().systemPrompt + callSignHeader + coordinationGuidance
-      + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd));
+      + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd))
+      + getPrompts().harnessBoundaryPrompt;
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;
     else if (editFormat === 'whole-file') systemPrompt += WHOLE_FILE_PROMPT;
 
@@ -392,6 +402,12 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       reasoningEffort: options.reasoningEffort,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
+      scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
+      sandbox: options.sandbox,
+      // The pipeline commits, publishes, reviews and updates the tracker after
+      // this stage; the worker never does (AGT-4418).
+      forbidPublication: true,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
@@ -453,6 +469,16 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       const { outsideScope } = reconcileWorkerFiles(freshChangedFiles, options.fileScope);
       const filesChanged = gitChangedFiles;
       parsedResult.filesChanged = filesChanged;
+
+      // Carry the fence's verdict forward to the preserve commit. Rejecting
+      // the iteration does not remove what it wrote: the file stays on disk
+      // and the next WIP commit stages it onto the branch, and nothing
+      // downstream can recognise it by name or mode. Accept first, so a path
+      // rejected on an earlier iteration and written legitimately inside
+      // scope on this one is not dropped as stale. (AGT-4440)
+      const rejectedSet = new Set(outsideScope);
+      acceptWorkerPaths(cwd, freshChangedFiles.filter((file) => !rejectedSet.has(file)));
+      noteRejectedWorkerPaths(cwd, outsideScope);
 
       if (gitChangedFiles.length > 0) {
         emitWorkerStatus(options, formatWorkerGitChangeStatus(gitChangedFiles));

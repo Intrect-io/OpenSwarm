@@ -51,12 +51,18 @@ import {
   formatPipelineResultEmbed,
 } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig } from '../core/types.js';
+import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
+import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import * as execution from './runnerExecution.js';
 import { pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
+import { pruneSessionLogs } from '../support/sessionLog.js';
+import { pruneScratchpads } from '../support/scratchpad.js';
+import { pruneSnapshots } from '../support/worktreeSnapshot.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
+import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
@@ -69,13 +75,17 @@ import {
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
 import { publishStuckWork } from './publishOnPark.js';
+import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
+import { draftPullRequestCause } from './draftPullRequestCause.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import { readFileSync, existsSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import {
   describeScopeConflict,
@@ -87,6 +97,8 @@ import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export { pickPipelineFailureDetail } from './runnerState.js';
 import type { AdapterName } from '../adapters/types.js';
+
+const execFileAsync = promisify(execFile);
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
@@ -112,6 +124,8 @@ import {
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
+import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
+import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import {
   isExplicitAdmissionRetry,
@@ -567,7 +581,17 @@ export class AutonomousRunner {
     // Initialize TaskScheduler
     // Same-repo parallelism is opt-in via config (default true) but the scheduler
     // force-disables it unless worktreeMode is on — see TaskScheduler guard. (INT-1975)
+    // One budget, two readers: the watchdog below and the pipeline's iteration
+    // loop get the same number, so a task can no longer be promised five
+    // attempts and given time for three and a half (AGT-4430).
+    const hardTaskTimeoutMs = resolveHardTaskTimeoutMs({
+      maxIterations: config.pairMaxAttempts ?? 3,
+      workerTimeoutMs: stageTimeoutMs('worker', config.defaultRoles?.worker?.timeoutMs),
+      otherStagesTimeoutMs: enabledStageTimeoutsMs(config.defaultRoles, config.verify),
+    });
+    console.log(`[Scheduler] Task wall-clock budget: ${Math.round(hardTaskTimeoutMs / 60_000)}min for ${config.pairMaxAttempts ?? 3} iteration(s)`);
     this.scheduler = initScheduler({
+      hardTaskTimeoutMs,
       maxConcurrent: config.maxConcurrentTasks ?? 1,
       allowSameProjectConcurrent: config.allowSameProjectConcurrent ?? true,
       // Preserve omission for TaskScheduler: undefined activates its weighted,
@@ -884,7 +908,7 @@ export class AutonomousRunner {
       }
 
       // Pair-level stagnation only proves that the CURRENT session stopped
-      // making progress. A fresh outer attempt gets a new model context and can
+      // making progress. A new outer attempt gets a new model context and can
       // resume the preserved worktree, which is often enough to escape a repeated
       // output/error loop. Let this flow through the normal bounded failure budget
       // below; only MAX_RETRY_COUNT consecutive outer attempts may require a human.
@@ -893,7 +917,7 @@ export class AutonomousRunner {
           ?? pickFailureDetail([result.lastReviewFeedback, result.reviewResult?.feedback, result.workerResult?.error])
           ?? 'Pair pipeline detected repeated non-progress.';
         recordLastFailureDetail(this.taskStateRef, task.issueId, failureDetail);
-        console.warn(`[Scheduler] Pair session stagnated for ${taskCtx}; retrying with fresh context: ${failureDetail}`);
+        console.warn(`[Scheduler] Pair session stagnated for ${taskCtx}; scheduling a new outer attempt: ${failureDetail}`);
       }
 
       console.log(`[Scheduler] Task failed: ${taskCtx} ${task.title}`);
@@ -1138,6 +1162,25 @@ export class AutonomousRunner {
       const taskCtx = this.formatTaskContext(task);
       console.error(`[Scheduler] Task error: ${taskCtx} ${task.title}`, error);
       const timeout = isTimeoutError(error);
+      const watchdogBudget = /^Task timed out after (\d+)ms \(scheduler hard watchdog\)$/.exec(error.message);
+      if (watchdogBudget) {
+        this.durableRuns.recordWatchdogTimeout(
+          task.issueId || task.id,
+          Number(watchdogBudget[1]),
+          Math.max(0, Date.now() - startedAt),
+        );
+      }
+      // A thrown executor is an infra_error to the ledger (durableRunCoordinator
+      // records it so and parks the row 15 min). Keep the same in-memory streak
+      // the 'failed' handler keeps, or a task whose failures arrive as
+      // exceptions never reaches the idle-fill gate that AGT-4305 added for
+      // returned results (AGT-4307).
+      if (task.issueId) {
+        const infraStreak = (this.consecutiveInfraErrorCounts.get(task.issueId) ?? 0) + 1;
+        this.consecutiveInfraErrorCounts.set(task.issueId, infraStreak);
+        setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
+        this.saveTaskState();
+      }
       this.recordPipelineHistory(task, {
         success: false, sessionId: `scheduler-error-${task.id}-${Date.now()}`, stages: [],
         finalStatus: timeout ? 'infra_error' : 'failed', failureSignal: timeout ? 'timeout' : undefined,
@@ -1231,7 +1274,16 @@ export class AutonomousRunner {
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
           }
         }
-        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0) {
+        // The same-fingerprint infra circuit parks a run so that an operator
+        // changes something before it runs again; a free slot changes nothing.
+        // Resuming it by idle fill re-runs a known-broken environment every
+        // heartbeat (AGT-4306). Only an explicit dispatch or a tracker Todo
+        // lifts that park — the resume paths that carry an operator's hand.
+        const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON;
+        // Nor does a free slot change a verdict that has already come back
+        // twice; see idleFillWouldRepeatVerdict.
+        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark
+            && !this.durableRuns.idleFillWouldRepeatVerdict(id)) {
           const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
           if (idleResumed) {
             idleFillBudget--;
@@ -1269,10 +1321,18 @@ export class AutonomousRunner {
         const infraStreak = durableRun.lastErrorCode === 'infra_error'
           ? this.consecutiveInfraErrorCounts.get(id) ?? 0
           : 0;
+        // A supersession backoff is not a slot going to waste: the run was
+        // refused because an open PR still owns its files, and that PR does not
+        // close because a slot is free. Lifting it re-runs the drafter against
+        // the same PR every heartbeat — AX-1481 reached attempt #415 that way,
+        // 25 s apart, on 2026-09-17 (AGT-4036). The exponential supersession
+        // backoff (retryAtFor) is the recheck cadence; idle fill leaves it alone.
         const idleLiftable = (
           durableRun.state === 'RETRY_AT'
           && (durableRun.retryAt ?? 0) > Date.now()
           && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
+          && durableRun.lastErrorCode !== 'superseded'
+          && !this.durableRuns.idleFillWouldRepeatVerdict(id)
         )
           || durableRun.state === 'NEEDS_SPEC'
           || durableRun.state === 'NEEDS_ENV';
@@ -1610,6 +1670,54 @@ export class AutonomousRunner {
     );
   }
 
+  /** Sweep stale ledger pointers before artifact recovery or pruning can act on them. */
+  private async reconcileMissingWorktreePointers(): Promise<void> {
+    if (!this.durableRuns.isPrimary || this.stopping) return;
+    const terminal = new Set(['DONE', 'DECOMPOSED', 'CANCELLED']);
+    for (const run of this.durableRuns.listRuns()) {
+      if (this.stopping) return;
+      if (terminal.has(run.state) || !run.worktreePath || existsSync(run.worktreePath)) continue;
+      if (!['READY', 'RETRY_AT', 'NEEDS_HUMAN'].includes(run.state)) continue;
+
+      let branchOnOrigin = false;
+      let branchProbeFailed = false;
+      if (run.branchName) {
+        try {
+          const { stdout } = await execFileAsync('git', [
+            '-C', run.projectPath, 'ls-remote', 'origin', `refs/heads/${run.branchName}`,
+          ], { timeout: 30_000 });
+          branchOnOrigin = Boolean(stdout.trim());
+        } catch {
+          branchProbeFailed = true;
+        }
+      }
+      if (branchProbeFailed) {
+        console.warn(`[Reconciler] Origin branch lookup failed for missing worktree ${run.identifier ?? run.issueId}; retaining pointer`);
+        continue;
+      }
+
+      let pr;
+      if (run.branchName) {
+        try {
+          pr = await findPullRequestForBranch(run.projectPath, run.branchName);
+        } catch (error) {
+          console.warn(`[Reconciler] GitHub lookup failed for missing worktree ${run.identifier ?? run.issueId}; retaining pointer:`, error);
+          continue;
+        }
+      }
+      const prefix = `Worktree gone before publication; branch \`${run.branchName ?? '(none)'}\` ${branchOnOrigin ? 'is on origin' : 'is not on origin'}`;
+      const disposition = pr ? 'published' : run.state === 'READY' ? 'needs_human' : 'clear';
+      if (this.durableRuns.reconcileMissingWorktree(
+        run,
+        disposition,
+        pr ? `${prefix}; PR exists: ${pr.url}` : prefix,
+        !branchOnOrigin,
+      )) {
+        console.log(`[Reconciler] ${run.identifier ?? run.issueId}: cleared missing worktree pointer (${disposition})`);
+      }
+    }
+  }
+
   private async reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void> {
     if (!this.durableRuns.isPrimary || this.stopping) return;
     const taskById = new Map(tasks.map((task) => [task.issueId || task.id, task]));
@@ -1646,29 +1754,45 @@ export class AutonomousRunner {
             this.durableRuns.markNeedsHuman(run.issueId, `Published PR was closed without merge: ${pr.url}`);
             continue;
           }
-          // A draft is the branch saying it is not finished — the run parked
-          // and published for visibility, a sibling PR already closes the
-          // issue (INT-2544), or the PR-time review rejected it and moved it
-          // back (AGT-4270). Recovering any of those as 'approved' would
-          // close the issue on work nobody accepted, and the draft flag means
-          // no human is prompted to look either. Send it back to be worked;
-          // the commits stay on the branch, so the next attempt continues
-          // instead of starting over.
+          // A draft is the branch saying it is not finished, and recovering
+          // one as 'approved' would close the issue on work nobody accepted
+          // with no human prompted to look (AGT-4270). But the three reasons a
+          // PR is a draft want three different things (AGT-4272):
           //
-          // Unlike the recovery below, this RE-RUNS work, so it needs the
-          // live tracker card the note at the top of this loop describes: an
-          // issue that already reached Done is invisible to the heartbeat
-          // fetch, and re-queueing one would pay a whole worker attempt for a
-          // card nobody can see. (AGT-4094)
+          // - the PR-time review rejected it and moved it back: re-run. The
+          //   commits stay on the branch, so the next attempt fixes rather
+          //   than restarts. Unlike the recovery below this RE-RUNS work, so
+          //   it needs the live tracker card the note at the top of this loop
+          //   describes — re-queueing an issue the heartbeat cannot see pays
+          //   a worker attempt for a card nobody can see (AGT-4094);
+          // - a sibling PR already closes the issue (INT-2544): the draft is
+          //   deliberate and survives every republish, so a re-run can never
+          //   make it ready — it only burns attempts. The work is delivered;
+          //   record it as such;
+          // - anything else is a publication a human has to judge: park it
+          //   with the draft in the reason instead of re-running it.
           if (pr.isDraft) {
-            if (!task) {
-              console.warn(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) but no live tracker card — leaving it for the terminal-run reconciler`);
+            const siblings = run.identifier
+              ? await findDuplicateIssuePRs(run.projectPath, run.identifier, run.branchName)
+              : [];
+            const cause = draftPullRequestCause(run.lastErrorCode, siblings.length);
+            if (cause === 'review_rollback') {
+              if (!task) {
+                console.warn(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) rolled back by review but no live tracker card — leaving it for the terminal-run reconciler`);
+                continue;
+              }
+              if (this.durableRuns.markReady(run.issueId)) {
+                console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) rolled back by review — returned to the queue rather than completed`);
+              }
               continue;
             }
-            if (this.durableRuns.markReady(run.issueId)) {
-              console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) — returned to the queue rather than completed`);
+            if (cause === 'parked_publication') {
+              if (this.durableRuns.markNeedsHuman(run.issueId, `Draft PR needs a human: ${pr.url} — not a review rollback and no sibling PR closes the issue`)) {
+                console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) of no recorded cause — parked for a human rather than re-run`);
+              }
+              continue;
             }
-            continue;
+            console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) because ${siblings.length} sibling PR(s) already close the issue — recording it as delivered`);
           }
           const publishedTask = task ?? runRecordToTask(run);
           const recoveredResult: PipelineResult = {
@@ -2212,6 +2336,12 @@ export class AutonomousRunner {
       this.registryScanAt.set(resolvedPath, Date.now());
       void scanRepository(resolvedPath, projectId, { timeoutMs: 180_000 })
         .then((result) => {
+          if (result.incomplete) {
+            this.syslog(
+              `Registry scan ${projectId} was INCOMPLETE after ${result.durationMs}ms: `
+              + result.incompleteReasons.slice(0, 5).join('; '),
+            );
+          }
           this.syslog(
             `Registry scan ${projectId}: ${result.extracted} entities `
             + `(+${result.registered}/~${result.updated}) in ${result.durationMs}ms`,
@@ -2373,6 +2503,100 @@ export class AutonomousRunner {
    * task or a live durable lease, never an abandoned claim. The bulk heartbeat
    * fetch already carries updatedAt, so the sweep adds no read-side API calls.
    */
+  /** Last merge sweep, so a 5-minute heartbeat does not pay a `gh` call per In Review issue every tick. */
+  private lastMergedPublicationSweepAt = 0;
+  private static readonly MERGED_PUBLICATION_SWEEP_INTERVAL_MS = 10 * 60_000;
+
+  /**
+   * Done means merged (AGT-4409). A publication leaves the issue In Review;
+   * this moves it on once GitHub says the PR merged (→ Done, unless the
+   * description still has unticked criteria) or closed unmerged (→ Backlog).
+   * Only issues whose PR this daemon published, only from In Review, re-read
+   * right before the write so a person's later move is never overwritten.
+   */
+  private async reconcileMergedPublications(tasks: TaskItem[], now = Date.now()): Promise<void> {
+    const source = getTaskSource();
+    if (source?.kind !== 'linear') return;
+    if (now - this.lastMergedPublicationSweepAt < AutonomousRunner.MERGED_PUBLICATION_SWEEP_INTERVAL_MS) return;
+    this.lastMergedPublicationSweepAt = now;
+
+    const candidates = planMergedPublicationChecks(tasks, {
+      publishedPrUrl: (issueId) => this.durableRuns.getRun(issueId)?.prUrl ?? undefined,
+      isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
+    });
+    if (candidates.length === 0) return;
+
+    const { parsePublishedPullRequest } = await import('./publishedPullRequest.js');
+    const { getPRLifecycleOrThrow } = await import('../github/github.js');
+    let moved = 0;
+    for (const { task, prUrl } of candidates) {
+      const issueId = task.issueId || task.id;
+      const label = task.issueIdentifier ?? issueId;
+      const pr = parsePublishedPullRequest(prUrl);
+      if (!pr) continue;
+      let lifecycle;
+      try {
+        lifecycle = await getPRLifecycleOrThrow(pr.repo, pr.number);
+      } catch (error) {
+        console.warn(`[AutonomousRunner] Could not read ${prUrl} for ${label}:`, error instanceof Error ? error.message : error);
+        continue;
+      }
+      const decision = decideMergedPublication(lifecycle, prUrl, task.description);
+      if (decision.action === 'none') continue;
+
+      const refreshed = await source.lookupIssueState(label).catch(() => null);
+      if (!refreshed || !refreshed.ok || !refreshed.issue || refreshed.issue.state.toLowerCase() !== 'in review') {
+        console.warn(`[AutonomousRunner] Skipping merge reconciliation for ${label}: tracker state changed since the heartbeat`);
+        continue;
+      }
+
+      if (decision.action === 'await-criteria') {
+        const comments = source.getExecutionComments ? await source.getExecutionComments(issueId).catch(() => []) : [];
+        const marker = `<!-- openswarm-effect:${decision.marker} -->`;
+        if (comments.some((c) => c.body.includes(marker))) continue;
+        await source.addComment(issueId, `${decision.comment}\n\n${marker}`, decision.marker).catch((error) => {
+          console.warn(`[AutonomousRunner] Could not note open criteria on ${label}:`, error);
+        });
+        this.syslog(`⏸ ${label}: PR merged, waiting on unticked completion criteria`);
+        continue;
+      }
+
+      const targetState = decision.action === 'done' ? 'Done' : 'Backlog';
+      const accepted = await source.updateState(issueId, targetState).catch((error) => {
+        console.warn(`[AutonomousRunner] Failed to move ${label} → ${targetState}:`, error);
+        return false;
+      });
+      if (!accepted) continue;
+      task.linearState = targetState;
+      updateTaskLinearState(issueId, targetState);
+      await source.addComment(issueId, decision.comment).catch(() => undefined);
+      moved++;
+      this.syslog(`${targetState === 'Done' ? '✓' : '↩'} ${label}: PR ${lifecycle.state.toLowerCase()} → ${targetState}`);
+
+      // A parent closes when its last child has MERGED, checked against the
+      // tracker — the local ledger marks children done at publication.
+      if (targetState === 'Done') await this.completeParentIfChildrenMerged(issueId, source);
+    }
+    if (moved > 0) this.syslog(`✓ Reconciled ${moved} merged/closed publication(s)`);
+  }
+
+  private async completeParentIfChildrenMerged(childIssueId: string, source: NonNullable<ReturnType<typeof getTaskSource>>): Promise<void> {
+    const parentState = getTaskState(childIssueId)?.parentIssueId
+      ? getTaskState(getTaskState(childIssueId)!.parentIssueId!)
+      : undefined;
+    if (!parentState || parentState.childIssueIds.length === 0) return;
+    for (const childId of parentState.childIssueIds) {
+      const lookup = await source.lookupIssueState(childId).catch(() => null);
+      if (!lookup || !lookup.ok || !lookup.issue || lookup.issue.state.toLowerCase() !== 'done') return;
+    }
+    const parent = completeParentLocally(childIssueId);
+    if (!parent) return;
+    const accepted = await source.updateState(parent.issueId, 'Done').catch(() => false);
+    if (!accepted) return;
+    await source.addComment(parent.issueId, buildTaskStateSyncComment(parent, 'All child tasks merged')).catch(() => undefined);
+    this.syslog(`✓ ${parent.issueIdentifier ?? parent.issueId}: all children merged → Done`);
+  }
+
   private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
     const source = getTaskSource();
     if (source?.kind !== 'linear') return tasks;
@@ -2458,6 +2682,19 @@ export class AutonomousRunner {
     // for, so without this the table keeps every task the daemon ever drafted.
     const pruned = pruneDraftCache();
     if (pruned > 0) this.syslog(`  Pruned ${pruned} expired draft cache entr${pruned === 1 ? 'y' : 'ies'}`);
+    // Session transcripts are written per agent invocation, so the directory
+    // grows with every iteration of every attempt. Swept on the same cadence,
+    // and the sweep itself skips anything a live recorder is still appending
+    // to. (AGT-4442)
+    const prunedSessions = pruneSessionLogs();
+    if (prunedSessions > 0) this.syslog(`  Pruned ${prunedSessions} expired session log(s)`);
+    // A task that finishes clears its own notes; this catches the ones that
+    // never got there — killed, abandoned, or parked and then forgotten.
+    // (AGT-4459)
+    const prunedScratch = pruneScratchpads();
+    if (prunedScratch > 0) this.syslog(`  Pruned ${prunedScratch} expired scratchpad(s)`);
+    const prunedSnapshots = pruneSnapshots();
+    if (prunedSnapshots > 0) this.syslog(`  Pruned ${prunedSnapshots} expired snapshot store(s)`);
 
     try {
       const expiredLeases = this.durableRuns.reconcile();
@@ -2493,6 +2730,10 @@ export class AutonomousRunner {
             console.error(`[AutonomousRunner] Worktree sweep failed for ${resolvedPath}:`, e),
           );
         }
+        // Pruning may have removed a tree whose durable row was still pointing
+        // at it. Reconcile in this heartbeat, before admission sees it.
+        await this.reconcileMissingWorktreePointers();
+        if (this.stopping) return;
       }
 
       // 0.5 Long-running monitor passive check (before time window)
@@ -2538,6 +2779,9 @@ export class AutonomousRunner {
         return;
       }
       let tasks = await this.reconcileStalledInProgress(fetchResult.tasks);
+      await this.reconcileMergedPublications(tasks).catch((error) => {
+        console.warn('[AutonomousRunner] Merge reconciliation failed:', error);
+      });
       const trackerReconcile = await reconcileTrackerTerminalRuns({
         durableRuns: this.durableRuns,
         source: getTaskSource(),
@@ -2571,6 +2815,8 @@ export class AutonomousRunner {
       }
 
       await this.migrateLegacyRunState(tasks);
+      if (this.stopping) return;
+      await this.reconcileMissingWorktreePointers();
       if (this.stopping) return;
       await this.reconcileDurableArtifacts(tasks);
       if (this.stopping) return;
@@ -2905,6 +3151,9 @@ export class AutonomousRunner {
           }
           await resolveTaskFileScope(c.task, projPath, {
             draftTask: () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath),
+            generatedOutputRules: this.config.projectAgents?.find(
+              pa => projPath.includes(pa.projectPath.replace('~', '')),
+            )?.generatedOutputRules,
           });
           if (c.task.fileScopeSource === 'drafted' && c.task.preAdmissionDraft) {
             const entry = {
@@ -3250,6 +3499,9 @@ export class AutonomousRunner {
       allowedProjects: this.config.allowedProjects,
       plannerModel: this.config.plannerModel,
       plannerTimeoutMs: this.config.plannerTimeoutMs,
+      // Was declared on ExecutionContext but never set — the drafter always ran
+      // the adapter's built-in default, so a single-model fleet was impossible.
+      draftModel: this.config.draftModel,
       pairMaxAttempts: this.config.pairMaxAttempts,
       enableDecomposition: this.config.enableDecomposition,
       decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
@@ -3257,6 +3509,8 @@ export class AutonomousRunner {
       decompositionMaxChildren: this.config.decomposition?.maxChildrenPerTask ?? 5,
       decompositionDailyLimit: this.config.decomposition?.dailyLimit ?? 20,
       decompositionAutoBacklog: this.config.decomposition?.autoBacklog ?? true,
+      decomposeAfterFailures: this.config.decomposition?.decomposeAfterFailures ?? 3,
+      getPriorFailures: (issueId) => this.failedTaskCounts.get(issueId) ?? 0,
       jobProfiles: this.config.jobProfiles,
       getRolesForProject: (p) => this.getRolesForProject(p),
       reportToDiscord,
@@ -3271,6 +3525,7 @@ export class AutonomousRunner {
       getActiveWorkerIssues: (p) => this.durableRuns.activeWorkerIdentifiers(p),
       mcpPolicies: this.config.mcpPolicies,
       adapterRouting: this.config.adapterRouting,
+      workerSandbox: this.config.workerSandbox,
     };
   }
 
@@ -3822,4 +4077,16 @@ export async function stopAutonomous(): Promise<void> {
     await stoppingRunner.stop();
     if (runnerInstance === stoppingRunner) runnerInstance = null;
   }
+}
+
+/** Per-iteration wall clock of every enabled stage except the worker (AGT-4430). */
+function enabledStageTimeoutsMs(
+  roles?: import('../core/types.js').DefaultRolesConfig,
+  verify?: import('../core/types.js').VerifyConfig,
+): number {
+  const stages: Array<'reviewer' | 'tester' | 'documenter'> = [];
+  if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
+  if (roles?.tester?.enabled || verify?.enabled) stages.push('tester');
+  if (roles?.documenter?.enabled) stages.push('documenter');
+  return stages.reduce((total, stage) => total + stageTimeoutMs(stage, roles?.[stage]?.timeoutMs), 0);
 }

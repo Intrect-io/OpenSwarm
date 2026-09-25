@@ -418,6 +418,9 @@ export type ProjectAgentConfig = {
   projectPath: string;
   /** Linear project ID (optional) */
   linearProjectId?: string;
+  /** Trusted command-to-output declarations for generated files. A task must
+   * name the command before its outputs join the binding worker write scope. */
+  generatedOutputRules?: Array<{ command: string; outputs: string[] }>;
   /** Per-role configuration override */
   roles?: {
     worker?: Partial<RoleConfig>;
@@ -461,10 +464,14 @@ export type DecompositionConfig = {
   dailyLimit?: number;
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog?: boolean;
+  /** Failed attempts after which a split is forced, resume or not; 0 = never (AGT-4287). */
+  decomposeAfterFailures?: number;
   /** Planner model */
   plannerModel: string;
   /** Planner timeout (ms) - default 600000 (10min) */
   plannerTimeoutMs: number;
+  /** Draft-stage model override; unset = the adapter's built-in drafter default. */
+  draftModel?: string;
 };
 
 export type BacklogGroomingConfig = {
@@ -545,6 +552,12 @@ export interface PipelineGuardsConfig {
   deadModuleCheck?: boolean;
   /** Flag reformat-only files and oversized diffs — scope creep (INT-2388 #6). */
   reformatCheck?: boolean;
+  /** Block an unacknowledged whole-file rewrite; restore stripped trailing newlines (AGT-4406). */
+  rewriteCheck?: boolean;
+  /** Block a docs-only change that replaces figures the run never produced; flag uncited approval claims (AGT-4408). */
+  claimEvidenceCheck?: boolean;
+  /** A run that claims to add a gate must assert every value it newly reports (AGT-3107). */
+  gateClaimEvidenceCheck?: boolean;
   /**
    * When the reviewer approves, file its recommendedActions as follow-up
    * sub-issues (INT-1611 / INT-1704). Optional, default OFF. (INT-1704)
@@ -620,6 +633,8 @@ export type AutonomousStartupConfig = {
   unknownScopeAdmission?: 'serialize' | 'admit';
   /** Identical-fingerprint infra_error attempts that park a run (0 disables, default 6). */
   infraFailureCircuit?: number;
+  /** Draft-stage model override; unset = the adapter's built-in drafter default. */
+  draftModel?: string;
   /** Pipeline guards configuration */
   guards?: Partial<PipelineGuardsConfig>;
   /** Deterministic baseline-diff verification, enabled by default. */
@@ -638,6 +653,12 @@ export type AutonomousStartupConfig = {
   coordinationBoardIssueId?: string;
   mcpPolicies?: Record<string, { servers: string[]; allowTools?: string[]; writeTools?: string[]; destructiveTools?: string[] }>;
   adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
+  /**
+   * OS fence for the worker's bash tool (AGT-4387): sandbox-exec (macOS) or
+   * bwrap (Linux) with writes limited to the worktree and build caches.
+   * Default 'on'; a host without either binary warns once and runs unfenced.
+   */
+  workerSandbox?: 'on' | 'off';
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */
   orchestrator?: OrchestratorConfig;

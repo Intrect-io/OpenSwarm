@@ -329,6 +329,7 @@ agents:
           mcpPolicies: { orchestrator: { servers: ['github', 'linear'], writeTools: ['linear__save_comment'] } },
           periodicReviews: [{ profile: 'hygiene', schedule: '43 */6 * * *' }],
           orchestrator: { schedule: '17 */2 * * *' },
+          draftModel: 'deepseek/deepseek-v4-flash',
         },
       });
       vi.mocked(existsSync).mockReturnValue(true);
@@ -338,6 +339,8 @@ agents:
       expect(config.autonomous?.adapterRouting?.fallbacks).toEqual(['cc-router', 'cursor']);
       expect(config.autonomous?.mcpPolicies?.orchestrator.servers).toEqual(['github', 'linear']);
       expect(config.autonomous?.periodicReviews?.[0]).toMatchObject({ profile: 'hygiene' });
+      expect(config.autonomous?.workerSandbox).toBe('on'); // default: the fence is on (AGT-4387)
+      expect(config.autonomous?.draftModel).toBe('deepseek/deepseek-v4-flash'); // single-model fleet knob
       expect(config.autonomous?.orchestrator).toEqual({
         enabled: true,
         schedule: '17 */2 * * *',

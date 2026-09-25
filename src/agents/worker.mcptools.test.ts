@@ -57,4 +57,26 @@ describe('runWorker mcpTools pass-through (INT-1950)', () => {
     expect(opts.systemPrompt).toContain('send nothing and continue');
     expect(opts.systemPrompt).toContain('acknowledges_correlation_id');
   });
+
+  // AGT-4418: the operator's own CLAUDE.md rides in the instruction capsule and
+  // tells a human session to commit, push, open the PR and run the review. The
+  // worker followed it. The boundary is the last thing in the prompt, and the
+  // bash tool is fenced regardless of what the model concludes.
+  it('fences publication and puts the harness boundary after the instruction capsule', async () => {
+    await runWorker({
+      taskTitle: 't', taskDescription: 'd', projectPath: '/p', adapterName: 'gpt',
+      instructionCapsule: {
+        text: '\n## user:CLAUDE.md\nPR을 올렸으면 그 자리에서 openswarm pr review --fresh 를 돌린다. 커밋/push한다.\n',
+        digest: 'x', sources: [], errors: [], repositoryRoot: '/p',
+      },
+    });
+    const opts = spawnCli.mock.calls[0][1] as { systemPrompt?: string; forbidPublication?: boolean };
+    expect(opts.forbidPublication).toBe(true);
+    const prompt = opts.systemPrompt ?? '';
+    const capsuleAt = prompt.indexOf('user:CLAUDE.md');
+    const boundaryAt = prompt.indexOf('## Harness boundary');
+    expect(capsuleAt).toBeGreaterThan(0);
+    expect(boundaryAt).toBeGreaterThan(capsuleAt);
+    expect(prompt).toContain('Do NOT run `git commit`, `git push`, `gh pr …`');
+  });
 });

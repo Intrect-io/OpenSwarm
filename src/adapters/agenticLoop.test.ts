@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, formatToolErrorLog, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, formatToolErrorLog, loopDeadlines, wrapUpNotice, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
 import type { ToolCall } from './tools.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError } from '../sandboxExecutor/protocol.js';
@@ -251,6 +251,55 @@ describe('runAgenticLoop nudge budgets (INT-1925)', () => {
   });
 });
 
+describe('wall-clock shaping (AGT-4415)', () => {
+  it('stops the loop before the adapter hard-aborts, and warns the model before that', () => {
+    const start = 1_000_000;
+    // A 20-minute worker: 2 min of salvage headroom, 3 min of notice.
+    const worker = loopDeadlines(start, 20 * 60_000);
+    expect(worker.softDeadline).toBe(start + 18 * 60_000);
+    expect(worker.wrapUpAt).toBe(start + 15 * 60_000);
+    // A 6-minute reviewer: 36 s headroom, 60 s notice (the clamps' floors apply).
+    const reviewer = loopDeadlines(start, 6 * 60_000);
+    expect(reviewer.softDeadline).toBe(start + 6 * 60_000 - 36_000);
+    expect(reviewer.wrapUpAt).toBe(reviewer.softDeadline - 60_000);
+    // A tiny budget is never eaten by its own margins.
+    const tiny = loopDeadlines(start, 1_000);
+    expect(tiny.softDeadline).toBe(start + 500);
+    expect(tiny.wrapUpAt).toBe(start + 250);
+    // No budget → no deadlines.
+    expect(loopDeadlines(start, 0)).toEqual({ wrapUpAt: Number.POSITIVE_INFINITY, softDeadline: Number.POSITIVE_INFINITY });
+  });
+
+  it('injects the wrap-up notice once and still reaches the final-answer turn before the budget ends', async () => {
+    const seen: ChatMessage[][] = [];
+    let call = 0;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const callApi = async (messages: ChatMessage[], tools: unknown[]) => {
+      call++;
+      seen.push(messages.map((m) => ({ ...m })));
+      if ((tools as unknown[]).length === 0) return finalResp('salvaged answer'); // the final-answer turn
+      await sleep(320); // each tool turn burns past the 250 ms wrap-up mark, then the 500 ms soft deadline
+      return toolCallResp(`c${call}`, 'read_file', { path: `nope${call}.ts` });
+    };
+    const logs: string[] = [];
+    const result = await runAgenticLoop({
+      prompt: 'work', cwd: process.cwd(), model: 'test', callApi,
+      maxTurns: 0, timeoutMs: 1_000, webTools: false,
+      onLog: (l) => logs.push(l),
+    });
+    const noticeCount = (messages: ChatMessage[]) => messages.filter((m) => m.role === 'user' && String(m.content).startsWith('About ')).length;
+    expect(logs.some((l) => l.includes('Wrap-up notice'))).toBe(true);
+    // Turn 1 had no notice; every later call carries exactly one.
+    expect(noticeCount(seen[0])).toBe(0);
+    expect(seen.slice(1).every((messages) => noticeCount(messages) === 1)).toBe(true);
+    expect(seen.slice(1).length).toBeGreaterThan(0);
+    expect(wrapUpNotice(3)).toContain('About 3 minute(s)');
+    // The loop broke on its own deadline and the salvage turn produced the answer.
+    expect(logs.some((l) => l.includes('Agentic loop timeout'))).toBe(true);
+    expect(result.text).toBe('salvaged answer');
+  });
+});
+
 describe('runAgenticLoop finishValidator (AGT-4300)', () => {
   it('rejects a would-be final answer and continues the SAME conversation instead of returning', async () => {
     const calls: number[] = [];
@@ -389,10 +438,15 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
   it('retries once when the first no-tools final answer is empty', async () => {
     const logs: string[] = [];
     let calls = 0;
+    let finalAnswerCalls = 0;
+    // maxTurns: 1 → two tool turns, then the loop is out of budget without a
+    // final message and runs the no-tools final-answer turn. (0 means unbounded
+    // since AGT-4388, so it can no longer be the shortcut here.)
     const callApi = async (_messages: ChatMessage[], tools: unknown[]) => {
       calls++;
       if (tools.length > 0) return toolCallResp('c1', 'read_file', { path: 'missing.ts' });
-      return calls === 2 ? finalResp('   ') : finalResp('Decision: revise\nFix the missing edge-case test.');
+      finalAnswerCalls++;
+      return finalAnswerCalls === 1 ? finalResp('   ') : finalResp('Decision: revise\nFix the missing edge-case test.');
     };
 
     const result = await runAgenticLoop({
@@ -401,21 +455,46 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
       model: 'test',
       callApi: callApi as never,
       webTools: false,
-      maxTurns: 0,
+      maxTurns: 1,
       onLog: (line) => logs.push(line),
     });
 
-    expect(calls).toBe(3);
+    expect(calls).toBe(4);
+    expect(finalAnswerCalls).toBe(2);
     expect(result.text).toContain('Fix the missing edge-case test.');
     expect(logs).toContain('↻ Final answer was empty — retrying once (no tools)');
   });
 
+  it('requires an explicit review verdict from a tool-exhausted reviewer (AGT-4484)', async () => {
+    let salvagePrompt = '';
+    const result = await runAgenticLoop({
+      prompt: 'Review this change and return a verdict.',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      maxTurns: 1,
+      callApi: async (messages, tools) => {
+        if (tools.length > 0) return toolCallResp('read', 'read_file', { path: 'package.json' });
+        salvagePrompt = String(messages.at(-1)?.content ?? '');
+        // This is the conclusion the historical reviewer omitted after using
+        // its full tool budget: a verdict, not a worker-style status report.
+        return finalResp('Decision: approve\nNo actionable issues found.');
+      },
+    });
+
+    expect(salvagePrompt).toContain('Decision: approve');
+    expect(salvagePrompt).toContain('worker-status summary');
+    expect(result.text).toContain('Decision: approve');
+  });
+
   it('fails explicitly when the retry is also reasoning-only/empty', async () => {
     let calls = 0;
+    let finalAnswerCalls = 0;
     const callApi = async (_messages: ChatMessage[], tools: unknown[]) => {
       calls++;
       if (tools.length > 0) return toolCallResp('c1', 'read_file', { path: 'missing.ts' });
-      return finalResp(calls === 2 ? '' : ' \n ');
+      finalAnswerCalls++;
+      return finalResp(finalAnswerCalls === 1 ? '' : ' \n ');
     };
 
     await expect(
@@ -425,10 +504,11 @@ describe('runAgenticLoop final-answer recovery (INT-2879)', () => {
         model: 'test',
         callApi: callApi as never,
         webTools: false,
-        maxTurns: 0,
+        maxTurns: 1,
       }),
     ).rejects.toThrow('Agentic loop produced no final message after one retry');
-    expect(calls).toBe(3);
+    expect(calls).toBe(4);
+    expect(finalAnswerCalls).toBe(2);
   });
 });
 
@@ -452,6 +532,45 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).toContain('read_file');
     expect(toolNames).toContain('bash');
     expect(toolNames).not.toContain('search_memory');
+  });
+
+  it('withholds the scratch tools when the run has no scratchpad', async () => {
+    let toolNames: string[] = [];
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).not.toContain('scratch_write');
+    expect(toolNames).not.toContain('scratch_read');
+  });
+
+  it('offers the scratch tools once a run owns a scratchpad', async () => {
+    let toolNames: string[] = [];
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      maxTurns: 1,
+      scratchpadRunId: 'AX-1556',
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toContain('scratch_write');
+    expect(toolNames).toContain('scratch_read');
   });
 
   it('withholds bash when shellTools=false while leaving the path-checked file tools', async () => {
@@ -535,7 +654,10 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(firstToolNames).toContain('bash');
     expect(firstToolNames).not.toContain('diagnostics');
     expect(sessionFactory).toHaveBeenCalledWith(process.cwd());
-    expect(execute).toHaveBeenCalledWith('npm test', 30_000);
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringMatching(/^export OPENSWARM_TEST_PARALLELISM=\d+ .*; npm test -- --maxWorkers=\d+$/),
+      30_000,
+    );
     expect(result.executedCommands).toEqual(['npm test']);
     expect(result.executionOutcomeUnknown).toBe(false);
   });

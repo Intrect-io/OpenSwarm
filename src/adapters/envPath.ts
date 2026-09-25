@@ -12,6 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripHumanSurfaceEnv } from '../mcp/humanSurfacePolicy.js';
+import { withTestResourceBudget } from '../support/testResourceBudget.js';
 
 /**
  * Resolve OpenSwarm's bundled `node_modules/.bin` directory.
@@ -39,15 +40,46 @@ export function getBundledBinDir(): string | null {
  */
 export function buildWorkerEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const binDir = getBundledBinDir();
-  if (binDir === null) return stripHumanSurfaceEnv(base);
+  if (binDir === null) return withTestResourceBudget(withoutDeadKeys(stripHumanSurfaceEnv(base)));
 
   const existingPath = base.PATH ?? base.Path ?? '';
   // Avoid duplicate entries if this env is reused across spawns.
   const parts = existingPath.split(delimiter).filter(Boolean);
   if (parts[0] === binDir) {
-    return stripHumanSurfaceEnv(base);
+    return withTestResourceBudget(withoutDeadKeys(stripHumanSurfaceEnv(base)));
   }
   const nextPath = [binDir, ...parts.filter((p) => p !== binDir)].join(delimiter);
 
-  return stripHumanSurfaceEnv({ ...base, PATH: nextPath });
+  return withTestResourceBudget(withoutDeadKeys(stripHumanSurfaceEnv({ ...base, PATH: nextPath })));
+}
+
+/**
+ * Credentials the daemon has probed and found dead. Workers inherit the
+ * daemon's environment wholesale, so a `LINEAR_API_KEY` the daemon itself
+ * never used (it ran on OAuth) reached every agent as its only Linear
+ * credential and 401'd on every write — two runs parked on it (AGT-4028).
+ * A key that fails its probe is withheld instead: an agent with no
+ * credential says so up front; one with a dead credential spends its turns
+ * discovering it.
+ */
+const deadWorkerEnvKeys = new Map<string, string>();
+
+export function markWorkerEnvKeyDead(key: string, reason: string): void {
+  deadWorkerEnvKeys.set(key, reason);
+}
+
+export function clearDeadWorkerEnvKeys(): void {
+  deadWorkerEnvKeys.clear();
+}
+
+/** Keys withheld from workers, with the probe result that condemned each. */
+export function deadWorkerEnvKeyReasons(): ReadonlyMap<string, string> {
+  return deadWorkerEnvKeys;
+}
+
+function withoutDeadKeys(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (deadWorkerEnvKeys.size === 0) return env;
+  const next = { ...env };
+  for (const key of deadWorkerEnvKeys.keys()) delete next[key];
+  return next;
 }

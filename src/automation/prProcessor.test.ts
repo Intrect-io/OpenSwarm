@@ -29,6 +29,11 @@ const { readFileImpl } = vi.hoisted(() => ({
 }));
 vi.mock('node:fs/promises', () => ({ readFile: readFileImpl }));
 
+const { withFreshReviewLockImpl } = vi.hoisted(() => ({
+  withFreshReviewLockImpl: vi.fn(async <T>(_path: string, operation: () => Promise<T>) => operation()),
+}));
+vi.mock('./freshReviewLock.js', () => ({ withFreshReviewLock: withFreshReviewLockImpl }));
+
 // mapRepoToProject() calls existsSync from plain 'node:fs' (not 'node:fs/promises'),
 // a separate module specifier that needs its own mock.
 const { existsSyncImpl } = vi.hoisted(() => ({
@@ -654,6 +659,35 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     );
   });
 
+  it('runs the review on the reviewer role\'s model, wall clock and turn ceiling, tagged pr-review in the ledger (AGT-4410)', async () => {
+    // Measured before this: 20 of 41 PR-time reviews cut at the CLI's 300s
+    // default while `roles.reviewer.timeoutMs` sat unused. 0 turns is the
+    // agentic loop's "no ceiling" and must pass through as 0, not be dropped.
+    const processor = newProcessor({
+      roles: { reviewer: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-flash', timeoutMs: 900_000, maxTurns: 0 } },
+    } as never);
+    await processor.freshReview(pr, '/tmp/proj');
+    expect(runReviewCommandImpl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapter: 'openrouter',
+        model: 'deepseek/deepseek-v4-flash',
+        timeoutMs: 900_000,
+        maxTurns: 0,
+        processContext: { taskId: 'o/r#9', stage: 'pr-review' },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('keeps the CLI\'s diff-scaled wall clock when the reviewer role says 0 (unlimited) or nothing', async () => {
+    const processor = newProcessor({ roles: { reviewer: { adapter: 'openrouter', timeoutMs: 0 } } } as never);
+    await processor.freshReview(pr, '/tmp/proj');
+    const [opts] = runReviewCommandImpl.mock.calls.at(-1)!;
+    expect(opts).toEqual(expect.objectContaining({ adapter: 'openrouter' }));
+    expect((opts as { timeoutMs?: number }).timeoutMs).toBeUndefined();
+    expect((opts as { maxTurns?: number }).maxTurns).toBeUndefined();
+  });
+
   it('reports a REVISE/reject verdict as a failure with the reviewer feedback as the error', async () => {
     runReviewCommandImpl.mockResolvedValue({ decision: 'reject', feedback: 'null deref in x.ts' });
     const processor = newProcessor();
@@ -781,6 +815,15 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     expect(fetchCalls[0][2]).not.toBe(fetchCalls[1][2]);
     const worktreeAddCalls = gitExecImpl.mock.calls.map((c) => c[0] as string[]).filter((a) => a[0] === 'worktree' && a[1] === 'add');
     expect(worktreeAddCalls[0][3]).not.toBe(worktreeAddCalls[1][3]);
+
+    // Git's shared worktree metadata and temporary refs are protected only
+    // around their mutations: the two reviews keep distinct scratch trees and
+    // can run their expensive reviewer stages in parallel, but every mutation
+    // for this repository resolves to one cross-process lock. (AGT-3916)
+    expect(withFreshReviewLockImpl).toHaveBeenCalledTimes(8);
+    const lockPaths = withFreshReviewLockImpl.mock.calls.map(([lockPath]) => lockPath);
+    expect(new Set(lockPaths)).toEqual(new Set([lockPaths[0]]));
+    expect(lockPaths[0]).toBe('/tmp/proj');
   });
 
   // The verdict was only ever visible in the streaming output: history defaulted

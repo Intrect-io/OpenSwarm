@@ -128,8 +128,8 @@ const RoleConfigSchema = z.object({
   escalateModel: z.string().optional(),
   /** Escalate after this iteration number (default: 3) */
   escalateAfterIteration: z.number().min(1).optional(),
-  /** Max agentic turns per CLI invocation */
-  maxTurns: z.number().min(1).optional(),
+  /** Max agentic turns per CLI invocation; 0 = no ceiling (the default for worker/tester since AGT-4388) */
+  maxTurns: z.number().int().min(0).optional(),
   /** Adaptive worker fan-out gate and candidate execution. */
   fanout: z.object({
     enabled: z.boolean().optional(),
@@ -143,7 +143,7 @@ const RoleConfigSchema = z.object({
       adapter: AdapterNameSchema.optional(),
       model: z.string().optional(),
       reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
-      maxTurns: z.number().min(1).optional(),
+      maxTurns: z.number().int().min(0).optional(), // 0 = no ceiling (AGT-4388)
       nudgeMaxOnNoEdit: z.number().min(0).optional(),
       webTools: z.boolean().optional(),
       memoryTools: z.boolean().optional(),
@@ -198,6 +198,10 @@ const ProjectAgentConfigSchema = z.object({
   projectPath: z.string().min(1),
   /** Linear project ID */
   linearProjectId: z.string().optional(),
+  generatedOutputRules: z.array(z.object({
+    command: z.string().min(1),
+    outputs: z.array(z.string().min(1)).min(1),
+  })).optional(),
   /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });
@@ -223,6 +227,12 @@ const DecompositionConfigSchema = z.object({
   dailyLimit: z.number().min(1).max(100).default(20).optional(),
   /** Auto-move to backlog if too complex or failing (default: true) */
   autoBacklog: z.boolean().default(true).optional(),
+  /**
+   * Failed attempts after which the task is split instead of retried whole,
+   * even on a resumed worktree (default: 3 — the attempt before STUCK at
+   * MAX_RETRY_COUNT=4). 0 disables forcing (AGT-4287).
+   */
+  decomposeAfterFailures: z.number().int().min(0).default(3).optional(),
   /**
    * Planner model — frontier tier. Decomposition is high-leverage: a bad split
    * pollutes every downstream worker, so we never cheap out here.
@@ -286,6 +296,12 @@ const PipelineGuardsConfigSchema = z.object({
   verifiedMetricEvidenceCheck: z.boolean().optional(),
   deadModuleCheck: z.boolean().optional(),
   reformatCheck: z.boolean().optional(),
+  /** Block an unacknowledged whole-file rewrite; restore stripped trailing newlines (AGT-4406). */
+  rewriteCheck: z.boolean().optional(),
+  /** Block a docs-only change that replaces figures the run never produced; flag uncited approval claims (AGT-4408). */
+  claimEvidenceCheck: z.boolean().optional(),
+  /** A run that claims to add a gate must assert every value it newly reports (AGT-3107). */
+  gateClaimEvidenceCheck: z.boolean().optional(),
 }).optional();
 
 const VerifyConfigSchema = z.object({
@@ -357,6 +373,12 @@ const AutonomousConfigSchema = z.object({
    * run parks for the operator instead of backing off again. 0 disables.
    */
   infraFailureCircuit: z.number().int().min(0).max(100).default(6),
+  /**
+   * Model for the draft (task-brief) stage that runs before every worker.
+   * Unset → the adapter's built-in drafter default (draftAnalyzer.ts
+   * DRAFT_MODELS). Set it to run a single-model fleet.
+   */
+  draftModel: z.string().min(1).optional(),
   /** Dynamic job profiles for model selection */
   jobProfiles: z.array(JobProfileSchema).optional(),
   /** Pipeline quality guards (bad-edit lint gate, BS detector, etc.) */
@@ -383,6 +405,13 @@ const AutonomousConfigSchema = z.object({
     fallbacks: z.array(z.enum(['cc-router', 'cursor', 'codex', 'codex-responses'])).default(['cc-router', 'cursor']),
     allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
   }).optional(),
+  /**
+   * OS fence for the worker's bash tool (AGT-4387). 'on' (default) wraps every
+   * bash call in sandbox-exec / bwrap: writes limited to the worktree, temp
+   * and build caches, network open. 'off' restores the pre-AGT-4387 behaviour
+   * (bash as the daemon user, regex denylist only).
+   */
+  workerSandbox: z.enum(['on', 'off']).default('on'),
   periodicReviews: z.array(z.object({
     profile: z.enum(['permissions', 'hygiene', 'security', 'review']),
     schedule: z.string().min(1),
@@ -757,6 +786,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
         maxChildrenPerTask: raw.autonomous.decomposition.maxChildrenPerTask ?? 5,
         dailyLimit: raw.autonomous.decomposition.dailyLimit ?? 20,
         autoBacklog: raw.autonomous.decomposition.autoBacklog ?? true,
+        decomposeAfterFailures: raw.autonomous.decomposition.decomposeAfterFailures ?? 3,
         plannerModel: raw.autonomous.decomposition.plannerModel,
         plannerTimeoutMs: raw.autonomous.decomposition.plannerTimeoutMs,
       } : undefined,
@@ -772,6 +802,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       allowSameProjectConcurrent: raw.autonomous.allowSameProjectConcurrent,
       unknownScopeAdmission: raw.autonomous.unknownScopeAdmission,
       infraFailureCircuit: raw.autonomous.infraFailureCircuit,
+      draftModel: raw.autonomous.draftModel,
       guards: raw.autonomous.guards,
       verify: raw.autonomous.verify,
       securityAudit: raw.autonomous.securityAudit,
@@ -782,6 +813,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       coordinationBoardIssueId: raw.autonomous.coordinationBoardIssueId,
       mcpPolicies: raw.autonomous.mcpPolicies,
       adapterRouting: raw.autonomous.adapterRouting,
+      workerSandbox: raw.autonomous.workerSandbox,
       periodicReviews: raw.autonomous.periodicReviews,
       orchestrator: raw.autonomous.orchestrator,
       orchestratorSchedule: raw.autonomous.orchestratorSchedule,

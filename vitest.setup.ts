@@ -39,3 +39,31 @@ process.env.OPENSWARM_AUTOMATION_DB = join(tmpdir(), 'openswarm-test-automation'
 // operator's live ~/.openswarm/usage/. Per worker: ledger tests read the whole
 // directory back. (AGT-4178)
 process.env.OPENSWARM_USAGE_DIR = join(tmpdir(), 'openswarm-test-usage', workerScope);
+
+// Same shape as the usage ledger above: the agentic loop now opens a session
+// recorder per invocation, so every loop test would otherwise leave a JSONL
+// transcript in the operator's live ~/.openswarm/sessions/. Redirected rather
+// than disabled, so the wiring stays exercised by those tests. Per worker
+// because pruning reads the whole directory back. (AGT-4442)
+process.env.OPENSWARM_SESSION_LOG_DIR = join(tmpdir(), 'openswarm-test-sessions', workerScope);
+
+// Same reason as the session log above: pipeline tests build worker options
+// that carry a scratchpad id, and a tool test that writes a note would land it
+// in the operator's live ~/.openswarm/scratch/. Per worker because the prune
+// sweep reads the whole directory back. (AGT-4459)
+process.env.OPENSWARM_SCRATCHPAD_DIR = join(tmpdir(), 'openswarm-test-scratch', workerScope);
+
+// Two settings, for two different hazards (AGT-4460).
+//
+// The directory redirect is the same story as the two above: without it a test
+// leaves a snapshot store in the operator's live ~/.openswarm/snapshots/. That
+// is worse here than elsewhere — a store is keyed by run id, and a fixture
+// using a real identifier writes trees of the TEST's checkout under that run's
+// name. A later rollback of the real run would restore the wrong repository
+// into it. Observed exactly once, before this line existed.
+process.env.OPENSWARM_SNAPSHOT_DIR = join(tmpdir(), 'openswarm-test-snapshots', workerScope);
+// Off by default because a rollback writes to `projectPath`, and pipeline tests
+// pass `process.cwd()` — a stagnating test could revert the developer's working
+// tree. Tests that exercise snapshots delete this in their own beforeEach and
+// point projectPath at a temporary worktree.
+process.env.OPENSWARM_SNAPSHOT = '0';

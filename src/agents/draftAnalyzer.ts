@@ -714,6 +714,14 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
       const raw = await spawnCli(adapter, {
         prompt,
         cwd: options.projectPath, // read the real repo (INT-1917) — was '/tmp'
+        // The brief is written from the operator's MAIN checkout, not a worktree,
+        // and the drafter used to get the full tool set there. Three times in one
+        // cgf-portal batch it "started implementing" — a FastAPI stub, a
+        // `def run(): pass`, a migration in the wrong directory — straight into
+        // the user's checkout, where the worker's own write guard never applies
+        // (validatePath fences the WORKER's cwd, and this cwd is the repo). A
+        // brief needs read_file/search_files and nothing else. (AGT-4405)
+        readOnly: true,
         timeoutMs: draftTimeoutMs, // size-adaptive: 30s timed out on large repos → type=unknown (INT-2485)
         model: resolvedModel,
         // +(DRAFT_MAX_ATTEMPTS-1) turns of headroom for the finish-retry round(s) —
@@ -761,6 +769,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
         const fallbackRaw = await spawnCli(adapter, {
           prompt: prompt + DRAFT_RETRY_NUDGE,
           cwd: options.projectPath,
+          readOnly: true, // same boundary as the first attempt (AGT-4405)
           timeoutMs: draftTimeoutMs,
           model: resolvedModel,
           maxTurns: budget.maxTurns,

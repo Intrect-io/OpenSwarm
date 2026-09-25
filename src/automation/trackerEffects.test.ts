@@ -10,6 +10,16 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { EffectClaim } from './runLedger.js';
 import type { ITaskSource } from './taskSource.js';
 
+// GitHub is a side channel of completion delivery; these tests own the
+// tracker side. The verdict module has its own tests with injected deps.
+const postPairVerdictOnPullRequest = vi.fn(async () => 'posted' as const);
+vi.mock('./pairVerdictComment.js', () => ({ postPairVerdictOnPullRequest: (...args: unknown[]) => postPairVerdictOnPullRequest(...args as []) }));
+const promoteStagedMemories = vi.fn(async () => 0);
+vi.mock('../memory/repoKnowledge.js', () => ({
+  recordTaskOutcome: vi.fn(async () => {}),
+  promoteStagedMemories: (...args: unknown[]) => promoteStagedMemories(...args as []),
+}));
+
 // The durable outbox is the daemon's DEFAULT completion path: on a primary
 // ledger the runner returns before its inline logPairComplete call, and the
 // Linear comment is rendered from the stats the effect payload carries. A
@@ -61,6 +71,93 @@ describe('completion effect carries the dialogue identity fields (AGT-4019)', ()
     expect(stats.workerUsage?.model).toBe('gpt-5.6-terra');
     expect(stats.reviewerName).toBe('Sable');
     expect(stats.reviewerUsage?.outputTokens).toBe(120);
+  });
+});
+
+describe('completion lands on In Review while the PR is open (AGT-4409)', () => {
+  function claimFor(result: PipelineResult) {
+    const input = buildCompletionEffect(task, result, 1);
+    return {
+      id: 3, issueId: 'issue-1', attemptNo: 1, kind: input.kind, dedupeKey: input.dedupeKey,
+      payload: input.payload, status: 'in_flight', attempts: 1, availableAt: 0,
+      ownerInstanceId: 'daemon', deliveryToken: 'token', leaseEpoch: 1, leaseExpiresAt: 10_000,
+      createdAt: 0, updatedAt: 0,
+    } as EffectClaim;
+  }
+
+  it('carries the PR URL and, on a retry after the comment landed, reconciles to In Review not Done', async () => {
+    const result = { ...pipelineResult(), prUrl: 'https://github.com/o/r/pull/9' };
+    expect(completionStats(result).prUrl).toBe('https://github.com/o/r/pull/9');
+    const claim = claimFor(result);
+    const marker = (claim.payload as { marker: string }).marker;
+    const updateState = vi.fn(async () => true);
+    const source = {
+      updateState,
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => [{ body: `done <!-- openswarm-effect:${marker} -->`, createdAt: '' }]),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+    await deliverTrackerEffect(claim, source);
+    expect(updateState).toHaveBeenCalledWith('issue-1', 'In Review');
+    expect(updateState).not.toHaveBeenCalledWith('issue-1', 'Done');
+    // The retry branch too: the tracker comment having landed says nothing
+    // about the PR side (AGT-4044). The module's own fence stops a double post.
+    expect(postPairVerdictOnPullRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ prUrl: 'https://github.com/o/r/pull/9', reviewerDecision: 'approve', reviewerName: 'Sable' }),
+      expect.objectContaining({ issueIdentifier: 'AGT-1' }),
+      marker,
+    );
+  });
+
+  it('posts the pair verdict on the PR on a first delivery (AGT-4044)', async () => {
+    postPairVerdictOnPullRequest.mockClear();
+    const result = { ...pipelineResult(), prUrl: 'https://github.com/o/r/pull/9' };
+    const claim = claimFor(result);
+    const marker = (claim.payload as { marker: string }).marker;
+    const source = {
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => []),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+    await deliverTrackerEffect(claim, source);
+    expect(source.logPairComplete).toHaveBeenCalledTimes(1);
+    expect(postPairVerdictOnPullRequest).toHaveBeenCalledTimes(1);
+    expect(postPairVerdictOnPullRequest.mock.calls[0][2]).toBe(marker);
+  });
+
+  it('promotes staged lessons only after the completion effect succeeds (AGT-4461)', async () => {
+    vi.stubEnv('OPENSWARM_SCRATCHPAD', '1');
+    promoteStagedMemories.mockClear();
+    const claim = claimFor(pipelineResult());
+    (claim.payload as { projectPath?: string }).projectPath = '/repo';
+    const source = {
+      updateState: vi.fn(async () => true),
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => []),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+
+    await deliverTrackerEffect(claim, source);
+
+    expect(promoteStagedMemories).toHaveBeenCalledWith('/repo', 'AGT-1', {
+      taskId: 'AGT-1', attempt: 1,
+    });
+    vi.unstubAllEnvs();
+  });
+
+  it('still reconciles to Done when the run published nothing to merge', async () => {
+    const claim = claimFor(pipelineResult());
+    const marker = (claim.payload as { marker: string }).marker;
+    const updateState = vi.fn(async () => true);
+    const source = {
+      updateState,
+      addComment: vi.fn(async () => undefined),
+      getExecutionComments: vi.fn(async () => [{ body: `done <!-- openswarm-effect:${marker} -->`, createdAt: '' }]),
+      logPairComplete: vi.fn(async () => undefined),
+    } as unknown as ITaskSource;
+    await deliverTrackerEffect(claim, source);
+    expect(updateState).toHaveBeenCalledWith('issue-1', 'Done');
   });
 });
 

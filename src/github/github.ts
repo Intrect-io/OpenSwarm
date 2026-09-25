@@ -715,6 +715,28 @@ export async function getOpenPRsOrThrow(repo: string, limit = 30): Promise<PRInf
  * Unlike the best-effort list helpers this propagates GitHub/auth failures:
  * callers must not record a merge as processed when its identity was unknown.
  */
+/** One PR's lifecycle state, for the merge watcher (AGT-4409). Throws on a gh failure. */
+export async function getPRLifecycleOrThrow(repo: string, prNumber: number): Promise<PRLifecycle> {
+  const stdout = await ghExec(
+    'pr', 'view', String(prNumber), '-R', repo,
+    '--json', 'number,state,headRefName,baseRefName,headRefOid,mergedAt,mergeCommit',
+  );
+  const view = JSON.parse(stdout) as {
+    number: number; state: 'OPEN' | 'CLOSED' | 'MERGED'; headRefName: string; baseRefName: string;
+    headRefOid?: string; mergedAt?: string | null; mergeCommit?: { oid?: string } | null;
+  };
+  return {
+    repo,
+    number: view.number,
+    state: view.state,
+    branch: view.headRefName,
+    baseBranch: view.baseRefName,
+    headOid: view.headRefOid,
+    mergedAt: view.mergedAt || undefined,
+    mergeCommitOid: view.mergeCommit?.oid,
+  };
+}
+
 export async function getMergedPRsOrThrow(repo: string, limit = 100): Promise<PRLifecycle[]> {
   const stdout = await ghExec(
     'pr', 'list', '-R', repo, '--state', 'merged', '--limit', String(limit),

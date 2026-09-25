@@ -269,15 +269,17 @@ program
     }
   });
 
-// openswarm memory status|compact|reembed
+// openswarm memory status|compact|reembed|preview
 
 program
   .command('memory')
   .description('Inspect and maintain the repo knowledge memory DB')
-  .argument('<action>', 'status | compact | reembed')
+  .argument('<action>', 'status | compact | reembed | preview')
   .option('--json', 'Print JSON')
   .option('--force', 'Allow compact/reembed while the daemon is running')
-  .action(async (action: string, opts: { json?: boolean; force?: boolean }) => {
+  .option('--project <path>', 'Repository path for preview')
+  .option('--task <title>', 'Task title for preview')
+  .action(async (action: string, opts: { json?: boolean; force?: boolean; project?: string; task?: string }) => {
     const { runMemoryCommand } = await import('./cli/memoryCommand.js');
     try {
       console.log(await runMemoryCommand(action, opts));
@@ -336,6 +338,7 @@ program
   .option('--issues-per-area [parent]', 'For --max: legacy per-area follow-up fan-out (skips the PM synthesis)')
   .option('--file [parent]', 'Alias for --issues (back-compat)')
   .option('--adapter <name>', 'Adapter override for the reviewer')
+  .option('--model <model>', 'Model override for the reviewer (useful for a cost-capped CI gate)')
   .option('--json', 'Emit the verdict as JSON on stdout instead of the human report (for CI)')
   .option('--sarif <file>', 'Write a SARIF 2.1.0 report for GitHub code scanning')
   .option('--read-only', 'Deny the reviewer all mutating tools including bash — required when reviewing an untrusted diff in CI')
@@ -358,7 +361,7 @@ program
   .option('--no-security-audit', 'For --max --fix: disable the default CodeQL audit gate')
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
-    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
+    path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; model?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
     maxTurns?: number; timeout?: number;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean; securityAudit?: boolean;
@@ -388,6 +391,7 @@ program
           concurrency: opts.concurrency,
           maxFilesPerArea: opts.maxFilesPerArea,
           adapter: opts.adapter,
+          debug: opts.debug,
           maxTurns: opts.maxTurns,
           timeoutMs: opts.timeout,
           fileIssue: opts.issues ?? opts.file,
@@ -414,7 +418,7 @@ program
         return;
       }
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, model: opts.model, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,
@@ -565,6 +569,24 @@ program
       if (exitCode) process.exitCode = exitCode;
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e));
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('drain-parks')
+  .description('Backfill draft PRs for committed NEEDS_HUMAN branches created before publish-on-park')
+  .option('--path <path>', 'Repository path whose parked branches to inspect (default: current directory)')
+  .option('--dry-run', 'Report eligible parked branches without creating PRs or updating the ledger')
+  .option('--json', 'Emit the final summary as JSON')
+  .action(async (opts: { path?: string; dryRun?: boolean; json?: boolean }) => {
+    const { formatDrainParksSummary, runDrainParksCommand } = await import('./cli/drainParksCommand.js');
+    try {
+      const summary = await runDrainParksCommand(opts);
+      safeConsole.log(opts.json ? JSON.stringify(summary) : formatDrainParksSummary(summary));
+      if (summary.failed.length > 0) process.exitCode = 1;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
     }
   });

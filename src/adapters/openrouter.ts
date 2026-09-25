@@ -22,7 +22,7 @@ import {
 import { resolveMcpTools } from '../mcp/mcpClient.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { RateLimitError } from './rateLimitError.js';
-import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
+import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import { abortSignalWithDeadline } from './requestDeadline.js';
@@ -30,7 +30,8 @@ import type { ToolDefinition } from './tools.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import {
   loadModelCatalog,
-  parseOpenAiModelList,
+  parseOpenAiModelListing,
+  contextWindowFor,
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
@@ -46,6 +47,7 @@ const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 // short answer (measured: 20 tokens → content null, 500 tokens → "OK"). The
 // reasoning-mandatory handling added for that lives further down in this file.
 export const DEFAULT_MODEL = 'deepseek/deepseek-v4-flash';
+export const DEEPSEEK_FALLBACK_MODEL = 'z-ai/glm-5.3-flash';
 const PROFILE_KEY = 'openrouter:default';
 
 /** OPENROUTER_API_KEY env var (legacy: OPENROUTER_API) → immediate API key (no PKCE needed). */
@@ -61,7 +63,7 @@ const MODEL_LIST_TIMEOUT_MS = 10_000;
  * models; this is deliberately just enough to start, since live discovery
  * replaces it whenever a key is present.
  */
-const CURATED_MODELS = [DEFAULT_MODEL, 'deepseek/deepseek-v4-pro', 'openai/gpt-5', 'anthropic/claude-sonnet-4'];
+const CURATED_MODELS = [DEFAULT_MODEL, DEEPSEEK_FALLBACK_MODEL, 'deepseek/deepseek-v4-pro', 'openai/gpt-5', 'anthropic/claude-sonnet-4'];
 
 function catalogSpec(): CatalogSpec {
   return {
@@ -83,7 +85,7 @@ function catalogSpec(): CatalogSpec {
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
       if (!res.ok) return [];
-      return parseOpenAiModelList(await res.json());
+      return parseOpenAiModelListing(await res.json()); // ids + context windows (AGT-4386)
     },
   };
 }
@@ -154,6 +156,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
     const model = options.model ?? await this.getDefaultModel();
     const callApi = createApiCaller(apiKey, model, {
       disableReasoning: options.disableReasoning,
+      reasoningEffort: options.reasoningEffort,
       onToken: options.onToken,
       signal: options.signal,
       timeoutMs: options.timeoutMs ?? 300000,
@@ -178,6 +181,8 @@ export class OpenRouterCliAdapter implements CliAdapter {
       model,
       callApi,
       maxTurns: options.maxTurns ?? 20,
+      // Size compaction to the advertised window when the catalog has it. (AGT-4386)
+      contextWindowTokens: contextWindowFor('openrouter', model),
       timeoutMs: options.timeoutMs ?? 300000,
       onLog: options.onLog,
       enableTools: options.enableTools ?? true,
@@ -185,6 +190,10 @@ export class OpenRouterCliAdapter implements CliAdapter {
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
+      scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
+      forbidPublication: options.forbidPublication,
+      sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
@@ -208,9 +217,19 @@ export class OpenRouterCliAdapter implements CliAdapter {
       if (cli.costInfo) cli.costInfo.model = model;
       return cli;
     } catch (err) {
-      // Rate-limit AND infra/capacity errors must propagate (pause / infra_error),
-      // not be buried in a fake failed result the worker reads as an empty success. (INT-1906, INT-2520)
+      // A model-family fallback is stronger than retrying the same endpoint:
+      // OpenRouter already exhausted transient retries inside createApiCaller,
+      // so a remaining v4-flash failure gets one clean GLM run with the exact
+      // same tool/sandbox/reasoning policy. Account quota errors and operator
+      // cancellation cannot be repaired by changing models and must propagate.
       if (err instanceof RateLimitError) throw err;
+      if (options.signal?.aborted) throw err;
+      if (model === DEFAULT_MODEL) {
+        options.onLog?.(`[OpenRouter] ${DEFAULT_MODEL} failed; escalating to ${DEEPSEEK_FALLBACK_MODEL}: ${err instanceof Error ? err.message : String(err)}`);
+        return this.run({ ...options, model: DEEPSEEK_FALLBACK_MODEL });
+      }
+      // Infra/capacity errors on the fallback still propagate so the scheduler
+      // classifies them as infrastructure instead of fake task failure.
       if (isInfraError(err)) throw err;
       return {
         exitCode: 1,
@@ -236,6 +255,13 @@ export class OpenRouterCliAdapter implements CliAdapter {
 export interface ApiCallerOptions {
   /** worker 등 기계적 역할: 추론 토큰 비활성화 (지원 모델 한정) */
   disableReasoning?: boolean;
+  /**
+   * OpenRouter's unified `reasoning.effort`. Wins over disableReasoning when
+   * both are set. Before AGT-4402 this adapter dropped it, so a jobProfile's
+   * `effort` and the escalation ladder's `effort→high` never reached the
+   * request — on openrouter they degraded to "not disabled".
+   */
+  reasoningEffort?: 'low' | 'medium' | 'high';
   /** 스트리밍 토큰 콜백 (chat TUI). 없으면 비스트리밍과 동일하게 동작. */
   onToken?: (delta: string) => void;
   /** 사용자 중단(Esc/Ctrl+C) — fetch에 전달. */
@@ -289,7 +315,11 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     // 단, OpenAI 추론 모델(gpt-5 등)은 "Reasoning is mandatory"로 이 플래그를
     // 거부하므로 제외한다 — worker escalate 대상이 gpt-5라 이걸 안 빼면 escalation이
     // 항상 깨진다. OpenAI는 단순 작업엔 추론을 자동 최소화하므로 끌 필요도 없다.
-    if (opts.disableReasoning && !/^openai\//i.test(model)) {
+    if (opts.reasoningEffort) {
+      // A model that does not take the parameter answers 400; the fallback
+      // below drops `reasoning` and retries, same as for `enabled: false`.
+      body.reasoning = { effort: opts.reasoningEffort };
+    } else if (opts.disableReasoning && !/^openai\//i.test(model)) {
       body.reasoning = { enabled: false };
     }
     if (tools.length > 0) {
@@ -297,17 +327,27 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     }
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
       const request = prepareApprovedModelRequest(`${OPENROUTER_API_BASE}/chat/completions`, body);
-      const res = await adapterFetch(request.url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          ...ATTRIBUTION_HEADERS,
-        },
-        body: request.body,
-        // The caller's signal AND this call's own deadline. Either one aborts.
-        signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
-      });
+      let res: Response;
+      try {
+        res = await adapterFetch(request.url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            ...ATTRIBUTION_HEADERS,
+          },
+          body: request.body,
+          // The caller's signal AND this call's own deadline. Either one aborts.
+          signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
+        });
+      } catch (err) {
+        // A dropped socket before any response (undici `fetch failed`) is a
+        // blip, not a verdict — retry the step in place. (AGT-4385)
+        if (await resolveTransientFailure('openrouter', { error: err }, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        throw err;
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
@@ -327,6 +367,10 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
         // swallowing it into a fake empty success → false STUCK (INT-2520).
         // A 429 is pacing, so it is waited out and retried. (INT-2907)
         if (await resolveLimitResponse('openrouter', res.status, res.headers, errText, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        // 5xx / 529: upstream blip, bounded retry before it becomes an infra error. (AGT-4385)
+        if (await resolveTransientFailure('openrouter', { status: res.status }, throttle, { signal: opts.signal }) === 'retry') {
           return attempt();
         }
         throw new Error(`OpenRouter API error (${res.status}): ${errText.slice(0, 500)}`);

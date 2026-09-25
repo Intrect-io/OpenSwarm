@@ -3,7 +3,11 @@
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 import { EventEmitter } from 'node:events';
-import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
+import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
+import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
+import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
+import { discardStagedMemoriesFrom } from './stagedMemory.js';
+import { captureBeforeIteration, createSnapshotState, rollbackStagnantIteration } from './iterationSnapshot.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -11,13 +15,15 @@ import type { DocumenterResult } from './documenter.js';
 import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
 import { summarizeStageResult } from './stageSummary.js';
+import { composePipelineResult } from './pairPipelineResult.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
-import { type CostInfo, aggregateCosts, formatCost } from '../support/costTracker.js';
+import { type CostInfo, formatCost } from '../support/costTracker.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { t } from '../locale/index.js';
 import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
 import { runGuards } from './pipelineGuards.js';
+import { adjudicateContractEvidenceStagnation } from './guardArbiter.js';
 import {
   type ReflectionSource,
   createReflectionState,
@@ -40,7 +46,6 @@ import type {
   PipelineRunMetadata,
   StageResult,
 } from './pairPipelineTypes.js';
-import { WORKER_NO_CHANGES_PARK_REASON } from './pairPipelineTypes.js';
 import * as reviewerAgent from './reviewer.js';
 import * as testerAgent from './tester.js';
 import * as documenterAgent from './documenter.js';
@@ -48,7 +53,9 @@ import * as auditorAgent from './auditor.js';
 import * as skillDocumenterAgent from './skillDocumenter.js';
 import { StuckDetector, createStuckDetector } from '../support/stuckDetector.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
+import { UNBOUNDED_TURNS } from '../adapters/agenticLoop.js';
 import { safeConsole } from '../support/safeLog.js';
+import { existsSync } from 'node:fs';
 import { isInfraError, isTimeoutError } from '../adapters/errorClassification.js';
 import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
@@ -56,6 +63,8 @@ import type { ModelRole } from '../adapters/modelCompat.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
 import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
+import { testerReflectionErrors, testerRevisionFeedback } from './testerFailureFeedback.js';
+import { formatGuardWarningLine, guardWarningsForResult } from './guardWarningRecord.js';
 import { repoNameFromPath, worktreeNameFromPath } from './repoPathNames.js';
 import { assignedAgentName, coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
@@ -77,6 +86,8 @@ export type {
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
+import { canStartAnotherIteration } from '../orchestration/taskBudget.js';
+import { buildReviewerStageOptions } from './reviewerStageOptions.js';
 
 
 /**
@@ -88,6 +99,17 @@ import { stageTimeoutMs } from './stageTimeouts.js';
  * inbox nobody reads. Role is part of the key so the worker and the reviewer on
  * one task never answer to the same name.
  */
+/**
+ * A test verdict describes the diff it ran against. Left in place, a run that
+ * ends before the tester — on a guard, a worker failure — is recorded with the
+ * previous iteration's test output as its reason (AX-1585, AGT-4468). A function
+ * rather than an inline assignment so the loop's later reads are not narrowed
+ * to `undefined`.
+ */
+function dropStaleTestVerdict(context: { testerResult?: TesterResult }): void {
+  context.testerResult = undefined;
+}
+
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
   private stuckDetector: StuckDetector;
@@ -162,6 +184,7 @@ export class PairPipeline extends EventEmitter {
 
     const taskPrefix = buildTaskPrefix(task, projectPath);
     const context: PipelineContext = {
+      snapshots: createSnapshotState(task),
       task,
       projectPath,
       session,
@@ -179,6 +202,13 @@ export class PairPipeline extends EventEmitter {
       if (this.config.securityAudit?.enabled) {
         context.securityBaseline = await captureSecurityAuditBaseline(projectPath, this.config.securityAudit);
         safeConsole.log(`[${context.taskPrefix}] CodeQL baseline: ${context.securityBaseline.status}, ${context.securityBaseline.findings.length} finding(s)`);
+        // A partial audit is accepted (the gap is permanent — see securityAuditGate),
+        // but the reduced coverage must be readable from the log, not only from
+        // a status word: name the languages CodeQL could not analyse (AGT-4098).
+        if (context.securityBaseline.status === 'partial') {
+          const skipped = context.securityBaseline.skippedCodeqlLanguages.join(', ') || 'unknown';
+          safeConsole.warn(`[${context.taskPrefix}] CodeQL coverage is partial — not analysed: ${skipped}. ${context.securityBaseline.detail ?? ''}`.trimEnd());
+        }
       }
       const iterationResult = await this.runFullIterationLoop(context, stages);
 
@@ -249,6 +279,8 @@ export class PairPipeline extends EventEmitter {
           : undefined,
         totalDuration: Date.now() - startTime,
         iterations: context.currentIteration,
+        // A crashed run still knows what the guards objected to (AGT-4439).
+        guardWarnings: guardWarningsForResult(context.guardsResult?.results),
         workerResult: context.workerResult,
         reviewResult: context.reviewResult,
         testerResult: context.testerResult,
@@ -288,12 +320,21 @@ export class PairPipeline extends EventEmitter {
       verify: this.config.verify,
       trustedCommands: context.trustedVerifyCommands, trustedPackageJsonByDirectory: context.trustedVerifyPackageJsonByDirectory,
       trustedInputFingerprint: context.trustedVerifyInputFingerprint,
-      onInfra: (error) => safeConsole.warn(`[${context.taskPrefix}] Deterministic verify unavailable; falling back to LLM tester: ${error instanceof Error ? error.message : String(error)}`),
+      onInfra: (error) => {
+        // The fallback changes what "tester passed" means — an LLM opinion in
+        // place of ruff/pytest — so it goes to the stage log (stdout, dashboard)
+        // and not only to stderr, where 29 of them went unnoticed (AGT-4416).
+        const line = `Deterministic verify unavailable; falling back to LLM tester: ${error instanceof Error ? error.message : String(error)}`;
+        safeConsole.warn(`[${context.taskPrefix}] ${line}`);
+        this.emit('log', { line });
+      },
       fallback: () => testerAgent.runTester({
         taskTitle: context.task.title, taskDescription: context.task.description || '',
         workerResult: context.workerResult!, projectPath: context.projectPath,
         timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model), maxTurns: this.config.roles?.tester?.maxTurns,
+        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model),
+        // Coding stages run without a turn ceiling unless configured (AGT-4388).
+        maxTurns: this.config.roles?.tester?.maxTurns ?? UNBOUNDED_TURNS,
         adapterName: this.config.roles?.tester?.adapter,
       }),
     });
@@ -334,18 +375,19 @@ export class PairPipeline extends EventEmitter {
 
       switch (stage) {
         case 'worker': {
+          // A run whose working directory vanished (superseded and re-dispatched
+          // before its tree was rebuilt, a prune, a hand removal) used to start
+          // the agent anyway; it read "empty repository" and parked an operator
+          // question about data access that was never missing (AGT-4080). The
+          // `worktree-missing:` prefix is an infra pattern, so the runner backs
+          // off and rebuilds the tree on the next attempt instead of counting it.
+          if (!existsSync(context.projectPath)) {
+            throw new Error(`worktree-missing: working directory is gone before the worker started: ${context.projectPath}`);
+          }
           agentPair.updateSessionStatus(context.session.id, 'working');
           const taskId = taskEventKey(context.task);
           const onLog = (line: string) =>
             broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line: `[${prefix}] ${line}` } });
-
-          // Check if fresh context should be used (after N failures)
-          const useFreshContext = agentPair.shouldUseFreshContext(context.session.id);
-          if (useFreshContext) {
-            safeConsole.log(`[${prefix}] Using fresh context for worker (retry with clean slate)`);
-            agentPair.consumeFreshContext(context.session.id);
-            onLog('🔄 Using fresh context (previous attempts failed)');
-          }
 
           // 코드 컨텍스트 수집 (첫 시도 정확도 향상 목적)
           const workerContext = await collectWorkerContext(context, this.config.draftAnalysis);
@@ -357,13 +399,9 @@ export class PairPipeline extends EventEmitter {
           }
 
           // Self-repair feedback: objective lint/test errors (reflection trail)
-          // are always carried forward — ground truth that survives a fresh-context
-          // reset. The reviewer's revision prompt is ALSO preserved across fresh
-          // context (INT-1705): it carries the task requirement (e.g. "wire it into
-          // the heartbeat / add the call site"), not chat pollution — dropping it
-          // made the worker repeat the same partial impl forever. Fresh context
-          // still clears the worker's own chat history; only the reviewer's task
-          // signal is kept.
+          // and the reviewer's revision prompt are always carried forward. The
+          // worker is stateless per iteration, so there is no context to reset;
+          // dropping this task signal made workers repeat partial implementations.
           const reflectionPart = buildReflectionFeedback(context.reflection);
           const includeReview =
             context.feedbackSource === 'review' && !!context.reviewResult;
@@ -381,8 +419,32 @@ export class PairPipeline extends EventEmitter {
                 + 'A prior run of this task did not pass. Address these points first and do not repeat them:\n'
                 + context.task.priorAttemptFeedback
               : undefined;
+          // The write-scope fence rejected these paths on an earlier iteration of
+          // this worktree. Without saying so, the loop cannot escape a demand it
+          // is structurally unable to satisfy: on AX-1556 the reviewer asked for
+          // a change to a file outside the worker's scope, and three successive
+          // workers tried to comply and were each failed by the fence — the last
+          // of them having otherwise addressed every point the reviewer raised.
+          // The task then ran out of iterations with the real blocker untouched.
+          //
+          // Sourced from the rejected-path registry rather than a prior turn so
+          // every stateless worker iteration receives the structural constraint.
+          // (AGT-4451)
+          const fenced = rejectedWorkerPaths(context.projectPath);
+          const scopeFencePart = fenced.length > 0
+            ? '## Outside your write scope — do not edit these\n'
+              + 'An earlier iteration changed these paths and the write-scope fence '
+              + 'rejected the whole result for it:\n'
+              + fenced.map((file) => `- ${file}`).join('\n') + '\n\n'
+              + 'Editing any of them fails this iteration no matter what else you get right. '
+              + 'If the review above asks for a change there, do not make it — say so in your '
+              + 'summary instead, naming the path and what was asked, so it reaches the pull '
+              + 'request as a known gap rather than being silently dropped.'
+            : undefined;
+          const scratchNotesPart = await scratchNotesSection(context.task);
           const combinedFeedback =
-            [priorSessionPart, reflectionPart, reviewPart].filter(Boolean).join('\n\n') || undefined;
+            [scratchNotesPart, priorSessionPart, reflectionPart, reviewPart, scopeFencePart]
+              .filter(Boolean).join('\n\n') || undefined;
 
           const workerOptions: WorkerOptions = {
             taskTitle: context.task.title,
@@ -390,6 +452,8 @@ export class PairPipeline extends EventEmitter {
             authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
             projectPath: context.projectPath,
             previousFeedback: combinedFeedback,
+            scratchpadRunId: workerScratchpadRunId(context.task),
+            memoryContext: { taskId: taskAttributionKey(context.task), iteration: context.currentIteration },
             timeoutMs: stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs),
             // getModelForRole gives the matched jobProfile's model precedence (config's
             // light/heavy → gpt-5.5/5.4), falling back to roles.worker.model. Reading
@@ -400,10 +464,14 @@ export class PairPipeline extends EventEmitter {
             // display value — is the one that reaches the agent. (AGT-4273)
             model: compatibleStageModel(this.config, 'worker', overrides?.model, overrides?.modelRole ?? 'worker')
               ?? modelForTask(this.config, 'worker', context.task),
-            maxTurns: this.config.roles?.worker?.maxTurns,
+            // Coding stages run without a turn ceiling unless configured; the
+            // wall-clock, the repeated-call guard and maxIterations bound them.
+            // Read-only stages below keep their adapter defaults. (AGT-4388)
+            maxTurns: this.config.roles?.worker?.maxTurns ?? UNBOUNDED_TURNS,
             adapterName: this.config.roles?.worker?.adapter,
             reasoningEffort: overrides?.reasoningEffort ?? effortForTask(this.config, context.task),
             bashTimeoutMs: await workerAgent.resolveWorkerBashTimeout(context.projectPath, overrides?.reasoningEffort ?? effortForTask(this.config, context.task)), // INT-2415
+            sandbox: this.config.workerSandbox,
             // No-edit guard (re-applied from stranded feat/v0.7.0 commit 2eea3bc):
             // reasoning workers frequently end with analysis only and never call
             // edit_file. Without this the guard defaults to 0 (disabled) — measured:
@@ -417,7 +485,7 @@ export class PairPipeline extends EventEmitter {
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,
-            processContext: { taskId: taskEventKey(context.task), stage: 'worker' },
+            processContext: { taskId: taskAttributionKey(context.task), stage: 'worker' },
             workerContext,
             signal: this.abortSignal,
             instructionCapsule: this.config.instructionCapsule,
@@ -486,44 +554,9 @@ export class PairPipeline extends EventEmitter {
           // removed (INT-1914): worker confidence is self-reported, so a confidently
           // scaffolded task was getting LESS review — exactly the wrong incentive. The
           // completion-criteria hard gate is the real check now.
-          const reviewerMaxTurns = this.config.roles?.reviewer?.maxTurns;
-          const reviewerOptions = {
-            taskTitle: context.task.title,
-            taskDescription: context.task.description || '',
-            authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
-            workerResult: context.workerResult,
-            projectPath: context.projectPath,
-            timeoutMs: stageTimeoutMs('reviewer', this.config.roles?.reviewer?.timeoutMs),
-            // jobProfile model precedence (see worker stage above). (INT-1599)
-            // `overrides.modelRole` (not the stage) so an escalation resolves as
-            // an escalation. This call — not the `stageModel` above, which is the
-            // display value — is the one that reaches the agent. (AGT-4273)
-            model: compatibleStageModel(this.config, 'reviewer', overrides?.model, overrides?.modelRole ?? 'reviewer')
-              ?? modelForTask(this.config, 'reviewer', context.task),
-            maxTurns: reviewerMaxTurns,
-            adapterName: this.config.roles?.reviewer?.adapter,
-            reasoningEffort: effortForTask(this.config, context.task),
-            completionCriteria: this.config.draftAnalysis?.completionCriteria,
-            verificationEvidence: context.testerResult?.verificationEvidence,
-            // Surface non-blocking guard warnings (dead-module, reformat/scope)
-            // so the reviewer verifies them instead of them dying in a log. (INT-2388)
-            guardWarnings: context.guardsResult?.results
-              .filter(r => !r.passed && !r.blocking)
-              .flatMap(r => r.issues),
-            processContext: { taskId: taskEventKey(context.task), stage: 'reviewer' },
-            // runReviewer has always accepted onLog; nothing passed one, so the
-            // reviewer's turns never reached the dashboard/desktop console the
-            // way the worker's do. (INT-3397)
-            onLog: (line: string) =>
-              broadcastEvent({
-                type: 'log',
-                data: { taskId: taskEventKey(context.task), stage: 'reviewer', line: `[${prefix}] ${line}` },
-              }),
-            signal: this.abortSignal,
-            instructionCapsule: this.config.instructionCapsule,
-            mcpTools: this.config.roleMcpTools?.reviewer,
-            coordinationContext: coordinationContextFor(context, 'reviewer'),
-          };
+          const reviewerOptions = await buildReviewerStageOptions({
+            config: this.config, context, prefix, overrides, abortSignal: this.abortSignal,
+          });
 
           safeConsole.log(`[${prefix}] Running full review...`);
           result = await reviewerAgent.runReviewer(reviewerOptions);
@@ -769,6 +802,7 @@ export class PairPipeline extends EventEmitter {
     stages: StageResult[]
   ): Promise<{ success: boolean }> {
     const maxIterations = this.config.maxIterations ?? 3;
+    const loopStartedAt = Date.now();
     const hasWorker = this.hasStage('worker');
     const hasReviewer = this.hasStage('reviewer');
     const hasTester = this.hasStage('tester');
@@ -779,9 +813,34 @@ export class PairPipeline extends EventEmitter {
       return { success: false };
     }
 
+    // The watchdog used to fire mid-iteration and the run ended "cancelled, PR
+    // not created" with finished work stranded on a branch (AGT-4430). Stop on
+    // our own terms instead: an iteration is only started when the longest one
+    // observed so far still fits in what is left of the same budget.
+    const taskBudgetMs = this.config.taskBudgetMs ?? 0;
+    const workerTimeoutMs = stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs);
+    let longestIterationMs = 0;
+
     while (context.currentIteration < maxIterations) {
       this.throwIfAborted(); // bail before starting another iteration
+      const budget = canStartAnotherIteration({
+        elapsedMs: Date.now() - loopStartedAt,
+        budgetMs: taskBudgetMs,
+        iterationsUsed: context.currentIteration,
+        maxIterations,
+        longestIterationMs,
+        workerTimeoutMs,
+      });
+      if (!budget.start && budget.reason) {
+        context.budgetParkReason = budget.reason;
+        safeConsole.warn(`[${context.taskPrefix}] Stopping before iteration ${context.currentIteration + 1}: ${budget.reason}`);
+        agentPair.updateSessionStatus(context.session.id, 'failed');
+        return { success: false };
+      }
+      const iterationStartedAt = Date.now();
       context.currentIteration++;
+      dropStaleTestVerdict(context);
+      await captureBeforeIteration(context);
 
       // Stuck detection check (before iteration starts)
       const stuckCheck = this.stuckDetector.check();
@@ -814,6 +873,7 @@ export class PairPipeline extends EventEmitter {
         workerCfg: this.config.roles?.worker,
         iteration: context.currentIteration,
         baseModel: modelForTask(this.config, 'worker', context.task),
+        baseEffort: effortForTask(this.config, context.task),
         signalEscalation: context.workerEscalation,
         taskId: taskEventKey(context.task),
         taskPrefix: context.taskPrefix,
@@ -876,8 +936,22 @@ export class PairPipeline extends EventEmitter {
           ?? failedWorker.haltReason
           ?? failedWorker.noChangesReason
           ?? failedWorker.summary;
+        // A second identical scope rejection is structural, not a worker-quality
+        // failure.  Retrying would only consume the next iteration with the same
+        // fence (and otherwise triggers fresh-context / reasoning escalation).
+        // Park it explicitly so the operator sees the incompatible demand and
+        // scope rather than receiving a PR that silently dropped the request.
+        if (detail?.startsWith('worker-scope:') && context.repeatedScopeRejection === detail) {
+          const reason = `Repeated write-scope rejection; stopped instead of retrying: ${detail}`;
+          safeConsole.log(`[${context.taskPrefix}] ${reason}`);
+          context.workerResult = { ...failedWorker, haltReason: reason };
+          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
+          this.emit('halt', { confidence: failedWorker.confidencePercent ?? 0, haltReason: reason, sessionId: context.session.id, iteration: context.currentIteration, context });
+          return { success: false };
+        }
+        if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
         safeConsole.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
-        agentPair.trackFailure(context.session.id); // Track for fresh context decision
+        agentPair.trackFailure(context.session.id);
         this.emit('iteration:fail', {
           iteration: context.currentIteration,
           stage: 'worker',
@@ -911,34 +985,60 @@ export class PairPipeline extends EventEmitter {
             errors: blockingIssues,
           });
 
-          context.reviewResult = {
-            decision: 'revise',
-            feedback: `Pipeline guard failed: ${blockingIssues.join('; ')}`,
-            issues: blockingIssues,
-            suggestions: ['Fix the issues flagged by quality guards'],
-          };
-          context.feedbackSource = 'objective';
-          agentPair.trackFailure(context.session.id);
-          this.emit('iteration:fail', {
-            iteration: context.currentIteration,
-            stage: 'worker',
-            context,
-          });
-          agentPair.updateSessionStatus(context.session.id, 'revising');
+          // Confirmed stagnation (identical block twice) on contractEvidence
+          // ALONE — not mixed with another guard — gets one arbiter
+          // adjudication before the mechanical retry/abort below (AGT-4462):
+          // the guard's own evidence check cannot accept a literal this same
+          // diff newly defines, so retrying never helps that specific case.
+          const arbiterOutcome = !progressed && blocking.length === 1 && blocking[0].guard === 'contractEvidence'
+            ? await adjudicateContractEvidenceStagnation({
+                issues: blockingIssues,
+                projectPath: context.projectPath,
+                adapter: this.config.roles?.reviewer?.adapter,
+                model: this.config.roles?.reviewer?.model,
+              })
+            : undefined;
+          if (arbiterOutcome) safeConsole.log(`[${context.taskPrefix}] ${arbiterOutcome.summary}`);
 
-          if (this.shouldAbortSelfRepair(context, progressed, source)) {
-            return { success: false };
+          if (!arbiterOutcome?.overridden) {
+            context.reviewResult = {
+              decision: 'revise',
+              feedback: `Pipeline guard failed: ${blockingIssues.join('; ')}`
+                + (arbiterOutcome ? `\n\n${arbiterOutcome.summary}` : ''),
+              issues: blockingIssues,
+              suggestions: ['Fix the issues flagged by quality guards'],
+            };
+            context.feedbackSource = 'objective';
+            agentPair.trackFailure(context.session.id);
+            this.emit('iteration:fail', {
+              iteration: context.currentIteration,
+              stage: 'worker',
+              context,
+            });
+            agentPair.updateSessionStatus(context.session.id, 'revising');
+
+            // Stagnation built on an edit that was not working: restore instead
+            // of abandoning the run on top of it (AGT-4460).
+            const rolledBack = await rollbackStagnantIteration(context, progressed);
+            if (rolledBack) await discardStagedMemoriesFrom(taskAttributionKey(context.task), rolledBack.iteration);
+            if (!rolledBack && this.shouldAbortSelfRepair(context, progressed, source)) {
+              return { success: false };
+            }
+            longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
+            continue;
           }
-          continue;
+          this.emit('log', { line: '🔓 Guard arbiter override: contractEvidence literal(s) confirmed self-defining by this diff — proceeding.' });
+          longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
+          // No `continue` here: fall through past this guard block and treat
+          // the iteration as if guards had passed.
         }
 
-        // Log non-blocking guard warnings
-        const warnings = guardsResult.results.filter(r => !r.passed && !r.blocking);
-        if (warnings.length > 0) {
-          safeConsole.log(`[${context.taskPrefix}] Guard warnings: ${warnings.map(w => w.guard).join(', ')}`);
-          this.emit('log', {
-            line: `⚠️ Guard warnings: ${warnings.flatMap(w => w.issues).join('; ')}`,
-          });
+        // Carries the issues, not just the guard's name: stdout is the last
+        // reader left. Why, in guardWarningRecord.ts (AGT-4439).
+        const warningLine = formatGuardWarningLine(guardsResult.results);
+        if (warningLine) {
+          safeConsole.log(`[${context.taskPrefix}] ${warningLine}`);
+          this.emit('log', { line: `⚠️ ${warningLine}` });
         }
       }
 
@@ -1083,30 +1183,26 @@ export class PairPipeline extends EventEmitter {
         stages.push(testerResult);
 
         const hasNewSecurityFindings = (context.newSecurityFindings?.length ?? 0) > 0;
-        const reviewerShouldJudgeFailure = context.testerResult?.deterministic === true && !hasNewSecurityFindings;
+        // Only a configured reviewer can judge a deterministic verdict; without
+        // one the deferral had no recipient and the run ended instead of
+        // self-repairing. See `testerFailureFeedback.ts` (AGT-4438).
+        const reviewerShouldJudgeFailure = hasReviewer
+          && context.testerResult?.deterministic === true
+          && !hasNewSecurityFindings;
         if (!testerResult.success && !this.config.continueOnTestFail && !reviewerShouldJudgeFailure) {
           // Test failure is objective ground truth → record into the reflection
           // trail and drive a bounded self-repair retry (INT-1679).
           safeConsole.log(`[${context.taskPrefix}] Tester failed, retrying...`);
-          agentPair.trackFailure(context.session.id); // Track for fresh context decision
+          agentPair.trackFailure(context.session.id);
 
-          const failedTests = context.testerResult?.failedTests ?? [];
-          const testErrors = failedTests.length > 0
-            ? failedTests
-            : [context.testerResult?.error || `Tests failed (${context.testerResult?.testsFailed ?? 0} failing)`];
           const { progressed } = recordReflection(context.reflection, {
             iteration: context.currentIteration,
             source: 'test',
-            errors: testErrors,
+            errors: testerReflectionErrors(context.testerResult),
           });
 
           if (context.testerResult) {
-            context.reviewResult = {
-              decision: 'revise',
-              feedback: testerAgent.buildTestFixPrompt(context.testerResult),
-              issues: context.testerResult.failedTests,
-              suggestions: context.testerResult.suggestions,
-            };
+            context.reviewResult = testerRevisionFeedback(context.testerResult);
           }
           context.feedbackSource = 'objective';
 
@@ -1231,10 +1327,10 @@ export class PairPipeline extends EventEmitter {
           context.lastReviseFeedback = reviseFeedback;
 
           // revise = next iteration. Reviewer feedback is subjective → it travels
-          // through the reviewer channel and is dropped on a fresh-context reset.
+          // through the reviewer channel and is kept for the next worker iteration.
           safeConsole.log(`[${context.taskPrefix}] Reviewer requested revision`);
           context.feedbackSource = 'review';
-          agentPair.trackFailure(context.session.id); // Track for fresh context decision
+          agentPair.trackFailure(context.session.id);
           this.emit('iteration:fail', {
             iteration: context.currentIteration,
             stage: 'reviewer',
@@ -1255,6 +1351,7 @@ export class PairPipeline extends EventEmitter {
         agentPair.updateSessionStatus(context.session.id, 'failed');
         return { success: false };
       }
+      longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
       safeConsole.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
       this.emit('iteration:complete', {
         iteration: context.currentIteration,
@@ -1276,69 +1373,8 @@ export class PairPipeline extends EventEmitter {
     stages: StageResult[],
     startTime: number
   ): PipelineResult {
-    // Use context.session directly — do NOT re-fetch from store.
-    // updateSessionStatus('approved') archives the session (deletes from Map),
-    // so getPairSession() would return undefined → finalStatus = 'failed'.
-    const session = context.session;
-    const finalStatus = session.status as PipelineResult['finalStatus'] || 'failed';
-    const success = finalStatus === 'approved';
-    // Aggregate costs from all stages
-    const stageCosts: (CostInfo | undefined)[] = [];
-    if (context.workerResult?.costInfo) stageCosts.push(context.workerResult.costInfo);
-    if (context.reviewResult?.costInfo) stageCosts.push(context.reviewResult.costInfo);
-    if (context.testerResult?.costInfo) stageCosts.push(context.testerResult.costInfo);
-    if (context.documenterResult?.costInfo) stageCosts.push(context.documenterResult.costInfo);
-    if (context.auditorResult?.costInfo) stageCosts.push(context.auditorResult.costInfo);
-    if (context.skillDocumenterResult?.costInfo) stageCosts.push(context.skillDocumenterResult.costInfo);
-    const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
-    if (totalCost) {
-      safeConsole.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
-      broadcastEvent({ type: 'task:cost', data: { taskId: taskEventKey(context.task), cost: totalCost } });
-    }
-    const result: PipelineResult = {
-      success,
-      sessionId: context.session.id,
-      stages,
-      finalStatus,
-      failureSignal: context.stuckReason ? 'stuck'
-        : context.guardsResult?.results.some(r => r.blocking && !r.passed) || context.testerResult?.success === false ? 'gate-fail' : undefined,
-      stuckReason: context.stuckReason,
-      // The session stopped because the worker claimed success, changed
-      // nothing and gave no reason — three times, across a model escalation
-      // and a fresh context. A new attempt runs the same prompt into the same
-      // silence: cgf-portal AX-868 reached attempt 27 and AGT-3844 attempt 53
-      // that way on 2026-09-02, each attempt ~900k tokens, and the operator
-      // was never told the agent had produced nothing at all.
-      operatorPark: context.stuckReason && context.workerResult?.zeroDiffWithoutReason
-        ? {
-          code: WORKER_NO_CHANGES_PARK_REASON,
-          reason: `Worker claimed success without changing a file and without a noChangesReason (${context.stuckReason.toLowerCase()}). The issue needs a human: either it asks for something the agent cannot express as a diff, or its description does not say what to change.`,
-        }
-        : undefined,
-      totalDuration: Date.now() - startTime,
-      iterations: context.currentIteration,
-      workerResult: context.workerResult,
-      reviewResult: context.reviewResult,
-      lastReviewFeedback: context.lastReviseFeedback,
-      testerResult: context.testerResult,
-      documenterResult: context.documenterResult,
-      auditorResult: context.auditorResult,
-      skillDocumenterResult: context.skillDocumenterResult,
-      taskContext: {
-        issueIdentifier: context.task.issueIdentifier || context.task.issueId,
-        projectName: context.task.linearProject?.name,
-        projectPath: context.projectPath,
-        taskTitle: context.task.title,
-      },
-      totalCost,
-    };
-
-    if (success) {
-      this.emit('pipeline:complete', result);
-    } else {
-      this.emit('pipeline:fail', result);
-    }
-
+    const result = composePipelineResult(context, stages, startTime);
+    this.emit(result.success ? 'pipeline:complete' : 'pipeline:fail', result);
     return result;
   }
 }
@@ -1387,6 +1423,8 @@ export function createPipelineFromConfig(
   instructionCapsule?: PipelineConfig['instructionCapsule'],
   roleMcpTools?: PipelineConfig['roleMcpTools'],
   adapterRouting?: PipelineConfig['adapterRouting'],
+  workerSandbox?: PipelineConfig['workerSandbox'],
+  taskBudgetMs?: number,
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1412,6 +1450,7 @@ export function createPipelineFromConfig(
   return new PairPipeline({
     stages,
     maxIterations,
+    taskBudgetMs,
     maxReflections,
     roles,
     guards,
@@ -1424,6 +1463,7 @@ export function createPipelineFromConfig(
     instructionCapsule,
     roleMcpTools,
     adapterRouting,
+    workerSandbox,
   });
 }
 

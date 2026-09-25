@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { describeLinuxSandbox, formatSandboxUnavailable, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
+import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
@@ -17,10 +18,26 @@ import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import type { VerifyCommand } from './manifest.js';
 import { rebasePythonEnvironment } from './pythonEnvironment.js';
+import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 30_000;
+/**
+ * The head sandbox is a `--no-hardlinks` clone: a full copy of the object store,
+ * because the sandbox runs the repository's own test commands and hardlinked
+ * packs would share inodes with the real checkout. That copy is bounded by disk
+ * throughput, not by git, and on a loaded host it outgrows the 30 s every other
+ * git call gets — cgf-portal's 135 MB took 33 s at load 55, and the runner fell
+ * back to the LLM tester 29 times in one day, which is how `ruff`-red code shipped
+ * as ready PRs (AGT-4416). The clone gets its own budget.
+ */
+export const CLONE_TIMEOUT_MS = 10 * 60_000;
+
+/** The budget a git invocation gets: the sandbox clone's own, everything else the short default. */
+export function gitTimeoutMsFor(args: readonly string[]): number {
+  return args[0] === 'clone' ? CLONE_TIMEOUT_MS : GIT_TIMEOUT_MS;
+}
 const execFileAsync = promisify(execFile);
 const DEPENDENCY_INPUTS = new Set([
   'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock',
@@ -35,6 +52,14 @@ export interface VerifyEvidence {
   newFailure: boolean;
   /** A containment/attestation failure that policy must never make non-blocking. */
   securityFailure?: boolean;
+  /**
+   * The head run failed because the toolchain is missing (ModuleNotFoundError
+   * for pytest, `Cannot find module`, no Cargo manifest …), not because of
+   * the change. Reported separately so a caller can refuse to count it as a
+   * verified pass: when base fails the same way this used to be "pre-existing
+   * failure → not new → success" — a green tester that ran nothing (AGT-4407).
+   */
+  environmentFailure?: boolean;
   rawOutputTail: string;
   durationMs: number;
 }
@@ -225,6 +250,14 @@ function isEnvironmentFailure(output: string): boolean {
     /ModuleNotFoundError:\s*No module named\b/i,
     /ImportError:\s*No module named\b/i,
     /Cannot find module ['"]/i,
+    // uv / pip driven from inside the network-less verification sandbox: the
+    // environment cannot be built, so neither run is a verdict. (AGT-4407)
+    /Failed to initialize cache at/i,
+    /error: Failed to (?:download|fetch|prepare|sync)/i,
+    /No solution found when resolving dependencies/i,
+    /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,
+    /No virtual environment found/i,
+    /command not found:? (?:uv|python3?|pytest|ruff|npm|cargo|go)\b/i,
     /could not find [`']?Cargo\.toml/i,
     /failed to (?:load|read) manifest for workspace member/i,
     /Cargo\.toml.*(?:No such file or directory|os error 2)/i,
@@ -276,6 +309,7 @@ async function runWithSandboxExecutor(
   cwd: string,
   isolatedHome: string,
   isolatedTmp: string,
+  env: NodeJS.ProcessEnv,
   createSession: (workspace: string) => Promise<SandboxExecutorSession>,
 ): Promise<CommandResult> {
   const timeoutMs = command.timeoutMs ?? 300_000;
@@ -293,6 +327,7 @@ async function runWithSandboxExecutor(
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
       // disposable checkout; neither admits its parent /work directory.
       ...(vegaWorkspace ? ['export VEGA_HEADLESS=1', `export VEGA_CWD=${shellQuote(vegaWorkspace)}`] : []),
+      testResourceShellPrefix(undefined, env).slice(0, -1),
       command.run,
     ].join(' && '), timeoutMs);
     let status: CommandResult['status'];
@@ -353,11 +388,12 @@ async function runCommand(
   } catch (error) {
     return { status: 'infra', output: error instanceof Error ? error.message : String(error) };
   }
+  const boundedCommand = { ...command, run: await resourceAwareTestCommand(command.run, cwd, undefined, env) };
   const isolatedHome = join(dirname(root), 'home');
   const isolatedTmp = join(dirname(root), 'tmp');
   await Promise.all([mkdir(isolatedHome, { recursive: true }), mkdir(isolatedTmp, { recursive: true })]);
   const processMarker = `openswarm-verify-${randomUUID()}`;
-  const safeEnv: NodeJS.ProcessEnv = {
+  const safeEnv: NodeJS.ProcessEnv = withTestResourceBudget({
     PATH: env.PATH,
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
@@ -368,7 +404,14 @@ async function runCommand(
     TMP: isolatedTmp,
     TEMP: isolatedTmp,
     OPENSWARM_VERIFY_PROCESS_MARKER: processMarker,
-  };
+    OPENSWARM_TEST_PARALLELISM: env.OPENSWARM_TEST_PARALLELISM,
+    PYTEST_XDIST_AUTO_NUM_WORKERS: env.PYTEST_XDIST_AUTO_NUM_WORKERS,
+    CARGO_BUILD_JOBS: env.CARGO_BUILD_JOBS,
+    RAYON_NUM_THREADS: env.RAYON_NUM_THREADS,
+    CMAKE_BUILD_PARALLEL_LEVEL: env.CMAKE_BUILD_PARALLEL_LEVEL,
+    GOMAXPROCS: env.GOMAXPROCS,
+    UV_CONCURRENT_BUILDS: env.UV_CONCURRENT_BUILDS,
+  }, undefined);
   for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (env[key] !== undefined) safeEnv[key] = env[key];
   }
@@ -380,17 +423,17 @@ async function runCommand(
   }
   if (sandboxExecutorSessionFactory) {
     return await runWithSandboxExecutor(
-      command, root, cwd, isolatedHome, isolatedTmp, sandboxExecutorSessionFactory,
+      boundedCommand, root, cwd, isolatedHome, isolatedTmp, safeEnv, sandboxExecutorSessionFactory,
     );
   }
   const shell = process.env.SHELL || '/bin/sh';
   let executable = shell;
-  let invocationArgs = ['-lc', command.run];
+  let invocationArgs = ['-lc', boundedCommand.run];
   if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
     const writableRoot = (await realpath(dirname(root))).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
     const profile = `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath "${writableRoot}") (literal "/dev/null") (literal "/dev/tty"))`;
     executable = '/usr/bin/sandbox-exec';
-    invocationArgs = ['-p', profile, shell, '-lc', command.run];
+    invocationArgs = ['-p', profile, shell, '-lc', boundedCommand.run];
   } else if (process.platform === 'linux') {
     // Still fails closed — running a worker's code unsandboxed to decide whether
     // to trust it defeats the point. What changed is that the message now names
@@ -401,7 +444,7 @@ async function runCommand(
     if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
     executable = sandbox.executable;
     const writableRoot = dirname(root);
-    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', command.run];
+    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
   } else if (process.platform === 'win32') {
     return { status: 'fail', output: '[security] OS verification sandbox is unavailable on this Windows host' };
   }
@@ -592,8 +635,7 @@ async function validateSandboxSymlinks(
       if (omitVerificationSource(path, sharedPaths)) continue;
       if (entry.isSymbolicLink()) {
         const target = await readlink(source);
-        const resolvedTarget = resolve(dirname(source), target);
-        if (isAbsolute(target) || (resolvedTarget !== projectRoot && !resolvedTarget.startsWith(`${projectRoot}${sep}`))) {
+        if (symlinkTargetEscapes({ root: projectRoot, linkPath: source, target })) {
           await rejectOrOmit(path);
           continue;
         }
@@ -677,6 +719,7 @@ async function createHeadSandbox(
 }
 
 async function git(projectPath: string, args: string[]): Promise<string> {
+  const timeoutMs = gitTimeoutMsFor(args);
   return await new Promise((resolveResult, reject) => {
     const maxOutputBytes = 4 * 1024 * 1024;
     // Checkout hooks belong to the live developer environment. Running them in
@@ -699,7 +742,7 @@ async function git(projectPath: string, args: string[]): Promise<string> {
       } else child.kill('SIGKILL');
       reject(error);
     };
-    timer = setTimeout(() => fail(new Error(`git ${args[0] ?? ''} timed out after ${GIT_TIMEOUT_MS}ms`)), GIT_TIMEOUT_MS);
+    timer = setTimeout(() => fail(new Error(`git ${args[0] ?? ''} timed out after ${timeoutMs}ms`)), timeoutMs);
     const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes > maxOutputBytes) {
@@ -859,14 +902,22 @@ export async function runVerify(options: RunVerifyOptions): Promise<VerifyEviden
         .subarray(-OUTPUT_TAIL_BYTES)
         .toString('utf8');
       const sameFailure = base.status === 'fail' && hasSameFailure(base, head);
-      const sameEnvironmentFailure = !!(sameFailure && base.environmentFailure && head.environmentFailure);
+      // The toolchain could not run on either side. That is not a verdict about
+      // the change even when the two outputs differ: the first package uv fails
+      // to download depends on resolution order, so base said `jiter` and head
+      // said `fastapi` (cgf-portal AX-1542, 2026-09-18) and the fingerprint
+      // mismatch was read as a new regression. The tester turns this into an
+      // infra error and falls back to the LLM tester (AGT-4407).
+      const environmentFailureOnBothSides = base.status === 'fail'
+        && !!base.environmentFailure && !!head.environmentFailure;
       evidence.push({
         command,
         baseStatus: base.status,
         headStatus: 'fail',
         securityFailure: base.securityFailure || undefined,
-        newFailure: base.status === 'pass'
-          || (base.status === 'fail' && (!sameFailure || (!!base.baselineEnvironmentChanged && !sameEnvironmentFailure))),
+        environmentFailure: head.environmentFailure || undefined,
+        newFailure: !environmentFailureOnBothSides && (base.status === 'pass'
+          || (base.status === 'fail' && (!sameFailure || !!base.baselineEnvironmentChanged))),
         rawOutputTail,
         durationMs: Date.now() - started,
       });

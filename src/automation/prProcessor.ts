@@ -4,6 +4,7 @@
 // ============================================
 
 import { Cron } from 'croner';
+import { prRemote } from './prRemote.js';
 import { homedir, tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -14,7 +15,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
-
+import { withFreshReviewLock } from './freshReviewLock.js';
 const execFileAsync = promisify(execFile);
 /** Safe git command execution (no shell) */
 async function gitExec(cwd: string, ...args: string[]): Promise<string> {
@@ -179,6 +180,7 @@ import {
   type IntegrationSiblingResult,
 } from './integrationCoordinator.js';
 import { getOwnedPRsForRepo } from './prOwnership.js';
+import { publicationReviewBudget } from './publicationReviewBudget.js';
 
 // Types
 
@@ -439,7 +441,8 @@ export class PRProcessor {
       // documented to specifically pick `origin` when a repo has multiple
       // remotes configured, which would let this check pass against one
       // remote while `git fetch origin` below reads from another.
-      const originUrl = (await gitExec(projectPath, 'remote', 'get-url', 'origin')).trim();
+      const remote = await prRemote(projectPath);
+      const originUrl = (await gitExec(projectPath, 'remote', 'get-url', remote)).trim();
       const localRepo = await ghRepoView(projectPath, originUrl);
       if (localRepo !== pr.repo) {
         throw new Error(
@@ -461,39 +464,40 @@ export class PRProcessor {
       // ref names and could hand each other a mid-update or wrong-generation
       // SHA.
       const scratchId = randomUUID();
-      prHeadRef = `refs/openswarm/pr-${pr.number}-review-${scratchId}`;
-      baseRef = `refs/openswarm/pr-${pr.number}-base-${scratchId}`;
+      const reviewHeadRef = `refs/openswarm/pr-${pr.number}-review-${scratchId}`;
+      const reviewBaseRef = `refs/openswarm/pr-${pr.number}-base-${scratchId}`;
+      prHeadRef = reviewHeadRef;
+      baseRef = reviewBaseRef;
       // Both sides fetched into explicit local refs via `<src>:<dst>`, not a
       // bare branch name for the base — a bare name (a) updates the
       // `origin/<base>` remote-tracking ref only via the remote's configured
       // fetch refspec, which this method has no way to confirm is the normal
       // default for whatever repo it's pointed at, and (b) is ambiguous
       // between a branch and a same-named tag (`refs/heads/<base>` pins it).
-      await gitExec(
-        projectPath, 'fetch', 'origin',
-        `pull/${pr.number}/head:${prHeadRef}`, `refs/heads/${base}:${baseRef}`,
-      );
-
-      const reviewedSha = (await gitExec(projectPath, 'rev-parse', prHeadRef)).trim();
+      const { reviewedSha, mergeBase, scratchWorktree } = await withFreshReviewLock(projectPath, async () => {
+        await gitExec(
+          projectPath, 'fetch', remote,
+          `pull/${pr.number}/head:${reviewHeadRef}`, `refs/heads/${base}:${reviewBaseRef}`,
+        );
+        const reviewedSha = (await gitExec(projectPath, 'rev-parse', reviewHeadRef)).trim();
+        const mergeBase = (await gitExec(projectPath, 'merge-base', reviewHeadRef, reviewBaseRef)).trim();
+        const scratchWorktree = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
+        await gitExec(projectPath, 'worktree', 'add', '--detach', scratchWorktree, reviewedSha);
+        return { reviewedSha, mergeBase, scratchWorktree };
+      });
       // The merge-base, not the base branch's current tip: the base branch
       // may have moved since the PR diverged, and a two-dot diff (what
       // getDiffText runs under the hood) against its tip would list every
       // commit merged into base since then as if the PR had made those
       // changes too. Same reasoning as review-gate.yml's `Resolve the PR
       // base` step.
-      const mergeBase = (await gitExec(projectPath, 'merge-base', prHeadRef, baseRef)).trim();
-
-      const scratchWorktree = join(tmpdir(), `openswarm-pr-review-${pr.number}-${scratchId}`);
       worktreePath = scratchWorktree;
-      await gitExec(projectPath, 'worktree', 'add', '--detach', scratchWorktree, reviewedSha);
-
       const review = await runReviewCommand({
         path: scratchWorktree,
         base: mergeBase,
-        // The scratch checkout is the reviewed repository, not OpenSwarm, so
-        // config discovery there falls back to the unavailable `codex` CLI.
-        // Preserve the daemon's explicitly configured PR reviewer adapter.
-        adapter: this.config.roles?.reviewer?.adapter,
+        // Adapter, model, wall clock and turn ceiling of the reviewer role —
+        // not the CLI's 300s/20-turn defaults, which killed half the reviews.
+        ...publicationReviewBudget(this.config.roles?.reviewer, `${pr.repo}#${pr.number}`),
         // The checked-out content is another PR's diff — untrusted the same
         // way review-gate.yml's CI run is (INT-3189). Denying mutating tools,
         // including bash, keeps a malicious PR from using the reviewer's
@@ -564,7 +568,7 @@ export class PRProcessor {
     } finally {
       if (worktreePath) {
         try {
-          await gitExec(projectPath, 'worktree', 'remove', '--force', worktreePath);
+          await withFreshReviewLock(projectPath, () => gitExec(projectPath, 'worktree', 'remove', '--force', worktreePath!));
         } catch (cleanupErr) {
           console.error(`[PRProcessor] Failed to remove scratch worktree ${worktreePath}:`, cleanupErr);
         }
@@ -574,7 +578,7 @@ export class PRProcessor {
       for (const ref of [prHeadRef, baseRef]) {
         if (!ref) continue;
         try {
-          await gitExec(projectPath, 'update-ref', '-d', ref);
+          await withFreshReviewLock(projectPath, () => gitExec(projectPath, 'update-ref', '-d', ref));
         } catch (cleanupErr) {
           console.error(`[PRProcessor] Failed to remove scratch ref ${ref}:`, cleanupErr);
         }
@@ -864,7 +868,7 @@ export class PRProcessor {
       }
 
       // 3. git fetch + checkout PR branch
-      await gitExec(projectPath, 'fetch', 'origin', pr.branch);
+      await gitExec(projectPath, 'fetch', await prRemote(projectPath), pr.branch);
 
       // Stash local changes before checkout
       autoStash = await stashLocalChanges(
@@ -944,7 +948,7 @@ export class PRProcessor {
         console.log(`[PRProcessor] ${key}: Pipeline succeeded, pushing changes...`);
         const publishedHeadSha = (await gitExec(projectPath, 'rev-parse', 'HEAD')).trim();
         if (!publishedHeadSha) throw new Error('Cannot publish CI remediation: HEAD identity is unavailable');
-        await gitExec(projectPath, 'push', 'origin', pr.branch);
+        await gitExec(projectPath, 'push', await prRemote(projectPath), pr.branch);
         console.log(`[PRProcessor] ${key}: Waiting for CI checks...`);
         const ciStatus = await waitForCICompletion(pr.repo, pr.number, {
           timeoutMs: ciTimeoutMs,
@@ -1007,7 +1011,7 @@ export class PRProcessor {
 
           // Fetch latest PR state before retry
           console.log(`[PRProcessor] ${key}: Retrying due to CI failure...`);
-          await gitExec(projectPath, 'pull', 'origin', pr.branch);
+          await gitExec(projectPath, 'pull', await prRemote(projectPath), pr.branch);
           continue;
 
         } else if (ciStatus.status === 'unknown') {
@@ -1094,7 +1098,7 @@ export class PRProcessor {
 
     try {
       // git fetch + checkout PR branch
-      await gitExec(projectPath, 'fetch', 'origin', pr.branch);
+      await gitExec(projectPath, 'fetch', await prRemote(projectPath), pr.branch);
 
       // Stash local changes before checkout
       autoStash = await stashLocalChanges(
@@ -1272,7 +1276,7 @@ export class PRProcessor {
 
       // Push changes
       console.log(`[PRProcessor] ${key}: Pushing review feedback changes...`);
-      await gitExec(projectPath, 'push', 'origin', pr.branch);
+      await gitExec(projectPath, 'push', await prRemote(projectPath), pr.branch);
 
       // Comment on PR
       const summary = result.workerResult?.summary || 'Review feedback addressed';

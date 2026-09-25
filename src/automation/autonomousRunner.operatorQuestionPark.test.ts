@@ -475,4 +475,120 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
     internal.durableRuns.close();
   });
+
+  // AGT-4306: the same-fingerprint infra circuit parks a run so an operator
+  // changes something first. A free slot is not that change.
+  it('does not idle-fill a run the infra circuit parked; an explicit dispatch still lifts it', async () => {
+    const internal = await makeRunner();
+    const { RunLedger } = await import('./runLedger.js');
+    const { INFRA_CIRCUIT_PARK_REASON } = await import('./infraFailureCircuit.js');
+    // Seeded the way durableRunCoordinator parks it: a claimed run transitioned
+    // to NEEDS_HUMAN with the circuit's own error code.
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'EXECUTING')).toBe(true);
+    expect(ledger.transition(claim!, 'NEEDS_HUMAN', {
+      errorCode: INFRA_CIRCUIT_PARK_REASON, errorMessage: 'Identical infrastructure failure on 6 consecutive attempts: codeql missing',
+    })).toBe(true);
+    ledger.close();
+    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({ state: 'NEEDS_HUMAN', lastErrorCode: INFRA_CIRCUIT_PARK_REASON });
+
+    // Free slots, Todo card: every other NEEDS_HUMAN park would be lifted here.
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+
+    // The operator's hand: `openswarm work` / POST /api/work readmits it.
+    const dispatched = { ...TASK, explicitDispatch: true };
+    expect((internal as unknown as { readmitForExplicitDispatch(task: TaskItem): boolean }).readmitForExplicitDispatch(dispatched)).toBe(true);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
+  // A deterministic gate gives the same answer to the same branch. On
+  // 2026-09-17 all 28 publication-scope parks were idle-filled within two
+  // minutes and parked again; cgf-portal AX-1027 went round 36 times.
+  describe('a verdict that already came back twice', () => {
+    const SCOPE = 'publication-scope: branch contains files outside reserved write scope: apps/pipelines/tests/test_x.py';
+
+    async function parkWith(message: string, resume: boolean): Promise<void> {
+      const { RunLedger } = await import('./runLedger.js');
+      const ledger = new RunLedger(dbPath);
+      const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+      expect(claim).not.toBeNull();
+      expect(ledger.transition(claim!, 'EXECUTING')).toBe(true);
+      expect(ledger.recordAttemptResult(claim!, { success: false, finalStatus: 'failed' })).toBe(true);
+      expect(ledger.transition(claim!, 'NEEDS_HUMAN', { errorCode: 'publication_scope_mismatch', errorMessage: message })).toBe(true);
+      if (resume) expect(ledger.resumeNeedsHuman('AGT-1', Date.now(), 'idle_fill')).toBe('READY');
+      ledger.close();
+    }
+
+    it('is lifted by idle fill the first time', async () => {
+      const internal = await makeRunner();
+      await parkWith(SCOPE, false);
+      expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+      internal.durableRuns.close();
+    });
+
+    it('is left parked once the same verdict has repeated, and an explicit dispatch still lifts it', async () => {
+      const internal = await makeRunner();
+      await parkWith(SCOPE, true);
+      await parkWith(SCOPE, false);
+      expect(internal.durableRuns.idleFillWouldRepeatVerdict('AGT-1')).toBe(true);
+
+      expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+
+      const dispatched = { ...TASK, explicitDispatch: true };
+      expect((internal as unknown as { readmitForExplicitDispatch(task: TaskItem): boolean }).readmitForExplicitDispatch(dispatched)).toBe(true);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+      internal.durableRuns.close();
+    });
+
+    it('is lifted again once the cooldown has passed, so a deployed fix needs no operator', async () => {
+      const internal = await makeRunner();
+      await parkWith(SCOPE, true);
+      await parkWith(SCOPE, false);
+      const { REPEATED_VERDICT_IDLE_COOLDOWN_MS } = await import('./infraFailureCircuit.js');
+      expect(internal.durableRuns.idleFillWouldRepeatVerdict('AGT-1', Date.now() + REPEATED_VERDICT_IDLE_COOLDOWN_MS + 1)).toBe(false);
+      internal.durableRuns.close();
+    });
+
+    // The other lift site: a backoff that idle fill pulls forward. AX-1027's
+    // two worker-scope refusals were RETRY_AT rows, not NEEDS_HUMAN parks.
+    it('leaves a repeated verdict to its own backoff instead of pulling it forward', async () => {
+      const internal = await makeRunner();
+      const { RunLedger } = await import('./runLedger.js');
+      const WORKER_SCOPE = 'worker-scope: changed files outside declared fileScope: apps/pipelines/tests/test_x.py';
+      const backoff = async (): Promise<void> => {
+        const ledger = new RunLedger(dbPath);
+        const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+        expect(claim).not.toBeNull();
+        expect(ledger.transition(claim!, 'EXECUTING')).toBe(true);
+        expect(ledger.recordAttemptResult(claim!, { success: false, finalStatus: 'failed' })).toBe(true);
+        expect(ledger.transition(claim!, 'RETRY_AT', {
+          errorCode: 'failed', errorMessage: WORKER_SCOPE, retryAt: Date.now() + 3_600_000,
+        })).toBe(true);
+        ledger.close();
+      };
+
+      await backoff();
+      // First refusal: a free slot may still chew the backoff (AGT-4257).
+      expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+
+      await backoff();
+      expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+      expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('RETRY_AT');
+      internal.durableRuns.close();
+    });
+
+    it('is lifted when the second verdict differs from the first', async () => {
+      const internal = await makeRunner();
+      await parkWith(SCOPE, true);
+      await parkWith('publication-scope: branch contains files outside reserved write scope: docs/other.md', false);
+      expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+      internal.durableRuns.close();
+    });
+  });
 });

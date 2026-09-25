@@ -6,7 +6,7 @@ import { LinearClient } from '@linear/sdk';
 import { createHash } from 'node:crypto';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
 import { formatAutomationComment, formatPairDialogue, type CommentSection } from './format.js';
-import type { PairCompleteStats } from '../automation/taskSource.js';
+import { completionTargetState, type PairCompleteStats } from '../automation/taskSource.js';
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
 import { c, status } from '../support/colors.js';
@@ -71,7 +71,7 @@ const FETCH_PAGE_SIZE = 100;
  * `issue.project`/`issue.state`/`issue.labels()` lazily (1 request each) for every
  * issue, so 150+ issues × Linear's ~40/min limit blew the 90s budget.
  */
-interface RawIssueNode {
+export interface RawIssueNode {
   id: string;
   identifier: string;
   title: string;
@@ -84,7 +84,22 @@ interface RawIssueNode {
   project?: { id: string; name: string; icon?: string | null; color?: string | null } | null;
   labels?: { nodes: Array<{ name: string }> } | null;
   comments?: { nodes: Array<{ id: string; body: string; createdAt: string }> } | null;
+  /**
+   * Linear's native relations pointing AT this issue, embedded in the bulk
+   * query. A `blocks` entry's `issue` is the blocker (AGT-4050).
+   */
+  inverseRelations?: { nodes: Array<{ type: string; issue?: { id: string } | null }> } | null;
 }
+
+/**
+ * Native relations per issue, embedded in the bulk query rather than resolved
+ * per issue: the per-issue `inverseRelations()` call this replaced cost one
+ * request each and stalled the fetch at Linear's request limit (INT-1909);
+ * as a nested field it rides the same request — measured 100 issues at
+ * complexity 54 in 0.4 s. Twenty covers any real issue; an issue with more
+ * blockers than that is a planning problem, not a fetch problem.
+ */
+const INVERSE_RELATIONS_PAGE_SIZE = 20;
 
 const ISSUES_QUERY = `
   query OswIssues($filter: IssueFilter, $first: Int, $after: String) {
@@ -101,6 +116,7 @@ const ISSUES_QUERY = `
         state { name }
         project { id name icon color }
         labels { nodes { name } }
+        inverseRelations(first: ${INVERSE_RELATIONS_PAGE_SIZE}) { nodes { type issue { id } } }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -616,32 +632,35 @@ export function parseBlockerIdentifiers(description?: string): string[] {
 
 /**
  * Populate `blockedBy` (issue UUIDs) on each fetched issue from two sources:
- *  1. Structured Linear relations — `inverseRelations()` of type "blocks" (the
- *     relation's source `issue` is the blocker).
+ *  1. Structured Linear relations — the `inverseRelations` of type "blocks"
+ *     embedded in the bulk query (the relation's `issue` is the blocker).
  *  2. Description prose parsed by {@link parseBlockerIdentifiers}.
+ *
+ * No per-issue API calls: the structured source used to be a lazy
+ * `inverseRelations()` resolver per issue, which at Linear's request limit
+ * pushed the bulk fetch past its timeout, so it was cut and only prose
+ * remained. A task blocked through Linear's own "Blocked by" then looked ready
+ * and paid a draft-analysis call every heartbeat (AGT-4050). The relations now
+ * ride the same request as everything else.
  *
  * Only blockers that are themselves in the current fetch set are kept. We never
  * query Done issues, so a completed blocker drops out of the set and won't
  * false-block its dependents; getTaskReadiness then gates on what remains.
+ *
+ * Exported for tests; not part of the module's public surface.
  */
-async function populateBlockedBy(
+export function populateBlockedBy(
   result: LinearIssueInfo[],
-  // SDK Issue nodes keyed by id (carry inverseRelations()); typed loosely to
-  // match the file's existing lazy-resolver usage.
-  sdkNodeById: Map<string, any>,
-): Promise<void> {
+  nodeById: Map<string, RawIssueNode>,
+): void {
   const fetchedIds = new Set(result.map((r) => r.id));
   const identifierToId = new Map(result.map((r) => [r.identifier.toUpperCase(), r.id]));
 
-  // Text-only blocker resolution — NO per-issue API calls. The structured
-  // `inverseRelations()` source was removed: it cost one API request per issue,
-  // which (at Linear's ~40/min limit) pushed the bulk fetch past its timeout and
-  // stalled the whole pipeline. Description prose ("Blocked by: KT-302") covers
-  // the common case for free; structured-relation enrichment can return as a
-  // batched GraphQL query later if needed.
-  void sdkNodeById;
   for (const info of result) {
     const blockers = new Set<string>();
+    for (const relation of nodeById.get(info.id)?.inverseRelations?.nodes ?? []) {
+      if (relation.type === 'blocks' && relation.issue?.id) blockers.add(relation.issue.id);
+    }
     for (const ident of parseBlockerIdentifiers(info.description)) {
       const id = identifierToId.get(ident.toUpperCase());
       if (id) blockers.add(id);
@@ -725,7 +744,7 @@ export async function getMyIssues(
         } as LinearIssueInfo);
       }
 
-      await populateBlockedBy(result, new Map(withState.map(({ issue }) => [issue.id, issue])));
+      populateBlockedBy(result, new Map(withState.map(({ issue }) => [issue.id, issue])));
       return result;
     }
 
@@ -759,7 +778,7 @@ export async function getMyIssues(
         });
       }
 
-      await populateBlockedBy(result, new Map(allNodes.map((n) => [n.id, n])));
+      populateBlockedBy(result, new Map(allNodes.map((n) => [n.id, n])));
     }
 
     // Sort by priority
@@ -1320,6 +1339,10 @@ export async function logPairComplete(
     sections.push({ label: 'Remaining work', body: stats.remainingWork.trim() });
   }
 
+  if (stats.prUrl) {
+    sections.push({ label: 'Pull request', body: `${stats.prUrl} — the issue moves to Done when it merges.` });
+  }
+
   sections.push({
     label: 'Changed files',
     body: stats.filesChanged.length > 0
@@ -1345,8 +1368,10 @@ export async function logPairComplete(
     attribution: 'Worker/Reviewer/Tester pipeline',
   }) + (stats.idempotencyMarker ? `\n\n<!-- openswarm-effect:${stats.idempotencyMarker} -->` : '');
   await addComment(issueId, comment, stats.idempotencyMarker ? effectCommentId(stats.idempotencyMarker) : undefined);
-  const accepted = await updateIssueState(issueId, 'Done');
-  if (!accepted) throw new Error(`Linear refused Done transition for ${issueId}`);
+  // In Review while the PR is open; the merge sweep grants Done (AGT-4409).
+  const target = completionTargetState(stats);
+  const accepted = await updateIssueState(issueId, target);
+  if (!accepted) throw new Error(`Linear refused ${target} transition for ${issueId}`);
 }
 
 /**

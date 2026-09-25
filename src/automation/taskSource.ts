@@ -39,11 +39,22 @@ export interface PairCompleteStats {
   remainingWork?: string;
   /** Hidden marker used by the durable outbox to make comment delivery idempotent. */
   idempotencyMarker?: string;
+  /** The pull request this run published; with one, completion means In Review until it merges (AGT-4409). */
+  prUrl?: string;
 }
 
 export type SubIssueResult = { id: string; identifier: string; title: string } | { error: string };
 
 /** Explicit tracker lookup used only for stale durable-run reconciliation. */
+/**
+ * Where a completed run leaves its issue: In Review while its pull request
+ * is open — Done is the merge's to grant (AGT-4409) — and Done only when
+ * there is nothing to merge.
+ */
+export function completionTargetState(stats: Pick<PairCompleteStats, 'prUrl'>): Extract<TaskState, 'In Review' | 'Done'> {
+  return stats.prUrl ? 'In Review' : 'Done';
+}
+
 export type TrackerIssueLookup =
   | { ok: true; issue: { state: string; stateType?: string; updatedAt?: number } | null }
   | { ok: false; error: string };
@@ -337,8 +348,9 @@ export class SqliteTaskSource implements ITaskSource {
       attribution: 'Worker/Reviewer/Tester pipeline',
     }) + (stats.idempotencyMarker ? `\n\n<!-- openswarm-effect:${stats.idempotencyMarker} -->` : '');
     await this.addComment(issueId, comment, stats.idempotencyMarker);
-    const accepted = await this.updateState(issueId, 'Done');
-    if (!accepted) throw new Error(`Local issue store refused Done transition for ${issueId}`);
+    const target = completionTargetState(stats);
+    const accepted = await this.updateState(issueId, target);
+    if (!accepted) throw new Error(`Local issue store refused ${target} transition for ${issueId}`);
   }
   async logBlocked(issueId: string, _sessionName: string, reason: string): Promise<void> {
     await this.addComment(issueId, formatAutomationComment({

@@ -20,6 +20,7 @@ import * as workerAgent from '../agents/worker.js';
 import * as reviewerAgent from '../agents/reviewer.js';
 import * as projectMapper from '../support/projectMapper.js';
 import * as planner from '../support/planner.js';
+import { evaluateDecompositionTrigger } from './decompositionTrigger.js';
 import type { SubTask } from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
@@ -78,7 +79,6 @@ import {
 } from './runnerState.js';
 import {
   buildTaskStateSyncComment,
-  completeParentIfChildrenDone,
   markTaskBlocked,
   markTaskBacklog,
   markTaskDecomposed,
@@ -87,6 +87,9 @@ import {
   releaseDependentTasks,
   upsertTaskState,
 } from '../taskState/store.js';
+import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
+import { stageTimeoutMs } from '../agents/stageTimeouts.js';
+import { getEnabledStages, otherStageTimeoutsMs } from './runnerStageBudget.js';
 
 // Notifier (outbound notifications — Discord/Slack/Telegram/webhook, INT-1576)
 
@@ -166,6 +169,10 @@ export interface ExecutionContext {
   decompositionMaxChildren?: number;
   decompositionDailyLimit?: number;
   decompositionAutoBacklog?: boolean;
+  /** Failures after which decomposition is forced (AGT-4287); 0 = never. */
+  decomposeAfterFailures?: number;
+  /** Failed attempts already recorded for an issue, from the runner's ledger. */
+  getPriorFailures?: (issueId: string) => number;
   getRolesForProject: (projectPath: string) => DefaultRolesConfig | undefined;
   reportToDiscord: (message: string | EmbedBuilder) => Promise<void>;
   /** Git worktree mode: work in an isolated worktree per issue, auto-create PR */
@@ -192,6 +199,8 @@ export interface ExecutionContext {
   getActiveWorkerIssues?: (projectPath: string) => string[] | undefined;
   mcpPolicies?: import('../automation/runnerTypes.js').AutonomousConfig['mcpPolicies'];
   adapterRouting?: import('../automation/runnerTypes.js').AutonomousConfig['adapterRouting'];
+  /** OS fence for the worker's bash tool (AGT-4387). */
+  workerSandbox?: 'on' | 'off';
 }
 
 export function prepareTaskExecutionContext(task: TaskItem): Promise<TaskItem> {
@@ -550,6 +559,8 @@ export async function decomposeTask(
   projectPath: string,
   targetMinutes: number,
   draftAnalysis?: DraftAnalysis,
+  /** Set when the failure budget forced this split: the planner's "fits" verdict is not honoured. */
+  forcedAfterFailures?: number,
 ): Promise<boolean | 'no-decomp'> {
   console.log(`[AutonomousRunner] Decomposing task: ${task.title}`);
 
@@ -653,6 +664,7 @@ export async function decomposeTask(
       projectName: task.linearProject?.name,
       taskId: task.issueIdentifier ?? taskId,
       targetMinutes,
+      priorFailures: forcedAfterFailures,
       // Planner runs through the configured adapter loop now (not claude -p);
       // leave model unset to use the adapter default when no planner model is configured.
       model: ctx.plannerModel,
@@ -679,7 +691,10 @@ export async function decomposeTask(
     return false;
   }
 
-  if (!result.needsDecomposition || result.subTasks.length === 0) {
+  // A forced split ignores the planner's "fits in the threshold" — that verdict
+  // is the same text-only estimate the failures already disproved. Only an
+  // empty plan can refuse it (AGT-4287).
+  if (result.subTasks.length === 0 || (!result.needsDecomposition && forcedAfterFailures === undefined)) {
     console.log('[AutonomousRunner] Planner determined no decomposition needed');
     return 'no-decomp';
   }
@@ -823,15 +838,25 @@ export async function executePipeline(
     )
   );
 
-  if (ctx.enableDecomposition && !resumesPreservedWork) {
-    const threshold = ctx.decompositionThresholdMinutes ?? 30;
-    const needsDecomp = planner.needsDecomposition(task, threshold, true); // heuristic pre-filter
+  const threshold = ctx.decompositionThresholdMinutes ?? 30;
+  const priorFailures = task.issueId ? (ctx.getPriorFailures?.(task.issueId) ?? 0) : 0;
+  const trigger = evaluateDecompositionTrigger({
+    enableDecomposition: !!ctx.enableDecomposition,
+    resumesPreservedWork,
+    priorFailures,
+    decomposeAfterFailures: ctx.decomposeAfterFailures ?? 3,
+    heuristicNeedsDecomposition: () => planner.needsDecomposition(task, threshold, true),
+  });
+  if (trigger.checked) {
+    {
+      if (trigger.forced) {
+        console.log(`[AutonomousRunner] Task "${task.title}" failed ${priorFailures} time(s) whole — forcing decomposition (AGT-4287)`);
+      } else {
+        const estimated = planner.estimateTaskDuration(task);
+        console.log(`[AutonomousRunner] Task "${task.title}" may need decomposition (estimated ${estimated}min > ${threshold}min)`);
+      }
 
-    if (needsDecomp) {
-      const estimated = planner.estimateTaskDuration(task);
-      console.log(`[AutonomousRunner] Task "${task.title}" may need decomposition (estimated ${estimated}min > ${threshold}min)`);
-
-      const decomposed = await decomposeTask(ctx, task, projectPath, threshold, draftResult);
+      const decomposed = await decomposeTask(ctx, task, projectPath, threshold, draftResult, trigger.forced ? priorFailures : undefined);
       if (decomposed === true) {
         // Successfully decomposed into sub-issues
         return {
@@ -852,7 +877,7 @@ export async function executePipeline(
         console.log('[AutonomousRunner] Decomposition failed, falling back to direct execution');
       }
     }
-  } else if (resumesPreservedWork) {
+  } else if (resumesPreservedWork && ctx.enableDecomposition) {
     console.log(`[AutonomousRunner] Preserved work exists for ${task.issueIdentifier ?? task.issueId} — skipping decomposition and resuming the task branch`);
   }
   } catch (err) {
@@ -972,6 +997,15 @@ export async function executePipeline(
       instructionCapsule,
       roleMcpTools,
       normalizeAdapterRouting(ctx.adapterRouting),
+      ctx.workerSandbox,
+      // The same wall-clock budget the scheduler's watchdog was given, so the
+      // loop stops on its own terms instead of being killed mid-iteration
+      // (AGT-4430).
+      resolveHardTaskTimeoutMs({
+        maxIterations: ctx.pairMaxAttempts ?? 3,
+        workerTimeoutMs: stageTimeoutMs('worker', roles?.worker?.timeoutMs),
+        otherStagesTimeoutMs: otherStageTimeoutsMs(roles, ctx.verify),
+      }),
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
@@ -1216,7 +1250,7 @@ export async function executePipeline(
 
     const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
 
-    await publishApprovedWork(worktreeInfo, task, result, ctx.durability, reviewHook(true));
+    await publishApprovedWork(worktreeInfo, task, result, ctx.durability, reviewHook(true), ctx.verify);
     if (!parkedPublished) {
       await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
     }
@@ -1237,15 +1271,6 @@ export async function executePipeline(
       await cleanup.catch((err) => console.warn('[Worktree] Cleanup failed:', err));
     }
   }
-}
-
-function getEnabledStages(roles?: DefaultRolesConfig, verify?: import('../core/types.js').VerifyConfig): PipelineStage[] {
-  const stages: PipelineStage[] = [];
-  if (roles?.worker?.enabled !== false) stages.push('worker');
-  if (roles?.reviewer?.enabled !== false) stages.push('reviewer');
-  if (roles?.tester?.enabled || verify?.enabled) stages.push('tester');
-  if (roles?.documenter?.enabled) stages.push('documenter');
-  return stages;
 }
 
 // Reporting
@@ -1380,18 +1405,10 @@ export async function reconcileCompletionState(task: TaskItem): Promise<void> {
     }
   }
 
-  const parent = completeParentIfChildrenDone(task.issueId);
-  if (!parent) return;
-
-  try {
-    await taskSource?.updateState(parent.issueId, 'Done');
-    await taskSource?.addComment(
-      parent.issueId,
-      buildTaskStateSyncComment(parent, 'All child tasks completed')
-    );
-  } catch (err) {
-    console.warn(`[AutonomousRunner] Failed to complete parent task ${parent.issueId}:`, err);
-  }
+  // The parent is not closed here. A publication leaves its issue In Review,
+  // and one child's open PR used to close the whole epic (AGT-4409); the merge
+  // sweep closes the parent once every child has MERGED, checked against the
+  // tracker rather than this ledger.
 }
 
 export async function syncFailureState(task: TaskItem, reason: string, retryState?: 'Todo'): Promise<boolean> {

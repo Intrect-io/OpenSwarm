@@ -355,6 +355,54 @@ describe('decomposition limits', () => {
       expect(createPipelineFromConfig).toHaveBeenCalledTimes(1);
     });
 
+    // AGT-4287: a task that failed three times whole is split on the resume path
+    // (which used to skip the check entirely), the text-only heuristic is not
+    // consulted, and the planner's "fits in the budget" veto is not honoured.
+    it('forces a split of a repeatedly failed task on a resumed worktree, over the planner\'s "no decomposition" verdict', async () => {
+      hasRecoverableWorktree.mockResolvedValue(true);
+      plannerNeedsDecomposition.mockReturnValue(false);
+      plannerRunPlanner.mockResolvedValue({
+        success: true,
+        originalIssue: 'issue-1',
+        needsDecomposition: false,
+        subTasks: [
+          { title: 'Sub 1', description: 'first', estimatedMinutes: 20, priority: 2 },
+          { title: 'Sub 2', description: 'second', estimatedMinutes: 20, priority: 2 },
+        ],
+        totalEstimatedMinutes: 40,
+      });
+
+      const result = await executePipeline(
+        makeCtx({ enableDecomposition: true, decomposeAfterFailures: 3, getPriorFailures: () => 3 }),
+        task(),
+        '/repo',
+      );
+
+      expect(plannerNeedsDecomposition).not.toHaveBeenCalled();
+      expect(plannerRunPlanner).toHaveBeenCalledWith(expect.objectContaining({ priorFailures: 3 }));
+      expect(taskSourceMock.createSubIssue).toHaveBeenCalledTimes(2);
+      expect(result.finalStatus).toBe('decomposed');
+    });
+
+    it('does not force below the budget, and an empty forced plan still falls through to execution', async () => {
+      hasRecoverableWorktree.mockResolvedValue(true);
+      await executePipeline(
+        makeCtx({ enableDecomposition: true, decomposeAfterFailures: 3, getPriorFailures: () => 2 }),
+        task(),
+        '/repo',
+      );
+      expect(plannerRunPlanner).not.toHaveBeenCalled();
+
+      plannerRunPlanner.mockResolvedValue({ success: true, originalIssue: 'issue-1', needsDecomposition: true, subTasks: [], totalEstimatedMinutes: 0 });
+      const result = await executePipeline(
+        makeCtx({ enableDecomposition: true, decomposeAfterFailures: 3, getPriorFailures: () => 5 }),
+        task(),
+        '/repo',
+      );
+      expect(taskSourceMock.createSubIssue).not.toHaveBeenCalled();
+      expect(result.finalStatus).not.toBe('decomposed');
+    });
+
     // Caught by the commit-gate review: comparing only the plan let a parent that
     // already had children below the cap sail past it — 2 existing + 2 planned
     // reaches 4 under a cap of 3, because the earlier gate only refuses a parent

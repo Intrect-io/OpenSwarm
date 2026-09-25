@@ -526,6 +526,12 @@ export interface PromptTemplates {
   systemPrompt: string;
   /** Coordination-only system guidance, appended only when those tools are exposed. */
   coordinationConsultationPrompt: string;
+  /**
+   * Appended AFTER the instruction capsule so it is the last word: the harness
+   * publishes, the stage does not. The capsule can carry a human session's
+   * commit/PR/review/tracker workflow, which a worker otherwise follows. (AGT-4418)
+   */
+  harnessBoundaryPrompt: string;
   buildWorkerPrompt: (opts: {
     taskTitle: string;
     taskDescription: string;
@@ -563,6 +569,8 @@ export interface PromptTemplates {
     projectName: string;
     targetMinutes: number;
     authoritativeOperatorFeedback?: string;
+    /** Whole-task attempts that failed; when set, the split is required, not optional (AGT-4287). */
+    priorFailures?: number;
     impactAnalysis?: {
       directModules: string[];
       dependentModules: string[];

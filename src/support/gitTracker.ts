@@ -67,9 +67,19 @@ export async function getDiffText(
      * worktree's own. (INT-3402)
      */
     includeUntracked?: boolean;
+    /**
+     * Paths to leave out, as literal pathspec exclusions. `includeUntracked`
+     * stages everything `add -A` would, which includes material the commit
+     * path deliberately refuses — see `refusedUntrackedPaths`. (AGT-4447)
+     */
+    excludePaths?: string[];
   } = {},
 ): Promise<string> {
   const base = since ?? 'HEAD';
+  // `literal` so a path containing glob characters is matched as written.
+  const pathspec = opts.excludePaths?.length
+    ? ['--', '.', ...opts.excludePaths.map((path) => `:(exclude,literal)${path}`)]
+    : [];
   try {
     let diff: string;
     if (opts.includeUntracked) {
@@ -84,14 +94,14 @@ export async function getDiffText(
         await runGitCommand(projectPath, ['add', '-A'], env);
         diff = await runGitCommand(
           projectPath,
-          ['diff', '--no-color', '--no-ext-diff', '--cached', base],
+          ['diff', '--no-color', '--no-ext-diff', '--cached', base, ...pathspec],
           env,
         );
       } finally {
         await rm(dir, { recursive: true, force: true }).catch(() => {});
       }
     } else {
-      diff = await runGitCommand(projectPath, ['diff', '--no-color', '--no-ext-diff', base]);
+      diff = await runGitCommand(projectPath, ['diff', '--no-color', '--no-ext-diff', base, ...pathspec]);
     }
     if (diff.length <= maxBytes) return diff;
     return `[diff truncated at ${maxBytes} bytes of ${diff.length}; read the files directly for the rest]\n\n${diff.slice(0, maxBytes)}`;

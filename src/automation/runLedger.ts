@@ -15,7 +15,8 @@ import { admitsConflictScope } from './runLedgerScope.js';
 import { migrateAutomationSchema } from './runLedgerSchema.js';
 import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import { listClaimOwnersInDb } from './runLedgerOwners.js';
-import { consecutiveIdenticalInfraFailuresInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
+import { reconcileMissingWorktreeInDb, type MissingWorktreeDisposition } from './runLedgerMissingWorktree.js';
+import { consecutiveIdenticalInfraFailuresInDb, consecutiveIdenticalVerdictsInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
 import {
   markNeedsHumanForQuestionsInDb,
   resumeNeedsHumanForQuestionsInDb,
@@ -31,7 +32,8 @@ import {
   readLedgerMetrics,
   type TrackerTerminalState,
 } from './runLedgerTrackerCache.js';
-import { toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
+import { assertRunState, parseJson, toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
+import { assertPositiveDuration, placeholders, stringifyJson } from './runLedgerUtils.js';
 import type {
   AttemptResultInput,
   ClaimOptions,
@@ -76,35 +78,6 @@ export type {
   TrackerStateObservation,
   TransitionPatch,
 } from './runLedgerTypes.js';
-
-function parseJson(value: string | null): unknown {
-  if (value == null) return undefined;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return undefined;
-  }
-}
-
-function stringifyJson(value: unknown): string | null {
-  return value === undefined ? null : JSON.stringify(value);
-}
-
-function placeholders(values: readonly unknown[]): string {
-  return values.map(() => '?').join(', ');
-}
-
-function assertPositiveDuration(value: number, label: string): void {
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} must be a positive finite number`);
-  }
-}
-
-function assertRunState(value: string): asserts value is RunState {
-  if (!(RUN_STATES as readonly string[]).includes(value)) {
-    throw new Error(`Unknown automation run state: ${value}`);
-  }
-}
 
 export { defaultAutomationDbPath } from './automationDbPath.js';
 
@@ -166,6 +139,16 @@ export class RunLedger {
       if (inserted.changes === 1) {
         this.insertEvent(input.issueId, 0, 'registered', null, initialState, input.metadata, now);
       } else {
+        const previous = this.db.prepare('SELECT metadata_json FROM automation_runs WHERE issue_id = ?').get(input.issueId) as Pick<RunRow, 'metadata_json'>;
+        const priorMetadata = (parseJson(previous.metadata_json) ?? {}) as Record<string, unknown>; const incomingMetadata = (input.metadata ?? {}) as Record<string, unknown>;
+        // A resumed branch is checked against every commit it carries; preserve its first scope. (AGT-4441)
+        const metadata = {
+          ...incomingMetadata,
+          ...(priorMetadata.pinnedFileScope !== undefined ? {
+            pinnedFileScope: priorMetadata.pinnedFileScope,
+            pinnedFileScopeSource: priorMetadata.pinnedFileScopeSource,
+          } : {}),
+        };
         // Discovery may refresh descriptive fields, but never rewinds execution.
         this.db.prepare(`
           UPDATE automation_runs
@@ -181,7 +164,7 @@ export class RunLedger {
           input.identifier ?? null,
           input.title ?? null,
           input.projectPath,
-          stringifyJson(input.metadata),
+          stringifyJson(metadata),
           now,
           input.issueId,
         );
@@ -270,6 +253,10 @@ export class RunLedger {
   /** Finished attempts, newest first, that ended as infra_error with this fingerprint before anything else. */
   consecutiveIdenticalInfraFailures(issueId: string, fingerprint: string): number {
     return consecutiveIdenticalInfraFailuresInDb(this.db, issueId, fingerprint);
+  }
+
+  consecutiveIdenticalVerdicts(issueId: string): number {
+    return consecutiveIdenticalVerdictsInDb(this.db, issueId);
   }
 
   /** Finished attempts, newest first, that ended superseded before anything else. */
@@ -557,13 +544,14 @@ export class RunLedger {
       const updated = this.db.prepare(`
         UPDATE automation_runs
         SET state = 'CLAIMED', state_version = state_version + 1,
-            attempt_no = ?, owner_instance_id = ?, lease_token = ?,
+            attempt_no = ?, owner_instance_id = ?, owner_pid_space = ?, lease_token = ?,
             lease_epoch = ?, lease_expires_at = ?, retry_at = NULL,
             started_at = COALESCE(started_at, ?), updated_at = ?, completed_at = NULL
         WHERE issue_id = ? AND state = ? AND state_version = ?
       `).run(
         attemptNo,
         options.ownerInstanceId,
+        options.ownerPidSpace ?? null,
         token,
         epoch,
         leaseExpiresAt,
@@ -821,7 +809,6 @@ export class RunLedger {
     });
     return transition.immediate();
   }
-
   attachWorktree(claim: RunClaim, worktreePath: string, branchName: string, now = Date.now()): boolean {
     const result = this.db.prepare(`
       UPDATE automation_runs
@@ -839,6 +826,16 @@ export class RunLedger {
       now,
     );
     return result.changes === 1;
+  }
+  reconcileMissingWorktree(
+    expected: Pick<RunRecord, 'issueId' | 'state' | 'stateVersion' | 'worktreePath'>,
+    disposition: MissingWorktreeDisposition,
+    reason: string,
+    clearHeadSha: boolean,
+    now = Date.now(),
+  ): boolean {
+    return reconcileMissingWorktreeInDb(this.db, expected, disposition, reason, clearHeadSha, now,
+      (issueId, attemptNo, kind, from, to, data, at) => this.insertEvent(issueId, attemptNo, kind, from, to, data, at));
   }
 
   attachPublication(claim: RunClaim, patch: Pick<TransitionPatch, 'prUrl' | 'headSha'>, now = Date.now()): boolean {

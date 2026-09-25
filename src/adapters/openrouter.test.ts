@@ -7,7 +7,7 @@
 // ============================================
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OpenRouterCliAdapter, createApiCaller, applyPromptCaching } from './openrouter.js';
+import { OpenRouterCliAdapter, createApiCaller, applyPromptCaching, DEEPSEEK_FALLBACK_MODEL } from './openrouter.js';
 import { RateLimitError } from './rateLimitError.js';
 import { getAdapter } from './index.js';
 import type { ChatMessage } from './agenticLoop.js';
@@ -42,17 +42,94 @@ describe('OpenRouterCliAdapter', () => {
     // The run() catch must re-throw infra errors just like RateLimitError, so the
     // pipeline classifies infra_error instead of the worker reading an empty
     // exitCode:1 result as a false success → STUCK.
+    //
+    // Since AGT-4385 a dropped connection is first retried in place (5 backoff
+    // waits, 6 attempts); only a failure that outlives the budget reaches the
+    // pipeline. Fake timers collapse the ~31s of backoff, and the call count
+    // proves the retries happened rather than the first failure escaping.
     const prevKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = 'sk-or-test';
-    vi.stubGlobal('fetch', vi.fn(async () => {
+    const fetchMock = vi.fn(async () => {
       throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
-    }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
     try {
       const adapter = new OpenRouterCliAdapter();
-      await expect(adapter.run({
+      const run = adapter.run({
         prompt: 'x', cwd: process.cwd(), model: 'openai/gpt-4o',
         webTools: false, memoryTools: false, mcpTools: [], enableTools: false, maxTurns: 1,
-      } as never)).rejects.toThrow(/fetch failed/);
+      } as never);
+      const settled = expect(run).rejects.toThrow(/fetch failed/);
+      await vi.runAllTimersAsync();
+      await settled;
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+    } finally {
+      vi.useRealTimers();
+      if (prevKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = prevKey;
+    }
+  });
+
+  it('a 503 then a 200 succeeds on the retry instead of failing the run — AGT-4385', async () => {
+    const prevKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"ok"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('upstream overloaded', { status: 503 }))
+      .mockResolvedValueOnce(new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const call = createApiCaller('sk-or-test', 'openai/gpt-4o');
+      const pending = call([{ role: 'user', content: 'hi' }] as ChatMessage[], []);
+      await vi.runAllTimersAsync();
+      const result = await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.choices[0].message.content).toBe('ok');
+      expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/transient failure \(HTTP 503\).*retry 1\/5/);
+    } finally {
+      vi.useRealTimers();
+      if (prevKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = prevKey;
+    }
+  });
+
+  it('replays a failed v4-flash run once on GLM 5.3 Flash', async () => {
+    const prevKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    const bodies: Array<{ model?: string }> = [];
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"fallback ok"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}',
+      'data: [DONE]', '',
+    ].join('\n');
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body)) as { model?: string };
+      bodies.push(body);
+      return bodies.length === 1
+        ? new Response('model unavailable', { status: 400 })
+        : new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }));
+    try {
+      const result = await new OpenRouterCliAdapter().run({
+        prompt: 'x', cwd: process.cwd(), model: 'deepseek/deepseek-v4-flash',
+        webTools: false, memoryTools: false, mcpTools: [], enableTools: false, maxTurns: 1,
+      } as never);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('fallback ok');
+      expect(bodies.map((body) => body.model)).toEqual([
+        'deepseek/deepseek-v4-flash',
+        DEEPSEEK_FALLBACK_MODEL,
+      ]);
+      expect(result.costInfo?.model).toBe(DEEPSEEK_FALLBACK_MODEL);
     } finally {
       if (prevKey === undefined) delete process.env.OPENROUTER_API_KEY;
       else process.env.OPENROUTER_API_KEY = prevKey;
@@ -214,15 +291,36 @@ describe('OpenRouterCliAdapter', () => {
   });
 
   it('throws a generic error (with status code) on an ordinary non-2xx', async () => {
+    // A 4xx that is neither a limit nor the reasoning-flag 400 is the caller's
+    // own error: no retry, the status reaches the message. (5xx is retried
+    // since AGT-4385 — see the persistent-500 case below.)
     const fetchMock = vi.fn(async () =>
-      new Response('upstream exploded', { status: 500 }),
+      new Response('no such model', { status: 404 }),
     );
     vi.stubGlobal('fetch', fetchMock);
 
     const callApi = createApiCaller('sk-or-test-key', 'openai/gpt-4o');
     await expect(
       callApi([{ role: 'user', content: 'x' }], []),
-    ).rejects.toThrow(/OpenRouter API error \(500\)/);
+    ).rejects.toThrow(/OpenRouter API error \(404\)/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a persistent 500 is retried five times, then reported with its status — AGT-4385', async () => {
+    const fetchMock = vi.fn(async () => new Response('upstream exploded', { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const callApi = createApiCaller('sk-or-test-key', 'openai/gpt-4o');
+      const pending = callApi([{ role: 'user', content: 'x' }], []);
+      const settled = expect(pending).rejects.toThrow(/OpenRouter API error \(500\)/);
+      await vi.runAllTimersAsync();
+      await settled;
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('waits out a 429 and retries instead of reporting a usage limit — INT-2907', async () => {
@@ -263,5 +361,37 @@ describe('OpenRouterCliAdapter', () => {
     ));
     const callApi = createApiCaller('sk-or-test-key', 'openai/gpt-4o');
     await expect(callApi([{ role: 'user', content: 'x' }], [])).rejects.toBeInstanceOf(RateLimitError);
+  });
+});
+
+describe('reasoning effort reaches the request (AGT-4402)', () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"ok"}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    'data: [DONE]', '',
+  ].join('\n');
+  const bodyOf = (fetchMock: ReturnType<typeof vi.fn>) =>
+    JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body) as { reasoning?: unknown };
+
+  it('sends reasoning.effort when set, and it wins over disableReasoning', async () => {
+    const fetchMock = vi.fn(async () => new Response(sse, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', { reasoningEffort: 'medium', disableReasoning: true })(
+      [{ role: 'user', content: 'x' }], []);
+    expect(bodyOf(fetchMock).reasoning).toEqual({ effort: 'medium' });
+  });
+
+  it('still disables reasoning when only disableReasoning is set', async () => {
+    const fetchMock = vi.fn(async () => new Response(sse, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', { disableReasoning: true })([{ role: 'user', content: 'x' }], []);
+    expect(bodyOf(fetchMock).reasoning).toEqual({ enabled: false });
+  });
+
+  it('sends nothing about reasoning when neither is set', async () => {
+    const fetchMock = vi.fn(async () => new Response(sse, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await createApiCaller('sk-or-test', 'deepseek/deepseek-v4-flash', {})([{ role: 'user', content: 'x' }], []);
+    expect(bodyOf(fetchMock).reasoning).toBeUndefined();
   });
 });

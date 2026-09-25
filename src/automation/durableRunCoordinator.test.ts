@@ -428,7 +428,7 @@ describe('DurableRunCoordinator', () => {
     })).rejects.toThrow('worker crashed');
     expect(coordinator.getRun('EXECUTOR-THROW')).toMatchObject({
       state: 'RETRY_AT',
-      lastErrorCode: 'executor_throw',
+      lastErrorCode: 'infra_error',
       lastErrorMessage: 'worker crashed',
     });
     coordinator.close();
@@ -974,11 +974,11 @@ describe('DurableRunCoordinator', () => {
     const ledger = new RunLedger(path);
     ledger.registerRun({ issueId: 'DEAD-OWNER', source: 'linear', projectPath: '/repo' }, 1_000);
     const stale = ledger.claimRun('DEAD-OWNER', {
-      ownerInstanceId: '424242-dead-owner', leaseMs: 3_000, now: 1_000,
+      ownerInstanceId: '424242-dead-owner', ownerPidSpace: 'pidns:test', leaseMs: 3_000, now: 1_000,
     })!;
     expect(ledger.transition(stale, 'EXECUTING', {}, 1_100)).toBe(true);
     const replacement = new DurableRunCoordinator({
-      mode: 'primary', ledger, instanceId: 'replacement', processIsAlive: () => false,
+      mode: 'primary', ledger, instanceId: 'replacement', pidSpace: 'pidns:test', processIsAlive: () => false,
     });
 
     expect(replacement.reconcile(4_001)).toHaveLength(1);
@@ -997,11 +997,11 @@ describe('DurableRunCoordinator', () => {
     const liveLedger = new RunLedger(livePath);
     liveLedger.registerRun({ issueId: 'LIVE-PID', source: 'linear', projectPath: '/live-repo' }, 1_000);
     const liveClaim = liveLedger.claimRun('LIVE-PID', {
-      ownerInstanceId: `${process.pid}-live-owner`, leaseMs: 3_000, now: 1_000,
+      ownerInstanceId: `${process.pid}-live-owner`, ownerPidSpace: 'pidns:test', leaseMs: 3_000, now: 1_000,
     })!;
     expect(liveLedger.transition(liveClaim, 'EXECUTING', {}, 1_100)).toBe(true);
     const liveReplacement = new DurableRunCoordinator({
-      mode: 'primary', ledger: liveLedger, instanceId: 'live-replacement',
+      mode: 'primary', ledger: liveLedger, instanceId: 'live-replacement', pidSpace: 'pidns:test',
     });
 
     expect(liveReplacement.reconcile(4_001)).toHaveLength(1);
@@ -1017,14 +1017,14 @@ describe('DurableRunCoordinator', () => {
     const deadLedger = new RunLedger(deadPath);
     deadLedger.registerRun({ issueId: 'DEAD-PID', source: 'linear', projectPath: '/dead-repo' }, 1_000);
     const deadClaim = deadLedger.claimRun('DEAD-PID', {
-      ownerInstanceId: '999999-dead-owner', leaseMs: 3_000, now: 1_000,
+      ownerInstanceId: '999999-dead-owner', ownerPidSpace: 'pidns:test', leaseMs: 3_000, now: 1_000,
     })!;
     expect(deadLedger.transition(deadClaim, 'EXECUTING', {}, 1_100)).toBe(true);
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
       throw Object.assign(new Error('missing process'), { code: 'ESRCH' });
     });
     const deadReplacement = new DurableRunCoordinator({
-      mode: 'primary', ledger: deadLedger, instanceId: 'dead-replacement',
+      mode: 'primary', ledger: deadLedger, instanceId: 'dead-replacement', pidSpace: 'pidns:test',
     });
 
     expect(deadReplacement.reconcile(4_001)).toHaveLength(1);
@@ -1226,8 +1226,7 @@ describe('DurableRunCoordinator dead marker owners', () => {
 
   it('names released prior-generation owners by marker id and never itself or the live owner', async () => {
     const { getInstanceId } = await import('../support/healthEndpoint.js');
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     ledger.registerRun({ issueId: 'GEN-1', source: 'linear', projectPath: '/repo' }, 1_000);
 
     // A prior generation claimed, went silent, and the ledger released it.
@@ -1244,8 +1243,7 @@ describe('DurableRunCoordinator dead marker owners', () => {
     expect(ledger.transition(ours, 'RETRY_AT', { retryAt: 3_500 }, 3_100)).toBe(true);
     expect(coordinator.deadMarkerOwners('GEN-1')).toEqual(['prior-generation-uuid']);
     expect(coordinator.deadMarkerOwners('unknown')).toEqual([]);
-    coordinator.close();
-    ledger.close();
+    coordinator.close(); ledger.close();
   });
 });
 
@@ -1337,8 +1335,7 @@ describe('runRecordToTask', () => {
   });
 
   it('round-trips what observeTask wrote, so the two mappings cannot drift apart', () => {
-    const ledger = new RunLedger(dbPath());
-    const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
     const original: TaskItem = {
       id: 'issue-1', issueId: 'issue-1', issueIdentifier: 'AX-1', source: 'linear',
       title: 'round trip', priority: 2, createdAt: 1_000,
@@ -1356,8 +1353,19 @@ describe('runRecordToTask', () => {
     expect(rebuilt.linearProject).toEqual(original.linearProject);
     expect(rebuilt.fileScope).toEqual(original.fileScope);
     expect(rebuilt.explicitDispatch).toBe(true);
-    coordinator.close();
-    ledger.close();
+    coordinator.close(); ledger.close();
+  });
+
+  it('pins the first write scope for later admission (AGT-4441)', async () => {
+    const ledger = new RunLedger(dbPath()); const coordinator = new DurableRunCoordinator({ mode: 'primary', ledger });
+    const first = { id: 'scope-pin', issueId: 'scope-pin', issueIdentifier: 'AX-SCOPE', source: 'linear' as const, title: 'scope pin', priority: 2, createdAt: 1_000, fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' as const };
+    coordinator.observeTask(first, '/repo'); const observed = coordinator.observeTask({ ...first, fileScope: ['src/old.ts'] }, '/repo');
+    expect(observed?.metadata).toMatchObject({ fileScope: ['src/old.ts'], pinnedFileScope: ['src/old.ts', 'src/pinned.ts'], pinnedFileScopeSource: 'drafted' });
+    expect(runRecordToTask(observed!)).toMatchObject({ fileScope: ['src/old.ts', 'src/pinned.ts'], fileScopeSource: 'drafted' });
+    expect(ledger.claimRun('scope-pin', { ownerInstanceId: 'owner', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: first.fileScope })).not.toBeNull();
+    ledger.registerRun({ issueId: 'conflict', source: 'linear', projectPath: '/repo', metadata: { fileScope: ['src/pinned.ts'] } });
+    expect(ledger.claimRun('conflict', { ownerInstanceId: 'other', leaseMs: 60_000, maxActiveForProject: 2, conflictScope: ['src/pinned.ts'] })).toBeNull();
+    coordinator.close(); ledger.close();
   });
 
   it('names an unrecognized source instead of asserting it into the union', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers } from './linear.js';
+import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -128,6 +128,11 @@ describe('fetchIssuesForStates pagination', () => {
     } as unknown as LinearClient;
     expect((await fetchIssuesForStates(linear, ['Todo'])).nodes.map((node) => node.id)).toEqual(['id-0', 'id-1']);
     expect(queries[0]).toMatch(/\burl\b/);
+    // The native blockers ride the same request (AGT-4050): one nested field,
+    // not one `inverseRelations()` resolver call per issue — measured 100
+    // issues at complexity 54 in 0.4 s against the live API.
+    expect(queries[0]).toMatch(/inverseRelations\(first: \d+\) \{ nodes \{ type issue \{ id \} \} \}/);
+    expect(queries).toHaveLength(2);
   });
 
   it('reports explicit truncation instead of silently returning a partial set', async () => {
@@ -344,5 +349,54 @@ describe('addComment idempotent recovery (AGT-4051)', () => {
     initLinear('fake-key', 'team-1');
 
     await expect(addComment('issue-1', 'body', 'comment-1')).rejects.toThrow('already exists');
+  });
+});
+
+// AGT-4050: a task blocked only through Linear's own "Blocked by" relation
+// used to look ready to the bulk fetch — only prose blockers were read — and
+// paid a draft-analysis call every heartbeat (AX-856 on 2026-08-29).
+describe('populateBlockedBy', () => {
+  function info(id: string, description?: string): LinearIssueInfo {
+    return { id, identifier: id.toUpperCase(), title: id, state: 'Todo', priority: 2, labels: [], comments: [], description } as LinearIssueInfo;
+  }
+  function node(id: string, blockers: string[], others: string[] = []): RawIssueNode {
+    return {
+      id, identifier: id.toUpperCase(), title: id, priority: 2,
+      inverseRelations: { nodes: [
+        ...blockers.map((issueId) => ({ type: 'blocks', issue: { id: issueId } })),
+        ...others.map((issueId) => ({ type: 'related', issue: { id: issueId } })),
+      ] },
+    };
+  }
+
+  it('reads a native "blocks" relation from the embedded node, ignoring other relation types', () => {
+    const result = [info('ax-856'), info('ax-869'), info('ax-858'), info('ax-1')];
+    populateBlockedBy(result, new Map([
+      ['ax-856', node('ax-856', ['ax-869', 'ax-858'], ['ax-1'])],
+      ['ax-869', node('ax-869', [])], ['ax-858', node('ax-858', [])], ['ax-1', node('ax-1', [])],
+    ]));
+    expect(result[0].blockedBy).toEqual(['ax-869', 'ax-858']);
+    expect(result[1].blockedBy).toBeUndefined();
+    expect(result[3].blockedBy).toBeUndefined();
+  });
+
+  it('drops a native blocker that is not in the fetch set (Done or out of scope) and never self-references', () => {
+    const result = [info('ax-856')];
+    populateBlockedBy(result, new Map([['ax-856', node('ax-856', ['ax-done', 'ax-856'])]]));
+    expect(result[0].blockedBy).toBeUndefined();
+  });
+
+  it('merges native relations with prose blockers without duplicates', () => {
+    const result = [info('kt-308', '블로커: KT-305/306'), info('kt-305'), info('kt-306')];
+    populateBlockedBy(result, new Map([
+      ['kt-308', node('kt-308', ['kt-305'])], ['kt-305', node('kt-305', [])], ['kt-306', node('kt-306', [])],
+    ]));
+    expect(result[0].blockedBy).toEqual(['kt-305', 'kt-306']);
+  });
+
+  it('tolerates a node without relations (older query shape, or a null connection)', () => {
+    const result = [info('ax-1')];
+    populateBlockedBy(result, new Map([['ax-1', { id: 'ax-1', identifier: 'AX-1', title: 'ax-1', priority: 2, inverseRelations: null }]]));
+    expect(result[0].blockedBy).toBeUndefined();
   });
 });

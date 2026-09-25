@@ -274,6 +274,72 @@ describe('createWorktree shared-path symlinks (INT-2415)', () => {
     expect(existsSync(join(wtSrc, 'index.ts'))).toBe(true);
     expect(lstatSync(wtSrc).isSymbolicLink()).toBe(false);
   });
+
+  // The cgf-portal shape (AGT-4043): no root dependencies, a workspace
+  // node_modules that can be linked, and a workspace venv that holds an
+  // editable install of the repo — which must be cloned and rebased, or
+  // pytest in the worktree would import the main checkout's code.
+  it('shares monorepo workspace deps: links node_modules, clones an editable venv onto the worktree', async () => {
+    const originBare = join(root, 'origin.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', originBare], { stdio: 'pipe' });
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    git(repo, 'config', 'user.email', 'test@example.com');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'commit.gpgsign', 'false');
+    mkdirSync(join(repo, 'apps', 'portal'), { recursive: true });
+    writeFileSync(join(repo, 'apps', 'portal', 'package.json'), '{}');
+    mkdirSync(join(repo, 'apps', 'pipelines', 'src', 'pkg'), { recursive: true });
+    writeFileSync(join(repo, 'apps', 'pipelines', 'pyproject.toml'), '');
+    writeFileSync(join(repo, 'apps', 'pipelines', 'src', 'pkg', '__init__.py'), '');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules/\n.venv/\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'init');
+    git(repo, 'remote', 'add', 'origin', originBare);
+    git(repo, 'push', 'origin', 'main');
+
+    mkdirSync(join(repo, 'apps', 'portal', 'node_modules', 'leftpad'), { recursive: true });
+    const site = join(repo, 'apps', 'pipelines', '.venv', 'lib', 'python3.12', 'site-packages');
+    mkdirSync(site, { recursive: true });
+    writeFileSync(join(site, '_editable_impl_pkg.pth'), `${realpathSync(join(repo, 'apps', 'pipelines', 'src'))}\n`);
+
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-test');
+
+    const wtNodeModules = join(info.worktreePath, 'apps', 'portal', 'node_modules');
+    expect(lstatSync(wtNodeModules).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(wtNodeModules, 'leftpad'))).toBe(true);
+
+    const wtVenv = join(info.worktreePath, 'apps', 'pipelines', '.venv');
+    expect(lstatSync(wtVenv).isSymbolicLink()).toBe(false);
+    const pth = readFileSync(join(wtVenv, 'lib', 'python3.12', 'site-packages', '_editable_impl_pkg.pth'), 'utf8').trim();
+    expect(realpathSync(pth)).toBe(realpathSync(join(info.worktreePath, 'apps', 'pipelines', 'src')));
+    // The original environment is untouched.
+    expect(readFileSync(join(site, '_editable_impl_pkg.pth'), 'utf8').trim()).toBe(realpathSync(join(repo, 'apps', 'pipelines', 'src')));
+  });
+
+  it('warns once when nothing qualified but dependency dirs exist in the repo', async () => {
+    const originBare = join(root, 'origin.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', originBare], { stdio: 'pipe' });
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    git(repo, 'config', 'user.email', 'test@example.com');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(join(repo, 'README.md'), '');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'init');
+    git(repo, 'remote', 'add', 'origin', originBare);
+    git(repo, 'push', 'origin', 'main');
+    mkdirSync(join(repo, 'tools', 'legacy', '.venv'), { recursive: true }); // no manifest next to it
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await createWorktree(repo, 'INT-1', 'swarm/INT-1-test');
+      const lines = warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('No shared dependency paths detected'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('tools/legacy/.venv');
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('preserveWorktree → createWorktree resume roundtrip (INT-2503)', () => {
@@ -1405,4 +1471,5 @@ esac`);
 
     git(repo, 'worktree', 'remove', '--force', info.worktreePath);
   });
+
 });

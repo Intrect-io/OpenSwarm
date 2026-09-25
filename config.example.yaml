@@ -17,6 +17,7 @@
 #   or VEGA_SEARXNG_URL. Optional OPENSWARM_SEARXNG_KEY / VEGA_SEARXNG_KEY for
 #   the public X-VEGA-Key header. TAVILY_KEY / BRAVE_SEARCH_KEY still work.
 adapter: codex-responses
+# reviewAdapter: openrouter   # reviewer for `openswarm review` AND `review --max`; omit to follow `adapter` (AGT-4292/4299)
 
 discord:
   token: ${DISCORD_TOKEN}
@@ -151,6 +152,12 @@ autonomous:
     # dailyLimit: paces unsupervised automation only. `/plan` enforces the
     # child cap above but does not reserve against this budget (AGT-4123).
     dailyLimit: 20
+    # decomposeAfterFailures: a task that failed this many times whole is split
+    # on its next attempt — even when it resumes a preserved worktree, where the
+    # size check used to be skipped — and the planner's "fits the budget" answer
+    # is not honoured (the failures already disproved it). 3 = the attempt
+    # before STUCK at 4 retries. 0 never forces (AGT-4287).
+    decomposeAfterFailures: 3
     plannerModel: gpt-5.6-sol         # High-leverage decomposition stays on Sol
 
   # Backlog grooming (Planner compares fetched open queue states against the repo).
@@ -172,9 +179,18 @@ autonomous:
       escalateModel: gpt-5.6-sol       # Repeated failure earns the frontier tier
       escalateAfterIteration: 2
       timeoutMs: 1800000  # 30 minutes
+      # Turn ceiling for the agentic loop. Omitted or 0 = none (AGT-4388): a coding
+      # run ends on completion, the repeated-tool-call guard, or timeoutMs — a turn
+      # count is not a property of the task. Set a number only to cap cost hard.
+      # maxTurns: 0
     reviewer:
       enabled: true
       model: gpt-5.6-sol               # Correctness gate; light profile lowers this to Terra
+      # model / timeoutMs / maxTurns also budget the PR-time fresh review that
+      # runs against every publication (even with `enabled: false`, when that
+      # review is the only semantic review). timeoutMs 0 there keeps the CLI's
+      # diff-scaled default (300s base); a slow model needs more — measured
+      # 2026-09-17: half the reviews died at 300s. maxTurns 0 = no ceiling.
       timeoutMs: 600000
     tester:
       enabled: false
@@ -191,6 +207,17 @@ autonomous:
       enabled: false
       model: gpt-5.6-luna
       timeoutMs: 120000   # 2 minutes
+
+  # Model for the draft (task-brief) stage that runs before every worker.
+  # Unset → the adapter's built-in drafter default (openrouter: qwen3-235b).
+  # Set it to run the whole fleet on one model.
+  # draftModel: deepseek/deepseek-v4-flash
+
+  # OS fence for the worker's bash tool (AGT-4387). on (default): every bash
+  # call runs under sandbox-exec (macOS) / bwrap (Linux) with writes limited to
+  # the worktree, temp dir and package caches; network stays open. off: bash
+  # runs as the daemon user with only the regex denylist (pre-AGT-4387).
+  # workerSandbox: on
 
   # Deterministic baseline-diff verification (enabled by default).
   # Define repo-specific commands in .openswarm/verify.yaml; see templates/verify.example.yaml.
@@ -229,12 +256,25 @@ autonomous:
     verifiedMetricEvidenceCheck: true # block verified evidence deletion / metric changes without distributions (INT-2388 #4)
     deadModuleCheck: true   # warn on new modules nothing imports/calls (INT-2388 #5)
     reformatCheck: true     # warn on reformat-only files / oversized diffs (INT-2388 #6)
+    rewriteCheck: true      # block an unacknowledged whole-file rewrite (>30% of a 20+ line file deleted;
+                            # the worker may declare `REWRITE: <path>` in its summary); restores stripped
+                            # trailing newlines in place (AGT-4406)
+    claimEvidenceCheck: true # block a docs-only change that replaces figures the run never printed;
+                            # flag approval claims without a link/date (AGT-4408)
 
   # Self-repair reflection budget: max objective (lint/bs/test) failures tolerated
   # before the loop gives up on bad edits. Lower it to cap token burn when
   # reflection stops making progress; the loop also bails early on stagnation
   # (identical errors twice in a row). Default: 3.
   maxReflections: 3
+
+  # Optional repository-owned generator declarations. An output enters a
+  # binding worker write scope only if the task explicitly names the command.
+  # projectAgents:
+  #   - projectPath: ~/dev/example
+  #     generatedOutputRules:
+  #       - command: npm run generate:catalog
+  #         outputs: [docs/DATA-CATALOG.md]
 
   # Job profiles override the default Worker/Reviewer pair by task estimate.
   jobProfiles:

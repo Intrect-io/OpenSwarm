@@ -1,5 +1,11 @@
 import { getInstanceId } from '../support/healthEndpoint.js';
-import { DEFAULT_INFRA_FAILURE_CIRCUIT, INFRA_CIRCUIT_PARK_REASON, infraFailureFingerprint } from './infraFailureCircuit.js';
+import {
+  DEFAULT_INFRA_FAILURE_CIRCUIT,
+  INFRA_CIRCUIT_PARK_REASON,
+  REPEATED_VERDICT_IDLE_COOLDOWN_MS,
+  REPEATED_VERDICT_STREAK,
+  infraFailureFingerprint,
+} from './infraFailureCircuit.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
@@ -26,6 +32,9 @@ import {
 } from '../coordination/operatorAnswers.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import type { CoordinatorResolution } from './coordinatorResolution.js';
+import { processNamespaceId } from '../support/processLiveness.js';
+import { ownerVerdict, type OwnerVerdict } from './ownerLiveness.js';
+import { isReviewRollbackDetail, PR_REVIEW_ROLLBACK_CODE } from './draftPullRequestCause.js';
 
 export interface DurableRunCoordinatorConfig {
   mode: RunLedgerMode;
@@ -37,6 +46,11 @@ export interface DurableRunCoordinatorConfig {
   maxActiveForProject?: number;
   /** Test seam for crash recovery; production probes the owner PID. */
   processIsAlive?: (pid: number) => boolean;
+  /**
+   * Test seam for the pid space stamped on claims and compared in reconcile();
+   * production uses `processNamespaceId()` (AGT-4072).
+   */
+  pidSpace?: string;
   /**
    * How long a NEEDS_RECONCILE row's stale owner is trusted once a pid probe
    * alone can't disprove it (container pid reuse — see reconcile()). Default
@@ -145,13 +159,6 @@ export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): 
   return now + 30 * 60_000;
 }
 
-function ownerProcessId(instanceId: string): number | null {
-  const match = instanceId.match(/^(\d+)-/);
-  if (!match) return null;
-  const pid = Number(match[1]);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
-}
-
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -202,6 +209,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     projectName?: string;
     fileScope?: string[];
     fileScopeSource?: TaskItem['fileScopeSource'];
+    pinnedFileScope?: string[];
+    pinnedFileScopeSource?: TaskItem['fileScopeSource'];
     explicitDispatch?: boolean;
   };
   const source = TASK_SOURCES.find((candidate) => candidate === run.source);
@@ -219,8 +228,8 @@ export function runRecordToTask(run: RunRecord): TaskItem {
     linearProject: metadata.projectId
       ? { id: metadata.projectId, name: metadata.projectName ?? run.projectPath }
       : undefined,
-    fileScope: metadata.fileScope,
-    fileScopeSource: metadata.fileScopeSource,
+    fileScope: metadata.pinnedFileScope ?? metadata.fileScope,
+    fileScopeSource: metadata.pinnedFileScopeSource ?? metadata.fileScopeSource,
     explicitDispatch: metadata.explicitDispatch === true,
     createdAt: run.discoveredAt,
   };
@@ -239,7 +248,9 @@ export class DurableRunCoordinator {
   private readonly maxActiveForProject: number;
   private readonly infraFailureCircuit: number;
   private readonly processIsAlive: (pid: number) => boolean;
+  private readonly pidSpace: string | undefined;
   private readonly reconcileAbandonMs: number;
+  private readonly activeClaims = new Map<string, RunClaim>();
   private readonly exitedClaims = new Map<string, RunClaim>();
   private closed = false;
 
@@ -252,6 +263,7 @@ export class DurableRunCoordinator {
     this.maxActiveForProject = Math.max(1, Math.floor(config.maxActiveForProject ?? 1));
     this.infraFailureCircuit = Math.max(0, Math.floor(config.infraFailureCircuit ?? DEFAULT_INFRA_FAILURE_CIRCUIT));
     this.processIsAlive = config.processIsAlive ?? processIsAlive;
+    this.pidSpace = 'pidSpace' in config ? config.pidSpace : processNamespaceId();
     this.reconcileAbandonMs = config.reconcileAbandonMs ?? this.leaseMs;
     if (this.leaseMs < 3_000) throw new Error('Durable run lease must be at least 3000ms');
     // A negative value would make `now - run.updatedAt >= reconcileAbandonMs`
@@ -274,6 +286,27 @@ export class DurableRunCoordinator {
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     return this.ledger?.listRuns(states) ?? [];
+  }
+
+  /** Records the scheduler's outer watchdog before its aborted executor exits. */
+  recordWatchdogTimeout(issueId: string, budgetMs: number, elapsedMs: number, now = Date.now()): boolean {
+    const claim = this.activeClaims.get(issueId);
+    if (!claim || !this.ledger || !this.isPrimary) return false;
+    const detail = `scheduler hard watchdog: budget ${Math.round(budgetMs / 60_000)}min (${budgetMs}ms), elapsed ${elapsedMs}ms`;
+    if (!this.ledger.recordAttemptResult(claim, {
+      success: false,
+      finalStatus: 'infra_error',
+      result: { failureCause: 'watchdog_timeout', budgetMs, elapsedMs },
+    }, now)) return false;
+    const transitioned = this.ledger.transition(claim, 'RETRY_AT', {
+      retryAt: now + 15 * 60_000,
+      errorCode: 'watchdog_timeout',
+      errorMessage: detail,
+      eventKind: 'watchdog_timeout',
+      eventData: { budgetMs, elapsedMs },
+    }, now);
+    if (transitioned) this.activeClaims.delete(issueId);
+    return transitioned;
   }
 
   cacheTrackerObservation(
@@ -426,6 +459,17 @@ export class DurableRunCoordinator {
     return this.ledger?.markNeedsHuman(issueId, reason, now) ?? false;
   }
 
+  reconcileMissingWorktree(
+    expected: Pick<RunRecord, 'issueId' | 'state' | 'stateVersion' | 'worktreePath'>,
+    disposition: 'published' | 'needs_human' | 'clear',
+    reason: string,
+    clearHeadSha: boolean,
+    now = Date.now(),
+  ): boolean {
+    if (!this.ledger || !this.isPrimary) return false;
+    return this.ledger.reconcileMissingWorktree(expected, disposition, reason, clearHeadSha, now);
+  }
+
   markNeedsHumanForQuestions(
     issueId: string,
     correlationIds: readonly string[],
@@ -433,6 +477,25 @@ export class DurableRunCoordinator {
     now = Date.now(),
   ): boolean {
     return this.ledger?.markNeedsHumanForQuestions(issueId, correlationIds, reason, now) ?? false;
+  }
+
+  /**
+   * True while a free slot has nothing to offer this run: its last verdicts
+   * were the same verdict, and the cooldown since the latest has not passed.
+   *
+   * Idle fill exists so a parked run is not left idle beside an empty slot,
+   * but a deterministic gate gives the same answer to the same branch. Every
+   * one of the 28 publication-scope parks and 6 no-change parks on 2026-09-17
+   * was lifted by idle fill within two minutes and parked again for the same
+   * reason; cgf-portal AX-1027 went round 36 times in ten hours. The cooldown
+   * rather than a permanent hold keeps a fix deployed in the meantime from
+   * needing an operator to release what it fixed. An explicit dispatch, a
+   * tracker Todo and a backoff that elapses on its own are all unaffected.
+   */
+  idleFillWouldRepeatVerdict(issueId: string, now = Date.now()): boolean {
+    const run = this.ledger?.getRun(issueId);
+    if (!run || now - run.updatedAt >= REPEATED_VERDICT_IDLE_COOLDOWN_MS) return false;
+    return (this.ledger?.consecutiveIdenticalVerdicts(issueId) ?? 0) >= REPEATED_VERDICT_STREAK;
   }
 
   resumeNeedsHuman(issueId: string, now = Date.now(), trigger: ParkResumeTrigger = 'unspecified'): RunState | null {
@@ -461,6 +524,8 @@ export class DurableRunCoordinator {
         projectName: task.linearProject?.name,
         fileScope: task.fileScope,
         fileScopeSource: task.fileScopeSource,
+        pinnedFileScope: task.fileScope,
+        pinnedFileScopeSource: task.fileScopeSource,
         explicitDispatch: task.explicitDispatch === true,
       },
     }, now);
@@ -492,7 +557,24 @@ export class DurableRunCoordinator {
     if (!this.ledger) return executor(this.noopHooks(), new AbortController().signal);
 
     const issueId = task.issueId || task.id;
-    this.observeTask(task, projectPath);
+    const observed = this.observeTask(task, projectPath);
+    const pinned = (observed?.metadata ?? {}) as {
+      pinnedFileScope?: string[];
+      pinnedFileScopeSource?: TaskItem['fileScopeSource'];
+    };
+    if (pinned.pinnedFileScope !== undefined) {
+      task = {
+        ...task,
+        fileScope: [...pinned.pinnedFileScope],
+        fileScopeSource: pinned.pinnedFileScopeSource,
+      };
+    }
+    // The persisted scope is the safety contract for this run.  Admission must
+    // use it too; otherwise a rediscovery can narrow a scope just long enough
+    // to pass the atomic conflict check before execution restores the pin.
+    const admission = options.admission?.conflictScope === undefined
+      ? options.admission
+      : { ...options.admission, conflictScope: task.fileScope ?? [] };
     // Shadow is projection-only: it may populate discovery records for rollout
     // comparison, but must never claim, fence, enqueue effects, or alter tracker
     // delivery. Otherwise the observer itself becomes a second control plane.
@@ -500,14 +582,15 @@ export class DurableRunCoordinator {
 
     let claim = this.ledger.claimRun(issueId, {
       ownerInstanceId: this.instanceId,
+      ownerPidSpace: this.pidSpace,
       leaseMs: this.leaseMs,
-      maxActiveForProject: options.admission?.maxConcurrent ?? this.maxActiveForProject,
-      conflictScope: options.admission?.conflictScope,
-      unknownScopeAdmission: options.admission?.unknownScopeAdmission,
-      maxAttemptsPerHour: options.admission?.maxAttemptsPerHour,
-      maxFailuresPerHour: options.admission?.maxFailuresPerHour,
-      maxCostUsdPerDay: options.admission?.maxCostUsdPerDay,
-      circuitCooldownMs: options.admission?.circuitCooldownMs,
+      maxActiveForProject: admission?.maxConcurrent ?? this.maxActiveForProject,
+      conflictScope: admission?.conflictScope,
+      unknownScopeAdmission: admission?.unknownScopeAdmission,
+      maxAttemptsPerHour: admission?.maxAttemptsPerHour,
+      maxFailuresPerHour: admission?.maxFailuresPerHour,
+      maxCostUsdPerDay: admission?.maxCostUsdPerDay,
+      circuitCooldownMs: admission?.circuitCooldownMs,
     });
     if (!claim) {
       if (this.isPrimary) {
@@ -552,6 +635,8 @@ export class DurableRunCoordinator {
       }
       return executor(this.noopHooks(), new AbortController().signal);
     }
+
+    this.activeClaims.set(issueId, claim);
 
     let leaseLost = false;
     const leaseAbortController = new AbortController();
@@ -618,14 +703,21 @@ export class DurableRunCoordinator {
         maxFailuresPerHour: options.admission?.maxFailuresPerHour,
         circuitCooldownMs: options.admission?.circuitCooldownMs,
       });
+      // Labelled `infra_error`, the same word the returned-result path uses:
+      // the attempt above is already recorded as infra_error, and the
+      // scheduler's idle-fill gate reads `lastErrorCode === 'infra_error'` to
+      // keep a repeatedly failing row parked. Under the old `executor_throw`
+      // label a thrown adapter timeout was lifted every heartbeat, the AX-1272
+      // shape AGT-4305 had closed for returned results only (AGT-4307).
       this.ledger.transition(claim, 'RETRY_AT', {
         retryAt: Date.now() + 15 * 60_000,
-        errorCode: 'executor_throw',
+        errorCode: 'infra_error',
         errorMessage: error instanceof Error ? error.message : String(error),
       });
       throw error;
     } finally {
       clearInterval(renewTimer);
+      if (this.activeClaims.get(issueId)?.leaseToken === claim.leaseToken) this.activeClaims.delete(issueId);
       try {
         if (!this.ledger.isClaimCurrent(claim)) loseLease();
       } catch {
@@ -684,6 +776,11 @@ export class DurableRunCoordinator {
         totalDuration: result.totalDuration,
         iterations: result.iterations,
         prUrl: result.prUrl,
+        // A non-blocking guard has no other reader: the reviewer it was given
+        // to is disabled by default and the `log` event has no subscriber in
+        // the daemon. Without this the row could not say what `bsDetector`
+        // objected to on three cgf-portal tasks (AGT-4439).
+        guardWarnings: result.guardWarnings,
       },
       maxFailuresPerHour: options.admission?.maxFailuresPerHour,
       circuitCooldownMs: options.admission?.circuitCooldownMs,
@@ -693,11 +790,16 @@ export class DurableRunCoordinator {
     const now = Date.now();
 
     if (publishedNeedsReconcile) {
+      // A PR-time review rollback is one of these too, and the reconciler has
+      // to tell it from a crash or a duplicate: only a rejected publication is
+      // fixed by re-running the work (AGT-4272). Keep the rollback's own code
+      // and the reviewer's words instead of the generic reconcile label.
+      const rolledBack = isReviewRollbackDetail(result.failureDetail);
       const reason = 'Published PR requires artifact reconciliation before tracker completion';
       return this.ledger.transition(claim, 'NEEDS_RECONCILE', {
         prUrl: result.prUrl,
-        errorCode: 'publication_reconcile',
-        errorMessage: reason,
+        errorCode: rolledBack ? PR_REVIEW_ROLLBACK_CODE : 'publication_reconcile',
+        errorMessage: rolledBack ? result.failureDetail ?? reason : reason,
         eventData: {
           sessionId: result.sessionId,
           finalStatus: result.finalStatus,
@@ -738,7 +840,12 @@ export class DurableRunCoordinator {
       return this.ledger.transition(claim, 'RETRY_AT', {
         retryAt: retryAtFor(result, now, this.ledger.consecutiveSupersessions(issueId) + 1),
         errorCode: result.finalStatus,
-        eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
+        errorMessage: result.failureDetail,
+        eventData: {
+          sessionId: result.sessionId,
+          finalStatus: result.finalStatus,
+          failureDetail: result.failureDetail,
+        },
       }, now) ? result : fencedResult(result);
     }
 
@@ -841,14 +948,15 @@ export class DurableRunCoordinator {
     for (const claim of this.exitedClaims.values()) this.confirmExitedClaim(claim, now);
     for (const run of this.ledger.listRuns(['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING'])) {
       if (!run.ownerInstanceId || !run.leaseToken) continue;
-      const pid = ownerProcessId(run.ownerInstanceId);
       // Docker commonly gives a replacement daemon the same container PID.
       // The PID probe then finds *this* process even though the persisted UUID
       // belongs to the daemon generation that was just stopped. A PID cannot
-      // belong to two generations, so this exact mismatch proves the recorded
-      // executor exited and avoids idling the repository for a full lease.
-      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
-      if (pid != null && this.processIsAlive(pid) && !samePidDifferentGeneration) continue;
+      // belong to two generations IN ONE PID SPACE, so that mismatch proves the
+      // recorded executor exited — but only when the row's recorded space is
+      // ours; a peer container on the same ledger also runs as pid 7 and is
+      // very much alive (AGT-4072). Rows that cannot be judged wait for the
+      // lease to expire and then for the age timer below.
+      if (this.judgeOwner(run) !== 'gone') continue;
       const ownership = {
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -886,10 +994,13 @@ export class DurableRunCoordinator {
         }
         continue;
       }
-      const pid = ownerProcessId(run.ownerInstanceId);
       // A container assigns the daemon the same pid every start, so a row
       // orphaned by a restart reads as "alive" forever — the new daemon's
-      // own pid probe hits itself. Age is the only signal that survives that
+      // own pid probe hits itself. The row's recorded pid space resolves
+      // that without a clock: our pid under another instance id, in our own
+      // space, is a prior generation (judgeOwner → 'gone'). Age remains the
+      // fallback for rows that cannot be judged — legacy rows without a
+      // space, a writer that could not name its space, or a foreign space
       // (see reference_container_pid_reuse_lock.md; same trap already fixed
       // once in taskState/store.ts's LOCK_ABANDON_MS).
       //
@@ -902,8 +1013,7 @@ export class DurableRunCoordinator {
       // renewal (multiple consecutive misses, not one) before this frees the
       // row, purely as a fallback for when the pid probe can't be trusted.
       const abandonedByAge = now - run.updatedAt >= this.reconcileAbandonMs;
-      const samePidDifferentGeneration = pid === process.pid && run.ownerInstanceId !== this.instanceId;
-      if (!abandonedByAge && !samePidDifferentGeneration && (pid == null || this.processIsAlive(pid))) continue;
+      if (!abandonedByAge && this.judgeOwner(run) !== 'gone') continue;
       this.confirmExitedClaim({
         issueId: run.issueId,
         ownerInstanceId: run.ownerInstanceId,
@@ -914,6 +1024,18 @@ export class DurableRunCoordinator {
       }, now);
     }
     return reconciled;
+  }
+
+  /** Whether a run's recorded owner is provably gone, alive, or unjudgeable from here. */
+  private judgeOwner(run: Pick<RunRecord, 'ownerInstanceId' | 'ownerPidSpace'>): OwnerVerdict {
+    return ownerVerdict({
+      ownerInstanceId: run.ownerInstanceId ?? '',
+      ownerPidSpace: run.ownerPidSpace,
+      ourInstanceId: this.instanceId,
+      ourPidSpace: this.pidSpace,
+      ourPid: process.pid,
+      processIsAlive: this.processIsAlive,
+    });
   }
 
   /**

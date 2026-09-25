@@ -104,6 +104,26 @@ describe('PairPipeline model selection', () => {
     };
   }
 
+  it('sends the worker stage the identifier a person reads, not the issue UUID (AGT-4445)', async () => {
+    // The draft stage files under `AX-1556` and this one used to file under
+    // `12a014e9-…`, so a task's transcripts landed in two directories and its
+    // cost in two ledger keys — $0.0775 under one, the rest under the other.
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 1,
+      roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
+    });
+
+    await pipeline.run(
+      task({ issueId: '12a014e9-f901-493d-8097-371918daf503', issueIdentifier: 'AX-1556' }),
+      process.cwd(),
+    );
+
+    const options = runWorker.mock.calls.at(-1)?.[0] as { processContext?: unknown };
+    expect(options?.processContext).toEqual({ taskId: 'AX-1556', stage: 'worker' });
+  });
+
   function initRepo(dir: string): void {
     execFileSync('git', ['init', '-q'], { cwd: dir });
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
@@ -205,6 +225,7 @@ describe('PairPipeline model selection', () => {
     expect(result.success).toBe(false);
     expect(result.finalStatus).toBe('waiting_on_operator');
     expect(result.workerResult?.blockedOnOperator).toBe(true);
+    expect(result.failureDetail).toBe('pipeline stopped early: Blocked on an operator decision (ask_human posted to Discord)');
     expect(runWorker).toHaveBeenCalledTimes(1);
     expect(runReviewer).not.toHaveBeenCalled();
   });
@@ -416,6 +437,54 @@ describe('PairPipeline model selection', () => {
     expect(runReviewer).not.toHaveBeenCalled();
   });
 
+  // AGT-4430: the 60min watchdog fired mid-iteration-4 on cgf-portal AX-1556
+  // and the run ended "cancelled / PR not created", stranding 1,320 lines on a
+  // branch. The loop now stops on its own terms and parks, so the publication
+  // path (shouldPublishParkedWork) opens a draft PR for the work.
+  it('stops before an iteration that does not fit the wall-clock budget and parks for a human', async () => {
+    runWorker.mockResolvedValue({
+      success: false, summary: 'revise me', filesChanged: ['a.ts'], commands: [], output: '',
+      error: 'worker-scope: changed files outside declared fileScope: docs/X.md',
+    });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 5,
+      // Smaller than the wrap-up reserve, so iteration 2 can never fit.
+      taskBudgetMs: 1,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(false);
+    expect(result.iterations).toBe(1);
+    expect(result.operatorPark?.code).toBe('iteration_budget_spent');
+    expect(result.operatorPark?.reason).toContain('wall-clock budget spent');
+    expect(result.failureDetail).toContain('pipeline stopped early:');
+    expect(result.failureDetail).toContain('wall-clock budget spent');
+    expect(runWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses every iteration when the budget is generous', async () => {
+    runWorker.mockResolvedValue({
+      success: false, summary: 'revise me', filesChanged: ['a.ts'], commands: [], output: '',
+      error: 'temporary worker failure',
+    });
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 3,
+      taskBudgetMs: 90 * 60_000,
+      roles: { worker: { enabled: true, timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.operatorPark?.code).toBeUndefined();
+    expect(runWorker).toHaveBeenCalledTimes(3);
+  });
+
   it('passes planner fileScope to the worker enforcement boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
     const pipeline = new PairPipeline({
@@ -584,6 +653,24 @@ describe('PairPipeline model selection', () => {
     // Same result-contract guarantee as the rate-limit case above (INT-2424).
     expect(result.stages).toHaveLength(1);
     expect(result.stages[0]).toMatchObject({ stage: 'worker', success: false });
+  });
+
+  // AGT-4080: a run whose worktree is gone used to start the agent in the
+  // missing directory; it read "empty repository" and asked the operator for
+  // data access. The stage now refuses before spawning, as infra.
+  it('reports a missing working directory as infra_error before the worker ever runs', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker'],
+      maxIterations: 1,
+      roles: { worker: { enabled: true, model: 'fallback-worker', timeoutMs: 0 } },
+    });
+
+    const result = await pipeline.run(task(), '/nonexistent/openswarm-worktree/0000-gone');
+
+    expect(result.finalStatus).toBe('infra_error');
+    expect(result.failureDetail).toMatch(/^worker: worktree-missing: working directory is gone/);
+    expect(runWorker).not.toHaveBeenCalled();
   });
 
   // isInfraError() also classifies a raw (non-Error) rejection — rethrowClassified

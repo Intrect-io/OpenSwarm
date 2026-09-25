@@ -70,7 +70,9 @@ ${workerReport}
 
 ## Test Execution Steps
 1. Check the project's test command (package.json, pytest.ini, etc.)
-2. Run relevant test files
+2. Run relevant test files. Respect the host-provided \`OPENSWARM_TEST_PARALLELISM\`
+   ceiling for any explicit worker/thread flag; never replace it with an
+   unbounded count. Pytest \`-n auto\` is capped automatically.
 3. Analyze any failed tests
 4. Determine if additional tests are needed
 

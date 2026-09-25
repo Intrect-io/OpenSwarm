@@ -93,6 +93,8 @@ export interface ReviewMaxOptions {
   maxFilesPerArea?: number;
   /** Adapter override for the reviewers. */
   adapter?: string;
+  /** Print which source chose the review adapter, as `openswarm review --debug` does. */
+  debug?: boolean;
   /** Per-area reviewer agentic-loop turn ceiling. */
   maxTurns?: number;
   /** Per-area reviewer wall-clock budget in milliseconds. */
@@ -155,6 +157,10 @@ export function resolveFallbackAdapter(
 ): AdapterName | undefined {
   if (opts.noFallback) return undefined;
   if (opts.fallbackAdapter) return opts.fallbackAdapter as AdapterName;
+  // `opts.adapter` is the RESOLVED review adapter by the time the batch runs
+  // (flag → OPENSWARM_REVIEW_ADAPTER → config.reviewAdapter → config.adapter,
+  // the same order `openswarm review` uses — AGT-4299), so a codex primary
+  // still arms claude and an openrouter reviewAdapter does not.
   // `opts.adapter` is set only when --adapter was passed explicitly. Defaulting
   // the primary to a hardcoded 'codex-responses' meant every flagless run was
   // treated as codex and silently armed the claude fallback — so a user on
@@ -401,7 +407,15 @@ export async function filePerAreaFollowups(cwd: string, fileIssue: string | bool
  * null when there's nothing to audit / the user declined). exit code is set to 1
  * by the caller on a reject verdict.
  */
-export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<ReviewMaxCommandResult | null> {
+export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promise<ReviewMaxCommandResult | null> {
+  // One resolution for every adapter use below — the batch path used to read
+  // `opts.adapter ?? activeAdapter()` in four places and never saw
+  // `reviewAdapter:`, so `adapter: codex-responses` + `reviewAdapter: openrouter`
+  // reviewed on codex while `openswarm review` reviewed on openrouter (AGT-4299).
+  const { resolveConfiguredReviewAdapter } = await import('./reviewCommand.js');
+  const adapterChoice = await resolveConfiguredReviewAdapter(rawOpts.adapter);
+  const opts: ReviewMaxOptions = { ...rawOpts, adapter: adapterChoice.name };
+  if (opts.debug && adapterChoice.name) console.error(`Reviewer adapter: ${adapterChoice.name} (${adapterChoice.source})`);
   const cwd = opts.path ?? process.cwd();
   const concurrency = positiveIntegerOption(opts.concurrency, 4, '--concurrency');
   const maxFilesPerArea = positiveIntegerOption(opts.maxFilesPerArea, 12, '--max-files-per-area');

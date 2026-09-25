@@ -24,6 +24,8 @@ export interface BsIssue {
 export interface BsScanResult {
   issues: BsIssue[];
   filesScanned: number;
+  incomplete: boolean;
+  incompleteReasons: string[];
   critical: number;
   warning: number;
   minor: number;
@@ -268,7 +270,11 @@ export async function scanFile(filePath: string): Promise<BsIssue[]> {
 
 // ============ 결과 집계 ============
 
-export function aggregateResults(issues: BsIssue[], filesScanned: number): BsScanResult {
+export function aggregateResults(
+  issues: BsIssue[],
+  filesScanned: number,
+  incompleteReasons: string[] = [],
+): BsScanResult {
   const critical = issues.filter(i => i.severity === 'critical').length;
   const warning = issues.filter(i => i.severity === 'warning').length;
   const minor = issues.filter(i => i.severity === 'minor').length;
@@ -276,7 +282,16 @@ export function aggregateResults(issues: BsIssue[], filesScanned: number): BsSca
     ? (critical * 10 + warning * 3 + minor * 1) / filesScanned
     : 0;
 
-  return { issues, filesScanned, critical, warning, minor, bsScore };
+  return {
+    issues,
+    filesScanned,
+    incomplete: incompleteReasons.length > 0,
+    incompleteReasons: Array.from(new Set(incompleteReasons)).slice(0, 50),
+    critical,
+    warning,
+    minor,
+    bsScore,
+  };
 }
 
 // ============ 레포 전체 스캔 ============
@@ -332,6 +347,7 @@ export async function scanRepository(
   let filesScanned = 0;
   const deadline = Date.now() + 30_000;
   const maxFiles = 10_000;
+  const incompleteReasons: string[] = [];
 
   async function walk(dirPath: string, relPath: string): Promise<void> {
     let entries;
@@ -344,7 +360,14 @@ export async function scanRepository(
     }
 
     for (const entry of entries) {
-      if (Date.now() >= deadline || filesScanned >= maxFiles) return;
+      if (Date.now() >= deadline) {
+        incompleteReasons.push(`${relPath || '.'}: bs scan timeout reached`);
+        return;
+      }
+      if (filesScanned >= maxFiles) {
+        incompleteReasons.push(`${relPath || '.'}: bs scan file cap ${maxFiles} reached`);
+        return;
+      }
       const fullPath = join(dirPath, entry.name);
       const entryRelPath = relPath ? `${relPath}/${entry.name}` : entry.name;
 
@@ -369,6 +392,9 @@ export async function scanRepository(
           }
         } catch (err) {
           allIssues.push(makeFilesystemIssue('readFile', entryRelPath, err));
+          if (err instanceof Error && err.message.startsWith('Source file exceeds')) {
+            incompleteReasons.push(`${entryRelPath}: source file excluded by size limit`);
+          }
           if (verbose) console.log(`  [bs] readFile failed ${entryRelPath}: ${err instanceof Error ? err.message : String(err)}`);
           continue;
         }
@@ -377,5 +403,5 @@ export async function scanRepository(
   }
 
   await walk(projectPath, '');
-  return aggregateResults(allIssues, filesScanned);
+  return aggregateResults(allIssues, filesScanned, incompleteReasons);
 }

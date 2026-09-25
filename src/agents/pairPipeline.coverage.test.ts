@@ -5,6 +5,10 @@
 // propagation, worker-context collection edge cases, and the pipeline factory
 // helpers. Mocking conventions mirror pairPipeline.test.ts (partial mocks via
 // vi.importActual, keeping the real pure helpers).
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkerOptions } from './worker.js';
 import type { ReviewerOptions } from './reviewer.js';
@@ -22,6 +26,7 @@ const runDocumenter = vi.fn();
 const runAuditor = vi.fn();
 const runSkillDocumenter = vi.fn();
 const runGuards = vi.fn();
+const adjudicateContractEvidenceStagnation = vi.fn();
 const broadcastEvent = vi.fn();
 const getDefaultModel = vi.fn();
 const hasRepoSnapshot = vi.fn();
@@ -62,6 +67,11 @@ vi.mock('./skillDocumenter.js', async () => {
 vi.mock('./pipelineGuards.js', async () => {
   const actual = await vi.importActual<typeof import('./pipelineGuards.js')>('./pipelineGuards.js');
   return { ...actual, runGuards };
+});
+
+vi.mock('./guardArbiter.js', async () => {
+  const actual = await vi.importActual<typeof import('./guardArbiter.js')>('./guardArbiter.js');
+  return { ...actual, adjudicateContractEvidenceStagnation };
 });
 
 vi.mock('../knowledge/index.js', () => ({
@@ -113,6 +123,9 @@ describe('PairPipeline coverage extension', () => {
     runGuards.mockResolvedValue({
       allPassed: true, results: [], combinedIssues: [],
     } satisfies GuardsRunResult);
+    adjudicateContractEvidenceStagnation.mockResolvedValue({
+      overridden: false, verdicts: [], summary: 'Guard arbiter: not exercised by this test.',
+    });
     getDefaultModel.mockResolvedValue('codex-live-model');
     hasRepoSnapshot.mockReturnValue(true);
     scanAndCache.mockResolvedValue(undefined);
@@ -457,9 +470,161 @@ describe('PairPipeline coverage extension', () => {
     // Iteration 1: guard fails (first occurrence → "progressed"), continues.
     // Iteration 2: identical issue → stagnation → shouldAbortSelfRepair() returns
     // true and the loop stops WITHOUT reaching the configured max of 5.
+    // Snapshots are off here (vitest.setup.ts), so stagnation aborts straight
+    // away; the test below covers what happens when a rollback is available.
     expect(runWorker).toHaveBeenCalledTimes(2);
     expect(runGuards).toHaveBeenCalledTimes(2);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+  });
+
+  // ============================================
+  // Guard dispute arbiter (AGT-4462): confirmed contractEvidence stagnation
+  // gets one adjudication before the mechanical retry/abort above fires.
+  // ============================================
+
+  const contractEvidenceIssue =
+    '[apps/pipelines/tests/test_foundation.py] test adds contract literal "day_of_month" but it is not present in HEAD and no producer/consumer evidence was cited. Avoid self-referential contract tests.';
+
+  it('asks the arbiter on confirmed contractEvidence-only stagnation and proceeds when it overrides', async () => {
+    runGuards.mockResolvedValue({
+      allPassed: false,
+      results: [{ guard: 'contractEvidence', passed: false, blocking: true, issues: [contractEvidenceIssue] }],
+      combinedIssues: [contractEvidenceIssue],
+    } satisfies GuardsRunResult);
+    adjudicateContractEvidenceStagnation.mockResolvedValue({
+      overridden: true,
+      verdicts: [{ literal: 'day_of_month', selfDefining: true, reasoning: 'this diff defines the field' }],
+      summary: 'Guard arbiter (contractEvidence, openrouter/model): self-defining',
+    });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 5,
+      guards: { contractEvidenceCheck: true },
+      roles: {
+        worker: { enabled: true, timeoutMs: 0 },
+        reviewer: { enabled: true, timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    // Iteration 1: first occurrence → "progressed", ordinary retry, arbiter not
+    // asked. Iteration 2: identical block → stagnation → arbiter asked once,
+    // overrides, and the loop proceeds to the reviewer instead of aborting.
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(runGuards).toHaveBeenCalledTimes(2);
+    expect(adjudicateContractEvidenceStagnation).toHaveBeenCalledTimes(1);
+    expect(runReviewer).toHaveBeenCalledTimes(1);
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+    expect(result.success).toBe(true);
+  });
+
+  it('keeps the mechanical abort when the arbiter does not confirm the literal is self-defining', async () => {
+    runGuards.mockResolvedValue({
+      allPassed: false,
+      results: [{ guard: 'contractEvidence', passed: false, blocking: true, issues: [contractEvidenceIssue] }],
+      combinedIssues: [contractEvidenceIssue],
+    } satisfies GuardsRunResult);
+    adjudicateContractEvidenceStagnation.mockResolvedValue({
+      overridden: false,
+      verdicts: [{ literal: 'day_of_month', selfDefining: false, reasoning: 'looks external' }],
+      summary: 'Guard arbiter (contractEvidence, openrouter/model): not self-defining',
+    });
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 5,
+      guards: { contractEvidenceCheck: true },
+      roles: {
+        worker: { enabled: true, timeoutMs: 0 },
+        reviewer: { enabled: true, timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(adjudicateContractEvidenceStagnation).toHaveBeenCalledTimes(1);
+    expect(runReviewer).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+    expect(result.success).toBe(false);
+  });
+
+  it('never asks the arbiter when a non-contractEvidence guard also blocks the same iteration', async () => {
+    runGuards.mockResolvedValue({
+      allPassed: false,
+      results: [
+        { guard: 'contractEvidence', passed: false, blocking: true, issues: [contractEvidenceIssue] },
+        { guard: 'qualityGate', passed: false, blocking: true, issues: ['TS2322: type mismatch in cache.ts'] },
+      ],
+      combinedIssues: [contractEvidenceIssue, 'TS2322: type mismatch in cache.ts'],
+    } satisfies GuardsRunResult);
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer'],
+      maxIterations: 5,
+      guards: { contractEvidenceCheck: true, qualityGate: true },
+      roles: {
+        worker: { enabled: true, timeoutMs: 0 },
+        reviewer: { enabled: true, timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(adjudicateContractEvidenceStagnation).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+    expect(result.success).toBe(false);
+  });
+
+  it('spends one more iteration on clean ground before abandoning a stagnating run', async () => {
+    runGuards.mockResolvedValue({
+      allPassed: false,
+      results: [{ guard: 'qualityGate', passed: false, blocking: true, issues: ['TS2322: type mismatch in cache.ts'] }],
+      combinedIssues: ['TS2322: type mismatch in cache.ts'],
+    } satisfies GuardsRunResult);
+
+    // A real worktree, and never `process.cwd()`: a rollback writes to
+    // projectPath, so pointing this at the checkout would revert it.
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'pipeline-rollback-')));
+    const main = join(base, 'main');
+    const worktree = join(base, 'wt');
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    mkdirSync(main);
+    git(main, 'init', '--quiet', '.');
+    git(main, 'config', 'user.email', 't@t');
+    git(main, 'config', 'user.name', 't');
+    writeFileSync(join(main, 'edit.txt'), 'orig\n');
+    git(main, 'add', '-A');
+    git(main, 'commit', '--quiet', '-m', 'base');
+    git(main, 'worktree', 'add', '--quiet', worktree, '-b', 'feature');
+    delete process.env.OPENSWARM_SNAPSHOT;
+
+    try {
+      const { PairPipeline } = await import('./pairPipeline.js');
+      const pipeline = new PairPipeline({
+        stages: ['worker'],
+        maxIterations: 5,
+        guards: { qualityGate: true },
+        roles: { worker: { enabled: true, timeoutMs: 0 } },
+      });
+
+      await pipeline.run(task(), worktree);
+
+      // 1: first failure. 2: identical → roll back, keep going. 3: identical
+      // again → this is not an accumulation problem, so abandon. Still short of
+      // the configured 5, which is the property the test above protects.
+      expect(runWorker).toHaveBeenCalledTimes(3);
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Rolled back to the start of iteration 2'));
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Aborting self-repair'));
+    } finally {
+      process.env.OPENSWARM_SNAPSHOT = '0';
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('surfaces non-blocking guard warnings to the reviewer without retrying', async () => {
@@ -554,6 +719,42 @@ describe('PairPipeline coverage extension', () => {
     expect(runWorker.mock.calls[1][0]).toEqual(expect.objectContaining({
       previousFeedback: expect.stringContaining('tests failed'),
     }));
+  });
+
+  it('does not report an earlier iteration\'s test failure when the run ended on a guard', async () => {
+    // AX-1585, 2026-09-19: iteration 3 failed its tests, iteration 4 rewrote the
+    // diff and was stopped by a guard before the tester ran. The ledger recorded
+    // iteration 3's pytest output as the reason, and the retry was handed a
+    // failure that no longer existed in the branch.
+    runTester.mockResolvedValueOnce({
+      success: false, testsPassed: 2, testsFailed: 1,
+      output: 'FAIL src/cache.test.ts', failedTests: ['cache.test.ts > stale'],
+    } satisfies TesterResult);
+    runGuards
+      .mockResolvedValueOnce({ allPassed: true, results: [], combinedIssues: [] } satisfies GuardsRunResult)
+      .mockResolvedValueOnce({
+        allPassed: false,
+        results: [{ guard: 'contractEvidence', passed: false, blocking: true, issues: ['literal "x" has no evidence'] }],
+        combinedIssues: ['literal "x" has no evidence'],
+      } as GuardsRunResult);
+
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'tester'],
+      maxIterations: 2,
+      guards: { qualityGate: true },
+      roles: {
+        worker: { enabled: true, timeoutMs: 0 },
+        tester: { enabled: true, timeoutMs: 0 },
+      },
+    });
+
+    const result = await pipeline.run(task(), process.cwd());
+
+    expect(result.success).toBe(false);
+    expect(runTester).toHaveBeenCalledTimes(1);
+    expect(result.testerResult).toBeUndefined();
+    expect(result.reviewResult?.feedback).toContain('literal "x" has no evidence');
   });
 
   it('aborts self-repair when the tester keeps failing with the identical error', async () => {

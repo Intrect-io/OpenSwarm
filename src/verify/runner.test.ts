@@ -59,6 +59,29 @@ describe('runVerify', () => {
     expect(execute).toHaveBeenCalledWith(expect.stringContaining('must-not-run-in-main-container'), 2_000);
   });
 
+  it('applies the host worker budget to deterministic JavaScript verification', async () => {
+    await writeFile(join(repo, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+    git('add', 'package.json');
+    git('commit', '-m', 'add test script');
+    const execute = vi.fn(async () => ({
+      output: 'pass', exitCode: 0, signal: null, timedOut: false,
+      truncated: false, outputLimitExceeded: false,
+    }));
+
+    await runVerify({
+      projectPath: repo,
+      commands: [verify('npm test')],
+      baseRef: 'HEAD',
+      sandboxExecutorSessionFactory: async () => ({ execute }),
+      sandboxScratchRoot: root,
+    });
+
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringMatching(/export OPENSWARM_TEST_PARALLELISM=\d+ .* && npm test -- --maxWorkers=\d+$/),
+      2_000,
+    );
+  });
+
   it('fails closed when the strict companion cannot attest instead of falling back to host execution', async () => {
     const createSession = vi.fn(async () => {
       throw new Error('socket unavailable');
@@ -81,6 +104,52 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'pass', baseStatus: 'skipped', newFailure: false });
     expect(evidence.rawOutputTail).toContain('head-pass');
     expect(git('worktree', 'list', '--porcelain')).not.toContain('openswarm-verify-base-');
+  });
+
+  // cgf-portal 2026-09-17 (AGT-4407): a fresh worktree has no virtualenv, so
+  // `python -m pytest` died with the same ModuleNotFoundError at base and head.
+  // "Same failure → not new" was right; "→ tester passed" was not. The evidence
+  // now names the toolchain failure so the tester can refuse the vacuous pass.
+  it('flags a head failure caused by a missing toolchain as an environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('python3 -c "import openswarm_definitely_missing_module_xyz"', 10_000)],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+    expect(evidence.rawOutputTail).toMatch(/ModuleNotFoundError: No module named/);
+  });
+
+  it('treats a uv cache/network failure inside the sandbox as an environment failure, not a verdict', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "error: Failed to initialize cache at /nowhere/.cache/uv\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+  });
+
+  it('is not a new failure when both sides fail on the environment with different words (AX-1542)', async () => {
+    // `$$` differs between the base and head sandboxes, as uv's first failed
+    // download did — the fingerprints must not decide this case.
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "error: Failed to download pkg-$$\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+    const [baseTail, headTail] = evidence.rawOutputTail.split('[head]');
+    expect(baseTail).not.toBe(headTail);
+  });
+
+  it('does not mark an ordinary head failure as an environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf assertion-failed; exit 1')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false });
+    expect(evidence.environmentFailure).toBeUndefined();
   });
 
   it('does not expose supervisor secrets or the supervisor home to verification code', async () => {
@@ -602,5 +671,16 @@ describe('runVerify', () => {
     });
     expect(Buffer.byteLength(evidence.rawOutputTail)).toBeLessThanOrEqual(8 * 1024);
     expect(evidence.rawOutputTail).toContain('tail-marker');
+  });
+});
+
+describe('git timeout budgets (AGT-4416)', () => {
+  it('gives the sandbox clone ten minutes and every other git call the 30 s default', async () => {
+    const { CLONE_TIMEOUT_MS, gitTimeoutMsFor } = await import('./runner.js');
+    expect(CLONE_TIMEOUT_MS).toBe(10 * 60_000);
+    expect(gitTimeoutMsFor(['clone', '--quiet', '--no-hardlinks', '--no-checkout', '/src', '/dst'])).toBe(CLONE_TIMEOUT_MS);
+    for (const args of [['rev-parse', 'HEAD'], ['checkout', '--quiet', '--detach', 'abc'], ['worktree', 'add', '--detach', '/x', 'abc'], ['merge-base', 'HEAD', 'main']]) {
+      expect(gitTimeoutMsFor(args)).toBe(30_000);
+    }
   });
 });

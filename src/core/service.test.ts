@@ -26,6 +26,12 @@ vi.mock('../auth/index.js', () => ({
   ensureValidToken: vi.fn(),
 }));
 
+const { credentialProbeMock } = vi.hoisted(() => ({ credentialProbeMock: vi.fn(async () => []) }));
+vi.mock('./credentialProbes.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./credentialProbes.js')>()),
+  probeAgentCredentials: credentialProbeMock,
+}));
+
 vi.mock('../linear/index.js', () => ({
   initLinear: vi.fn(),
   getClient: vi.fn(),
@@ -264,6 +270,19 @@ describe('service', () => {
     );
   });
 
+  it('forwards draftModel to the runner (the hand-picked mapping dropped it once) — AGT-4404', async () => {
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+
+    await startService({
+      ...mockAutonomousConfig,
+      autonomous: { ...mockAutonomousConfig.autonomous, draftModel: 'deepseek/deepseek-v4-flash' },
+    } as SwarmConfig);
+
+    expect(vi.mocked(startAutonomous)).toHaveBeenCalledWith(
+      expect.objectContaining({ draftModel: 'deepseek/deepseek-v4-flash' }),
+    );
+  });
+
   it('reapplies a persisted provider override on boot when it differs from config', async () => {
     const { readProviderOverride } = await import('./providerOverride.js');
     const { setDefaultAdapter } = await import('../adapters/index.js');
@@ -343,6 +362,45 @@ describe('service', () => {
   // Service Lifecycle
   // ============================================
 
+  describe('agent credential probes at boot (AGT-4028 / AGT-4075)', () => {
+    afterEach(async () => {
+      const { clearDeadWorkerEnvKeys } = await import('../adapters/envPath.js');
+      const { resetCredentialProbeSnapshotForTests } = await import('./credentialProbes.js');
+      clearDeadWorkerEnvKeys();
+      resetCredentialProbeSnapshotForTests();
+      credentialProbeMock.mockReset();
+    });
+
+    it('withholds a key its service rejects from workers and publishes the verdict on /api/health', async () => {
+      const { buildWorkerEnv } = await import('../adapters/envPath.js');
+      const { credentialProbeSnapshot } = await import('./credentialProbes.js');
+      credentialProbeMock.mockResolvedValue([
+        { name: 'LINEAR_API_KEY', status: 'dead', reason: 'HTTP 401: Authentication required' },
+        { name: 'OPENROUTER_API_KEY', status: 'ok', identity: 'macstudio' },
+      ]);
+      await startService(mockConfig);
+      const env = buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'dead-key', OPENROUTER_API_KEY: 'live' });
+      expect(env.LINEAR_API_KEY).toBeUndefined();
+      expect(env.OPENROUTER_API_KEY).toBe('live');
+      expect(credentialProbeSnapshot()).toEqual({
+        LINEAR_API_KEY: { status: 'dead', reason: 'HTTP 401: Authentication required' },
+        OPENROUTER_API_KEY: { status: 'ok', identity: 'macstudio' },
+      });
+    });
+
+    it('leaves a key alone when its probe never reached the service', async () => {
+      const { buildWorkerEnv } = await import('../adapters/envPath.js');
+      credentialProbeMock.mockResolvedValueOnce([{ name: 'LINEAR_API_KEY', status: 'unreachable', reason: 'probe did not complete: ENOTFOUND' }]);
+      await startService(mockConfig);
+      expect(buildWorkerEnv({ PATH: '/bin', LINEAR_API_KEY: 'unknown-key' }).LINEAR_API_KEY).toBe('unknown-key');
+    });
+
+    it('never lets a broken probe keep the daemon down', async () => {
+      credentialProbeMock.mockRejectedValueOnce(new Error('probe exploded'));
+      await expect(startService(mockConfig)).resolves.not.toThrow();
+    });
+  });
+
   describe('service lifecycle', () => {
     it('should start service without errors', async () => {
       await expect(startService(mockConfig)).resolves.not.toThrow();
@@ -368,6 +426,50 @@ describe('service', () => {
         mockConfig.discordToken,
         mockConfig.discordChannelId
       );
+    });
+
+    it('stays up when Discord cannot connect, because the daemon is willing to run without it (AGT-4453)', async () => {
+      // 2026-09-18: a rotated bot token made `login` throw TokenInvalid inside
+      // startServiceLocked, before the web server, the scheduler and the
+      // autonomous runner. 22 crash-loop restarts, /api/health answering
+      // nothing, launchd reporting `state = running` throughout.
+      const { initDiscord } = await import('../discord/index.js');
+      const { startWebServer } = await import('../support/web.js');
+      const { startAutonomous } = await import('../automation/autonomousRunner.js');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.mocked(initDiscord).mockRejectedValueOnce(new Error('An invalid token was provided.'));
+
+      await startService(mockAutonomousConfig as SwarmConfig);
+
+      // The lanes that make the daemon a daemon are up.
+      expect(startWebServer).toHaveBeenCalledWith(3847);
+      expect(vi.mocked(startAutonomous)).toHaveBeenCalled();
+      // And the degradation is named rather than swallowed.
+      const warned = warn.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(warned).toContain('Discord did not start');
+      expect(warned).toContain('An invalid token was provided.');
+      warn.mockRestore();
+    });
+
+    it('keeps the daemon up but leaves Linear disabled when its OAuth profile is revoked (AGT-4455)', async () => {
+      const { AuthProfileStore, ensureValidToken } = await import('../auth/index.js');
+      const { initLinear } = await import('../linear/index.js');
+      const { startWebServer } = await import('../support/web.js');
+      const { startAutonomous } = await import('../automation/autonomousRunner.js');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      vi.spyOn(AuthProfileStore.prototype, 'getProfile').mockReturnValue({} as never);
+      vi.mocked(ensureValidToken).mockRejectedValueOnce(new Error('Token refresh failed (400): revoked'));
+
+      await expect(startService(mockAutonomousConfig)).resolves.not.toThrow();
+
+      // The service is available, but its Linear actor is deliberately absent.
+      expect(startWebServer).toHaveBeenCalledWith(3847);
+      expect(vi.mocked(startAutonomous)).toHaveBeenCalled();
+      expect(initLinear).not.toHaveBeenCalled();
+      const warned = warn.mock.calls.map((call) => call.join(' ')).join('\n');
+      expect(warned).toContain('OAuth profile rejected');
+      expect(warned).toContain('API-key fallback was intentionally not used');
+      warn.mockRestore();
     });
 
     it('keeps local web serving but never initializes Discord in strict human-surface mode', async () => {

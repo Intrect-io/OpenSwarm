@@ -32,6 +32,12 @@ export interface PipelineConfig {
   continueOnTestFail?: boolean;
   skipDocumenterIfNoChange?: boolean;
   maxIterations?: number;
+  /**
+   * Wall-clock budget for the whole task — the SAME number the scheduler's
+   * watchdog uses (resolveHardTaskTimeoutMs). The loop stops before it rather
+   * than being killed mid-iteration (AGT-4430).
+   */
+  taskBudgetMs?: number;
   maxReflections?: number;
   roles?: {
     worker?: RoleConfig;
@@ -55,6 +61,8 @@ export interface PipelineConfig {
   instructionCapsule?: InstructionCapsule;
   roleMcpTools?: { worker?: ToolDefinition[]; reviewer?: ToolDefinition[] };
   adapterRouting?: AdapterRoutePolicy;
+  /** OS fence for the worker's bash tool (autonomous.workerSandbox). Unset = off, as before AGT-4387. */
+  workerSandbox?: 'on' | 'off';
   draftAnalysis?: {
     taskType: string;
     intentSummary: string;
@@ -81,6 +89,12 @@ export interface PipelineResult {
   success: boolean;
   sessionId: string;
   stages: StageResult[];
+  /**
+   * Non-blocking guard warnings from the final guards run, kept so the
+   * durable record answers "what did the guards object to?" without a
+   * reviewer and without re-running them (AGT-4439).
+   */
+  guardWarnings?: import('./guardWarningRecord.js').GuardWarningRecord[];
   finalStatus: 'approved' | 'rejected' | 'failed' | 'cancelled' | 'decomposed' | 'superseded' | 'deferred' | 'rate_limited' | 'infra_error' | 'waiting_on_operator';
   /**
    * Set only when `finalStatus === 'infra_error'` and the cause is the
@@ -179,6 +193,12 @@ export interface PipelineContext {
   newSecurityFindings?: import('../verify/securityAudit.js').SecurityFinding[];
   /** Pair-level stagnation detector reason, preserved so the scheduler does not rerun the same loop. */
   stuckReason?: string;
+  /** Wall-clock budget spent before another iteration could fit (AGT-4430). */
+  budgetParkReason?: string;
+  /** Per-iteration worktree snapshots and whether this run has already rolled back (AGT-4460). */
+  snapshots?: import('./iterationSnapshot.js').IterationSnapshotState;
+  /** Same out-of-scope write rejected twice: retrying cannot alter the fence. */
+  repeatedScopeRejection?: string;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

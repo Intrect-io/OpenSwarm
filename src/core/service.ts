@@ -55,6 +55,27 @@ export function getPRProcessor(): PRProcessor | null {
 }
 
 /**
+ * Start a surface the service is willing to run without.
+ *
+ * Returns whether it came up. A surface that is merely *absent* already had a
+ * branch here; one that is present but broken did not, and took the whole
+ * service with it. Anything whose absence would make the daemon pointless —
+ * the web server, which is also what answers /api/health — stays a bare
+ * `await` on purpose, so a real outage still fails loudly instead of running
+ * hollow. (AGT-4453)
+ */
+async function startOptionalSurface(name: string, start: () => Promise<void>): Promise<boolean> {
+  try {
+    await start();
+    return true;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️ ${name} did not start — the service continues without it: ${reason}`);
+    return false;
+  }
+}
+
+/**
  * Start the service
  */
 export async function startService(config: SwarmConfig): Promise<void> {
@@ -128,9 +149,18 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     const authStore = new AuthProfileStore();
     if (authStore.getProfile('linear:default')) {
       console.log('🔗 Initializing Linear client (OAuth)...');
-      const token = await ensureValidToken(authStore, 'linear:default');
-      linear.initLinear(token, config.linearTeamId, true);
-      console.log('✅ Linear client connected (OAuth)');
+      try {
+        const token = await ensureValidToken(authStore, 'linear:default');
+        linear.initLinear(token, config.linearTeamId, true);
+        console.log('✅ Linear client connected (OAuth)');
+      } catch (error) {
+        // OAuth is optional integration state. Do not silently fall through to
+        // the API key: that may be a different Linear actor. Keeping Linear
+        // unavailable is explicit, while the web server and local runner can
+        // still start and expose the degraded state in their boot log.
+        console.warn('[Linear] OAuth profile rejected; Linear integration is disabled for this service run. '
+          + 'API-key fallback was intentionally not used because it may act as a different identity:', error);
+      }
     } else if (config.linearApiKey) {
       console.log('🔗 Initializing Linear client...');
       linear.initLinear(config.linearApiKey, config.linearTeamId);
@@ -141,6 +171,12 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   } else {
     console.log('⏭ Linear not configured — skipping');
   }
+  // Every credential the daemon hands to agents is probed once at boot; a key
+  // its service rejects is withheld from workers and shown on /api/health, so
+  // an agent is told it has no credential instead of handed one that 401s
+  // (AGT-4028, AGT-4075). Never blocks startup.
+  const { probeAndReportAgentCredentials, probeAgentCredentials } = await import('./credentialProbes.js');
+  await probeAndReportAgentCredentials(process.env, probeAgentCredentials);
 
   // Discord initialization (optional)
   if (isHumanSurfaceReadOnlyEnabled()) {
@@ -151,8 +187,23 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log('⏭ Discord disabled by humanSurfaceReadOnly policy');
   } else if (config.discordToken && config.discordChannelId) {
     console.log('🤖 Connecting Discord bot...');
-    await discord.initDiscord(config.discordToken, config.discordChannelId);
-    console.log('✅ Discord bot connected successfully');
+    // Optional surface, so its failure degrades the surface and not the
+    // service. This `await` used to be bare: on 2026-09-18 a rotated bot token
+    // made `login` throw `TokenInvalid`, which left `startServiceLocked` before
+    // the web server, the scheduler and the autonomous runner — 22 crash-loop
+    // restarts with every lane down, while launchd reported `state = running`
+    // the whole time and /api/health answered nothing. A chat bot the operator
+    // had stopped using could stop the daemon. (AGT-4453)
+    //
+    // Safe to continue after a failure: `initDiscord` destroys the client and
+    // leaves the module-level `client` null before rethrowing, and every send
+    // path is guarded by `if (!client) return`, so the surface goes quiet
+    // rather than half-connected.
+    const connected = await startOptionalSurface(
+      'Discord',
+      () => discord.initDiscord(config.discordToken!, config.discordChannelId!),
+    );
+    if (connected) console.log('✅ Discord bot connected successfully');
   } else {
     console.log('⏭ Discord not configured — skipping');
   }
@@ -315,6 +366,10 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       decompositionThresholdMinutes: config.autonomous.decomposition?.thresholdMinutes ?? 30,
       plannerModel: config.autonomous.decomposition?.plannerModel,
       plannerTimeoutMs: config.autonomous.decomposition?.plannerTimeoutMs,
+      // Same trap as AGT-4122 one line up: the schema and the runner both knew
+      // draftModel, this hand-picked mapping did not, and the drafter kept
+      // running the adapter default after the knob shipped. (AGT-4404)
+      draftModel: config.autonomous.draftModel,
       backlogGrooming: config.autonomous.backlogGrooming,
       // Git worktree mode
       worktreeMode: config.autonomous.worktreeMode ?? false,
@@ -369,6 +424,14 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log(heartbeatEnabled
       ? `[Service] Autonomous runner started (pairMode: ${config.autonomous.pairMode}, schedule: ${config.autonomous.schedule}${modelInfo})`
       : `[Service] Autonomous runner ready for explicit dispatch (pairMode: ${config.autonomous.pairMode}${modelInfo})`);
+    // Say which fence the worker's shell runs under, so an unfenced native
+    // daemon is visible in the boot log rather than discovered later. (AGT-4387)
+    const { detectSandboxBackend } = await import('../support/osSandbox.js');
+    const sandboxMode = config.autonomous.workerSandbox ?? 'on';
+    const backend = detectSandboxBackend();
+    console.log(sandboxMode === 'on'
+      ? (backend ? `[Service] Worker sandbox: on (${backend})` : '[Service] Worker sandbox: on, but no sandbox-exec/bwrap on this host — bash runs unfenced')
+      : '[Service] Worker sandbox: off (bash runs as the daemon user)');
   }
 
   // Start PR Auto-Improvement

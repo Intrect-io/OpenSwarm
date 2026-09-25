@@ -19,6 +19,7 @@ import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, sep } from 'node:path';
 import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
+import type { VerifyEvidence } from '../verify/runner.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import {
   isProofCapableSpace,
@@ -292,7 +293,10 @@ export interface LastFailureEntry {
   at: string; // ISO-8601
 }
 
-const MAX_FAILURE_DETAIL_CHARS = 2000;
+export const MAX_FAILURE_DETAIL_CHARS = 2000;
+/** Enough of the head to keep the banner that names which suite spoke. */
+const FAILURE_DETAIL_HEAD_CHARS = 240;
+const FAILURE_DETAIL_ELISION = '\n… [middle elided] …\n';
 
 export interface TaskState {
   completedTaskIds: Set<string>;
@@ -329,6 +333,41 @@ export function pickFailureDetail(candidates: Array<string | undefined>): string
   return undefined;
 }
 
+/**
+ * Keep the head *and* the tail when a detail exceeds the cap.
+ *
+ * Test-runner output is bottom-heavy: pytest, vitest and go test print a
+ * progress banner first and the failure summary last. Slicing the first 2000
+ * characters stored 2000 characters of `....s....` for AX-1556 and dropped
+ * every offending file, the rejected value and the `FAILED …` line, so the
+ * retry's worker prompt carried no signal at all (AGT-4436). The cap itself
+ * stays: the prompt budget is why it exists, and the fix is *which* 2000
+ * characters survive, not how many.
+ */
+export function clipFailureDetail(detail: string, maxChars = MAX_FAILURE_DETAIL_CHARS): string {
+  if (detail.length <= maxChars) return detail;
+  const head = Math.min(FAILURE_DETAIL_HEAD_CHARS, Math.floor(maxChars / 4));
+  const tail = maxChars - head - FAILURE_DETAIL_ELISION.length;
+  if (tail <= 0) return detail.slice(-maxChars);
+  return `${detail.slice(0, head)}${FAILURE_DETAIL_ELISION}${detail.slice(-tail)}`;
+}
+
+/**
+ * Report only the commands that actually failed.
+ *
+ * `TesterResult.output` concatenates every command's tail, passing ones
+ * included, so a run with one failing suite among many spends most of the
+ * budget on `All checks passed!` lines. New failures come first: those are
+ * what blocked the run.
+ */
+function testerEvidenceFailure(evidence: VerifyEvidence[] | undefined): string | undefined {
+  if (!evidence?.length) return undefined;
+  const failing = evidence.filter((item) => item.headStatus === 'fail');
+  if (failing.length === 0) return undefined;
+  const ordered = [...failing].sort((a, b) => Number(b.newFailure) - Number(a.newFailure));
+  return ordered.map((item) => `[${item.command.name}] ${item.rawOutputTail}`).join('\n');
+}
+
 /** Prefer the stage that actually failed over earlier successful feedback. */
 export function pickPipelineFailureDetail(result: PipelineResult): string | undefined {
   const workerFailure = result.workerResult?.success === false
@@ -342,6 +381,7 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
   const testerFailure = result.testerResult?.success === false
     ? pickFailureDetail([
       result.testerResult.error,
+      testerEvidenceFailure(result.testerResult.verificationEvidence),
       result.testerResult.output,
       result.testerResult.failedTests?.join(', '),
     ])
@@ -357,14 +397,24 @@ export function pickPipelineFailureDetail(result: PipelineResult): string | unde
     ? `${failedStage.stage}: ${failedStage.result.error}`
     : undefined;
 
+  // An approval is never why a run failed. With the reviewer satisfied, the
+  // cause is a later stage, and reporting the approval instead told the retry
+  // its prior failure was "All hard-gate criteria are evidenced and passing".
+  const reviewFeedback = result.reviewResult?.decision === 'approve'
+    ? []
+    : [result.lastReviewFeedback, result.reviewResult?.feedback];
+  // An infrastructure failure is identified by the stage that died, not by an
+  // earlier revise: the same-fingerprint circuit reads this string, and
+  // reviewer prose differs on every attempt, so led by prose it never trips.
+  const causes = result.finalStatus === 'infra_error'
+    ? [workerFailure, stageError, ...reviewFeedback]
+    : [...reviewFeedback, workerFailure, stageError];
+
   return pickFailureDetail([
     // Publication failed after every stage passed: nothing below describes it.
     result.failureDetail,
     testerFailure,
-    result.lastReviewFeedback,
-    result.reviewResult?.feedback,
-    workerFailure,
-    stageError,
+    ...causes,
     result.stuckReason,
   ]);
 }
@@ -373,7 +423,7 @@ export function recordLastFailureDetail(state: TaskState, issueId: string, detai
   const trimmed = detail.trim();
   if (!trimmed) return;
   state.lastFailureDetails.set(issueId, {
-    detail: trimmed.slice(0, MAX_FAILURE_DETAIL_CHARS),
+    detail: clipFailureDetail(trimmed),
     at: new Date().toISOString(),
   });
 }

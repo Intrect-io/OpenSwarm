@@ -109,6 +109,127 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(res.allPassed).toBe(false);
     });
 
+    // AGT-4427: cgf-portal AX-1556 lost three worker iterations to a fixture
+    // timestamp, a "test://" sentinel and a "file:///test/…" path. None can
+    // ever appear in HEAD producer code, so the block was unescapable.
+    it.each([
+      ['a fixture timestamp', "it('stale write', () => expect(row.updated_at).toBe('2000-01-01T00:00:00'));", '2000-01-01T00:00:00'],
+      ['a sentinel scheme', "it('source', () => expect(f.source).toBe('test://a2/master'));", 'test://'],
+      ['a fixture file url', "it('reads', () => expect(load('file:///test/test.xlsx')).toBeTruthy());", 'file:///test/test.xlsx'],
+      ['a fixture path', "it('reads', () => expect(load('apps/pipelines/tests/data.xlsx')).toBeTruthy());", 'tests/data.xlsx'],
+    ])('does not read %s as a contract literal', async (_name, body, literal) => {
+      writeFileSync(join(repo, 'contract.test.ts'), `import { expect, it } from 'vitest';\n${body}\n`);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').filter(i => i.includes(literal))).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
+    // AGT-4462: labels a test invents for itself. Each of these blocked a real
+    // cgf-portal run on 2026-09-18/19 (AX-1554, AX-1560, AX-1556), and none can
+    // be given "producer evidence": a producer holds a template or nothing at
+    // all, never the instance a test made up.
+    it.each([
+      ['a numbered instance id', "it('row', () => expect(label(r)).toBe('row:1'));", 'row:1'],
+      ['prose ending in a colon', "it('msg', () => expect(msg).toContain('AX-1486: '));", 'AX-1486: '],
+      ['a connection string', "it('conn', () => expect(connect('postgresql://x/y')).toBeTruthy());", 'postgresql://x/y'],
+      ['a test-scoped identifier', "it('ident', () => expect(payload.id).toBe('itest_q9'));", 'itest_q9'],
+    ])('does not read %s as a contract literal', async (_name, body, literal) => {
+      writeFileSync(join(repo, 'contract.test.ts'), `import { expect, it } from 'vitest';\n${body}\n`);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').filter(i => i.includes(literal))).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
+    // AX-1447, 2026-09-19: cgf-portal lost a full 5-iteration budget because a
+    // brand-new test file's own `node:test` import specifiers were read as
+    // fabricated contract literals. `node:*` is Node's own reserved built-in
+    // module namespace — no application diff could ever "define" it, and no
+    // application could ever legitimately dispute that it's real, so it can
+    // never be given (or need) producer evidence.
+    it.each([
+      ['node:test', "import { it } from 'node:test';\nit('x', () => {});\n"],
+      ['node:assert/strict', "import assert from 'node:assert/strict';\nassert.ok(true);\n"],
+      ['node:fs/promises', "import { readFile } from 'node:fs/promises';\nvoid readFile;\n"],
+      ['node:child_process', "const { execFile } = require('node:child_process');\nvoid execFile;\n"],
+    ])('does not read the builtin specifier %s as a contract literal', async (literal, body) => {
+      writeFileSync(join(repo, 'contract.test.ts'), body);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').filter(i => i.includes(literal))).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
+    it('does not read markdown backticks in a Python docstring as a string literal', async () => {
+      // AX-1556: a docstring said "`test_update_through_registry` creates a row
+      // without these fields", and the name of a sibling test became a contract.
+      writeFileSync(join(repo, 'test_master.py'), [
+        'def test_partial_update(payload):',
+        '    """An update names the fields it changes.',
+        '',
+        '    Nothing in the suite caught this: `test_update_through_registry` creates a row without',
+        '    these fields, so there was never anything to lose.',
+        '    """',
+        '    assert payload is not None',
+        '',
+      ].join('\n'));
+      const res = await runGuards(mockWorker(['test_master.py']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence')).toEqual([]);
+    });
+
+    it('finds a literal that follows a string too short to be one', async () => {
+      // The old single regex paired the closing quote of 'k' with the opening
+      // quote of the next string and swallowed the literal between them, so a
+      // two-letter test name was enough to hide a fabricated key from the guard.
+      writeFileSync(
+        join(repo, 'contract.test.ts'),
+        "import { expect, it } from 'vitest';\nit('k', () => expect(key()).toBe('foreign_summary:'));\n",
+      );
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').some(i => i.includes('foreign_summary:'))).toBe(true);
+    });
+
+    it.each([
+      ['a namespaced key', "it('key', () => expect(k).toBe('foreign_summary:'));", 'foreign_summary:'],
+      ['a multi-segment key', "it('key', () => expect(k).toBe('swarm:queue:pending'));", 'swarm:queue:pending'],
+      ['a snake_case field under an assertion', "it('field', () => expect(payload).toHaveProperty('settlement_total'));", 'settlement_total'],
+    ])('still blocks %s nobody produces', async (_name, body, literal) => {
+      writeFileSync(join(repo, 'contract.test.ts'), `import { expect, it } from 'vitest';\n${body}\n`);
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      expect(guardIssues(res, 'contractEvidence').some(i => i.includes(literal))).toBe(true);
+    });
+
+    // AX-1521, 2026-09-18: a correct fix — the test imports and calls the
+    // production handler directly, exercising a route matched by prefix
+    // inside it — was blocked for two iterations because the regex above
+    // captures a backtick template literal's `${...}` interpolation as if it
+    // were literal text, and that text can never appear verbatim in HEAD.
+    it('checks a template literal route by its static prefix, not its interpolated id', async () => {
+      writeFileSync(join(repo, 'handler.ts'), 'export const prefix = "/api/a2/account-master/";\n');
+      execFileSync('git', ['add', 'handler.ts'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'add real route prefix'], { cwd: repo });
+
+      writeFileSync(
+        join(repo, 'contract.test.ts'),
+        "import { expect, it } from 'vitest';\nconst ENTITY_ID = 'e1';\nit('patches the real route', () => "
+        + "expect(`/api/a2/account-master/${encodeURIComponent(ENTITY_ID)}`).toBeTruthy());\n",
+      );
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      const issues = guardIssues(res, 'contractEvidence');
+      expect(issues.some(i => i.includes('/api/a2/account-master/'))).toBe(false);
+      expect(res.allPassed).toBe(true);
+    });
+
+    it('still blocks a template literal route whose static prefix is not a real route', async () => {
+      writeFileSync(
+        join(repo, 'contract.test.ts'),
+        "import { expect, it } from 'vitest';\nconst ENTITY_ID = 'e1';\nit('invents an endpoint', () => "
+        + "expect(`/api/totally-fake-endpoint/${encodeURIComponent(ENTITY_ID)}`).toBeTruthy());\n",
+      );
+      const res = await runGuards(mockWorker(['contract.test.ts']), repo, { contractEvidenceCheck: true });
+      const issues = guardIssues(res, 'contractEvidence');
+      expect(issues.some(i => i.includes('/api/totally-fake-endpoint/'))).toBe(true);
+      expect(res.allPassed).toBe(false);
+    });
+
     it('allows a contract literal that already exists in HEAD producer code', async () => {
       writeFileSync(join(repo, 'publisher.ts'), "export const KEY_PREFIX = 'stockapi:foreign_summary:';\n");
       execFileSync('git', ['add', 'publisher.ts'], { cwd: repo });
@@ -557,6 +678,92 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       const res = await runGuards(mockWorker(), repo, { deadModuleCheck: true });
       const issues = guardIssues(res, 'deadModule');
       expect(issues.some(i => i.includes('index.ts'))).toBe(false);
+    });
+  });
+
+  describe('rewriteCheck (AGT-4406)', () => {
+    const lines = (n: number, prefix = 'field') => Array.from({ length: n }, (_, i) => `${prefix}_${i} = ${i}`).join('\n') + '\n';
+
+    it('blocks an unacknowledged whole-file rewrite and names the escape hatch', async () => {
+      writeFileSync(join(repo, 'config.py'), lines(40));
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'config']);
+      writeFileSync(join(repo, 'config.py'), lines(28, 'other'));
+      const res = await runGuards(mockWorker(['config.py']), repo, { rewriteCheck: true });
+      const issues = guardIssues(res, 'rewrite');
+      expect(issues.some(i => i.includes('config.py') && i.includes('REWRITE: config.py'))).toBe(true);
+      expect(res.allPassed).toBe(false);
+    });
+
+    it('passes the same rewrite once the worker declares it, as an advisory', async () => {
+      writeFileSync(join(repo, 'config.py'), lines(40));
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'config']);
+      writeFileSync(join(repo, 'config.py'), lines(28, 'other'));
+      const worker = { ...mockWorker(['config.py']), summary: 'Rebuilt per the issue. REWRITE: config.py' };
+      const res = await runGuards(worker, repo, { rewriteCheck: true });
+      expect(res.allPassed).toBe(true);
+      expect(guardIssues(res, 'rewrite').some(i => i.includes('acknowledged rewrite'))).toBe(true);
+    });
+  });
+
+  describe('claimEvidenceCheck (AGT-4408)', () => {
+    it('blocks a docs-only change that replaces a figure the run never printed, and passes once the output shows it', async () => {
+      writeFileSync(join(repo, 'docs.md'), '| 안심뉴타운 | 27행 | 20,706,700 |\n');
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'docs']);
+      writeFileSync(join(repo, 'docs.md'), '| 안심뉴타운 | 27행 | 13,955,000 |\n');
+
+      const silent = await runGuards(mockWorker(['docs.md']), repo, { claimEvidenceCheck: true });
+      expect(guardIssues(silent, 'claimEvidence').some(i => i.includes('13955000'))).toBe(true);
+      expect(silent.allPassed).toBe(false);
+
+      const sourced = { ...mockWorker(['docs.md']), output: '$ uv run b4 --site 안심뉴타운\ntotal=13,955,000 rows=27\n' };
+      const res = await runGuards(sourced, repo, { claimEvidenceCheck: true });
+      expect(guardIssues(res, 'claimEvidence')).toEqual([]);
+    });
+
+    it('only advises when the same figure change ships with code', async () => {
+      writeFileSync(join(repo, 'docs.md'), 'count: 100\n');
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'docs']);
+      writeFileSync(join(repo, 'docs.md'), 'count: 250\n');
+      writeFileSync(join(repo, 'base.ts'), 'export const base = 250;\n');
+      const res = await runGuards(mockWorker(['docs.md', 'base.ts']), repo, { claimEvidenceCheck: true });
+      expect(guardIssues(res, 'claimEvidence').length).toBe(1);
+      expect(res.allPassed).toBe(true);
+    });
+  });
+
+  describe('gateClaimEvidenceCheck (AGT-3107)', () => {
+    // A new host script reports a value into the QC JSON; the run claims a gate.
+    const HOST = 'report["present_preset_number"] = presetNumber\n';
+    const CLAIM = { summary: 'test(au-qc): gate on PresentPreset — regression class' };
+
+    it('blocks a gate claim whose reported value nothing asserts, naming the key', async () => {
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      const res = await runGuards({ ...mockWorker(['host.swift']), ...CLAIM }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim').some(i => i.includes('`present_preset_number`'))).toBe(true);
+      expect(res.allPassed).toBe(false);
+    });
+
+    it('passes the same change once a sibling file in the change asserts the value', async () => {
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      writeFileSync(join(repo, 'qc.sh'), '[ "$(jq -r .present_preset_number "$out")" != "-1" ] && exit 1\n');
+      const res = await runGuards({ ...mockWorker(['host.swift', 'qc.sh']), ...CLAIM }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim')).toEqual([]);
+      expect(res.allPassed).toBe(true);
+    });
+
+    it('passes when a committed, untouched file already asserts the value', async () => {
+      writeFileSync(join(repo, 'qc.sh'), '[ "$(jq -r .present_preset_number "$out")" != "-1" ] && exit 1\n');
+      execFileSync('git', ['-C', repo, 'add', '-A']); execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'gate']);
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      const res = await runGuards({ ...mockWorker(['host.swift']), ...CLAIM }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim')).toEqual([]);
+    });
+
+    it('never touches a run that claims no gate', async () => {
+      writeFileSync(join(repo, 'host.swift'), HOST);
+      const res = await runGuards({ ...mockWorker(['host.swift']), summary: 'report the preset number' }, repo, { gateClaimEvidenceCheck: true });
+      expect(guardIssues(res, 'gateClaim')).toEqual([]);
+      expect(res.allPassed).toBe(true);
     });
   });
 

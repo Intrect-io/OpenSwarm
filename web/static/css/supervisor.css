@@ -65,6 +65,7 @@ body.page-supervisor {
 .control-group { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .control-spacer { flex: 1; }
 .control-label { font-size: var(--text-xs); color: var(--fg-muted); }
+.effort-select { min-height: 28px; width: auto; padding: 0 var(--space-6) 0 var(--space-2); font-size: var(--text-xs); }
 
 .svc-status {
   display: inline-flex;

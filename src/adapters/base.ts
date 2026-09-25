@@ -23,6 +23,8 @@ import {
 import { raceWithAbort } from './abortRace.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { assertAdapterCanRunUnderHumanSurfaceBoundary } from './humanSurfaceBoundary.js';
+import { applyReasoningEffortOverride } from '../support/reasoningEffortOverride.js';
+import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
 
 export { terminateCliProcessTree } from './processTree.js';
 
@@ -35,6 +37,7 @@ export async function spawnCli(
   adapter: CliAdapter,
   requestedOptions: CliRunOptions,
 ): Promise<CliRunResult> {
+  requestedOptions = applyReasoningEffortOverride(requestedOptions);
   const strictHumanSurfaceBoundary = isHumanSurfaceReadOnlyEnabled();
   assertAdapterCanRunUnderHumanSurfaceBoundary(adapter);
   const options: CliRunOptions = strictHumanSurfaceBoundary
@@ -126,8 +129,22 @@ export async function spawnCli(
   // atomically by the OS.
   let promptDir: string | undefined;
   let cleanupPaths: string[] = [];
+  // Delegated CLIs own their internal tool loop, so this is deliberately a
+  // CLI-level record rather than a misleading per-turn transcript. It still
+  // preserves the prompt, raw result, timing, and exit result an operator
+  // needs to audit the boundary OpenSwarm actually controls. (AGT-4456)
+  let session: SessionRecorder | undefined;
 
   try {
+    session = createSessionRecorder({
+      taskId: options.usageAttribution?.taskId ?? options.processContext?.taskId,
+      stage: options.usageAttribution?.stage ?? options.processContext?.stage,
+      adapter: options.usageAttribution?.adapter ?? adapter.name,
+      model: options.model,
+      cwd: options.cwd,
+      recordingLevel: 'cli',
+    });
+    session?.record({ type: 'notice', note: 'prompt', prompt: options.prompt });
     promptDir = await fs.mkdtemp(join(tmpdir(), 'openswarm-prompt-'));
     const promptFile = join(promptDir, 'prompt.txt');
     if (lifecycleController.signal.aborted) {
@@ -235,6 +252,11 @@ export async function spawnCli(
         cleanupLifecycle();
         terminateCliProcessTree(proc);
         const reason = lifecycleController.signal.reason;
+        session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });
+        session?.close({
+          outcome: 'aborted', durationMs: Date.now() - startTime,
+          error: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
+        });
         reject(reason instanceof Error ? reason : new Error(`${adapter.name} aborted`));
       };
 
@@ -249,6 +271,13 @@ export async function spawnCli(
             ? adapter.parseStreamingChunk('\n', options.onLog, streamBuffer)
             : parseCliStreamChunk('\n', options.onLog, streamBuffer);
         }
+
+        session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });
+        session?.close({
+          outcome: code === 0 || code === null ? 'returned' : 'exit_nonzero',
+          exitCode: code,
+          durationMs,
+        });
 
         if (code !== 0 && code !== null) {
           const stderrSnippet = stderr.slice(0, 500);
@@ -316,13 +345,21 @@ export async function spawnCli(
         if (settled) return;
         settled = true;
         cleanupLifecycle();
+        session?.close({ outcome: 'spawn_error', durationMs: Date.now() - startTime, error: err.message });
         reject(new Error(`${adapter.name} spawn error: ${err.message}`));
       });
 
       if (lifecycleController.signal.aborted) onAbort();
       else lifecycleController.signal.addEventListener('abort', onAbort, { once: true });
     });
+  } catch (error) {
+    session?.close({
+      outcome: 'threw', durationMs: Date.now() - startTime,
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+    throw error;
   } finally {
+    session?.close({ outcome: 'threw', durationMs: Date.now() - startTime });
     cleanupDeadline();
     try {
       // Remove the whole private directory, not just the file inside it.

@@ -7,6 +7,7 @@ import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 import type { ToolDefinition } from './tools.js';
 import type { CostInfo } from '../support/costTracker.js';
 import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
+import type { UsageAttribution } from '../support/usageLedger.js';
 
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
@@ -84,6 +85,8 @@ export interface CliRunOptions {
   maxTurns?: number;
   onLog?: (line: string) => void;
   processContext?: ProcessContext;
+  /** Identity stamped on usage and session records for this invocation. */
+  usageAttribution?: UsageAttribution;
   /** 시스템 프롬프트 (GPT/Local 에이전틱 루프에서 사용) */
   systemPrompt?: string;
   /**
@@ -109,6 +112,16 @@ export interface CliRunOptions {
    * rewriting the verification script when tests fail.
    */
   protectedFiles?: string[];
+  /** Run whose scratchpad the scratch_* tools address (AGT-4459). */
+  scratchpadRunId?: string;
+  memoryContext?: { taskId: string; iteration: number };
+  /** OS fence for the worker's bash tool (agenticLoop → tools). See ToolExecOptions.sandbox. (AGT-4387) */
+  sandbox?: 'on' | 'off';
+  /**
+   * Refuse publication commands in the bash tool (`git push`/`commit`, `gh pr`,
+   * `openswarm …`): the pipeline publishes after the stage returns. (AGT-4418)
+   */
+  forbidPublication?: boolean;
   /** bash tool timeout in ms (default 30s). Raise for docker-based tests that take minutes. */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */

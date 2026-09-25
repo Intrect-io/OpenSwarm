@@ -9,6 +9,7 @@
 // command shell wires git + reviewer + Linear.
 
 import type { ReviewResult, WorkerResult } from '../agents/agentPair.js';
+import type { ProcessContext } from '../adapters/types.js';
 import type { ITaskSource } from '../automation/taskSource.js';
 import { startReviewProgress } from './reviewProgress.js';
 import {
@@ -390,6 +391,10 @@ export interface ReviewCommandOptions {
   maxTurns?: number;
   /** Override the reviewer's wall-clock budget in ms (default: scaled by diff size). */
   timeoutMs?: number;
+  /** Model override (default: the adapter's own default). */
+  model?: string;
+  /** Ledger/telemetry attribution for the reviewer's calls (default: untagged). */
+  processContext?: ProcessContext;
 }
 
 /**
@@ -430,7 +435,7 @@ export interface ReviewCommandOptions {
  * invokes this once per process and `prProcessor.ts` never passes `json` — but
  * a future concurrent caller needs a nesting counter, not this.
  */
-async function resolveConfiguredReviewAdapter(flag?: string, quiet = false) {
+export async function resolveConfiguredReviewAdapter(flag?: string, quiet = false) {
   const { resolveReviewAdapter } = await import('./reviewAdapter.js');
   // A leaf module, not the adapter registry and not config: see adapterNames.ts.
   const { ADAPTER_NAMES, isConfiguredAdapterName } = await import('../core/adapterNames.js');
@@ -545,6 +550,8 @@ export async function runReviewCommand(
         readOnly: opts.readOnly,
         maxTurns: opts.maxTurns ?? scaledReviewMaxTurns(changed.length),
         timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length),
+        model: opts.model,
+        processContext: opts.processContext,
         diff: await deps.getDiff?.(c, opts.base) ?? await defaultGetDiff(c, opts.base),
         onLog,
       });

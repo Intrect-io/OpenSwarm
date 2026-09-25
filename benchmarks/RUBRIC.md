@@ -257,6 +257,28 @@ SWE_MODEL=openai/gpt-5 \
   grades only the last one → **grade per model separately**.
 - Image tag: `swebench/sweb.eval.x86_64.<instance_id with __ replaced by _1776_>`.
 
+### Verified N=30 cohort (AGT-3185)
+
+`benchmarks/sweBenchVerifiedSet.ts` generates a fixed N=30 cohort: ten each
+from pylint, Sphinx, and SymPy. These pure-logic repositories avoid the known
+external-http dependency in old `requests` cases, while fixing the denominator
+before comparing models.
+
+```bash
+# Writes the complete official records needed by sweBench.ts.
+npx tsx benchmarks/sweBenchVerifiedSet.ts --out /tmp/swebench-verified-n30.json
+
+# Low-disk preflight: prove all 30 tags resolve without storing image layers.
+npx tsx benchmarks/sweBenchVerifiedSet.ts --check-manifests --out /tmp/swebench-verified-n30.json
+
+# Only after confirming Docker storage headroom: sequentially pull all amd64 images.
+npx tsx benchmarks/sweBenchVerifiedSet.ts --pull --out /tmp/swebench-verified-n30.json
+```
+
+The final command is intentionally opt-in: 30 evaluation images can exceed a
+developer machine's free Docker storage. A successful manifest check is a tag
+availability preflight, not a substitute for the ticket's required pull proof.
+
 ## Harness defects — found and fixed at L6 (invisible on synthetic L0–L5)
 
 L6 exposed defects that only manifest in large repos:

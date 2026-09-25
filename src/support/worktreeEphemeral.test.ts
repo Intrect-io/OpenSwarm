@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { citedPathsAreEphemeral, ephemeralPathspecRoots, isEphemeralWorktreeArtifact } from './worktreeEphemeral.js';
+import { citedPathsAreEphemeral, ephemeralPathspecRoots, isEphemeralWorktreeArtifact, isAgentScratchFile } from './worktreeEphemeral.js';
 
 describe('isEphemeralWorktreeArtifact', () => {
   // cgf-portal#207 (2026-09-02) shipped `apps/pipelines/.coverage`: the repo
@@ -108,6 +108,7 @@ describe('agent-runtime scratch (2026-09-10)', () => {
   // swept in by a worker's `git add -A`.
   it.each([
     ['node_modules', 'symlink to the shared install; a checkout that gets it cannot npm ci'],
+    ['apps/portal/node_modules', 'the same, in a monorepo package — cgf-portal AX-1485 (2026-09-19)'],
     ['cli.json', 'cursor-agent permission allow-list granting Shell(**)'],
     ['cursor/cli.json', 'the same, under its own directory'],
     ['.run-tests.sh', 'generated runner with a hardcoded container worktree UUID'],
@@ -151,4 +152,62 @@ describe('agent-runtime scratch (2026-09-10)', () => {
     expect(isEphemeralWorktreeArtifact('docs/tmp-run-guide.txt')).toBe(false);
   });
 
+});
+
+describe('isAgentScratchFile (AGT-4410)', () => {
+  it('names the two shapes that reached cgf-portal PRs and their neighbours', () => {
+    for (const file of [
+      '_apply_edit.py',
+      'apps/pipelines/_apply_fix.sh',
+      'scripts/check_migration_immutability.py.bak',
+      'src/a.ts.orig',
+      'src/a.ts.rej',
+      'docs/notes.md~',
+      '.DS_Store',
+      'apps/portal/.DS_Store',
+    ]) {
+      expect(isAgentScratchFile(file), file).toBe(true);
+    }
+  });
+
+  it('leaves source that merely resembles scratch alone', () => {
+    for (const file of [
+      'src/apply_edit.py',            // no leading underscore
+      'src/backup.ts',                // "bak" is not an extension here
+      'fixtures/original.json',
+      'apps/portal/src/rejected_orders.py',
+      'scripts/_apply_edit.md',       // not a script
+      'src/tilde~/x.ts',              // ~ mid-path, not a trailing backup marker
+    ]) {
+      expect(isAgentScratchFile(file), file).toBe(false);
+    }
+  });
+
+  // cgf-portal#572, 2026-09-19: the worker's own one-off `fix_cafe24.py` and
+  // `fix_tests.py` (string-replace apply scripts, never imported) landed in a
+  // new top-level `scratchpad/` directory and reached the real PR — a
+  // constitution gate rejected the new top-level directory, and a person
+  // removed them by hand in a follow-up commit. `_apply_*` did not match this
+  // shape: the worker did not use that name.
+  it('names a one-off script the worker left in its own scratchpad directory', () => {
+    for (const file of [
+      'scratchpad/fix_cafe24.py',
+      'scratchpad/fix_tests.py',
+      'apps/pipelines/scratchpad/patch.sh',
+    ]) {
+      expect(isAgentScratchFile(file), file).toBe(true);
+    }
+  });
+
+  it('leaves non-script content in a scratchpad directory alone', () => {
+    // Real, useful content the worker meant to keep — just filed in the wrong
+    // place. Not junk on its own; a scope/placement concern, not a scratch one.
+    expect(isAgentScratchFile('scratchpad/land_records_survey.md')).toBe(false);
+  });
+
+  it('is not folded into the runtime-artifact predicate, which also purges tracked files', () => {
+    // A repository may legitimately track a .bak; the purge on a resumed branch
+    // must not delete it. Only additions are filtered, by the staging step.
+    expect(isEphemeralWorktreeArtifact('config/prod.yaml.bak')).toBe(false);
+  });
 });

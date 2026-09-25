@@ -16,7 +16,16 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import Database from 'better-sqlite3';
 import { registerOwnedPR } from '../automation/prOwnership.js';
 import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
+import type { VerifyConfig } from '../core/types.js';
+import { regressedAgainstFreshBase } from './publicationRegressionProbe.js';
+import { publicationCommitSubject } from './publicationCommitMessage.js';
+import { changeShapeSection } from './publicationChangeShape.js';
+import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
+import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { loadRepoMetadata } from './repoMetadata.js';
+import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
+import { copyIsolatedPath } from './isolatedPath.js';
+import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
 
 const execFileAsync = promisify(execFile);
@@ -92,15 +101,17 @@ async function stripRuntimeMarkerFromGit(worktreePath: string): Promise<void> {
 
 // Branch & Path Utilities
 
-// The naming convention lives in its own module (branchNaming.ts) so the one
-// rule that decides "is this branch mine?" is not buried in lifecycle code.
-import { isBranchForIssue, isSwarmBranch } from './branchNaming.js';
 // Overlap set arithmetic and rendering live in fileOverlap.ts — pure, and this
 // file is at the pre-commit LOC cap. Re-exported so callers keep one import.
 export { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 import { computeFileOverlaps, formatOverlapReport, type BranchScope, type FileOverlap } from './fileOverlap.js';
 import { findDuplicateIssuePRs, formatDuplicateIssueSection, gh } from './ghPullRequests.js';
 import { guardUnsafeBinaryStaging, unsafeBinaryDataOnBranch, UNRESOLVED_BASE } from './unsafeBinaryData.js';
+import { assertNoSensitiveDataOnBranch, sensitiveDataOnBranch } from './sensitiveDataFence.js';
+import { releaseRejectedWorkerPaths } from './rejectedWorkerPaths.js';
+// The open-PR ownership preflight lives in openPullRequestOverlaps.ts for the
+// same reason; callers keep importing it from here.
+export { findOpenPRFileOverlaps, type OpenPRFileOverlap } from './openPullRequestOverlaps.js';
 
 function isPathInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -145,56 +156,31 @@ function assertManagedWorktreePath(repoPath: string, worktreePath: string): stri
   return path;
 }
 
-// Shared deps/data linking (INT-2415)
+// Shared deps/data linking (INT-2415, AGT-4043)
 //
 // A worktree is created fresh from origin/main, so it has NO node_modules / .venv
 // and none of the repo's gitignored real data (db/*.db etc.) — a worker there
 // physically cannot run npm/pytest/playwright or real-data verification. We keep
 // the worktree isolating CODE, but SHARE the original repo's gitignored deps/data
-// into it via symlink. The original repo is itself the installed sandbox, and
-// deps/DBs are read-mostly, so parallel workers sharing them is safe.
+// into it. Which paths qualify is decided in sharedPathDetection.ts (root plus
+// workspace manifests, bounded depth); this file owns the side effect.
 
-/** Always-gitignored dependency dirs safe to auto-link without a config. */
-const AUTO_SHARED_CANDIDATES = ['node_modules', '.venv-verify', '.venv', 'venv'];
-
-interface SandboxConfig {
-  sandbox?: { sharedPaths?: string[] } | null;
-}
+export { resolveSharedPaths } from './sharedPathDetection.js';
 
 /**
- * Pure decision: which repo-relative paths should be symlinked into a worktree.
+ * Share the original repo's gitignored deps/data into a fresh worktree.
  *
- * - If openswarm.json declares `sandbox.sharedPaths`, trust that list verbatim
- *   (the repo owner opted in — no gitignore check).
- * - Otherwise auto-detect only the always-gitignored dependency dirs
- *   (node_modules/.venv/venv); never a tracked dir.
+ * Most paths are symlinked: deps are read-mostly and the original checkout is
+ * the installed sandbox. A Python environment that holds an EDITABLE install of
+ * this repository is the exception — its `.pth` points at the original
+ * checkout's source, so a symlinked venv would make `pytest` in the worktree
+ * import the main tree and pass against code the worker never changed. Such an
+ * environment is cloned (APFS clonefile / reflink where available) and its
+ * `.pth` entries rebased onto the worktree instead (AGT-4043).
  *
- * Returns only candidates that actually EXIST at `<repoPath>/<P>` (read-only
- * check). Absolute or parent-escaping (`..`) entries are dropped for safety.
- * The symlink creation itself is the caller's side effect. (INT-2415)
- */
-export function resolveSharedPaths(repoPath: string, openswarmJson?: SandboxConfig | null): string[] {
-  const configured = openswarmJson?.sandbox?.sharedPaths;
-  const candidates = configured && configured.length > 0 ? configured : AUTO_SHARED_CANDIDATES;
-
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of candidates) {
-    const p = (raw ?? '').trim();
-    if (!p) continue;
-    if (isAbsolute(p) || p.split(/[\\/]/).includes('..')) continue; // never escape the repo
-    if (seen.has(p)) continue;
-    seen.add(p);
-    if (existsSync(join(repoPath, p))) out.push(p);
-  }
-  return out;
-}
-
-/**
- * Symlink the original repo's shared gitignored deps/data into a fresh worktree.
  * Best-effort and idempotent: skips paths already present in the worktree (never
  * clobbers a checked-out tracked dir) and swallows per-link failures (a failed
- * symlink degrades to today's no-deps behavior, never breaks worktree creation).
+ * share degrades to today's no-deps behavior, never breaks worktree creation).
  */
 async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<void> {
   let meta: SandboxConfig | null = null;
@@ -205,16 +191,28 @@ async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<
     console.warn(`[Worktree] openswarm.json unreadable; skipping sharedPaths config:`, err);
   }
 
-  for (const rel of resolveSharedPaths(repoPath, meta)) {
+  const shared = resolveSharedPaths(repoPath, meta);
+  if (shared.length === 0 && !(meta?.sandbox?.sharedPaths?.length)) {
+    const warning = emptyDetectionWarning(repoPath, detectSharedPaths(repoPath));
+    if (warning) console.warn(warning);
+  }
+
+  for (const rel of shared) {
     const target = join(repoPath, rel); // absolute source so the link survives any cwd
     const linkPath = join(worktreePath, rel);
     try {
       if (existsSync(linkPath)) continue; // tracked dir already checked out — do not clobber
-      mkdirSync(dirname(linkPath), { recursive: true }); // support nested sharedPaths (e.g. db/x.db)
+      mkdirSync(dirname(linkPath), { recursive: true }); // support nested sharedPaths (e.g. apps/x/.venv)
+      if (await hasEditableInstallInto(repoPath, target)) {
+        await copyIsolatedPath(target, linkPath, worktreePath, rel);
+        await rebasePythonEnvironment(repoPath, worktreePath, rel);
+        console.log(`[Worktree] Cloned editable Python environment: ${rel} (imports rebased onto the worktree)`);
+        continue;
+      }
       symlinkSync(target, linkPath);
       console.log(`[Worktree] Linked shared path: ${rel} -> ${target}`);
     } catch (err) {
-      console.warn(`[Worktree] Failed to link shared path ${rel}:`, err);
+      console.warn(`[Worktree] Failed to share path ${rel}:`, err);
     }
   }
 }
@@ -630,8 +628,12 @@ async function removePreservedWorktreeAtUnlocked(
     // .duckdb/.parquet/.pkl/.pt keeps it locally and simply is not published.
     // Fail closed: an unresolvable base means the branch cannot be judged, and
     // publication would fail on the same lookup anyway.
+    // Same fail-closed shape for customer credentials / financial PII (AGT-4188).
     const unsafe = await resolveBaseRef(worktreePath)
-      .then((base) => unsafeBinaryDataOnBranch(worktreePath, base.ref))
+      .then(async (base) => [
+        ...(await unsafeBinaryDataOnBranch(worktreePath, base.ref)),
+        ...(await sensitiveDataOnBranch(worktreePath, base.ref)).map((f) => `${f.file} [${f.kind}]`),
+      ])
       .catch(() => [UNRESOLVED_BASE]);
     if (unsafe.length > 0) {
       console.warn(
@@ -850,7 +852,13 @@ export async function createWorktree(
       );
       baseRef = base.ref;
     }
-    await git(repoPath, 'worktree', 'add', '-b', branchName, worktreePath, baseRef);
+    // --no-track: branching from a remote ref makes git record an upstream in
+    // the repository's shared .git/config. The lifecycle lock is per issue, so
+    // two issues of one repo reach this line together and the loser fails with
+    // "could not lock config file .git/config: File exists" — leaving a branch
+    // with no worktree and costing the issue an attempt. Nothing reads that
+    // upstream before publication, where `push -u` sets the real one.
+    await git(repoPath, 'worktree', 'add', '--no-track', '-b', branchName, worktreePath, baseRef);
   }
   console.log(`[Worktree] Created: ${worktreePath} (branch: ${branchName}, base: ${baseRef})`);
 
@@ -905,10 +913,6 @@ async function ensureLfsSmudged(worktreePath: string): Promise<void> {
 // created, surface which open PRs / active swarm/* branches touch the same
 // files — advisory only, never blocks PR creation.
 
-export interface OpenPRFileOverlap extends FileOverlap {
-  number: number;
-  url: string;
-}
 
 export interface BranchPullRequest {
   url: string;
@@ -944,64 +948,6 @@ export async function findPullRequestForBranch(
   };
 }
 
-/**
- * Check planned files before a worker branch is created. This is intentionally
- * fail-open when GitHub is unavailable, but a successful query lets the runner
- * avoid producing another divergent implementation of the same files.
- */
-export async function findOpenPRFileOverlaps(
-  repoPath: string,
-  plannedFiles: string[],
-  /**
-   * Which open PRs count as competing work.
-   *
-   * A PR reserves its files while a worker is editing them, and `publishOnPark`
-   * leaves a PR behind long after its worker exits — so an open PR alone is not
-   * evidence of anyone editing. Two exclusions follow: the dispatched issue's
-   * own PR (AGT-4095), and a `swarm/*` PR whose run no longer holds a lease
-   * (AGT-4097).
-   *
-   * A branch outside the `swarm/` namespace — a human's, another tool's — has
-   * no run to consult, so it always reserves.
-   *
-   * `activeIssueIdentifiers` distinguishes "none are active" from "I cannot
-   * tell": an array, **including an empty one**, asserts it is the complete set
-   * of held leases; `undefined` means the caller has no ledger to ask, and
-   * every `swarm/*` PR keeps reserving. Getting those two confused would empty
-   * the gate on any caller that simply never wired the accessor.
-   */
-  competing: {
-    selfIssueIdentifier?: string;
-    /** Issues whose runs a worker currently holds; undefined when unknowable. */
-    activeIssueIdentifiers?: readonly string[];
-  } = {},
-): Promise<OpenPRFileOverlap[]> {
-  if (plannedFiles.length === 0) return [];
-  const planned = new Set(plannedFiles.map((f) => f.replace(/^\.\//, '')));
-  try {
-    // `files` is available on `gh pr list --json`; fetch every scope in one API
-    // request instead of running an unbounded `gh pr diff` loop.
-    // gh paginates internally up to the requested limit. 1,000 is a deliberate
-    // safety ceiling well above GitHub's practical open-PR queue sizes while
-    // keeping one bounded request and covering the former 100-PR blind spot.
-    const raw = await gh(repoPath, 'pr', 'list', '--state', 'open', '--json', 'number,url,headRefName,files', '--limit', '1000');
-    const prs: { number: number; url: string; headRefName: string; files?: { path: string }[] }[] = JSON.parse(raw || '[]');
-    const overlaps: OpenPRFileOverlap[] = [];
-    for (const pr of prs) {
-      if (competing.selfIssueIdentifier && isBranchForIssue(pr.headRefName, competing.selfIssueIdentifier)) continue;
-      const active = competing.activeIssueIdentifiers;
-      const heldByAWorker = active === undefined
-        || active.some((id) => isBranchForIssue(pr.headRefName, id));
-      if (isSwarmBranch(pr.headRefName) && !heldByAWorker) continue;
-      const shared = (pr.files ?? []).map((f) => f.path).filter((f) => planned.has(f.replace(/^\.\//, '')));
-      if (shared.length > 0) overlaps.push({ number: pr.number, url: pr.url, label: `PR #${pr.number} (${pr.headRefName})`, files: shared });
-    }
-    return overlaps;
-  } catch (err) {
-    console.warn('[Worktree] Preflight open-PR overlap check skipped:', err);
-    return [];
-  }
-}
 
 /** Split git/gh newline output into a trimmed, non-empty list. */
 function toLines(out: string): string[] {
@@ -1097,6 +1043,7 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
     '--json', 'url', '--jq', '.[0].url',
   )).trim();
 }
+
 /** PR URL plus the immutable commit this publication call pushed. */
 export type PublishedPullRequest = { prUrl: string; headSha: string };
 export async function commitAndCreatePRWithHead(
@@ -1104,9 +1051,17 @@ export async function commitAndCreatePRWithHead(
   title: string,
   issueIdentifier: string,
   description: string,
-  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[] } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
+
+  // A daemon restart mid-`regressedAgainstFreshBase` (below) is killed with
+  // MERGE_HEAD still set — its own try/finally only restores on a JS
+  // exception, never on the process itself dying between the merge and the
+  // finally block. Every other resume path in this codebase already expects
+  // to find committed-or-clean state, not a merge in progress, so clear a
+  // stray one before anything else touches this worktree.
+  await git(worktreePath, 'merge', '--abort').catch(() => {});
 
   // A parked/stuck branch can be published without a subsequent resume, so the
   // resume-time cleanup above is not sufficient. Repair legacy generated
@@ -1136,9 +1091,9 @@ export async function commitAndCreatePRWithHead(
 
       const stillStaged = await git(worktreePath, 'diff', '--cached', '--name-only');
       if (stillStaged.trim()) {
-        const commitMsg = [
-          `feat(${issueIdentifier}): ${title.slice(0, 72)}`,
-        ].join('\n');
+        // Type from the title's own prefix or from the staged files — not a
+        // blanket `feat` that double-prefixed typed titles (AGT-4410).
+        const commitMsg = publicationCommitSubject(issueIdentifier, title, stillStaged.split('\n').filter(Boolean));
 
         // Validate conventional commit format (warning only)
         const commitCheck = runConventionalCommitGuard(commitMsg);
@@ -1173,8 +1128,44 @@ export async function commitAndCreatePRWithHead(
   if (!headSha) throw new Error(`Cannot publish ${branchName}: HEAD identity is unavailable`);
 
   await assertBranchWithinWriteScope(worktreePath, base.ref, options.fileScope);
+  await assertNoSensitiveDataOnBranch(worktreePath, base.ref); // AGT-4188 — before anything leaves this machine
   await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
   console.log(`[Worktree] Pushed branch ${branchName}`);
+
+  // A branch that no longer merges into its base gets no CI from GitHub while
+  // the default CodeQL checks still turn green (AGT-4189). Say so in the body
+  // and keep it a draft; a merely stale base is noted and left ready.
+  const freshness = await probeBaseFreshness(worktreePath, base.ref);
+  const conflicting = freshness.conflictFiles.length > 0;
+  if (conflicting) {
+    console.warn(
+      `[Worktree] ${branchName} conflicts with ${base.ref} in ${freshness.conflictFiles.length} file(s) — draft only: ` +
+      freshness.conflictFiles.join(', '),
+    );
+  } else if (freshness.behindBy > 0) {
+    console.log(`[Worktree] ${branchName} is ${freshness.behindBy} commit(s) behind ${base.ref} at publication`);
+  }
+
+  // A base that moved with no textual conflict still shipped ready without
+  // ever being retested against the merged result (AGT-4465) — do that now,
+  // before ANY ready/draft decision, including reusing an already-open PR. A
+  // parked run resumes on the same branch, and that is exactly the branch
+  // most likely to have gone stale against a moved base while it sat parked
+  // — computing this only for the fresh-create path below left the
+  // parked-then-approved flow, the scenario this exists for, unprotected.
+  // Cheap: it reuses the tester stage's own deterministic verifier, never an
+  // LLM call, and only runs when the caller supplied a verify config (the
+  // reviewed/approved-publish path does; a parked/unreviewed draft publish
+  // has no reviewer to protect and skips this).
+  const regressed = !conflicting && freshness.behindBy > 0 && options.verify
+    ? await regressedAgainstFreshBase(worktreePath, base.ref, headSha, options.verify)
+    : false;
+  if (regressed) {
+    console.warn(
+      `[Worktree] ${branchName} passes its own base but fails against the CURRENT ${base.ref} ` +
+      `(merged-result revalidation) — draft only`,
+    );
+  }
 
   // If PR already exists, just return the URL
   const existing = await findOpenPullRequestUrl(worktreePath, branchName)
@@ -1190,8 +1181,9 @@ export async function commitAndCreatePRWithHead(
     // when another branch already closes this issue (INT-2544), deliberately, so
     // a duplicate implementation cannot masquerade as the sole one. Promoting on
     // the caller's option alone would defeat that, so the duplicate condition is
-    // re-checked here. (Caught by the commit gate, not self-caught.)
-    if (!options.draft) {
+    // re-checked here. (Caught by the commit gate, not self-caught.) A merged-
+    // result regression (AGT-4465) is a third such reason, checked above.
+    if (!options.draft && !conflicting && !regressed) {
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
@@ -1200,6 +1192,9 @@ export async function commitAndCreatePRWithHead(
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
   const overlapSection = await buildFileOverlapSection(worktreePath, branchName);
+  const shapeSection = changeShapeSection(
+    (await git(worktreePath, 'diff', '--name-only', `${base.ref}..HEAD`).catch(() => '')).split('\n').filter(Boolean),
+  );
 
   // Another branch may already close this same Linear issue (INT-2544) — never
   // block on it (the work is done and worth keeping visible), but never let it
@@ -1213,10 +1208,14 @@ export async function commitAndCreatePRWithHead(
     );
   }
 
+  const freshnessSection = baseFreshnessSection(freshness, base.branch);
+
   // Create PR
-  const prBody = [
+  const basePrBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
+    ...(shapeSection ? ['', shapeSection] : []),
+    ...(freshnessSection ? ['', freshnessSection] : []),
     ...(overlapSection ? ['', overlapSection] : []),
     ...(duplicateSection ? ['', duplicateSection] : []),
     '',
@@ -1226,12 +1225,14 @@ export async function commitAndCreatePRWithHead(
     '---',
     '🤖 Generated with [OpenSwarm](https://github.com/Intrect-io/OpenSwarm)',
   ].join('\n');
+  const claimEvidence = publicationClaimEvidence(basePrBody, headSha);
+  const prBody = claimEvidence.section ? `${basePrBody}\n\n${claimEvidence.section}` : basePrBody;
 
   const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
-  if (options.draft || duplicates.length > 0) createArgs.push('--draft');
+  if (options.draft || duplicates.length > 0 || conflicting || regressed || !claimEvidence.ready) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();
@@ -1248,8 +1249,11 @@ export async function commitAndCreatePRWithHead(
     console.warn(`[Worktree] PR create raced with another publisher; using existing PR: ${url}`);
     // The winner may have opened it as a draft (a parked run does). Losing the
     // race must not turn a reviewed publication into a hidden draft. Reuses the
-    // duplicate set already computed above rather than re-querying.
-    if (!options.draft) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
+    // duplicate set already computed above rather than re-querying. `regressed`
+    // was computed above too, before this branch even knew whether it would
+    // create or reuse a PR — a merged-result regression (AGT-4465) must block
+    // promotion here exactly as it does on the non-raced path.
+    if (!options.draft && !conflicting && !regressed && claimEvidence.ready) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
   }
 
   // Register PR ownership for conflict auto-resolution
@@ -1274,7 +1278,7 @@ export async function commitAndCreatePRWithHead(
 /** Backwards-compatible URL-only publication surface. */
 export async function commitAndCreatePR(
   info: WorktreeInfo, title: string, issueIdentifier: string, description: string,
-  options: { draft?: boolean; committedOnly?: boolean } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
 ): Promise<string> {
   return (await commitAndCreatePRWithHead(info, title, issueIdentifier, description, options)).prUrl;
 }
@@ -1381,6 +1385,9 @@ export async function removeWorktree(info: WorktreeInfo): Promise<void> {
     console.log(`[Worktree] Force removed: ${worktreePath}`);
   }
   await clearActiveWorktreeMarker(info);
+  // The fence verdicts belong to the run that just ended. A recycled worktree
+  // path must not inherit them, or a later run's real file is refused. (AGT-4440)
+  releaseRejectedWorkerPaths(worktreePath);
 }
 
 /** Clean up dangling worktrees.

@@ -6,6 +6,56 @@
 
 - **Human `/plan` respects `maxChildrenPerTask` but not `dailyLimit` (AGT-4123).** `POST /api/plan/dispatch` now refuses with `decomposition_child_cap` when an approved plan would leave more children than `autonomous.decomposition.maxChildrenPerTask` on the new parent (sharing `refuseForChildCap` with the autonomous path). The automation-pacing `dailyLimit` / `reserveDailyCreations` budget remains runner-only — an explicitly confirmed plan is not refused because the daemon already spent today's slots.
 
+## 0.24.2 — 2026-09-20
+
+### Fixed
+
+- **Reviewer salvage now preserves a real verdict (AGT-4484).** When a reviewer
+  exhausts its tool turns, the final no-tools turn explicitly requires
+  `Decision: approve`, `Decision: revise`, or `Decision: reject` with concrete
+  reasoning instead of returning a worker-status summary that the reviewer
+  parser must discard.
+
+## 0.24.1 — 2026-09-20
+
+### Added
+
+- **Cost-capped GitHub Action reviews.** `openswarm review --model <id>` is now
+  exposed by the CLI and the composite action forwards its optional `model`
+  input through the same reviewed call chain. The action refuses as
+  gate-not-run when an older installed package lacks the option, rather than
+  silently falling back to an uncontrolled default model. The dogfood workflow
+  pins `deepseek/deepseek-v4-flash`.
+- **Backfill for pre-publication parked branches (AGT-4124).** `openswarm
+  drain-parks --path <repo>` finds unowned `NEEDS_HUMAN` rows, creates or
+  reuses their draft PRs, and records zero-ahead or missing-branch reasons with
+  CAS-protected ledger updates. `--dry-run` performs no GitHub or ledger write.
+- **Resource-aware test fan-out.** Test parallelism now scales with available
+  CPU and memory instead of unconditionally consuming the host.
+
+### Changed
+
+- **OpenSwarm is documented as an agentic CI/CD gate first.** The README now
+  leads with review → fix → re-review → deterministic verification and presents
+  the Linear daemon as an optional orchestration layer.
+- **Fleet supervision exposes thinking effort.** The supervisor can configure
+  reasoning effort for every role instead of treating it as an inaccessible
+  model default.
+
+### Fixed
+
+- **Reproducible package installation on every supported platform.** LanceDB is
+  pinned to the last stable release whose declared macOS, Linux, and Windows
+  optional native packages all exist in the registry, so `npm ci` no longer
+  rejects the committed lockfile.
+- **OpenRouter flash routing fails over to GLM.** A failing or unavailable
+  `deepseek/deepseek-v4-flash` review can promote to `z-ai/glm-5.3-flash` under
+  the existing fallback policy.
+- **Durable run state has stronger recovery evidence.** Session transcripts,
+  watchdog causes, staged memory promotion, write scopes, and parked
+  publication records now survive the retries and handoffs that previously
+  obscured them.
+
 
 ## 0.24.0 — 2026-09-10
 

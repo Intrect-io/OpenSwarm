@@ -191,12 +191,50 @@ describe('processNamespaceId / sameProcessNamespace', () => {
     // license the proof.
     const readNs = vi.fn(() => NS);
     const readBoot = vi.fn(() => BOOT);
-    const id = resolveNamespaceId('darwin', readNs, readBoot);
+    const id = resolveNamespaceId('win32', readNs, readBoot);
     expect(id).toBe(`host:${hostname()}`);
     expect(isProofCapableSpace(id)).toBe(false);
-    expect(isProofCapableSpace(resolveNamespaceId('win32', readNs, readBoot))).toBe(false);
     expect(readNs).not.toHaveBeenCalled();
     expect(readBoot).not.toHaveBeenCalled();
+  });
+
+  // AGT-4069: two Macs sharing a state directory carry the same host name
+  // routinely, so a live owner on the other machine was judged dead by the
+  // local pid probe. The kernel's boot-session UUID names the pid table.
+  it('names a macOS pid space by its boot-session UUID, as a proof', () => {
+    const readNs = vi.fn(() => NS);
+    const readBoot = vi.fn(() => BOOT);
+    const id = resolveNamespaceId('darwin', readNs, readBoot, () => '7D4293A2-1EBC-4844-ACCE-008AAB3F9B45\n');
+    expect(id).toBe('pidns:boot:7D4293A2-1EBC-4844-ACCE-008AAB3F9B45');
+    expect(isProofCapableSpace(id)).toBe(true);
+    expect(readNs).not.toHaveBeenCalled();
+    expect(readBoot).not.toHaveBeenCalled();
+  });
+
+  it('two Macs with the same host name never match, and the same boot always does', () => {
+    const here = resolveNamespaceId('darwin', () => NS, () => BOOT, () => 'BOOT-A');
+    const there = resolveNamespaceId('darwin', () => NS, () => BOOT, () => 'BOOT-B');
+    const hereAgain = resolveNamespaceId('darwin', () => NS, () => BOOT, () => 'BOOT-A');
+    expect(namespacesMatch(there, here)).toBe(false);
+    expect(namespacesMatch(hereAgain, here)).toBe(true);
+    // Same host name on both — the old id could not tell them apart.
+    expect(`host:${hostname()}`).toBe(`host:${hostname()}`);
+  });
+
+  it('falls back to the host hint when the boot session cannot be read, never to a shared proof', () => {
+    const failing = resolveNamespaceId('darwin', () => NS, () => BOOT, () => { throw new Error('sysctl: not permitted'); });
+    const empty = resolveNamespaceId('darwin', () => NS, () => BOOT, () => '');
+    expect(failing).toBe(`host:${hostname()}`);
+    expect(empty).toBe(`host:${hostname()}`);
+    expect(isProofCapableSpace(failing)).toBe(false);
+  });
+
+  it('on this machine, reads the live boot-session UUID the kernel reports', async () => {
+    if (process.platform !== 'darwin') return;
+    const { execFileSync } = await import('node:child_process');
+    const live = execFileSync('sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8' }).trim();
+    expect(processNamespaceId()).toBe(`pidns:boot:${live}`);
+    expect(isProofCapableSpace(processNamespaceId())).toBe(true);
   });
 
   it('marks a real Linux pid space as proof-capable, and nothing else', () => {

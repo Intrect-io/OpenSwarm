@@ -15,6 +15,7 @@ import { webFetch, webSearch } from './webTools.js';
 import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
+import { preserveTrailingNewline, pythonSyntaxError, wholeFileRewriteVerdict } from './writeGuards.js';
 import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import {
   humanSurfaceShellWriteReason,
@@ -22,9 +23,22 @@ import {
   stripHumanSurfaceEnv,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
+import { looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
+import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
+import { stageMemory, type RememberKind } from '../agents/stagedMemory.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
+import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
+import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
+import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const execFileAsync = promisify(execFile);
+
+let sandboxUnavailableWarned = false;
+function warnSandboxUnavailableOnce(): void {
+  if (sandboxUnavailableWarned) return;
+  sandboxUnavailableWarned = true;
+  console.warn('[Tools] workerSandbox is on but this host has no sandbox-exec/bwrap — bash runs unfenced');
+}
 
 /**
  * The daemon's launchd PATH is minimal (/usr/bin:/bin:/opt/homebrew/bin, no
@@ -47,7 +61,7 @@ export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
   ];
   const current = (base.PATH ?? '').split(':').filter(Boolean);
   const merged = [...extra.filter((p) => !current.includes(p)), ...current];
-  return stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') });
+  return withTestResourceBudget(stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') }));
 }
 
 // ============ 도구 정의 (OpenAI function calling 포맷) ============
@@ -76,6 +90,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
         required: ['path'],
       },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remember',
+      description: 'Stage one durable lesson for this repository. It is NOT shared yet: it stays in this run\'s scratchpad and is promoted only if the whole run succeeds. Record a specific reusable pattern or constraint, never secrets or a guess.',
+      parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['pattern', 'constraint'] }, title: { type: 'string' }, content: { type: 'string' } }, required: ['kind', 'title', 'content'] },
     },
   },
   {
@@ -155,6 +177,42 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'scratch_write',
+      description:
+        'Save a note for yourself, outside the repository. Use it for what you worked out and '
+        + 'what you ruled out — a later iteration of this same task is shown these notes and '
+        + 'otherwise starts with no memory of what you tried. Writing the same name again '
+        + 'replaces that note. Never put working files in the repository for this: anything '
+        + 'under the worktree is reviewed and can reach the pull request.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Short name for the note, e.g. "approach" or "ruled-out"' },
+          content: { type: 'string', description: 'The note, in Markdown' },
+        },
+        required: ['name', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'scratch_read',
+      description:
+        'Read back one of your notes by name, or list them all when called without a name. '
+        + 'The most recent notes are already in your prompt; use this to fetch an older one '
+        + 'that was left out of it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Note name. Omit to list every note.' },
+        },
+      },
+    },
+  },
 ];
 
 // apply_patch — gated to codex adapters only (codex models are RLHF-trained on the
@@ -217,6 +275,8 @@ const BLOCKED_COMMANDS = [
  * under review, with the full environment. (INT-3189, INT-2961)
  */
 const READ_ONLY_DENIED_TOOLS = new Set([
+  'scratch_write',
+  'remember',
   'write_file',
   'edit_file',
   'apply_patch',
@@ -413,6 +473,16 @@ function invalidateCache(cache: ReadCache | undefined, filePath: string): void {
 export interface ToolExecOptions {
   /** Filenames (matched by path suffix) for which edit_file/write_file are refused */
   protectedFiles?: string[];
+  /**
+   * OS-level fence for the bash tool (AGT-4387): 'on' runs the command under
+   * sandbox-exec / bwrap with writes limited to the worktree and build caches
+   * (see support/osSandbox.ts); 'off' or unset runs it as the daemon user,
+   * which is what every worker did before a native (non-container) daemon
+   * made that the user's whole home directory.
+   */
+  sandbox?: 'on' | 'off';
+  /** Refuse publication commands (`git push`/`commit`, `gh pr`, `openswarm …`). (AGT-4418) */
+  forbidPublication?: boolean;
   /** bash tool timeout (default DEFAULT_BASH_TIMEOUT_MS) */
   bashTimeoutMs?: number;
   /** Refuse mutation and shell tools even if a model emits hidden tool names. */
@@ -437,6 +507,15 @@ export interface ToolExecOptions {
    * (AGT-4065, caught by the PR review.)
    */
   loopDeadlineAt?: number;
+  /**
+   * Which run's scratchpad `scratch_write`/`scratch_read` address. Absent means
+   * the stage has no scratchpad and both tools refuse rather than inventing one:
+   * a note written to a run id nobody reads back is worse than no note, because
+   * the agent believes it recorded something.
+   */
+  scratchpadRunId?: string;
+  /** Provenance attached to a staged remember entry. */
+  memoryContext?: { taskId: string; iteration: number };
 }
 
 const DEFAULT_BASH_TIMEOUT_MS = 30000;
@@ -694,9 +773,23 @@ export async function executeTool(
             is_error: true,
           };
         }
+        // An existing file: refuse a rewrite that drops a large share of it,
+        // keep its trailing newline, and do not write Python that cannot parse
+        // (AGT-4406). A new file is written as given.
+        let content: string = args.content;
+        const original = await fs.readFile(filePath, 'utf-8').catch(() => null);
+        if (original !== null) {
+          const refusal = wholeFileRewriteVerdict(original, content);
+          if (refusal) return { tool_call_id: callId, content: refusal, is_error: true };
+          content = preserveTrailingNewline(original, content);
+        }
+        const syntaxError = await pythonSyntaxError(filePath, content);
+        if (syntaxError) {
+          return { tool_call_id: callId, content: `REFUSED: ${path.basename(filePath)} would not parse — ${syntaxError}. Nothing was written.`, is_error: true };
+        }
         // 디렉토리 자동 생성
         await fs.mkdir(path.dirname(filePath), { recursive: true });
-        await atomicWriteFile(filePath, args.content);
+        await atomicWriteFile(filePath, content);
         invalidateCache(cache, filePath);
         return { tool_call_id: callId, content: `Written: ${filePath}`, is_error: false };
       }
@@ -734,9 +827,12 @@ export async function executeTool(
           editEnd = span.end;
           fuzzy = true;
         }
-        const updated = original.slice(0, editStart) + args.new_string + original.slice(editEnd);
+        const updated = preserveTrailingNewline(original, original.slice(0, editStart) + args.new_string + original.slice(editEnd));
         await atomicWriteFile(filePath, updated);
         invalidateCache(cache, filePath);
+        // Applied, but say so: an edit can legitimately be one of several that
+        // only parse together, so this warns instead of refusing (AGT-4406).
+        const parseWarning = await pythonSyntaxError(filePath, updated);
         // Return the changed region so the model can verify without a re-read.
         // editStart is the exact offset in the ORIGINAL (exact or fuzzy), so the
         // line math is correct either way.
@@ -747,7 +843,9 @@ export async function executeTool(
         const snippet = newLines.slice(from, to).map((l, i) => `${from + i + 1}\t${l}`).join('\n');
         return {
           tool_call_id: callId,
-          content: `Edited: ${filePath}${fuzzy ? ' (matched with whitespace/quote normalization)' : ''}\nResulting region:\n${snippet}`,
+          content: `Edited: ${filePath}${fuzzy ? ' (matched with whitespace/quote normalization)' : ''}`
+            + `${parseWarning ? `\n⚠ The file no longer parses: ${parseWarning}. Fix it before finishing.` : ''}`
+            + `\nResulting region:\n${snippet}`,
           is_error: false,
         };
       }
@@ -830,6 +928,21 @@ export async function executeTool(
 
       case 'bash': {
         const command: string = args.command;
+        const boundedCommand = await resourceAwareTestCommand(command, cwd);
+        // Checked before every execution path below, including the attested
+        // sandbox one: a worker's job ends at the working tree (AGT-4418).
+        if (execOptions?.forbidPublication) {
+          const what = publicationCommandIn(command);
+          if (what) return { tool_call_id: callId, content: publicationFenceMessage(what), is_error: true };
+        }
+        // A command reaching into another task's worktree is made visible on
+        // both sides: the daemon log for the operator, the tool result for the
+        // model (AGT-4043). Never blocked — a linter pointed at a path is
+        // harmless; the note is what stops the pytest variant.
+        const auditNote = crossWorktreeAuditNote(command, cwd);
+        if (auditNote) console.warn(`[Audit] bash in ${cwd} referenced another worktree: ${command.slice(0, 200)}`);
+        const audited = (result: ToolResult): ToolResult =>
+          auditNote ? { ...result, content: `${auditNote}\n${result.content}` } : result;
         if (isHumanSurfaceReadOnlyEnabled()) {
           if (!execOptions?.sandboxExecutorSession) {
             return {
@@ -843,7 +956,7 @@ export async function executeTool(
           }
           const limit = execOptions.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
           try {
-            const result = await execOptions.sandboxExecutorSession.execute(command, limit);
+            const result = await execOptions.sandboxExecutorSession.execute(`${testResourceShellPrefix()} ${boundedCommand}`, limit);
             const output = result.output.length > 8000
               ? `...[sandbox output tail]\n${result.output.slice(-8000)}`
               : result.output;
@@ -894,8 +1007,15 @@ export async function executeTool(
         if (isCommandBlocked(command)) {
           return { tool_call_id: callId, content: `BLOCKED: destructive command not allowed: ${command}`, is_error: true };
         }
+        const fenced = execOptions?.sandbox === 'on'
+          ? wrapForSandbox(['bash', '-c', boundedCommand], {
+            writableRoots: workerWritableRoots(cwd, execOptions.scratchpadRunId),
+            allowNetwork: true,
+          })
+          : null;
+        if (execOptions?.sandbox === 'on' && !fenced) warnSandboxUnavailableOnce();
         try {
-          const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
+          const { stdout, stderr } = await execFileAsync(fenced?.file ?? 'bash', fenced?.args ?? ['-c', boundedCommand], {
             cwd,
             timeout: execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
             maxBuffer: 1024 * 512,
@@ -903,11 +1023,11 @@ export async function executeTool(
           });
           const output = stdout + (stderr ? `\n[stderr] ${stderr}` : '');
           // 출력이 너무 길면 잘라냄
-          return {
+          return audited({
             tool_call_id: callId,
             content: output.length > 8000 ? output.slice(0, 8000) + '\n... (truncated)' : output || '(no output, exit 0)',
             is_error: false,
-          };
+          });
         } catch (err) {
           // exit code != 0 → execFile이 throw. 하지만 grep/find 등은 "매치 없음"으로
           // exit 1을 내며 이건 정상이다. 실제 stdout/stderr + exit code를 모델에게 줘서
@@ -928,12 +1048,17 @@ export async function executeTool(
               is_error: true,
             };
           }
+          // Name the fence when it is what refused the write, so the model fixes
+          // its target instead of concluding the filesystem is broken.
+          const fenceHint = fenced && looksLikeSandboxDenial(out)
+            ? '\n[sandbox] Writes are limited to this worktree, the temp dir and build caches; this command tried to write elsewhere.'
+            : '';
           const body = out.trim()
-            ? `exit ${code}:\n${out.slice(0, 4000)}`
+            ? `exit ${code}:\n${out.slice(0, 4000)}${fenceHint}`
             : `exit ${code} (no output) — likely no matches or a non-fatal nonzero exit, not necessarily an error.`;
           // exit 1 + 출력 없음은 보통 무해(grep no-match) → is_error를 false로 둬 모델이 안 헤매게.
           const benign = e.code === 1 && !out.trim();
-          return { tool_call_id: callId, content: body, is_error: !benign };
+          return audited({ tool_call_id: callId, content: body, is_error: !benign });
         }
       }
 
@@ -952,6 +1077,60 @@ export async function executeTool(
         } catch (err) {
           return { tool_call_id: callId, content: `search_memory failed: ${err instanceof Error ? err.message : String(err)}`, is_error: false };
         }
+      }
+
+      case 'scratch_write':
+      case 'scratch_read': {
+        const runId = execOptions?.scratchpadRunId;
+        if (!runId) {
+          return {
+            tool_call_id: callId,
+            content: `NO_SCRATCHPAD: ${name} is unavailable in this run.`,
+            is_error: true,
+          };
+        }
+        if (name === 'scratch_read') {
+          const noteName = typeof args.name === 'string' ? args.name.trim() : '';
+          if (!noteName) {
+            const notes = await listNotes(runId);
+            const listing = notes.length === 0
+              ? 'No notes yet.'
+              : notes.map((note) => `- ${note.name} (${note.bytes} bytes)`).join('\n');
+            return { tool_call_id: callId, content: listing, is_error: false };
+          }
+          const body = await readNote(runId, noteName);
+          return body === undefined
+            ? { tool_call_id: callId, content: `No note named "${noteName}".`, is_error: true }
+            : { tool_call_id: callId, content: body, is_error: false };
+        }
+        const noteName = String(args.name ?? '').trim();
+        const content = typeof args.content === 'string' ? args.content : '';
+        if (!noteName) {
+          return { tool_call_id: callId, content: 'scratch_write requires a non-empty "name".', is_error: true };
+        }
+        try {
+          const { bytes } = await writeNote(runId, noteName, content);
+          return { tool_call_id: callId, content: `Saved note "${noteName}" (${bytes} bytes).`, is_error: false };
+        } catch (err) {
+          // A budget refusal is the model's to act on — it can shorten the note
+          // or drop one — so it comes back as a tool error, not an exception.
+          const reason = err instanceof Error ? err.message : String(err);
+          return { tool_call_id: callId, content: `scratch_write refused: ${reason}`, is_error: true };
+        }
+      }
+
+      case 'remember': {
+        const runId = execOptions?.scratchpadRunId;
+        const context = execOptions?.memoryContext;
+        if (!runId || !context) return { tool_call_id: callId, content: 'NO_SCRATCHPAD: remember is unavailable in this run.', is_error: true };
+        const kind = args.kind as RememberKind;
+        const title = typeof args.title === 'string' ? args.title.trim() : '';
+        const content = typeof args.content === 'string' ? args.content.trim() : '';
+        if ((kind !== 'pattern' && kind !== 'constraint') || !title || !content) return { tool_call_id: callId, content: 'remember requires kind (pattern or constraint), title, and content.', is_error: true };
+        try {
+          await stageMemory(runId, { kind, title, content, taskId: context.taskId, iteration: context.iteration });
+          return { tool_call_id: callId, content: 'Staged this lesson in the scratchpad. It will be promoted only if this run succeeds.', is_error: false };
+        } catch (err) { return { tool_call_id: callId, content: `remember refused: ${err instanceof Error ? err.message : String(err)}`, is_error: true }; }
       }
 
       case 'diagnostics': {
@@ -1017,7 +1196,7 @@ export async function executeToolCalls(
   cache?: ReadCache,
   execOptions?: ToolExecOptions,
 ): Promise<ToolResult[]> {
-  const readOnlyTools = new Set(['read_file', 'search_files', 'search_memory', 'web_fetch', 'web_search']);
+  const readOnlyTools = new Set(['read_file', 'search_files', 'search_memory', 'scratch_read', 'web_fetch', 'web_search']);
   const results: ToolResult[] = [];
   let index = 0;
   while (index < toolCalls.length) {

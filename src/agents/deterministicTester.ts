@@ -152,6 +152,20 @@ export async function runDeterministicTester(
   if (infra) {
     throw new Error(`verify-runner: ${infra.command.name} infrastructure failure: ${infra.rawOutputTail}`);
   }
+  // A command that could not run at all — pytest not importable, a missing
+  // module resolver, no manifest — is not a verdict on the change even when
+  // base fails the same way. cgf-portal 2026-09-17: fresh worktrees have no
+  // virtualenv, `python -m pytest` died identically at base and head, and the
+  // tester went green in 3 s having run nothing; a SyntaxError shipped as a
+  // ready PR. Surface it as infrastructure so the caller falls back (or the
+  // operator sees a park), never as a pass. (AGT-4407)
+  const unrunnable = evidence.find((item) => item.headStatus === 'fail' && item.environmentFailure && !item.newFailure);
+  if (unrunnable) {
+    throw new Error(
+      `verify-runner: ${unrunnable.command.name} could not run in this checkout (toolchain missing at base and head — ` +
+      `not a verified pass): ${unrunnable.rawOutputTail.slice(-600)}`,
+    );
+  }
   const headFailures = evidence.filter((item) => item.headStatus === 'fail');
   const newFailures = headFailures.filter((item) => item.newFailure);
   return {

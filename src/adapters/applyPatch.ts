@@ -106,7 +106,12 @@ function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
 
 async function runGit(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
-    const { stdout, stderr } = await execFileAsync('git', args, { cwd, encoding: 'utf-8', maxBuffer: GIT_OUTPUT_LIMIT });
+    // git's rejection text becomes the error the model and the tests read.
+    // Pin the C locale so it is the English original on every host — a Korean
+    // machine used to fail the symlink assertions on the translated message
+    // and would hand the model a string no pattern in this codebase knows. (AGT-3918)
+    const env = { ...process.env, LC_ALL: 'C', LANG: 'C' };
+    const { stdout, stderr } = await execFileAsync('git', args, { cwd, encoding: 'utf-8', maxBuffer: GIT_OUTPUT_LIMIT, env });
     return { exitCode: 0, stdout, stderr };
   } catch (error) {
     const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };

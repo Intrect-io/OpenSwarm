@@ -15,9 +15,11 @@
 import { broadcastEvent } from '../core/eventHub.js';
 import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
+import { SensitiveDataError } from '../support/sensitiveDataFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
+import type { VerifyConfig } from '../core/types.js';
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
@@ -33,6 +35,8 @@ const NO_COMMITS_TO_PUBLISH = /No commits to create PR from/;
 
 /** NEEDS_HUMAN code for a branch the publication-scope fence refused. */
 export const PUBLICATION_SCOPE_PARK_REASON = 'publication_scope_mismatch';
+/** NEEDS_HUMAN code for a branch carrying customer credentials / financial PII (AGT-4188). Never auto-retried. */
+export const SENSITIVE_DATA_PARK_REASON = 'sensitive_data_on_branch';
 
 export { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
 
@@ -288,6 +292,7 @@ export async function publishApprovedWork(
   result: PublishableResult & Pick<PipelineResult, 'failureDetail' | 'operatorPark'> & { success?: boolean; finalStatus?: string; prUrl?: string },
   durability: ExecutionDurabilityHooks | undefined,
   afterPublication?: ApprovedPublicationHook,
+  verify?: VerifyConfig,
 ): Promise<void> {
   // Create PR (worktree mode + pipeline success = finalStatus 'approved')
   if (worktreeInfo && result.success && result.finalStatus === 'approved') {
@@ -310,7 +315,7 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
-          { fileScope: enforcedFileScope(task) },
+          { fileScope: enforcedFileScope(task), verify },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
@@ -350,7 +355,13 @@ export async function publishApprovedWork(
         // reviewable artifact — and record WHY, or the ledger row is blank.
         result.success = false;
         result.failureDetail = `publication: ${message}`;
-        if (err instanceof PublicationScopeMismatchError) {
+        if (err instanceof SensitiveDataError) {
+          // Customer credentials / financial PII on the branch. No retry can
+          // rewrite that history, and pushing it is the one outcome this fence
+          // exists to prevent — park for a person with the file list (AGT-4188).
+          result.finalStatus = 'failed';
+          result.operatorPark = { code: SENSITIVE_DATA_PARK_REASON, reason: message };
+        } else if (err instanceof PublicationScopeMismatchError) {
           // The branch already holds commits outside the reserved write scope.
           // No retry changes that history; the worker just re-runs, finds the
           // work done, and the fence rejects the same files again — 15-min

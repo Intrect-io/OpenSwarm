@@ -10,10 +10,12 @@ import { runFixVerifyLoop } from './reviewFixPass.js';
 const ensureTaskSourceMock = vi.fn();
 const ensureProjectMappingMock = vi.fn();
 const resolveIssueFromBranchMock = vi.fn();
+const resolveConfiguredReviewAdapterMock = vi.fn(async () => ({ source: 'built-in default' as const }));
 vi.mock('./reviewCommand.js', () => ({
   ensureTaskSource: (...args: unknown[]) => ensureTaskSourceMock(...args),
   ensureProjectMapping: (...args: unknown[]) => ensureProjectMappingMock(...args),
   resolveIssueFromBranch: (...args: unknown[]) => resolveIssueFromBranchMock(...args),
+  resolveConfiguredReviewAdapter: (...args: unknown[]) => resolveConfiguredReviewAdapterMock(...args),
   buildReviewWorkerResult: vi.fn(),
 }));
 
@@ -55,8 +57,39 @@ const {
   dedupeAuditRunHistory,
   shipAuditWorktree,
   resolveFallbackAdapter,
+  runReviewMaxCommand,
 } =
   await import('./reviewMaxCommand.js');
+
+describe('review --max resolves the reviewer adapter like `review` does (AGT-4299)', () => {
+  it('goes through the shared resolver (flag → env → config.reviewAdapter → config.adapter) and says so under --debug', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'openswarm-review-max-adapter-'));
+    execFileSync('git', ['init', '-q', repo]);
+    await mkdir(join(repo, 'src'), { recursive: true });
+    await writeFile(join(repo, 'src/a.ts'), 'export const a = 1;\n');
+    execFileSync('git', ['-C', repo, 'add', '-A']);
+    resolveConfiguredReviewAdapterMock.mockResolvedValueOnce({ name: 'openrouter', source: 'config.reviewAdapter' } as never);
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((line: unknown) => { errors.push(String(line)); });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      // dryRun stops before any reviewer runs; the resolution and the debug line come first.
+      await runReviewMaxCommand({ path: repo, dryRun: true, debug: true, adapter: undefined });
+    } finally {
+      spy.mockRestore();
+      log.mockRestore();
+      await rm(repo, { recursive: true, force: true });
+    }
+    expect(resolveConfiguredReviewAdapterMock).toHaveBeenCalledWith(undefined);
+    expect(errors).toContain('Reviewer adapter: openrouter (config.reviewAdapter)');
+  });
+
+  it('arms the claude fallback from the RESOLVED primary, not the process default', () => {
+    // reviewAdapter: openrouter on a codex deployment must not retry on claude.
+    expect(resolveFallbackAdapter({ adapter: 'openrouter' }, () => 'codex-responses')).toBeUndefined();
+    expect(resolveFallbackAdapter({ adapter: 'codex-responses' }, () => 'openrouter')).toBe('claude');
+  });
+});
 
 function makeRun(actions: ReviewResult['recommendedActions']): AuditRun {
   const review: ReviewResult = { decision: 'revise', feedback: 'x', recommendedActions: actions };

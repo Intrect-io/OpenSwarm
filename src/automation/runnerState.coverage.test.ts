@@ -361,6 +361,55 @@ describe('pickPipelineFailureDetail stage fallback', () => {
     expect(detail).toBe('worker-scope: outside fileScope');
   });
 
+  // Census 2026-09-19: ~40 failed/infra rows carry reviewer APPROVAL prose as
+  // their error ("All hard-gate criteria are evidenced and passing"). The run
+  // failed somewhere after the reviewer, the retry was then told its prior
+  // failure was an approval, and the infra circuit fingerprinted prose that
+  // differs every attempt, so it could never see the same failure twice.
+  it('never reports an approval as the reason a run failed', () => {
+    const detail = mod.pickPipelineFailureDetail({
+      ...base,
+      finalStatus: 'failed',
+      lastReviewFeedback: 'All hard-gate criteria are evidenced and passing.',
+      reviewResult: { decision: 'approve', feedback: 'All hard-gate criteria are evidenced and passing.' },
+      stages: [
+        { stage: 'reviewer', success: true, result: { decision: 'approve' }, duration: 1, startedAt: 0, completedAt: 1 },
+        { stage: 'auditor', success: false, result: { success: false, error: 'CodeQL extractor missing for go' }, duration: 1, startedAt: 1, completedAt: 2 },
+      ],
+    } as never);
+    expect(detail).toBe('auditor: CodeQL extractor missing for go');
+  });
+
+  it('reports nothing rather than an approval when no other cause is recorded', () => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'failed', stages: [],
+      lastReviewFeedback: 'Work complete and approved.',
+      reviewResult: { decision: 'approve', feedback: 'Work complete and approved.' },
+    } as never)).toBeUndefined();
+  });
+
+  it('names the infrastructure failure ahead of an earlier revise, so the circuit can fingerprint it', () => {
+    const detail = mod.pickPipelineFailureDetail({
+      ...base,
+      finalStatus: 'infra_error',
+      lastReviewFeedback: 'The cache misses tenant scope; fix and test.',
+      reviewResult: { decision: 'revise', feedback: 'The cache misses tenant scope; fix and test.' },
+      stages: [
+        { stage: 'reviewer', success: false, result: { decision: 'revise' }, duration: 1, startedAt: 0, completedAt: 1 },
+        { stage: 'worker', success: false, result: { success: false, error: 'openrouter timeout after 1200000ms' }, duration: 1, startedAt: 1, completedAt: 2 },
+      ],
+    } as never);
+    expect(detail).toBe('worker: openrouter timeout after 1200000ms');
+  });
+
+  it('still leads with the revise feedback when the run failed on the review itself', () => {
+    expect(mod.pickPipelineFailureDetail({
+      ...base, finalStatus: 'failed', stages: [],
+      reviewResult: { decision: 'revise', feedback: 'The cache misses tenant scope; fix and test.' },
+      workerResult: { success: false, error: 'older worker error' },
+    } as never)).toBe('The cache misses tenant scope; fix and test.');
+  });
+
   it('falls back to stuckReason when stages carry no error text', () => {
     const detail = mod.pickPipelineFailureDetail({
       ...base,

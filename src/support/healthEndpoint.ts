@@ -17,6 +17,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { getHeapStatistics } from 'node:v8';
+import { credentialProbeSnapshot } from '../core/credentialProbes.js';
 
 export interface HealthPayload {
   status: 'ok';
@@ -41,6 +42,12 @@ export interface HealthPayload {
   heap_used_mb: number;
   heap_limit_mb: number;
   rss_mb: number;
+  /**
+   * Boot-time probe of every credential the daemon hands to agents, by name
+   * only (AGT-4075). Present only once the probes have run, so the vega shell
+   * contract above is unchanged when nothing was probed.
+   */
+  credentials?: Record<string, { status: 'ok' | 'dead' | 'unreachable'; identity?: string; reason?: string }>;
 }
 
 const MB = 1024 * 1024;
@@ -70,6 +77,7 @@ export function buildHealthPayload(
     version?: string;
     instanceId?: string;
     memory?: { heapUsedBytes: number; heapLimitBytes: number; rssBytes: number };
+    credentials?: HealthPayload['credentials'];
   } = {},
 ): HealthPayload {
   const env = deps.env ?? process.env;
@@ -91,7 +99,15 @@ export function buildHealthPayload(
     // consumer of the contract.
     uptime_s: Math.floor(uptimeS),
     ...memoryFields(deps.memory),
+    ...credentialField(deps.credentials),
   };
+}
+
+function credentialField(
+  provided: HealthPayload['credentials'] | undefined,
+): Pick<HealthPayload, 'credentials'> {
+  const snapshot = provided ?? credentialProbeSnapshot();
+  return Object.keys(snapshot).length > 0 ? { credentials: snapshot } : {};
 }
 
 /**

@@ -67,7 +67,17 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     // #606), but it only protects repositories that carry the pattern. This
     // predicate is the daemon's own staging step, so it holds for every project
     // the daemon touches, including ones it has never committed to before.
-    || file === 'node_modules'
+    // Any depth, not just the repo root: cgf-portal is a monorepo whose
+    // installs live at `apps/portal/node_modules`, and the exact-string form
+    // this used to be never matched that path. A node_modules symlink
+    // committed before this fix stays poisoned forever, because
+    // `purgeTrackedEphemeralArtifacts` (the only cleanup a resumed branch
+    // gets) filters through this same predicate — AX-1485, 2026-09-19,
+    // carried an absolute-target `apps/portal/node_modules` symlink from a
+    // 2026-09-18 07:29 preserve commit into a fresh PR eleven hours after
+    // AGT-4431 shipped the escaping-symlink check that would have caught it
+    // as a NEW addition, because it was never new again after that.
+    || /(?:^|\/)node_modules$/.test(file)
     || /(?:^|\/)cli\.json$/.test(file)
     || /(?:^|\/)\.run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
     || /(?:^|\/)\.tmp-run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
@@ -78,6 +88,35 @@ export function isEphemeralWorktreeArtifact(file: string): boolean {
     || /(?:^|\/)tmp-run-[^/]*\.(?:sh|mjs|js|py)$/.test(file)
     || /(?:^|\/)\.test-runner-tmp\.[^/]+$/.test(file)
     || /(?:^|\/)\.cursor-review-[^/]+$/.test(file);
+}
+
+/**
+ * The agent's own working files, as opposed to runtime artifacts: an editor or
+ * patch backup left beside the file it edited, or a one-off script the worker
+ * wrote to apply an edit and never removed. Two reached open PRs on cgf-portal
+ * 2026-09-17 in daemon-made commits — `_apply_edit.py` at the repository root
+ * (#488, a 40-line string-replace script) and
+ * `scripts/check_migration_immutability.py.bak` (#489, the whole original) —
+ * and a person removed each in a follow-up commit (AGT-4410).
+ *
+ * Deliberately NOT part of `isEphemeralWorktreeArtifact`: that predicate also
+ * drives the purge of files already tracked on a resumed branch, and a
+ * repository is entitled to track a `.bak` or `.orig` of its own. This one is
+ * consulted only for files the staging step would ADD.
+ */
+export function isAgentScratchFile(file: string): boolean {
+  return /\.(?:bak|orig|rej)$/i.test(file)
+    || file.endsWith('~')
+    || /(?:^|\/)\.DS_Store$/.test(file)
+    || /(?:^|\/)_apply_[^/]*\.(?:py|sh|mjs|js|ts)$/.test(file)
+    // A one-off script filed under its own `scratchpad/` directory rather than
+    // named `_apply_*`. cgf-portal#572, 2026-09-19: `fix_cafe24.py` and
+    // `fix_tests.py` (string-replace apply scripts, never imported) reached
+    // the real PR under a new top-level `scratchpad/`; a constitution gate
+    // caught the new directory and a person removed them by hand. Script
+    // extensions only — real content a worker means to keep (a report, notes)
+    // is a placement concern the reviewer should catch, not scratch.
+    || /(?:^|\/)scratchpad\/[^/]+\.(?:py|sh|mjs|js|ts)$/.test(file);
 }
 
 

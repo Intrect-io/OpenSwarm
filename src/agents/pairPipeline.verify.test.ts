@@ -71,6 +71,8 @@ function task(): TaskItem {
 
 async function runPipeline(options: {
   stages?: Array<'worker' | 'tester' | 'reviewer'>;
+  maxIterations?: number;
+  maxReflections?: number;
   continueOnTestFail?: boolean;
   skipTesterIfNoCodeChange?: boolean;
   verbose?: boolean;
@@ -123,6 +125,7 @@ afterEach(() => {
 
 describe('PairPipeline deterministic tester (INT-2662)', () => {
   it('treats CodeQL partial coverage as a known extractor gap, not infrastructure failure', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // Go/Swift extractors reject --build-mode=none permanently. Baseline and
     // current skip the same languages, so the introduced-findings comparison
     // stays sound; failing closed here parked every Go pipeline (AGT-3841).
@@ -151,6 +154,9 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
     expect(runSecurityAudit).toHaveBeenCalledTimes(2);
     expect(runWorker).toHaveBeenCalled();
     expect(runReviewer).toHaveBeenCalled();
+    // The gap is accepted but never silent: the log names the language (AGT-4098).
+    expect(warn.mock.calls.map((call) => String(call[0])))
+      .toEqual(expect.arrayContaining([expect.stringMatching(/CodeQL coverage is partial — not analysed: swift\. Swift does not support build-mode=none\./)]));
   });
 
   it('blocks new CodeQL findings even when the tester stage is not configured', async () => {
@@ -284,11 +290,13 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
       rawOutputTail: 'timeout after 20ms',
       durationMs: 20,
     }]);
-    const { result } = await runPipeline();
+    const { result, logs } = await runPipeline();
     expect(result).toMatchObject({ success: true, finalStatus: 'approved' });
     expect(result.testerResult?.deterministic).toBeUndefined();
     expect(runTester).toHaveBeenCalledOnce();
     expect(runReviewer).toHaveBeenCalledOnce();
+    // The downgrade is on the stage log, not only stderr (AGT-4416).
+    expect(logs).toEqual(expect.arrayContaining([expect.stringMatching(/^Deterministic verify unavailable; falling back to LLM tester: verify-runner: /)]));
   });
 
   it('downgrades an unavailable baseline comparison to the LLM fallback', async () => {
@@ -445,5 +453,111 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
     expect(result.success).toBe(true);
     expect(result.testerResult?.deterministic).toBe(true);
     expect(runVerify).toHaveBeenCalledOnce();
+  });
+});
+
+describe('PairPipeline deterministic tester without a reviewer (AGT-4438)', () => {
+  const verifyCommand = { name: 'pytest', run: 'pytest', kind: 'test' as const };
+
+  /** One evidence row; `pass` flips the head status. */
+  function evidence(pass: boolean, tail: string) {
+    return [{
+      command: verifyCommand,
+      baseStatus: 'pass' as const,
+      headStatus: pass ? ('pass' as const) : ('fail' as const),
+      newFailure: !pass,
+      rawOutputTail: tail,
+      durationMs: 1,
+    }];
+  }
+
+  const CONTRACT_FAILURE = [
+    'FAILED tests/test_contracts.py::test_dataset_column_schema',
+    "AssertionError: 'boolean' is not one of ['text', 'date', 'number']",
+  ].join('\n');
+
+  beforeEach(() => {
+    loadVerifyManifest.mockResolvedValue({ manifest: { version: 1, commands: [verifyCommand] } });
+  });
+
+  it('drives another iteration instead of ending the run, and reaches success when the retry fixes it', async () => {
+    runVerify
+      .mockResolvedValueOnce(evidence(false, CONTRACT_FAILURE))
+      .mockResolvedValueOnce(evidence(true, '1 passed'));
+
+    const { result } = await runPipeline({ stages: ['worker', 'tester'], maxIterations: 2 });
+
+    expect(result.success).toBe(true);
+    // The whole point: the failure came back to the worker rather than ending
+    // the attempt and waiting for the scheduler's backoff.
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(runVerify).toHaveBeenCalledTimes(2);
+  });
+
+  it('carries the failing command output into the retry as objective feedback', async () => {
+    runVerify
+      .mockResolvedValueOnce(evidence(false, CONTRACT_FAILURE))
+      .mockResolvedValueOnce(evidence(true, '1 passed'));
+
+    await runPipeline({ stages: ['worker', 'tester'], maxIterations: 2 });
+
+    // The trail must carry what failed, not just which command failed:
+    // `failedTests` from the deterministic runner holds command names only.
+    const secondCall = runWorker.mock.calls[1]?.[0] as { previousFeedback?: string } | undefined;
+    expect(secondCall?.previousFeedback ?? '').toContain('test_dataset_column_schema');
+    expect(secondCall?.previousFeedback ?? '').toContain("'boolean' is not one of");
+  });
+
+  it('still defers to the reviewer when the reviewer stage is enabled', async () => {
+    runVerify.mockResolvedValue(evidence(false, CONTRACT_FAILURE));
+
+    const { result } = await runPipeline({ stages: ['worker', 'tester', 'reviewer'], maxIterations: 2 });
+
+    // Unchanged behaviour: the deterministic verdict is the reviewer's to judge,
+    // and the terminal check ends the run rather than retrying the worker.
+    expect(result.success).toBe(false);
+    expect(runWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops on an identical repeated failure through the self-repair guard, not by burning the budget', async () => {
+    runVerify.mockResolvedValue(evidence(false, CONTRACT_FAILURE));
+
+    const { result, logs } = await runPipeline({ stages: ['worker', 'tester'], maxIterations: 5 });
+
+    expect(result.success).toBe(false);
+    // Two passes, then the stagnation guard — not five.
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(logs.join(' ')).toContain('self-repair stagnated');
+  });
+
+  it('leaves the CodeQL gate ahead of the tester: a new finding is what the retry is told about', async () => {
+    runVerify.mockResolvedValue(evidence(false, CONTRACT_FAILURE));
+    // Baseline clean, head with a finding: only an INTRODUCED finding counts.
+    runSecurityAudit
+      .mockResolvedValueOnce({
+        status: 'passed', codeqlLanguages: ['javascript'], skippedCodeqlLanguages: [], findings: [],
+      })
+      .mockResolvedValueOnce({
+        status: 'findings',
+        codeqlLanguages: ['javascript'],
+        skippedCodeqlLanguages: [],
+        findings: [{
+          ruleId: 'codeql/js/file-access-to-http', level: 'error', message: 'outbound file data', filePath: 'src/example.ts', line: 12,
+        }],
+      });
+
+    const { result } = await runPipeline({
+      stages: ['worker', 'tester'],
+      maxIterations: 3,
+      securityAudit: { enabled: true, maxThreads: 2 },
+    });
+
+    expect(result.success).toBe(false);
+    // The CodeQL gate sits before the tester block and drives its own bounded
+    // retry, so the finding — not the test failure — is what iteration 2 is
+    // told to fix. Reaching the tester's self-repair path must not change that.
+    const secondCall = runWorker.mock.calls[1]?.[0] as { previousFeedback?: string } | undefined;
+    expect(secondCall?.previousFeedback ?? '').toContain('file-access-to-http');
+    expect(secondCall?.previousFeedback ?? '').not.toContain('test_dataset_column_schema');
   });
 });

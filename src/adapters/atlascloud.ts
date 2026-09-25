@@ -21,14 +21,15 @@ import {
 import { resolveMcpTools } from '../mcp/mcpClient.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { RateLimitError } from './rateLimitError.js';
-import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
+import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import {
   loadModelCatalog,
-  parseOpenAiModelList,
+  parseOpenAiModelListing,
+  contextWindowFor,
   resolveDefaultModel,
   type CatalogSpec,
 } from './modelCatalog.js';
@@ -72,7 +73,7 @@ function catalogSpec(): CatalogSpec {
         signal: AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS),
       });
       if (!res.ok) return [];
-      return parseOpenAiModelList(await res.json());
+      return parseOpenAiModelListing(await res.json()); // ids + context windows (AGT-4386)
     },
   };
 }
@@ -146,6 +147,8 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       model,
       callApi,
       maxTurns: options.maxTurns ?? 20,
+      // Size compaction to the advertised window when the catalog has it. (AGT-4386)
+      contextWindowTokens: contextWindowFor('atlascloud', model),
       timeoutMs: options.timeoutMs ?? 300000,
       onLog: options.onLog,
       enableTools: options.enableTools ?? true,
@@ -153,6 +156,10 @@ export class AtlasCloudCliAdapter implements CliAdapter {
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
+      scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
+      forbidPublication: options.forbidPublication,
+      sandbox: options.sandbox,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
@@ -227,22 +234,35 @@ export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudA
     }
     const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
       const request = prepareApprovedModelRequest(`${ATLASCLOUD_API_BASE}/chat/completions`, body);
-      const res = await adapterFetch(request.url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: request.body,
-        // The caller's signal AND this call's own deadline. Either one aborts.
-        signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
-      });
+      let res: Response;
+      try {
+        res = await adapterFetch(request.url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: request.body,
+          // The caller's signal AND this call's own deadline. Either one aborts.
+          signal: abortSignalWithDeadline(opts.signal, opts.timeoutMs),
+        });
+      } catch (err) {
+        // Dropped socket before any response → bounded in-place retry. (AGT-4385)
+        if (await resolveTransientFailure('atlascloud', { error: err }, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        throw err;
+      }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
         // Spent quota → typed RateLimitError (scheduler pauses); a throttle is
         // waited out and retried instead of masquerading as one. (INT-2907)
         if (await resolveLimitResponse('atlascloud', res.status, res.headers, errText, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        // 5xx / 529: upstream blip, bounded retry before it becomes an infra error. (AGT-4385)
+        if (await resolveTransientFailure('atlascloud', { status: res.status }, throttle, { signal: opts.signal }) === 'retry') {
           return attempt();
         }
         throw new Error(`Atlas Cloud API error (${res.status}): ${errText.slice(0, 500)}`);

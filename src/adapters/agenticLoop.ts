@@ -15,6 +15,7 @@ import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../su
 import type { CliRunResult, FinishValidation } from './types.js';
 import type { ChatUsage } from './chatStream.js';
 import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
+import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
@@ -111,7 +112,11 @@ export interface AgenticLoopOptions {
   model: string;
   /** API 호출 함수 (어댑터별로 주입) */
   callApi: (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<ChatCompletionResponse>;
-  /** 최대 도구 사용 턴 수 (기본: 20) */
+  /**
+   * 최대 도구 사용 턴 수 (기본: 20). `0` = 상한 없음 (UNBOUNDED_TURNS) — 코딩
+   * 단계는 턴 수가 아니라 벽시계(timeoutMs)·반복 호출 가드(NO_PROGRESS_LIMIT)·
+   * 파이프라인 iteration 상한으로 끝난다. (AGT-4388)
+   */
   maxTurns?: number;
   /** 전체 타임아웃 (ms, 기본: 300000) */
   timeoutMs?: number;
@@ -119,8 +124,16 @@ export interface AgenticLoopOptions {
   onLog?: (line: string) => void;
   /** 도구 사용 허용 여부 (기본: true) */
   enableTools?: boolean;
-  /** 토큰 기반 압축 트리거 임계값 (기본: 24000) */
+  /** 토큰 기반 압축 트리거 임계값 — 모델 창을 모를 때의 폴백 (기본: 60000) */
   compactTokenThreshold?: number;
+  /**
+   * Advertised context window of `model`, when the adapter knows it (catalog
+   * `context_length`). With it the compaction threshold is derived from the
+   * window instead of the fixed fallback — see resolveCompactionThreshold. (AGT-4386)
+   */
+  contextWindowTokens?: number;
+  /** Tokens the request must leave for the model's own output (adapter max_tokens; default 16384). */
+  reservedOutputTokens?: number;
   /** 이 메시지 수를 넘어야 압축 후보 (VEGA compact_threshold, 기본: 24) */
   compactAfterMessages?: number;
   /** 압축 시 항상 원본 유지할 최근 메시지 수 (VEGA keep_recent, 기본: 8) */
@@ -148,12 +161,25 @@ export interface AgenticLoopOptions {
   finishValidatorMaxRetries?: number;
   /** Verification-harness files for which edit/write are refused (see tools.ts ToolExecOptions) */
   protectedFiles?: string[];
+  /** OS fence for the bash tool — see ToolExecOptions.sandbox (AGT-4387). */
+  sandbox?: 'on' | 'off';
+  /** Refuse publication commands in bash — the pipeline publishes. (AGT-4418) */
+  forbidPublication?: boolean;
   /** bash tool timeout — docker-based tests need minutes (default 30s) */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Disabled e.g. for SWE-bench integrity. */
   webTools?: boolean;
   /** Expose search_memory (default true). Disabled for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
+  /**
+   * Run whose scratchpad `scratch_write`/`scratch_read` address (AGT-4459).
+   * Absent means no scratchpad: the two tools are withheld from the model and
+   * refused if it emits them anyway. Notes are the only thing an agent writes
+   * to itself that survives an iteration boundary, so this is threaded from the
+   * pipeline rather than derived here — a loop cannot know which run it serves.
+   */
+  scratchpadRunId?: string;
+  memoryContext?: { taskId: string; iteration: number };
   /**
    * Expose the `bash` tool. Default true.
    *
@@ -238,7 +264,44 @@ export interface AgenticLoopResult {
  * 2. 응답에 tool_calls가 있으면 → 도구 실행 → 결과를 메시지에 추가 → 2로
  * 3. 응답에 tool_calls가 없으면 (finish_reason = 'stop') → 최종 텍스트 반환
  */
+/**
+ * Run one agent invocation, recording what it did.
+ *
+ * The record is opened here rather than inside the loop so that a thrown rate
+ * limit, infra error or timeout still closes it. A loop that ends by throwing
+ * is exactly the one whose transcript is worth reading (AGT-4442).
+ */
 export async function runAgenticLoop(options: AgenticLoopOptions): Promise<AgenticLoopResult> {
+  const session = createSessionRecorder({
+    taskId: options.usageAttribution?.taskId,
+    stage: options.usageAttribution?.stage,
+    adapter: options.usageAttribution?.adapter,
+    model: options.model,
+    cwd: options.cwd,
+  });
+  try {
+    const result = await runAgenticLoopInner({ ...options, session });
+    session?.close({
+      outcome: 'returned',
+      toolCallCount: result.toolCallCount,
+      apiCallCount: result.apiCallCount,
+      totalTokens: result.totalTokens,
+      costUsd: result.costUsd,
+      text: result.text,
+    });
+    return result;
+  } catch (error) {
+    session?.close({
+      outcome: 'threw',
+      error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+    });
+    throw error;
+  }
+}
+
+async function runAgenticLoopInner(
+  options: AgenticLoopOptions & { session?: SessionRecorder },
+): Promise<AgenticLoopResult> {
   const {
     systemPrompt,
     prompt,
@@ -254,13 +317,18 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     compactTokenThreshold = 60000,
     compactAfterMessages = 60,
     keepRecentMessages = 16,
+    contextWindowTokens,
+    reservedOutputTokens = DEFAULT_RESERVED_OUTPUT_TOKENS,
     nudgeMaxOnNoEdit = 0,
     finishValidator,
     finishValidatorMaxRetries = 0,
     protectedFiles,
+    sandbox,
+    forbidPublication,
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
+    scratchpadRunId,
     shellTools: requestedShellTools = true,
     sandboxExecutorSessionFactory,
     filesystemTools = true,
@@ -300,7 +368,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   }
 
   const startTime = Date.now();
-  const deadline = timeoutMs > 0 ? startTime + timeoutMs : Number.POSITIVE_INFINITY;
+  const { wrapUpAt, softDeadline: deadline } = loopDeadlines(startTime, timeoutMs);
+  let wrapUpNudged = false;
 
   // 메시지 히스토리 구성
   const messages: ChatMessage[] = [];
@@ -319,6 +388,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     `Read /warehouse/INDEX.md before asking the operator for missing material, and never print secret values.\n\n`;
   messages.push({ role: 'user', content: cwdNote + prompt });
 
+  // Owned by the wrapper so every exit path — including a thrown rate limit
+  // or infra error — still closes the record (AGT-4442).
+  const session = options.session;
+  session?.record({ type: 'notice', note: 'prompt', systemPrompt, prompt: cwdNote + prompt });
+
   // In search-replace / whole-file mode the model edits via response-text blocks
   // (S/R) or whole write_file calls, so the structured edit_file tool is hidden to
   // force that path; apply_patch is likewise suppressed (it's a structured edit). (INT-1676)
@@ -330,11 +404,14 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const memoryFilteredTools = memoryTools
     ? baseTools
     : baseTools.filter((t) => t.function.name !== 'search_memory');
-  const shellFilteredTools = shellTools
+  const scratchFilteredTools = scratchpadRunId
     ? memoryFilteredTools
-    : memoryFilteredTools.filter((t) => t.function.name !== 'bash');
+    : memoryFilteredTools.filter((t) => !t.function.name.startsWith('scratch_') && t.function.name !== 'remember');
+  const shellFilteredTools = shellTools
+    ? scratchFilteredTools
+    : scratchFilteredTools.filter((t) => t.function.name !== 'bash');
   const visibleBaseTools = readOnly
-    ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash'].includes(t.function.name))
+    ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash', 'remember'].includes(t.function.name))
     : shellFilteredTools;
   const tools = enableTools
     ? [
@@ -358,6 +435,16 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // registered MCP route (or another built-in withheld for this run).
   const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
+  const compaction = resolveCompactionThreshold(contextWindowTokens, {
+    fallback: compactTokenThreshold,
+    reservedOutputTokens,
+  });
+  const headerCount = systemPrompt ? 2 : 1; // system + first user, or just the first user
+  onLog?.(
+    compaction.source === 'window'
+      ? `📐 Context window ${contextWindowTokens} tokens → compact at ${compaction.compactAt} (0.75 × usable)`
+      : `📐 Context window unknown → compact at ${compaction.compactAt} (fallback)`,
+  );
   let toolCallCount = 0;
   let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
   const executedCommands: string[] = []; // `bash` 도구로 실제 실행한 명령 (검증 증거 ground truth)
@@ -433,7 +520,13 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     }
   };
 
-  for (let turn = 0; turn < maxTurns + 1; turn++) {
+  // AGT-4388: a turn count is not a property of the task. With the cap the
+  // workers on cgf-portal ended in "Step limit reached" after their analysis,
+  // retried from a fresh context and did the analysis again — five times,
+  // zero edits. `0` lifts the ceiling; the wall-clock deadline above, the
+  // repeated-call guard and the pipeline's iteration cap remain.
+  const turnCap = maxTurns > 0 ? maxTurns : Number.POSITIVE_INFINITY;
+  for (let turn = 0; turn < turnCap + 1; turn++) {
     // 사용자 중단 (Esc/Ctrl+C) — 현재 텍스트가 있으면 유지, 없으면 표시만.
     if (signal?.aborted) {
       onLog?.('■ Stopped by user');
@@ -446,16 +539,45 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       onLog?.(`⏰ Agentic loop timeout after ${turn} turns`);
       break;
     }
+    // Wrap-up notice: the model learns the budget is nearly spent while it can
+    // still act on it — commit the edits it has and answer — instead of being
+    // cut mid-exploration and retried from scratch. Once per run. (AGT-4415)
+    if (!wrapUpNudged && Date.now() > wrapUpAt) {
+      wrapUpNudged = true;
+      const minutesLeft = Math.max(1, Math.round((deadline - Date.now()) / 60_000));
+      onLog?.(`⏳ Wrap-up notice: about ${minutesLeft} minute(s) of wall-clock budget left`);
+      messages.push({ role: 'user', content: wrapUpNotice(minutesLeft) });
+    }
 
     // 히스토리 압축 — VEGA compaction.py 패턴 이식.
     // 트리거: 메시지 수가 compactAfterMessages를 넘고 + 토큰이 임계값 초과일 때만.
     // 과거에는 turn>=2부터 매 턴 무조건 압축해 모델이 방금 읽은 파일·작업 맥락을
     // 즉시 잃고 헛돌았다(루프 재발). 이제 정말 길어질 때만 압축하고, 압축해도
     // 최근 keepRecentMessages 블록은 원본 유지한다.
-    if (messages.length > compactAfterMessages) {
+    //
+    // AGT-4386: the threshold is sized to the model's window when the adapter
+    // knows it (0.75 × what the request can carry), and oversized old tool
+    // outputs are trimmed first — cheaper than a whole-history summary and
+    // it keeps the conversation shape, so the model does not re-read what
+    // the summary would have flattened to "→ok".
+    if (countMessageTokens(messages) > compaction.compactAt * TRIM_AT_FRACTION) {
+      const trimmed = trimOversizedToolOutputs(messages, { maxTokens: TOOL_OUTPUT_TRIM_TOKENS, keepRecent: keepRecentMessages });
+      if (trimmed > 0) {
+        onLog?.(`✂ Trimmed ${trimmed} oversized tool output(s) older than the last ${keepRecentMessages} messages`);
+        // Same premise as after compaction: a trimmed read_file body is no
+        // longer "already in the conversation", so the stub cache must not
+        // answer the re-read the trim marker invites. (INT-1929)
+        readCache.store.clear();
+      }
+    }
+    // A window-derived threshold is already the size signal; the message-count
+    // gate only made sense for the fixed fallback (it stopped a 24-message
+    // conversation with one huge file from compacting at once).
+    const compactMessageGate = compaction.source === 'window' ? headerCount + keepRecentMessages : compactAfterMessages;
+    if (messages.length > compactMessageGate) {
       const msgTokens = countMessageTokens(messages);
-      if (msgTokens > compactTokenThreshold) {
-        onLog?.(`📦 Compacting history (${messages.length} msgs, ${msgTokens} tokens > ${compactTokenThreshold})`);
+      if (msgTokens > compaction.compactAt) {
+        onLog?.(`📦 Compacting history (${messages.length} msgs, ${msgTokens} tokens > ${compaction.compactAt})`);
         compactPriorTurns(messages, keepRecentMessages);
         // Compaction drops prior read content from the model's view, so the read
         // cache's premise ("content is already earlier in the conversation") no
@@ -554,6 +676,15 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     }
 
     const assistantMsg = choice.message;
+    // Recorded here, not in the tool-call branch below: a response that ends
+    // the loop — or one the finish gate rejects and replays — is exactly what
+    // an operator needs to read back, and that path never reaches the branch.
+    session?.record({
+      type: 'assistant',
+      turn,
+      content: assistantMsg.content ?? '',
+      toolCalls: (assistantMsg.tool_calls ?? []).map((tc) => `${tc.function.name} ${tc.function.arguments}`),
+    });
 
     // 도구 호출이 없으면 최종 응답
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
@@ -663,7 +794,6 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       content: assistantMsg.content,
       tool_calls: assistantMsg.tool_calls,
     });
-
     // 도구 실행
     const toolCalls: ToolCall[] = assistantMsg.tool_calls.map(tc => ({
       id: tc.id,
@@ -685,6 +815,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 
     const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, {
       protectedFiles,
+      sandbox,
+      forbidPublication,
       bashTimeoutMs,
       readOnly,
       filesystemTools,
@@ -692,6 +824,19 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       coordinationContext,
       sandboxExecutorSession,
       loopDeadlineAt: Number.isFinite(deadline) ? deadline : undefined,
+      scratchpadRunId,
+      memoryContext: options.memoryContext,
+    });
+    toolCalls.forEach((tc, i) => {
+      const result = results[i];
+      session?.record({
+        type: 'tool',
+        turn,
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+        isError: result?.is_error ?? false,
+        output: result?.content ?? '',
+      });
     });
     toolCallCount += toolCalls.length;
     // Count only SUCCESSFUL edits — a model whose edit_file calls all fail
@@ -835,12 +980,28 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   // 올려 보내 reviewer/worker 호출자가 명시적으로 처리하게 한다. (INT-1442, INT-2879)
   if (!finalText && apiCallCount > 0) {
     const maxFinalAnswerAttempts = 2;
-    messages.push({
-      role: 'user',
-      content:
-        "You've reached this turn's step limit, so stop calling tools now. Using everything " +
-        'above, write a non-empty final answer now. Follow the output format requested in the ' +
-        'original task exactly. Do not mention step/tool limits or "budget" to the user.',
+    const stepLimitPrompt =
+      "You've reached this turn's step limit, so stop calling tools now. Using everything " +
+      'above, write a non-empty final answer now. Follow the output format requested in the ' +
+      'original task exactly. If the original task requests a review or verdict, begin with ' +
+      '`Decision: approve`, `Decision: revise`, or `Decision: reject` and give concrete ' +
+      'reasoning; do not return a worker-status summary. Do not mention step/tool limits or ' +
+      '"budget" to the user.';
+    messages.push({ role: 'user', content: stepLimitPrompt });
+    // Salvage is where a cut-short run gets the answer that becomes its verdict,
+    // and it used to leave no trace at all: the transcript ended on a tool
+    // result, and the reviewer's entire REVISE — evidence table, three named
+    // problems, decision JSON — existed only inside the `end` summary. Reading
+    // the events, the run looked like it simply stopped. Worse, nothing said the
+    // loop had run out of turns; establishing that meant counting API calls
+    // against recorded events. Record the reason, the injected prompt and every
+    // attempt, so a salvaged run explains itself. (AGT-4450)
+    session?.record({
+      type: 'notice',
+      note: 'salvage',
+      reason: 'the loop ended without a final message; asking for an answer with no tools',
+      attempts: maxFinalAnswerAttempts,
+      prompt: stepLimitPrompt,
     });
 
     for (let attempt = 1; attempt <= maxFinalAnswerAttempts && !finalText; attempt++) {
@@ -848,12 +1009,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         onLog?.('▸ Final answer turn (no tools) — loop ended without a final message');
       } else {
         onLog?.('↻ Final answer was empty — retrying once (no tools)');
-        messages.push({
-          role: 'user',
-          content:
-            'Your previous final-answer attempt returned no user-visible text. Respond now with ' +
-            'the complete, non-empty final answer in the exact format requested by the original task.',
-        });
+        const retryPrompt =
+          'Your previous final-answer attempt returned no user-visible text. Respond now with ' +
+          'the complete, non-empty final answer in the exact format requested by the original task.';
+        messages.push({ role: 'user', content: retryPrompt });
+        session?.record({ type: 'notice', note: 'salvage-retry', attempt, prompt: retryPrompt });
       }
 
       try {
@@ -863,7 +1023,21 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
         apiCallCount++;
         const content = response.choices?.[0]?.message?.content;
         finalText = typeof content === 'string' && content.trim() ? content : '';
+        // Recorded even when empty, so recorded assistant events reconcile with
+        // `apiCallCount` and an empty salvage is visible rather than inferred.
+        session?.record({
+          type: 'assistant',
+          salvage: attempt,
+          content: typeof content === 'string' ? content : '',
+          toolCalls: [],
+        });
       } catch (err) {
+        session?.record({
+          type: 'notice',
+          note: 'salvage-failed',
+          attempt,
+          error: err instanceof Error ? err.message : String(err),
+        });
         // A rate limit on a salvage call must still propagate — swallowing it
         // here would return an empty result the scheduler reads as a plain failure
         // instead of pausing. Mirror the main call path: preserve a typed
@@ -879,6 +1053,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 
     if (!finalText) {
       onLog?.('✖ Final answer remained empty after one retry');
+      session?.record({
+        type: 'notice',
+        note: 'salvage-exhausted',
+        reason: 'every final-answer attempt came back empty; the run ends with no answer',
+      });
       throw new Error('Agentic loop produced no final message after one retry');
     }
   }
@@ -912,6 +1091,46 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
  * because the loop keeps no price table (it would go stale). Tokens and
  * duration are real measurements either way. (INT-2508, AGT-4178)
  */
+/** `maxTurns` value that means "no turn ceiling" (AGT-4388). */
+export const UNBOUNDED_TURNS = 0;
+
+/**
+ * Wall-clock shaping for a run of `timeoutMs` (AGT-4415).
+ *
+ * The adapter wrapper (base.ts) aborts the whole run at `start + timeoutMs`,
+ * hard. The loop used to check the SAME instant, so its own timeout path — the
+ * final-answer turn that turns a cut-off run into a result with a summary —
+ * could never execute: whichever turn was in flight at T was killed, and the
+ * attempt failed as `openrouter timeout after 1200000ms`. Measured on the run
+ * ledger: 37 such attempts in 24 h, 17 issues, up to attempt #176.
+ *
+ * - `softDeadline`: where the loop stops calling tools, `headroom` before the
+ *   hard abort so the salvage turn has time to run.
+ * - `wrapUpAt`: where the model is told how much budget is left, `notice`
+ *   before the soft deadline, so it can commit and answer on its own.
+ *
+ * Both scale with the budget and are clamped so a short review run is not
+ * eaten by its own margins.
+ */
+export function loopDeadlines(startTime: number, timeoutMs: number): { wrapUpAt: number; softDeadline: number } {
+  if (!(timeoutMs > 0) || !Number.isFinite(timeoutMs)) {
+    return { wrapUpAt: Number.POSITIVE_INFINITY, softDeadline: Number.POSITIVE_INFINITY };
+  }
+  const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+  const headroom = Math.min(clamp(timeoutMs * 0.1, 30_000, 120_000), timeoutMs / 2);
+  const notice = Math.min(clamp(timeoutMs * 0.15, 60_000, 180_000), timeoutMs / 4);
+  const softDeadline = startTime + timeoutMs - headroom;
+  return { wrapUpAt: softDeadline - notice, softDeadline };
+}
+
+/** The message injected at `wrapUpAt` (AGT-4415). */
+export function wrapUpNotice(minutesLeft: number): string {
+  return `About ${minutesLeft} minute(s) of wall-clock budget remain for this run. Stop exploring now: `
+    + 'apply the edits you already know you need, run the single quickest relevant check, and then write '
+    + 'your final answer in the format the task asked for. Unfinished parts go in the answer as an explicit list, '
+    + 'not into more tool calls.';
+}
+
 export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
   return {
     exitCode: 0,
@@ -1025,6 +1244,85 @@ export function shouldNudgeCoordinationCheck(
  * 기존 [Prior turns compacted] 요약이 있으면 새 요약에 합산 후 교체.
  * (테스트를 위해 export — 외부에서 직접 호출할 일은 없음)
  */
+/** What the adapters ask for as max_tokens; the request must leave this much of the window free. */
+export const DEFAULT_RESERVED_OUTPUT_TOKENS = 16384;
+/** Compact when history reaches this share of what the request can carry (VEGA 0.75; ori 0.8). */
+export const COMPACT_AT_FRACTION = 0.75;
+/** Start trimming old tool outputs at this share of the compaction threshold. */
+export const TRIM_AT_FRACTION = 0.5;
+/** A tool output older than the recent window and larger than this is trimmed to a marker. */
+export const TOOL_OUTPUT_TRIM_TOKENS = 2000;
+/** Never derive a threshold below this — a smaller one would compact every turn. */
+export const MIN_COMPACT_AT = 4096;
+/** Cost and attention guard: even a 1M window does not get a 750k history. */
+export const MAX_COMPACT_AT = 200_000;
+
+export interface CompactionThreshold {
+  compactAt: number;
+  source: 'window' | 'fallback';
+}
+
+/**
+ * Size the compaction threshold to the model's window when it is known.
+ *
+ * `0.75 × (window − reservedOutput)`, clamped to [MIN_COMPACT_AT, MAX_COMPACT_AT].
+ * Unknown window → the fixed fallback (today's 60k), so a provider that does
+ * not advertise `context_length` behaves exactly as before. A 32k model gets
+ * 12k and is protected for the first time; a 262k model gets 184k instead of
+ * being summarised at 60k and re-reading what it lost. (AGT-4386)
+ */
+export function resolveCompactionThreshold(
+  contextWindowTokens: number | undefined,
+  opts: { fallback: number; reservedOutputTokens?: number },
+): CompactionThreshold {
+  if (!Number.isFinite(contextWindowTokens) || (contextWindowTokens as number) <= 0) {
+    return { compactAt: opts.fallback, source: 'fallback' };
+  }
+  const reserved = opts.reservedOutputTokens ?? DEFAULT_RESERVED_OUTPUT_TOKENS;
+  const usable = Math.max(0, (contextWindowTokens as number) - reserved);
+  const derived = Math.floor(usable * COMPACT_AT_FRACTION);
+  return { compactAt: Math.min(MAX_COMPACT_AT, Math.max(MIN_COMPACT_AT, derived)), source: 'window' };
+}
+
+const TRIM_MARKER_PREFIX = '[tool output trimmed:';
+
+/**
+ * Replace oversized tool outputs older than the last `keepRecent` messages
+ * with a short marker that names the tool and invites a re-read. Assistant
+ * text, tool calls and small outputs stay verbatim, so the conversation keeps
+ * its shape; only the bulk goes. Returns how many outputs were trimmed.
+ * Idempotent: an already-trimmed message is never touched again. (AGT-4386)
+ */
+export function trimOversizedToolOutputs(
+  messages: ChatMessage[],
+  opts: { maxTokens: number; keepRecent: number },
+): number {
+  const headerCount = messages[0]?.role === 'system' ? 2 : 1;
+  const boundary = messages.length - opts.keepRecent;
+  if (boundary <= headerCount) return 0;
+
+  // tool_call_id → tool name, from the assistant turns that issued them.
+  const toolNames = new Map<string, string>();
+  for (const m of messages) {
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) toolNames.set(tc.id, tc.function.name);
+    }
+  }
+
+  let trimmed = 0;
+  for (let i = headerCount; i < boundary; i++) {
+    const m = messages[i];
+    if (m.role !== 'tool' || typeof m.content !== 'string') continue;
+    if (m.content.startsWith(TRIM_MARKER_PREFIX)) continue;
+    const tokens = countTokensApprox(m.content);
+    if (tokens <= opts.maxTokens) continue;
+    const name = toolNames.get(m.tool_call_id) ?? 'tool';
+    m.content = `${TRIM_MARKER_PREFIX} ~${tokens} tokens from "${name}". Read it again if you still need it.]`;
+    trimmed++;
+  }
+  return trimmed;
+}
+
 export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void {
   const headerCount = messages[0]?.role === 'system' ? 2 : 1;
 

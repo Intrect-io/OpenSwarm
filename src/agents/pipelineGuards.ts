@@ -13,6 +13,9 @@ import { getRegistryStore } from '../registry/sqliteStore.js';
 import { scanFile as scanFileForBs } from '../registry/bsDetector.js';
 import { getWorkingDiffDetail } from '../support/gitTracker.js';
 import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
+import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
+import { figuresChangedInPlace, unsourcedFigures, uncitedApprovalClaims } from './claimEvidenceGuard.js';
+import { claimsGate, unassertedReportedKeys, gateClaimIssue } from './gateClaimGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -314,7 +317,7 @@ async function runBsDetectorGuard(
 }
 
 const SOURCE_FILE_RE = /\.(ts|tsx|js|jsx|py)$/;
-const TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.py$/;
+export const TEST_FILE_RE = /\.(test|spec)\.[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.py$/;
 const DEPENDENCY_FAILURE_RE =
   /\b(ModuleNotFoundError|ImportError|Cannot find module|ERR_MODULE_NOT_FOUND|No module named|PackageNotFoundError|missing dependency|not installed)\b/i;
 const VERSION_SPOOF_RE =
@@ -323,7 +326,7 @@ const PACKAGE_SCAFFOLD_RE =
   /(^|\/)(package\.json|pyproject\.toml|setup\.py|setup\.cfg)$/;
 const EVIDENCE_FILE_REF_RE =
   /((?:\/|\.\/)?[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|yaml|yml|json)):(\d+)\b/g;
-const CONTRACT_EVIDENCE_FILE_RE =
+export const CONTRACT_EVIDENCE_FILE_RE =
   /\.(ts|tsx|js|jsx|py|go|rs|java|yaml|yml|json)$/;
 const DOC_FILE_RE = /\.(md|mdx|txt|rst)$/;
 const VERIFIED_STATEMENT_RE = /\b(verified|confirmed|measured)\b/i;
@@ -359,7 +362,7 @@ function hasFileScopedBeforeAfterEvidence(reportText: string, filePath: string):
     );
 }
 
-async function getAddedLinesForFile(projectPath: string, filePath: string, isNew: boolean): Promise<string> {
+export async function getAddedLinesForFile(projectPath: string, filePath: string, isNew: boolean): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       'git',
@@ -401,19 +404,103 @@ async function getRemovedLinesForFile(projectPath: string, filePath: string): Pr
   }
 }
 
-function extractStringLiterals(text: string): string[] {
+// A backtick delimits a string only where the language says so. In a Python
+// docstring it is markdown: "`test_update_through_registry` creates a row…" made
+// the name of a sibling test a contract literal (AX-1556, AGT-4462).
+const BACKTICK_STRING_FILE_RE = /\.(?:[cm]?[jt]sx?|go)$/;
+const MIN_LITERAL_CHARS = 3;
+const MAX_LITERAL_CHARS = 120;
+
+/**
+ * Scans quote to matching quote, one line at a time. The single regex this
+ * replaces accepted any quote character as the close of any other, and skipped
+ * strings under three characters without consuming them — so the closing quote
+ * of `'k'` opened a "literal" that ran to the next string and swallowed it. A
+ * two-letter test name hid a fabricated key from the guard, and an apostrophe
+ * could invent one.
+ */
+function extractStringLiterals(text: string, file: string): string[] {
+  const quotes = BACKTICK_STRING_FILE_RE.test(file) ? '\'"`' : '\'"';
   const literals = new Set<string>();
-  const re = /['"`]([^'"`\n]{3,120})['"`]/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(text))) {
-    literals.add(match[1]);
+  for (const line of text.split('\n')) {
+    let i = 0;
+    while (i < line.length) {
+      const quote = line[i];
+      if (!quotes.includes(quote)) { i++; continue; }
+      let j = i + 1;
+      while (j < line.length && line[j] !== quote) j += line[j] === '\\' ? 2 : 1;
+      // No close on this line: an apostrophe or a multi-line string, not a literal.
+      if (j >= line.length) { i++; continue; }
+      const body = line.slice(i + 1, j);
+      if (body.length >= MIN_LITERAL_CHARS && body.length <= MAX_LITERAL_CHARS) {
+        literals.add(normalizeTemplateLiteral(body));
+      }
+      i = j + 1;
+    }
   }
   return [...literals];
 }
 
+// A backtick template literal's ${...} interpolation is source code the regex
+// above captures as if it were literal text — it can never appear verbatim in
+// HEAD, so a route like `/api/a2/account-master/${encodeURIComponent(id)}`
+// was unescapable even though the route itself (matched by prefix in the
+// handler) is real. AX-1521, 2026-09-18: a correct fix — the test imports and
+// calls the production handler directly — was blocked for two iterations by
+// the interpolation syntax, not by anything wrong with the endpoint. Checking
+// the static prefix up to the first `${` preserves the guard's actual job
+// (is the ROUTE real?) without asking a dynamic segment to match literally.
+// A prefix under 3 chars is not enough to search for or trust, so leave those
+// literals as the whole interpolated text (still flagged) — a bare `${x}`
+// route is not a case this narrowing needs to rescue.
+function normalizeTemplateLiteral(literal: string): string {
+  const interpolationIndex = literal.indexOf('${');
+  if (interpolationIndex === -1) return literal;
+  const prefix = literal.slice(0, interpolationIndex);
+  return prefix.length >= 3 ? prefix : literal;
+}
+
+// A literal a test needs in order to *be* a test, not a contract it invents
+// (AGT-4427). cgf-portal AX-1556 lost three worker iterations — 44 minutes —
+// to "2000-01-01T00:00:00" (the fixture timestamp for an updated_at
+// concurrency check), "test://" and "file:///test/test.xlsx". The colon rule
+// below matches an ISO 8601 timestamp exactly, and a fixture path or sentinel
+// scheme is never going to appear in HEAD producer code, so the guard was
+// unescapable for any test that names a time or a file.
+const ISO_DATE_LITERAL_RE = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+const TEST_SENTINEL_LITERAL_RE = /^(?:test|example|dummy|fake|mock|localhost|file):\/\/|^file:\/\/\/|(?:^|\/)(?:tmp|test|tests|fixtures?)\//i;
+
+// Labels a test invents for itself (AGT-4462). Each shape blocked a real run and
+// none can be given producer evidence, because no producer holds it:
+//  - "postgresql://x/y": any scheme://, not only the sentinel schemes above.
+//  - "row:1": a numbered instance. A producer holds the template (`row:${n}`),
+//    never the instance, so the literal cannot appear in HEAD even when real.
+//  - "itest_q9": an identifier that says it belongs to the test.
+const URL_LITERAL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+const NUMBERED_INSTANCE_LITERAL_RE = /^[A-Za-z0-9_.-]+:\d+$/;
+const TEST_SCOPED_IDENTIFIER_RE = /^(?:i?tests?|fake|dummy|mock|fixture|sample|example)_/i;
+// Node's own reserved built-in module namespace (AX-1447, 2026-09-19): a new
+// test file's own `import ... from 'node:test'` / `require('node:assert/strict')`
+// specifier matched isContractLiteral's colon rule below because it has no
+// `//` after the colon (URL_LITERAL_RE requires one). No application diff
+// could ever "define" or dispute a node: specifier — it's the runtime's, not
+// the app's — so it can never need or be given producer evidence.
+const NODE_BUILTIN_MODULE_RE = /^node:[a-z][a-z0-9_/-]*$/i;
+
+function isTestOnlyLiteral(literal: string): boolean {
+  return ISO_DATE_LITERAL_RE.test(literal)
+    || TEST_SENTINEL_LITERAL_RE.test(literal)
+    || URL_LITERAL_RE.test(literal)
+    || NODE_BUILTIN_MODULE_RE.test(literal)
+    || NUMBERED_INSTANCE_LITERAL_RE.test(literal)
+    || TEST_SCOPED_IDENTIFIER_RE.test(literal);
+}
+
 function isContractLiteral(literal: string, addedLines: string): boolean {
+  if (isTestOnlyLiteral(literal)) return false;
   if (literal.startsWith('/api/')) return true;
-  if (/^[a-zA-Z0-9_.-]{3,}:/.test(literal)) return true;
+  // A key has no whitespace; "AX-1486: " is the start of a sentence.
+  if (/^[a-zA-Z0-9_.-]{3,}:\S*$/.test(literal)) return true;
   if (
     /^[a-z][a-z0-9]+(?:_[a-z0-9]+)+$/.test(literal) &&
     /\b(expect|assert|field|schema|payload|json|contract)\b/i.test(addedLines)
@@ -622,7 +709,7 @@ async function runContractEvidenceGuard(
 
     for (const d of changedTests) {
       const addedLines = await getAddedLinesForFile(projectPath, d.file, d.isNew);
-      const literals = extractStringLiterals(addedLines)
+      const literals = extractStringLiterals(addedLines, d.file)
         .filter(literal => isContractLiteral(literal, addedLines));
 
       for (const literal of literals) {
@@ -729,6 +816,106 @@ async function runReformatScopeGuard(projectPath: string): Promise<GuardResult> 
   return { passed: issues.length === 0, guard, issues, blocking: false };
 }
 
+/**
+ * Whole-file rewrite guard (AGT-4406): blocking on an unacknowledged rewrite
+ * of an existing file, advisory on an acknowledged one; restores trailing
+ * newlines the worker stripped, in place.
+ */
+async function runRewriteGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
+  const guard = 'rewrite';
+  const issues: string[] = [];
+  let blocking = false;
+  try {
+    const outcome = await inspectRewrites(projectPath, workerResult.summary ?? '');
+    for (const f of outcome.unacknowledged) issues.push(describeRewrite(f));
+    blocking = outcome.unacknowledged.length > 0;
+    for (const f of outcome.acknowledged) {
+      issues.push(`[${f.file}] acknowledged rewrite (${Math.round(f.ratio * 100)}% deleted) — reviewer: check nothing outside the task was lost.`);
+    }
+    if (outcome.newlineRestored.length > 0) {
+      console.log(`[Guard:rewrite] Restored trailing newline on ${outcome.newlineRestored.length} file(s): ${outcome.newlineRestored.join(', ')}`);
+    }
+  } catch (err) {
+    console.warn('[Guard:rewrite] Error:', err);
+  }
+  return { passed: !blocking, guard, issues, blocking };
+}
+
+/**
+ * Claim-evidence guard (AGT-4408). Blocking when a docs-only change replaces
+ * figures the run never produced; advisory for the same in a change that also
+ * touches code, and for approval claims without a citation.
+ */
+async function runClaimEvidenceGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
+  const guard = 'claimEvidence';
+  const issues: string[] = [];
+  let blocking = false;
+  const reportText = `${workerResult.summary}\n${workerResult.output}\n${workerResult.error ?? ''}`;
+  try {
+    const details = await getWorkingDiffDetail(projectPath);
+    const docsOnly = details.length > 0 && details.every((d) => DOC_FILE_RE.test(d.file));
+    for (const d of details) {
+      const added = (await getAddedLinesForFile(projectPath, d.file, d.isNew)).split('\n');
+      if (DOC_FILE_RE.test(d.file) && !d.isNew) {
+        const removed = (await getRemovedLinesForFile(projectPath, d.file)).split('\n');
+        for (const c of unsourcedFigures(figuresChangedInPlace(removed, added), reportText)) {
+          issues.push(
+            `[${d.file}] replaces ${c.before.join('/')} with ${c.after.join('/')} but nothing in this run printed ${c.missing.join(', ')} — `
+            + 'a documented figure comes from a command run in this task (show it and its output), or stays as it was.',
+          );
+          if (docsOnly) blocking = true;
+        }
+      }
+      for (const line of uncitedApprovalClaims(added)) {
+        issues.push(`[${d.file}] claims an approval without citing it (link or date): "${line.slice(0, 120)}"`);
+      }
+    }
+  } catch (err) {
+    console.warn('[Guard:claimEvidence] Error:', err);
+  }
+  return { passed: !blocking, guard, issues, blocking };
+}
+
+/**
+ * Lines anywhere in the tracked tree that mention `key`. One `git grep` per
+ * key, bounded by the caller; a key asserted by code this change did not
+ * touch must not be flagged, and a false negative here is the cheap error.
+ */
+async function treeMentions(projectPath: string, key: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('git', ['grep', '-h', '-F', '-e', key, '--', '.'], { cwd: projectPath, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
+    return stdout;
+  } catch {
+    return '';
+  }
+}
+
+/** At most this many reported keys are checked against the tree per run. */
+const GATE_CLAIM_TREE_LOOKUPS = 12;
+
+async function runGateClaimGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
+  const guard = 'gateClaim';
+  const issues: string[] = [];
+  const reportText = `${workerResult.summary}\n${workerResult.output}\n${workerResult.error ?? ''}`;
+  if (!claimsGate(reportText)) return { passed: true, guard, issues, blocking: true };
+  try {
+    const details = await getWorkingDiffDetail(projectPath);
+    const files: Array<{ file: string; added: string }> = [];
+    for (const d of details) {
+      files.push({ file: d.file, added: await getAddedLinesForFile(projectPath, d.file, d.isNew) });
+    }
+    const mentions = new Map<string, string>();
+    for (const key of unassertedReportedKeys(files, () => '').slice(0, GATE_CLAIM_TREE_LOOKUPS)) {
+      mentions.set(key, await treeMentions(projectPath, key));
+    }
+    const unasserted = unassertedReportedKeys(files, (key) => mentions.get(key) ?? '');
+    if (unasserted.length > 0) issues.push(gateClaimIssue(unasserted));
+  } catch (err) {
+    console.warn('[Guard:gateClaim] Error:', err);
+  }
+  return { passed: issues.length === 0, guard, issues, blocking: true };
+}
+
 // Guard Runner
 
 /**
@@ -790,6 +977,18 @@ export async function runGuards(
 
   if (config.reformatCheck) {
     results.push(await runReformatScopeGuard(projectPath));
+  }
+
+  if (config.rewriteCheck) {
+    results.push(await runRewriteGuard(guardWorkerResult, projectPath));
+  }
+
+  if (config.claimEvidenceCheck) {
+    results.push(await runClaimEvidenceGuard(guardWorkerResult, projectPath));
+  }
+
+  if (config.gateClaimEvidenceCheck) {
+    results.push(await runGateClaimGuard(guardWorkerResult, projectPath));
   }
 
   // conventionalCommits is checked separately (needs commit message)

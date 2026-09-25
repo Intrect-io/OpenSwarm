@@ -23,8 +23,6 @@ import {
   getConfidenceSummary,
   trackFailure,
   resetFailureStreak,
-  shouldUseFreshContext,
-  consumeFreshContext,
   formatSessionSummary,
   formatDiscussion,
   CONFIDENCE_THRESHOLDS,
@@ -619,7 +617,7 @@ describe('agentPair', () => {
     });
   });
 
-  describe('Fresh Context Strategy', () => {
+  describe('Failure streak', () => {
     it('should track failure streak', () => {
       const session = createPairSession({
         taskId: 'INT-123',
@@ -635,7 +633,7 @@ describe('agentPair', () => {
       expect(retrieved?.worker.failureStreak).toBe(2);
     });
 
-    it('should trigger fresh context after threshold', () => {
+    it('keeps counting past the former fresh-context threshold', () => {
       const session = createPairSession({
         taskId: 'INT-123',
         taskTitle: 'Test Task',
@@ -647,7 +645,7 @@ describe('agentPair', () => {
       trackFailure(session.id);
 
       const retrieved = getPairSession(session.id);
-      expect(retrieved?.worker.useFreshContext).toBe(true);
+      expect(retrieved?.worker.failureStreak).toBe(2);
     });
 
     it('should reset failure streak on success', () => {
@@ -664,37 +662,6 @@ describe('agentPair', () => {
 
       const retrieved = getPairSession(session.id);
       expect(retrieved?.worker.failureStreak).toBe(0);
-      expect(retrieved?.worker.useFreshContext).toBe(false);
-    });
-
-    it('should check if fresh context should be used', () => {
-      const session = createPairSession({
-        taskId: 'INT-123',
-        taskTitle: 'Test Task',
-        taskDescription: 'Test Description',
-        projectPath: '/tmp/project',
-      });
-
-      trackFailure(session.id);
-      trackFailure(session.id);
-
-      expect(shouldUseFreshContext(session.id)).toBe(true);
-    });
-
-    it('should consume fresh context flag', () => {
-      const session = createPairSession({
-        taskId: 'INT-123',
-        taskTitle: 'Test Task',
-        taskDescription: 'Test Description',
-        projectPath: '/tmp/project',
-      });
-
-      trackFailure(session.id);
-      trackFailure(session.id);
-      consumeFreshContext(session.id);
-
-      const retrieved = getPairSession(session.id);
-      expect(retrieved?.worker.useFreshContext).toBe(false);
     });
   });
 

@@ -64,10 +64,17 @@ afterAll(async () => {
 // ──────────────────────────────────────────────
 
 describe('TOOL_DEFINITIONS', () => {
-  const expectedNames = ['read_file', 'write_file', 'edit_file', 'search_files', 'bash', 'search_memory'];
+  const expectedNames = [
+    'read_file', 'write_file', 'edit_file', 'search_files', 'bash', 'search_memory',
+    'scratch_write', 'scratch_read', 'remember',
+  ];
 
-  it('exports exactly 6 tool definitions', () => {
-    expect(TOOL_DEFINITIONS).toHaveLength(6);
+  it('exports exactly the tools it names, and no more', () => {
+    // The count is the point: a tool added without being listed above is a tool
+    // no test describes, and this list is what the withholding filters in
+    // agenticLoop are written against.
+    expect(TOOL_DEFINITIONS.map((t) => t.function.name).sort()).toEqual([...expectedNames].sort());
+    expect(TOOL_DEFINITIONS).toHaveLength(expectedNames.length);
   });
 
   it.each(expectedNames)('includes "%s" tool', (name) => {
@@ -475,7 +482,10 @@ describe('Safety guards (isCommandBlocked via bash)', () => {
     });
 
     expect(result).toMatchObject({ is_error: false, content: 'green\n' });
-    expect(execute).toHaveBeenCalledWith('npm test', 12_345);
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringMatching(/^export OPENSWARM_TEST_PARALLELISM=\d+ .*; npm test$/),
+      12_345,
+    );
   });
 
   it.each([
@@ -1134,5 +1144,46 @@ describe.skipIf(!hasRelativeWorktrees)('worktrees that record their links as rel
     const r = await executeTool(makeCall('read_file', { path: 'local-data/asset.txt' }), worktree);
     expect(r.is_error).toBe(false);
     expect(r.content).toContain('CGF ROWS');
+  });
+});
+
+// ──────────────────────────────────────────────
+// bash under the OS fence (AGT-4387)
+// ──────────────────────────────────────────────
+const hasMacSandbox = process.platform === 'darwin' && (await import('node:fs')).existsSync('/usr/bin/sandbox-exec');
+describe.runIf(hasMacSandbox)('bash tool with sandbox: on (live sandbox-exec)', () => {
+  it('runs the command fenced: worktree writable, home refused with the fence named', async () => {
+    const wt = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-fence-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-outside-'));
+    // The default writable set includes the temp dir, so target the parent of
+    // a temp dir is not enough — use a path under $HOME that is not a cache.
+    const homeTarget = path.join(homedir(), `.osw-fence-probe-${process.pid}`);
+    try {
+      const ok = await executeTool(makeCall('bash', { command: `touch inside && ls inside` }), wt, createReadCache(), { sandbox: 'on' });
+      expect(ok.is_error).toBe(false);
+      expect(ok.content).toContain('inside');
+      const denied = await executeTool(makeCall('bash', { command: `touch "${homeTarget}"` }), wt, createReadCache(), { sandbox: 'on' });
+      expect(denied.is_error).toBe(true);
+      expect(denied.content).toMatch(/Operation not permitted/);
+      expect(denied.content).toContain('[sandbox] Writes are limited');
+      expect((await import('node:fs')).existsSync(homeTarget)).toBe(false);
+    } finally {
+      await fs.rm(wt, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+      await fs.rm(homeTarget, { force: true });
+    }
+  });
+
+  it('sandbox: off (or unset) keeps the old unfenced behaviour', async () => {
+    const wt = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-nofence-'));
+    const homeTarget = path.join(homedir(), `.osw-nofence-probe-${process.pid}`);
+    try {
+      const r = await executeTool(makeCall('bash', { command: `touch "${homeTarget}" && echo wrote` }), wt, createReadCache(), { sandbox: 'off' });
+      expect(r.is_error).toBe(false);
+      expect(r.content).toContain('wrote');
+    } finally {
+      await fs.rm(wt, { recursive: true, force: true });
+      await fs.rm(homeTarget, { force: true });
+    }
   });
 });

@@ -16,6 +16,7 @@ import { PERMANENT_EXPIRY } from '../memory/memoryCore.js';
 import { isTransientReviewRejectionMemory } from '../memory/memoryFilters.js';
 import { c, status as statusIcon } from '../support/colors.js';
 import { getDaemonStatus } from './daemon.js';
+import { recallRepoKnowledge } from '../memory/repoKnowledge.js';
 
 const LEGACY_COLUMNS = ['revisionCount', 'decay', 'stability', 'contradicts', 'supports'] as const;
 
@@ -44,6 +45,8 @@ export interface MemoryStatus {
 export interface MemoryCommandOptions {
   json?: boolean;
   force?: boolean;
+  project?: string;
+  task?: string;
 }
 
 export interface MemoryCommandDeps {
@@ -269,7 +272,13 @@ export async function runMemoryCommand(
         `  signature: ${result.signature}`,
       ].join('\n');
     }
+    case 'preview': {
+      if (!opts.project || !opts.task) throw new Error('preview requires --project <path> and --task <title>');
+      const entries = await recallRepoKnowledge(opts.project, opts.task, '');
+      return entries.length === 0 ? 'No repo memory would be injected for this task.'
+        : `Repo memory that would be injected (${entries.length}):\n${entries.map((entry) => `- [${entry.type}] ${entry.title}\n  ${entry.content}`).join('\n')}`;
+    }
     default:
-      throw new Error(`Unknown memory action "${action}" (use status|compact|reembed)`);
+      throw new Error(`Unknown memory action "${action}" (use status|compact|reembed|preview)`);
   }
 }

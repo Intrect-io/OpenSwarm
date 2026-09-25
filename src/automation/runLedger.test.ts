@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { RunLedger, type RunClaim } from './runLedger.js';
+import { attachParkedPublication, recordParkedPublicationSkip } from './runLedgerParkedPublication.js';
 import Database from 'better-sqlite3';
 
 const roots: string[] = [];
@@ -45,6 +46,33 @@ afterEach(() => {
 });
 
 describe('RunLedger state machine', () => {
+  it('clears a missing worktree only when the observed row is still unowned and unchanged', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'MISSING-TREE');
+    const runClaim = claim(ledger, 'MISSING-TREE', 'daemon');
+    expect(ledger.attachWorktree(runClaim, '/repo/worktree/MISSING-TREE', 'swarm/MISSING-TREE', 2_100)).toBe(true);
+    expect(ledger.transition(runClaim, 'RETRY_AT', { retryAt: 3_000 }, 2_200)).toBe(true);
+    const observed = ledger.getRun('MISSING-TREE')!;
+
+    expect(ledger.reconcileMissingWorktree(observed, 'clear', 'worktree gone; branch remains on origin', false, 2_300)).toBe(true);
+    expect(ledger.getRun('MISSING-TREE')).toMatchObject({ state: 'RETRY_AT', worktreePath: undefined });
+    expect(ledger.reconcileMissingWorktree(observed, 'clear', 'stale observation', false, 2_400)).toBe(false);
+    ledger.close();
+  });
+
+  it('routes a missing worktree with a published branch through durable PR recovery', () => {
+    const ledger = new RunLedger(createDbPath());
+    register(ledger, 'PUBLISHED-TREE');
+    const runClaim = claim(ledger, 'PUBLISHED-TREE', 'daemon');
+    expect(ledger.attachWorktree(runClaim, '/repo/worktree/PUBLISHED-TREE', 'swarm/PUBLISHED-TREE', 2_100)).toBe(true);
+    expect(ledger.transition(runClaim, 'RETRY_AT', { retryAt: 3_000 }, 2_200)).toBe(true);
+    const observed = ledger.getRun('PUBLISHED-TREE')!;
+
+    expect(ledger.reconcileMissingWorktree(observed, 'published', 'worktree gone; open PR exists', false, 2_300)).toBe(true);
+    expect(ledger.getRun('PUBLISHED-TREE')).toMatchObject({ state: 'NEEDS_RECONCILE', worktreePath: undefined, lastErrorCode: 'missing_worktree_published' });
+    ledger.close();
+  });
+
   it('does not rewind a run when discovery sees the same issue again', () => {
     const ledger = new RunLedger(createDbPath());
     register(ledger, 'INT-1');
@@ -956,6 +984,41 @@ describe('RunLedger claim and fencing races', () => {
   });
 });
 
+describe('RunLedger parked publication backfill', () => {
+  function parkedLedger() {
+    const ledger = new RunLedger(createDbPath());
+    const { record } = ledger.importRun({
+      issueId: 'PARKED-PR', source: 'linear', identifier: 'AX-1',
+      projectPath: '/repo', state: 'NEEDS_HUMAN', branchName: 'swarm/AX-1',
+    }, 1_000);
+    return { ledger, record };
+  }
+
+  it('attaches a backfilled draft only to the unchanged unowned parked row', () => {
+    const { ledger, record } = parkedLedger();
+    expect(attachParkedPublication(ledger, record, { prUrl: 'https://github.test/pull/7', headSha: 'beef' }, 1_100)).toBe(true);
+    expect(ledger.getRun('PARKED-PR')).toMatchObject({
+      state: 'NEEDS_HUMAN', prUrl: 'https://github.test/pull/7', headSha: 'beef', stateVersion: record.stateVersion + 1,
+    });
+    expect(attachParkedPublication(ledger, record, { prUrl: 'https://github.test/pull/8', headSha: 'cafe' }, 1_200)).toBe(false);
+    ledger.close();
+  });
+
+  it('records a no-commit skip without changing the park state', () => {
+    const { ledger, record } = parkedLedger();
+    expect(recordParkedPublicationSkip(ledger, record, 'no commits ahead of base', 1_100)).toBe(true);
+    expect(ledger.getRun('PARKED-PR')).toMatchObject({ state: 'NEEDS_HUMAN', stateVersion: record.stateVersion, prUrl: undefined });
+    ledger.close();
+  });
+
+  it('refuses a row that has been resumed or claimed since the scan', () => {
+    const { ledger, record } = parkedLedger();
+    expect(ledger.markReady('PARKED-PR', 1_050)).toBe(true);
+    expect(attachParkedPublication(ledger, record, { prUrl: 'https://github.test/pull/7', headSha: 'beef' }, 1_100)).toBe(false);
+    ledger.close();
+  });
+});
+
 describe('RunLedger schema migration', () => {
   it('imports legacy state once and never lets a later import overwrite durable truth', () => {
     const ledger = new RunLedger(createDbPath());
@@ -1011,8 +1074,8 @@ describe('RunLedger schema migration', () => {
     const attemptColumns = (verify.pragma('table_info(automation_attempts)') as Array<{ name: string }>).map((row) => row.name);
     const runColumns = (verify.pragma('table_info(automation_runs)') as Array<{ name: string }>).map((row) => row.name);
     expect(attemptColumns).toEqual(expect.arrayContaining(['result_status', 'success', 'cost_usd']));
-    expect(runColumns).toEqual(expect.arrayContaining(['tracker_state', 'tracker_state_type', 'tracker_checked_at']));
-    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('4');
+    expect(runColumns).toEqual(expect.arrayContaining(['tracker_state', 'tracker_state_type', 'tracker_checked_at', 'owner_pid_space']));
+    expect((verify.prepare("SELECT value FROM automation_meta WHERE key = 'schema_version'").get() as { value: string }).value).toBe('5');
     verify.close();
   });
 });
