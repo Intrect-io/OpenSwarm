@@ -13,6 +13,7 @@ import {
   snapshotEnabled,
 } from '../support/worktreeSnapshot.js';
 import { taskAttributionKey } from '../orchestration/decisionEngine.js';
+import { isGitRepo, takeSnapshot } from '../support/gitTracker.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
 type SnapshotTask = Pick<TaskItem, 'id' | 'issueId' | 'issueIdentifier'>;
@@ -53,9 +54,12 @@ export interface SnapshotHost {
   currentIteration: number;
   taskPrefix: string;
   snapshots?: IterationSnapshotState;
+  /** Git tree the run started from; every worker iteration diffs against it too (AGT-4534). */
+  runSnapshotHash?: string;
 }
 
 export async function captureBeforeIteration(host: SnapshotHost): Promise<void> {
+  await captureRunStart(host);
   const { snapshots: state, projectPath: worktreePath, currentIteration: iteration, taskPrefix: prefix } = host;
   if (!state?.runId) return;
   try {
@@ -116,4 +120,24 @@ export async function rollbackStagnantIteration(
 export async function discardSnapshots(state: IterationSnapshotState | undefined): Promise<void> {
   if (!state?.runId) return;
   await clearSnapshots(state.runId).catch(() => undefined);
+}
+
+/**
+ * Record, once, the Git tree the run started from.
+ *
+ * Each worker invocation diffs against its own snapshot, so an iteration that
+ * only answers a review (the fix already made by an earlier iteration) looked
+ * like it changed nothing and failed the run with accepted work in the tree
+ * (AGT-4534 eval base6). Unlike the rollback snapshots this is the repository's
+ * own Git tree, the one the worker's snapshot is compared in. Without it the
+ * worker behaves as before.
+ */
+async function captureRunStart(host: SnapshotHost): Promise<void> {
+  if (host.currentIteration !== 1 || host.runSnapshotHash) return;
+  try {
+    if (await isGitRepo(host.projectPath)) host.runSnapshotHash = await takeSnapshot(host.projectPath);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    safeConsole.log(`[${host.taskPrefix}] Run-start snapshot failed — later iterations count only their own edits: ${reason}`);
+  }
 }

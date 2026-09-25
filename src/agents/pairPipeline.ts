@@ -483,6 +483,7 @@ export class PairPipeline extends EventEmitter {
             // enforcedFileScope for which provenances qualify and why.
             fileScope: enforcedFileScope(context.task),
             resumedTaskFiles: this.config.resumedTaskFiles,
+            runSnapshotHash: context.runSnapshotHash,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,
             projectName: context.task.linearProject?.name,
             onLog,

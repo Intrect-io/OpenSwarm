@@ -199,6 +199,8 @@ export interface PipelineContext {
   budgetParkReason?: string;
   /** Per-iteration worktree snapshots and whether this run has already rolled back (AGT-4460). */
   snapshots?: import('./iterationSnapshot.js').IterationSnapshotState;
+  /** Git tree the run started from; see captureRunStart (AGT-4534). */
+  runSnapshotHash?: string;
   /** Same out-of-scope write rejected twice: retrying cannot alter the fence. */
   repeatedScopeRejection?: string;
   /** A no-edit worker blocker claim has been put to the reviewer this run (AGT-4535). */
