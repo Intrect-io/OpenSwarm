@@ -554,9 +554,10 @@ export interface PromptTemplates {
     /**
      * 'change' (default): review a worker's diff against requirements — the pair
      * pipeline. 'audit': evaluate existing files with no diff/worker — the
-     * `review --max` codebase audit. (INT-2006)
+     * `review --max` codebase audit. (INT-2006) 'blocker': verify a worker's
+     * claim that the task cannot be completed as written (AGT-4535).
      */
-    mode?: 'change' | 'audit' | 'direct';
+    mode?: 'change' | 'audit' | 'direct' | 'blocker';
   }) => string;
   buildRevisionPromptFromReview: (opts: {
     decision: string;

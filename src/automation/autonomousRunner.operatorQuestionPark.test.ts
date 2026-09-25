@@ -505,6 +505,30 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     internal.durableRuns.close();
   });
 
+  // AGT-4535: a confirmed worker blocker is a claim about the task text; a
+  // free slot would re-run the same text into the same confirmed claim.
+  it('does not idle-fill a verified worker blocker; an explicit dispatch still lifts it', async () => {
+    const internal = await makeRunner();
+    const { RunLedger } = await import('./runLedger.js');
+    const { VERIFIED_WORKER_BLOCKER_PARK_REASON } = await import('../agents/pairPipelineTypes.js');
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'EXECUTING')).toBe(true);
+    expect(ledger.transition(claim!, 'NEEDS_HUMAN', {
+      errorCode: VERIFIED_WORKER_BLOCKER_PARK_REASON, errorMessage: 'Worker stopped without edits and the reviewer confirmed why.',
+    })).toBe(true);
+    ledger.close();
+
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+
+    const dispatched = { ...TASK, explicitDispatch: true };
+    expect((internal as unknown as { readmitForExplicitDispatch(task: TaskItem): boolean }).readmitForExplicitDispatch(dispatched)).toBe(true);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+    internal.durableRuns.close();
+  });
+
   // A deterministic gate gives the same answer to the same branch. On
   // 2026-09-17 all 28 publication-scope parks were idle-filled within two
   // minutes and parked again; cgf-portal AX-1027 went round 36 times.
