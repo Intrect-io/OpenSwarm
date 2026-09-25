@@ -12,11 +12,11 @@ describe('workerBlockerClaim', () => {
     expect(workerBlockerClaim(stop({ haltReason: undefined, noChangesReason: 'already fixed on main' }))?.reason).toBe('already fixed on main');
   });
 
-  // AGT-4534 base5 broken-verify-tool: the worker fixed the code, then stopped
-  // on a DoD item that could not run (its verify script exists nowhere).
+  // AGT-4534: a worker that changed files and then stopped on part of the task
+  // is making a claim too.
   it('is also the stated reason of a stop that kept edits, with the files', () => {
-    expect(workerBlockerClaim(stop({ filesChanged: ['src/a.ts'], haltReason: 'verify script does not exist' })))
-      .toEqual({ reason: 'verify script does not exist', changedFiles: ['src/a.ts'] });
+    expect(workerBlockerClaim(stop({ filesChanged: ['src/a.ts'], haltReason: 'staging database is unreachable' })))
+      .toEqual({ reason: 'staging database is unreachable', changedFiles: ['src/a.ts'] });
   });
 
   it.each([
@@ -36,14 +36,14 @@ describe('blocker-mode reviewer prompt', () => {
   it('asks to verify the claim, with its own approve rule and no completion-criteria gate', async () => {
     const { buildReviewerPrompt } = await import('./reviewer.js');
     const prompt = buildReviewerPrompt({
-      taskTitle: 'Make range tests pass', taskDescription: 'Make every test pass', projectPath: '/repo',
-      mode: 'blocker', blockerClaim: 'test/range.test.mjs:7 and :11 contradict each other',
+      taskTitle: 'Make interval tests pass', taskDescription: 'Make every test pass', projectPath: '/repo',
+      mode: 'blocker', blockerClaim: 'test/interval.test.mjs:7 and :11 contradict each other',
       completionCriteria: ['all tests pass'],
-      workerResult: { success: false, summary: 'no edit', filesChanged: [], commands: [], output: '', executedCommands: ['node --test test/range.test.mjs [exit 1]'] },
+      workerResult: { success: false, summary: 'no edit', filesChanged: [], commands: [], output: '', executedCommands: ['node --test test/interval.test.mjs [exit 1]'] },
     });
     expect(prompt).toContain('Blocker Verification Mode');
-    expect(prompt).toContain('test/range.test.mjs:7 and :11 contradict each other');
-    expect(prompt).toContain('node --test test/range.test.mjs [exit 1]');
+    expect(prompt).toContain('test/interval.test.mjs:7 and :11 contradict each other');
+    expect(prompt).toContain('node --test test/interval.test.mjs [exit 1]');
     expect(prompt).toContain('It is NOT a blocker that the worker was stuck');
     // The change-mode rules would make a no-diff confirmation impossible.
     expect(prompt).not.toContain('EVERY Definition of Done');
@@ -53,11 +53,11 @@ describe('blocker-mode reviewer prompt', () => {
   it('lists the files a partial stop changed and says the change is not being approved', async () => {
     const { buildReviewerPrompt } = await import('./reviewer.js');
     const prompt = buildReviewerPrompt({
-      taskTitle: 'Fix formatCents', taskDescription: 'Fix it and run the verify script', projectPath: '/repo',
-      mode: 'blocker', blockerClaim: 'scripts/verify-all.mjs exists nowhere', blockerChangedFiles: ['src/money.mjs'],
-      workerResult: { success: false, summary: 'fixed, verify missing', filesChanged: ['src/money.mjs'], commands: [], output: '' },
+      taskTitle: 'Fix the ledger formatter', taskDescription: 'Fix it and run the staging check', projectPath: '/repo',
+      mode: 'blocker', blockerClaim: 'the staging database is unreachable', blockerChangedFiles: ['src/ledger.mjs'],
+      workerResult: { success: false, summary: 'fixed, staging unreachable', filesChanged: ['src/ledger.mjs'], commands: [], output: '' },
     });
-    expect(prompt).toContain('src/money.mjs');
+    expect(prompt).toContain('src/ledger.mjs');
     expect(prompt).toContain('not approving the change');
   });
 });

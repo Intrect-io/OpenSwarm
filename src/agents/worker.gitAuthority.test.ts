@@ -116,7 +116,7 @@ describe('runWorker Git authority (INT-2609)', () => {
     expect(result.error).toContain('fresh/outside.py');
   });
 
-  // AGT-4534 eval base6 fabricated-green#2: iteration 1 fixed clamp.mjs, the
+  // AGT-4534, measured on a real run: iteration 1 fixed the code, the
   // reviewer asked only for a better report, and iteration 2 supplied it
   // without a new edit. Diffed against its own snapshot it changed nothing, so
   // the run failed with the reviewer-accepted fix still in the tree.
@@ -128,30 +128,30 @@ describe('runWorker Git authority (INT-2609)', () => {
       getChangedFilesSinceSnapshot.mockImplementation(async (_cwd: string, tree: string) => byTree[tree] ?? []);
 
     it('counts files still changed since the run started', async () => {
-      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['tools/textkit/src/clamp.mjs'] });
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['pkg/src/bounds.mjs'] });
 
       const result = await runWorker({
-        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        taskTitle: 'confirm bounds', taskDescription: 'summarise',
         projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
       });
 
       expect(result.success).toBe(true);
-      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+      expect(result.filesChanged).toEqual(['pkg/src/bounds.mjs']);
     });
 
     it('does not count a file an earlier iteration changed and this one reverted', async () => {
       // Reverted: no longer differs from the run start.
-      snapshots({ 'snapshot-tree': ['tools/textkit/src/clamp.mjs'], 'run-start-tree': [] });
+      snapshots({ 'snapshot-tree': ['pkg/src/bounds.mjs'], 'run-start-tree': [] });
 
       const result = await runWorker({
-        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        taskTitle: 'confirm bounds', taskDescription: 'summarise',
         projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
       });
 
-      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+      expect(result.filesChanged).toEqual(['pkg/src/bounds.mjs']);
       snapshots({ 'snapshot-tree': [], 'run-start-tree': [] });
       const reverted = await runWorker({
-        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        taskTitle: 'confirm bounds', taskDescription: 'summarise',
         projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
       });
       expect(reverted.success).toBe(false);
@@ -159,29 +159,29 @@ describe('runWorker Git authority (INT-2609)', () => {
     });
 
     it('does not credit an earlier out-of-scope write that stayed on disk', async () => {
-      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['tools/textkit/src/clamp.mjs', 'earlier/outside.py'] });
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['pkg/src/bounds.mjs', 'earlier/outside.py'] });
 
       const result = await runWorker({
-        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        taskTitle: 'confirm bounds', taskDescription: 'summarise',
         projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
-        fileScope: ['tools/textkit/src/clamp.mjs'],
+        fileScope: ['pkg/src/bounds.mjs'],
       });
 
       expect(result.success).toBe(true);
-      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+      expect(result.filesChanged).toEqual(['pkg/src/bounds.mjs']);
     });
 
     it('does not credit a path the fence rejected on an earlier iteration', async () => {
       const { noteRejectedWorkerPaths } = await import('../support/rejectedWorkerPaths.js');
-      noteRejectedWorkerPaths('/repo', ['tools/textkit/test/clamp.test.mjs']);
-      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['tools/textkit/src/clamp.mjs', 'tools/textkit/test/clamp.test.mjs'] });
+      noteRejectedWorkerPaths('/repo', ['pkg/test/bounds.test.mjs']);
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['pkg/src/bounds.mjs', 'pkg/test/bounds.test.mjs'] });
 
       const result = await runWorker({
-        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        taskTitle: 'confirm bounds', taskDescription: 'summarise',
         projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
       });
 
-      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+      expect(result.filesChanged).toEqual(['pkg/src/bounds.mjs']);
     });
   });
 });

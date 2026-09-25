@@ -105,11 +105,11 @@ describe('PairPipeline worker blocker claims', () => {
   // blocker claim now goes to the reviewer once, as a claim to verify.
     const blocker = {
       success: false,
-      summary: 'Blocked: the two tests assert range(1,3) == [1,2,3] and == [1,2]; no implementation satisfies both.',
+      summary: 'Blocked: the two tests assert span(2,4) == [2,3,4] and == [2,3]; no implementation satisfies both.',
       filesChanged: [],
-      commands: ['node --test test/range.test.mjs'],
+      commands: ['node --test test/interval.test.mjs'],
       output: '',
-      haltReason: 'DoD unsatisfiable: test/range.test.mjs:7 and :11 contradict each other',
+      haltReason: 'DoD unsatisfiable: test/interval.test.mjs:7 and :11 contradict each other',
     };
     const pipelineConfig = {
       stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
@@ -123,7 +123,7 @@ describe('PairPipeline worker blocker claims', () => {
     it('parks for the operator, without retrying, when the reviewer confirms the blocker', async () => {
       const { PairPipeline } = await import('./pairPipeline.js');
       runWorker.mockResolvedValue(blocker);
-      runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: test/range.test.mjs:7 expects [1,2,3], :11 expects [1,2].' });
+      runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: test/interval.test.mjs:7 expects [2,3,4], :11 expects [2,3].' });
 
       const result = await new PairPipeline(pipelineConfig).run(task(), process.cwd());
 
@@ -137,7 +137,7 @@ describe('PairPipeline worker blocker claims', () => {
       expect(result.finalStatus).toBe('waiting_on_operator');
       expect(result.operatorPark?.code).toBe('verified_worker_blocker');
       expect(result.operatorPark?.reason).toContain('DoD unsatisfiable');
-      expect(result.operatorPark?.reason).toContain('Confirmed: test/range.test.mjs:7');
+      expect(result.operatorPark?.reason).toContain('Confirmed: test/interval.test.mjs:7');
       expect(result.operatorPark!.reason.length).toBeLessThan(1400);
     });
 
@@ -194,28 +194,29 @@ describe('PairPipeline worker blocker claims', () => {
       for (const call of runReviewer.mock.calls) expect((call[0] as ReviewerOptions).mode).not.toBe('blocker');
     });
 
-    // AGT-4534 base5 broken-verify-tool: a correct fix plus a true "the verify
-    // script does not exist" stop was retried three times and failed.
+    // AGT-4534: a stop that kept edits used to skip verification and be
+    // retried blind. These tests pin the routing only; the verdict is the
+    // reviewer's.
     const partial = {
       ...blocker,
-      filesChanged: ['tools/textkit/src/money.mjs'],
-      haltReason: 'Fix done; the DoD verify script tools/textkit/scripts/verify-all.mjs exists in no commit',
+      filesChanged: ['pkg/src/ledger.mjs'],
+      haltReason: 'Change done; the DoD step needs the staging database, which this checkout cannot reach',
     };
 
     it('verifies a stop that kept edits and parks it naming the unreviewed files', async () => {
       const { PairPipeline } = await import('./pairPipeline.js');
       runWorker.mockResolvedValue(partial);
-      runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: package.json:8 runs a script absent from every commit.' });
+      runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: config/staging.yml:3 points at a host outside this network.' });
 
       const result = await new PairPipeline(pipelineConfig).run(task(), process.cwd());
 
       expect(runWorker).toHaveBeenCalledTimes(1);
       const reviewed = runReviewer.mock.calls[0][0] as ReviewerOptions;
       expect(reviewed.mode).toBe('blocker');
-      expect(reviewed.blockerChangedFiles).toEqual(['tools/textkit/src/money.mjs']);
+      expect(reviewed.blockerChangedFiles).toEqual(['pkg/src/ledger.mjs']);
       expect(result.finalStatus).toBe('waiting_on_operator');
       expect(result.operatorPark?.code).toBe('verified_worker_blocker');
-      expect(result.operatorPark?.reason).toContain('tools/textkit/src/money.mjs');
+      expect(result.operatorPark?.reason).toContain('pkg/src/ledger.mjs');
       expect(result.operatorPark?.reason).toContain('unreviewed, kept in the run\'s worktree');
       expect(result.operatorPark!.reason.length).toBeLessThan(1600);
     });
@@ -223,11 +224,11 @@ describe('PairPipeline worker blocker claims', () => {
     it('verifies a stop that kept edits on a later iteration too', async () => {
       const { PairPipeline } = await import('./pairPipeline.js');
       runWorker
-        .mockResolvedValueOnce({ success: true, summary: 'partial', filesChanged: ['tools/textkit/src/money.mjs'], commands: ['node --test'], output: '', confidencePercent: 100 })
+        .mockResolvedValueOnce({ success: true, summary: 'partial', filesChanged: ['pkg/src/ledger.mjs'], commands: ['node --test'], output: '', confidencePercent: 100 })
         .mockResolvedValue(partial);
       runReviewer
-        .mockResolvedValueOnce({ decision: 'revise', feedback: 'also run the verify script' })
-        .mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: the script is absent.' });
+        .mockResolvedValueOnce({ decision: 'revise', feedback: 'also run the staging check' })
+        .mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: the host is unreachable.' });
 
       const result = await new PairPipeline(pipelineConfig).run(task(), process.cwd());
 

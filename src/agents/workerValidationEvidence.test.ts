@@ -89,15 +89,15 @@ describe('testerWouldRunForWorkerResult', () => {
 });
 
 // AGT-4534: measured on a real run, a worker that executed
-// `node --test test/slug.test.mjs` through the bash tool was rejected for
+// `node --test test/strings.test.mjs` through the bash tool was rejected for
 // "zero validation commands", because the gate read only the model's
 // self-reported `commands`. Execution the adapter observed is the evidence.
 describe('missingWorkerValidationIssues with observed execution (AGT-4534)', () => {
   it('accepts a validation run the adapter observed even when the model reported none', () => {
     expect(missingWorkerValidationIssues(worker({
-      filesChanged: ['benchmarks/fixtures/pipeline-eval/src/slug.mjs'],
+      filesChanged: ['pkg/src/strings.mjs'],
       commands: [],
-      executedCommands: ['cd benchmarks/fixtures/pipeline-eval && node --test test/slug.test.mjs 2>&1 | tail -30'],
+      executedCommands: ['cd pkg && node --test test/strings.test.mjs 2>&1 | tail -30'],
     }))).toEqual([]);
   });
 

@@ -65,7 +65,7 @@ vi.mock('../support/gitTracker.js', async () => {
   return { ...actual, ...gitTracker };
 });
 
-// AGT-4534 eval base6 fabricated-green#2: iteration 1 fixed the code, the
+// AGT-4534, measured on a real run: iteration 1 fixed the code, the
 // reviewer asked only for a better report, iteration 2 supplied it without a
 // new edit and was failed for "no changed files". Every iteration now gets
 // the tree the run started from, so earlier iterations' edits still count.
@@ -79,7 +79,7 @@ describe('PairPipeline run-start snapshot', () => {
     },
   };
   const task = (): TaskItem => ({
-    id: 'task-1', source: 'linear', title: 'confirm clamp', description: 'summarise',
+    id: 'task-1', source: 'linear', title: 'confirm bounds', description: 'summarise',
     priority: 1, createdAt: Date.now(), estimatedMinutes: 60,
   });
 
@@ -88,7 +88,7 @@ describe('PairPipeline run-start snapshot', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     getDefaultModel.mockResolvedValue('m');
-    runWorker.mockResolvedValue({ success: true, summary: 'done', filesChanged: ['src/clamp.mjs'], commands: ['node --test'], output: '', confidencePercent: 100 });
+    runWorker.mockResolvedValue({ success: true, summary: 'done', filesChanged: ['src/bounds.mjs'], commands: ['node --test'], output: '', confidencePercent: 100 });
     runReviewer
       .mockResolvedValueOnce({ decision: 'revise', feedback: 'fix is right; add the summary' })
       .mockResolvedValue({ decision: 'approve', feedback: 'ok' });

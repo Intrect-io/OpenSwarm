@@ -6,8 +6,8 @@
 // written (e.g. its definition of done is self-contradictory) instead of
 // paging the operator over a scope debate. The pipeline used to treat that
 // stop like any failed attempt and retry it: measured on a real run
-// (AGT-4534 eval base3), a precise, correct "range(1,3) is asserted to equal
-// both [1,2,3] and [1,2]" was retried twice with raised effort.
+// (AGT-4534), a precise, correct report that two tests assert contradictory
+// results for the same call was retried twice with raised effort.
 //
 // This turns the claim into one bounded exchange instead: the reviewer
 // verifies the claim against the repository. Confirmed, the run stops for the
@@ -33,10 +33,10 @@ export interface WorkerBlockerClaim {
 /**
  * The worker's claim that the task cannot be completed as written, or
  * undefined. A stop that states a reason qualifies, with or without edits: a
- * worker that fixed the code and then stopped on a DoD item that cannot run
- * (AGT-4534 eval base5: a verify script that exists in no commit) is making
- * the same claim about the rest of the task. An adapter/infrastructure error
- * is not a claim about the task.
+ * worker that changed files and then stopped on part of the task is making
+ * the same kind of claim about the rest of it, and the reviewer judges it the
+ * same way (AGT-4534). An adapter/infrastructure error is not a claim about
+ * the task.
  */
 export function workerBlockerClaim(result: WorkerResult): WorkerBlockerClaim | undefined {
   if (result.success || result.error) return undefined;

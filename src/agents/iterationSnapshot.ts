@@ -128,7 +128,7 @@ export async function discardSnapshots(state: IterationSnapshotState | undefined
  * Each worker invocation diffs against its own snapshot, so an iteration that
  * only answers a review (the fix already made by an earlier iteration) looked
  * like it changed nothing and failed the run with accepted work in the tree
- * (AGT-4534 eval base6). Unlike the rollback snapshots this is the repository's
+ * (AGT-4534). Unlike the rollback snapshots this is the repository's
  * own Git tree, the one the worker's snapshot is compared in. Without it the
  * worker behaves as before.
  */
