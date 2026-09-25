@@ -302,6 +302,9 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
 
     const callApi = async (messages: ChatMessage[], tools: ToolDefinition[]) => {
       const throttle: ThrottleState = { attempts: 0 };
+      // One deadline per call, shared by every retry: a retried request must
+      // not restart the clock the caller set.
+      const deadline = abortSignalWithDeadline(options.signal, timeoutMs);
       const body: Record<string, unknown> = {
         model,
         messages,
@@ -317,7 +320,6 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
         // retried, rather than holding the stage until its whole budget runs out.
         const idleMs = this.options.streamIdleMs ?? OLLAMA_CLOUD_STREAM_IDLE_MS;
         const guard = createStallGuard(idleMs);
-        const deadline = abortSignalWithDeadline(options.signal, timeoutMs);
         const signal = deadline ? AbortSignal.any([deadline, guard.signal]) : guard.signal;
         const retryStall = async (err: unknown): Promise<ChatCompletionLike | undefined> => {
           const failure = guard.stalled() ? new StreamStallError(idleMs) : err;
@@ -345,6 +347,7 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
+          guard.clear();
           if (await resolveLimitResponse('ollama-cloud', res.status, res.headers, errText, throttle, { signal: options.signal }) === 'retry') {
             return attempt();
           }
@@ -352,7 +355,6 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
           if (await resolveTransientFailure('ollama-cloud', { status: res.status }, throttle, { signal: options.signal }) === 'retry') {
             return attempt();
           }
-          guard.clear();
           throw new Error(`Ollama Cloud API error (${res.status}): ${errText.slice(0, 500)}`);
         }
 

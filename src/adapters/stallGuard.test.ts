@@ -25,3 +25,17 @@ describe('createStallGuard', () => {
     expect(guard.signal.aborted).toBe(false);
   });
 });
+
+describe('StreamStallError classification', () => {
+  it('is an infrastructure error once retries are exhausted, as the timeout it replaces was', async () => {
+    const { isInfraError } = await import('./errorClassification.js');
+    expect(isInfraError(new StreamStallError(180_000))).toBe(true);
+  });
+});
+
+describe('StreamStallError as a timeout', () => {
+  it('is reported as a timeout, like the deadline abort it replaces', async () => {
+    const { isTimeoutError } = await import('./errorClassification.js');
+    expect(isTimeoutError(new StreamStallError(180_000))).toBe(true);
+  });
+});
