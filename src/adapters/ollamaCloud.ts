@@ -110,6 +110,9 @@ export interface OllamaCloudAdapterOptions {
  */
 export const OLLAMA_CLOUD_STREAM_IDLE_MS = 180_000;
 
+/** Per-request generation ceiling, reasoning included. */
+export const OLLAMA_CLOUD_MAX_TOKENS = 16_384;
+
 /** How one call reaches Ollama Cloud, resolved from options and the environment. */
 export type OllamaCloudRoute =
   | { transport: 'direct'; baseUrl: string; apiKey?: string }
@@ -172,6 +175,8 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
       // class. The local server holds its own sign-in and gets no key.
       apiKey: undefined,
       logPrefix: 'Ollama Cloud',
+      // The local route serves the same reasoning models (AGT-4534).
+      maxTokens: OLLAMA_CLOUD_MAX_TOKENS,
       noServerMessage: 'No local Ollama server found. Start Ollama (or `ollama signin`) first, or set OLLAMA_API_KEY for direct cloud access.',
     });
     this.options = options;
@@ -309,6 +314,11 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
         model,
         messages,
         temperature: 0.2,
+        // Same ceiling as atlascloud/openrouter. Reasoning models stream their
+        // thinking as `reasoning` deltas, which keep the stall guard satisfied;
+        // without a cap a runaway think never ends (AGT-4534, run base4).
+        // Ollama counts reasoning against it (finish_reason=length).
+        max_tokens: OLLAMA_CLOUD_MAX_TOKENS,
         stream: true,
         stream_options: { include_usage: true },
       };
