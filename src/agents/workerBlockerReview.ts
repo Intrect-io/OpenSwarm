@@ -39,6 +39,9 @@ export function workerBlockerClaim(result: WorkerResult): string | undefined {
   return reason;
 }
 
+const PARK_REASON_PART_MAX = 600;
+const clip = (text: string) => (text.length > PARK_REASON_PART_MAX ? `${text.slice(0, PARK_REASON_PART_MAX)}…` : text);
+
 /** Stop reasons that describe the run's limits rather than the task. */
 const RUN_LIMIT_REASON = /rate.?limit|quota|\b429\b|timed?.?out|timeout|turn.?limit|max(?:imum)?.?turns|context.?(?:length|window)|budget/i;
 
@@ -85,7 +88,8 @@ export async function reviewWorkerBlocker(
   agentPair.saveReviewerResult(context.session.id, verdict);
   context.blockerReview = verdict;
   if (verdict.decision === 'approve') {
-    const reason = `Worker stopped without edits and the reviewer confirmed why. Worker: ${claim} — Reviewer: ${verdict.feedback}`;
+    // Bounded: the reason is posted to the tracker and the operator's channel.
+    const reason = `Worker stopped without edits and the reviewer confirmed why. Worker: ${clip(claim)} — Reviewer: ${clip(verdict.feedback)}`;
     safeConsole.log(`[${prefix}] Worker blocker confirmed by reviewer — stopping for the operator`);
     context.verifiedBlocker = reason;
     context.workerResult = { ...failedWorker, haltReason: reason };

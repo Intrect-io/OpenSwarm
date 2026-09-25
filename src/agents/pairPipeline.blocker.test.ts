@@ -138,6 +138,7 @@ describe('PairPipeline worker blocker claims', () => {
       expect(result.operatorPark?.code).toBe('verified_worker_blocker');
       expect(result.operatorPark?.reason).toContain('DoD unsatisfiable');
       expect(result.operatorPark?.reason).toContain('Confirmed: test/range.test.mjs:7');
+      expect(result.operatorPark!.reason.length).toBeLessThan(1400);
     });
 
     it('sends a refuted blocker back to the worker as review feedback', async () => {
