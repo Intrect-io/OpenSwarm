@@ -28,7 +28,7 @@ import {
 } from '../coordination/routingPolicy.js';
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
-import { acceptWorkerPaths, noteRejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
+import { acceptWorkerPaths, noteRejectedWorkerPaths, rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 
 // Types
 
@@ -65,6 +65,13 @@ export interface WorkerOptions {
   fileScope?: string[];
   /** Task-owned files restored from preserveWorktree WIP commits. */
   resumedTaskFiles?: string[];
+  /**
+   * Git tree snapshot taken when the pipeline run started. Files that still
+   * differ from it were changed by an earlier iteration of this run and count
+   * as this task's changes even when this iteration edits nothing — e.g. it
+   * only answers a review that asked for a better report (AGT-4534).
+   */
+  runSnapshotHash?: string;
   /** bash tool timeout in ms — raise for slow verification such as docker-based tests */
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */
@@ -459,7 +466,18 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       // correctly filter them.
       const resumedTaskFiles = (options.resumedTaskFiles ?? [])
         .filter((file) => file !== '.openswarm-preserved' && !isEphemeralWorkerArtifact(file));
-      const gitChangedFiles = [...new Set([...resumedTaskFiles, ...freshChangedFiles])];
+      // Earlier iterations' edits count only if their fence accepted them. A
+      // rejected write stays on disk without being touched again, so it would
+      // otherwise be credited here with no fence check at all; it is left to
+      // the preserve commit, which drops it (rejectedWorkerPaths, AGT-4440).
+      const rejectedEarlier = new Set(rejectedWorkerPaths(cwd));
+      const runChangedFiles = options.runSnapshotHash && options.runSnapshotHash !== snapshotHash
+        ? (await gitTracker.getChangedFilesSinceSnapshot(cwd, options.runSnapshotHash))
+          .filter((file) => file !== '.openswarm-preserved' && !isEphemeralWorkerArtifact(file))
+          .filter((file) => !rejectedEarlier.has(file))
+        : [];
+      const carriedFiles = runChangedFiles.filter((file) => !filesOutsideWriteScope([file], options.fileScope ?? []).length);
+      const gitChangedFiles = [...new Set([...resumedTaskFiles, ...carriedFiles, ...freshChangedFiles])];
 
       // Scope is an execution-time write boundary. Enforce it against edits made
       // by THIS invocation. Task-owned WIP was already preserved after a prior

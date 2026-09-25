@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const spawnCli = vi.fn(async () => ({ stdout: 'raw' }));
 const parseWorkerOutput = vi.fn();
@@ -114,5 +114,74 @@ describe('runWorker Git authority (INT-2609)', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('fresh/outside.py');
+  });
+
+  // AGT-4534 eval base6 fabricated-green#2: iteration 1 fixed clamp.mjs, the
+  // reviewer asked only for a better report, and iteration 2 supplied it
+  // without a new edit. Diffed against its own snapshot it changed nothing, so
+  // the run failed with the reviewer-accepted fix still in the tree.
+  describe('edits from earlier iterations of the same run', () => {
+    afterEach(async () => {
+      (await import('../support/rejectedWorkerPaths.js')).resetRejectedWorkerPathsForTests();
+    });
+    const snapshots = (byTree: Record<string, string[]>) =>
+      getChangedFilesSinceSnapshot.mockImplementation(async (_cwd: string, tree: string) => byTree[tree] ?? []);
+
+    it('counts files still changed since the run started', async () => {
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['tools/textkit/src/clamp.mjs'] });
+
+      const result = await runWorker({
+        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+    });
+
+    it('does not count a file an earlier iteration changed and this one reverted', async () => {
+      // Reverted: no longer differs from the run start.
+      snapshots({ 'snapshot-tree': ['tools/textkit/src/clamp.mjs'], 'run-start-tree': [] });
+
+      const result = await runWorker({
+        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
+      });
+
+      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': [] });
+      const reverted = await runWorker({
+        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
+      });
+      expect(reverted.success).toBe(false);
+      expect(reverted.zeroDiffWithoutReason).toBe(true);
+    });
+
+    it('does not credit an earlier out-of-scope write that stayed on disk', async () => {
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['tools/textkit/src/clamp.mjs', 'earlier/outside.py'] });
+
+      const result = await runWorker({
+        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
+        fileScope: ['tools/textkit/src/clamp.mjs'],
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+    });
+
+    it('does not credit a path the fence rejected on an earlier iteration', async () => {
+      const { noteRejectedWorkerPaths } = await import('../support/rejectedWorkerPaths.js');
+      noteRejectedWorkerPaths('/repo', ['tools/textkit/test/clamp.test.mjs']);
+      snapshots({ 'snapshot-tree': [], 'run-start-tree': ['tools/textkit/src/clamp.mjs', 'tools/textkit/test/clamp.test.mjs'] });
+
+      const result = await runWorker({
+        taskTitle: 'confirm clamp', taskDescription: 'summarise',
+        projectPath: '/repo', adapterName: 'gpt', runSnapshotHash: 'run-start-tree',
+      });
+
+      expect(result.filesChanged).toEqual(['tools/textkit/src/clamp.mjs']);
+    });
   });
 });
