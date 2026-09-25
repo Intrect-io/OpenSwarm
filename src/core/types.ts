@@ -126,12 +126,12 @@ export type McpConfig = {
  */
 export type SwarmConfig = {
   /** Default CLI adapter */
-  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
+  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'ollama-cloud' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
   /**
    * Adapter for `openswarm review` only. Omit to follow `adapter`.
    * See src/cli/reviewAdapter.ts. (AGT-4292)
    */
-  reviewAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
+  reviewAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'ollama-cloud' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
   /** UI language: 'en' | 'ko' (default: 'en') */
   language: 'en' | 'ko';
   /** Discord bot token */
@@ -312,7 +312,7 @@ export type ModelConfig = {
 /**
  * Per-role configuration
  */
-export type AgentAdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
+export type AgentAdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'ollama-cloud' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
 
 export type WorkerFanoutCandidateConfig = {
   /** Stable display/id for logs and scoring. */

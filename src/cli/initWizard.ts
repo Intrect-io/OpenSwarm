@@ -23,7 +23,7 @@ import { banner } from '../support/banner.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
-type ProviderId = 'codex-responses' | 'openrouter' | 'atlascloud' | 'gpt' | 'lmstudio' | 'local' | 'codex' | 'claude';
+type ProviderId = 'codex-responses' | 'openrouter' | 'atlascloud' | 'gpt' | 'lmstudio' | 'local' | 'ollama-cloud' | 'codex' | 'claude';
 type TaskBackend = 'linear' | 'local';
 type NotifyChannel = 'none' | 'discord' | 'slack' | 'telegram' | 'webhook';
 
@@ -36,6 +36,7 @@ const PROVIDER_CHOICES: { name: string; value: ProviderId; description: string }
   { name: 'claude', value: 'claude', description: 'Claude Code CLI (claude -p) — opt-in fallback' },
   { name: 'lmstudio', value: 'lmstudio', description: 'Local LM Studio server (no account)' },
   { name: 'local', value: 'local', description: 'Local Ollama models (no account)' },
+  { name: 'ollama-cloud', value: 'ollama-cloud', description: 'Ollama cloud models (signed-in local server, or OLLAMA_API_KEY)' },
 ];
 
 const NOTIFY_CHOICES: { name: string; value: NotifyChannel; description: string }[] = [
@@ -126,8 +127,12 @@ async function bootstrapProvider(
     console.log('   `codex` not found. Install the OpenAI Codex CLI and ensure `codex` is on PATH.');
     return { doAuthNow: false, plan: null };
   }
-  if (provider === 'lmstudio' || provider === 'local') {
-    console.log(`   No ${provider} server detected — start it (LM Studio :1234 / Ollama :11434) before running.`);
+  if (provider === 'lmstudio' || provider === 'local' || provider === 'ollama-cloud') {
+    console.log(
+      provider === 'ollama-cloud'
+        ? '   No Ollama server detected — sign in to the Ollama app/CLI (or set OLLAMA_API_KEY for direct cloud access) before running.'
+        : `   No ${provider} server detected — start it (LM Studio :1234 / Ollama :11434) before running.`,
+    );
     return { doAuthNow: false, plan: null };
   }
 

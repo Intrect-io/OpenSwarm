@@ -31,6 +31,7 @@ export function resolveEditFormat(adapterName: string | undefined): EditFormat {
   switch (adapterName) {
     case 'local':
     case 'lmstudio':
+    case 'ollama-cloud':
     case 'openrouter':
       return 'search-replace';
     default:

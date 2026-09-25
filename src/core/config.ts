@@ -401,7 +401,7 @@ const AutonomousConfigSchema = z.object({
     // primary — a policy whose primary the schema rejects cannot match the
     // running adapter, which silently disables routing (README documents the
     // equality requirement).
-    primary: z.enum(['codex', 'codex-responses', 'cc-router', 'cursor', 'gpt', 'openrouter', 'atlascloud', 'lmstudio', 'local', 'claude']).default('codex'),
+    primary: z.enum(['codex', 'codex-responses', 'cc-router', 'cursor', 'gpt', 'openrouter', 'atlascloud', 'lmstudio', 'local', 'ollama-cloud', 'claude']).default('codex'),
     fallbacks: z.array(z.enum(['cc-router', 'cursor', 'codex', 'codex-responses'])).default(['cc-router', 'cursor']),
     allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
   }).optional(),
@@ -940,12 +940,14 @@ export function generateSampleConfig(): string {
 # Environment variables use \${VAR_NAME} or \${VAR_NAME:-default} format
 
 # Default CLI adapter for worker/reviewer stages
-# Options: codex, openrouter, atlascloud, lmstudio, local, gpt
+# Options: codex, openrouter, atlascloud, lmstudio, local, ollama-cloud, gpt
 # - codex:      OpenAI Codex via PKCE login (openswarm auth login --provider codex)
 # - openrouter: OpenRouter API key (OPENROUTER_API_KEY env var or openswarm auth login --provider openrouter)
 # - atlascloud: Atlas Cloud API key (ATLASCLOUD_API_KEY env var)
 # - lmstudio:   LM Studio local server (set LMSTUDIO_BASE_URL / LMSTUDIO_MODEL)
 # - local:      Ollama local models (ollama pull <model>)
+# - ollama-cloud: Ollama cloud models (signed-in local Ollama server, or set OLLAMA_API_KEY
+#               for direct https://ollama.com access; OLLAMA_CLOUD_MODEL overrides the model)
 # - gpt:        OpenAI Chat API via OAuth (openswarm auth login --provider gpt)
 adapter: codex
 

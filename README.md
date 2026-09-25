@@ -335,6 +335,7 @@ adapter: codex   # codex · codex-responses · cc-router · cursor · gpt · ope
 | `atlascloud` | Atlas Cloud API (native agentic loop) · [sponsor](#sponsors) | Atlas models — deepseek-v4-pro (default), qwen3.5-flash, … | `ATLASCLOUD_API_KEY` |
 | `lmstudio` | LM Studio (OpenAI-compatible, local) | loaded LM Studio model (`LMSTUDIO_MODEL`) | None |
 | `local` | Ollama (local, auto-detected) | gemma, llama, qwen, mistral, … | None |
+| `ollama-cloud` | Ollama cloud models (native agentic loop) — via a signed-in local server, or direct `ollama.com` with a key | deepseek-v4.1-flash (default), glm-5.3, kimi-k2.6, minimax-m3, gemma4:31b | Local Ollama sign-in, or `OLLAMA_API_KEY` |
 
 > **Claude Code (`claude -p`)** is supported as an **opt-in fallback** (and powers the `claude -p` chat path) — install the `claude` CLI and authenticate it; `openswarm init` and `openswarm doctor` detect it. It is a valid `adapter:` value, but opt-in: nothing falls back to it automatically. Switch to it when another provider runs out of quota with `openswarm provider claude`.
 
@@ -348,6 +349,8 @@ reviewAdapter: openrouter     # what `openswarm review` and `openswarm review --
 Review is a second opinion, so running it on the provider that wrote the code is a correlated failure — and that provider's quota is the one already spent. `reviewAdapter` sets the reviewer's adapter for `openswarm review` (working-tree and `--base` diffs) and for `openswarm review --max` (the batch audit, including its fix/verify rounds and the claude fallback decision). Precedence: `--adapter` flag → `OPENSWARM_REVIEW_ADAPTER` → `reviewAdapter` → `adapter`; both commands print the winning source under `--debug` (`Reviewer adapter: openrouter (config.reviewAdapter)`). Omit it to review on `adapter`.
 
 The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edit/bash with verification guards), enables ZDR (`data_collection: deny`) for non-OpenAI models, and applies Anthropic prompt caching automatically. Local backends are auto-detected on standard ports (Ollama `:11434`, LM Studio `:1234`); use `lmstudio` for a dedicated LM Studio endpoint (`LMSTUDIO_BASE_URL`, default `http://localhost:1234`).
+
+`ollama-cloud` reaches Ollama's cloud models over whichever transport you have. With no key set it uses the **local server at `:11434`**, which proxies cloud models under its own `ollama signin` — so no API key is needed. Set `OLLAMA_API_KEY` (and leave `OLLAMA_CLOUD_BASE_URL` unset) to call `https://ollama.com` directly instead. The two transports disagree about model ids: the direct API takes `deepseek-v4.1-flash`, while the local server requires `deepseek-v4.1-flash:cloud`; the adapter spells the id for the transport in use, so either form is accepted as configuration. `OLLAMA_CLOUD_MODEL` overrides the default. Note that cloud models are deliberately absent from the local server's model list, which is why the adapter carries its own curated list.
 
 ### Autonomous coordination and supervision
 

@@ -20,6 +20,7 @@ export { CodexResponsesAdapter } from './codexResponses.js';
 export { GptCliAdapter } from './gpt.js';
 export { LocalModelAdapter } from './local.js';
 export { LmStudioAdapter } from './lmstudio.js';
+export { OllamaCloudAdapter } from './ollamaCloud.js';
 export { OpenRouterCliAdapter } from './openrouter.js';
 export { AtlasCloudCliAdapter } from './atlascloud.js';
 export { ClaudeCliAdapter } from './claude.js';
@@ -39,6 +40,7 @@ import { CodexResponsesAdapter } from './codexResponses.js';
 import { GptCliAdapter } from './gpt.js';
 import { LocalModelAdapter } from './local.js';
 import { LmStudioAdapter } from './lmstudio.js';
+import { OllamaCloudAdapter } from './ollamaCloud.js';
 import { OpenRouterCliAdapter } from './openrouter.js';
 import { AtlasCloudCliAdapter } from './atlascloud.js';
 import { ClaudeCliAdapter } from './claude.js';
@@ -53,6 +55,7 @@ const adapters: Record<string, CliAdapter> = {
   gpt: new GptCliAdapter(),
   local: new LocalModelAdapter(),
   lmstudio: new LmStudioAdapter(),
+  'ollama-cloud': new OllamaCloudAdapter(),
   openrouter: new OpenRouterCliAdapter(),
   atlascloud: new AtlasCloudCliAdapter(),
   // claude -p CLI delegate — opt-in fallback (Anthropic hasn't blocked it). Offered

@@ -176,6 +176,28 @@ describe('mapModelForProvider', () => {
     expect(mapModelForProvider('gpt', 'gpt-5.5')).toBeUndefined();
   });
 
+  // `ollama-cloud` ids are BARE, so the generic "namespaced ids may carry over"
+  // rule that closes this function would accept a foreign `vendor/model` id and
+  // send it to ollama.com, which serves no such namespace. Measured 2026-09-23:
+  // the transport 404s on ids it does not have, so carrying one over is a run
+  // that dies at the first API call rather than falling back to its default.
+  it('ollama-cloud keeps its own ids, drops foreign namespaced ids', () => {
+    expect(mapModelForProvider('ollama-cloud', 'deepseek-v4.1-flash')).toBe('deepseek-v4.1-flash');
+    expect(mapModelForProvider('ollama-cloud', 'gemma4:31b')).toBe('gemma4:31b');
+    expect(mapModelForProvider('ollama-cloud', 'deepseek-v4.1-flash:cloud')).toBe('deepseek-v4.1-flash:cloud');
+    // The leak this branch exists to stop:
+    expect(mapModelForProvider('ollama-cloud', 'openai/gpt-5')).toBeUndefined();
+    expect(mapModelForProvider('ollama-cloud', 'atlascloud/llama-4')).toBeUndefined();
+    expect(mapModelForProvider('ollama-cloud', 'z-ai/glm-4.7-flash')).toBeUndefined();
+    expect(mapModelForProvider('ollama-cloud', 'gpt-5.5')).toBeUndefined();
+  });
+
+  it('ollama-cloud accepts an id only its live catalogue knows', () => {
+    vi.mocked(readCachedCatalog).mockReturnValue({ models: ['some-new-cloud-model'], fetchedAt: Date.now() } as never);
+    expect(mapModelForProvider('ollama-cloud', 'some-new-cloud-model')).toBe('some-new-cloud-model');
+    expect(mapModelForProvider('ollama-cloud', 'some-new-cloud-model:cloud')).toBe('some-new-cloud-model:cloud');
+  });
+
   // Was 'cursor adapter passes everything through', asserting these three ids
   // came back unchanged. The property worth keeping is the one below — cursor
   // never drops a model, because it has no useful default to drop to. Echoing
