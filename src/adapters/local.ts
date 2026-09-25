@@ -39,6 +39,8 @@ export interface LocalModelAdapterOptions {
   apiKey?: string;
   logPrefix?: string;
   noServerMessage?: string;
+  /** Per-request generation ceiling; unset leaves the server default (AGT-4534). */
+  maxTokens?: number;
 }
 
 export class LocalModelAdapter implements CliAdapter {
@@ -63,6 +65,7 @@ export class LocalModelAdapter implements CliAdapter {
   private readonly apiKey?: string;
   private readonly logPrefix: string;
   private readonly noServerMessage: string;
+  private readonly maxTokens?: number;
 
   constructor(options: LocalModelAdapterOptions = {}) {
     this.name = options.name ?? 'local';
@@ -71,6 +74,7 @@ export class LocalModelAdapter implements CliAdapter {
     this.apiKey = options.apiKey;
     this.logPrefix = options.logPrefix ?? 'Local';
     this.noServerMessage = options.noServerMessage ?? 'No local model server found. Start Ollama, LMStudio, or llama.cpp server first.';
+    this.maxTokens = options.maxTokens;
   }
 
   /** config.yaml에서 baseUrl을 주입받을 때 사용 */
@@ -293,6 +297,7 @@ export class LocalModelAdapter implements CliAdapter {
         temperature: 0.2,
         stream: true,
         stream_options: { include_usage: true },
+        ...(this.maxTokens ? { max_tokens: this.maxTokens } : {}),
       };
       if (tools.length > 0) {
         body.tools = tools;

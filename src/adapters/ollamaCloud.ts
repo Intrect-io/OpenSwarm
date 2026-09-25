@@ -175,6 +175,8 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
       // class. The local server holds its own sign-in and gets no key.
       apiKey: undefined,
       logPrefix: 'Ollama Cloud',
+      // The local route serves the same reasoning models (AGT-4534).
+      maxTokens: OLLAMA_CLOUD_MAX_TOKENS,
       noServerMessage: 'No local Ollama server found. Start Ollama (or `ollama signin`) first, or set OLLAMA_API_KEY for direct cloud access.',
     });
     this.options = options;

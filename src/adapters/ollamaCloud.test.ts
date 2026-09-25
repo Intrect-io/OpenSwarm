@@ -442,4 +442,25 @@ describe('OllamaCloudAdapter', () => {
     await new OllamaCloudAdapter().run({ prompt: 'x', cwd: process.cwd(), model: 'deepseek-v4.1-flash', enableTools: false, maxTurns: 1 });
     expect(bodies[0]?.max_tokens).toBe(16384);
   });
+
+  it('caps generation length on the local transport too', async () => {
+    delete process.env.OLLAMA_API_KEY;
+    process.env.OLLAMA_CLOUD_BASE_URL = 'http://127.0.0.1:11434';
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/chat/completions')) bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        'data: {"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n\n' + 'data: [DONE]\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      );
+    }));
+    const adapter = new OllamaCloudAdapter();
+    await adapter.isAvailable();
+    await adapter.run({ prompt: 'x', cwd: process.cwd(), model: 'deepseek-v4.1-flash', enableTools: false, maxTurns: 1 });
+    // The first request is the adapter's 1-token tool-support probe; the chat
+    // request is the streamed one.
+    const chat = bodies.filter((body) => body.stream === true);
+    expect(chat.length).toBeGreaterThan(0);
+    expect(chat.every((body) => body.max_tokens === 16384)).toBe(true);
+  });
 });
