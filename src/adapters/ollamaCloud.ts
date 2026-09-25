@@ -33,11 +33,11 @@ import { resolveMcpTools } from '../mcp/mcpClient.js';
 import type { ToolDefinition } from './tools.js';
 import { consumeChatCompletionsStream, type ChatCompletionLike } from './chatStream.js';
 import { RateLimitError } from './rateLimitError.js';
-import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
+import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import { adapterFetch } from './httpDispatcher.js';
-import { parseOpenAiModelList } from './modelCatalog.js';
+import { parseOpenAiModelList, writeCachedCatalog } from './modelCatalog.js';
 
 export const OLLAMA_CLOUD_DIRECT_BASE_URL = 'https://ollama.com';
 export const OLLAMA_CLOUD_LOCAL_BASE_URL = 'http://127.0.0.1:11434';
@@ -60,7 +60,7 @@ export const OLLAMA_CLOUD_CURATED_MODELS = [
 
 export const OLLAMA_CLOUD_DEFAULT_MODEL = OLLAMA_CLOUD_CURATED_MODELS[0];
 
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 /** Availability and model listing are advisory metadata; neither may stall a run. */
 const AVAILABILITY_TIMEOUT_MS = 10_000;
@@ -86,11 +86,6 @@ export function toDirectTransportModel(id: string): string {
   return id.trim().replace(/[-:]cloud$/, '');
 }
 
-function envValue(name: string): string | undefined {
-  const trimmed = process.env[name]?.trim();
-  return trimmed ? trimmed : undefined;
-}
-
 function isLoopback(baseUrl: string): boolean {
   try {
     return LOOPBACK_HOSTS.has(new URL(baseUrl).hostname);
@@ -106,121 +101,170 @@ export interface OllamaCloudAdapterOptions {
   model?: string;
 }
 
+/** How one call reaches Ollama Cloud, resolved from options and the environment. */
+export type OllamaCloudRoute =
+  | { transport: 'direct'; baseUrl: string; apiKey?: string }
+  | { transport: 'local'; baseUrl: string }
+  | { transport: 'refused'; baseUrl: string; reason: string };
+
+/**
+ * Pick the transport for one call.
+ *
+ * Read per call, not at construction: the adapter registry is built when its
+ * module is imported, before the CLI loads `.env`, so a key kept only in `.env`
+ * would otherwise never be seen.
+ *
+ * A base URL override may only name a loopback server (local transport) or
+ * ollama.com itself. Anything else is refused outright: the key must never be
+ * sent to a host the user did not mean as Ollama Cloud, and a chat request must
+ * never silently go somewhere other than the URL the user configured.
+ */
+export function resolveOllamaCloudRoute(
+  options: OllamaCloudAdapterOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): OllamaCloudRoute {
+  const read = (name: string) => env[name]?.trim() || undefined;
+  const override = options.baseUrl ?? read('OLLAMA_CLOUD_BASE_URL');
+  const apiKey = options.apiKey ?? read('OLLAMA_API_KEY');
+  if (!override) {
+    return apiKey
+      ? { transport: 'direct', baseUrl: OLLAMA_CLOUD_DIRECT_BASE_URL, apiKey }
+      : { transport: 'local', baseUrl: OLLAMA_CLOUD_LOCAL_BASE_URL };
+  }
+  const baseUrl = override.replace(/\/+$/, '');
+  if (isLoopback(baseUrl)) return { transport: 'local', baseUrl };
+  let origin: string | undefined;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch { // cxt-ignore: error_swallow — an unparsable URL is refused below
+    origin = undefined;
+  }
+  if (origin === OLLAMA_CLOUD_DIRECT_BASE_URL) return { transport: 'direct', baseUrl: OLLAMA_CLOUD_DIRECT_BASE_URL, apiKey };
+  return {
+    transport: 'refused',
+    baseUrl,
+    reason: `OLLAMA_CLOUD_BASE_URL must be a loopback Ollama server or ${OLLAMA_CLOUD_DIRECT_BASE_URL}; refusing ${baseUrl}`,
+  };
+}
+
 export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter {
-  private readonly transport: OllamaCloudTransport;
-  private readonly explicitModel?: string;
-  private readonly directApiKey?: string;
-  private readonly endpointBaseUrl: string;
+  private readonly options: OllamaCloudAdapterOptions;
 
   constructor(options: OllamaCloudAdapterOptions = {}) {
-    const overrideBaseUrl = options.baseUrl ?? envValue('OLLAMA_CLOUD_BASE_URL');
-    const apiKey = options.apiKey ?? envValue('OLLAMA_API_KEY');
-
-    // An explicit base URL decides the transport outright; otherwise the
-    // presence of a key means the user authorized direct cloud calls.
-    const transport: OllamaCloudTransport = overrideBaseUrl
-      ? (isLoopback(overrideBaseUrl) ? 'local' : 'direct')
-      : (apiKey ? 'direct' : 'local');
-
-    const baseUrl = overrideBaseUrl ?? (transport === 'direct' ? OLLAMA_CLOUD_DIRECT_BASE_URL : OLLAMA_CLOUD_LOCAL_BASE_URL);
-
     super({
       name: 'ollama-cloud',
-      endpoints: [baseUrl.replace(/\/+$/, '')],
+      endpoints: [OLLAMA_CLOUD_LOCAL_BASE_URL],
       // Curated ids are canonical; getDefaultModel() spells them per transport.
       defaultModel: OLLAMA_CLOUD_DEFAULT_MODEL,
-      // Only the direct transport authenticates. The local server holds its own
-      // sign-in and ignores a key, so sending one would be a credential on a
-      // hop that has no use for it.
-      apiKey: transport === 'direct' ? apiKey : undefined,
+      // Only the direct path authenticates, and it never goes through the base
+      // class. The local server holds its own sign-in and gets no key.
+      apiKey: undefined,
       logPrefix: 'Ollama Cloud',
-      noServerMessage:
-        transport === 'direct'
-          ? 'Ollama Cloud is unreachable. Check OLLAMA_API_KEY, or set OLLAMA_CLOUD_BASE_URL to a local Ollama server.'
-          : 'No local Ollama server found. Start Ollama (or `ollama signin`) first, or set OLLAMA_API_KEY for direct cloud access.',
+      noServerMessage: 'No local Ollama server found. Start Ollama (or `ollama signin`) first, or set OLLAMA_API_KEY for direct cloud access.',
     });
-
-    this.transport = transport;
-    this.endpointBaseUrl = baseUrl.replace(/\/+$/, '');
-    this.directApiKey = transport === 'direct' ? apiKey : undefined;
-    this.explicitModel = options.model ?? envValue('OLLAMA_CLOUD_MODEL');
+    this.options = options;
   }
 
-  getTransport(): OllamaCloudTransport {
-    return this.transport;
+  private route(): OllamaCloudRoute {
+    return resolveOllamaCloudRoute(this.options);
   }
 
-  /**
-   * The base class records its active URL only from its own loopback probe, and
-   * the direct transport deliberately never calls that one. Resolving it from
-   * the transport keeps the accessor honest on both paths.
-   */
+  private explicitModel(): string | undefined {
+    return this.options.model ?? (process.env.OLLAMA_CLOUD_MODEL?.trim() || undefined);
+  }
+
+  /** Point the base class at the loopback server this call should use. */
+  private useLocal(route: Extract<OllamaCloudRoute, { transport: 'local' }>): void {
+    this.setBaseUrl(route.baseUrl);
+  }
+
+  getTransport(): OllamaCloudTransport | 'refused' {
+    return this.route().transport;
+  }
+
   override getActiveUrl(): string | null {
-    return this.endpointBaseUrl;
+    return this.route().baseUrl;
   }
 
   /**
    * The base class probes through `approvedLocalModelEndpoint`, which refuses
    * any non-loopback host by construction — correct for a local server, and
    * fatal here: the direct transport is exactly that refusal. So the direct
-   * probe goes through the same allowlisted egress path its chat calls use.
+   * probe goes to the fixed ollama.com origin its chat calls use.
    */
   override async isAvailable(): Promise<boolean> {
-    if (this.transport === 'local') return super.isAvailable();
-    if (!this.directApiKey) return false;
+    const route = this.route();
+    if (route.transport === 'refused') return false;
+    if (route.transport === 'local') {
+      this.useLocal(route);
+      return super.isAvailable();
+    }
+    if (!route.apiKey) return false;
     try {
-      const res = await adapterFetch(`${this.endpointBaseUrl}/v1/models`, {
-        headers: { Authorization: `Bearer ${this.directApiKey}` },
+      const res = await adapterFetch(`${OLLAMA_CLOUD_DIRECT_BASE_URL}/v1/models`, {
+        headers: { Authorization: `Bearer ${route.apiKey}` },
         signal: AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS),
       });
       return res.ok;
-    } catch {
+    } catch { // cxt-ignore: error_swallow — unreachable is exactly "not available"
       return false;
     }
   }
 
   /** Curated ids, plus whatever the active transport reports. */
   override async listModels(): Promise<string[]> {
-    const live = this.transport === 'local' ? await super.listModels() : await this.listDirectModels();
+    const route = this.route();
+    let live: string[] = [];
+    if (route.transport === 'local') {
+      this.useLocal(route);
+      live = await super.listModels();
+    } else if (route.transport === 'direct') {
+      live = await this.listDirectModels(route.apiKey);
+    }
     // Local discovery returns [] for cloud models; the curated list carries them.
     return Array.from(new Set([...OLLAMA_CLOUD_CURATED_MODELS, ...live]));
   }
 
-  /** `/v1/models` is the same route on both transports; only auth differs. */
-  private async listDirectModels(): Promise<string[]> {
-    if (!this.directApiKey) return [];
+  /**
+   * The live catalogue, cached so the provider-switch guard (modelCompat) can
+   * accept every id the service actually serves, not only the curated five.
+   */
+  private async listDirectModels(apiKey: string | undefined): Promise<string[]> {
+    if (!apiKey) return [];
     try {
-      const res = await adapterFetch(`${this.endpointBaseUrl}/v1/models`, {
-        headers: { Authorization: `Bearer ${this.directApiKey}` },
+      const res = await adapterFetch(`${OLLAMA_CLOUD_DIRECT_BASE_URL}/v1/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(AVAILABILITY_TIMEOUT_MS),
       });
       if (!res.ok) return [];
-      return parseOpenAiModelList(await res.json());
-    } catch {
+      const ids = parseOpenAiModelList(await res.json());
+      if (ids.length > 0) writeCachedCatalog('ollama-cloud', ids);
+      return ids;
+    } catch { // cxt-ignore: error_swallow — listing is advisory metadata
       return [];
     }
   }
 
+  /**
+   * The explicit model, else the curated default — never "whichever cloud model
+   * a server happens to list first", which would silently change the model.
+   */
   override async getDefaultModel(): Promise<string> {
-    if (this.explicitModel) return this.spellForTransport(this.explicitModel);
-    // Resolution goes through the provider catalogue when the transport can
-    // list one (direct can; local cannot), and through the curated list when it
-    // cannot — never to the base class's `gemma3:4b`, which this transport
-    // rejects.
-    const live = (await super.listModels()).filter((id) => this.isCloudModel(id));
-    const preferred = live[0] ?? OLLAMA_CLOUD_DEFAULT_MODEL;
-    return this.spellForTransport(preferred);
+    const route = this.route();
+    return this.spellFor(route, this.explicitModel() ?? OLLAMA_CLOUD_DEFAULT_MODEL);
   }
 
   override async run(options: CliRunOptions): Promise<CliRunResult> {
-    if (this.transport === 'local') {
-      const requested = options.model ?? this.explicitModel;
-      return super.run({
-        ...options,
-        model: requested ? toLocalTransportModel(requested) : await this.getDefaultModel(),
-      });
+    const route = this.route();
+    if (route.transport === 'refused') {
+      return { exitCode: 1, stdout: '', stderr: `Config error: ${route.reason}`, durationMs: 0 };
     }
-    return this.runDirect(options);
+    if (route.transport === 'local') {
+      this.useLocal(route);
+      const requested = options.model ?? this.explicitModel() ?? OLLAMA_CLOUD_DEFAULT_MODEL;
+      return super.run({ ...options, model: toLocalTransportModel(requested) });
+    }
+    return this.runDirect(options, route.apiKey);
   }
 
   /**
@@ -228,10 +272,10 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
    * the base class's request builder — that one refuses any non-loopback host
    * by design (support/approvedEgress.ts).
    */
-  private async runDirect(options: CliRunOptions): Promise<CliRunResult> {
+  private async runDirect(options: CliRunOptions, directApiKey: string | undefined): Promise<CliRunResult> {
     const startTime = Date.now();
 
-    if (!this.directApiKey) {
+    if (!directApiKey) {
       return {
         exitCode: 1,
         stdout: '',
@@ -240,8 +284,8 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
       };
     }
 
-    const model = toDirectTransportModel(options.model ?? this.explicitModel ?? OLLAMA_CLOUD_DEFAULT_MODEL);
-    const apiKey = this.directApiKey;
+    const model = toDirectTransportModel(options.model ?? this.explicitModel() ?? OLLAMA_CLOUD_DEFAULT_MODEL);
+    const apiKey = directApiKey;
     const timeoutMs = options.timeoutMs ?? 300000;
 
     const callApi = async (messages: ChatMessage[], tools: ToolDefinition[]) => {
@@ -257,16 +301,29 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
 
       const attempt = async (): Promise<ChatCompletionLike> => {
         const request = prepareApprovedModelRequest(OLLAMA_CLOUD_CHAT_ENDPOINT, body);
-        const res = await adapterFetch(request.url, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-          body: request.body,
-          signal: abortSignalWithDeadline(options.signal, timeoutMs),
-        });
+        let res: Response;
+        try {
+          res = await adapterFetch(request.url, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+            body: request.body,
+            signal: abortSignalWithDeadline(options.signal, timeoutMs),
+          });
+        } catch (err) {
+          // Dropped socket before any response: bounded in-place retry, as atlascloud.
+          if (await resolveTransientFailure('ollama-cloud', { error: err }, throttle, { signal: options.signal }) === 'retry') {
+            return attempt();
+          }
+          throw err;
+        }
 
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
           if (await resolveLimitResponse('ollama-cloud', res.status, res.headers, errText, throttle, { signal: options.signal }) === 'retry') {
+            return attempt();
+          }
+          // 5xx: upstream blip, bounded retry before it becomes a task failure.
+          if (await resolveTransientFailure('ollama-cloud', { status: res.status }, throttle, { signal: options.signal }) === 'retry') {
             return attempt();
           }
           throw new Error(`Ollama Cloud API error (${res.status}): ${errText.slice(0, 500)}`);
@@ -332,12 +389,7 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
     }
   }
 
-  private spellForTransport(id: string): string {
-    return this.transport === 'local' ? toLocalTransportModel(id) : toDirectTransportModel(id);
-  }
-
-  /** Cloud ids arrive tagless or with a tag; a `:cloud` suffix is ours, not theirs. */
-  private isCloudModel(id: string): boolean {
-    return id.endsWith(':cloud') || id.endsWith('-cloud') || OLLAMA_CLOUD_CURATED_MODELS.includes(id);
+  private spellFor(route: OllamaCloudRoute, id: string): string {
+    return route.transport === 'local' ? toLocalTransportModel(id) : toDirectTransportModel(id);
   }
 }

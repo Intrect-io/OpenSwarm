@@ -50,7 +50,7 @@ describe('Ollama Cloud model-id contract', () => {
     expect(toLocalTransportModel('deepseek-v4.1-flash')).toBe('deepseek-v4.1-flash:cloud');
   });
 
-  it('accepts a bare :cloud suffix and normalizes it to -cloud', () => {
+  it('keeps an already cloud-spelled id as given', () => {
     expect(toLocalTransportModel('gemma4:cloud')).toBe('gemma4:cloud');
     expect(toLocalTransportModel('gemma4:31b-cloud')).toBe('gemma4:31b-cloud');
   });
@@ -239,5 +239,118 @@ describe('OllamaCloudAdapter', () => {
 
     const adapter = new OllamaCloudAdapter();
     await expect(adapter.isAvailable()).resolves.toBe(false);
+  });
+
+  // Independent review of the adapter (AGT-4512).
+  it('reads the key at call time, so a key loaded from .env after import is used', async () => {
+    delete process.env.OLLAMA_API_KEY;
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    const adapter = new OllamaCloudAdapter();
+    // The CLI loads .env after the adapter registry is built.
+    process.env.OLLAMA_API_KEY = 'late-key';
+    const calls: Array<{ url: string; auth?: string }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), auth: (init?.headers as Record<string, string> | undefined)?.Authorization });
+      return new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 });
+    }));
+    expect(adapter.getTransport()).toBe('direct');
+    await expect(adapter.isAvailable()).resolves.toBe(true);
+    expect(calls[0]).toEqual({ url: `${OLLAMA_CLOUD_DIRECT_BASE_URL}/v1/models`, auth: 'Bearer late-key' });
+  });
+
+  it('refuses a non-loopback base URL other than ollama.com and never sends it the key', async () => {
+    process.env.OLLAMA_API_KEY = 'secret-key';
+    process.env.OLLAMA_CLOUD_BASE_URL = 'http://192.168.1.10:11434';
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new OllamaCloudAdapter();
+    await expect(adapter.isAvailable()).resolves.toBe(false);
+    const result = await adapter.run({ prompt: 'x', cwd: process.cwd(), enableTools: false, maxTurns: 1 });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('OLLAMA_CLOUD_BASE_URL');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('treats a bracketed IPv6 loopback base URL as the local transport', () => {
+    process.env.OLLAMA_API_KEY = 'secret-key';
+    process.env.OLLAMA_CLOUD_BASE_URL = 'http://[::1]:11434';
+    expect(new OllamaCloudAdapter().getTransport()).toBe('local');
+  });
+
+  it('retries a transient 5xx on the direct transport and sends the plain id to the chat endpoint', async () => {
+    process.env.OLLAMA_API_KEY = 'test-key';
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    const chat: Array<{ url: string; model?: string }> = [];
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/chat/completions')) {
+        chat.push({ url: String(url), model: (JSON.parse(String(init?.body)) as { model?: string }).model });
+        calls += 1;
+        if (calls === 1) return new Response('bad gateway', { status: 502 });
+        return new Response(
+          'data: {"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n\n' + 'data: [DONE]\n',
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        );
+      }
+      return new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 });
+    }));
+    const result = await new OllamaCloudAdapter().run({
+      prompt: 'say ok', cwd: process.cwd(), model: 'deepseek-v4.1-flash:cloud', enableTools: false, maxTurns: 1,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(chat).toHaveLength(2);
+    expect(chat[1]).toEqual({ url: 'https://ollama.com/v1/chat/completions', model: 'deepseek-v4.1-flash' });
+  }, 30_000);
+
+  it('defaults to the curated model, not whichever cloud model a server lists first', async () => {
+    delete process.env.OLLAMA_API_KEY;
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    delete process.env.OLLAMA_CLOUD_MODEL;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ object: 'list', data: [{ id: 'kimi-k2.6:cloud' }, { id: 'deepseek-v4.1-flash:cloud' }] }),
+      { status: 200 },
+    )));
+    const adapter = new OllamaCloudAdapter();
+    await adapter.isAvailable();
+    await expect(adapter.getDefaultModel()).resolves.toBe(`${OLLAMA_CLOUD_DEFAULT_MODEL}:cloud`);
+  });
+
+  it('caches the live direct catalogue so model compatibility accepts every served id', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ollama-catalog-'));
+    process.env.OPENSWARM_MODEL_CATALOG_DIR = dir;
+    process.env.OLLAMA_API_KEY = 'test-key';
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    try {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(
+        JSON.stringify({ object: 'list', data: [{ id: 'kimi-k3' }, { id: 'deepseek-v4.1-flash' }] }),
+        { status: 200 },
+      )));
+      await new OllamaCloudAdapter().listModels();
+      const { mapModelForProvider } = await import('./modelCompat.js');
+      expect(mapModelForProvider('ollama-cloud', 'kimi-k3')).toBe('kimi-k3');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never sends the key to the local server, even when one is set', async () => {
+    process.env.OLLAMA_API_KEY = 'secret-key';
+    process.env.OLLAMA_CLOUD_BASE_URL = 'http://127.0.0.1:11434';
+    const auth: Array<string | undefined> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      auth.push((init?.headers as Record<string, string> | undefined)?.Authorization);
+      return new Response(
+        'data: {"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n\n' + 'data: [DONE]\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      );
+    }));
+    const adapter = new OllamaCloudAdapter();
+    await adapter.isAvailable();
+    await adapter.run({ prompt: 'x', cwd: process.cwd(), enableTools: false, maxTurns: 1 });
+    expect(auth.length).toBeGreaterThan(0);
+    expect(auth.every((value) => value === undefined)).toBe(true);
   });
 });
