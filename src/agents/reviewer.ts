@@ -51,6 +51,8 @@ export interface ReviewerOptions {
   mode?: 'change' | 'audit' | 'direct' | 'blocker';
   /** The worker's claim that the task cannot be done as written ('blocker' mode, AGT-4535). */
   blockerClaim?: string;
+  /** Files the worker changed before making that claim; unset for a no-edit stop ('blocker' mode). */
+  blockerChangedFiles?: string[];
   /** MCP tools to expose (e.g. linear__*). When unset the adapter self-sources (INT-1951). (INT-1950) */
   mcpTools?: ToolDefinition[];
   /** Tool-activity log lines (🔧 read_file …) for live progress display. (INT-1963) */
@@ -194,6 +196,7 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
       authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
       workerReport: [
         `- **Claim:** ${options.blockerClaim ?? '(none stated)'}`,
+        `- **Files the worker changed (in the working tree; you are not approving the change):** ${options.blockerChangedFiles?.length ? options.blockerChangedFiles.join(', ') : 'none'}`,
         `- **Worker summary:** ${options.workerResult.summary}`,
         formatCommandEvidence(options.workerResult),
       ].join('\n'),
