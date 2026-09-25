@@ -204,6 +204,8 @@ export interface ResolvedHumanAnswer {
   answer: string;
   answeredAt: number;
   answerEventIds: string[];
+  /** Role of the answering actor; `advisor` marks automated, non-human advice. */
+  answeredByRole?: string;
 }
 
 interface ResolvedHumanAnswerRow {
@@ -212,6 +214,7 @@ interface ResolvedHumanAnswerRow {
   answer: string;
   answered_at: number;
   answer_event_id: string;
+  answer_actor_role: string | null;
   metadata_json: string | null;
 }
 
@@ -428,6 +431,7 @@ export function resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
         COALESCE(a.detail, a.summary) AS answer,
         a.timestamp AS answered_at,
         a.event_id AS answer_event_id,
+        a.actor_role AS answer_actor_role,
         a.metadata_json
       FROM coordination_trace q
       JOIN coordination_trace a
@@ -468,8 +472,10 @@ export function resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
           // A malformed historical metadata blob must not hide the answer.
         }
       }
+      const role = row.answer_actor_role ?? undefined;
+      // Role is part of the key so advice and a human decision never merge.
       const key = answerSetId
-        ? `set:${answerSetId}\u0000answer:${row.answer}`
+        ? `set:${answerSetId}\u0000answer:${row.answer}\u0000role:${role ?? ''}`
         : `correlation:${row.correlation_id}`;
       const existing = grouped.get(key);
       if (existing) {
@@ -484,6 +490,7 @@ export function resolvedHumanAnswers(taskId: string): ResolvedHumanAnswer[] {
           answer: row.answer,
           answeredAt: row.answered_at,
           answerEventIds: [row.answer_event_id],
+          ...(role ? { answeredByRole: role } : {}),
         });
       }
     }

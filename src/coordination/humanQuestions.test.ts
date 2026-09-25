@@ -440,6 +440,40 @@ describe('question class gates automated answers (AGT-4514)', () => {
     expect((await h.answerHumanQuestion(c.correlationId, 'yes', 'supervisor', 'orchestrator')).accepted).toBe(true);
   });
 
+  it('does not let an automated answer settle a sibling approval question of the same task', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const approval = await ask(h, { question: 'May I rotate the prod key?', questionClass: 'approval' });
+    const clarification = await ask(h, { question: 'Which test runner?', questionClass: 'clarification' });
+
+    const result = await h.answerHumanQuestion(clarification.correlationId, 'vitest', 'advisor:hermes', 'advisor');
+
+    expect(result.accepted).toBe(true);
+    // The approval sibling is still open: sibling settling must not be a way
+    // around the class gate.
+    expect(store.openQuestions('/repo', 'cls-1').map((e) => e.correlationId)).toEqual([approval.correlationId]);
+    expect(store.exchange(approval.correlationId).some((e) => e.kind === 'human-answer')).toBe(false);
+  });
+
+  it('never labels an automated advisor answer as a human or supervisor answer', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'clarification' });
+    const result = await h.answerHumanQuestion(posted.correlationId, 'vitest', 'advisor:hermes', 'advisor');
+    expect(result.accepted).toBe(true);
+    expect(result.event?.actorRole).toBe('advisor');
+    const { t } = await import('../locale/index.js');
+    expect(result.event?.summary).not.toBe(t('coordination.humanQuestion.humanAnswered'));
+    expect(result.event?.summary).not.toBe(t('coordination.humanQuestion.supervisorAnswered'));
+    expect(result.event?.summary).toBe(t('coordination.humanQuestion.advisorAnswered'));
+  });
+
+  it('treats the advisor role as automated even on an allowlisted-looking actor', async () => {
+    const h = await modules();
+    const posted = await ask(h, { questionClass: 'approval' });
+    const result = await h.answerHumanQuestion(posted.correlationId, 'yes', 'operator-dashboard', 'advisor');
+    expect(result.accepted).toBe(false);
+  });
+
   it('leaves a refused answer unsettled so a human can still answer it', async () => {
     const h = await modules();
     const store = (await import('./coordinationStore.js')).getCoordinationStore();
@@ -448,5 +482,223 @@ describe('question class gates automated answers (AGT-4514)', () => {
     // The refusal must not consume the question.
     expect(store.findQuestion(posted.correlationId)).toBeDefined();
     expect((await h.answerHumanQuestion(posted.correlationId, 'real answer', 'discord:user-1')).accepted).toBe(true);
+  });
+});
+
+// AGT-4516: the Hermes advisor may take a clarification question off the
+// operator's plate; anything else, and any advisor failure, pages the human.
+describe('advisor consult before paging (AGT-4516)', () => {
+  const answered = { status: 'answered' as const, answer: 'vitest', confidence: 90, provenance: { model: 'm-1', sessionId: 's-1' } };
+  const ask = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown> = {}) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'adv-1', actor: 'worker-1',
+      question: 'Which test runner?', questionClass: 'clarification',
+      ...over,
+    } as Parameters<typeof h.postHumanQuestion>[0]);
+
+  it('returns the advisor answer inline and does not page the operator', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const notify = vi.fn(async () => true);
+    const advisor = vi.fn(async () => answered);
+
+    const posted = await ask(h, { notify, advisor });
+
+    expect(advisor).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+    expect(posted.answeredBy).toBe('advisor:hermes');
+    expect(posted.answer).toContain('vitest');
+    expect(posted.answer).toContain('not a human');
+    expect(posted.answer).toContain('m-1');
+    const answer = store.exchange(posted.correlationId).find((e) => e.kind === 'human-answer');
+    expect(answer).toMatchObject({ actor: 'advisor:hermes', actorRole: 'advisor', status: 'completed' });
+    expect(store.openQuestionCount('/repo', 'adv-1')).toBe(0);
+  });
+
+  it.each([
+    ['declined', { status: 'declined' as const, reason: 'operator preference' }],
+    ['unavailable', { status: 'unavailable' as const, reason: 'timeout' }],
+  ])('pages the operator when the advisor %s', async (_label, verdict) => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    const posted = await ask(h, { notify, advisor: vi.fn(async () => verdict) });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(posted.answer).toBeUndefined();
+    expect(posted.answeredBy).toBeUndefined();
+  });
+
+  it('never consults the advisor on an approval or unclassified question', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => answered);
+    await ask(h, { taskId: 'adv-2', questionClass: 'approval', notify: async () => true, advisor });
+    await ask(h, { taskId: 'adv-3', questionClass: undefined, notify: async () => true, advisor });
+    expect(advisor).not.toHaveBeenCalled();
+  });
+
+  it('does not re-consult on a retry of a question the advisor already declined', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => ({ status: 'declined' as const, reason: 'no' }));
+    await ask(h, { notify: async () => true, advisor });
+    await ask(h, { notify: async () => true, advisor });
+    expect(advisor).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays off without explicit opt-in', async () => {
+    const h = await modules();
+    const previous = process.env.OPENSWARM_HERMES_ADVISOR;
+    delete process.env.OPENSWARM_HERMES_ADVISOR;
+    try {
+      const notify = vi.fn(async () => true);
+      const posted = await ask(h, { notify });
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(posted.answeredBy).toBeUndefined();
+    } finally {
+      if (previous !== undefined) process.env.OPENSWARM_HERMES_ADVISOR = previous;
+    }
+  });
+});
+
+// Independent review of the AGT-4516 bridge found these paths around the gate.
+describe('advisor answers stay advice (AGT-4516 review)', () => {
+  const answered = { status: 'answered' as const, answer: 'vitest', confidence: 90, provenance: { model: 'm-1' } };
+  const post = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown>) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'rv-1', actor: 'worker-1', question: 'Which test runner?',
+      notify: async () => true, ...over,
+    } as Parameters<typeof h.postHumanQuestion>[0]);
+
+  it('keeps advisor answers out of the authoritative operator feedback', async () => {
+    const h = await modules();
+    const { loadAuthoritativeOperatorFeedback } = await import('./operatorGuidance.js');
+    await post(h, { questionClass: 'clarification', advisor: async () => answered });
+    expect(loadAuthoritativeOperatorFeedback('rv-1')).toBeUndefined();
+
+    const human = await post(h, { question: 'Ship it?', questionClass: 'approval' });
+    await h.answerHumanQuestion(human.correlationId, 'yes, ship', 'discord:op');
+    const feedback = loadAuthoritativeOperatorFeedback('rv-1') ?? '';
+    expect(feedback).toContain('yes, ship');
+    expect(feedback).not.toContain('vitest');
+  });
+
+  it('does not hand an advisor answer to the same text asked as approval', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => answered);
+    await post(h, { questionClass: 'clarification', advisor });
+    const asApproval = await post(h, { questionClass: 'approval', advisor });
+    expect(asApproval.answer).toBeUndefined();
+    expect(asApproval.answeredBy).toBeUndefined();
+    expect(advisor).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps legacy approval correlation ids stable', async () => {
+    const h = await modules();
+    const legacy = h.humanQuestionCorrelation({ repository: '/repo', taskId: 't', question: 'q' });
+    expect(h.humanQuestionCorrelation({ repository: '/repo', taskId: 't', question: 'q', questionClass: 'approval' })).toBe(legacy);
+    expect(h.humanQuestionCorrelation({ repository: '/repo', taskId: 't', question: 'q', questionClass: 'clarification' })).not.toBe(legacy);
+  });
+
+  it('returns the existing answer instead of paging when the question was answered during the consult', async () => {
+    const h = await modules();
+    const notify = vi.fn(async () => true);
+    const advisor = vi.fn(async () => {
+      // The operator answers on the dashboard while Hermes is still thinking.
+      const q = (await import('./coordinationStore.js')).getCoordinationStore()
+        .openQuestions('/repo', 'rv-1')[0];
+      await h.answerHumanQuestion(q.correlationId, 'use jest', 'operator-dashboard');
+      return answered;
+    });
+    const posted = await post(h, { questionClass: 'clarification', advisor, notify });
+    expect(notify).not.toHaveBeenCalled();
+    expect(posted.answer).toBe('use jest');
+    expect(posted.answeredBy).toBeUndefined();
+  });
+
+  it('settles no sibling question, clarification or not, on an automated answer', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const paged = await post(h, { question: 'Which runner (v1)?', questionClass: 'clarification', advisor: async () => ({ status: 'declined' as const }) });
+    const reworded = await post(h, { question: 'Which runner (v2)?', questionClass: 'clarification', advisor: async () => answered });
+    expect(reworded.answeredBy).toBe('advisor:hermes');
+    expect(store.openQuestions('/repo', 'rv-1').map((e) => e.correlationId)).toEqual([paged.correlationId]);
+    // The operator can still answer the question they were paged about.
+    expect((await h.answerHumanQuestion(paged.correlationId, 'vitest', 'discord:op')).accepted).toBe(true);
+  });
+});
+
+// Round-2 review: the model picks the class, and may pick differently on a retry.
+describe('advisor consult across retries and concurrency (AGT-4516 review 2)', () => {
+  const answered = { status: 'answered' as const, answer: 'vitest', confidence: 90 };
+  const post = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown>) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'rt-1', actor: 'worker-1', question: 'Which test runner?',
+      notify: async () => true, ...over,
+    } as Parameters<typeof h.postHumanQuestion>[0]);
+
+  it('returns the operator answer when the same text is re-asked as a clarification', async () => {
+    const h = await modules();
+    const first = await post(h, { questionClass: 'approval' });
+    await h.answerHumanQuestion(first.correlationId, 'use vitest', 'discord:op');
+    const advisor = vi.fn(async () => answered);
+    const notify = vi.fn(async () => true);
+    const again = await post(h, { questionClass: 'clarification', advisor, notify });
+    expect(again.answer).toBe('use vitest');
+    expect(again.answeredBy).toBeUndefined();
+    expect(advisor).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('returns a human answer to a clarification when the same text is re-asked as approval', async () => {
+    const h = await modules();
+    const first = await post(h, { questionClass: 'clarification', advisor: async () => ({ status: 'declined' as const }) });
+    await h.answerHumanQuestion(first.correlationId, 'use vitest', 'operator-dashboard');
+    const notify = vi.fn(async () => true);
+    const again = await post(h, { questionClass: 'approval', notify });
+    expect(again.answer).toBe('use vitest');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('shares one consult between concurrent asks of the same question', async () => {
+    const h = await modules();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const advisor = vi.fn(async () => { await gate; return answered; });
+    const notify = vi.fn(async () => true);
+    const a = post(h, { questionClass: 'clarification', advisor, notify });
+    const b = post(h, { questionClass: 'clarification', advisor, notify });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(advisor).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+    expect(ra.answeredBy).toBe('advisor:hermes');
+    expect(rb.answeredBy).toBe('advisor:hermes');
+  });
+
+  it('pages once when concurrent asks of the same question fall through to the operator', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => ({ status: 'declined' as const, reason: 'no' }));
+    const notify = vi.fn(async () => true);
+    const [a, b] = await Promise.all([
+      post(h, { taskId: 'rt-4', questionClass: 'clarification', advisor, notify }),
+      post(h, { taskId: 'rt-4', questionClass: 'clarification', advisor, notify }),
+    ]);
+    expect(advisor).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(a.correlationId).toBe(b.correlationId);
+  });
+
+  it('skips the advisor when the run has too little time left, and bounds it otherwise', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => answered);
+    const notify = vi.fn(async () => true);
+    const short = await post(h, { taskId: 'rt-2', questionClass: 'clarification', advisor, notify, deadlineAt: Date.now() + 5_000 });
+    expect(advisor).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(short.answer).toBeUndefined();
+
+    await post(h, { taskId: 'rt-3', questionClass: 'clarification', advisor, notify, deadlineAt: Date.now() + 60_000 });
+    expect(advisor).toHaveBeenCalledTimes(1);
+    const [, options] = advisor.mock.calls[0] as unknown as [unknown, { runBudgetSeconds: number }];
+    expect(options.runBudgetSeconds).toBeLessThanOrEqual(60);
   });
 });

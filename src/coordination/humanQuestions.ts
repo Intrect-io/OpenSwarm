@@ -14,6 +14,14 @@ import { getCoordinationStore, type CoordinationEvent } from './coordinationStor
 import { t } from '../locale/index.js';
 import { answerHint } from './answerHint.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import {
+  HERMES_ADVISOR_ACTOR,
+  consultHermesAdvisor,
+  formatAdvisorAnswer,
+  isHermesAdvisorEnabled,
+  type AdvisorQuestion,
+  type AdvisorVerdict,
+} from './hermesAdvisor.js';
 
 export interface HumanQuestionInput {
   repository: string;
@@ -36,7 +44,46 @@ export interface HumanQuestionInput {
   questionClass?: HumanQuestionClass;
   /** Overridable for tests; defaults to the configured Discord channel. */
   notify?: (message: string) => Promise<boolean>;
+  /**
+   * Automated advisor consulted on `clarification` questions before the
+   * operator is paged (AGT-4516). Overridable for tests; defaults to the Hermes
+   * bridge when `OPENSWARM_HERMES_ADVISOR=1`, otherwise no advisor.
+   */
+  advisor?: (question: AdvisorQuestion, options: AdvisorCallOptions) => Promise<AdvisorVerdict>;
+  /**
+   * Epoch-ms by which the asking run must be done. The advisor is skipped when
+   * too little time is left and otherwise bounded to fit, so a consult never
+   * outlives the run that asked for it.
+   */
+  deadlineAt?: number;
 }
+
+export interface AdvisorCallOptions {
+  runBudgetSeconds: number;
+}
+
+/** Longest a consult may take when the run has no tighter deadline. */
+const ADVISOR_MAX_BUDGET_SECONDS = 120;
+/** Below this a consult is not worth starting; the operator is paged instead. */
+const ADVISOR_MIN_BUDGET_SECONDS = 20;
+/** Room left for Hermes' kill grace and the rest of the tool call. */
+const ADVISOR_DEADLINE_MARGIN_SECONDS = 20;
+
+/** Budget for one consult, or undefined when the run cannot afford one. */
+export function advisorBudgetSeconds(deadlineAt: number | undefined, now: number = Date.now()): number | undefined {
+  if (deadlineAt === undefined || !Number.isFinite(deadlineAt)) return ADVISOR_MAX_BUDGET_SECONDS;
+  const remaining = Math.floor((deadlineAt - now) / 1000) - ADVISOR_DEADLINE_MARGIN_SECONDS;
+  if (remaining < ADVISOR_MIN_BUDGET_SECONDS) return undefined;
+  return Math.min(ADVISOR_MAX_BUDGET_SECONDS, remaining);
+}
+
+/**
+ * Asks in flight in this process, by correlation id. A second ask of the same
+ * question while the first is still being handled (two identical calls in one
+ * turn, a retry racing the original) receives the first ask's outcome — the
+ * advisor's answer or the page it sent — instead of consulting or paging again.
+ */
+const inflightPosts = new Map<string, Promise<HumanQuestionPost>>();
 
 /**
  * Whether a question is one another machine may answer.
@@ -78,16 +125,39 @@ export function resolveQuestionClass(value: unknown): HumanQuestionClass {
  * (`orchestratorTrackerTools.ts`), which answers with the authority the
  * operator delegated to it. (AGT-4514)
  */
-function isHumanSurfaceActor(actor: string, actorRole: 'human' | 'orchestrator'): boolean {
+function isHumanSurfaceActor(actor: string, actorRole: AnswerActorRole): boolean {
+  // `advisor` is a declaration of automation and wins over any actor name, so
+  // an advisor bridge cannot inherit a human surface's authority by reusing
+  // its identifier.
+  if (actorRole === 'advisor') return false;
   return actorRole === 'orchestrator'
     || actor.startsWith('discord:')
     || actor === 'operator-dashboard';
 }
 
+/**
+ * Who is answering. `advisor` is a clearly non-human automated responder
+ * (e.g. the Hermes advisor bridge): it may answer `clarification` questions
+ * only, and its answer is never labelled as a human's.
+ */
+export type AnswerActorRole = 'human' | 'orchestrator' | 'advisor';
+
+function answerSummaryKey(actorRole: AnswerActorRole) {
+  if (actorRole === 'human') return 'coordination.humanQuestion.humanAnswered' as const;
+  if (actorRole === 'advisor') return 'coordination.humanQuestion.advisorAnswered' as const;
+  return 'coordination.humanQuestion.supervisorAnswered' as const;
+}
+
 export function humanQuestionCorrelation(
-  input: Pick<HumanQuestionInput, 'repository' | 'taskId' | 'question'>,
+  input: Pick<HumanQuestionInput, 'repository' | 'taskId' | 'question' | 'questionClass'>,
 ): string {
-  return `hq-${createHash('sha256').update(`${input.repository}\0${input.taskId}\0${input.question}`).digest('hex').slice(0, 16)}`;
+  // The class is part of the identity only for `clarification`, so every id
+  // minted before classes existed — all of them read as approval — is
+  // unchanged. Without it, the same text asked once as clarification (and
+  // answered by the advisor) and again as approval would share one exchange,
+  // and the approval ask would be handed the machine's answer (AGT-4516).
+  const classPart = resolveQuestionClass(input.questionClass) === 'clarification' ? '\0clarification' : '';
+  return `hq-${createHash('sha256').update(`${input.repository}\0${input.taskId}\0${input.question}${classPart}`).digest('hex').slice(0, 16)}`;
 }
 
 /**
@@ -113,8 +183,10 @@ export interface HumanQuestionPost {
   correlationId: string;
   /** False when Discord is unconfigured or unreachable — the board still has it. */
   delivered: boolean;
-  /** Set when the operator already answered this exact question. */
+  /** Set when the operator — or, for a clarification, the advisor — already answered. */
   answer?: string;
+  /** Board actor that supplied `answer` when it was the automated advisor. */
+  answeredBy?: string;
   /**
    * How many open (unanswered) questions this task has asked, this one
    * included. 1 on a first ask; higher when a re-dispatch rephrased the same
@@ -132,24 +204,43 @@ export interface HumanQuestionPost {
  * a retry after an answer returns that answer instead of asking twice.
  */
 export async function postHumanQuestion(input: HumanQuestionInput): Promise<HumanQuestionPost> {
-  const store = getCoordinationStore();
   const correlationId = humanQuestionCorrelation(input);
+  // Synchronous from here to the map entry, so racing asks cannot both miss it.
+  const inflight = inflightPosts.get(correlationId);
+  if (inflight) return inflight;
+  const post = postHumanQuestionOnce(input, correlationId);
+  inflightPosts.set(correlationId, post);
+  try {
+    return await post;
+  } finally {
+    if (inflightPosts.get(correlationId) === post) inflightPosts.delete(correlationId);
+  }
+}
+
+async function postHumanQuestionOnce(input: HumanQuestionInput, correlationId: string): Promise<HumanQuestionPost> {
+  const store = getCoordinationStore();
   const questionClass = resolveQuestionClass(input.questionClass);
   // The whole exchange, from the durable trace as well as the board: reading a
   // recency window would lose sight of this task's own answer once it has talked
   // enough, and it would ask again — spending an attempt to arrive back at the
   // question the operator has already answered.
   const prior = store.exchange(correlationId);
-  // Board-only, unlike `prior` above: this backs only the "already paged"
-  // check below, which is a rate-limit on re-paging, not a correctness gate —
-  // losing sight of an old page on a very chatty task just risks one extra
-  // page, not a stuck run.
-  const taskEvents = store.list({ repository: input.repository, taskId: input.taskId, limit: 500 });
 
   const answered = prior.find((event) => event.kind === 'human-answer' && event.status === 'completed');
-  if (answered) {
-    return { correlationId, delivered: true, answer: answered.detail ?? answered.summary, openAskCount: 0 };
-  }
+  if (answered) return answeredPost(correlationId, answered);
+
+  // The class is the asking model's choice and can differ between attempts of
+  // the same task. A human answer to the same text under the other class still
+  // answers it — the operator must not be paged twice for one decision. An
+  // advisor answer never crosses over: it answered a clarification, and an
+  // approval ask must not receive it (AGT-4516).
+  const twinId = humanQuestionCorrelation({
+    ...input,
+    questionClass: questionClass === 'clarification' ? 'approval' : 'clarification',
+  });
+  const twinAnswer = store.exchange(twinId).find((event) =>
+    event.kind === 'human-answer' && event.status === 'completed' && event.actorRole !== 'advisor');
+  if (twinAnswer) return answeredPost(twinId, twinAnswer);
 
   const alreadyWaiting = prior.some((event) => event.kind === 'human-question' && event.status === 'waiting');
   if (!alreadyWaiting) {
@@ -168,7 +259,20 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
       summary: input.question,
       metadata: { questionClass },
     });
+
+    // First ask only: a retry of a question the advisor already declined goes
+    // straight to the operator path instead of paying for the same refusal.
+    if (questionClass === 'clarification') {
+      const advised = await consultAdvisor(input, correlationId);
+      if (advised) return advised;
+    }
   }
+
+  // Board-only, unlike `prior` above: this backs only the "already paged"
+  // check below, which is a rate-limit on re-paging, not a correctness gate —
+  // losing sight of an old page on a very chatty task just risks one extra
+  // page, not a stuck run.
+  const taskEvents = store.list({ repository: input.repository, taskId: input.taskId, limit: 500 });
 
   // Task-scoped, not question-scoped. A re-dispatched task is a fresh worker
   // session that writes its own ask_human call, and it paraphrases the same
@@ -240,11 +344,66 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
   return { correlationId, delivered, openAskCount };
 }
 
+function answeredPost(correlationId: string, answer: CoordinationEvent): HumanQuestionPost {
+  return {
+    correlationId,
+    delivered: true,
+    answer: answer.detail ?? answer.summary,
+    ...(answer.actorRole === 'advisor' ? { answeredBy: answer.actor } : {}),
+    openAskCount: 0,
+  };
+}
+
+function resolveAdvisor(input: HumanQuestionInput): HumanQuestionInput['advisor'] {
+  if (input.advisor) return input.advisor;
+  return isHermesAdvisorEnabled()
+    ? (question, options) => consultHermesAdvisor(question, options)
+    : undefined;
+}
+
+/**
+ * Let the automated advisor answer a clarification question. Returns the post
+ * result when it did; `undefined` sends the caller on to page the operator —
+ * on a decline, on any advisor failure, and when the answer gate refuses it.
+ */
+async function consultAdvisor(input: HumanQuestionInput, correlationId: string): Promise<HumanQuestionPost | undefined> {
+  const advisor = resolveAdvisor(input);
+  if (!advisor) return undefined;
+  const runBudgetSeconds = advisorBudgetSeconds(input.deadlineAt);
+  if (runBudgetSeconds === undefined) {
+    console.log(`[Coordination] advisor skipped on ${correlationId}: the run has too little time left — paging operator`);
+    return undefined;
+  }
+  const verdict = await advisor(
+    { repository: input.repository, taskLabel: input.taskLabel, question: input.question },
+    { runBudgetSeconds },
+  );
+  const origin = [verdict.provenance?.model, verdict.provenance?.sessionId].filter(Boolean).join(' ');
+  if (verdict.status !== 'answered' || !verdict.answer) {
+    console.log(`[Coordination] advisor ${verdict.status} on ${correlationId}${origin ? ` (${origin})` : ''}: ${verdict.reason ?? ''} — paging operator`);
+    return undefined;
+  }
+  const answer = formatAdvisorAnswer(verdict);
+  const result = await answerHumanQuestion(correlationId, answer, HERMES_ADVISOR_ACTOR, 'advisor');
+  if (!result.accepted) {
+    // The consult can take minutes; someone may have answered meanwhile (the
+    // operator on the dashboard, or a concurrent ask of the same question).
+    // That answer is the one to return — paging for it would be a stale page.
+    const existing = getCoordinationStore().exchange(correlationId)
+      .find((event) => event.kind === 'human-answer' && event.status === 'completed');
+    if (existing) return answeredPost(correlationId, existing);
+    console.warn(`[Coordination] advisor answer refused on ${correlationId}: ${result.reason ?? ''} — paging operator`);
+    return undefined;
+  }
+  console.log(`[Coordination] advisor answered ${correlationId}${origin ? ` (${origin})` : ''}`);
+  return { correlationId, delivered: true, answer, answeredBy: HERMES_ADVISOR_ACTOR, openAskCount: 0 };
+}
+
 export async function answerHumanQuestion(
   correlationId: string,
   answer: string,
   actor: string,
-  actorRole: 'human' | 'orchestrator' = 'human',
+  actorRole: AnswerActorRole = 'human',
 ): Promise<{ accepted: boolean; event?: CoordinationEvent; reason?: string }> {
   const store = getCoordinationStore();
   // findQuestion scans the whole retained board, not a recency window: on a
@@ -286,9 +445,7 @@ export async function answerHumanQuestion(
     kind: 'human-answer',
     status: 'completed',
     correlationId,
-    summary: t(actorRole === 'human'
-      ? 'coordination.humanQuestion.humanAnswered'
-      : 'coordination.humanQuestion.supervisorAnswered'),
+    summary: t(answerSummaryKey(actorRole)),
     detail: answer,
     metadata: { answerSetId: correlationId },
   });
@@ -303,7 +460,14 @@ export async function answerHumanQuestion(
   // out of the board's own retention window would otherwise leave it
   // permanently unanswered in the trace, and `allQuestionsAnswered` would
   // never see that task as answered again.
-  const siblings = store
+  //
+  // Only a human surface settles siblings. An automated answer was written
+  // for one exact question: settling an approval sibling would walk around
+  // the class gate above, and settling a clarification sibling the operator
+  // was already paged about would refuse the operator's own reply to it as
+  // "already completed" (AGT-4516).
+  const automated = !isHumanSurfaceActor(actor, actorRole);
+  const siblings = automated ? [] : store
     .openQuestions(question.repository, question.taskId)
     .filter((e) => e.correlationId !== correlationId);
   const seenSiblingIds = new Set<string>();

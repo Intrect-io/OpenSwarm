@@ -10,11 +10,15 @@ const MAX_PROMPT_DECISIONS = 20;
 export function formatAuthoritativeOperatorFeedback(
   answers: readonly ResolvedHumanAnswer[],
 ): string | undefined {
-  if (answers.length === 0) return undefined;
-  const selected = answers.slice(-MAX_PROMPT_DECISIONS);
+  // Automated advisor answers are advice, not operator decisions, and this
+  // text is injected as authoritative operator feedback. An agent that needs
+  // the advice again gets it from `ask_human`, marked as automated (AGT-4516).
+  const decisions = answers.filter((entry) => entry.answeredByRole !== 'advisor');
+  if (decisions.length === 0) return undefined;
+  const selected = decisions.slice(-MAX_PROMPT_DECISIONS);
   const lines: string[] = [];
-  if (answers.length > selected.length) {
-    lines.push(`[${answers.length - selected.length} older resolved decisions omitted; newest ${selected.length} shown]`, '');
+  if (decisions.length > selected.length) {
+    lines.push(`[${decisions.length - selected.length} older resolved decisions omitted; newest ${selected.length} shown]`, '');
   }
   selected.forEach((entry, index) => {
     lines.push(`Decision ${index + 1}:`);
