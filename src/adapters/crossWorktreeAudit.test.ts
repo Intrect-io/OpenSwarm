@@ -44,6 +44,28 @@ describe('foreignWorktreeReferences (AGT-4043)', () => {
   });
 });
 
+// A repository that itself lives under a `worktree/` directory (a checkout
+// kept in another repo's ./worktree/) gives its task worktrees two `worktree`
+// segments. Measured on a real run (AGT-4534): the worker's commands naming its
+// own worktree came back with "referenced another task's worktree".
+describe('foreignWorktreeReferences with a nested worktree/ layout', () => {
+  const NESTED_OWN = '/work/repo/worktree/checkout-a/worktree/tk-1';
+  const NESTED_OTHER = '/work/repo/worktree/checkout-a/worktree/tk-2';
+
+  it('ignores references to the worktree the command runs in', () => {
+    expect(foreignWorktreeReferences(`cd ${NESTED_OWN} && ls -R tools`, NESTED_OWN)).toEqual([]);
+    expect(foreignWorktreeReferences(`cat ${NESTED_OWN}/src/a.ts`, `${NESTED_OWN}/src`)).toEqual([]);
+  });
+
+  it('still flags a sibling task worktree in the same nested checkout', () => {
+    expect(foreignWorktreeReferences(`cat ${NESTED_OTHER}/src/a.ts`, NESTED_OWN)).toEqual([`${NESTED_OTHER}/src/a.ts`]);
+  });
+
+  it('still flags the enclosing checkout\'s own worktrees', () => {
+    expect(foreignWorktreeReferences('ls /work/repo/worktree/checkout-b/src', NESTED_OWN)).toEqual(['/work/repo/worktree/checkout-b/src']);
+  });
+});
+
 describe('crossWorktreeAuditNote', () => {
   it('is null for clean commands and names the paths otherwise', () => {
     expect(crossWorktreeAuditNote('ls', OWN)).toBeNull();

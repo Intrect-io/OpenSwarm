@@ -22,6 +22,14 @@ export function ownWorktreeId(cwd: string): string | null {
   return segments[index + 1];
 }
 
+/** `cwd` up to and including its own worktree directory, or `null` outside one. */
+function ownWorktreeRoot(cwd: string): string | null {
+  const segments = cwd.split(sep === '\\' ? /[\\/]/ : '/');
+  const index = segments.lastIndexOf('worktree');
+  if (index < 0 || index + 1 >= segments.length || !segments[index + 1]) return null;
+  return segments.slice(0, index + 2).join('/');
+}
+
 /**
  * Absolute paths in `command` that reach into a worktree other than the one
  * `cwd` belongs to. When `cwd` is not itself a worktree, every worktree
@@ -29,10 +37,15 @@ export function ownWorktreeId(cwd: string): string | null {
  */
 export function foreignWorktreeReferences(command: string, cwd: string): string[] {
   const own = ownWorktreeId(cwd);
+  const ownRoot = ownWorktreeRoot(cwd);
   const out: string[] = [];
   for (const match of command.matchAll(WORKTREE_PATH_RE)) {
     const [, path, id] = match;
     if (id === own) continue;
+    // The pattern stops at the first `worktree/`; a repository that itself
+    // lives under one (…/worktree/<checkout>/worktree/<task>) would otherwise
+    // report the command's own worktree as foreign. (AGT-4534)
+    if (ownRoot && (path === ownRoot || path.startsWith(`${ownRoot}/`))) continue;
     if (!out.includes(path)) out.push(path);
   }
   return out;
