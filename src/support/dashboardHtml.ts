@@ -1832,6 +1832,7 @@ const PROVIDER_BUTTON_LABELS: Record<string, string> = {
   openrouter: 'OpenRouter',
   atlascloud: 'Atlas',
   lmstudio: 'LM Studio',
+  'ollama-cloud': 'Ollama Cloud',
   local: 'Local',
 };
 

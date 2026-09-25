@@ -13,6 +13,7 @@ import { DEFAULT_MODEL as LOCAL_DEFAULT_MODEL } from '../adapters/local.js';
 import { DEFAULT_MODEL as OPENROUTER_DEFAULT_MODEL } from '../adapters/openrouter.js';
 import { extractCursorFinalText } from '../adapters/cursor.js';
 import { ATLASCLOUD_DEFAULT_MODEL } from '../adapters/atlascloud.js';
+import { OLLAMA_CLOUD_DEFAULT_MODEL } from '../adapters/ollamaCloud.js';
 import { CLAUDE_DEFAULT_MODEL } from '../adapters/claude.js';
 import {
   prepareCliProcessTreeSpawn,
@@ -87,6 +88,14 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     local: process.env.LMSTUDIO_MODEL ?? 'local-model',
     lmstudio: process.env.LMSTUDIO_MODEL ?? 'local-model',
   },
+  'ollama-cloud': {
+    // Short aliases onto ids the cloud actually serves. Full ids pass through.
+    deepseek: 'deepseek-v4.1-flash',
+    glm: 'glm-5.3',
+    kimi: 'kimi-k2.6',
+    minimax: 'minimax-m3',
+    gemma: 'gemma4:31b',
+  },
   openrouter: {
     // Short aliases — full IDs (e.g. 'anthropic/claude-sonnet-4') pass through unchanged.
     sonnet: 'anthropic/claude-sonnet-4',
@@ -153,6 +162,7 @@ export function getDefaultChatModel(provider: AdapterName): string {
   if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';
   if (provider === 'openrouter') return OPENROUTER_DEFAULT_MODEL;
   if (provider === 'atlascloud') return ATLASCLOUD_DEFAULT_MODEL;
+  if (provider === 'ollama-cloud') return OLLAMA_CLOUD_DEFAULT_MODEL;
   if (provider === 'claude') return CLAUDE_DEFAULT_MODEL;
   if (provider === 'cc-router') return process.env.CC_ROUTER_MODEL ?? 'gpt-5.6-terra';
   if (provider === 'cursor') return 'auto';

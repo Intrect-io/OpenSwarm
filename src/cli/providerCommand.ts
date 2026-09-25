@@ -36,6 +36,7 @@ const PROVIDER_HINTS: Partial<Record<AdapterName, string>> = {
   openrouter: 'OpenRouter API key or OAuth (any model)',
   atlascloud: 'Atlas Cloud API key (OpenAI-compatible models)',
   lmstudio: 'Local LM Studio server (no account)',
+  'ollama-cloud': 'Ollama cloud models (signed-in local server, or OLLAMA_API_KEY)',
   local: 'Local Ollama models (no account)',
 };
 

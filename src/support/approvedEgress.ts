@@ -10,6 +10,7 @@ const APPROVED_MODEL_ENDPOINTS = new Set([
   'https://api.atlascloud.ai/v1/chat/completions',
   'https://chatgpt.com/backend-api/codex/responses',
   'https://api.openai.com/v1/chat/completions',
+  'https://ollama.com/v1/chat/completions',
   'https://openrouter.ai/api/v1/chat/completions',
 ]);
 

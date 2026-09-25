@@ -11,6 +11,7 @@
 
 import type { AdapterName } from './types.js';
 import { ATLASCLOUD_CURATED_MODELS } from './atlascloud.js';
+import { OLLAMA_CLOUD_CURATED_MODELS } from './ollamaCloud.js';
 import { readCachedCatalog } from './modelCatalog.js';
 
 /** Version-agnostic aliases the claude CLI resolves natively. */
@@ -53,8 +54,21 @@ const ADAPTER_DEFAULT_MODEL: Partial<Record<AdapterName, string>> = {
   gpt: 'gpt-5',
   local: 'gpt-5',
   lmstudio: 'gpt-5',
+  'ollama-cloud': 'deepseek-v4.1-flash',
   atlascloud: 'atlascloud/default',
 };
+
+/**
+ * Does this id belong to Ollama Cloud? Its ids carry no shared prefix — the
+ * canonical form is a bare name ("deepseek-v4.1-flash") and the local transport
+ * appends `:cloud`. Membership in the curated set is the offline half; a live
+ * catalogue (when the direct transport has cached one) is the other.
+ */
+function isOllamaCloudModel(id: string): boolean {
+  const bare = id.replace(/[-:]cloud$/, '');
+  if (OLLAMA_CLOUD_CURATED_MODELS.includes(bare)) return true;
+  return readCachedCatalog('ollama-cloud')?.models?.includes(bare) ?? false;
+}
 
 function isAtlasCloudModel(id: string): boolean {
   // Fast path: atlascloud models always start with 'atlascloud/'
@@ -178,6 +192,15 @@ export function mapModelForProvider(
       // Unlike gpt-*/claude-*, Atlas ids have no shared prefix — check membership
       // against its own catalog instead.
       return isAtlasCloudModel(current) ? current : undefined;
+    }
+    if (adapter === 'ollama-cloud') {
+      // Ollama Cloud ids are bare ("deepseek-v4.1-flash"), so the generic
+      // namespaced-id rule below would ACCEPT a foreign "vendor/model" id and
+      // hand it to ollama.com, which serves no such namespace. Keep only ids
+      // this transport can actually resolve: its curated set, the `:cloud`/
+      // `-cloud` spellings of them, or whatever the direct catalogue reports.
+      if (isOllamaCloudModel(current)) return current;
+      return undefined;
     }
     // openrouter/gpt/local/lmstudio: a namespaced id ("vendor/model") may carry
     // over; a bare id from another provider usually won't — drop to the default.
