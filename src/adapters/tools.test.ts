@@ -390,6 +390,25 @@ describe('executeTool', () => {
       );
       expect(result.is_error).toBe(true);
       expect(result.content).toContain('BLOCKED');
+      // A refused command ran nothing, so it is no evidence of anything.
+      expect(result.executed).toBeUndefined();
+    });
+
+    // AGT-4534: what actually ran is validation evidence, pass or fail.
+    it('records a command that ran, with its exit code when it failed', async () => {
+      const ok = await executeTool(makeCall('bash', { command: 'echo hi' }), TMP_DIR);
+      expect(ok.executed).toBe('echo hi');
+      const failed = await executeTool(makeCall('bash', { command: 'echo boom >&2; exit 3' }), TMP_DIR);
+      expect(failed.is_error).toBe(true);
+      expect(failed.executed).toBe('echo boom >&2; exit 3 [exit 3]');
+    });
+  });
+
+  describe('diagnostics evidence', () => {
+    it('records nothing when no checker ran', async () => {
+      const result = await executeTool(makeCall('diagnostics', { paths: ['config.yaml'] }), TMP_DIR);
+      expect(result.content).toContain('no TypeScript/Python files');
+      expect(result.executed).toBeUndefined();
     });
   });
 });

@@ -63,6 +63,18 @@ describe('reviewer', () => {
     expect(prompt).not.toContain('- **Commands:**');
   });
 
+  it('does not call a claim unobserved when the observed run merely wraps it', () => {
+    const prompt = buildReviewerPrompt({
+      taskTitle: 't', taskDescription: 'd', projectPath: '/repo',
+      workerResult: {
+        success: true, summary: 's', filesChanged: ['src/a.ts'], output: '',
+        commands: ['npm test'],
+        executedCommands: ['cd pkg && npm test 2>&1 | tail -20'],
+      },
+    });
+    expect(prompt).not.toContain('NOT observed running');
+  });
+
   it('labels self-reported commands as unverified when execution was not observable', () => {
     const prompt = buildReviewerPrompt({
       taskTitle: 't', taskDescription: 'd', projectPath: '/repo',

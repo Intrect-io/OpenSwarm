@@ -3,6 +3,7 @@
 // Test execution agent (CLI adapter based)
 // ============================================
 
+import { formatCommandEvidence } from './workerValidationEvidence.js';
 import type { WorkerResult } from './agentPair.js';
 import type { AdapterName } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
@@ -50,7 +51,7 @@ function buildTesterPrompt(options: TesterOptions): string {
 - **Success:** ${options.workerResult.success}
 - **Summary:** ${options.workerResult.summary}
 - **Files Changed:** ${options.workerResult.filesChanged.join(', ') || '(none)'}
-- **Commands:** ${options.workerResult.commands.join(', ') || '(none)'}
+${formatCommandEvidence(options.workerResult)}
 `;
 
   return `# Tester Agent

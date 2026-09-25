@@ -101,24 +101,32 @@ interface ChatCompletionResponse {
 }
 
 /**
- * The command a completed tool call ran, as validation evidence, or undefined.
- * Successful `bash` calls count as their command line. The `diagnostics` tool
- * runs the project's type checker / linter (tsc, ruff) itself, so a successful
- * call is recorded under a label the validation gate recognises. (AGT-4534)
+ * What a tool call executed, as validation evidence, or undefined. The tool
+ * itself says what ran (`ToolResult.executed`): a bash command that ran to an
+ * exit code — failing runs included, they are still evidence that validation
+ * happened — or the checkers a diagnostics call used. Refused, blocked,
+ * timed-out or empty calls ran nothing. (AGT-4534)
  */
 export function observedCommandFor(
-  call: { function: { name: string; arguments: string } },
-  result: { is_error?: boolean } | undefined,
+  _call: { function: { name: string; arguments: string } },
+  result: { is_error?: boolean; executed?: string } | undefined,
 ): string | undefined {
-  if (!result || result.is_error) return undefined;
-  if (call.function.name === 'diagnostics') return 'diagnostics tool (tsc / ruff)';
-  if (call.function.name !== 'bash') return undefined;
-  try {
-    const cmd = String((JSON.parse(call.function.arguments) as { command?: unknown }).command ?? '').trim();
-    return cmd || undefined;
-  } catch { // cxt-ignore: error_swallow — unparseable arguments ran nothing we can name
-    return undefined;
-  }
+  const executed = result?.executed?.trim();
+  return executed || undefined;
+}
+
+/** Most recent observed commands kept per run. */
+const OBSERVED_COMMAND_LIMIT = 20;
+
+/**
+ * Record an observed command, keeping the most recent ones: the check a worker
+ * runs last must survive a long exploration that came before it.
+ */
+export function recordObservedCommand(list: string[], command: string): void {
+  const existing = list.indexOf(command);
+  if (existing !== -1) list.splice(existing, 1);
+  list.push(command);
+  if (list.length > OBSERVED_COMMAND_LIMIT) list.splice(0, list.length - OBSERVED_COMMAND_LIMIT);
 }
 
 /** 에이전틱 루프 설정 */
@@ -883,9 +891,7 @@ async function runAgenticLoopInner(
     // empty). Deduped, capped. (INT-2485, AGT-4534)
     toolCalls.forEach((tc, i) => {
       const cmd = observedCommandFor(tc, results[i]);
-      if (cmd && !executedCommands.includes(cmd) && executedCommands.length < 20) {
-        executedCommands.push(cmd);
-      }
+      if (cmd) recordObservedCommand(executedCommands, cmd);
     });
 
     // Progress-based stop: if every tool call this turn repeats a prior one

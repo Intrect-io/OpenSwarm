@@ -232,9 +232,19 @@ async function runRuff(cwd: string, pyFiles: string[]): Promise<CheckOutcome> {
  * or an explicit all-clean line (silence would read as "tool broken").
  */
 export async function runDiagnosticsTool(paths: unknown, cwd: string): Promise<string> {
+  return (await runDiagnosticsCheck(paths, cwd)).text;
+}
+
+/**
+ * The diagnostics report plus the checkers that actually ran (tsc, ruff). A
+ * checker skipped for a missing binary or tsconfig did not run, and a call
+ * with nothing to check ran nothing — neither is validation evidence. (AGT-4534)
+ */
+export async function runDiagnosticsCheck(paths: unknown, cwd: string): Promise<{ text: string; ran: string[] }> {
+  const text = (value: string) => ({ text: value, ran: [] as string[] });
   const requested = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : [];
   if (requested.length === 0) {
-    return 'diagnostics: pass the files you changed in "paths" (relative to the project root).';
+    return text('diagnostics: pass the files you changed in "paths" (relative to the project root).');
   }
 
   const tsFiles = requested.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f));
@@ -244,18 +254,23 @@ export async function runDiagnosticsTool(paths: unknown, cwd: string): Promise<s
   if (pyFiles.length > 0) checks.push(runRuff(cwd, pyFiles));
   if (checks.length === 0) {
     if (pyEscaped.length > 0) {
-      return `diagnostics: refused ${pyEscaped.length} path(s) outside the project root: ${pyEscaped.join(', ')}`;
+      return text(`diagnostics: refused ${pyEscaped.length} path(s) outside the project root: ${pyEscaped.join(', ')}`);
     }
-    return `diagnostics: no TypeScript/Python files among ${requested.join(', ')} — use the bash tool to run this project's own checks.`;
+    return text(`diagnostics: no TypeScript/Python files among ${requested.join(', ')} — use the bash tool to run this project's own checks.`);
   }
 
   const outcomes = await Promise.all(checks);
   const lines: string[] = [];
+  const ran: string[] = [];
   if (pyEscaped.length > 0) lines.push(`[ruff] refused ${pyEscaped.length} path(s) outside the project root: ${pyEscaped.join(', ')}`);
   for (const { label, output, infraError } of outcomes) {
-    if (infraError) lines.push(`[${label}] SKIPPED: ${infraError}`);
-    else if (output) lines.push(`[${label}] errors:\n${output}`);
+    if (infraError) {
+      lines.push(`[${label}] SKIPPED: ${infraError}`);
+      continue;
+    }
+    ran.push(label);
+    if (output) lines.push(`[${label}] errors:\n${output}`);
     else lines.push(`[${label}] clean — no errors.`);
   }
-  return lines.join('\n\n');
+  return { text: lines.join('\n\n'), ran };
 }

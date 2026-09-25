@@ -409,6 +409,18 @@ export interface ToolResult {
   is_error: boolean;
   /** Stop the enclosing agent loop; retrying could duplicate a partial mutation. */
   fatal?: 'execution_outcome_unknown';
+  /**
+   * What this call actually executed, as validation evidence — the command
+   * line (with `[exit N]` when it failed) or the checkers a diagnostics run
+   * used. Absent when nothing ran: refused, blocked, fenced, timed out, or a
+   * diagnostics call that had nothing to check. (AGT-4534)
+   */
+  executed?: string;
+}
+
+/** Evidence string for a bash command that ran to an exit code. */
+function executedCommand(command: string, exitCode: number): string {
+  return exitCode === 0 ? command : `${command} [exit ${exitCode}]`;
 }
 
 /**
@@ -981,9 +993,10 @@ export async function executeTool(
                 tool_call_id: callId,
                 content: `${output || '(no output)'}\n[exit code ${result.exitCode ?? '?'}${result.signal ? `, signal ${result.signal}` : ''}]`,
                 is_error: true,
+                ...(typeof result.exitCode === 'number' ? { executed: executedCommand(command, result.exitCode) } : {}),
               };
             }
-            return { tool_call_id: callId, content: output || '(no output, exit 0)', is_error: false };
+            return { tool_call_id: callId, content: output || '(no output, exit 0)', is_error: false, executed: command };
           } catch (error) {
             if (error instanceof SandboxOutcomeUnknownError) {
               return {
@@ -1027,6 +1040,7 @@ export async function executeTool(
             tool_call_id: callId,
             content: output.length > 8000 ? output.slice(0, 8000) + '\n... (truncated)' : output || '(no output, exit 0)',
             is_error: false,
+            executed: command,
           });
         } catch (err) {
           // exit code != 0 → execFile이 throw. 하지만 grep/find 등은 "매치 없음"으로
@@ -1058,7 +1072,14 @@ export async function executeTool(
             : `exit ${code} (no output) — likely no matches or a non-fatal nonzero exit, not necessarily an error.`;
           // exit 1 + 출력 없음은 보통 무해(grep no-match) → is_error를 false로 둬 모델이 안 헤매게.
           const benign = e.code === 1 && !out.trim();
-          return audited({ tool_call_id: callId, content: body, is_error: !benign });
+          // A numeric exit code means the command ran; a string code (ENOENT…)
+          // means it never started.
+          return audited({
+            tool_call_id: callId,
+            content: body,
+            is_error: !benign,
+            ...(typeof e.code === 'number' ? { executed: executedCommand(command, e.code) } : {}),
+          });
         }
       }
 
@@ -1143,9 +1164,14 @@ export async function executeTool(
         }
         // Lazy: only loops that opted in (AgenticLoopOptions.diagnosticsTool)
         // expose the schema, so most consumers never load this module.
-        const { runDiagnosticsTool } = await import('./diagnosticsTool.js');
-        const text = await runDiagnosticsTool(args.paths, cwd);
-        return { tool_call_id: callId, content: text, is_error: false };
+        const { runDiagnosticsCheck } = await import('./diagnosticsTool.js');
+        const { text, ran } = await runDiagnosticsCheck(args.paths, cwd);
+        return {
+          tool_call_id: callId,
+          content: text,
+          is_error: false,
+          ...(ran.length > 0 ? { executed: `diagnostics: ${ran.join(', ')}` } : {}),
+        };
       }
 
       case 'web_fetch': {
