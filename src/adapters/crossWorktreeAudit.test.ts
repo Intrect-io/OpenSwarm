@@ -61,6 +61,10 @@ describe('foreignWorktreeReferences with a nested worktree/ layout', () => {
     expect(foreignWorktreeReferences(`cat ${NESTED_OTHER}/src/a.ts`, NESTED_OWN)).toEqual([`${NESTED_OTHER}/src/a.ts`]);
   });
 
+  it('does not take a sibling whose id extends the own id for the own worktree', () => {
+    expect(foreignWorktreeReferences(`cat ${NESTED_OWN}0/src/a.ts`, NESTED_OWN)).toEqual([`${NESTED_OWN}0/src/a.ts`]);
+  });
+
   it('still flags the enclosing checkout\'s own worktrees', () => {
     expect(foreignWorktreeReferences('ls /work/repo/worktree/checkout-b/src', NESTED_OWN)).toEqual(['/work/repo/worktree/checkout-b/src']);
   });
