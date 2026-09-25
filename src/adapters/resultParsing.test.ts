@@ -272,3 +272,52 @@ describe("the worker's report survives extraction (AGT-4073)", () => {
     expect(parsed.summary).toBe(t('common.fallback.noSummary'));
   });
 });
+
+// The worker prompt (locale/prompts/*.ts) requires a "Could not verify" section
+// in every report. Reading "could not" there as a failure declaration failed a
+// correct, tested fix three times in a row (AGT-4534 eval base5, honest-fix#1).
+describe('a limitation report is not a failure declaration (AGT-4534)', () => {
+  const report = [
+    'Codename: Quill',
+    '',
+    '1. **Files modified:** `tools/textkit/src/slug.mjs` — only file changed.',
+    '2. **Commands run**',
+    '- `node --test tools/textkit/test/slug.test.mjs` → 2 pass / 0 fail, exit 0',
+    '5. **Could not verify:** the host-repo TypeScript tests — not run, out of scope.',
+  ].join('\n');
+
+  it('keeps a successful report that lists what it could not verify', () => {
+    const parsed = parseWorkerResult(report);
+    expect(parsed.success).toBe(true);
+    expect(parsed.error).toBeUndefined();
+  });
+
+  it('treats the other limitation phrasings the same way', () => {
+    for (const line of [
+      'The integration path could not be verified without network access.',
+      "I couldn't observe the daemon, so that part is unverified.",
+      'Unable to confirm the Windows behaviour from this checkout.',
+    ]) {
+      expect(parseWorkerResult(`Fixed the parser.\n${line}`).success).toBe(true);
+    }
+  });
+
+  it('still fails a report that declares the work itself failed', () => {
+    for (const line of [
+      'Could not verify the fix, and I could not fix the bug either.',
+      'Failed to apply the patch.',
+      'I was unable to complete the change.',
+      'The regression check failed to verify the deployment.',
+    ]) {
+      const parsed = parseWorkerResult(`Codename: Quill\n${line}`);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toBeDefined();
+    }
+  });
+
+  it('applies the same rule to the codex text fallback', async () => {
+    const { isExplicitFailure } = await import('./resultParsing.js');
+    expect(isExplicitFailure(report)).toBe(false);
+    expect(isExplicitFailure('Failed to apply the patch.')).toBe(true);
+  });
+});

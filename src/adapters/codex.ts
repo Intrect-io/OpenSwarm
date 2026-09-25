@@ -20,7 +20,7 @@ import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { getCodexModelIds } from './codexModels.js';
 import { codexMcpConfigArgs } from './memoryMcp.js';
 import { codexUserMcpDisableArgs } from './codexUserMcp.js';
-import { extractSummary, parseReviewerResult } from './resultParsing.js';
+import { extractSummary, isExplicitFailure, parseReviewerResult } from './resultParsing.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
@@ -481,11 +481,6 @@ function extractWorkerFromText(text: string): WorkerResult {
   };
 }
 
-// Detect a real failure declaration, not incidental "error"/"fail" prose (see gpt.ts).
-function isExplicitFailure(text: string): boolean {
-  if (/"success"\s*:\s*false/i.test(text)) return true;
-  return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(text);
-}
 
 
 function extractErrorMessage(text: string): string {

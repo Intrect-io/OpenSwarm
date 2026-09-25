@@ -187,10 +187,21 @@ function findJsonObject(text: string, marker: string): string | null {
   return null;
 }
 
+/**
+ * A statement of what the agent could not check, which the worker prompt
+ * requires as a "Could not verify" section (locale/prompts/*.ts). It names a
+ * limit of the evidence, not a failure of the work, so it is removed before
+ * looking for a failure declaration (AGT-4534). "Failed to verify" is left
+ * out on purpose: it can mean a check ran and failed, so it fails closed.
+ */
+const LIMITATION_PHRASE =
+  /\b(?:unable to|could not|couldn['’]t|cannot)\s+(?:be\s+)?(?:verif(?:y|ied)|observe[d]?|confirm(?:ed)?)\b/gi;
+
 /** Detect a real failure declaration, not incidental "error"/"fail" prose. */
-function isExplicitFailure(text: string): boolean {
+export function isExplicitFailure(text: string): boolean {
   if (/"success"\s*:\s*false/i.test(text)) return true;
-  return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(text);
+  const declarations = text.replace(LIMITATION_PHRASE, '');
+  return /\b(failed to|unable to|could not|couldn['’]t|cannot (?:complete|finish|proceed|continue)|giving up|abort(?:ed|ing))\b/i.test(declarations);
 }
 
 /** The self-introduction line the worker prompt mandates, not part of the report. */
