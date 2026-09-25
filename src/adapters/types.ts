@@ -12,7 +12,7 @@ import type { UsageAttribution } from '../support/usageLedger.js';
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
+export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'ollama-cloud' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
 
 /**
  * Result of validating a would-be final answer from the agentic loop

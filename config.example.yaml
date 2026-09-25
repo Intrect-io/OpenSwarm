@@ -3,7 +3,7 @@
 # Copy this file to config.yaml to use
 
 # Default CLI adapter for worker/reviewer stages
-# Options: codex, codex-responses, cc-router, cursor, gpt, local, lmstudio, openrouter, atlascloud, claude
+# Options: codex, codex-responses, cc-router, cursor, gpt, local, lmstudio, ollama-cloud, openrouter, atlascloud, claude
 # For ChatGPT OAuth: run `openswarm auth login --provider gpt`
 #   `codex-responses` runs OpenSwarm's native tool loop with the same login.
 # For OpenRouter: run `openswarm auth login --provider openrouter`

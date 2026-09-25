@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`ollama-cloud` adapter: Ollama's cloud models, over either transport it offers.** Ollama exposes the same cloud models two ways and they disagree about the model id — `https://ollama.com/v1` wants `deepseek-v4.1-flash` and a `Bearer OLLAMA_API_KEY`, while a signed-in local server at `:11434` wants `deepseek-v4.1-flash:cloud` and no key at all (measured 2026-09-23: the plain id returns 404 there). Neither was reachable before: the `local` adapter discovers models from `/v1/models`, which reports `{"data":null}` for cloud models, so it fell back to `gemma3:4b` — an id this transport also rejects. The new adapter picks its transport from the environment (`OLLAMA_CLOUD_BASE_URL` override, else `OLLAMA_API_KEY` present ⇒ direct, else local), spells the id for whichever is in use, and carries a curated model list because local discovery is blind to these models by design. `OLLAMA_CLOUD_MODEL` overrides the default. Verified end to end against a live signed-in server: a real completion returned `OK` through the full agentic loop.
+
 ### Changed
 
 - **Human `/plan` respects `maxChildrenPerTask` but not `dailyLimit` (AGT-4123).** `POST /api/plan/dispatch` now refuses with `decomposition_child_cap` when an approved plan would leave more children than `autonomous.decomposition.maxChildrenPerTask` on the new parent (sharing `refuseForChildCap` with the autonomous path). The automation-pacing `dailyLimit` / `reserveDailyCreations` budget remains runner-only — an explicitly confirmed plan is not refused because the daemon already spent today's slots.

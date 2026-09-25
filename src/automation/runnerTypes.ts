@@ -8,7 +8,7 @@ import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, Job
 import type { RoleMcpPolicy } from '../coordination/mcpPolicy.js';
 
 export interface AutonomousConfig {
-  defaultAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
+  defaultAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'ollama-cloud' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
   linearTeamId: string;
   allowedProjects: string[];
   heartbeatSchedule: string;

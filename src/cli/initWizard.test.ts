@@ -53,8 +53,8 @@ describe('buildWizardConfig', () => {
 });
 
 // AdapterNameSchema (src/core/config.ts) accepts exactly these.
-const VALID_ADAPTERS = ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter', 'atlascloud', 'claude'];
-const PROVIDERS = ['codex-responses', 'openrouter', 'atlascloud', 'gpt', 'lmstudio', 'local', 'codex', 'claude'] as const;
+const VALID_ADAPTERS = ['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'ollama-cloud', 'openrouter', 'atlascloud', 'claude'];
+const PROVIDERS = ['codex-responses', 'openrouter', 'atlascloud', 'gpt', 'lmstudio', 'local', 'ollama-cloud', 'codex', 'claude'] as const;
 const adapterOf = (cfg: string) =>
   cfg.split('\n').find((l) => l.startsWith('adapter:'))?.replace('adapter:', '').trim();
 

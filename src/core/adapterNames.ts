@@ -14,7 +14,7 @@
 /** Adapter names as configuration and the CLI accept them. */
 export const ADAPTER_NAMES = [
   'codex', 'codex-responses', 'gpt', 'local', 'lmstudio',
-  'openrouter', 'atlascloud', 'claude', 'cc-router', 'cursor',
+  'ollama-cloud', 'openrouter', 'atlascloud', 'claude', 'cc-router', 'cursor',
 ] as const;
 
 export type AdapterName = (typeof ADAPTER_NAMES)[number];

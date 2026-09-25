@@ -326,7 +326,7 @@ const ALLOWED_DETAILS = new Set([
 ]);
 const MAX_DETAIL_ITEMS = 8;
 const ALLOWED_ADAPTERS = new Set([
-  'atlascloud', 'claude', 'codex', 'codex-responses', 'gpt', 'lmstudio', 'local', 'openrouter',
+  'atlascloud', 'claude', 'codex', 'codex-responses', 'gpt', 'lmstudio', 'local', 'ollama-cloud', 'openrouter',
 ]);
 
 function allowTelemetryLabel(
