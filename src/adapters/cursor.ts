@@ -13,7 +13,7 @@ import type {
   ReviewResult,
   WorkerResult,
 } from './types.js';
-import { parseReviewerResult, parseWorkerResult } from './resultParsing.js';
+import { parseReviewerResult, parseWorkerResult, withExecutionEvidence } from './resultParsing.js';
 import { readCachedCatalog, writeCachedCatalog } from './modelCatalog.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
@@ -153,9 +153,7 @@ export class CursorCliAdapter implements CliAdapter {
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {
-    const result = parseWorkerResult(extractCursorFinalText(raw.stdout));
-    if (raw.executedCommands?.length) result.commands = [...new Set([...result.commands, ...raw.executedCommands])];
-    return result;
+    return withExecutionEvidence(parseWorkerResult(extractCursorFinalText(raw.stdout)), raw);
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {

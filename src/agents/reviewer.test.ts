@@ -47,6 +47,30 @@ describe('reviewer', () => {
     expect(spawn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ timeoutMs: 300000 }));
   });
 
+  // AGT-4534: the reviewer has no bash, so it cannot check what the worker ran.
+  // It must be told which commands OpenSwarm saw run and which are only claimed.
+  it('separates commands OpenSwarm observed from commands the worker only claimed', () => {
+    const prompt = buildReviewerPrompt({
+      taskTitle: 't', taskDescription: 'd', projectPath: '/repo',
+      workerResult: {
+        success: true, summary: 's', filesChanged: ['src/a.ts'], output: '',
+        commands: ['node --test test/a.test.mjs', 'npm test'],
+        executedCommands: ['node --test test/a.test.mjs'],
+      },
+    });
+    expect(prompt).toContain('Commands executed (observed by OpenSwarm):** node --test test/a.test.mjs');
+    expect(prompt).toContain('Commands claimed by the worker but NOT observed running:** npm test');
+    expect(prompt).not.toContain('- **Commands:**');
+  });
+
+  it('labels self-reported commands as unverified when execution was not observable', () => {
+    const prompt = buildReviewerPrompt({
+      taskTitle: 't', taskDescription: 'd', projectPath: '/repo',
+      workerResult: { success: true, summary: 's', filesChanged: ['src/a.ts'], output: '', commands: ['npm test'] },
+    });
+    expect(prompt).toContain('Commands (self-reported, execution not observable):** npm test');
+  });
+
   it('renders direct Git reviews without a fictitious command-less worker', () => {
     const prompt = buildReviewerPrompt({
       taskTitle: 'CLI working-tree review',

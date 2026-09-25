@@ -100,6 +100,27 @@ interface ChatCompletionResponse {
   usage?: ChatUsage;
 }
 
+/**
+ * The command a completed tool call ran, as validation evidence, or undefined.
+ * Successful `bash` calls count as their command line. The `diagnostics` tool
+ * runs the project's type checker / linter (tsc, ruff) itself, so a successful
+ * call is recorded under a label the validation gate recognises. (AGT-4534)
+ */
+export function observedCommandFor(
+  call: { function: { name: string; arguments: string } },
+  result: { is_error?: boolean } | undefined,
+): string | undefined {
+  if (!result || result.is_error) return undefined;
+  if (call.function.name === 'diagnostics') return 'diagnostics tool (tsc / ruff)';
+  if (call.function.name !== 'bash') return undefined;
+  try {
+    const cmd = String((JSON.parse(call.function.arguments) as { command?: unknown }).command ?? '').trim();
+    return cmd || undefined;
+  } catch { // cxt-ignore: error_swallow — unparseable arguments ran nothing we can name
+    return undefined;
+  }
+}
+
 /** 에이전틱 루프 설정 */
 export interface AgenticLoopOptions {
   /** 시스템 프롬프트 */
@@ -857,17 +878,14 @@ async function runAgenticLoopInner(
       lastCoordinationCheckTurn = turn;
     }
 
-    // Capture the shell commands the worker actually ran (ground truth for the
+    // Capture the commands the worker actually ran (ground truth for the
     // validation-evidence gate — the model's self-reported `commands` is often
-    // empty). Only successful bash calls; deduped, capped. (INT-2485)
+    // empty). Deduped, capped. (INT-2485, AGT-4534)
     toolCalls.forEach((tc, i) => {
-      if (tc.function.name !== 'bash' || results[i]?.is_error) return;
-      try {
-        const cmd = String(JSON.parse(tc.function.arguments).command ?? '').trim();
-        if (cmd && !executedCommands.includes(cmd) && executedCommands.length < 20) {
-          executedCommands.push(cmd);
-        }
-      } catch { /* ignore unparseable args */ }
+      const cmd = observedCommandFor(tc, results[i]);
+      if (cmd && !executedCommands.includes(cmd) && executedCommands.length < 20) {
+        executedCommands.push(cmd);
+      }
     });
 
     // Progress-based stop: if every tool call this turn repeats a prior one

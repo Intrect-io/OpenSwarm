@@ -51,11 +51,24 @@ function commandLooksLikeValidation(command: string): boolean {
 export function missingWorkerValidationIssues(result: WorkerResult): string[] {
   const changed = validationRelevantFiles(result.filesChanged ?? []);
   if (changed.length === 0) return [];
-  const commands = result.commands ?? [];
+  // What the adapter saw run is the evidence when it can see it; the model's
+  // own list is a claim. Only adapters that cannot observe execution (CLI
+  // adapters) fall back to the claim. (AGT-4534)
+  const observed = result.executedCommands;
+  const commands = observed ?? result.commands ?? [];
   if (commands.some(commandLooksLikeValidation)) return [];
 
   const sample = changed.slice(0, 6).join(', ');
   const suffix = changed.length > 6 ? `, +${changed.length - 6} more` : '';
+  const claimedOnly = observed
+    ? (result.commands ?? []).filter((command) => commandLooksLikeValidation(command) && !observed.includes(command))
+    : [];
+  if (claimedOnly.length > 0) {
+    return [
+      `Worker reported validation commands that were never executed: ${claimedOnly.slice(0, 3).join('; ')}`,
+      `Run at least one relevant smoke/build/test/static check before review, or run the closest available check and report its failure. Files needing validation: ${sample}${suffix}`,
+    ];
+  }
   const commandIssue = commands.length === 0
     ? 'Worker changed code/config files but reported zero validation commands.'
     : `Worker changed code/config files but only reported non-validation commands: ${commands.slice(0, 3).join('; ')}`;
