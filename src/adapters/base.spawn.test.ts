@@ -342,12 +342,41 @@ describe('argv-safe adapter spawning', () => {
     expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
-  // The property: a 25ms hard timeout fires long before the ignored operation
-  // settles. The bound sits well under the late rejection, so it still proves
-  // that, but far above a loaded CI runner's scheduling jitter — a 150ms bound
-  // against a 300ms rejection failed main at 190ms (AGT-4537).
-  const LATE_REJECTION_MS = 1_000;
-  const TIMEOUT_BOUND_MS = 600;
+  /**
+   * The caller gets the timeout at its deadline, not when the ignored
+   * operation (settling at 300ms) finally does.
+   *
+   * Timers run on a fake clock; file I/O stays real. spawnCli writes the prompt
+   * file and removes it again around the deadline, and the caller hears about
+   * the timeout only once that local I/O is done — by design, so no prompt is
+   * left behind. The wall-clock bound this replaces (`< 150ms`) therefore timed
+   * the runner's disk as much as the deadline: it failed main at 190ms on a
+   * loaded CI runner, while an idle machine measured p99 31ms (AGT-4537).
+   * Here the clock stops at 25ms: nothing is settled at 24ms, the timeout is
+   * delivered with the clock still at 25ms, and the 300ms operation has not
+   * run. That is stricter than the old bound and independent of load.
+   */
+  async function expectRejectedAtDeadline(adapter: CliAdapter): Promise<void> {
+    const realSetTimeout = globalThis.setTimeout;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      let outcome: string | undefined;
+      const run = spawnCli(adapter, { prompt: 'hello', cwd: process.cwd(), timeoutMs: 25 })
+        .then(() => { outcome = 'resolved'; }, (error: Error) => { outcome = error.message; });
+      await vi.advanceTimersByTimeAsync(24);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      // Only real I/O remains. A generous real-time cap turns "never
+      // delivered at the deadline" into a failure instead of a hung test.
+      await Promise.race([run, new Promise((resolve) => realSetTimeout(resolve, 10_000))]);
+      expect(outcome).toBe('fixture timeout after 25ms');
+      // Let the abandoned operation reject. Vitest fails the test if that
+      // rejection escapes unhandled.
+      await vi.advanceTimersByTimeAsync(300);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
 
   it('hard-times-out command construction that ignores AbortSignal and handles its late rejection', async () => {
     const adapter = {
@@ -356,23 +385,14 @@ describe('argv-safe adapter spawning', () => {
       isAvailable: async () => true,
       getDefaultModel: async () => 'fixture',
       buildCommand: () => new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error('late command failure')), LATE_REJECTION_MS);
+        setTimeout(() => reject(new Error('late command failure')), 300);
       }),
       parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
       parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
     } as unknown as CliAdapter;
 
-    const started = Date.now();
-    await expect(spawnCli(adapter, {
-      prompt: 'hello',
-      cwd: process.cwd(),
-      timeoutMs: 25,
-    })).rejects.toThrow('fixture timeout after 25ms');
-    expect(Date.now() - started).toBeLessThan(TIMEOUT_BOUND_MS);
+    await expectRejectedAtDeadline(adapter);
     expect(spawnMock).not.toHaveBeenCalled();
-    // Let the abandoned operation reject. Vitest will fail this test if it
-    // escapes as an unhandled rejection.
-    await new Promise((resolve) => setTimeout(resolve, LATE_REJECTION_MS + 25));
   });
 
   it('hard-times-out adapter.run when the adapter ignores AbortSignal', async () => {
@@ -383,20 +403,13 @@ describe('argv-safe adapter spawning', () => {
       getDefaultModel: async () => 'fixture',
       buildCommand: () => ({ command: 'fixture-cli', args: [] }),
       run: () => new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error('late run failure')), LATE_REJECTION_MS);
+        setTimeout(() => reject(new Error('late run failure')), 300);
       }),
       parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
       parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
     } satisfies CliAdapter;
 
-    const started = Date.now();
-    await expect(spawnCli(adapter, {
-      prompt: 'hello',
-      cwd: process.cwd(),
-      timeoutMs: 25,
-    })).rejects.toThrow('fixture timeout after 25ms');
-    expect(Date.now() - started).toBeLessThan(TIMEOUT_BOUND_MS);
-    await new Promise((resolve) => setTimeout(resolve, LATE_REJECTION_MS + 25));
+    await expectRejectedAtDeadline(adapter);
   });
 });
 

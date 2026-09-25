@@ -126,6 +126,35 @@ describe('runChatCompletion CLI fallback', () => {
     expect(existsSync(dirname(promptPath))).toBe(false);
   });
 
+  /**
+   * The caller gets the timeout at its 25ms deadline, not when the ignored
+   * operation settles at 300ms. Timers run on a fake clock and file I/O stays
+   * real: the prompt file is written and removed around the deadline, and the
+   * caller hears about the timeout only once that is done. The wall-clock
+   * bound this replaces (`< 150ms`) failed main at 175ms on a loaded CI runner
+   * — it timed the runner's disk as much as the deadline (AGT-4537).
+   */
+  async function expectRejectedAtDeadline(prompt: string): Promise<void> {
+    const realSetTimeout = globalThis.setTimeout;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      let outcome: string | undefined;
+      const run = runChatCompletion({ prompt, provider: 'codex', timeoutMs: 25 })
+        .then(() => { outcome = 'resolved'; }, (error: Error) => { outcome = error.message; });
+      await vi.advanceTimersByTimeAsync(24);
+      expect(outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      // Only real I/O remains; the real-time cap turns "not delivered at the
+      // deadline" into a failure instead of a hung test.
+      await Promise.race([run, new Promise((resolve) => realSetTimeout(resolve, 10_000))]);
+      expect(outcome).toBe('Chat response timeout');
+      // Let the abandoned operation reject; an unhandled rejection fails the test.
+      await vi.advanceTimersByTimeAsync(300);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
   it('hard-times-out chat command construction that ignores AbortSignal and handles its late rejection', async () => {
     let promptPath = '';
     getAdapter.mockReturnValue(cliAdapter((options) => {
@@ -135,16 +164,9 @@ describe('runChatCompletion CLI fallback', () => {
       });
     }));
 
-    const startedAt = Date.now();
-    await expect(runChatCompletion({
-      prompt: 'time out while enumerating MCP',
-      provider: 'codex',
-      timeoutMs: 25,
-    })).rejects.toThrow('Chat response timeout');
-    expect(Date.now() - startedAt).toBeLessThan(150);
+    await expectRejectedAtDeadline('time out while enumerating MCP');
     expect(existsSync(promptPath)).toBe(false);
     expect(existsSync(dirname(promptPath))).toBe(false);
-    await new Promise((resolve) => setTimeout(resolve, 325));
   });
 
   it('hard-times-out a run adapter that ignores AbortSignal', async () => {
@@ -155,14 +177,7 @@ describe('runChatCompletion CLI fallback', () => {
       }),
     });
 
-    const startedAt = Date.now();
-    await expect(runChatCompletion({
-      prompt: 'time out an uncooperative run adapter',
-      provider: 'codex',
-      timeoutMs: 25,
-    })).rejects.toThrow('Chat response timeout');
-    expect(Date.now() - startedAt).toBeLessThan(150);
-    await new Promise((resolve) => setTimeout(resolve, 325));
+    await expectRejectedAtDeadline('time out an uncooperative run adapter');
   });
 
   it('sources the globally filtered MCP set for native chat runs', async () => {
