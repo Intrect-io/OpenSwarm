@@ -131,8 +131,8 @@ describe('PairPipeline worker blocker claims', () => {
       expect(runReviewer).toHaveBeenCalledTimes(1);
       // The reviewer is asked to verify the claim, not to review a diff.
       const reviewed = runReviewer.mock.calls[0][0] as ReviewerOptions;
-      expect(reviewed.taskDescription).toContain('Blocker verification');
-      expect(reviewed.taskDescription).toContain('DoD unsatisfiable');
+      expect(reviewed.mode).toBe('blocker');
+      expect(reviewed.blockerClaim).toContain('DoD unsatisfiable');
       expect(result.success).toBe(false);
       expect(result.finalStatus).toBe('waiting_on_operator');
       expect(result.operatorPark?.code).toBe('verified_worker_blocker');
@@ -167,6 +167,30 @@ describe('PairPipeline worker blocker claims', () => {
       // One verification; the dialogue does not loop on the same claim.
       expect(runReviewer).toHaveBeenCalledTimes(1);
       expect(runWorker).toHaveBeenCalledTimes(3);
+    });
+
+    it('falls back to retrying when the verification itself fails', async () => {
+      const { PairPipeline } = await import('./pairPipeline.js');
+      runWorker.mockResolvedValue(blocker);
+      runReviewer.mockRejectedValue(new Error('reviewer adapter down'));
+
+      const result = await new PairPipeline(pipelineConfig).run(task(), process.cwd());
+
+      expect(result.operatorPark).toBeUndefined();
+      expect(runWorker).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not treat a stop on a later iteration as a no-edit claim', async () => {
+      const { PairPipeline } = await import('./pairPipeline.js');
+      runWorker
+        .mockResolvedValueOnce({ success: true, summary: 'partial', filesChanged: ['src/a.ts'], commands: ['npm test'], output: '', confidencePercent: 100 })
+        .mockResolvedValue(blocker);
+      runReviewer.mockResolvedValue({ decision: 'revise', feedback: 'missing case' });
+
+      await new PairPipeline(pipelineConfig).run(task(), process.cwd());
+
+      // Only the real review of iteration 1 — no blocker verification later.
+      for (const call of runReviewer.mock.calls) expect((call[0] as ReviewerOptions).mode).not.toBe('blocker');
     });
 
     it('does not treat an adapter error as a blocker claim', async () => {

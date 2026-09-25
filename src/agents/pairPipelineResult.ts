@@ -12,8 +12,8 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { safeConsole } from '../support/safeLog.js';
 import { guardWarningsForResult } from './guardWarningRecord.js';
 import { ITERATION_BUDGET_PARK_REASON } from '../orchestration/taskBudget.js';
-import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from './workerBlockerReview.js';
 import {
+  VERIFIED_WORKER_BLOCKER_PARK_REASON,
   WORKER_NO_CHANGES_PARK_REASON,
   type PipelineContext,
   type PipelineResult,
@@ -41,6 +41,8 @@ export function composePipelineResult(
   const stageCosts: (CostInfo | undefined)[] = [];
   if (context.workerResult?.costInfo) stageCosts.push(context.workerResult.costInfo);
   if (context.reviewResult?.costInfo) stageCosts.push(context.reviewResult.costInfo);
+  // A confirmed blocker review is not the run's reviewResult; count it anyway.
+  if (context.blockerReview?.costInfo && context.blockerReview !== context.reviewResult) stageCosts.push(context.blockerReview.costInfo);
   if (context.testerResult?.costInfo) stageCosts.push(context.testerResult.costInfo);
   if (context.documenterResult?.costInfo) stageCosts.push(context.documenterResult.costInfo);
   if (context.auditorResult?.costInfo) stageCosts.push(context.auditorResult.costInfo);

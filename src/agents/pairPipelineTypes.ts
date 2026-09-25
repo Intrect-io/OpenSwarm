@@ -159,6 +159,8 @@ export interface PipelineResult {
 export const WORKER_NO_CHANGES_PARK_REASON = 'worker_no_changes';
 /** Publication-path park: the worker stated why no source edit was required. */
 export const WORKER_NO_CHANGES_STATEMENT_PREFIX = 'Worker finished without edits:';
+/** NEEDS_HUMAN code for a no-edit stop whose reason the reviewer confirmed (AGT-4535). */
+export const VERIFIED_WORKER_BLOCKER_PARK_REASON = 'verified_worker_blocker';
 
 export interface PipelineContext {
   task: TaskItem;
@@ -203,6 +205,8 @@ export interface PipelineContext {
   blockerReviewed?: boolean;
   /** The worker's blocker claim plus the reviewer's confirming evidence. */
   verifiedBlocker?: string;
+  /** The reviewer's verdict on a blocker claim, kept for cost accounting. */
+  blockerReview?: ReviewResult;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

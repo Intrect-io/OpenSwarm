@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkerResult } from './agentPair.js';
-import { blockerVerificationDescription, workerBlockerClaim } from './workerBlockerReview.js';
+import { workerBlockerClaim } from './workerBlockerReview.js';
 
 const stop = (over: Partial<WorkerResult> = {}): WorkerResult => ({
   success: false, summary: 's', filesChanged: [], commands: [], output: '', haltReason: 'DoD unsatisfiable', ...over,
@@ -19,18 +19,28 @@ describe('workerBlockerClaim', () => {
     ['an operator question', { blockedOnOperator: true }],
     ['an unknown sandbox outcome', { executionOutcomeUnknown: true }],
     ['a stop with no reason', { haltReason: '  ' }],
+    ['a rate-limit stop', { haltReason: 'Rate limit reached for gpt; quota resets at 12:00' }],
+    ['a turn-limit stop', { haltReason: 'hit max turns before finishing' }],
   ])('is not claimed by %s', (_label, over) => {
     expect(workerBlockerClaim(stop(over as Partial<WorkerResult>))).toBeUndefined();
   });
 });
 
-describe('blockerVerificationDescription', () => {
-  it('asks for independent verification with evidence and keeps the task', () => {
-    const text = blockerVerificationDescription('Make range tests pass', 'tests contradict\nat :7 and :11', 'no edit');
-    expect(text.startsWith('Make range tests pass')).toBe(true);
-    expect(text).toContain('Blocker verification');
-    expect(text).toContain('> tests contradict\n> at :7 and :11');
-    expect(text).toContain('APPROVE only if you confirm it with concrete evidence');
-    expect(text).toContain('REVISE');
+describe('blocker-mode reviewer prompt', () => {
+  it('asks to verify the claim, with its own approve rule and no completion-criteria gate', async () => {
+    const { buildReviewerPrompt } = await import('./reviewer.js');
+    const prompt = buildReviewerPrompt({
+      taskTitle: 'Make range tests pass', taskDescription: 'Make every test pass', projectPath: '/repo',
+      mode: 'blocker', blockerClaim: 'test/range.test.mjs:7 and :11 contradict each other',
+      completionCriteria: ['all tests pass'],
+      workerResult: { success: false, summary: 'no edit', filesChanged: [], commands: [], output: '', executedCommands: ['node --test test/range.test.mjs [exit 1]'] },
+    });
+    expect(prompt).toContain('Blocker Verification Mode');
+    expect(prompt).toContain('test/range.test.mjs:7 and :11 contradict each other');
+    expect(prompt).toContain('node --test test/range.test.mjs [exit 1]');
+    expect(prompt).toContain('It is NOT a blocker that the worker was stuck');
+    // The change-mode rules would make a no-diff confirmation impossible.
+    expect(prompt).not.toContain('EVERY Definition of Done');
+    expect(prompt).not.toContain('all tests pass');
   });
 });

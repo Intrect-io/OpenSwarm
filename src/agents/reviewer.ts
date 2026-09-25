@@ -48,7 +48,9 @@ export interface ReviewerOptions {
    * 'change' (default): review a worker's diff. 'audit': evaluate existing files
    * with no diff/worker (the `review --max` codebase audit). (INT-2006)
    */
-  mode?: 'change' | 'audit' | 'direct';
+  mode?: 'change' | 'audit' | 'direct' | 'blocker';
+  /** The worker's claim that the task cannot be done as written ('blocker' mode, AGT-4535). */
+  blockerClaim?: string;
   /** MCP tools to expose (e.g. linear__*). When unset the adapter self-sources (INT-1951). (INT-1950) */
   mcpTools?: ToolDefinition[];
   /** Tool-activity log lines (🔧 read_file …) for live progress display. (INT-1963) */
@@ -179,6 +181,23 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
       workerReport: `- **Files under audit (${files.length}):** ${filesSummary}`,
       mode: 'audit',
       priorReviewContext: options.priorReviewContext,
+    });
+  }
+
+  // Blocker mode verifies a no-edit worker's claim that the task cannot be
+  // done as written; there is no change to judge against completion criteria.
+  // (AGT-4535)
+  if (options.mode === 'blocker') {
+    return getPrompts().buildReviewerPrompt({
+      taskTitle: options.taskTitle,
+      taskDescription: options.taskDescription,
+      authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
+      workerReport: [
+        `- **Claim:** ${options.blockerClaim ?? '(none stated)'}`,
+        `- **Worker summary:** ${options.workerResult.summary}`,
+        formatCommandEvidence(options.workerResult),
+      ].join('\n'),
+      mode: 'blocker',
     });
   }
 

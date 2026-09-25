@@ -63,6 +63,7 @@ import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
+import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
@@ -1279,7 +1280,11 @@ export class AutonomousRunner {
         // Resuming it by idle fill re-runs a known-broken environment every
         // heartbeat (AGT-4306). Only an explicit dispatch or a tracker Todo
         // lifts that park — the resume paths that carry an operator's hand.
-        const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON;
+        const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON
+          // A blocker the reviewer confirmed is a claim about the task text; a
+          // free slot re-runs the same text into the same confirmed claim
+          // (AGT-4535). Explicit dispatch or a tracker Todo lifts it.
+          || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON;
         // Nor does a free slot change a verdict that has already come back
         // twice; see idleFillWouldRepeatVerdict.
         if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark

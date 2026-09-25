@@ -21,8 +21,7 @@ import { buildReviewerStageOptions } from './reviewerStageOptions.js';
 import type { PipelineConfig, PipelineContext } from './pairPipelineTypes.js';
 import { safeConsole } from '../support/safeLog.js';
 
-/** NEEDS_HUMAN code for a no-edit stop whose reason the reviewer confirmed. */
-export const VERIFIED_WORKER_BLOCKER_PARK_REASON = 'verified_worker_blocker';
+export { VERIFIED_WORKER_BLOCKER_PARK_REASON } from './pairPipelineTypes.js';
 
 /**
  * The worker's claim that the task cannot be completed as written, or
@@ -35,27 +34,13 @@ export function workerBlockerClaim(result: WorkerResult): string | undefined {
   if ((result.filesChanged ?? []).length > 0) return undefined;
   const reason = (result.haltReason ?? result.noChangesReason ?? '').trim();
   if (!reason) return undefined;
+  // A provider/budget stop is about the run, not the task.
+  if (RUN_LIMIT_REASON.test(reason)) return undefined;
   return reason;
 }
 
-/** Task text for the reviewer when it is asked to verify a blocker claim. */
-export function blockerVerificationDescription(taskDescription: string, claim: string, summary: string): string {
-  return [
-    taskDescription,
-    '',
-    '## Blocker verification (not a code review)',
-    'The worker made NO changes and stopped, claiming this task cannot be completed as written:',
-    '',
-    `> ${claim.replace(/\n/g, '\n> ')}`,
-    '',
-    summary ? `Worker summary: ${summary}` : '',
-    '',
-    'Verify this claim yourself against the repository; do not take it on trust.',
-    '- APPROVE only if you confirm it with concrete evidence (file:line). The run then stops and the operator decides how to change the task.',
-    '- REVISE if the claim is wrong or incomplete, and say exactly how the task can be completed as written.',
-    'Put the evidence in your feedback either way.',
-  ].filter((line, index, lines) => line !== '' || lines[index - 1] !== '').join('\n');
-}
+/** Stop reasons that describe the run's limits rather than the task. */
+const RUN_LIMIT_REASON = /rate.?limit|quota|\b429\b|timed?.?out|timeout|turn.?limit|max(?:imum)?.?turns|context.?(?:length|window)|budget/i;
 
 export interface BlockerReviewOutcome {
   confirmed: boolean;
@@ -79,15 +64,26 @@ export async function reviewWorkerBlocker(
 ): Promise<BlockerReviewOutcome | undefined> {
   const claim = workerBlockerClaim(failedWorker);
   if (!claim || context.blockerReviewed || !config.stages.includes('reviewer')) return undefined;
+  // Only a first, clean attempt can claim "no changes": later iterations and
+  // resumed runs have earlier edits in the tree, which the reviewer would see.
+  if (context.currentIteration !== 1 || (config.resumedTaskFiles?.length ?? 0) > 0) return undefined;
   context.blockerReviewed = true;
   context.workerResult = failedWorker;
   const prefix = context.taskPrefix;
-  // The reviewer's own model and read-only mode; only its task text changes.
-  const options = await buildReviewerStageOptions({ config, context, prefix, overrides: undefined, abortSignal });
-  options.taskDescription = blockerVerificationDescription(options.taskDescription, claim, failedWorker.summary ?? '');
-  safeConsole.log(`[${prefix}] Worker stopped without edits: ${claim.slice(0, 300)} — asking the reviewer to verify`);
-  const verdict = await reviewerAgent.runReviewer(options);
+  let verdict: ReviewResult;
+  try {
+    // The reviewer's own model and read-only mode, in blocker-verification mode.
+    const options = await buildReviewerStageOptions({ config, context, prefix, overrides: undefined, abortSignal });
+    options.mode = 'blocker';
+    options.blockerClaim = claim;
+    safeConsole.log(`[${prefix}] Worker stopped without edits: ${claim.slice(0, 300)} — asking the reviewer to verify`);
+    verdict = await reviewerAgent.runReviewer(options);
+  } catch (error) { // cxt-ignore: error_swallow — a failed verification falls back to the old retry
+    safeConsole.warn(`[${prefix}] Blocker verification failed (${error instanceof Error ? error.message : String(error)}) — retrying the worker instead`);
+    return undefined;
+  }
   agentPair.saveReviewerResult(context.session.id, verdict);
+  context.blockerReview = verdict;
   if (verdict.decision === 'approve') {
     const reason = `Worker stopped without edits and the reviewer confirmed why. Worker: ${claim} — Reviewer: ${verdict.feedback}`;
     safeConsole.log(`[${prefix}] Worker blocker confirmed by reviewer — stopping for the operator`);
@@ -98,5 +94,6 @@ export async function reviewWorkerBlocker(
   safeConsole.log(`[${prefix}] Worker blocker refuted by reviewer — sending the reasons back`);
   context.reviewResult = verdict;
   context.feedbackSource = 'review';
+  context.lastReviseFeedback = verdict.feedback;
   return { confirmed: false, reason: verdict.feedback, verdict };
 }
