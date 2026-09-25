@@ -45,7 +45,7 @@ export interface HermesRunResult {
 
 export type HermesRunner = (
   args: string[],
-  options: { timeoutMs: number; bin: string; signal?: AbortSignal },
+  options: { timeoutMs: number; bin: string },
 ) => Promise<HermesRunResult>;
 
 export interface AdvisorQuestion {
@@ -177,11 +177,18 @@ export function parseAdvisorVerdict(text: string): AdvisorVerdictShape | undefin
  * advisor's process, so only what a CLI needs to run is passed through.
  */
 export function advisorEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const passthrough = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'TERM', 'TZ'];
+  // Upper-cased for the comparison: Windows spells it `Path`, `SystemRoot`.
+  const passthrough = new Set([
+    'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TMPDIR', 'TERM', 'TZ',
+    // What a Windows process (and the Job Object supervisor's PowerShell) needs
+    // to start, resolve `hermes.cmd`, and find the user profile.
+    'SYSTEMROOT', 'WINDIR', 'PATHEXT', 'COMSPEC', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+  ]);
   const out: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;
-    if (passthrough.includes(key) || key.startsWith('LC_') || key.startsWith('HERMES_')) out[key] = value;
+    const upper = key.toUpperCase();
+    if (passthrough.has(upper) || upper.startsWith('LC_') || upper.startsWith('HERMES_')) out[key] = value;
   }
   return out;
 }
@@ -189,11 +196,7 @@ export function advisorEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS
 /** After a kill, stop waiting for pipes a surviving descendant may hold open. */
 const POST_KILL_SETTLE_MS = 2_000;
 
-export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin, signal }) => new Promise((resolve, reject) => {
-  if (signal?.aborted) {
-    reject(signal.reason instanceof Error ? signal.reason : new Error('advisor consult aborted'));
-    return;
-  }
+export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin }) => new Promise((resolve, reject) => {
   // Same process-tree handling as every other CLI OpenSwarm spawns: its own
   // group on POSIX, a Job Object on Windows, so a kill reaches descendants.
   const cliSpawn = prepareCliProcessTreeSpawn(bin, args, advisorEnvironment());
@@ -213,7 +216,6 @@ export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin, signal })
   const cleanup = () => {
     clearTimeout(timer);
     clearTimeout(settleTimer);
-    signal?.removeEventListener('abort', onAbort);
     untrackCliProcessTree(child);
   };
   const finish = (exitCode: number | null) => {
@@ -231,15 +233,10 @@ export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin, signal })
     terminateCliProcessTree(child);
     settleTimer = setTimeout(() => finish(null), POST_KILL_SETTLE_MS);
   };
-  const onAbort = () => {
-    timedOut = true;
-    kill();
-  };
   const timer = setTimeout(() => {
     timedOut = true;
     kill();
   }, timeoutMs);
-  signal?.addEventListener('abort', onAbort, { once: true });
   child.stdout?.on('data', (chunk: Buffer) => {
     if (stdout.length < MAX_STDOUT_BYTES) stdout += chunk.toString('utf8');
   });
@@ -259,7 +256,6 @@ export interface ConsultOptions {
   runner?: HermesRunner;
   bin?: string;
   runBudgetSeconds?: number;
-  signal?: AbortSignal;
 }
 
 export async function consultHermesAdvisor(
@@ -277,7 +273,6 @@ export async function consultHermesAdvisor(
     const run = await runner(buildHermesArgs({ queryFile, workDir, runBudgetSeconds }), {
       timeoutMs: runBudgetSeconds * 1000 + KILL_GRACE_MS,
       bin,
-      signal: options.signal,
     });
     const stream = parseHermesStream(run.stdout);
     const provenance: AdvisorProvenance = {

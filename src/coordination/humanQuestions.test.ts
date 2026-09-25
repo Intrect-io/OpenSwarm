@@ -674,6 +674,19 @@ describe('advisor consult across retries and concurrency (AGT-4516 review 2)', (
     expect(rb.answeredBy).toBe('advisor:hermes');
   });
 
+  it('pages once when concurrent asks of the same question fall through to the operator', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => ({ status: 'declined' as const, reason: 'no' }));
+    const notify = vi.fn(async () => true);
+    const [a, b] = await Promise.all([
+      post(h, { taskId: 'rt-4', questionClass: 'clarification', advisor, notify }),
+      post(h, { taskId: 'rt-4', questionClass: 'clarification', advisor, notify }),
+    ]);
+    expect(advisor).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(a.correlationId).toBe(b.correlationId);
+  });
+
   it('skips the advisor when the run has too little time left, and bounds it otherwise', async () => {
     const h = await modules();
     const advisor = vi.fn(async () => answered);

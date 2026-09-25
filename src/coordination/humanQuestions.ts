@@ -56,13 +56,10 @@ export interface HumanQuestionInput {
    * outlives the run that asked for it.
    */
   deadlineAt?: number;
-  /** Aborts an in-flight advisor consult (the asking run was cancelled). */
-  signal?: AbortSignal;
 }
 
 export interface AdvisorCallOptions {
   runBudgetSeconds: number;
-  signal?: AbortSignal;
 }
 
 /** Longest a consult may take when the run has no tighter deadline. */
@@ -81,12 +78,12 @@ export function advisorBudgetSeconds(deadlineAt: number | undefined, now: number
 }
 
 /**
- * Consults in flight in this process, by correlation id. A second ask of the
- * same question while the first is being answered (two identical calls in one
- * turn, a retry racing the original) waits for that consult instead of paging
- * the operator for a question the advisor is about to answer.
+ * Asks in flight in this process, by correlation id. A second ask of the same
+ * question while the first is still being handled (two identical calls in one
+ * turn, a retry racing the original) receives the first ask's outcome — the
+ * advisor's answer or the page it sent — instead of consulting or paging again.
  */
-const inflightConsults = new Map<string, Promise<HumanQuestionPost | undefined>>();
+const inflightPosts = new Map<string, Promise<HumanQuestionPost>>();
 
 /**
  * Whether a question is one another machine may answer.
@@ -207,8 +204,21 @@ export interface HumanQuestionPost {
  * a retry after an answer returns that answer instead of asking twice.
  */
 export async function postHumanQuestion(input: HumanQuestionInput): Promise<HumanQuestionPost> {
-  const store = getCoordinationStore();
   const correlationId = humanQuestionCorrelation(input);
+  // Synchronous from here to the map entry, so racing asks cannot both miss it.
+  const inflight = inflightPosts.get(correlationId);
+  if (inflight) return inflight;
+  const post = postHumanQuestionOnce(input, correlationId);
+  inflightPosts.set(correlationId, post);
+  try {
+    return await post;
+  } finally {
+    if (inflightPosts.get(correlationId) === post) inflightPosts.delete(correlationId);
+  }
+}
+
+async function postHumanQuestionOnce(input: HumanQuestionInput, correlationId: string): Promise<HumanQuestionPost> {
+  const store = getCoordinationStore();
   const questionClass = resolveQuestionClass(input.questionClass);
   // The whole exchange, from the durable trace as well as the board: reading a
   // recency window would lose sight of this task's own answer once it has talked
@@ -232,48 +242,36 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
     event.kind === 'human-answer' && event.status === 'completed' && event.actorRole !== 'advisor');
   if (twinAnswer) return answeredPost(twinId, twinAnswer);
 
-  // Everything from here to the map entry below is synchronous, so two asks
-  // racing in this process cannot both miss each other's reservation.
   const alreadyWaiting = prior.some((event) => event.kind === 'human-question' && event.status === 'waiting');
-  const inflight = inflightConsults.get(correlationId);
-  if (inflight) {
-    const advised = await inflight;
-    if (advised) return advised;
-  } else if (!alreadyWaiting) {
+  if (!alreadyWaiting) {
+    await store.publish({
+      repository: input.repository,
+      taskId: input.taskId,
+      taskLabel: input.taskLabel,
+      actor: input.actor,
+      actorName: input.actorName,
+      actorRole: input.actorRole,
+      recipient: 'human',
+      recipientRole: 'human',
+      kind: 'human-question',
+      status: 'waiting',
+      correlationId,
+      summary: input.question,
+      metadata: { questionClass },
+    });
+
     // First ask only: a retry of a question the advisor already declined goes
     // straight to the operator path instead of paying for the same refusal.
-    const work = (async () => {
-      await store.publish({
-        repository: input.repository,
-        taskId: input.taskId,
-        taskLabel: input.taskLabel,
-        actor: input.actor,
-        actorName: input.actorName,
-        actorRole: input.actorRole,
-        recipient: 'human',
-        recipientRole: 'human',
-        kind: 'human-question',
-        status: 'waiting',
-        correlationId,
-        summary: input.question,
-        metadata: { questionClass },
-      });
-      return questionClass === 'clarification' ? consultAdvisor(input, correlationId) : undefined;
-    })();
-    inflightConsults.set(correlationId, work);
-    try {
-      const advised = await work;
+    if (questionClass === 'clarification') {
+      const advised = await consultAdvisor(input, correlationId);
       if (advised) return advised;
-    } finally {
-      inflightConsults.delete(correlationId);
     }
   }
 
   // Board-only, unlike `prior` above: this backs only the "already paged"
   // check below, which is a rate-limit on re-paging, not a correctness gate —
   // losing sight of an old page on a very chatty task just risks one extra
-  // page, not a stuck run. Read after any consult, so an ask that waited on a
-  // concurrent consult sees the page that ask already sent.
+  // page, not a stuck run.
   const taskEvents = store.list({ repository: input.repository, taskId: input.taskId, limit: 500 });
 
   // Task-scoped, not question-scoped. A re-dispatched task is a fresh worker
@@ -378,7 +376,7 @@ async function consultAdvisor(input: HumanQuestionInput, correlationId: string):
   }
   const verdict = await advisor(
     { repository: input.repository, taskLabel: input.taskLabel, question: input.question },
-    { runBudgetSeconds, signal: input.signal },
+    { runBudgetSeconds },
   );
   const origin = [verdict.provenance?.model, verdict.provenance?.sessionId].filter(Boolean).join(' ');
   if (verdict.status !== 'answered' || !verdict.answer) {
