@@ -15,7 +15,7 @@ const VALIDATION_COMMAND_RE = /\b(npm\s+(?:test|run\s+(?:test|build|lint|typeche
 // Anchored at each segment start: a leading inspection verb means that segment
 // ran no validation (e.g. `rg "npm test"` searches for the string, it does not
 // run it), so the segment is skipped rather than the whole command rejected.
-const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:status|diff|show|log|grep)|jq|head|tail|wc|tree|du|file|which)\b/i;
+const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:status|diff|show|log|grep)|jq|head|tail|wc|tree|du|file|which|echo|printf)\b/i;
 const SCRIPT_SMOKE_COMMAND_RE = /^\s*(?:python3?|node|tsx|ts-node|uv\s+run|npx|bunx|bash|sh)\b.*\b(?:scripts?\/|tests?\/|\.py|\.js|\.ts|\.sh|--help|--dry-run|smoke|verify|validate|check|test|build|compile)\b/i;
 const TESTER_CODE_FILE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rs|go|java|rb|c|cpp|h|hpp)$/;
 
@@ -57,9 +57,14 @@ const normalizeCommand = (command: string) => command.replace(/\s+/g, ' ').trim(
  */
 export function claimedButNotObserved(claimed: readonly string[], observed: readonly string[]): string[] {
   const seen = observed.map(normalizeCommand);
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return claimed.filter((command) => {
     const wanted = normalizeCommand(command);
-    return wanted.length > 0 && !seen.some((ran) => ran.includes(wanted));
+    if (!wanted) return false;
+    // Whole words: `tsc` is not inside `tsconfig.json`, and `npm run build`
+    // is not `npm run build:docs`.
+    const pattern = new RegExp(`(?:^|[\\s;&|(])${escape(wanted)}(?=$|[\\s;&|)])`);
+    return !seen.some((ran) => pattern.test(ran));
   });
 }
 
@@ -117,9 +122,10 @@ export function isTesterCodeFile(file: string): boolean {
  * observe execution — the self-report, labelled as such. (AGT-4534)
  */
 export function formatCommandEvidence(result: Pick<WorkerResult, 'commands' | 'executedCommands'>): string {
+  // The newest commands are shown: the final check is the one that matters.
   const list = (cmds: readonly string[]) => (cmds.length <= 10
     ? (cmds.join(', ') || '(none)')
-    : `${cmds.slice(0, 10).join(', ')} (+${cmds.length - 10} more)`);
+    : `(${cmds.length - 10} earlier omitted) ${cmds.slice(-10).join(', ')}`);
   const observed = result.executedCommands;
   if (!observed) return `- **Commands (self-reported, execution not observable):** ${list(result.commands)}`;
   const claimedOnly = claimedButNotObserved(result.commands, observed);

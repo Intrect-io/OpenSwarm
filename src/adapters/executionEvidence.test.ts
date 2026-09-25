@@ -22,6 +22,9 @@ describe('native-loop adapters carry observed execution into the worker result',
     const result = adapter.parseWorkerOutput(raw(['node --test test/a.test.mjs']));
     expect(result.executedCommands).toEqual(['node --test test/a.test.mjs']);
     expect(result.commands).toContain('node --test test/a.test.mjs');
+    // The display list keeps the newest commands too.
+    const many = adapter.parseWorkerOutput(raw([...Array.from({ length: 25 }, (_, i) => `cat f${i}`), 'npm test']));
+    expect(many.commands.at(-1)).toBe('npm test');
     // An observed-but-empty run is evidence of no execution, not "unknown".
     expect(adapter.parseWorkerOutput(raw([])).executedCommands).toEqual([]);
     expect(adapter.parseWorkerOutput(raw()).executedCommands).toBeUndefined();
@@ -59,5 +62,27 @@ describe('claimed vs observed commands', () => {
     const { claimedButNotObserved } = await import('../agents/workerValidationEvidence.js');
     expect(claimedButNotObserved(['npm test', 'npm  run build'], ['cd pkg && npm test 2>&1 | tail', 'npm run build'])).toEqual([]);
     expect(claimedButNotObserved(['npm test'], ['git status'])).toEqual(['npm test']);
+  });
+
+  it('matches whole words, so a claim is not "observed" inside an unrelated command', async () => {
+    const { claimedButNotObserved } = await import('../agents/workerValidationEvidence.js');
+    expect(claimedButNotObserved(['tsc'], ['cat tsconfig.json'])).toEqual(['tsc']);
+    expect(claimedButNotObserved(['npm run build'], ['npm run build:docs'])).toEqual(['npm run build']);
+    expect(claimedButNotObserved(['tsc'], ['npx tsc --noEmit'])).toEqual([]);
+  });
+
+  it('does not accept echoing a test command as running it', async () => {
+    const { missingWorkerValidationIssues } = await import('../agents/workerValidationEvidence.js');
+    expect(missingWorkerValidationIssues({
+      success: true, summary: '', filesChanged: ['src/a.ts'], commands: [], output: '', executedCommands: ['echo npm test'],
+    })).not.toEqual([]);
+  });
+
+  it('shows the most recent commands, where the final check is', async () => {
+    const { formatCommandEvidence } = await import('../agents/workerValidationEvidence.js');
+    const observed = [...Array.from({ length: 15 }, (_, i) => `cat f${i}`), 'npm test [exit 1]'];
+    const text = formatCommandEvidence({ commands: [], executedCommands: observed });
+    expect(text).toContain('npm test [exit 1]');
+    expect(text).not.toContain('cat f0,');
   });
 });

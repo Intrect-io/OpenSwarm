@@ -355,6 +355,7 @@ function isSubstantiated(
 export function withExecutionEvidence(result: WorkerResult, raw: Pick<CliRunResult, 'executedCommands'>): WorkerResult {
   if (!Array.isArray(raw.executedCommands)) return result;
   result.executedCommands = [...raw.executedCommands];
-  result.commands = [...new Set([...result.commands, ...raw.executedCommands])].slice(0, 20);
+  // Newest last and kept: the final check a worker ran is the one that matters.
+  result.commands = [...new Set([...result.commands, ...raw.executedCommands])].slice(-20);
   return result;
 }
