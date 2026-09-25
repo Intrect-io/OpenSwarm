@@ -22,6 +22,8 @@ export interface ChatCompletionLike {
     finish_reason: string;
   }>;
   usage?: ChatUsage;
+  /** Model id the server reports having served (may differ from the one requested). */
+  model?: string;
 }
 
 /**
@@ -42,6 +44,7 @@ export interface ChatUsage {
 }
 
 interface StreamChunk {
+  model?: string;
   choices?: Array<{
     delta?: {
       content?: string | null;
@@ -88,11 +91,13 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
   let sawContent = false;
   let finishReason = 'stop';
   let usage: ChatCompletionLike['usage'];
+  let model: string | undefined;
   // Tool calls accumulate by their streaming index (id/name arrive once, arguments stream).
   const calls = new Map<number, { id: string; name: string; args: string }>();
 
   for (const chunk of chunks) {
     if (chunk.usage) usage = normalizeChatUsage(chunk.usage);
+    if (typeof chunk.model === 'string' && chunk.model) model = chunk.model;
     const choice = chunk.choices?.[0];
     if (!choice) continue;
     const delta = choice.delta ?? {};
@@ -130,6 +135,7 @@ export function reduceChatChunks(chunks: StreamChunk[], onToken?: (delta: string
       },
     ],
     usage,
+    ...(model ? { model } : {}),
   };
 }
 

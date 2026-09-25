@@ -1217,4 +1217,19 @@ describe('runAgenticLoop usage ledger (AGT-4178)', () => {
     expect(row).toMatchObject({ adapter: 'local', costUsd: null, promptTokens: 5 });
     expect(row?.stage).toBeUndefined();
   });
+
+  // Runtime model evidence (AGT-4534): the requested id is configuration, the
+  // served id is what actually answered. Both are kept so a provider-side
+  // substitution is visible in the ledger.
+  it('records the model the provider reports serving next to the requested one', async () => {
+    const { readUsage } = await import('../support/usageLedger.js');
+    const startedAt = Date.now();
+    await runAgenticLoop({
+      prompt: 'x', cwd: '/work/demo', model: 'deepseek-v4.1-flash', webTools: false, maxTurns: 1,
+      usageAttribution: { adapter: 'ollama-cloud', taskId: 'AGT-80', stage: 'reviewer' },
+      callApi: async () => ({ ...finalResp('done'), model: 'deepseek-v4.1-flash-0925', usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } }),
+    });
+    const row = readUsage({ since: startedAt - 1000 }).find((r) => r.taskId === 'AGT-80');
+    expect(row).toMatchObject({ model: 'deepseek-v4.1-flash', servedModel: 'deepseek-v4.1-flash-0925' });
+  });
 });

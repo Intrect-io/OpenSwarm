@@ -2,6 +2,15 @@ import { describe, it, expect, vi } from 'vitest';
 import { reduceChatChunks } from './chatStream.js';
 
 describe('reduceChatChunks', () => {
+  it('keeps the model the server reports serving', () => {
+    const res = reduceChatChunks([
+      { model: 'deepseek-v4.1-flash', choices: [{ delta: { content: 'o' } }] },
+      { model: 'deepseek-v4.1-flash', choices: [{ delta: { content: 'k' }, finish_reason: 'stop' }] },
+    ] as Parameters<typeof reduceChatChunks>[0]);
+    expect(res.model).toBe('deepseek-v4.1-flash');
+    expect(reduceChatChunks([{ choices: [{ delta: { content: 'x' } }] }]).model).toBeUndefined();
+  });
+
   it('accumulates content deltas and emits each via onToken in order', () => {
     const onToken = vi.fn();
     const res = reduceChatChunks(
