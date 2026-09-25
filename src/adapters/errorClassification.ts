@@ -96,6 +96,9 @@ export function isInfraError(error: unknown): boolean {
   // reported as the task itself failing. A user abort is deliberately not
   // included: that is a stop, not a fault.
   if (error instanceof DOMException && error.name === 'TimeoutError') return true;
+  // A request abandoned for silence (stallGuard.ts) after its retries ran out
+  // is the same fault as the timeout it replaces. (AGT-4534)
+  if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ESTREAMSTALL') return true;
   const msg = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
   // undici wraps connection failures as `TypeError: fetch failed` with the real
   // code (ECONNREFUSED / ECONNRESET / UND_ERR_*) on `error.cause.code` — the
@@ -113,6 +116,9 @@ export function isInfraError(error: unknown): boolean {
 /** Distinguish wall-clock exhaustion from other infrastructure failures. */
 export function isTimeoutError(error: unknown): boolean {
   if (error instanceof DOMException && error.name === 'TimeoutError') return true;
+  // A request abandoned for silence (stallGuard.ts) after its retries ran out
+  // is the same fault as the timeout it replaces. (AGT-4534)
+  if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ESTREAMSTALL') return true;
   const msg = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
   return msg.includes('timed out') || msg.includes('timeout after');
 }

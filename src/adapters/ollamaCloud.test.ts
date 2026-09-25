@@ -366,4 +366,61 @@ describe('OllamaCloudAdapter', () => {
     await expect(new OllamaCloudAdapter().isAvailable()).resolves.toBe(false);
     expect(urls.every((url) => url.includes(':9999'))).toBe(true);
   });
+
+  // AGT-4534, run base2: one direct request went silent and consumed the
+  // reviewer's whole 600 s stage budget. A silent request is now abandoned
+  // after an idle window and retried.
+  it('abandons a request that goes silent and retries it', async () => {
+    process.env.OLLAMA_API_KEY = 'test-key';
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    let chatCalls = 0;
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (!String(url).endsWith('/chat/completions')) {
+        return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
+      }
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        // Accepts the request and never answers — only an abort ends it.
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        });
+      }
+      return Promise.resolve(new Response(
+        'data: {"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}\n\n' + 'data: [DONE]\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      ));
+    }));
+    const started = Date.now();
+    const result = await new OllamaCloudAdapter({ streamIdleMs: 200 }).run({
+      prompt: 'say ok', cwd: process.cwd(), model: 'deepseek-v4.1-flash', enableTools: false, maxTurns: 1, timeoutMs: 60_000,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(chatCalls).toBe(2);
+    expect(Date.now() - started).toBeLessThan(20_000);
+  }, 30_000);
+
+  it('does not restart the caller deadline on a stall retry', async () => {
+    process.env.OLLAMA_API_KEY = 'test-key';
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    let chatCalls = 0;
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (!String(url).endsWith('/chat/completions')) {
+        return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
+      }
+      chatCalls += 1;
+      return new Promise((_resolve, reject) => {
+        if (init?.signal?.aborted) { reject(init.signal.reason); return; }
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      });
+    }));
+    const started = Date.now();
+    // The deadline abort is an infra error, which the adapter rethrows.
+    await expect(new OllamaCloudAdapter({ streamIdleMs: 150 }).run({
+      prompt: 'x', cwd: process.cwd(), model: 'deepseek-v4.1-flash', enableTools: false, maxTurns: 1, timeoutMs: 400,
+    })).rejects.toThrow(/timeout/i);
+    // Every retry after the 400 ms deadline fails at once instead of waiting
+    // out a fresh deadline of its own.
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(chatCalls).toBeLessThanOrEqual(3);
+  }, 30_000);
 });
