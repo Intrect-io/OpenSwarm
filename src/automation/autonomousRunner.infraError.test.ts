@@ -227,8 +227,16 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
 
     vi.spyOn(internal, 'executePipeline').mockImplementation(async () => await new Promise<PipelineResult>(() => {}));
     const timedOutTask = task();
+    const startedAt = Date.now(); // fake clock
     scheduler.startTask(timedOutTask, '/repo', (signal) => internal.executeDurably(timedOutTask, '/repo', signal));
-    await vi.advanceTimersByTimeAsync(budgetMs - 1);
+    // The durable claim is taken after real file I/O (repo metadata), which
+    // fake timers do not wait for. Advancing before it exists lets the
+    // watchdog fire on an unclaimed run, which records nothing — the flake
+    // behind AGT-4537. Wait for the claim, as a real run would have it.
+    const claims = (runner as unknown as { durableRuns: { activeClaims: Map<string, unknown> } }).durableRuns.activeClaims;
+    await vi.waitFor(() => expect(claims.has('ISSUE-1')).toBe(true), { timeout: 10_000, interval: 5 });
+    // waitFor advances the fake clock by its interval on every check.
+    await vi.advanceTimersByTimeAsync(budgetMs - 1 - (Date.now() - startedAt));
     expect(existsSync(join(tempDir, 'runner-pipeline-history.json'))).toBe(false);
 
     await vi.advanceTimersByTimeAsync(1);
