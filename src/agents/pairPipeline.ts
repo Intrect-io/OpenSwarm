@@ -88,6 +88,7 @@ export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
 import { canStartAnotherIteration } from '../orchestration/taskBudget.js';
 import { buildReviewerStageOptions } from './reviewerStageOptions.js';
+import { reviewWorkerBlocker } from './workerBlockerReview.js';
 
 
 /**
@@ -950,6 +951,20 @@ export class PairPipeline extends EventEmitter {
           return { success: false };
         }
         if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
+        // A no-edit stop with a stated reason is a claim about the task: put it
+        // to the reviewer once instead of retrying blind (AGT-4535).
+        const blocker = await reviewWorkerBlocker(this.config, context, failedWorker, this.abortSignal);
+        if (blocker?.confirmed) {
+          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
+          this.emit('halt', { confidence: failedWorker.confidencePercent ?? 0, haltReason: blocker.reason, sessionId: context.session.id, iteration: context.currentIteration, context });
+          return { success: false };
+        }
+        if (blocker) {
+          agentPair.trackFailure(context.session.id);
+          this.emit('iteration:fail', { iteration: context.currentIteration, stage: 'worker', context });
+          agentPair.updateSessionStatus(context.session.id, 'revising');
+          continue;
+        }
         safeConsole.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
         agentPair.trackFailure(context.session.id);
         this.emit('iteration:fail', {

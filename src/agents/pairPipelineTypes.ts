@@ -199,6 +199,10 @@ export interface PipelineContext {
   snapshots?: import('./iterationSnapshot.js').IterationSnapshotState;
   /** Same out-of-scope write rejected twice: retrying cannot alter the fence. */
   repeatedScopeRejection?: string;
+  /** A no-edit worker blocker claim has been put to the reviewer this run (AGT-4535). */
+  blockerReviewed?: boolean;
+  /** The worker's blocker claim plus the reviewer's confirming evidence. */
+  verifiedBlocker?: string;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

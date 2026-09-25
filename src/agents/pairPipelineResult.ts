@@ -12,6 +12,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { safeConsole } from '../support/safeLog.js';
 import { guardWarningsForResult } from './guardWarningRecord.js';
 import { ITERATION_BUDGET_PARK_REASON } from '../orchestration/taskBudget.js';
+import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from './workerBlockerReview.js';
 import {
   WORKER_NO_CHANGES_PARK_REASON,
   type PipelineContext,
@@ -73,7 +74,11 @@ export function composePipelineResult(
       // draft instead of stranded (AGT-4430).
       : context.budgetParkReason
         ? { code: ITERATION_BUDGET_PARK_REASON, reason: context.budgetParkReason }
-        : undefined,
+        // The reviewer confirmed the worker's reason for stopping: retrying
+        // the same task text reproduces it, so a person decides (AGT-4535).
+        : context.verifiedBlocker
+          ? { code: VERIFIED_WORKER_BLOCKER_PARK_REASON, reason: context.verifiedBlocker }
+          : undefined,
     totalDuration: Date.now() - startTime,
     iterations: context.currentIteration,
     // Final iteration's non-blocking warnings; see guardWarningRecord.ts.
