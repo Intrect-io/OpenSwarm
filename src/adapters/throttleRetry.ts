@@ -54,7 +54,8 @@ export const TRANSIENT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as cons
 const TRANSIENT_HTTP_STATUSES: ReadonlySet<number> = new Set([500, 502, 503, 504, 529]);
 
 /** undici / Node error codes for a connection that never delivered a response. */
-const TRANSIENT_CAUSE_CODES = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND'];
+// ESTREAMSTALL: a request that went silent and was abandoned (stallGuard.ts).
+const TRANSIENT_CAUSE_CODES = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND', 'ESTREAMSTALL'];
 
 export interface TransientFailure {
   /** Set when the server answered with a non-OK status. */

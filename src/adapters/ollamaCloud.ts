@@ -37,6 +37,7 @@ import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } fro
 import { isInfraError } from './errorClassification.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 import { adapterFetch } from './httpDispatcher.js';
+import { StreamStallError, createStallGuard } from './stallGuard.js';
 import { parseOpenAiModelList, writeCachedCatalog } from './modelCatalog.js';
 
 export const OLLAMA_CLOUD_DIRECT_BASE_URL = 'https://ollama.com';
@@ -99,7 +100,15 @@ export interface OllamaCloudAdapterOptions {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
+  /** Abandon (and retry) a direct request that produces no bytes for this long. */
+  streamIdleMs?: number;
 }
+
+/**
+ * Silence after which a direct request is abandoned and retried. Long enough
+ * for a slow first token, far shorter than a stage budget.
+ */
+export const OLLAMA_CLOUD_STREAM_IDLE_MS = 180_000;
 
 /** How one call reaches Ollama Cloud, resolved from options and the environment. */
 export type OllamaCloudRoute =
@@ -304,20 +313,34 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
 
       const attempt = async (): Promise<ChatCompletionLike> => {
         const request = prepareApprovedModelRequest(OLLAMA_CLOUD_CHAT_ENDPOINT, body);
+        // A request that goes silent is abandoned after the idle window and
+        // retried, rather than holding the stage until its whole budget runs out.
+        const idleMs = this.options.streamIdleMs ?? OLLAMA_CLOUD_STREAM_IDLE_MS;
+        const guard = createStallGuard(idleMs);
+        const deadline = abortSignalWithDeadline(options.signal, timeoutMs);
+        const signal = deadline ? AbortSignal.any([deadline, guard.signal]) : guard.signal;
+        const retryStall = async (err: unknown): Promise<ChatCompletionLike | undefined> => {
+          const failure = guard.stalled() ? new StreamStallError(idleMs) : err;
+          if (await resolveTransientFailure('ollama-cloud', { error: failure }, throttle, { signal: options.signal }) === 'retry') {
+            return attempt();
+          }
+          return undefined;
+        };
         let res: Response;
         try {
           res = await adapterFetch(request.url, {
             method: 'POST',
             headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
             body: request.body,
-            signal: abortSignalWithDeadline(options.signal, timeoutMs),
+            signal,
           });
+          guard.touch();
         } catch (err) {
-          // Dropped socket before any response: bounded in-place retry, as atlascloud.
-          if (await resolveTransientFailure('ollama-cloud', { error: err }, throttle, { signal: options.signal }) === 'retry') {
-            return attempt();
-          }
-          throw err;
+          guard.clear();
+          // Dropped socket or silent request before any response: bounded retry.
+          const retried = await retryStall(err);
+          if (retried) return retried;
+          throw guard.stalled() ? new StreamStallError(idleMs) : err;
         }
 
         if (!res.ok) {
@@ -329,10 +352,21 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
           if (await resolveTransientFailure('ollama-cloud', { status: res.status }, throttle, { signal: options.signal }) === 'retry') {
             return attempt();
           }
+          guard.clear();
           throw new Error(`Ollama Cloud API error (${res.status}): ${errText.slice(0, 500)}`);
         }
 
-        return consumeChatCompletionsStream(res, options.onToken);
+        try {
+          return await consumeChatCompletionsStream(res, options.onToken, guard.touch);
+        } catch (err) {
+          if (!guard.stalled()) throw err;
+          guard.clear();
+          const retried = await retryStall(err);
+          if (retried) return retried;
+          throw new StreamStallError(idleMs);
+        } finally {
+          guard.clear();
+        }
       };
 
       return attempt();

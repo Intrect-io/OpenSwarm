@@ -150,6 +150,8 @@ function parseChunkLine(line: string): StreamChunk | null {
 export async function consumeChatCompletionsStream(
   res: Response,
   onToken?: (delta: string) => void,
+  /** Called whenever body bytes arrive — progress for a stall guard. */
+  onBytes?: () => void,
 ): Promise<ChatCompletionLike> {
   const reader = res.body?.getReader();
   if (!reader) throw new Error('chat stream: empty response body');
@@ -166,6 +168,7 @@ export async function consumeChatCompletionsStream(
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    onBytes?.();
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
