@@ -1,0 +1,10 @@
+{
+  "name": "textkit",
+  "private": true,
+  "type": "module",
+  "description": "Small utility functions.",
+  "scripts": {
+    "test": "node --test test/",
+    "verify": "node scripts/verify-all.mjs"
+  }
+}
