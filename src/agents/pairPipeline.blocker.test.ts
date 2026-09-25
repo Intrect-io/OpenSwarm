@@ -194,6 +194,47 @@ describe('PairPipeline worker blocker claims', () => {
       for (const call of runReviewer.mock.calls) expect((call[0] as ReviewerOptions).mode).not.toBe('blocker');
     });
 
+    // AGT-4534 base5 broken-verify-tool: a correct fix plus a true "the verify
+    // script does not exist" stop was retried three times and failed.
+    const partial = {
+      ...blocker,
+      filesChanged: ['tools/textkit/src/money.mjs'],
+      haltReason: 'Fix done; the DoD verify script tools/textkit/scripts/verify-all.mjs exists in no commit',
+    };
+
+    it('verifies a stop that kept edits and parks it naming the unreviewed files', async () => {
+      const { PairPipeline } = await import('./pairPipeline.js');
+      runWorker.mockResolvedValue(partial);
+      runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: package.json:8 runs a script absent from every commit.' });
+
+      const result = await new PairPipeline(pipelineConfig).run(task(), process.cwd());
+
+      expect(runWorker).toHaveBeenCalledTimes(1);
+      const reviewed = runReviewer.mock.calls[0][0] as ReviewerOptions;
+      expect(reviewed.mode).toBe('blocker');
+      expect(reviewed.blockerChangedFiles).toEqual(['tools/textkit/src/money.mjs']);
+      expect(result.finalStatus).toBe('waiting_on_operator');
+      expect(result.operatorPark?.code).toBe('verified_worker_blocker');
+      expect(result.operatorPark?.reason).toContain('tools/textkit/src/money.mjs');
+      expect(result.operatorPark?.reason).toContain('unreviewed, kept in the run\'s worktree');
+      expect(result.operatorPark!.reason.length).toBeLessThan(1600);
+    });
+
+    it('verifies a stop that kept edits on a later iteration too', async () => {
+      const { PairPipeline } = await import('./pairPipeline.js');
+      runWorker
+        .mockResolvedValueOnce({ success: true, summary: 'partial', filesChanged: ['tools/textkit/src/money.mjs'], commands: ['node --test'], output: '', confidencePercent: 100 })
+        .mockResolvedValue(partial);
+      runReviewer
+        .mockResolvedValueOnce({ decision: 'revise', feedback: 'also run the verify script' })
+        .mockResolvedValue({ decision: 'approve', feedback: 'Confirmed: the script is absent.' });
+
+      const result = await new PairPipeline(pipelineConfig).run(task(), process.cwd());
+
+      expect((runReviewer.mock.calls[1][0] as ReviewerOptions).mode).toBe('blocker');
+      expect(result.finalStatus).toBe('waiting_on_operator');
+    });
+
     it('does not treat an adapter error as a blocker claim', async () => {
       const { PairPipeline } = await import('./pairPipeline.js');
       runWorker.mockResolvedValue({ ...blocker, error: 'ollama-cloud request failed: 502', haltReason: undefined });
