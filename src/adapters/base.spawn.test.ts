@@ -342,6 +342,13 @@ describe('argv-safe adapter spawning', () => {
     expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
+  // The property: a 25ms hard timeout fires long before the ignored operation
+  // settles. The bound sits well under the late rejection, so it still proves
+  // that, but far above a loaded CI runner's scheduling jitter — a 150ms bound
+  // against a 300ms rejection failed main at 190ms (AGT-4537).
+  const LATE_REJECTION_MS = 1_000;
+  const TIMEOUT_BOUND_MS = 600;
+
   it('hard-times-out command construction that ignores AbortSignal and handles its late rejection', async () => {
     const adapter = {
       name: 'fixture',
@@ -349,7 +356,7 @@ describe('argv-safe adapter spawning', () => {
       isAvailable: async () => true,
       getDefaultModel: async () => 'fixture',
       buildCommand: () => new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error('late command failure')), 300);
+        setTimeout(() => reject(new Error('late command failure')), LATE_REJECTION_MS);
       }),
       parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
       parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
@@ -361,11 +368,11 @@ describe('argv-safe adapter spawning', () => {
       cwd: process.cwd(),
       timeoutMs: 25,
     })).rejects.toThrow('fixture timeout after 25ms');
-    expect(Date.now() - started).toBeLessThan(150);
+    expect(Date.now() - started).toBeLessThan(TIMEOUT_BOUND_MS);
     expect(spawnMock).not.toHaveBeenCalled();
     // Let the abandoned operation reject. Vitest will fail this test if it
     // escapes as an unhandled rejection.
-    await new Promise((resolve) => setTimeout(resolve, 325));
+    await new Promise((resolve) => setTimeout(resolve, LATE_REJECTION_MS + 25));
   });
 
   it('hard-times-out adapter.run when the adapter ignores AbortSignal', async () => {
@@ -376,7 +383,7 @@ describe('argv-safe adapter spawning', () => {
       getDefaultModel: async () => 'fixture',
       buildCommand: () => ({ command: 'fixture-cli', args: [] }),
       run: () => new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error('late run failure')), 300);
+        setTimeout(() => reject(new Error('late run failure')), LATE_REJECTION_MS);
       }),
       parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
       parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
@@ -388,8 +395,8 @@ describe('argv-safe adapter spawning', () => {
       cwd: process.cwd(),
       timeoutMs: 25,
     })).rejects.toThrow('fixture timeout after 25ms');
-    expect(Date.now() - started).toBeLessThan(150);
-    await new Promise((resolve) => setTimeout(resolve, 325));
+    expect(Date.now() - started).toBeLessThan(TIMEOUT_BOUND_MS);
+    await new Promise((resolve) => setTimeout(resolve, LATE_REJECTION_MS + 25));
   });
 });
 
