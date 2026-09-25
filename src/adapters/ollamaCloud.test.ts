@@ -353,4 +353,17 @@ describe('OllamaCloudAdapter', () => {
     expect(auth.length).toBeGreaterThan(0);
     expect(auth.every((value) => value === undefined)).toBe(true);
   });
+
+  it('probes only the configured loopback server, never falling back to :11434', async () => {
+    delete process.env.OLLAMA_API_KEY;
+    process.env.OLLAMA_CLOUD_BASE_URL = 'http://localhost:9999';
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      urls.push(String(url));
+      if (String(url).includes(':9999')) throw new Error('ECONNREFUSED');
+      return new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 });
+    }));
+    await expect(new OllamaCloudAdapter().isAvailable()).resolves.toBe(false);
+    expect(urls.every((url) => url.includes(':9999'))).toBe(true);
+  });
 });

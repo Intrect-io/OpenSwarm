@@ -153,7 +153,10 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
   constructor(options: OllamaCloudAdapterOptions = {}) {
     super({
       name: 'ollama-cloud',
-      endpoints: [OLLAMA_CLOUD_LOCAL_BASE_URL],
+      // No fallback list: each call probes exactly the loopback server its route
+      // names (useLocal), so a configured server that is down is reported down
+      // instead of silently replaced by :11434.
+      endpoints: [],
       // Curated ids are canonical; getDefaultModel() spells them per transport.
       defaultModel: OLLAMA_CLOUD_DEFAULT_MODEL,
       // Only the direct path authenticates, and it never goes through the base
