@@ -133,20 +133,27 @@ describe('runChatCompletion CLI fallback', () => {
    * caller hears about the timeout only once that is done. The wall-clock
    * bound this replaces (`< 150ms`) failed main at 175ms on a loaded CI runner
    * — it timed the runner's disk as much as the deadline (AGT-4537).
+   *
+   * The clock moves only once the operation under test is actually pending.
+   * Fake time does not wait for real I/O: advancing it straight away let the
+   * deadline land while mkdtemp was still running on a slow CI disk, so the
+   * command was never built and the test checked a path it never reached.
    */
-  async function expectRejectedAtDeadline(prompt: string): Promise<void> {
+  async function expectRejectedAtDeadline(prompt: string, operationStarted: Promise<void>): Promise<void> {
     const realSetTimeout = globalThis.setTimeout;
+    const realTimeCap = () => new Promise<'cap'>((resolve) => realSetTimeout(() => resolve('cap'), 10_000));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
       let outcome: string | undefined;
       const run = runChatCompletion({ prompt, provider: 'codex', timeoutMs: 25 })
         .then(() => { outcome = 'resolved'; }, (error: Error) => { outcome = error.message; });
+      expect(await Promise.race([operationStarted.then(() => 'started'), realTimeCap()])).toBe('started');
       await vi.advanceTimersByTimeAsync(24);
       expect(outcome).toBeUndefined();
       await vi.advanceTimersByTimeAsync(1);
-      // Only real I/O remains; the real-time cap turns "not delivered at the
-      // deadline" into a failure instead of a hung test.
-      await Promise.race([run, new Promise((resolve) => realSetTimeout(resolve, 10_000))]);
+      // Only real I/O remains; the cap turns "not delivered at the deadline"
+      // into a failure instead of a hung test.
+      await Promise.race([run, realTimeCap()]);
       expect(outcome).toBe('Chat response timeout');
       // Let the abandoned operation reject; an unhandled rejection fails the test.
       await vi.advanceTimersByTimeAsync(300);
@@ -157,27 +164,33 @@ describe('runChatCompletion CLI fallback', () => {
 
   it('hard-times-out chat command construction that ignores AbortSignal and handles its late rejection', async () => {
     let promptPath = '';
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
     getAdapter.mockReturnValue(cliAdapter((options) => {
       promptPath = options.prompt;
+      markStarted();
       return new Promise<never>((_resolve, reject) => {
         setTimeout(() => reject(new Error('late chat command failure')), 300);
       });
     }));
 
-    await expectRejectedAtDeadline('time out while enumerating MCP');
+    await expectRejectedAtDeadline('time out while enumerating MCP', started);
     expect(existsSync(promptPath)).toBe(false);
     expect(existsSync(dirname(promptPath))).toBe(false);
   });
 
   it('hard-times-out a run adapter that ignores AbortSignal', async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
     getAdapter.mockReturnValue({
       ...cliAdapter(() => ({ command: 'unused', args: [] })),
       run: () => new Promise<never>((_resolve, reject) => {
+        markStarted();
         setTimeout(() => reject(new Error('late chat run failure')), 300);
       }),
     });
 
-    await expectRejectedAtDeadline('time out an uncooperative run adapter');
+    await expectRejectedAtDeadline('time out an uncooperative run adapter', started);
   });
 
   it('sources the globally filtered MCP set for native chat runs', async () => {

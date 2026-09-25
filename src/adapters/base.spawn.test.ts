@@ -356,19 +356,23 @@ describe('argv-safe adapter spawning', () => {
    * delivered with the clock still at 25ms, and the 300ms operation has not
    * run. That is stricter than the old bound and independent of load.
    */
-  async function expectRejectedAtDeadline(adapter: CliAdapter): Promise<void> {
+  async function expectRejectedAtDeadline(adapter: CliAdapter, operationStarted: Promise<void>): Promise<void> {
     const realSetTimeout = globalThis.setTimeout;
+    const realTimeCap = () => new Promise<'cap'>((resolve) => realSetTimeout(() => resolve('cap'), 10_000));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
       let outcome: string | undefined;
       const run = spawnCli(adapter, { prompt: 'hello', cwd: process.cwd(), timeoutMs: 25 })
         .then(() => { outcome = 'resolved'; }, (error: Error) => { outcome = error.message; });
+      // Move the clock only once the operation under test is pending: fake
+      // time does not wait for the real prompt-file I/O in front of it.
+      expect(await Promise.race([operationStarted.then(() => 'started'), realTimeCap()])).toBe('started');
       await vi.advanceTimersByTimeAsync(24);
       expect(outcome).toBeUndefined();
       await vi.advanceTimersByTimeAsync(1);
       // Only real I/O remains. A generous real-time cap turns "never
       // delivered at the deadline" into a failure instead of a hung test.
-      await Promise.race([run, new Promise((resolve) => realSetTimeout(resolve, 10_000))]);
+      await Promise.race([run, realTimeCap()]);
       expect(outcome).toBe('fixture timeout after 25ms');
       // Let the abandoned operation reject. Vitest fails the test if that
       // rejection escapes unhandled.
@@ -379,23 +383,28 @@ describe('argv-safe adapter spawning', () => {
   }
 
   it('hard-times-out command construction that ignores AbortSignal and handles its late rejection', async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const adapter = {
       name: 'fixture',
       capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
       isAvailable: async () => true,
       getDefaultModel: async () => 'fixture',
       buildCommand: () => new Promise<never>((_resolve, reject) => {
+        markStarted();
         setTimeout(() => reject(new Error('late command failure')), 300);
       }),
       parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
       parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
     } as unknown as CliAdapter;
 
-    await expectRejectedAtDeadline(adapter);
+    await expectRejectedAtDeadline(adapter, started);
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('hard-times-out adapter.run when the adapter ignores AbortSignal', async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const adapter = {
       name: 'fixture',
       capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
@@ -403,13 +412,14 @@ describe('argv-safe adapter spawning', () => {
       getDefaultModel: async () => 'fixture',
       buildCommand: () => ({ command: 'fixture-cli', args: [] }),
       run: () => new Promise<never>((_resolve, reject) => {
+        markStarted();
         setTimeout(() => reject(new Error('late run failure')), 300);
       }),
       parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
       parseReviewerOutput: () => ({ decision: 'approve' as const, feedback: '', issues: [], suggestions: [] }),
     } satisfies CliAdapter;
 
-    await expectRejectedAtDeadline(adapter);
+    await expectRejectedAtDeadline(adapter, started);
   });
 });
 
