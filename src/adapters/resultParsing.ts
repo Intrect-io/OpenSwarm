@@ -9,7 +9,7 @@
 // not). This module is the single source of truth — each adapter delegates to
 // `parseWorkerResult` / `parseReviewerResult`.
 
-import type { WorkerResult, ReviewResult } from './types.js';
+import type { CliRunResult, WorkerResult, ReviewResult } from './types.js';
 import { t } from '../locale/index.js';
 
 /** JSON-first worker parse: fenced ```json block, else a `"success"`-anchored object. */
@@ -344,4 +344,18 @@ function isSubstantiated(
     return hasSubstance(result.feedback ?? '');
   }
   return explicit && hasSubstance(sourceText.replace(DECISION_PHRASE, ''));
+}
+
+/**
+ * Attach the shell commands the adapter's own loop executed to a parsed
+ * worker result. The model's self-reported `commands` is often empty and can
+ * name commands that never ran; the observed list is what the validation gate
+ * reads when it exists. `commands` keeps the union for display. (AGT-4534)
+ */
+export function withExecutionEvidence(result: WorkerResult, raw: Pick<CliRunResult, 'executedCommands'>): WorkerResult {
+  if (!Array.isArray(raw.executedCommands)) return result;
+  result.executedCommands = [...raw.executedCommands];
+  // Newest last and kept: the final check a worker ran is the one that matters.
+  result.commands = [...new Set([...result.commands, ...raw.executedCommands])].slice(-20);
+  return result;
 }

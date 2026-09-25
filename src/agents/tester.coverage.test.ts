@@ -67,7 +67,7 @@ describe('runTester prompt building', () => {
     await runTester(baseOptions({ workerResult: { ...workerResult, filesChanged: [], commands: [] } }));
     const opts = spawnCli.mock.calls[0][1] as { prompt: string };
     expect(opts.prompt).toContain('**Files Changed:** (none)');
-    expect(opts.prompt).toContain('**Commands:** (none)');
+    expect(opts.prompt).toContain('**Commands (self-reported, execution not observable):** (none)');
   });
 
   it('forwards timeoutMs, model, and maxTurns through to spawnCli', async () => {

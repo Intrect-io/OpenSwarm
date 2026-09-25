@@ -18,7 +18,7 @@ import type {
 import { abortSignalWithDeadline } from './requestDeadline.js';
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopOptions } from './agenticLoop.js';
-import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { parseWorkerResult, parseReviewerResult, withExecutionEvidence } from './resultParsing.js';
 import { formatCost } from '../support/costTracker.js';
 import type { ToolDefinition } from './tools.js';
 import { RateLimitError, rateLimitFromCodexHeaders } from './rateLimitError.js';
@@ -590,13 +590,9 @@ export class CodexResponsesAdapter implements CliAdapter {
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {
-    const result = parseWorkerResult(raw.stdout);
-    // Backfill the model's frequently-empty self-reported `commands` with the
-    // shell commands the agentic loop actually ran, so the validation-evidence
-    // gate and reviewers see the real checks. (INT-2485)
-    if (raw.executedCommands && raw.executedCommands.length > 0) {
-      result.commands = [...new Set([...result.commands, ...raw.executedCommands])].slice(0, 20);
-    }
+    // The shell commands the agentic loop actually ran are the validation
+    // evidence; the model's self-reported `commands` is often empty. (INT-2485, AGT-4534)
+    const result = withExecutionEvidence(parseWorkerResult(raw.stdout), raw);
     // Same tokens/duration visibility as the claude adapter (INT-2508).
     if (raw.costInfo) {
       console.log(`[Worker] Cost: ${formatCost(raw.costInfo)}`);

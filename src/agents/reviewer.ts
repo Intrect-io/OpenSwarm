@@ -3,6 +3,7 @@
 // Code review agent (CLI adapter based)
 // ============================================
 
+import { formatCommandEvidence } from './workerValidationEvidence.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
 import type { AdapterName, ProcessContext } from '../adapters/types.js';
@@ -208,10 +209,9 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
     });
   }
 
-  const cmds = options.workerResult.commands;
-  const cmdsSummary = cmds.length <= 10
-    ? (cmds.join(', ') || '(none)')
-    : `${cmds.slice(0, 10).join(', ')} (+${cmds.length - 10} more)`;
+  // The reviewer cannot run anything, so it has to be told which commands
+  // OpenSwarm itself saw run and which are only the worker's claim. (AGT-4534)
+  const commandLines = formatCommandEvidence(options.workerResult);
 
   const guardSection = options.guardWarnings && options.guardWarnings.length > 0
     ? `- **Automated guard warnings (deterministic pre-checks — verify each, don't dismiss):**\n${options.guardWarnings.map(w => `  - ${w}`).join('\n')}\n`
@@ -231,7 +231,7 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
 - **Success:** ${options.workerResult.success}
 - **Summary:** ${options.workerResult.summary}
 - **Files Changed (${files.length}):** ${filesSummary}
-- **Commands:** ${cmdsSummary}
+${commandLines}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
 ${guardSection}${diffSection}`;
 

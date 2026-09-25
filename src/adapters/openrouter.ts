@@ -20,7 +20,7 @@ import {
   type AgenticLoopOptions,
 } from './agenticLoop.js';
 import { resolveMcpTools } from '../mcp/mcpClient.js';
-import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { parseWorkerResult, parseReviewerResult, withExecutionEvidence } from './resultParsing.js';
 import { RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
@@ -241,7 +241,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {
-    return parseWorkerResult(raw.stdout);
+    return withExecutionEvidence(parseWorkerResult(raw.stdout), raw);
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {

@@ -15,7 +15,7 @@ const VALIDATION_COMMAND_RE = /\b(npm\s+(?:test|run\s+(?:test|build|lint|typeche
 // Anchored at each segment start: a leading inspection verb means that segment
 // ran no validation (e.g. `rg "npm test"` searches for the string, it does not
 // run it), so the segment is skipped rather than the whole command rejected.
-const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:status|diff|show|log|grep)|jq|head|tail|wc|tree|du|file|which)\b/i;
+const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:status|diff|show|log|grep)|jq|head|tail|wc|tree|du|file|which|echo|printf)\b/i;
 const SCRIPT_SMOKE_COMMAND_RE = /^\s*(?:python3?|node|tsx|ts-node|uv\s+run|npx|bunx|bash|sh)\b.*\b(?:scripts?\/|tests?\/|\.py|\.js|\.ts|\.sh|--help|--dry-run|smoke|verify|validate|check|test|build|compile)\b/i;
 const TESTER_CODE_FILE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rs|go|java|rb|c|cpp|h|hpp)$/;
 
@@ -48,14 +48,47 @@ function commandLooksLikeValidation(command: string): boolean {
   });
 }
 
+const normalizeCommand = (command: string) => command.replace(/\s+/g, ' ').trim();
+
+/**
+ * Claimed commands that no observed command contains. Containment, not
+ * equality: a worker that claims `npm test` and ran
+ * `cd pkg && npm test 2>&1 | tail` did run it. (AGT-4534)
+ */
+export function claimedButNotObserved(claimed: readonly string[], observed: readonly string[]): string[] {
+  const seen = observed.map(normalizeCommand);
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return claimed.filter((command) => {
+    const wanted = normalizeCommand(command);
+    if (!wanted) return false;
+    // Whole words: `tsc` is not inside `tsconfig.json`, and `npm run build`
+    // is not `npm run build:docs`.
+    const pattern = new RegExp(`(?:^|[\\s;&|(])${escape(wanted)}(?=$|[\\s;&|)])`);
+    return !seen.some((ran) => pattern.test(ran));
+  });
+}
+
 export function missingWorkerValidationIssues(result: WorkerResult): string[] {
   const changed = validationRelevantFiles(result.filesChanged ?? []);
   if (changed.length === 0) return [];
-  const commands = result.commands ?? [];
+  // What the adapter saw run is the evidence when it can see it; the model's
+  // own list is a claim. Only adapters that cannot observe execution (CLI
+  // adapters) fall back to the claim. (AGT-4534)
+  const observed = result.executedCommands;
+  const commands = observed ?? result.commands ?? [];
   if (commands.some(commandLooksLikeValidation)) return [];
 
   const sample = changed.slice(0, 6).join(', ');
   const suffix = changed.length > 6 ? `, +${changed.length - 6} more` : '';
+  const claimedOnly = observed
+    ? claimedButNotObserved((result.commands ?? []).filter(commandLooksLikeValidation), observed)
+    : [];
+  if (claimedOnly.length > 0) {
+    return [
+      `Worker reported validation commands that were never executed: ${claimedOnly.slice(0, 3).join('; ')}`,
+      `Run at least one relevant smoke/build/test/static check before review, or run the closest available check and report its failure. Files needing validation: ${sample}${suffix}`,
+    ];
+  }
   const commandIssue = commands.length === 0
     ? 'Worker changed code/config files but reported zero validation commands.'
     : `Worker changed code/config files but only reported non-validation commands: ${commands.slice(0, 3).join('; ')}`;
@@ -80,4 +113,24 @@ export function testerWouldRunForWorkerResult(
 
 export function isTesterCodeFile(file: string): boolean {
   return TESTER_CODE_FILE_RE.test(file);
+}
+
+/**
+ * Report lines for the commands behind a worker result, for agents that
+ * cannot run anything themselves (reviewer, tester): what OpenSwarm observed
+ * running, what the worker only claimed, or — for adapters that cannot
+ * observe execution — the self-report, labelled as such. (AGT-4534)
+ */
+export function formatCommandEvidence(result: Pick<WorkerResult, 'commands' | 'executedCommands'>): string {
+  // The newest commands are shown: the final check is the one that matters.
+  const list = (cmds: readonly string[]) => (cmds.length <= 10
+    ? (cmds.join(', ') || '(none)')
+    : `(${cmds.length - 10} earlier omitted) ${cmds.slice(-10).join(', ')}`);
+  const observed = result.executedCommands;
+  if (!observed) return `- **Commands (self-reported, execution not observable):** ${list(result.commands)}`;
+  const claimedOnly = claimedButNotObserved(result.commands, observed);
+  return [
+    `- **Commands executed (observed by OpenSwarm):** ${list(observed)}`,
+    ...(claimedOnly.length > 0 ? [`- **Commands claimed by the worker but NOT observed running:** ${list(claimedOnly)}`] : []),
+  ].join('\n');
 }

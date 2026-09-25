@@ -100,6 +100,35 @@ interface ChatCompletionResponse {
   usage?: ChatUsage;
 }
 
+/**
+ * What a tool call executed, as validation evidence, or undefined. The tool
+ * itself says what ran (`ToolResult.executed`): a bash command that ran to an
+ * exit code — failing runs included, they are still evidence that validation
+ * happened — or the checkers a diagnostics call used. Refused, blocked,
+ * timed-out or empty calls ran nothing. (AGT-4534)
+ */
+export function observedCommandFor(
+  _call: { function: { name: string; arguments: string } },
+  result: { is_error?: boolean; executed?: string } | undefined,
+): string | undefined {
+  const executed = result?.executed?.trim();
+  return executed || undefined;
+}
+
+/** Most recent observed commands kept per run. */
+const OBSERVED_COMMAND_LIMIT = 20;
+
+/**
+ * Record an observed command, keeping the most recent ones: the check a worker
+ * runs last must survive a long exploration that came before it.
+ */
+export function recordObservedCommand(list: string[], command: string): void {
+  const existing = list.indexOf(command);
+  if (existing !== -1) list.splice(existing, 1);
+  list.push(command);
+  if (list.length > OBSERVED_COMMAND_LIMIT) list.splice(0, list.length - OBSERVED_COMMAND_LIMIT);
+}
+
 /** 에이전틱 루프 설정 */
 export interface AgenticLoopOptions {
   /** 시스템 프롬프트 */
@@ -857,17 +886,12 @@ async function runAgenticLoopInner(
       lastCoordinationCheckTurn = turn;
     }
 
-    // Capture the shell commands the worker actually ran (ground truth for the
+    // Capture the commands the worker actually ran (ground truth for the
     // validation-evidence gate — the model's self-reported `commands` is often
-    // empty). Only successful bash calls; deduped, capped. (INT-2485)
+    // empty). Deduped, capped. (INT-2485, AGT-4534)
     toolCalls.forEach((tc, i) => {
-      if (tc.function.name !== 'bash' || results[i]?.is_error) return;
-      try {
-        const cmd = String(JSON.parse(tc.function.arguments).command ?? '').trim();
-        if (cmd && !executedCommands.includes(cmd) && executedCommands.length < 20) {
-          executedCommands.push(cmd);
-        }
-      } catch { /* ignore unparseable args */ }
+      const cmd = observedCommandFor(tc, results[i]);
+      if (cmd) recordObservedCommand(executedCommands, cmd);
     });
 
     // Progress-based stop: if every tool call this turn repeats a prior one

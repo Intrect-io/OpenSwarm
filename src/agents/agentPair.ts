@@ -35,6 +35,13 @@ export interface WorkerResult {
   codename?: string;
   filesChanged: string[];
   commands: string[];
+  /**
+   * Shell commands the adapter itself observed being executed (its agentic
+   * loop's bash tool). Undefined when the adapter cannot observe execution —
+   * a CLI adapter — in which case only the self-reported `commands` exist.
+   * When present, this, not `commands`, is the validation evidence. (AGT-4534)
+   */
+  executedCommands?: string[];
   output: string;
   error?: string;
   confidence?: ConfidenceLevel; // Legacy quality/reliability of the result

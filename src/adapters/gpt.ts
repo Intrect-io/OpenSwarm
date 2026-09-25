@@ -15,7 +15,7 @@ import type {
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopOptions } from './agenticLoop.js';
 import { resolveMcpTools } from '../mcp/mcpClient.js';
-import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { parseWorkerResult, parseReviewerResult, withExecutionEvidence } from './resultParsing.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
@@ -280,7 +280,7 @@ export class GptCliAdapter implements CliAdapter {
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {
-    return parseWorkerResult(raw.stdout);
+    return withExecutionEvidence(parseWorkerResult(raw.stdout), raw);
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {
