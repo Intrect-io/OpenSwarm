@@ -144,4 +144,25 @@ describe('runHermesProcess', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it('stops the whole tree when the asking run is aborted', async () => {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { runHermesProcess } = await import('./hermesAdvisor.js');
+    const dir = mkdtempSync(join(tmpdir(), 'hermes-fake-'));
+    const bin = join(dir, 'fake-hermes');
+    writeFileSync(bin, '#!/bin/sh\nsleep 30 &\nsleep 30\n');
+    chmodSync(bin, 0o755);
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 500);
+      const started = Date.now();
+      const run = await runHermesProcess([], { timeoutMs: 60_000, bin, signal: controller.signal });
+      expect(run.timedOut).toBe(true);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });

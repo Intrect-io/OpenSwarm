@@ -49,8 +49,44 @@ export interface HumanQuestionInput {
    * operator is paged (AGT-4516). Overridable for tests; defaults to the Hermes
    * bridge when `OPENSWARM_HERMES_ADVISOR=1`, otherwise no advisor.
    */
-  advisor?: (question: AdvisorQuestion) => Promise<AdvisorVerdict>;
+  advisor?: (question: AdvisorQuestion, options: AdvisorCallOptions) => Promise<AdvisorVerdict>;
+  /**
+   * Epoch-ms by which the asking run must be done. The advisor is skipped when
+   * too little time is left and otherwise bounded to fit, so a consult never
+   * outlives the run that asked for it.
+   */
+  deadlineAt?: number;
+  /** Aborts an in-flight advisor consult (the asking run was cancelled). */
+  signal?: AbortSignal;
 }
+
+export interface AdvisorCallOptions {
+  runBudgetSeconds: number;
+  signal?: AbortSignal;
+}
+
+/** Longest a consult may take when the run has no tighter deadline. */
+const ADVISOR_MAX_BUDGET_SECONDS = 120;
+/** Below this a consult is not worth starting; the operator is paged instead. */
+const ADVISOR_MIN_BUDGET_SECONDS = 20;
+/** Room left for Hermes' kill grace and the rest of the tool call. */
+const ADVISOR_DEADLINE_MARGIN_SECONDS = 20;
+
+/** Budget for one consult, or undefined when the run cannot afford one. */
+export function advisorBudgetSeconds(deadlineAt: number | undefined, now: number = Date.now()): number | undefined {
+  if (deadlineAt === undefined || !Number.isFinite(deadlineAt)) return ADVISOR_MAX_BUDGET_SECONDS;
+  const remaining = Math.floor((deadlineAt - now) / 1000) - ADVISOR_DEADLINE_MARGIN_SECONDS;
+  if (remaining < ADVISOR_MIN_BUDGET_SECONDS) return undefined;
+  return Math.min(ADVISOR_MAX_BUDGET_SECONDS, remaining);
+}
+
+/**
+ * Consults in flight in this process, by correlation id. A second ask of the
+ * same question while the first is being answered (two identical calls in one
+ * turn, a retry racing the original) waits for that consult instead of paging
+ * the operator for a question the advisor is about to answer.
+ */
+const inflightConsults = new Map<string, Promise<HumanQuestionPost | undefined>>();
 
 /**
  * Whether a question is one another machine may answer.
@@ -179,48 +215,66 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
   // enough, and it would ask again — spending an attempt to arrive back at the
   // question the operator has already answered.
   const prior = store.exchange(correlationId);
+
+  const answered = prior.find((event) => event.kind === 'human-answer' && event.status === 'completed');
+  if (answered) return answeredPost(correlationId, answered);
+
+  // The class is the asking model's choice and can differ between attempts of
+  // the same task. A human answer to the same text under the other class still
+  // answers it — the operator must not be paged twice for one decision. An
+  // advisor answer never crosses over: it answered a clarification, and an
+  // approval ask must not receive it (AGT-4516).
+  const twinId = humanQuestionCorrelation({
+    ...input,
+    questionClass: questionClass === 'clarification' ? 'approval' : 'clarification',
+  });
+  const twinAnswer = store.exchange(twinId).find((event) =>
+    event.kind === 'human-answer' && event.status === 'completed' && event.actorRole !== 'advisor');
+  if (twinAnswer) return answeredPost(twinId, twinAnswer);
+
+  // Everything from here to the map entry below is synchronous, so two asks
+  // racing in this process cannot both miss each other's reservation.
+  const alreadyWaiting = prior.some((event) => event.kind === 'human-question' && event.status === 'waiting');
+  const inflight = inflightConsults.get(correlationId);
+  if (inflight) {
+    const advised = await inflight;
+    if (advised) return advised;
+  } else if (!alreadyWaiting) {
+    // First ask only: a retry of a question the advisor already declined goes
+    // straight to the operator path instead of paying for the same refusal.
+    const work = (async () => {
+      await store.publish({
+        repository: input.repository,
+        taskId: input.taskId,
+        taskLabel: input.taskLabel,
+        actor: input.actor,
+        actorName: input.actorName,
+        actorRole: input.actorRole,
+        recipient: 'human',
+        recipientRole: 'human',
+        kind: 'human-question',
+        status: 'waiting',
+        correlationId,
+        summary: input.question,
+        metadata: { questionClass },
+      });
+      return questionClass === 'clarification' ? consultAdvisor(input, correlationId) : undefined;
+    })();
+    inflightConsults.set(correlationId, work);
+    try {
+      const advised = await work;
+      if (advised) return advised;
+    } finally {
+      inflightConsults.delete(correlationId);
+    }
+  }
+
   // Board-only, unlike `prior` above: this backs only the "already paged"
   // check below, which is a rate-limit on re-paging, not a correctness gate —
   // losing sight of an old page on a very chatty task just risks one extra
-  // page, not a stuck run.
+  // page, not a stuck run. Read after any consult, so an ask that waited on a
+  // concurrent consult sees the page that ask already sent.
   const taskEvents = store.list({ repository: input.repository, taskId: input.taskId, limit: 500 });
-
-  const answered = prior.find((event) => event.kind === 'human-answer' && event.status === 'completed');
-  if (answered) {
-    return {
-      correlationId,
-      delivered: true,
-      answer: answered.detail ?? answered.summary,
-      ...(answered.actorRole === 'advisor' ? { answeredBy: answered.actor } : {}),
-      openAskCount: 0,
-    };
-  }
-
-  const alreadyWaiting = prior.some((event) => event.kind === 'human-question' && event.status === 'waiting');
-  if (!alreadyWaiting) {
-    await store.publish({
-      repository: input.repository,
-      taskId: input.taskId,
-      taskLabel: input.taskLabel,
-      actor: input.actor,
-      actorName: input.actorName,
-      actorRole: input.actorRole,
-      recipient: 'human',
-      recipientRole: 'human',
-      kind: 'human-question',
-      status: 'waiting',
-      correlationId,
-      summary: input.question,
-      metadata: { questionClass },
-    });
-
-    // First ask only: a retry of a question the advisor already declined goes
-    // straight to the operator path instead of paying for the same refusal.
-    const advised = questionClass === 'clarification'
-      ? await consultAdvisor(input, correlationId)
-      : undefined;
-    if (advised) return advised;
-  }
 
   // Task-scoped, not question-scoped. A re-dispatched task is a fresh worker
   // session that writes its own ask_human call, and it paraphrases the same
@@ -292,9 +346,21 @@ export async function postHumanQuestion(input: HumanQuestionInput): Promise<Huma
   return { correlationId, delivered, openAskCount };
 }
 
+function answeredPost(correlationId: string, answer: CoordinationEvent): HumanQuestionPost {
+  return {
+    correlationId,
+    delivered: true,
+    answer: answer.detail ?? answer.summary,
+    ...(answer.actorRole === 'advisor' ? { answeredBy: answer.actor } : {}),
+    openAskCount: 0,
+  };
+}
+
 function resolveAdvisor(input: HumanQuestionInput): HumanQuestionInput['advisor'] {
   if (input.advisor) return input.advisor;
-  return isHermesAdvisorEnabled() ? (question) => consultHermesAdvisor(question) : undefined;
+  return isHermesAdvisorEnabled()
+    ? (question, options) => consultHermesAdvisor(question, options)
+    : undefined;
 }
 
 /**
@@ -305,7 +371,15 @@ function resolveAdvisor(input: HumanQuestionInput): HumanQuestionInput['advisor'
 async function consultAdvisor(input: HumanQuestionInput, correlationId: string): Promise<HumanQuestionPost | undefined> {
   const advisor = resolveAdvisor(input);
   if (!advisor) return undefined;
-  const verdict = await advisor({ repository: input.repository, taskLabel: input.taskLabel, question: input.question });
+  const runBudgetSeconds = advisorBudgetSeconds(input.deadlineAt);
+  if (runBudgetSeconds === undefined) {
+    console.log(`[Coordination] advisor skipped on ${correlationId}: the run has too little time left — paging operator`);
+    return undefined;
+  }
+  const verdict = await advisor(
+    { repository: input.repository, taskLabel: input.taskLabel, question: input.question },
+    { runBudgetSeconds, signal: input.signal },
+  );
   const origin = [verdict.provenance?.model, verdict.provenance?.sessionId].filter(Boolean).join(' ');
   if (verdict.status !== 'answered' || !verdict.answer) {
     console.log(`[Coordination] advisor ${verdict.status} on ${correlationId}${origin ? ` (${origin})` : ''}: ${verdict.reason ?? ''} — paging operator`);
@@ -319,15 +393,7 @@ async function consultAdvisor(input: HumanQuestionInput, correlationId: string):
     // That answer is the one to return — paging for it would be a stale page.
     const existing = getCoordinationStore().exchange(correlationId)
       .find((event) => event.kind === 'human-answer' && event.status === 'completed');
-    if (existing) {
-      return {
-        correlationId,
-        delivered: true,
-        answer: existing.detail ?? existing.summary,
-        ...(existing.actorRole === 'advisor' ? { answeredBy: existing.actor } : {}),
-        openAskCount: 0,
-      };
-    }
+    if (existing) return answeredPost(correlationId, existing);
     console.warn(`[Coordination] advisor answer refused on ${correlationId}: ${result.reason ?? ''} — paging operator`);
     return undefined;
   }

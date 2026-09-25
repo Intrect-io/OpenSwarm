@@ -15,6 +15,12 @@
 // `answerHumanQuestion` refuses it on anything but `clarification`.
 
 import { spawn } from 'node:child_process';
+import {
+  prepareCliProcessTreeSpawn,
+  terminateCliProcessTree,
+  trackCliProcessTree,
+  untrackCliProcessTree,
+} from '../adapters/processTree.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,7 +45,7 @@ export interface HermesRunResult {
 
 export type HermesRunner = (
   args: string[],
-  options: { timeoutMs: number; bin: string },
+  options: { timeoutMs: number; bin: string; signal?: AbortSignal },
 ) => Promise<HermesRunResult>;
 
 export interface AdvisorQuestion {
@@ -183,41 +189,67 @@ export function advisorEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS
 /** After a kill, stop waiting for pipes a surviving descendant may hold open. */
 const POST_KILL_SETTLE_MS = 2_000;
 
-export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin }) => new Promise((resolve, reject) => {
-  // Own process group, so a timeout kills Hermes and anything it started.
-  const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: advisorEnvironment() });
+export const runHermesProcess: HermesRunner = (args, { timeoutMs, bin, signal }) => new Promise((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(signal.reason instanceof Error ? signal.reason : new Error('advisor consult aborted'));
+    return;
+  }
+  // Same process-tree handling as every other CLI OpenSwarm spawns: its own
+  // group on POSIX, a Job Object on Windows, so a kill reaches descendants.
+  const cliSpawn = prepareCliProcessTreeSpawn(bin, args, advisorEnvironment());
+  const child = spawn(cliSpawn.command, cliSpawn.args, {
+    shell: false,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+    env: cliSpawn.env,
+    windowsHide: true,
+  });
+  trackCliProcessTree(child);
   let stdout = '';
   let stderr = '';
   let timedOut = false;
   let settled = false;
+  let settleTimer: NodeJS.Timeout | undefined;
+  const cleanup = () => {
+    clearTimeout(timer);
+    clearTimeout(settleTimer);
+    signal?.removeEventListener('abort', onAbort);
+    untrackCliProcessTree(child);
+  };
   const finish = (exitCode: number | null) => {
     if (settled) return;
     settled = true;
-    clearTimeout(timer);
-    clearTimeout(settleTimer);
+    cleanup();
+    // A descendant that survived the kill may still hold the pipes: release
+    // them so neither file descriptors nor the event loop are held.
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.unref();
     resolve({ exitCode, stdout, stderr, timedOut });
   };
-  let settleTimer: NodeJS.Timeout | undefined;
+  const kill = () => {
+    terminateCliProcessTree(child);
+    settleTimer = setTimeout(() => finish(null), POST_KILL_SETTLE_MS);
+  };
+  const onAbort = () => {
+    timedOut = true;
+    kill();
+  };
   const timer = setTimeout(() => {
     timedOut = true;
-    try {
-      if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-    } catch { // cxt-ignore: error_swallow — group already gone; fall back to the direct child
-      child.kill('SIGKILL');
-    }
-    settleTimer = setTimeout(() => finish(null), POST_KILL_SETTLE_MS);
+    kill();
   }, timeoutMs);
-  child.stdout.on('data', (chunk: Buffer) => {
+  signal?.addEventListener('abort', onAbort, { once: true });
+  child.stdout?.on('data', (chunk: Buffer) => {
     if (stdout.length < MAX_STDOUT_BYTES) stdout += chunk.toString('utf8');
   });
-  child.stderr.on('data', (chunk: Buffer) => {
+  child.stderr?.on('data', (chunk: Buffer) => {
     if (stderr.length < 64_000) stderr += chunk.toString('utf8');
   });
   child.on('error', (error) => {
     if (settled) return;
     settled = true;
-    clearTimeout(timer);
-    clearTimeout(settleTimer);
+    cleanup();
     reject(error);
   });
   child.on('close', (code) => finish(code));
@@ -227,6 +259,7 @@ export interface ConsultOptions {
   runner?: HermesRunner;
   bin?: string;
   runBudgetSeconds?: number;
+  signal?: AbortSignal;
 }
 
 export async function consultHermesAdvisor(
@@ -244,6 +277,7 @@ export async function consultHermesAdvisor(
     const run = await runner(buildHermesArgs({ queryFile, workDir, runBudgetSeconds }), {
       timeoutMs: runBudgetSeconds * 1000 + KILL_GRACE_MS,
       bin,
+      signal: options.signal,
     });
     const stream = parseHermesStream(run.stdout);
     const provenance: AdvisorProvenance = {

@@ -428,6 +428,8 @@ export async function executeCoordinationTool(
       // then reads the omission as `approval`.
       questionClass: args.class === 'clarification' || args.class === 'approval' ? args.class : undefined,
       notify: context.notifyOperator,
+      // The advisor consult must fit inside the asking loop's own deadline.
+      deadlineAt: typeof args.__loopDeadlineAt === 'number' ? args.__loopDeadlineAt : undefined,
     });
     // A question the operator already answered is returned rather than asked
     // again, so a retry of the same task does not page them twice.

@@ -624,3 +624,68 @@ describe('advisor answers stay advice (AGT-4516 review)', () => {
     expect((await h.answerHumanQuestion(paged.correlationId, 'vitest', 'discord:op')).accepted).toBe(true);
   });
 });
+
+// Round-2 review: the model picks the class, and may pick differently on a retry.
+describe('advisor consult across retries and concurrency (AGT-4516 review 2)', () => {
+  const answered = { status: 'answered' as const, answer: 'vitest', confidence: 90 };
+  const post = (h: Awaited<ReturnType<typeof modules>>, over: Record<string, unknown>) =>
+    h.postHumanQuestion({
+      repository: '/repo', taskId: 'rt-1', actor: 'worker-1', question: 'Which test runner?',
+      notify: async () => true, ...over,
+    } as Parameters<typeof h.postHumanQuestion>[0]);
+
+  it('returns the operator answer when the same text is re-asked as a clarification', async () => {
+    const h = await modules();
+    const first = await post(h, { questionClass: 'approval' });
+    await h.answerHumanQuestion(first.correlationId, 'use vitest', 'discord:op');
+    const advisor = vi.fn(async () => answered);
+    const notify = vi.fn(async () => true);
+    const again = await post(h, { questionClass: 'clarification', advisor, notify });
+    expect(again.answer).toBe('use vitest');
+    expect(again.answeredBy).toBeUndefined();
+    expect(advisor).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('returns a human answer to a clarification when the same text is re-asked as approval', async () => {
+    const h = await modules();
+    const first = await post(h, { questionClass: 'clarification', advisor: async () => ({ status: 'declined' as const }) });
+    await h.answerHumanQuestion(first.correlationId, 'use vitest', 'operator-dashboard');
+    const notify = vi.fn(async () => true);
+    const again = await post(h, { questionClass: 'approval', notify });
+    expect(again.answer).toBe('use vitest');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('shares one consult between concurrent asks of the same question', async () => {
+    const h = await modules();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const advisor = vi.fn(async () => { await gate; return answered; });
+    const notify = vi.fn(async () => true);
+    const a = post(h, { questionClass: 'clarification', advisor, notify });
+    const b = post(h, { questionClass: 'clarification', advisor, notify });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(advisor).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+    expect(ra.answeredBy).toBe('advisor:hermes');
+    expect(rb.answeredBy).toBe('advisor:hermes');
+  });
+
+  it('skips the advisor when the run has too little time left, and bounds it otherwise', async () => {
+    const h = await modules();
+    const advisor = vi.fn(async () => answered);
+    const notify = vi.fn(async () => true);
+    const short = await post(h, { taskId: 'rt-2', questionClass: 'clarification', advisor, notify, deadlineAt: Date.now() + 5_000 });
+    expect(advisor).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(short.answer).toBeUndefined();
+
+    await post(h, { taskId: 'rt-3', questionClass: 'clarification', advisor, notify, deadlineAt: Date.now() + 60_000 });
+    expect(advisor).toHaveBeenCalledTimes(1);
+    const [, options] = advisor.mock.calls[0] as unknown as [unknown, { runBudgetSeconds: number }];
+    expect(options.runBudgetSeconds).toBeLessThanOrEqual(60);
+  });
+});
