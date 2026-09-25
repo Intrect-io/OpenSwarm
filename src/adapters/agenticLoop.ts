@@ -98,6 +98,8 @@ interface ChatCompletionResponse {
     finish_reason: string;
   }>;
   usage?: ChatUsage;
+  /** Model id the provider reports serving (kept as runtime evidence). */
+  model?: string;
 }
 
 /**
@@ -521,13 +523,14 @@ async function runAgenticLoopInner(
   // response — rate-limit re-throw, infra re-throw, the empty-final-answer
   // throw, or the process being killed — would otherwise erase the spend of
   // every call that already completed. (AGT-4178)
-  const accountUsage = (usage: ChatUsage | undefined, callStartedAt: number): void => {
+  const accountUsage = (usage: ChatUsage | undefined, callStartedAt: number, servedModel?: string): void => {
     if (!usage) return;
     const metered = typeof usage.cost === 'number';
     recordUsage({
       ts: new Date().toISOString(),
       adapter: usageAttribution?.adapter ?? 'unknown',
       model: options.model,
+      ...(servedModel ? { servedModel } : {}),
       taskId: usageAttribution?.taskId,
       stage: usageAttribution?.stage,
       cwd,
@@ -695,7 +698,7 @@ async function runAgenticLoopInner(
       break;
     }
 
-    accountUsage(response.usage, callStartedAt);
+    accountUsage(response.usage, callStartedAt, response.model);
 
     const choice = response.choices?.[0];
     if (!choice) {
@@ -1043,7 +1046,7 @@ async function runAgenticLoopInner(
       try {
         const salvageStartedAt = Date.now();
         const response = await callApi(messages, []);
-        accountUsage(response.usage, salvageStartedAt);
+        accountUsage(response.usage, salvageStartedAt, response.model);
         apiCallCount++;
         const content = response.choices?.[0]?.message?.content;
         finalText = typeof content === 'string' && content.trim() ? content : '';

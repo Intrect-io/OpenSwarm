@@ -25,7 +25,10 @@ export interface UsageRecord {
   ts: string;
   /** Adapter name (openrouter, gpt, local, atlascloud, codex-responses, …). */
   adapter: string;
+  /** Model id OpenSwarm requested. */
   model: string;
+  /** Model id the provider reported serving, when it reports one. */
+  servedModel?: string;
   /** Pipeline task identity (issue identifier or scheduler task id) when known. */
   taskId?: string;
   /** Pipeline stage (worker, reviewer, draft, decompose, groom, orchestrator, chat, …). */
