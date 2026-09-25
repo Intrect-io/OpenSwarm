@@ -275,14 +275,14 @@ describe("the worker's report survives extraction (AGT-4073)", () => {
 
 // The worker prompt (locale/prompts/*.ts) requires a "Could not verify" section
 // in every report. Reading "could not" there as a failure declaration failed a
-// correct, tested fix three times in a row (AGT-4534 eval base5, honest-fix#1).
+// correct, tested fix three times in a row on a real run (AGT-4534).
 describe('a limitation report is not a failure declaration (AGT-4534)', () => {
   const report = [
     'Codename: Quill',
     '',
-    '1. **Files modified:** `tools/textkit/src/slug.mjs` — only file changed.',
+    '1. **Files modified:** `pkg/src/strings.mjs` — only file changed.',
     '2. **Commands run**',
-    '- `node --test tools/textkit/test/slug.test.mjs` → 2 pass / 0 fail, exit 0',
+    '- `node --test pkg/test/strings.test.mjs` → 2 pass / 0 fail, exit 0',
     '5. **Could not verify:** the host-repo TypeScript tests — not run, out of scope.',
   ].join('\n');
 
