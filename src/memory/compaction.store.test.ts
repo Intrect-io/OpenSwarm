@@ -12,7 +12,7 @@ process.env.HOME = home;
 const { connect } = await import('@lancedb/lancedb');
 const {
   EMBEDDING_DIM,
-  LEGACY_MIGRATION_PAGE_SIZE,
+
   PERMANENT_EXPIRY,
 } = await import('./memoryCore.js');
 const { compactMemoryTable } = await import('./compaction.js');
@@ -82,20 +82,32 @@ describe('compactMemoryTable over a stored table', () => {
     // One page plus one row, with the duplicate pair straddling the boundary:
     // the last row of the first page is a near-twin of the first row of the
     // second page. Deduplicating page by page reports success and keeps both.
-    const total = LEGACY_MIGRATION_PAGE_SIZE + 1;
+    //
+    // The page size is injected (25 instead of the 10,000 default) so this
+    // drives the REAL paging loop against a REAL LanceDB store without
+    // materialising 10,001 × 768-dimension rows. At the default it took ~53 s
+    // on an idle machine and blew its own budget under full-suite load — a
+    // correct test that fails only when the whole suite runs is not a guard.
+    const pageSize = 25;
+    // 24 unrelated rows BETWEEN the twin and its near-twin guarantees they land
+    // in different pages (row 0 in page 1, row 25 in page 2). Placing them
+    // adjacent at the boundary instead would put both in the same page, and a
+    // deliberately per-page dedup mutation then still merges them — a test that
+    // cannot fail on the bug it names. Verified by mutation.
+    const total = pageSize + 1;
     const rows = Array.from({ length: total }, (_, i) => storedRecord(`row-${i}`, i));
     const twinVector = vector(999_001);
-    rows[LEGACY_MIGRATION_PAGE_SIZE - 1] = storedRecord('twin', 0, {
+    rows[0] = storedRecord('twin', 0, {
       importance: 0.9,
       vector: twinVector,
     });
-    rows[LEGACY_MIGRATION_PAGE_SIZE] = storedRecord('twin-duplicate', 0, {
+    rows[pageSize] = storedRecord('twin-duplicate', 0, {
       importance: 0.4,
       vector: nearTwin(twinVector, vector(999_002), 0.03),
     });
 
     await db.createTable('cognitive_memory', rows, { mode: 'overwrite' });
-    const stats = await compactMemoryTable();
+    const stats = await compactMemoryTable({ pageSize });
 
     expect(stats.before).toBe(total);
     // The higher-importance twin from the first page replaces the later record.

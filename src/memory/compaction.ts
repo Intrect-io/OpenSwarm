@@ -174,13 +174,19 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
  *
  * @returns Statistics about compaction
  */
-export async function compactMemoryTable(): Promise<{
+export async function compactMemoryTable(options: { pageSize?: number } = {}): Promise<{
   before: number;
   after: number;
   removed: number;
   deduplicated: number;
 }> {
   console.log('[Compaction] Starting memory table compaction...');
+
+  // Page size is injectable so the store-backed test can exercise the
+  // cross-page boundary without materialising 10,001 × 768-dimension rows —
+  // the production default is unchanged, and the test still drives the real
+  // paging loop against a real LanceDB store rather than a mock.
+  const pageSize = options.pageSize ?? COMPACTION_SCAN_PAGE_SIZE;
 
   try {
     await initDatabase();
@@ -208,7 +214,7 @@ export async function compactMemoryTable(): Promise<{
     let offset = 0;
 
     for (;;) {
-      const page = await table.query().offset(offset).limit(COMPACTION_SCAN_PAGE_SIZE).toArray();
+      const page = await table.query().offset(offset).limit(pageSize).toArray();
       if (page.length === 0) break;
 
       beforeCount += page.length;
@@ -241,7 +247,7 @@ export async function compactMemoryTable(): Promise<{
       }
 
       offset += page.length;
-      if (page.length < COMPACTION_SCAN_PAGE_SIZE) break;
+      if (page.length < pageSize) break;
     }
 
     console.log(`[Compaction] Found ${beforeCount} records`);
