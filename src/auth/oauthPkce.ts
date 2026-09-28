@@ -3,10 +3,11 @@
 // Browser-based OpenAI OAuth login
 // ============================================
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
+import { listenOnLoopback } from './loopbackCallback.js';
 import { PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
 import { parseTokenResponse } from './tokenResponse.js';
 
@@ -101,154 +102,155 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
     const timeout = setTimeout(() => {
       if (settlement.finish()) {
         exchangeAbort.abort(new Error('OAuth login timed out'));
-        server.close();
+        listener.close();
         reject(new Error('OAuth login timed out (120s). 다시 시도하세요.'));
       }
     }, LOGIN_TIMEOUT_MS);
 
-    const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (settlement.settled) {
-        res.writeHead(400);
-        res.end();
-        return;
-      }
-
-      const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
-
-      if (url.pathname !== '/auth/callback') {
-        res.writeHead(404);
-        res.end('Not found');
-        return;
-      }
-
-      const code = url.searchParams.get('code');
-      const returnedState = url.searchParams.get('state');
-      const error = url.searchParams.get('error');
-
-      if (!settlement.tryClaim()) {
-        res.writeHead(409);
-        res.end('OAuth callback already being processed');
-        return;
-      }
-
-      if (error) {
-        settlement.finish();
-        clearTimeout(timeout);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml(error));
-        server.close();
-        reject(new Error(`OAuth error: ${error}`));
-        return;
-      }
-
-      if (!code || returnedState !== state) {
-        settlement.finish();
-        clearTimeout(timeout);
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml('Invalid callback parameters'));
-        server.close();
-        reject(new Error('Invalid OAuth callback: missing code or state mismatch'));
-        return;
-      }
-
-      // 4. Token Exchange
-      try {
-        const tokenBody = new URLSearchParams({
-          grant_type: 'authorization_code',
-          code,
-          code_verifier: codeVerifier,
-          redirect_uri: redirectUri,
-          client_id: clientId,
-        });
-
-        const tokenRes = await fetch(OPENAI_TOKEN_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: tokenBody.toString(),
-          signal: AbortSignal.any([exchangeAbort.signal, AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS)]),
-        });
-
-        if (!tokenRes.ok) {
-          const errText = await tokenRes.text().catch(() => '');
-          throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
+    const listener = listenOnLoopback(
+      port,
+      async (req: IncomingMessage, res: ServerResponse) => {
+        if (settlement.settled) {
+          res.writeHead(400);
+          res.end();
+          return;
         }
 
-        // Validated before any of it reaches an AuthProfile: a 200 carrying an
-        // error body would otherwise be stored with an undefined access token
-        // and a NaN expiry, which fails the store's load-time check and used to
-        // take every other provider's credentials with it. An exchange is the
-        // only point a refresh token is issued, so it is required here.
-        const raw: unknown = await tokenRes.json();
-        const parsed = parseTokenResponse(raw, { provider: 'ChatGPT', requireRefreshToken: true });
-        const tokens = {
-          access_token: parsed.accessToken,
-          refresh_token: parsed.refreshToken as string,
-          expires_in: parsed.expiresIn,
-          id_token: (raw as { id_token?: unknown }).id_token as string | undefined,
-        };
+        const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
 
-        // Codex 백엔드(/responses, /models)는 `chatgpt-account-id` 헤더를 요구한다.
-        // 그 값은 access_token JWT의 `https://api.openai.com/auth` claim 안의
-        // `chatgpt_account_id`다. (과거엔 id_token.sub를 저장했는데, 그건 IdP
-        // subject — 예: `google-oauth2|...` — 라서 codex account_id가 아니다.)
-        // access_token 우선, 없으면 id_token으로 폴백.
-        let accountId: string | undefined;
-        for (const jwt of [tokens.access_token, tokens.id_token]) {
-          if (!jwt) continue;
-          try {
-            const payload = JSON.parse(
-              Buffer.from(jwt.split('.')[1], 'base64url').toString(),
-            ) as Record<string, unknown>;
-            const authClaim = payload['https://api.openai.com/auth'];
-            const candidate =
-              authClaim && typeof authClaim === 'object'
-                ? (authClaim as Record<string, unknown>).chatgpt_account_id
-                : undefined;
-            if (typeof candidate === 'string' && candidate) {
-              accountId = candidate;
-              break;
-            }
-          } catch {
-            // JWT 파싱 실패는 무시 — accountId 없이 진행
+        if (url.pathname !== '/auth/callback') {
+          res.writeHead(404);
+          res.end('Not found');
+          return;
+        }
+
+        const code = url.searchParams.get('code');
+        const returnedState = url.searchParams.get('state');
+        const error = url.searchParams.get('error');
+
+        if (!settlement.tryClaim()) {
+          res.writeHead(409);
+          res.end('OAuth callback already being processed');
+          return;
+        }
+
+        if (error) {
+          settlement.finish();
+          clearTimeout(timeout);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(errorHtml(error));
+          listener.close();
+          reject(new Error(`OAuth error: ${error}`));
+          return;
+        }
+
+        if (!code || returnedState !== state) {
+          settlement.finish();
+          clearTimeout(timeout);
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(errorHtml('Invalid callback parameters'));
+          listener.close();
+          reject(new Error('Invalid OAuth callback: missing code or state mismatch'));
+          return;
+        }
+
+        // 4. Token Exchange
+        try {
+          const tokenBody = new URLSearchParams({
+            grant_type: 'authorization_code',
+            code,
+            code_verifier: codeVerifier,
+            redirect_uri: redirectUri,
+            client_id: clientId,
+          });
+
+          const tokenRes = await fetch(OPENAI_TOKEN_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: tokenBody.toString(),
+            signal: AbortSignal.any([exchangeAbort.signal, AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS)]),
+          });
+
+          if (!tokenRes.ok) {
+            const errText = await tokenRes.text().catch(() => '');
+            throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
           }
+
+          // Validated before any of it reaches an AuthProfile: a 200 carrying an
+          // error body would otherwise be stored with an undefined access token
+          // and a NaN expiry, which fails the store's load-time check and used to
+          // take every other provider's credentials with it. An exchange is the
+          // only point a refresh token is issued, so it is required here.
+          const raw: unknown = await tokenRes.json();
+          const parsed = parseTokenResponse(raw, { provider: 'ChatGPT', requireRefreshToken: true });
+          const tokens = {
+            access_token: parsed.accessToken,
+            refresh_token: parsed.refreshToken as string,
+            expires_in: parsed.expiresIn,
+            id_token: (raw as { id_token?: unknown }).id_token as string | undefined,
+          };
+
+          // Codex 백엔드(/responses, /models)는 `chatgpt-account-id` 헤더를 요구한다.
+          // 그 값은 access_token JWT의 `https://api.openai.com/auth` claim 안의
+          // `chatgpt_account_id`다. (과거엔 id_token.sub를 저장했는데, 그건 IdP
+          // subject — 예: `google-oauth2|...` — 라서 codex account_id가 아니다.)
+          // access_token 우선, 없으면 id_token으로 폴백.
+          let accountId: string | undefined;
+          for (const jwt of [tokens.access_token, tokens.id_token]) {
+            if (!jwt) continue;
+            try {
+              const payload = JSON.parse(
+                Buffer.from(jwt.split('.')[1], 'base64url').toString(),
+              ) as Record<string, unknown>;
+              const authClaim = payload['https://api.openai.com/auth'];
+              const candidate =
+                authClaim && typeof authClaim === 'object'
+                  ? (authClaim as Record<string, unknown>).chatgpt_account_id
+                  : undefined;
+              if (typeof candidate === 'string' && candidate) {
+                accountId = candidate;
+                break;
+              }
+            } catch {
+              // JWT 파싱 실패는 무시 — accountId 없이 진행
+            }
+          }
+
+          const result: OAuthFlowResult = {
+            accessToken: tokens.access_token,
+            refreshToken: tokens.refresh_token,
+            expiresIn: tokens.expires_in,
+            accountId,
+          };
+
+          if (!settlement.finish()) return;
+          clearTimeout(timeout);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(successHtml());
+          listener.close();
+          resolve(result);
+        } catch (err) {
+          if (!settlement.finish()) return;
+          clearTimeout(timeout);
+          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(errorHtml(String(err)));
+          listener.close();
+          reject(err);
         }
-
-        const result: OAuthFlowResult = {
-          accessToken: tokens.access_token,
-          refreshToken: tokens.refresh_token,
-          expiresIn: tokens.expires_in,
-          accountId,
-        };
-
-        if (!settlement.finish()) return;
-        clearTimeout(timeout);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(successHtml());
-        server.close();
-        resolve(result);
-      } catch (err) {
-        if (!settlement.finish()) return;
-        clearTimeout(timeout);
-        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml(String(err)));
-        server.close();
-        reject(err);
-      }
-    });
-
-    server.listen(port, '127.0.0.1', () => {
-      console.log(`[Auth] Callback server listening on http://127.0.0.1:${port}`);
-      console.log(`[Auth] 브라우저에서 OpenAI 로그인 페이지를 엽니다...`);
-      openBrowser(authUrl);
-    });
-
-    server.on('error', (err) => {
-      if (settlement.finish()) {
-        exchangeAbort.abort(err);
-        clearTimeout(timeout);
-        reject(new Error(`Callback server error: ${err.message}`));
-      }
-    });
+      },
+      () => {
+        console.log(`[Auth] Callback server listening on http://localhost:${port}`);
+        console.log(`[Auth] 브라우저에서 OpenAI 로그인 페이지를 엽니다...`);
+        openBrowser(authUrl);
+      },
+      (err) => {
+        if (settlement.finish()) {
+          exchangeAbort.abort(err);
+          clearTimeout(timeout);
+          reject(new Error(`Callback server error: ${err.message}`));
+        }
+      },
+    );
   });
 }
 

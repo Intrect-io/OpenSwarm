@@ -3,7 +3,7 @@
 // Test Status: Complete
 
 import { describe, it, expect } from 'vitest';
-import { formatAuditReport, type AuditorOptions, type AuditorResult } from './auditor.js';
+import { formatAuditReport, parseAuditorOutput, type AuditorOptions, type AuditorResult } from './auditor.js';
 import type { WorkerResult } from './agentPair.js';
 
 describe('auditor', () => {
@@ -772,5 +772,66 @@ Third line continuation`;
         expect(result.summary).toBeDefined();
       }
     });
+  });
+});
+
+describe('unfenced auditor JSON survives braces inside strings (AGT-3466)', () => {
+  // A summary is prose the auditor writes, and prose about JSON/code routinely
+  // contains braces — "Use `{}` here". Counting braces without tracking whether
+  // they sit inside a quoted string ends the object at the first one, so
+  // JSON.parse throws and every structured field is lost to the text heuristic
+  // below it. Measured before the fix: bsScore vanished, issues came back empty.
+  const ndjson = (result: string) => JSON.stringify({ type: 'result', result });
+
+  const result = (summary: string): string => JSON.stringify({
+    success: true,
+    bsScore: 2.5,
+    criticalCount: 1,
+    warningCount: 2,
+    minorCount: 3,
+    issues: ['src/foo.ts:42 - unused import'],
+    summary,
+  });
+
+  it('keeps every field when the summary contains a balanced {} pair', () => {
+    const parsed = parseAuditorOutput(ndjson(result('Use `{}` here')));
+    expect(parsed.bsScore).toBe(2.5);
+    expect(parsed.criticalCount).toBe(1);
+    expect(parsed.warningCount).toBe(2);
+    expect(parsed.minorCount).toBe(3);
+    expect(parsed.issues).toEqual(['src/foo.ts:42 - unused import']);
+    expect(parsed.summary).toBe('Use `{}` here');
+  });
+
+  it('keeps every field when a string holds an unmatched closing brace', () => {
+    const parsed = parseAuditorOutput(ndjson(result('remove the trailing } here')));
+    expect(parsed.bsScore).toBe(2.5);
+    expect(parsed.issues).toEqual(['src/foo.ts:42 - unused import']);
+    expect(parsed.summary).toBe('remove the trailing } here');
+  });
+
+  it('keeps every field when a string holds an unmatched opening brace', () => {
+    const parsed = parseAuditorOutput(ndjson(result('the fragment "{ here never closes')));
+    expect(parsed.bsScore).toBe(2.5);
+    expect(parsed.issues).toEqual(['src/foo.ts:42 - unused import']);
+    expect(parsed.summary).toBe('the fragment "{ here never closes');
+  });
+
+  it('keeps every field when an escaped quote precedes a brace', () => {
+    // The backslash-escape state must be tracked too: the closing quote of
+    // \"}\" would otherwise end the string early and expose the brace as
+    // structure. A scanner that only toggles on '"' slices the object short.
+    const parsed = parseAuditorOutput(ndjson(result('say "}" here')));
+    expect(parsed.bsScore).toBe(2.5);
+    expect(parsed.summary).toBe('say "}" here');
+  });
+
+  it('treats a backslash-escaped backslash as a literal, not an escape', () => {
+    // `C:\\` ends with an escaped backslash: the following quote really does
+    // close the string, so a scanner that lets the second backslash swallow it
+    // would stay "in string" and never close the object at all.
+    const parsed = parseAuditorOutput(ndjson(result('path C:\\ then } here')));
+    expect(parsed.bsScore).toBe(2.5);
+    expect(parsed.summary).toBe('path C:\\ then } here');
   });
 });

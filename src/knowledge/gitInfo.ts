@@ -51,29 +51,35 @@ async function getFileChurns(projectPath: string, sinceDays: number = 30): Promi
   const churns = new Map<string, FileChurn>();
 
   try {
-    // git log --since="30 days ago" --name-only --format="%ct"
+    // `%x01` marks each commit record so a purely numeric filename is never
+    // mistaken for a timestamp; `-z` preserves embedded newlines in filenames.
     const output = await runGitCommand(projectPath, [
       'log',
       `--since=${sinceDays} days ago`,
       '--name-only',
       '-z',
-      '--format=%ct',
+      '--format=%x01%ct',
     ]);
 
     let currentTimestamp = 0;
+    let separatorPending = false;
 
     for (const token of output.split('\0')) {
       if (!token) continue;
-      const timestampToken = token.trim();
 
-      // If numeric, it's a commit timestamp
-      if (/^\d+$/.test(timestampToken)) {
-        currentTimestamp = parseInt(timestampToken, 10) * 1000; // Convert to ms
+      // \x01 marks a commit record here, the same sentinel the `--format` above
+      // emits; the control character is the point, not an accident.
+      // eslint-disable-next-line no-control-regex
+      const record = /^\x01(\d+)$/.exec(token);
+      if (record) {
+        currentTimestamp = parseInt(record[1], 10) * 1000; // Convert to ms
+        separatorPending = true;
         continue;
       }
 
-      // `-z` preserves embedded newlines and other whitespace in filenames.
-      const filePath = token.startsWith('\n') ? token.slice(1) : token;
+      // The name token right after a commit record carries git's header/body separator.
+      const filePath = separatorPending && token.startsWith('\n') ? token.slice(1) : token;
+      separatorPending = false;
       if (!filePath) continue;
       const existing = churns.get(filePath);
       if (existing) {
@@ -146,32 +152,27 @@ export async function getRecentlyChangedFiles(
   sinceTimestamp: number,
 ): Promise<string[]> {
   const files = new Set<string>();
-  try {
-    const sinceDate = new Date(sinceTimestamp).toISOString();
-    const committed = await runGitCommand(projectPath, [
-      'log',
-      `--since=${sinceDate}`,
-      '--name-only',
-      '--format=',
-    ]);
-    for (const line of committed.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) files.add(trimmed);
-    }
 
-    const untracked = await runGitCommand(projectPath, [
-      'ls-files',
-      '--others',
-      '--exclude-standard',
-      '-z',
-    ]);
-    for (const token of untracked.split('\0')) {
-      const trimmed = token.trim();
-      if (trimmed) files.add(trimmed);
+  // Every query is NUL-delimited and tokens are taken verbatim: git paths may
+  // contain newlines, and trimming would corrupt leading/trailing-space names.
+  const collect = async (args: string[]): Promise<void> => {
+    try {
+      for (const token of (await runGitCommand(projectPath, args)).split('\0')) {
+        if (token) files.add(token);
+      }
+    } catch {
+      // One failing query (a repo without commits, a non-repo path) must not
+      // discard the results of the others.
     }
+  };
 
-    return Array.from(files);
-  } catch {
-    return [];
-  }
+  const sinceDate = new Date(sinceTimestamp).toISOString();
+  // `--format=` omits the commit header, so no separator token precedes the
+  // first path of each commit.
+  await collect(['log', `--since=${sinceDate}`, '--name-only', '--format=', '-z']);
+  await collect(['diff', '--cached', '--name-only', '-z']);
+  await collect(['diff', '--name-only', '-z']);
+  await collect(['ls-files', '--others', '--exclude-standard', '-z']);
+
+  return Array.from(files);
 }

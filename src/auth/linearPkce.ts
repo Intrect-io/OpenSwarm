@@ -4,10 +4,11 @@
 // access_token (+ refresh_token). PKCE → NO client_secret is used or stored.
 // ============================================
 
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
+import { listenOnLoopback } from './loopbackCallback.js';
 import { PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
 import { parseTokenResponse } from './tokenResponse.js';
 
@@ -122,107 +123,108 @@ export async function runLinearPkceFlow(options: LinearFlowOptions = {}): Promis
     const timeout = setTimeout(() => {
       if (settlement.finish()) {
         exchangeAbort.abort(new Error('Linear login timed out'));
-        server.close();
+        listener.close();
         reject(new Error('Linear login timed out (120s). 다시 시도하세요.'));
       }
     }, LOGIN_TIMEOUT_MS);
 
-    const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (settlement.settled) {
-        res.writeHead(400);
-        res.end();
-        return;
-      }
-
-      const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
-      if (url.pathname !== '/callback') {
-        res.writeHead(404);
-        res.end('Not found');
-        return;
-      }
-
-      const code = url.searchParams.get('code');
-      const returnedState = url.searchParams.get('state');
-      const error = url.searchParams.get('error');
-
-      if (!settlement.tryClaim()) {
-        res.writeHead(409);
-        res.end('OAuth callback already being processed');
-        return;
-      }
-
-      if (!isValidLinearCallback(code, error, returnedState, state)) {
-        settlement.finish();
-        clearTimeout(timeout);
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml('Invalid callback parameters'));
-        server.close();
-        reject(new Error('Invalid Linear callback: missing code or state mismatch'));
-        return;
-      }
-
-      if (error) {
-        settlement.finish();
-        clearTimeout(timeout);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml(error));
-        server.close();
-        reject(new Error(`Linear OAuth error: ${error}`));
-        return;
-      }
-
-      try {
-        const tokenBody = new URLSearchParams({
-          grant_type: 'authorization_code',
-          code: code!,
-          code_verifier: codeVerifier,
-          redirect_uri: redirectUri,
-          client_id: clientId,
-        });
-
-        const tokenRes = await fetch(LINEAR_TOKEN_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: tokenBody.toString(),
-          signal: AbortSignal.any([exchangeAbort.signal, AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS)]),
-        });
-
-        if (!tokenRes.ok) {
-          const errText = await tokenRes.text().catch(() => '');
-          throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
+    const listener = listenOnLoopback(
+      port,
+      async (req: IncomingMessage, res: ServerResponse) => {
+        if (settlement.settled) {
+          res.writeHead(400);
+          res.end();
+          return;
         }
 
-        const result = parseLinearTokenResponse(await tokenRes.json());
+        const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+        if (url.pathname !== '/callback') {
+          res.writeHead(404);
+          res.end('Not found');
+          return;
+        }
 
-        if (!settlement.finish()) return;
-        clearTimeout(timeout);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(successHtml());
-        server.close();
-        resolve(result);
-      } catch (err) {
-        if (!settlement.finish()) return;
-        clearTimeout(timeout);
-        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(errorHtml(String(err)));
-        server.close();
-        reject(err);
-      }
-    });
+        const code = url.searchParams.get('code');
+        const returnedState = url.searchParams.get('state');
+        const error = url.searchParams.get('error');
 
-    server.listen(port, '127.0.0.1', () => {
-      console.log(`[Auth] Callback server listening on http://127.0.0.1:${port}`);
-      console.log('[Auth] 브라우저에서 Linear 로그인 페이지를 엽니다...');
-      openBrowser(authUrl);
-    });
+        if (!settlement.tryClaim()) {
+          res.writeHead(409);
+          res.end('OAuth callback already being processed');
+          return;
+        }
 
-    server.on('error', (err) => {
-      if (settlement.finish()) {
-        exchangeAbort.abort(err);
-        clearTimeout(timeout);
-        reject(new Error(`Callback server error: ${err.message}`));
-      }
-    });
+        if (!isValidLinearCallback(code, error, returnedState, state)) {
+          settlement.finish();
+          clearTimeout(timeout);
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(errorHtml('Invalid callback parameters'));
+          listener.close();
+          reject(new Error('Invalid Linear callback: missing code or state mismatch'));
+          return;
+        }
+
+        if (error) {
+          settlement.finish();
+          clearTimeout(timeout);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(errorHtml(error));
+          listener.close();
+          reject(new Error(`Linear OAuth error: ${error}`));
+          return;
+        }
+
+        try {
+          const tokenBody = new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: code!,
+            code_verifier: codeVerifier,
+            redirect_uri: redirectUri,
+            client_id: clientId,
+          });
+
+          const tokenRes = await fetch(LINEAR_TOKEN_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: tokenBody.toString(),
+            signal: AbortSignal.any([exchangeAbort.signal, AbortSignal.timeout(TOKEN_EXCHANGE_TIMEOUT_MS)]),
+          });
+
+          if (!tokenRes.ok) {
+            const errText = await tokenRes.text().catch(() => '');
+            throw new Error(`Token exchange failed (${tokenRes.status}): ${errText.slice(0, 300)}`);
+          }
+
+          const result = parseLinearTokenResponse(await tokenRes.json());
+
+          if (!settlement.finish()) return;
+          clearTimeout(timeout);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(successHtml());
+          listener.close();
+          resolve(result);
+        } catch (err) {
+          if (!settlement.finish()) return;
+          clearTimeout(timeout);
+          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(errorHtml(String(err)));
+          listener.close();
+          reject(err);
+        }
+      },
+      () => {
+        console.log(`[Auth] Callback server listening on http://localhost:${port}`);
+        console.log('[Auth] 브라우저에서 Linear 로그인 페이지를 엽니다...');
+        openBrowser(authUrl);
+      },
+      (err) => {
+        if (settlement.finish()) {
+          exchangeAbort.abort(err);
+          clearTimeout(timeout);
+          reject(new Error(`Callback server error: ${err.message}`));
+        }
+      },
+    );
   });
 }
 

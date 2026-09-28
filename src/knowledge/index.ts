@@ -130,6 +130,11 @@ export async function scanAndCache(
 
     const elapsed = Date.now() - startMs;
     safeConsole.log(`[Knowledge] Scan complete: ${slug} (${graph.nodeCount} nodes, ${graph.edgeCount} edges, ${elapsed}ms)`);
+    if (graph.incomplete) {
+      safeConsole.warn(
+        `[Knowledge] Scan INCOMPLETE for ${slug}: ${graph.incompleteReasons.slice(0, 5).join('; ')}`,
+      );
+    }
 
     // Export GraphQL schema + snapshot for agent consumption
     try {

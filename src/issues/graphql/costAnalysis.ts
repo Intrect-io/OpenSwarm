@@ -22,12 +22,39 @@ export const BULK_REGISTER_ENTITIES_COST = 500;
 export const AUTO_LINK_MEMORIES_COST = 500;
 
 /**
- * 뮤테이션 루트 최상위 필드의 실행 대표 비용 매핑.
+ * Registry CRUD mutations: bounded single-row writes. Priced below a bulk
+ * register so one entity edit is never mistaken for a bulk write, but high
+ * enough that alias/fragment multiplication — which runs the resolver once per
+ * alias per spread site — passes the budget quickly.
+ */
+export const REGISTER_ENTITY_COST = 100;
+export const REGISTRY_WRITE_COST = 80;
+export const REGISTRY_RELATION_COST = 60;
+
+/** Registry reads that scan the entity table (FTS or filtered) once per call. */
+export const REGISTRY_SCAN_COST = 100;
+
+/**
+ * 루트 필드의 실행 대표 비용 매핑.
  * (DoD 명칭: FIELD_COSTS — 뮤테이션/쿼리 루트 필드 비용 테이블)
  */
 export const FIELD_COSTS: Record<string, number> = {
   bulkRegisterEntities: BULK_REGISTER_ENTITIES_COST,
   autoLinkMemories: AUTO_LINK_MEMORIES_COST,
+  registerEntity: REGISTER_ENTITY_COST,
+  updateEntity: REGISTRY_WRITE_COST,
+  removeEntity: REGISTRY_WRITE_COST,
+  addEntityRelation: REGISTRY_RELATION_COST,
+  removeEntityRelation: REGISTRY_RELATION_COST,
+  codeEntities: REGISTRY_SCAN_COST,
+  fileBrief: REGISTRY_SCAN_COST,
+  registryStats: REGISTRY_SCAN_COST,
+  deprecatedEntities: REGISTRY_SCAN_COST,
+  untestedEntities: REGISTRY_SCAN_COST,
+  highRiskEntities: REGISTRY_SCAN_COST,
+  entitiesByTag: REGISTRY_SCAN_COST,
+  entityWarnings: REGISTRY_SCAN_COST,
+  searchEntities: REGISTRY_SCAN_COST,
 };
 
 /** 기본 쿼리 비용 상한 */
@@ -49,19 +76,31 @@ function readMaximumCostFromEnv(): number | undefined {
 }
 
 /**
- * 필드 1개의 기본 비용. 뮤테이션 루트의 최상위 필드 중 등록된 비싼 뮤테이션은
- * 실행 대표 비용으로 대체한다. alias는 별개 Field 노드이므로 각각 비용이 부과된다.
+ * 오퍼레이션 루트 종류. 루트에서만 실행 대표 비용 테이블을 적용한다.
+ * subscription은 스키마에 없지만 방어적으로 쿼리와 동일하게 취급한다.
+ */
+type RootKind = 'query' | 'mutation' | null;
+
+/**
+ * 필드 1개의 비용. 오퍼레이션 루트의 최상위 필드 중 실행 비용이 큰 필드는
+ * 실행 대표 비용으로 대체한다. alias는 별개 Field 노드이고 파편은 spread 지점마다
+ * 확산되므로, N번 실행되는 필드는 N번 부과된다.
  */
 function fieldCost(
   node: FieldNode,
   fieldCosts: Record<string, number>,
-  inMutationRoot: boolean,
-): { cost: number; isExpensiveMutation: boolean } {
-  if (inMutationRoot) {
-    const mutationCost = fieldCosts[node.name.value];
-    if (mutationCost !== undefined) return { cost: mutationCost, isExpensiveMutation: true };
+  root: RootKind,
+): { cost: number; coversSelectionSet: boolean } {
+  if (root !== null) {
+    const rootCost = fieldCosts[node.name.value];
+    if (rootCost !== undefined) {
+      // 뮤테이션의 대표 비용은 payload({ id } 등)까지 포함한다(기존 동작 유지).
+      // 쿼리 루트는 대표 비용에 더해 하위 selectionSet도 정상 청구한다 — 그래야
+      // 비싼 조회의 하위 필드를 alias로 늘려도 비용이 늘지 않는 우회가 생기지 않는다.
+      return { cost: rootCost, coversSelectionSet: root === 'mutation' };
+    }
   }
-  return { cost: 1, isExpensiveMutation: false };
+  return { cost: 1, coversSelectionSet: false };
 }
 
 /**
@@ -72,7 +111,7 @@ function costOfSelectionSet(
   selectionSet: SelectionSetNode,
   fragments: Map<string, FragmentDefinitionNode>,
   fieldCosts: Record<string, number>,
-  inMutationRoot: boolean,
+  root: RootKind,
   depth: number,
 ): number {
   if (depth > MAX_EXPANSION_DEPTH) return Number.POSITIVE_INFINITY;
@@ -81,22 +120,23 @@ function costOfSelectionSet(
   for (const selection of selectionSet.selections) {
     switch (selection.kind) {
       case 'Field': {
-        const { cost: fc, isExpensiveMutation } = fieldCost(selection, fieldCosts, inMutationRoot);
+        const { cost: fc, coversSelectionSet } = fieldCost(selection, fieldCosts, root);
         cost += fc;
-        // 비싼 뮤테이션의 하위 selectionSet({ id } 등)은 대표 비용에 포함 — 별도 가산 안 함
-        if (!isExpensiveMutation && selection.selectionSet) {
-          cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, false, depth + 1);
+        // 대표 비용이 하위 selectionSet({ id } 등)까지 포함 — 별도 가산 안 함
+        if (!coversSelectionSet && selection.selectionSet) {
+          cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, null, depth + 1);
         }
         break;
       }
       case 'InlineFragment': {
-        cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, inMutationRoot, depth + 1);
+        cost += costOfSelectionSet(selection.selectionSet, fragments, fieldCosts, root, depth + 1);
         break;
       }
       case 'FragmentSpread': {
         const fragment = fragments.get(selection.name.value);
         if (fragment) {
-          cost += costOfSelectionSet(fragment.selectionSet, fragments, fieldCosts, inMutationRoot, depth + 1);
+          // 파편은 spread 지점마다 확산되므로 그 안의 리졸버도 지점 수만큼 실행된다.
+          cost += costOfSelectionSet(fragment.selectionSet, fragments, fieldCosts, root, depth + 1);
         }
         break;
       }
@@ -121,8 +161,10 @@ export function calculateOperationCost(document: DocumentNode, options: QueryCos
   let cost = 0;
   for (const definition of document.definitions) {
     if (definition.kind === 'OperationDefinition') {
-      const inMutationRoot = definition.operation === 'mutation';
-      cost += costOfSelectionSet(definition.selectionSet, fragments, fieldCosts, inMutationRoot, 0);
+      // 쿼리/뮤테이션 모두 루트 필드의 실행 대표 비용 테이블을 적용한다.
+      // subscription은 스키마에 없으므로 방어적으로 쿼리와 동일하게 취급한다.
+      const root: RootKind = definition.operation === 'mutation' ? 'mutation' : 'query';
+      cost += costOfSelectionSet(definition.selectionSet, fragments, fieldCosts, root, 0);
     }
   }
   return cost;

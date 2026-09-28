@@ -98,6 +98,11 @@ export async function runAutoLinkWithDeadline(
       () => controller.abort(new Error(`autoLinkMemories timed out after ${timeoutMs}ms`)),
       timeoutMs,
     );
+    // 이 타이머는 fire-and-forget 자동 연결의 기한일 뿐, 아무도 기다리지 않는다.
+    // ref 상태로 두면 검색이 AbortSignal을 무시할 때 프로세스가 기한(30초)까지
+    // 붙잡힌다 — 기한 자체는 남아 있는 동안에도 abort를 계속 전달하므로 liveness에는
+    // 영향이 없다. 슬롯 회수는 아래 race가 deadline 쪽에서 끝나는 것으로 보장된다.
+    deadlineTimer.unref?.();
     return await Promise.race([
       linkFn(store, issue),
       new Promise<string[]>((_, reject) => {

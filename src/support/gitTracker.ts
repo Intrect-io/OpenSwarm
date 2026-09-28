@@ -313,6 +313,12 @@ function runGitCommand(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Pr
     let stdout = '';
     let stderr = '';
     let settled = false;
+    // Streaming UTF-8 decoders: the decoder holds the tail of a code point that
+    // straddles a chunk boundary until the next chunk completes it, where
+    // `data.toString()` would decode each chunk alone and emit U+FFFD for both
+    // halves — corrupting diff text and paths with non-ASCII characters.
+    const stdoutDecoder = new TextDecoder();
+    const stderrDecoder = new TextDecoder();
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true; // claim settlement before the late close/error handlers run
@@ -320,12 +326,16 @@ function runGitCommand(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Pr
       reject(new Error(`git ${args.join(' ')} timed out after ${GIT_CMD_TIMEOUT_MS}ms`));
     }, GIT_CMD_TIMEOUT_MS);
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
-    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+    proc.stdout.on('data', (data) => { stdout += stdoutDecoder.decode(data, { stream: true }); });
+    proc.stderr.on('data', (data) => { stderr += stderrDecoder.decode(data, { stream: true }); });
 
     proc.on('close', (code) => {
       settled = true;
       clearTimeout(timer);
+      // Flush what the decoders still hold: a stream that ends on a truncated
+      // code point would otherwise drop those bytes silently.
+      stdout += stdoutDecoder.decode();
+      stderr += stderrDecoder.decode();
       if (code === 0) {
         resolve(stdout);
       } else {

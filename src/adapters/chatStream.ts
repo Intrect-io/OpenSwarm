@@ -152,6 +152,25 @@ function parseChunkLine(line: string): StreamChunk | null {
   }
 }
 
+/**
+ * Byte ceilings on ONE streamed chat/completions call.
+ *
+ * Frames are split on '\n', so bytes from an endpoint that never sends one pile
+ * up in the carry buffer for as long as it keeps writing — the request deadline
+ * is the only other thing that would stop it, and that is minutes away. 1 MiB
+ * matches the partial-line bound this repo already keeps for the same reason
+ * (streamBuffer.ts MAX_LINE_BUFFER_BYTES); a real chunk here is a few hundred
+ * bytes, so nothing legitimate approaches it.
+ *
+ * The raw ceiling bounds bytes read from a source we do not control, the same
+ * class as the 2 MiB web-fetch body cap (webTools.ts) and the 16 MiB
+ * GIT_OUTPUT_LIMIT in applyPatch.ts. It is deliberately the same 16 MiB the
+ * Responses adapter applies, so the two streaming parsers this repo runs against
+ * model endpoints share one ceiling: below the model's own output window, and
+ * far above any real answer. Both limits are stated in the error.
+ */
+const MAX_CHAT_STREAM_BYTES = 16 * 1024 * 1024;
+const MAX_CHAT_PARTIAL_FRAME_BYTES = 1024 * 1024;
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
   res: Response,
@@ -165,6 +184,7 @@ export async function consumeChatCompletionsStream(
   const chunks: StreamChunk[] = [];
   const decoder = new TextDecoder();
   let buffer = '';
+  let readBytes = 0;
   const handle = (c: StreamChunk | null) => {
     if (!c) return;
     const delta = c.choices?.[0]?.delta?.content;
@@ -175,9 +195,21 @@ export async function consumeChatCompletionsStream(
     const { done, value } = await reader.read();
     if (done) break;
     onBytes?.();
+    readBytes += value.byteLength;
+    if (readBytes > MAX_CHAT_STREAM_BYTES) {
+      await reader.cancel('chat stream exceeded retention limit').catch(() => {});
+      throw new Error(`chat stream exceeded the 16 MiB limit (${readBytes} bytes read)`);
+    }
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
+    // The carry is what a non-newline flood grows, so the ceiling is applied to
+    // the carry rather than to the decoded chunk: a burst of many complete
+    // frames in one chunk is not a partial frame and must not trip this bound.
     buffer = lines.pop() ?? '';
+    if (Buffer.byteLength(buffer, 'utf8') > MAX_CHAT_PARTIAL_FRAME_BYTES) {
+      await reader.cancel('chat stream partial frame exceeded limit').catch(() => {});
+      throw new Error('chat stream partial frame exceeded the 1 MiB limit (no newline in the stream)');
+    }
     for (const line of lines) handle(parseChunkLine(line));
   }
   handle(parseChunkLine(buffer));

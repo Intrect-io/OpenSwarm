@@ -36,6 +36,28 @@ export const DEFAULT_MODEL = 'gpt-5.6-terra';
 const PROFILE_KEY = 'openai-gpt:default';
 const SPARK_MODEL = 'gpt-5.3-codex-spark';
 
+/**
+ * Byte ceilings on ONE streamed Responses call.
+ *
+ * The partial-frame ceiling is the one a hostile endpoint drives: frames are
+ * split on '\n', so bytes that never contain a newline pile up in the carry
+ * buffer for as long as the server keeps sending them, and the request deadline
+ * only fires when it fires. 1 MiB matches the partial-line bound this repo
+ * already keeps for the same reason (streamBuffer.ts MAX_LINE_BUFFER_BYTES); a
+ * real frame — `response.output_text.delta` or a tool-argument fragment — is a
+ * few dozen bytes, so nothing legitimate comes close.
+ *
+ * The raw ceiling bounds bytes read from a source we do not control, the same
+ * class as the 2 MiB web-fetch body cap and the 16 MiB GIT_OUTPUT_LIMIT in
+ * applyPatch.ts. It is per API call, and it stays a ceiling on the STREAM rather
+ * than on retained state: the reducer below keeps only accumulated text,
+ * tool-call state and final usage, so >16 MiB in one call means an endpoint that
+ * will not stop, not a long answer (the model's window caps output far below
+ * that). Both limits are stated in the error, so an operator sees which one hit.
+ */
+const MAX_STREAM_BYTES = 16 * 1024 * 1024;
+const MAX_PARTIAL_FRAME_BYTES = 1024 * 1024;
+
 // ---- Responses API wire types (the subset we send/receive) ----
 
 interface ResponsesTool {
@@ -148,8 +170,28 @@ interface SseEvent {
 /**
  * Reduce parsed Responses SSE events → a chat-completions-shaped response.
  * Exported so the SSE→chat mapping is unit-testable without a live stream.
+ *
+ * A batch is just the incremental reducer fed up front: the live path
+ * (`consumeResponsesStream`) must NOT retain the event array, because a long
+ * stream duplicates the whole raw body again as a parsed object graph plus one
+ * repeated delta string per token. Only accumulated text, tool-call state and
+ * the final usage survive a stream here.
  */
 export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
+  const reducer = createResponsesEventReducer();
+  for (const ev of events) reducer.accept(ev);
+  return reducer.finish();
+}
+
+/**
+ * The streaming form of `reduceResponsesEvents`: one event in, no history kept.
+ * `accept` folds an event into the retained state; `finish` renders the
+ * chat-completions shape the agentic loop consumes.
+ */
+function createResponsesEventReducer(): {
+  accept: (event: SseEvent) => void;
+  finish: () => ChatLikeResponse;
+} {
   let text = '';
   // Keyed by the streaming item id; the emitted tool-call id is the call_id so it
   // round-trips back as `function_call_output.call_id` on the next turn.
@@ -157,7 +199,7 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
   let usage: ChatLikeResponse['usage'];
   const getOnlyCall = () => calls.size === 1 ? calls.values().next().value : undefined;
 
-  for (const ev of events) {
+  const accept = (ev: SseEvent) => {
     switch (ev.type) {
       case 'response.output_text.delta':
         if (ev.delta) text += ev.delta;
@@ -197,26 +239,31 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
         break;
       }
     }
-  }
-
-  const toolCalls: ApiToolCallShape[] = [...calls.values()].map((c) => ({
-    id: c.callId,
-    type: 'function',
-    function: { name: c.name, arguments: c.args },
-  }));
+  };
 
   return {
-    choices: [
-      {
-        message: {
-          role: 'assistant',
-          content: text || null,
-          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-        },
-        finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
-      },
-    ],
-    usage,
+    accept,
+    finish: () => {
+      const toolCalls: ApiToolCallShape[] = [...calls.values()].map((c) => ({
+        id: c.callId,
+        type: 'function',
+        function: { name: c.name, arguments: c.args },
+      }));
+
+      return {
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: text || null,
+              tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+            },
+            finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+          },
+        ],
+        usage,
+      };
+    },
   };
 }
 
@@ -243,12 +290,13 @@ async function consumeResponsesStream(
   onToken?: (delta: string) => void,
   onReasoning?: (line: string) => void,
 ): Promise<ChatLikeResponse> {
-  const events: SseEvent[] = [];
+  const reducer = createResponsesEventReducer();
   const reader = res.body?.getReader();
   if (!reader) throw new Error('Codex responses: empty stream body');
 
   const decoder = new TextDecoder();
   let buffer = '';
+  let readBytes = 0;
   let terminalError: string | undefined;
   // Reasoning summary streams token-by-token; buffer and emit whole lines so the
   // live log shows readable thoughts instead of one-word-per-line spam.
@@ -265,7 +313,7 @@ async function consumeResponsesStream(
   };
   const handle = (ev: SseEvent | null) => {
     if (!ev) return;
-    events.push(ev);
+    reducer.accept(ev);
     if (ev.type === 'response.incomplete') {
       terminalError = `Responses stream incomplete${ev.response?.incomplete_details?.reason ? `: ${ev.response.incomplete_details.reason}` : ''}`;
     } else if (ev.type === 'response.failed') {
@@ -284,9 +332,21 @@ async function consumeResponsesStream(
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    readBytes += value.byteLength;
+    if (readBytes > MAX_STREAM_BYTES) {
+      await reader.cancel('responses stream exceeded retention limit').catch(() => {});
+      throw new Error(`Codex response stream exceeded the 16 MiB limit (${readBytes} bytes read)`);
+    }
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
+    // The carry is what a non-newline flood grows, so the ceiling is applied to
+    // the carry rather than to the whole decoded chunk — a legitimate burst of
+    // many complete frames in one chunk must not trip a partial-frame bound.
     buffer = lines.pop() ?? '';
+    if (Buffer.byteLength(buffer, 'utf8') > MAX_PARTIAL_FRAME_BYTES) {
+      await reader.cancel('responses partial frame exceeded limit').catch(() => {});
+      throw new Error('Codex response partial frame exceeded the 1 MiB limit (no newline in the stream)');
+    }
     for (const line of lines) handle(parseSseLine(line));
   }
   handle(parseSseLine(buffer));
@@ -294,7 +354,7 @@ async function consumeResponsesStream(
 
   if (terminalError) throw new Error(terminalError);
 
-  return reduceResponsesEvents(events);
+  return reducer.finish();
 }
 
 // ---- Adapter ----

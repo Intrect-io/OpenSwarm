@@ -19,6 +19,9 @@ export class KnowledgeGraph {
   readonly projectSlug: string;
   readonly projectPath: string;
   scannedAt: number = 0;
+  /** True when a scan/update limit truncated this graph (see incompleteReasons). */
+  incomplete: boolean = false;
+  incompleteReasons: string[] = [];
 
   constructor(projectSlug: string, projectPath: string) {
     this.projectSlug = projectSlug;
@@ -273,6 +276,8 @@ export class KnowledgeGraph {
       projectSlug: this.projectSlug,
       projectPath: this.projectPath,
       scannedAt: this.scannedAt,
+      incomplete: this.incomplete,
+      incompleteReasons: this.incompleteReasons,
       nodes: this.getAllNodes(),
       edges: this.getAllEdges(),
       summary: this.buildSummary(),
@@ -282,6 +287,8 @@ export class KnowledgeGraph {
   static deserialize(data: SerializedGraph): KnowledgeGraph {
     const graph = new KnowledgeGraph(data.projectSlug, data.projectPath);
     graph.scannedAt = data.scannedAt;
+    graph.incomplete = data.incomplete ?? false;
+    graph.incompleteReasons = data.incompleteReasons ?? [];
     for (const node of data.nodes) {
       graph.addNode(node);
     }

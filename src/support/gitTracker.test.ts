@@ -1,9 +1,40 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getChangedFiles, getChangedFilesSinceSnapshot, getDiffText, getWorkingDiffDetail, takeSnapshot } from './gitTracker.js';
+
+/**
+ * Fake `git` that writes `diff ¬` (UTF-8) as TWO chunks: the lead byte of the
+ * final `¬` (`C2`), a following event-loop turn, then its trailing byte (`AC`)
+ * plus a trailing newline. `setImmediate` is what keeps the writes in separate
+ * pipe reads deterministically — each write flushes on its own turn — so the
+ * parent must carry decoder state across chunk boundaries. `data.toString()`
+ * decoded each chunk alone: the lead byte alone became U+FFFD, corrupting the
+ * text (AGT-3493). `GIT_PROBE=stderr` sends the same bytes to stderr and exits
+ * non-zero to exercise the rejection path.
+ */
+const SPLIT_BYTE_GIT = `#!/usr/bin/env node
+const head = Buffer.from([0x64, 0x69, 0x66, 0x66, 0x20, 0xc2]);
+const tail = Buffer.from([0xac, 0x0a]);
+const stream = process.env.GIT_PROBE === 'stderr' ? process.stderr : process.stdout;
+stream.write(head);
+setImmediate(() => {
+  stream.write(tail, () => { if (process.env.GIT_PROBE === 'stderr') process.exit(1); });
+});
+`;
+
+/** Put the split-byte fake `git` first on PATH; returns a restore function. */
+function installSplitByteGit(root: string): () => void {
+  const bin = join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'git'), SPLIT_BYTE_GIT);
+  chmodSync(join(bin, 'git'), 0o755);
+  const previous = process.env.PATH;
+  process.env.PATH = `${bin}:${previous}`;
+  return () => { process.env.PATH = previous; };
+}
 
 describe('gitTracker', () => {
   let repo: string;
@@ -208,6 +239,66 @@ describe('gitTracker', () => {
         await expect(getWorkingDiffDetail(notGit)).resolves.toEqual([]);
       } finally {
         rmSync(notGit, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // AGT-3493: each stdout/stderr chunk was decoded on its own with data.toString(),
+  // so a multi-byte character split across a chunk boundary became U+FFFD —
+  // corrupting non-ASCII diff text and Git paths.
+  describe('runGitCommand decodes output across chunk boundaries', () => {
+    let probeRoot: string;
+
+    beforeEach(() => {
+      probeRoot = mkdtempSync(join(tmpdir(), 'openswarm-git-probe-'));
+    });
+
+    afterEach(() => {
+      rmSync(probeRoot, { recursive: true, force: true });
+      delete process.env.GIT_PROBE;
+    });
+
+    // The probe is a POSIX shim on PATH, so the split-chunk cases cannot run on Windows.
+    it.skipIf(process.platform === 'win32')('decodes a character split across two stdout chunks instead of corrupting it', async () => {
+      const restorePath = installSplitByteGit(probeRoot);
+      try {
+        // The fake git writes `diff ¬` with the `¬` (C2 AC) split across two
+        // pipe reads. Per-chunk decoding yields 'diff \uFFFD\n'.
+        const diff = await getDiffText(repo);
+
+        expect(diff).not.toContain('\uFFFD');
+        expect(diff).toBe('diff \u00ac\n');
+      } finally {
+        restorePath();
+      }
+    });
+
+    it.skipIf(process.platform === 'win32')('applies the byte cap to the decoded output', async () => {
+      const restorePath = installSplitByteGit(probeRoot);
+      try {
+        const capped = await getDiffText(repo, undefined, 4);
+
+        // 7 decoded bytes > cap 4 → the leading notice plus the first 4 chars,
+        // which is where the split character lives. Under per-chunk decoding the
+        // window ended in U+FFFD.
+        expect(capped).toContain('[diff truncated at 4 bytes of 7;');
+        expect(capped.endsWith('\n\ndiff')).toBe(true);
+        expect(capped).not.toContain('\uFFFD');
+      } finally {
+        restorePath();
+      }
+    });
+
+    it.skipIf(process.platform === 'win32')('decodes a split stderr chunk into the git-failure message', async () => {
+      const restorePath = installSplitByteGit(probeRoot);
+      process.env.GIT_PROBE = 'stderr';
+      try {
+        // Non-zero exit must still reject, with the decoded stderr (not U+FFFD)
+        // and the git-tracker marker that routes it to infra_error (INT-2521).
+        await expect(getChangedFilesSinceSnapshot(repo, '0000000000000000000000000000000000000000'))
+          .rejects.toThrow('git-tracker: diff since snapshot failed: git add -A failed: diff \u00ac\n');
+      } finally {
+        restorePath();
       }
     });
   });

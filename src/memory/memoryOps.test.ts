@@ -8,8 +8,12 @@ const state = {
 
 vi.mock('./memoryCore.js', () => ({
   EMBEDDING_DIM: 4,
+  LEGACY_MIGRATION_PAGE_SIZE: 10_000,
   PERMANENT_EXPIRY: Number.MAX_SAFE_INTEGER,
   normalizeRecords: (records: any[]) => records,
+  // Row vectors arrive from the store as Arrow vectors; identity is enough here
+  // because this file's fixtures already hand over plain arrays.
+  vectorAsNumberArray: (vector: unknown) => vector,
   initDatabase: vi.fn(async () => {}),
   embedPassage: vi.fn(async () => [0.1, 0.2, 0.3, 0.4]),
   getTable: () => ({

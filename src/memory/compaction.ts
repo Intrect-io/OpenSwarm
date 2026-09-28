@@ -2,12 +2,42 @@
 // OpenSwarm - Memory Compaction
 // ============================================
 
-import { getDb, getTable, initDatabase, EMBEDDING_DIM, PERMANENT_EXPIRY, normalizeRecords, setTable } from './memoryCore.js';
+import {
+  getDb,
+  getTable,
+  initDatabase,
+  EMBEDDING_DIM,
+  LEGACY_MIGRATION_PAGE_SIZE,
+  PERMANENT_EXPIRY,
+  normalizeRecords,
+  setTable,
+  vectorAsNumberArray,
+} from './memoryCore.js';
 import type { CognitiveMemoryRecord } from './memoryCore.js';
 import { isTransientReviewRejectionMemory } from './memoryFilters.js';
 
 const MIN_IMPORTANCE = 0.1;
 const CONSOLIDATION_SIMILARITY = 0.85;
+
+/**
+ * Page size for the compaction scan.
+ *
+ * The scan must be paged rather than one `.search().limit(N)` query: a single
+ * query silently truncates at N and, once a vector index exists, returns an
+ * approximate candidate set instead of every row.
+ */
+const COMPACTION_SCAN_PAGE_SIZE = LEGACY_MIGRATION_PAGE_SIZE;
+
+/**
+ * Ceiling on the records one compaction may rewrite.
+ *
+ * Survivors cannot be streamed: compaction replaces the table with a single
+ * `createTable(..., { mode: 'overwrite' })` built from the deduplicated set, and
+ * this client has no table rename, so the whole survivor set has to be
+ * materialized (≈ EMBEDDING_DIM floats per record). Exceeding this bound refuses
+ * the compaction before any mutation rather than truncating the candidate set.
+ */
+const COMPACTION_MAX_SURVIVORS = 100_000;
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
@@ -27,6 +57,23 @@ function stableMetadata(value: unknown): string {
   } catch {
     return JSON.stringify(value);
   }
+}
+
+/**
+ * Bucket key for duplicate candidates.
+ *
+ * Mirrors the exact-match fields `removeDuplicates` compares before measuring
+ * similarity, so bucketing can never pair records the pairwise rule would skip.
+ * Keying on the fields that must be identical shrinks the candidate set to
+ * plausible duplicates without hashing 768-dim vectors.
+ */
+function duplicateBucketKey(record: CognitiveMemoryRecord): string {
+  return [
+    record.repo,
+    record.type,
+    record.derivedFrom,
+    stableMetadata(record.metadata),
+  ].join('\u0000');
 }
 
 /**
@@ -50,51 +97,75 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Remove duplicate memories based on vector similarity
+ * Incremental duplicate index.
+ *
+ * Holds one survivor per duplicate group and accepts records page by page, so a
+ * compaction scan never has to materialize the whole table before comparing:
+ * candidates only ever meet other candidates from the same bucket. Records
+ * arrive in table order and survivors keep that order, which is what
+ * `removeDuplicates` (its single-shot wrapper) used to produce by rescanning
+ * every survivor for each record.
  */
-export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
+function createDuplicateAccumulator(): {
+  add: (records: CognitiveMemoryRecord[]) => void;
+  candidateCount: () => number;
+  survivors: () => CognitiveMemoryRecord[];
+} {
   const unique: CognitiveMemoryRecord[] = [];
+  const uniqueVectors: number[][] = [];
   const seen = new Set<string>();
+  const buckets = new Map<string, number[]>();
+  let accepted = 0;
 
-  for (const record of records) {
-    // Skip if exact ID already seen
-    if (seen.has(record.id)) continue;
+  function add(records: CognitiveMemoryRecord[]): void {
+    for (const record of records) {
+      accepted++;
+      // Skip if exact ID already seen
+      if (seen.has(record.id)) continue;
 
-    // Check similarity with existing unique records
-    let isDuplicate = false;
-    for (const existing of unique) {
-      if (
-        record.repo !== existing.repo ||
-        record.type !== existing.type ||
-        record.derivedFrom !== existing.derivedFrom ||
-        stableMetadata(record.metadata) !== stableMetadata(existing.metadata)
-      ) {
+      const key = duplicateBucketKey(record);
+      const candidates = buckets.get(key);
+      const vector = vectorAsNumberArray(record.vector);
+
+      // Only same-bucket survivors can match: the bucket key is exactly the set
+      // of fields the similarity rule requires to be equal.
+      let duplicateOf = -1;
+      for (const index of candidates ?? []) {
+        if (cosineSimilarity(vector, uniqueVectors[index]) >= CONSOLIDATION_SIMILARITY) {
+          duplicateOf = index;
+          break;
+        }
+      }
+
+      if (duplicateOf === -1) {
+        buckets.set(key, [...(candidates ?? []), unique.length]);
+        unique.push(record);
+        uniqueVectors.push(vector);
+        seen.add(record.id);
         continue;
       }
 
-      const similarity = cosineSimilarity(record.vector, existing.vector);
-
-      if (similarity >= CONSOLIDATION_SIMILARITY) {
-        // Keep the one with higher importance or more recent
-        if (record.importance > existing.importance ||
-            record.lastUpdated > existing.lastUpdated) {
-          // Replace existing with current
-          const index = unique.indexOf(existing);
-          unique[index] = record;
-          seen.add(record.id);
-        }
-        isDuplicate = true;
-        break;
+      // Keep the one with higher importance or more recent
+      const existing = unique[duplicateOf];
+      if (record.importance > existing.importance ||
+          record.lastUpdated > existing.lastUpdated) {
+        unique[duplicateOf] = record;
+        uniqueVectors[duplicateOf] = vector;
+        seen.add(record.id);
       }
-    }
-
-    if (!isDuplicate) {
-      unique.push(record);
-      seen.add(record.id);
     }
   }
 
-  return unique;
+  return { add, candidateCount: () => accepted, survivors: () => unique };
+}
+
+/**
+ * Remove duplicate memories based on vector similarity
+ */
+export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
+  const accumulator = createDuplicateAccumulator();
+  accumulator.add(records);
+  return accumulator.survivors();
 }
 
 /**
@@ -121,18 +192,58 @@ export async function compactMemoryTable(): Promise<{
       return { before: 0, after: 0, removed: 0, deduplicated: 0 };
     }
 
-    // 1. Read all records
-    const queryLimit = 100_000;
-    const allRecords = await table
-      .search(Array.from({ length: EMBEDDING_DIM }, () => 0))
-      .limit(queryLimit)
-      .toArray();
+    // 1. Stream records page by page.
+    //
+    // One `.search().limit(100_000)` query was wrong twice over: it silently
+    // truncated larger stores (compaction then rewrote the table with only the
+    // rows it happened to see) and, once a vector index exists, it returns an
+    // approximate candidate set rather than the table. A scalar `query()` scan
+    // with offset paging is complete and index-independent; deduplication runs
+    // on each page but keeps its state across pages, so a duplicate pair split
+    // by a page boundary is still merged.
+    const now = Date.now();
+    const accumulator = createDuplicateAccumulator();
+    let beforeCount = 0;
+    let afterFilter = 0;
+    let offset = 0;
 
-    if (allRecords.length >= queryLimit) {
-      throw new Error(`Memory compaction refused: query reached the ${queryLimit}-row safety limit`);
+    for (;;) {
+      const page = await table.query().offset(offset).limit(COMPACTION_SCAN_PAGE_SIZE).toArray();
+      if (page.length === 0) break;
+
+      beforeCount += page.length;
+
+      // 2. Filter valid records
+      const validPage = (page as CognitiveMemoryRecord[]).filter((r) => {
+        if (r.id === 'init') return true;
+
+        // Remove transient infrastructure failures that were previously stored as
+        // high-importance reviewer constraints.
+        if (isTransientReviewRejectionMemory(r)) return false;
+
+        // Remove if expired
+        if (Number(r.expiresAt) < PERMANENT_EXPIRY && Number(r.expiresAt) < now) return false;
+
+        // Remove if unimportant
+        if (Number(r.importance) < MIN_IMPORTANCE) return false;
+
+        return true;
+      });
+
+      afterFilter += validPage.length;
+      accumulator.add(validPage);
+
+      if (accumulator.candidateCount() > COMPACTION_MAX_SURVIVORS) {
+        throw new Error(
+          `Memory compaction refused: more than ${COMPACTION_MAX_SURVIVORS} candidate records; ` +
+          'the replacement table cannot be built incrementally',
+        );
+      }
+
+      offset += page.length;
+      if (page.length < COMPACTION_SCAN_PAGE_SIZE) break;
     }
 
-    const beforeCount = allRecords.length;
     console.log(`[Compaction] Found ${beforeCount} records`);
 
     if (beforeCount === 0) {
@@ -140,29 +251,10 @@ export async function compactMemoryTable(): Promise<{
       return { before: 0, after: 0, removed: 0, deduplicated: 0 };
     }
 
-    // 2. Filter valid records
-    const now = Date.now();
-    const validRecords = allRecords.filter((r: any) => {
-      if (r.id === 'init') return true;
-
-      // Remove transient infrastructure failures that were previously stored as
-      // high-importance reviewer constraints.
-      if (isTransientReviewRejectionMemory(r)) return false;
-
-      // Remove if expired
-      if (r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) return false;
-
-      // Remove if unimportant
-      if (r.importance < MIN_IMPORTANCE) return false;
-
-      return true;
-    });
-
-    const afterFilter = validRecords.length;
     console.log(`[Compaction] After filtering: ${afterFilter} records (removed ${beforeCount - afterFilter})`);
 
-    // 3. Deduplicate
-    const deduplicated = removeDuplicates(validRecords as CognitiveMemoryRecord[]);
+    // 3. Deduplicate (across page boundaries — see the accumulator)
+    const deduplicated = accumulator.survivors();
     const afterDedup = deduplicated.length;
     console.log(`[Compaction] After deduplication: ${afterDedup} records (merged ${afterFilter - afterDedup})`);
 

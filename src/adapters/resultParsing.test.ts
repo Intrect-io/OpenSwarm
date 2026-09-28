@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseReviewerResult, parseWorkerResult } from './resultParsing.js';
+import { findStringAwareJsonObject, parseReviewerResult, parseWorkerResult } from './resultParsing.js';
 import { t } from '../locale/index.js';
 
 const wrap = (obj: unknown) => '```json\n' + JSON.stringify(obj) + '\n```';
@@ -319,5 +319,56 @@ describe('a limitation report is not a failure declaration (AGT-4534)', () => {
     const { isExplicitFailure } = await import('./resultParsing.js');
     expect(isExplicitFailure(report)).toBe(false);
     expect(isExplicitFailure('Failed to apply the patch.')).toBe(true);
+  });
+});
+
+describe('findStringAwareJsonObject (AGT-3466)', () => {
+  const find = (text: string) => findStringAwareJsonObject(text, '"success"');
+
+  it('does not end the object at a brace inside a quoted string', () => {
+    // The unscanned variant sliced to the `}` inside the summary, so
+    // JSON.parse failed on an unterminated string and every field was lost.
+    expect(find('{"success": true, "summary": "Use `{}` here"}'))
+      .toBe('{"success": true, "summary": "Use `{}` here"}');
+    expect(find('{"success": true, "summary": "trailing } here"}'))
+      .toBe('{"success": true, "summary": "trailing } here"}');
+    expect(find('{"success": true, "summary": "the { never closes"}'))
+      .toBe('{"success": true, "summary": "the { never closes"}');
+  });
+
+  it('honors backslash escapes when deciding string boundaries', () => {
+    // Without escape state the quote inside \"}\" closes the string early, and
+    // the brace that follows is then read as structure.
+    expect(find('{"success": true, "summary": "say \\"}\\" here"}'))
+      .toBe('{"success": true, "summary": "say \\"}\\" here"}');
+    // An escaped backslash is a literal, so the next quote really does close.
+    expect(find('{"success": true, "summary": "path C:\\\\ then } here"}'))
+      .toBe('{"success": true, "summary": "path C:\\\\ then } here"}');
+  });
+
+  it('returns the object enclosing the marker, not a nested object before it', () => {
+    // lastIndexOf('{') would settle on the inner object and hand back a
+    // fragment with no `success` field in it.
+    expect(find('{"a": {"b": 1}, "success": true}')).toBe('{"a": {"b": 1}, "success": true}');
+  });
+
+  it('skips prose that names the marker before the object appears', () => {
+    expect(find('The "success" flag was set. Result: {"success":true,"summary":"done"}'))
+      .toBe('{"success":true,"summary":"done"}');
+  });
+
+  it('skips stray braces in the prose before the object', () => {
+    // A `{` in prose opens a candidate that never balances; a `}` closes one
+    // that never opened. Neither may abort the scan or become the result.
+    expect(find('noise } then {"success":true}')).toBe('{"success":true}');
+    expect(find('noise { then {"success":true}')).toBe('{"success":true}');
+    expect(find('oops { {"success":true}')).toBe('{"success":true}');
+    expect(find('sibling {"x":1} then {"success":true}')).toBe('{"success":true}');
+  });
+
+  it('returns null when there is no enclosing object', () => {
+    expect(find('no json at all')).toBeNull();
+    expect(find('{"success": true')).toBeNull();
+    expect(find('"success" with no object')).toBeNull();
   });
 });

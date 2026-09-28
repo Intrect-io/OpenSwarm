@@ -144,6 +144,9 @@ export const SerializedGraphSchema = z.object({
   projectSlug: z.string(),
   projectPath: z.string(),
   scannedAt: z.number(),
+  // Absent in graphs persisted before scan limits were surfaced (AGT-3490).
+  incomplete: z.boolean().optional(),
+  incompleteReasons: z.array(z.string()).optional(),
   nodes: z.array(GraphNodeSchema),
   edges: z.array(GraphEdgeSchema),
   summary: ProjectSummarySchema.optional(),

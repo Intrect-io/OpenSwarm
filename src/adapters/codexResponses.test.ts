@@ -694,3 +694,153 @@ describe('401 refresh scope', () => {
     expect(responsesCalls).toBe(2);
   });
 });
+
+describe('Responses stream byte bounds (AGT-3429)', () => {
+  type CreateApiCaller = (
+    initialToken: string,
+    accountId: string,
+    store: unknown,
+    model: string,
+    onToken?: (delta: string) => void,
+    signal?: AbortSignal,
+    onReasoning?: (line: string) => void,
+  ) => (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<ChatLikeResponseShape>;
+
+  interface ChatLikeResponseShape {
+    choices: Array<{ message: { content: string | null; tool_calls?: unknown[] }; finish_reason: string }>;
+    usage?: unknown;
+  }
+
+  const encoder = new TextEncoder();
+  const caller = (onToken?: (delta: string) => void, onReasoning?: (line: string) => void) => {
+    const adapter = new CodexResponsesAdapter() as unknown as { createApiCaller: CreateApiCaller };
+    return adapter.createApiCaller('token', 'account', {}, 'gpt-5.6-terra', onToken, undefined, onReasoning);
+  };
+
+  /**
+   * A lazy byte flood: `chunks` copies of one buffer, pulled on demand. Lazy so
+   * a test can describe an over-cap stream without allocating it up front, and
+   * so a reader that gives up stops the source instead of draining it.
+   */
+  const floodResponse = (chunk: Uint8Array, chunks: number) => {
+    let pulls = 0;
+    const res = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (pulls >= chunks) {
+            controller.close();
+            return;
+          }
+          pulls += 1;
+          controller.enqueue(chunk);
+        },
+        cancel() {
+          pulls = -1;
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    );
+    return { res, pulls: () => pulls };
+  };
+
+  it('aborts a non-newline flood instead of carrying it forever', async () => {
+    // The carry buffer grows with every byte until a '\n' arrives. An endpoint
+    // that never sends one (malformed, or adversarial) used to accumulate the
+    // whole body — the request deadline is minutes away. 2 MiB of 'x' in 64 KiB
+    // chunks; real frames here are a few dozen bytes.
+    const { res } = floodResponse(encoder.encode('x'.repeat(64 * 1024)), 32);
+    vi.stubGlobal('fetch', vi.fn(async () => res));
+
+    await expect(caller()([{ role: 'user', content: 'hi' }], [])).rejects.toThrow(
+      /partial frame exceeded the 1 MiB limit/,
+    );
+  });
+
+  it('cancels the body when it gives up, so the endpoint stops producing', async () => {
+    const { res, pulls } = floodResponse(encoder.encode('z'.repeat(64 * 1024)), 32);
+    vi.stubGlobal('fetch', vi.fn(async () => res));
+
+    await expect(caller()([{ role: 'user', content: 'hi' }], [])).rejects.toThrow(/1 MiB limit/);
+    expect(pulls()).toBe(-1);
+  });
+
+  it('caps total bytes read even when every frame is well formed', async () => {
+    // Valid frames never trip the carry bound, so only the raw ceiling stops an
+    // endpoint that loops on well-formed events instead of ending the stream.
+    const burst = encoder.encode(
+      `${'data: {"type":"response.output_text.delta","delta":"ok"}\n'.repeat(32_768)}`,
+    );
+    const { res } = floodResponse(burst, Math.ceil((17 * 1024 * 1024) / burst.byteLength));
+    vi.stubGlobal('fetch', vi.fn(async () => res));
+
+    await expect(caller()([{ role: 'user', content: 'hi' }], [])).rejects.toThrow(
+      /exceeded the 16 MiB limit/,
+    );
+  });
+
+  it('parses a normal multi-frame stream through the streaming path', async () => {
+    // The bound and the incremental reducer must leave ordinary streams alone:
+    // content deltas, a tool call assembled from fragments, reasoning summary
+    // lines, and usage last — plus one frame as large as a real long content
+    // delta (256 KiB) staying well inside the carry ceiling.
+    const bigFrame = `data: ${JSON.stringify({
+      type: 'response.output_text.delta',
+      delta: 'z'.repeat(256 * 1024),
+    })}`;
+    const body = [
+      'data: {"type":"response.created"}',
+      'data: {"type":"response.output_text.delta","delta":"Hel"}',
+      'data: {"type":"response.output_text.delta","delta":"lo"}',
+      bigFrame,
+      'data: {"type":"response.reasoning_summary_text.delta","delta":"weighing options\\n"}',
+      'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_9","name":"edit_file"}}',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"path\\":"}',
+      'data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"\\"x.ts\\"}"}',
+      'data: {"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":4}}}',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+
+    const tokens: string[] = [];
+    const thoughts: string[] = [];
+    const out = await caller((d) => tokens.push(d), (l) => thoughts.push(l))(
+      [{ role: 'user', content: 'hi' }],
+      [],
+    );
+
+    expect(out.choices[0].message.content).toBe(`Hello${'z'.repeat(256 * 1024)}`);
+    expect(out.choices[0].finish_reason).toBe('tool_calls');
+    expect(out.choices[0].message.tool_calls).toEqual([
+      { id: 'call_9', type: 'function', function: { name: 'edit_file', arguments: '{"path":"x.ts"}' } },
+    ]);
+    expect(out.usage).toEqual({ prompt_tokens: 11, completion_tokens: 4, total_tokens: 15, cached_tokens: 0 });
+    expect(tokens).toEqual(['Hel', 'lo', 'z'.repeat(256 * 1024)]);
+    expect(thoughts).toEqual(['weighing options']);
+  });
+
+  it('folds a long stream incrementally, matching the batch reduce exactly', async () => {
+    // Thousands of frames through the split/carry loop, which the handful-of-
+    // frames test above does not exercise: the carry must survive every chunk
+    // boundary, and the incremental reducer must produce exactly what the batch
+    // form does for the same sequence. (~8.5 MiB of body, under the 16 MiB cap.)
+    const events = Array.from({ length: 8_000 }, (_, i) => ({
+      type: 'response.output_text.delta',
+      delta: `chunk-${i}-${'y'.repeat(1_000)}`,
+    }));
+    const body = `${events.map((e) => `data: ${JSON.stringify(e)}`).join('\n')}\ndata: [DONE]\n`;
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+
+    const streamed = await caller()([{ role: 'user', content: 'hi' }], []);
+    const batched = reduceResponsesEvents(events);
+
+    expect(streamed).toEqual(batched);
+    expect(streamed.choices[0].message.content).toBe(events.map((e) => e.delta).join(''));
+  });
+});

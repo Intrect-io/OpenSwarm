@@ -65,6 +65,38 @@ const TTL_REPOMAP = 30 * 24 * 60 * 60 * 1000; // 30 days
 export const PERMANENT_EXPIRY = new Date('9999-12-31T23:59:59Z').getTime();
 
 /**
+ * Coerce a stored vector into a plain number array.
+ *
+ * Rows read back from Lance hand over an Arrow `Vector`, not a JS array:
+ * `row.vector[0]` is `undefined`, so reading one as an array silently yields
+ * zeros (rewrites destroyed every embedding) and cosine similarity over it is
+ * `NaN` (deduplication compared nothing and still reported success). Iterating
+ * the Arrow vector returns its real numbers. Anything non-numeric falls back to
+ * `fallbackLength` zeros — the column has a fixed width, so a shorter value
+ * would fail the write — or to an empty vector when no width is given, which
+ * similarity scoring treats as distinct rather than accidentally equal.
+ */
+export function vectorAsNumberArray(vector: unknown, fallbackLength = 0): number[] {
+  const zeros = () => Array.from({ length: fallbackLength }, () => 0);
+
+  if (Array.isArray(vector)) {
+    const numbers = vector.map(Number);
+    return numbers.every(Number.isFinite) ? numbers : zeros();
+  }
+  if (!vector || typeof vector !== 'object' || typeof (vector as Iterable<unknown>)[Symbol.iterator] !== 'function') {
+    return zeros();
+  }
+
+  const numbers: number[] = [];
+  for (const value of vector as Iterable<unknown>) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return zeros();
+    numbers.push(n);
+  }
+  return numbers.length > 0 ? numbers : zeros();
+}
+
+/**
  * Normalize records before LanceDB createTable.
  *
  * v3 keeps only fields that are actively used by save/search/recall. Older
@@ -78,7 +110,7 @@ export function normalizeRecords(records: any[]): CognitiveMemoryRecord[] {
     id: String(r.id || `unknown-${now}-${Math.random().toString(36).slice(2, 6)}`),
     type: String(r.type || 'journal') as MemoryType,
     content: String(r.content || ''),
-    vector: Array.isArray(r.vector) ? r.vector.map(Number) : Array.from({ length: EMBEDDING_DIM }, () => 0),
+    vector: vectorAsNumberArray(r.vector, EMBEDDING_DIM),
 
     importance: clamp01(r.importance, 0.5),
     confidence: clamp01(r.confidence, 0.7),

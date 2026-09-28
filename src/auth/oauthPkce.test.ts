@@ -1,42 +1,29 @@
 // ============================================
-// OpenSwarm - Linear OAuth callback delivery
+// OpenSwarm - OAuth PKCE callback delivery
 // ============================================
 //
-// Same defect and same proof as oauthPkce.test.ts, on the Linear flow: the
-// redirect URI is `http://localhost:<port>/callback`, so the browser connects
-// to whichever address the name resolves to — ::1 first on macOS — and the
-// listener used to answer only on 127.0.0.1. (AGT-3432)
+// The redirect URI this flow advertises is `http://localhost:<port>/auth/callback`,
+// so the browser connects to whatever `localhost` resolves to — and on macOS
+// that is ::1 first. While the listener was bound to 127.0.0.1 alone, the
+// browser's connection was refused, and the flow then sat on its 120s timeout
+// with nothing server-side to explain it. These tests drive the real flow over
+// the real loopback stack, on the address the name actually resolves to. (AGT-3432)
+//
+// `openBrowser` is mocked, but only as a signal: it is called from the
+// listener's `onListening`, so a call means the port accepts callbacks, and its
+// argument is the authorization URL the flow would have opened — which is where
+// the random `state` comes from. The test never invents that state.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import net from 'node:net';
-import { isValidLinearCallback, parseLinearTokenResponse, runLinearPkceFlow } from './linearPkce.js';
+import { runOAuthPkceFlow } from './oauthPkce.js';
 import { openBrowser } from './openBrowser.js';
 
 vi.mock('./openBrowser.js', () => ({ openBrowser: vi.fn() }));
 
-describe('parseLinearTokenResponse', () => {
-  it('requires access, refresh, and a positive expiry', () => {
-    expect(parseLinearTokenResponse({ access_token: 'a', refresh_token: 'r', expires_in: 3600 })).toEqual({
-      accessToken: 'a', refreshToken: 'r', expiresIn: 3600,
-    });
-    expect(() => parseLinearTokenResponse({ access_token: 'a', expires_in: 3600 })).toThrow(/refresh_token/);
-    expect(() => parseLinearTokenResponse({ access_token: 'a', refresh_token: '', expires_in: 3600 })).toThrow(/refresh_token/);
-    expect(() => parseLinearTokenResponse({ access_token: 'a', refresh_token: 'r', expires_in: 0 })).toThrow(/expires_in/);
-  });
-});
-
-describe('Linear callback validation', () => {
-  it('requires matching state for both success and OAuth error callbacks', () => {
-    expect(isValidLinearCallback('code', null, 'expected', 'expected')).toBe(true);
-    expect(isValidLinearCallback(null, 'access_denied', 'expected', 'expected')).toBe(true);
-    expect(isValidLinearCallback(null, 'access_denied', 'attacker', 'expected')).toBe(false);
-    expect(isValidLinearCallback('code', null, null, 'expected')).toBe(false);
-  });
-});
-
-const LINEAR_HOST = 'https://api.linear.app';
+const TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
 const realFetch = globalThis.fetch;
 
 /** A port with nothing bound to it, on either loopback family. */
@@ -61,7 +48,11 @@ async function ipv6LoopbackAvailable(): Promise<boolean> {
   });
 }
 
-/** An IPv4 address of this machine that is not loopback, or null when there is none. */
+/**
+ * An IPv4 address of this machine that is not loopback, or null when there is
+ * none. IPv4 because an unreachable port is refused immediately there, where a
+ * link-local IPv6 address would have to run out a timeout instead.
+ */
 function nonLoopbackIpv4(): string | null {
   for (const entries of Object.values(networkInterfaces())) {
     for (const entry of entries ?? []) {
@@ -86,16 +77,11 @@ async function connects(port: number, host: string): Promise<boolean> {
   });
 }
 
-/**
- * Answer the token exchange, leaving every other request to the real fetch.
- * `LINEAR_OAUTH_CLIENT_ID` is the flow's own precondition, so it is set here
- * rather than left to the developer's environment.
- */
+/** Answer the token exchange, leaving every other request to the real fetch. */
 function stubTokenExchange(): { bodies: URLSearchParams[] } {
   const bodies: URLSearchParams[] = [];
-  vi.stubEnv('LINEAR_OAUTH_CLIENT_ID', 'test-client-id');
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (!String(input).startsWith(LINEAR_HOST)) return realFetch(input, init);
+    if (String(input) !== TOKEN_ENDPOINT) return realFetch(input, init);
     bodies.push(new URLSearchParams(String(init?.body ?? '')));
     return new Response(
       JSON.stringify({ access_token: 'access-token', refresh_token: 'refresh-token', expires_in: 3600 }),
@@ -110,7 +96,7 @@ function stubTokenExchange(): { bodies: URLSearchParams[] } {
  * the callback path a browser would request on it.
  */
 async function startFlow(port: number): Promise<{ flow: Promise<unknown>; callback: string }> {
-  const flow = runLinearPkceFlow({ port });
+  const flow = runOAuthPkceFlow({ port });
   // Handled from the start so a rejected flow (the state-mismatch case) is never
   // reported as an unhandled rejection between the callback and the assertion.
   // The assertion below still observes the real rejection.
@@ -118,19 +104,18 @@ async function startFlow(port: number): Promise<{ flow: Promise<unknown>; callba
   await vi.waitFor(() => expect(openBrowser).toHaveBeenCalled());
   const authUrl = vi.mocked(openBrowser).mock.calls[0][0];
   const state = new URL(authUrl).searchParams.get('state');
-  return { flow, callback: `/callback?code=test-code&state=${state}` };
+  return { flow, callback: `/auth/callback?code=test-code&state=${state}` };
 }
 
 const hasIpv6Loopback = await ipv6LoopbackAvailable();
 const nonLoopback = nonLoopbackIpv4();
 
 afterEach(() => {
-  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
-describe('runLinearPkceFlow callback delivery', () => {
+describe('runOAuthPkceFlow callback delivery', () => {
   it.skipIf(!hasIpv6Loopback)('accepts the callback on the IPv6 loopback address localhost resolves to', async () => {
     const port = await freePort();
     const { bodies } = stubTokenExchange();
@@ -139,14 +124,16 @@ describe('runLinearPkceFlow callback delivery', () => {
     const response = await fetch(`http://[::1]:${port}${callback}`);
 
     expect(response.status).toBe(200);
+    expect(await response.text()).toContain('인증 완료');
     await expect(flow).resolves.toMatchObject({
       accessToken: 'access-token',
       refreshToken: 'refresh-token',
       expiresIn: 3600,
     });
-    // Linear's app has the `localhost` URI registered, so the exchange must
-    // keep presenting that exact value.
-    expect(bodies[0].get('redirect_uri')).toBe(`http://localhost:${port}/callback`);
+    // The advertised redirect URI must stay `localhost` — the public Codex
+    // client has that exact value registered and rejects 127.0.0.1 — so the
+    // exchange has to be told the URI the callback was advertised under.
+    expect(bodies[0].get('redirect_uri')).toBe(`http://localhost:${port}/auth/callback`);
   });
 
   it('accepts the callback on the IPv4 loopback address', async () => {
@@ -165,7 +152,7 @@ describe('runLinearPkceFlow callback delivery', () => {
     stubTokenExchange();
     const { flow } = await startFlow(port);
 
-    const response = await fetch(`http://[::1]:${port}/callback?code=test-code&state=attacker`);
+    const response = await fetch(`http://[::1]:${port}/auth/callback?code=test-code&state=attacker`);
 
     expect(response.status).toBe(400);
     await expect(flow).rejects.toThrow(/state mismatch/);
@@ -178,6 +165,7 @@ describe('runLinearPkceFlow callback delivery', () => {
 
     expect(await connects(port, nonLoopback as string)).toBe(false);
 
+    // Settle the flow so its listener does not outlive the test.
     await fetch(`http://127.0.0.1:${port}${callback}`);
     await expect(flow).resolves.toMatchObject({ accessToken: 'access-token' });
   });

@@ -6,6 +6,7 @@
  */
 import {
   EMBEDDING_DIM,
+  LEGACY_MIGRATION_PAGE_SIZE,
   PERMANENT_EXPIRY,
   normalizeRecords,
   initDatabase,
@@ -14,6 +15,7 @@ import {
   searchMemory,
   calculateFreshness,
   safeParseMetadata,
+  vectorAsNumberArray,
   logWork,
   withMemoryWriteRetry,
   type MemoryType,
@@ -24,6 +26,42 @@ import { embeddingTextFor } from './embeddingConfig.js';
 
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
+
+/** Page size for full-table maintenance scans (offset/limit over scalar columns). */
+const MAINTENANCE_SCAN_PAGE_SIZE = LEGACY_MIGRATION_PAGE_SIZE;
+
+/** Delete chunk size: bounded enough that one predicate cannot blow up a commit. */
+const MAINTENANCE_DELETE_CHUNK_SIZE = 1_000;
+
+/**
+ * Page a Lance table by offset/limit.
+ *
+ * A single `.limit(N)` silently truncates at N, and a vector `search()` returns
+ * an approximate candidate set once an index exists; offset paging over the
+ * scalar columns is complete either way. A short page ends the walk.
+ */
+async function forEachMemoryPage<T>(
+  table: MemoryTable,
+  pageSize: number,
+  visit: (page: T[]) => void,
+): Promise<void> {
+  const size = Math.max(1, Math.floor(pageSize));
+  let offset = 0;
+  for (;;) {
+    const page = await table.query().offset(offset).limit(size).toArray() as T[];
+    if (page.length === 0) return;
+    visit(page);
+    offset += page.length;
+    if (page.length < size) return;
+  }
+}
+
+/** Split `items` into fixed-size chunks, so a delete never carries an unbounded predicate. */
+function chunked<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
 
 /**
  * In-process queue that serializes full read-modify-write memory mutations.
@@ -395,7 +433,13 @@ function formatDate(timestamp: number): string {
 }
 
 /**
- * Clean up expired memories
+ * Clean up expired memories.
+ *
+ * The scan is paged (a single `.limit(10_000)` left every row past the first
+ * page behind forever) and runs outside the write lock, so a large store does
+ * not stall memory writers for the length of a full table scan. The lock is
+ * held only around each bounded delete chunk, which is where the read-modify-
+ * write race actually lives.
  */
 export async function cleanupExpired(): Promise<number> {
   try {
@@ -404,17 +448,30 @@ export async function cleanupExpired(): Promise<number> {
     if (!table) return 0;
 
     const now = Date.now();
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
+    const expiredIds: string[] = [];
 
-    const expiredIds = results
-      .filter((r: any) => r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now)
-      .map((r: any) => r.id);
+    await forEachMemoryPage<{ id?: unknown; expiresAt?: unknown }>(
+      table,
+      MAINTENANCE_SCAN_PAGE_SIZE,
+      (page) => {
+        for (const record of page) {
+          const expiresAt = Number(record.expiresAt);
+          if (expiresAt < PERMANENT_EXPIRY && expiresAt < now) expiredIds.push(String(record.id));
+        }
+      },
+    );
 
-    if (expiredIds.length > 0) {
-      await deleteMemoryIds(table, expiredIds);
-      console.log(`[Memory] Deleted ${expiredIds.length} expired records`);
-    }
+    if (expiredIds.length === 0) return 0;
 
+    // Delete under the mutation lock in bounded chunks: another writer cannot
+    // revise a record between its expiry check and its delete.
+    await withMemoryMutationLock(async () => {
+      for (const chunk of chunked(expiredIds, MAINTENANCE_DELETE_CHUNK_SIZE)) {
+        await deleteMemoryIds(table, chunk);
+      }
+    });
+
+    console.log(`[Memory] Deleted ${expiredIds.length} expired records`);
     return expiredIds.length;
   } catch (error) {
     console.error('[Memory] Cleanup error:', error);
@@ -425,8 +482,29 @@ export async function cleanupExpired(): Promise<number> {
 // Maintenance
 const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
+/** One similarity group: a seed anchor plus the records that joined it. */
+interface ConsolidationGroup {
+  /** Scan position of the seed — restores the order the old all-pairs scan reported. */
+  seedOrder: number;
+  /** The seed's vector: the anchor every member is compared against. */
+  seedVector: number[];
+  members: Array<{ id: string; score: number; order: number }>;
+}
+
 /**
- * Consolidate duplicate/similar memories
+ * Consolidate duplicate/similar memories.
+ *
+ * Records are grouped by the fields the similarity rule requires to be equal
+ * (`type`, `repo`) and compared only inside their own group, so the traversal is
+ * no longer every record against every other while the write lock is held. The
+ * scan is paged and buckets hold only ids, scores, and one vector per group
+ * anchor — the kept row is re-read by id when it is updated, so the whole table
+ * is not retained.
+ *
+ * Grouping matches the previous all-pairs scan exactly, which matters because
+ * cosine similarity is not transitive: in scan order the first record of a group
+ * becomes its seed and later records join the *earliest* seed they match, so the
+ * anchor stays the seed rather than whichever member currently scores highest.
  */
 export async function consolidateMemories(): Promise<{
   merged: number;
@@ -438,76 +516,80 @@ export async function consolidateMemories(): Promise<{
       const table = getTable();
       if (!table) return { merged: 0, groups: [] };
 
-      const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-      const validMemories = results.filter((r: any) => r.id !== 'init');
+      const buckets = new Map<string, ConsolidationGroup[]>();
+      let scanOrder = 0;
 
-      const merged: string[] = [];
-      const groups: Array<{ kept: string; merged: string[] }> = [];
-      const updatedKept: any[] = [];
+      await forEachMemoryPage<CognitiveMemoryRecord>(table, MAINTENANCE_SCAN_PAGE_SIZE, (page) => {
+        for (const record of page) {
+          if (record.id === 'init') continue;
 
-      // Find similar memory groups
-      for (let i = 0; i < validMemories.length; i++) {
-        const m1 = validMemories[i];
-        if (merged.includes(m1.id)) continue;
+          const order = scanOrder++;
+          const key = `${String(record.type)}\u0000${String(record.repo)}`;
+          const groups = buckets.get(key) ?? [];
+          if (groups.length === 0) buckets.set(key, groups);
 
-        const similarGroup: any[] = [m1];
+          const vector = vectorAsNumberArray(record.vector);
+          let group = groups.find((candidate) =>
+            cosineSimilarity(vector, candidate.seedVector) >= CONSOLIDATION_SIMILARITY);
 
-        for (let j = i + 1; j < validMemories.length; j++) {
-          const m2 = validMemories[j];
-          if (merged.includes(m2.id)) continue;
-          if (m1.type !== m2.type || m1.repo !== m2.repo) continue;
-
-          // Calculate cosine similarity
-          const similarity = cosineSimilarity(m1.vector, m2.vector);
-
-          if (similarity >= CONSOLIDATION_SIMILARITY) {
-            similarGroup.push(m2);
-            merged.push(m2.id);
+          if (!group) {
+            group = { seedOrder: order, seedVector: vector, members: [] };
+            groups.push(group);
           }
+          // importance * confidence, as before; ties keep the earlier record.
+          group.members.push({
+            id: String(record.id),
+            score: (record.importance ?? 0.5) * (record.confidence ?? 0.5),
+            order,
+          });
         }
+      });
 
-        // Merge if group has duplicates
-        if (similarGroup.length > 1) {
-          // Keep the one with highest importance * confidence
-          similarGroup.sort((a, b) =>
-            (b.importance ?? 0.5) * (b.confidence ?? 0.5) -
-            (a.importance ?? 0.5) * (a.confidence ?? 0.5)
-          );
+      const duplicateGroups = [...buckets.values()]
+        .flat()
+        .filter((group) => group.members.length > 1)
+        .sort((a, b) => a.seedOrder - b.seedOrder);
 
-          const kept = similarGroup[0];
-          const toMerge = similarGroup.slice(1);
+      const groups: Array<{ kept: string; merged: string[] }> = [];
+      const mergedIds: string[] = [];
+      const updates: Array<{ kept: string; merged: string[] }> = [];
+
+      for (const group of duplicateGroups) {
+        // Keep the one with highest importance * confidence
+        const [kept, ...toMerge] = [...group.members].sort((a, b) => b.score - a.score || a.order - b.order);
+        const mergedHere = toMerge.map((member) => member.id);
+
+        mergedIds.push(...mergedHere);
+        groups.push({ kept: kept.id, merged: mergedHere });
+        updates.push({ kept: kept.id, merged: mergedHere });
+
+        console.log(`[Memory] Consolidated ${mergedHere.length} duplicates into ${kept.id}`);
+      }
+
+      if (mergedIds.length > 0) {
+        for (const { kept, merged } of updates) {
+          const record = await loadMemoryById(table, kept);
+          if (!record) continue;
 
           // Boost kept memory
-          kept.confidence = Math.min(1, (kept.confidence ?? 0.7) + 0.05 * toMerge.length);
-          const meta = safeParseMetadata(kept.metadata);
-          kept.metadata = JSON.stringify({
+          record.confidence = Math.min(1, (record.confidence ?? 0.7) + 0.05 * merged.length);
+          const meta = safeParseMetadata(record.metadata);
+          record.metadata = JSON.stringify({
             ...meta,
             consolidatedFrom: [
               ...(Array.isArray(meta.consolidatedFrom) ? meta.consolidatedFrom : []),
-              ...toMerge.map((m: any) => m.id),
+              ...merged,
             ].slice(-MAX_MEMORY_REVISIONS),
           });
-          updatedKept.push(kept);
 
-          groups.push({
-            kept: kept.id,
-            merged: toMerge.map((m: any) => m.id),
-          });
-
-          console.log(`[Memory] Consolidated ${toMerge.length} duplicates into ${kept.id}`);
-        }
-      }
-
-      if (merged.length > 0) {
-        for (const record of updatedKept) {
           await updateMemoryRecord(table, record);
         }
-        await deleteMemoryIds(table, merged);
+        await deleteMemoryIds(table, mergedIds);
 
-        console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
+        console.log(`[Memory] Consolidation complete: ${mergedIds.length} memories merged`);
       }
 
-      return { merged: merged.length, groups };
+      return { merged: mergedIds.length, groups };
     });
   } catch (error) {
     console.error('[Memory] Consolidation error:', error);
