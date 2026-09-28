@@ -10,9 +10,9 @@
 // keypress logs one code point but the screen shows two glyphs, it's terminal
 // echo (fix in the client); if it logs the code point twice, it's ink-level.
 
-import { closeSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute, relative, resolve } from 'node:path';
 
 export const INPUT_DEBUG_LOG = join(homedir(), '.openswarm', 'input-debug.log');
 
@@ -46,11 +46,56 @@ export function inputDebugEnabled(env: NodeJS.ProcessEnv = process.env): boolean
   return v === '1' || v === 'true';
 }
 
+/**
+ * Resolve `path` and refuse anything that escapes ~/.openswarm. Diagnostics are
+ * best-effort, but they must not be a write primitive for an arbitrary path.
+ *
+ * `resolve()` is lexical, so a symlinked directory inside the sandbox could
+ * still redirect the write outside it. The nearest EXISTING ancestor is
+ * therefore canonicalized with `realpath` — the same path the kernel follows —
+ * and only the not-yet-created tail is re-attached lexically. That ancestor
+ * walk also covers a first run, when ~/.openswarm itself does not exist yet.
+ */
+function assertPathInDebugSandbox(path: string): string {
+  if (path.includes('\0')) {
+    throw new Error('Diagnostic log path contains NUL');
+  }
+  const sandbox = resolve(homedir(), '.openswarm');
+  const absolute = resolve(path);
+
+  // Walk up to the closest existing ancestor; remember the tail to re-attach.
+  const canonicalize = (input: string): string => {
+    let existing = input;
+    const tail: string[] = [];
+    while (true) {
+      try {
+        existing = realpathSync(existing);
+        break;
+      } catch {
+        const parent = dirname(existing);
+        if (parent === existing) break; // hit the filesystem root
+        tail.unshift(existing.slice(parent.length + 1));
+        existing = parent;
+      }
+    }
+    return resolve(existing, ...tail);
+  };
+
+  // The sandbox root may not exist on a first run, so canonicalize it the same
+  // way rather than letting realpath throw ENOENT and drop the line.
+  const rel = relative(canonicalize(sandbox), canonicalize(absolute));
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`Diagnostic log path escapes sandbox: ${path}`);
+  }
+  return canonicalize(absolute);
+}
+
 /** Append a diagnostic line to the debug log (best-effort, never throws). (INT-1964) */
 export function appendInputDebug(input: string, key: DebugKeyFlags = {}, path = INPUT_DEBUG_LOG): void {
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const fd = openSync(path, 'a', 0o600);
+    const safePath = assertPathInDebugSandbox(path);
+    mkdirSync(dirname(safePath), { recursive: true, mode: 0o700 });
+    const fd = openSync(safePath, 'a', 0o600);
     try {
       writeFileSync(fd, `${formatInputDebug(input, key)}\n`, 'utf8');
     } finally {

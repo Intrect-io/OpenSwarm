@@ -45,55 +45,76 @@ interface FileChurn {
 }
 
 /**
+ * `git log --format=%x1e%ct` prefixes every timestamp with an ASCII
+ * record-separator, so a timestamp token is self-identifying. Without it a
+ * numeric filename (`12345`) is indistinguishable from a commit timestamp —
+ * main's parser dropped such files entirely, and a state machine that assumes
+ * an empty NUL token between commits misreads the *next* commit's timestamp as
+ * a filename, because real `git log -z` output has no such empty token.
+ */
+const CHURN_TIMESTAMP_SENTINEL = '\x1e';
+
+/**
+ * Parse NUL-delimited `git log -z --format=%x1e%ct --name-only` output into
+ * per-file churn counts. Tokens prefixed with the sentinel are timestamps;
+ * every other token is a filename and is NEVER parsed as a number, even when
+ * the file is named `12345`. Git prefixes each commit's first filename with the
+ * newline that terminates the format, which is stripped here.
+ */
+export function parseNulDelimitedChurnOutput(output: string): Map<string, FileChurn> {
+  const churns = new Map<string, FileChurn>();
+  let currentTimestamp = 0;
+
+  for (const token of output.split('\0')) {
+    if (!token) continue;
+
+    if (token.startsWith(CHURN_TIMESTAMP_SENTINEL)) {
+      const trimmed = token.slice(CHURN_TIMESTAMP_SENTINEL.length).trim();
+      currentTimestamp = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) * 1000 : 0;
+      continue;
+    }
+
+    const filePath = token.startsWith('\n') ? token.slice(1) : token;
+    if (!filePath) continue;
+    const existing = churns.get(filePath);
+    if (existing) {
+      existing.commitCount++;
+      if (currentTimestamp > existing.lastCommitDate) {
+        existing.lastCommitDate = currentTimestamp;
+      }
+    } else {
+      churns.set(filePath, {
+        path: filePath,
+        commitCount: 1,
+        lastCommitDate: currentTimestamp,
+      });
+    }
+  }
+
+  return churns;
+}
+
+/**
  * Calculate per-file commit count over the last 30 days
  */
 async function getFileChurns(projectPath: string, sinceDays: number = 30): Promise<Map<string, FileChurn>> {
   const churns = new Map<string, FileChurn>();
 
   try {
-    // git log --since="30 days ago" --name-only --format="%ct"
+    // git log --since="30 days ago" --name-only --format="%x1e%ct"
     const output = await runGitCommand(projectPath, [
       'log',
       `--since=${sinceDays} days ago`,
       '--name-only',
       '-z',
-      '--format=%ct',
+      '--format=%x1e%ct',
     ]);
 
-    let currentTimestamp = 0;
-
-    for (const token of output.split('\0')) {
-      if (!token) continue;
-      const timestampToken = token.trim();
-
-      // If numeric, it's a commit timestamp
-      if (/^\d+$/.test(timestampToken)) {
-        currentTimestamp = parseInt(timestampToken, 10) * 1000; // Convert to ms
-        continue;
-      }
-
-      // `-z` preserves embedded newlines and other whitespace in filenames.
-      const filePath = token.startsWith('\n') ? token.slice(1) : token;
-      if (!filePath) continue;
-      const existing = churns.get(filePath);
-      if (existing) {
-        existing.commitCount++;
-        if (currentTimestamp > existing.lastCommitDate) {
-          existing.lastCommitDate = currentTimestamp;
-        }
-      } else {
-        churns.set(filePath, {
-          path: filePath,
-          commitCount: 1,
-          lastCommitDate: currentTimestamp,
-        });
-      }
-    }
+    return parseNulDelimitedChurnOutput(output);
   } catch (err) {
     console.warn(`[GitInfo] Failed to get file churns:`, err);
+    return churns;
   }
-
-  return churns;
 }
 
 /**

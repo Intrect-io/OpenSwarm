@@ -20,6 +20,9 @@ export class HttpError extends Error {
 
 export function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
+    // A multi-byte character split across chunks must survive: decode
+    // incrementally and flush the decoder's tail at end-of-body.
+    const decoder = new TextDecoder('utf-8');
     let data = '';
     let totalBytes = 0;
     let settled = false;
@@ -37,11 +40,12 @@ export function readBody(req: IncomingMessage): Promise<string> {
         fail(413, 'Request body too large');
         return;
       }
-      data += chunk.toString('utf-8');
+      data += decoder.decode(chunk, { stream: true });
     });
     req.on('end', () => {
       if (settled) return;
       settled = true;
+      data += decoder.decode();
       resolve(data);
     });
     req.on('aborted', () => fail(400, 'Request body aborted'));

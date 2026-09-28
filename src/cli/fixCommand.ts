@@ -343,7 +343,9 @@ export interface FixReport {
 /** Default check runner: spawn the command, capture combined output, pass = exit 0. */
 async function defaultRunCheck(check: Check, cwd: string): Promise<{ passed: boolean; output: string }> {
   return new Promise((resolve) => {
-    execFile(check.program, check.args, { cwd, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
+    // A check that hangs must not hang `openswarm fix`; the fix loop needs a
+    // failed check it can act on, not an indefinitely parked round.
+    execFile(check.program, check.args, { cwd, maxBuffer: 32 * 1024 * 1024, timeout: 300_000 }, (err, stdout, stderr) => {
       resolve({ passed: !err, output: `${stdout ?? ''}${stderr ?? ''}` });
     });
   });

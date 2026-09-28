@@ -359,9 +359,15 @@ async function runChatViaAdapter(
     'Chat response cancelled',
   );
   if (raw.exitCode !== 0 && !raw.stdout.trim()) {
-    throw new Error(raw.stderr.trim() || `${provider} exited with code ${raw.exitCode}`);
+    throw new Error(raw.stderr.trim().slice(0, 256 * 1024) || `${provider} exited with code ${raw.exitCode}`);
   }
-  const text = raw.stdout.trim();
+  // Bound retained adapter stdout before returning to the chat UI (AGT-3429).
+  // Keep the TAIL: the consumer of this value is looking for the reply, which
+  // is emitted last, not the earliest output.
+  const MAX_ADAPTER_STDOUT_CHARS = 1024 * 1024;
+  const text = raw.stdout.length > MAX_ADAPTER_STDOUT_CHARS
+    ? raw.stdout.slice(-MAX_ADAPTER_STDOUT_CHARS).trim()
+    : raw.stdout.trim();
   // Non-streaming adapters emit nothing via onToken — flush the full reply once.
   if (!streamed) options.onText?.(text, false);
   return { response: text || '[No response]', provider, model };
@@ -464,6 +470,11 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
         proc.stdin?.end(stdin);
       }
 
+      // Hard caps on retained CLI chat output (AGT-3429). Oversized streams are
+      // bounded in place so a runaway subprocess cannot exhaust process memory.
+      const MAX_CHAT_STDOUT_CHARS = 1024 * 1024; // 1 MiB
+      const MAX_CHAT_STDERR_CHARS = 256 * 1024; // 256 KiB
+      const MAX_CHAT_PARTIAL_BUFFER_CHARS = 64 * 1024; // 64 KiB
       let stdout = '';
       let stderr = '';
       let buffer = '';
@@ -471,6 +482,13 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
       let startedStreaming = false;
       let thinkingTimer: NodeJS.Timeout | null = null;
       let settled = false;
+
+      /** Keep the newest `max` chars — the tail is what a consumer still needs. */
+      const keepTail = (current: string, chunk: string, max: number): string => {
+        if (chunk.length >= max) return chunk.slice(-max);
+        const excess = current.length + chunk.length - max;
+        return excess > 0 ? current.slice(excess) + chunk : current + chunk;
+      };
 
       const cleanupProcessHooks = () => {
         if (thinkingTimer) clearTimeout(thinkingTimer);
@@ -540,13 +558,17 @@ export async function runChatCompletion(options: ChatCompletionOptions): Promise
 
       proc.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
-        stdout += text;
-        buffer += text;
+        // Both keep the TAIL: `extractChatResponse` reads the LAST matching
+        // stream event, and `flushLines` can only emit lines it still has — a
+        // head-truncated line buffer would never find a newline again and live
+        // streaming would stop for the rest of the turn.
+        stdout = keepTail(stdout, text, MAX_CHAT_STDOUT_CHARS);
+        buffer = keepTail(buffer, text, MAX_CHAT_PARTIAL_BUFFER_CHARS);
         flushLines(false);
       });
 
       proc.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
+        stderr = keepTail(stderr, chunk.toString(), MAX_CHAT_STDERR_CHARS);
       });
 
       proc.on('close', (code) => {
