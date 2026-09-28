@@ -66,6 +66,10 @@ describe('daily reporter watermark', () => {
 
   it('retries after a partial failure because no watermark is written', async () => {
     testState.postStatusUpdate
+      // Both attempts in the first run fail: the bounded retry is one extra
+      // attempt inside that run, so a persistent failure still leaves the
+      // watermark unadvanced and the window is retried on the next run.
+      .mockRejectedValueOnce(new Error('temporary Linear failure'))
       .mockRejectedValueOnce(new Error('temporary Linear failure'))
       .mockResolvedValueOnce(undefined);
     configureReporter();
@@ -74,7 +78,7 @@ describe('daily reporter watermark', () => {
     expect(existsSync(watermarkFile)).toBe(false);
 
     await generateDailyReports();
-    expect(testState.postStatusUpdate).toHaveBeenCalledTimes(2);
+    expect(testState.postStatusUpdate).toHaveBeenCalledTimes(3);
     expect(existsSync(watermarkFile)).toBe(true);
   });
 });

@@ -10,6 +10,8 @@ import {
   runMaxReview,
   mergeFallback,
   mergeSecurityAuditFindings,
+  mergeQualityHarnessResult,
+  QUALITY_HARNESS_AREA,
   type AuditArea,
   type AuditAreaResult,
   type AuditProgress,
@@ -214,6 +216,56 @@ describe('mergeSecurityAuditFindings', () => {
     expect(merged.summary.decision).toBe('reject');
     expect(fixTargets(merged)).toHaveLength(1);
     expect(merged.summary.issues).toContain('[.openswarm/codeql-security] CodeQL codeql/js/file-system-race (src/a.ts:8): race');
+  });
+});
+
+describe('mergeQualityHarnessResult', () => {
+  it('always injects a harness area so clean scans still gate-ran', () => {
+    const base: AuditRun = {
+      results: [],
+      summary: aggregateAuditResults([]),
+    };
+    const merged = mergeQualityHarnessResult(base, {
+      status: 'passed',
+      filesListed: 3,
+      filesScanned: 3,
+      findings: [],
+      commands: [{ name: 'typecheck', kind: 'typecheck', status: 'pass', detail: 'ok' }],
+    });
+    expect(merged.summary.decision).toBe('approve');
+    expect(merged.summary.completed).toBe(1);
+    expect(merged.results[0]?.area.label).toBe(QUALITY_HARNESS_AREA);
+    const md = formatAuditReport(merged.summary, 'repo', 'ts');
+    expect(md).toContain(QUALITY_HARNESS_AREA);
+    expect(md).toContain('Verdict: APPROVE');
+  });
+
+  it('rejects when static or command findings are errors', () => {
+    const base: AuditRun = {
+      results: [{
+        area: { label: 'src', dir: 'src', files: ['src/a.ts'] },
+        review: { decision: 'approve', feedback: '', issues: [], recommendedActions: [] },
+      }],
+      summary: aggregateAuditResults([{
+        area: { label: 'src', dir: 'src', files: ['src/a.ts'] },
+        review: { decision: 'approve', feedback: '', issues: [], recommendedActions: [] },
+      }]),
+    };
+    const merged = mergeQualityHarnessResult(base, {
+      status: 'failed',
+      filesListed: 1,
+      filesScanned: 1,
+      findings: [{
+        ruleId: 'openswarm/quality-truncated',
+        level: 'error',
+        message: 'too large',
+        filePath: 'src/a.ts',
+      }],
+      commands: [],
+    });
+    expect(merged.summary.decision).toBe('reject');
+    expect(merged.summary.issues.some((i) => i.includes('openswarm/quality-truncated'))).toBe(true);
+    expect(formatAuditReport(merged.summary, 'repo', 'ts')).toContain('Quality openswarm/quality-truncated');
   });
 });
 

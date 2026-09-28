@@ -120,17 +120,13 @@ export function stopDailyReporter(): void {
 }
 
 /**
- * Generate daily status reports for all active projects
- * Watermark is persisted ONLY after all reports succeed.
+ * Generate daily status reports for all active projects.
+ * Watermark is persisted ONLY after all reports succeed; failed projects get
+ * one bounded retry so a transient Linear error is not reported as a failure.
  */
 export async function generateDailyReports(): Promise<void> {
-  if (!linearClient) {
-    console.warn('[DailyReporter] LinearClient not set, skipping reports');
-    return;
-  }
-
-  if (!teamId) {
-    console.warn('[DailyReporter] Team ID not set, skipping reports');
+  if (!linearClient || !teamId) {
+    console.warn('[DailyReporter] Linear client or team ID not configured');
     return;
   }
 
@@ -143,7 +139,6 @@ export async function generateDailyReports(): Promise<void> {
   console.log('[DailyReporter] Generating daily reports...');
 
   try {
-    // Fetch all active projects from Linear
     const team = await linearClient.team(teamId);
     if (!team) {
       console.warn('[DailyReporter] Team not found');
@@ -165,36 +160,63 @@ export async function generateDailyReports(): Promise<void> {
 
     console.log(`[DailyReporter] Found ${activeProjects.length} active projects`);
 
-    // Generate status update for each project
-    let successCount = 0;
-    let failCount = 0;
+    // Track per-project publication outcome so retries target only failed projects
+    const projectResults: { id: string; name: string; ok: boolean }[] = [];
 
     for (const project of activeProjects) {
       try {
         const projectPath = projectPathMapping.get(project.id);
         await postStatusUpdate(project.id, project.name, projectPath);
-        successCount++;
+        projectResults.push({ id: project.id, name: project.name, ok: true });
       } catch (err) {
         console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
-        failCount++;
+        projectResults.push({ id: project.id, name: project.name, ok: false });
       }
     }
 
+    const successCount = projectResults.filter(r => r.ok).length;
+    const failCount = projectResults.filter(r => !r.ok).length;
+    const failedProjects = projectResults.filter(r => !r.ok).map(r => r.name);
+
     console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
 
-    // Only persist watermark when ALL reports succeeded.
-    // If any failed, the watermark stays at the previous value so the next
-    // run retries the same window instead of skipping it.
-    if (failCount === 0) {
+    // Retry only failed projects (up to 1 retry each)
+    if (failCount > 0) {
+      console.log(`[DailyReporter] Retrying ${failCount} failed project(s): ${failedProjects.join(', ')}`);
+      for (const result of projectResults) {
+        if (!result.ok) {
+          try {
+            const projectPath = projectPathMapping.get(result.id);
+            await postStatusUpdate(result.id, result.name, projectPath);
+            result.ok = true;
+            console.log(`[DailyReporter] Retry succeeded for "${result.name}"`);
+          } catch (err) {
+            console.error(`[DailyReporter] Retry also failed for "${result.name}":`, err);
+          }
+        }
+      }
+    }
+
+    // Outcome counts must reflect post-retry state so Discord/summary stay accurate.
+    const finalSuccessCount = projectResults.filter(r => r.ok).length;
+    const finalFailCount = projectResults.filter(r => !r.ok).length;
+    if (finalSuccessCount !== successCount || finalFailCount !== failCount) {
+      console.log(`[DailyReporter] After retry: ${finalSuccessCount} success, ${finalFailCount} failed`);
+    }
+
+    // Only persist watermark when EVERY project succeeded (after the retry pass).
+    // A remaining failure keeps the previous watermark so the next run retries
+    // the same window instead of skipping it.
+    if (finalFailCount === 0) {
       writeWatermark(today);
       console.log(`[DailyReporter] Watermark persisted: ${today}`);
     } else {
-      console.warn(`[DailyReporter] ${failCount} report(s) failed — watermark NOT updated`);
+      console.warn(`[DailyReporter] ${finalFailCount} report(s) failed — watermark NOT updated`);
     }
 
     // Send summary to Discord
-    if (discordReporter && successCount > 0) {
-      await sendDiscordSummary(activeProjects.length, successCount, failCount);
+    if (discordReporter && finalSuccessCount > 0) {
+      await sendDiscordSummary(activeProjects.length, finalSuccessCount, finalFailCount);
     }
   } catch (error) {
     console.error('[DailyReporter] Failed to generate reports:', error);

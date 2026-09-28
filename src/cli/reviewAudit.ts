@@ -19,9 +19,13 @@ import { isInfraError } from '../adapters/errorClassification.js';
 import { c, status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
 import type { SecurityFinding } from '../verify/securityAudit.js';
+import type { QualityHarnessResult } from '../verify/qualityHarness.js';
 
 /** Synthetic area label carrying deterministic CodeQL findings into a review run. */
 export const SECURITY_AUDIT_AREA = '.openswarm/codeql-security';
+
+/** Synthetic area label for the deterministic quality harness (static + verify cmds). */
+export const QUALITY_HARNESS_AREA = '.openswarm/quality-harness';
 
 /** Add deterministic CodeQL findings as a fixable, synthetic review area. */
 export function mergeSecurityAuditFindings(run: AuditRun, findings: readonly SecurityFinding[]): AuditRun {
@@ -42,6 +46,49 @@ export function mergeSecurityAuditFindings(run: AuditRun, findings: readonly Sec
       recommendedActions: findings.map((finding) => ({
         type: 'security',
         title: `Fix CodeQL ${finding.ruleId}${finding.filePath ? ` at ${finding.filePath}${finding.line ? `:${finding.line}` : ''}` : ''}`,
+      })),
+    },
+  });
+  return { ...run, results, summary: aggregateAuditResults(results) };
+}
+
+/**
+ * Fold the deterministic quality harness into the audit run. Always injects an
+ * area so `--harness-only` still produces a gate-ran verdict and the markdown
+ * report records coverage even when the scan is clean.
+ */
+export function mergeQualityHarnessResult(run: AuditRun, harness: QualityHarnessResult): AuditRun {
+  const results = run.results.filter((result) => result.area.label !== QUALITY_HARNESS_AREA);
+  const files = [...new Set(
+    harness.findings.map((finding) => finding.filePath).filter((file): file is string => Boolean(file)),
+  )].sort();
+  const issues = harness.findings.map((finding) => {
+    const location = finding.filePath
+      ? `${finding.filePath}${finding.line ? `:${finding.line}` : ''}`
+      : 'repository';
+    return `Quality ${finding.ruleId} (${location}): ${finding.message}`;
+  });
+  const commandLine = harness.commands.length === 0
+    ? 'no verify commands discovered'
+    : harness.commands.map((c) => `${c.name}:${c.status}`).join(', ');
+  const coverage = `static ${harness.filesScanned}/${harness.filesListed}; commands: ${commandLine}`;
+  const decision: ReviewResult['decision'] = harness.findings.some((f) => f.level === 'error')
+    ? 'reject'
+    : harness.findings.length > 0
+      ? 'revise'
+      : 'approve';
+  const feedback = decision === 'approve'
+    ? `Deterministic quality harness passed (${coverage}).`
+    : `Deterministic quality harness findings (${coverage}):\n${issues.join('\n')}`;
+  results.push({
+    area: { label: QUALITY_HARNESS_AREA, dir: '.', files },
+    review: {
+      decision,
+      feedback,
+      issues,
+      recommendedActions: harness.findings.map((finding) => ({
+        type: finding.ruleId.includes('command') ? 'test' : 'quality',
+        title: `Address ${finding.ruleId}${finding.filePath ? ` at ${finding.filePath}${finding.line ? `:${finding.line}` : ''}` : ''}`,
       })),
     },
   });

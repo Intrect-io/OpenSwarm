@@ -222,6 +222,16 @@ describe('loadRepos malformed-JSON recovery (via handleProjectList)', () => {
     expect(() => handleProjectList()).toThrow(/preserved as/);
     expect(renameSyncMock).toHaveBeenCalledOnce();
   });
+
+  it('surfaces a quarantine failure when the corrupt file cannot be moved aside', () => {
+    readFileSyncMock.mockReturnValue('{ not valid json ,, }');
+    existsSyncMock.mockImplementation((p: string) => typeof p === 'string' && p.endsWith('openswarm-repos.json'));
+    renameSyncMock.mockImplementation(() => {
+      throw new Error('EACCES: permission denied');
+    });
+    expect(() => handleProjectList()).toThrow(/quarantine failure/);
+    expect(errors.join('\n')).toMatch(/quarantine failed/);
+  });
 });
 
 describe('loadRepos defaults missing fields (via handleProjectList)', () => {

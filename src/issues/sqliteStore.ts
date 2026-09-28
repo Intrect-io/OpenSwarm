@@ -326,6 +326,13 @@ export class SqliteIssueStore implements IIssueStore {
   // ============ 이슈 CRUD ============
 
   createIssue(input: CreateIssueInput): Issue {
+    // Honor the documented idempotent-ID contract: a caller-supplied stable id
+    // returns the existing row instead of colliding on UNIQUE(id).
+    if (input.id) {
+      const existing = this.getIssue(input.id);
+      if (existing) return existing;
+    }
+
     const id = input.id ?? nanoid(12);
     const now = new Date().toISOString();
 
@@ -438,6 +445,12 @@ export class SqliteIssueStore implements IIssueStore {
         return transaction() as string;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // Concurrent create with the same caller-supplied id: return the winner's
+        // row instead of surfacing a UNIQUE(id) violation to the caller.
+        if (input.id) {
+          const existing = this.getIssue(input.id);
+          if (existing) return existing.id;
+        }
         // Cross-process inbound sync can both pass the pre-insert SELECT and then
         // collide on the unique Linear indexes — reclaim the winner's row.
         if (/UNIQUE/i.test(message) && (input.linearId || input.linearIdentifier)) {
@@ -562,7 +575,12 @@ export class SqliteIssueStore implements IIssueStore {
       }
 
       if (patch.status !== undefined) {
-        this.applyStatusChange(id, existing.status, patch.status, 'system');
+        // Re-read inside the write txn so event oldValue matches effective DB state.
+        const current = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+          | { status: IssueStatus }
+          | undefined;
+        if (!current) return;
+        this.applyStatusChange(id, current.status, patch.status, 'system');
       }
     });
 
@@ -654,11 +672,18 @@ export class SqliteIssueStore implements IIssueStore {
   // ============ 상태 전이 ============
 
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null {
-    const existing = this.getIssue(id);
-    if (!existing) return null;
+    const run = this.db.transaction(() => {
+      // Read effective status inside the write transaction so concurrent
+      // transitions cannot stamp a stale oldValue onto the event log.
+      const row = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+        | { status: IssueStatus }
+        | undefined;
+      if (!row) return null;
 
-    this.applyStatusChange(id, existing.status, status, actor ?? 'system');
-    return this.getIssue(id);
+      this.applyStatusChange(id, row.status, status, actor ?? 'system');
+      return this.getIssue(id);
+    });
+    return run();
   }
 
   private applyStatusChange(id: string, oldStatus: IssueStatus, status: IssueStatus, actor: string): void {

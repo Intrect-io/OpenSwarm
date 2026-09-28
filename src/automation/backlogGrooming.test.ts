@@ -28,10 +28,11 @@ describe('backlogGrooming (INT-1609)', () => {
   "decisions": [
     {"issueId":"id-1","identifier":"INT-1","status":"stale","reason":"implemented","evidence":["src/a.ts:10"],"closeState":"Done"},
     {"issueId":"id-2","status":"bogus","reason":"bad"},
-    {"issueId":"id-3","status":"needs_update","reason":"drifted","updatedDescription":"new body"}
+    {"issueId":"id-3","status":"needs_update","reason":"drifted","updatedDescription":"new body"},
+    {"issueId":"hallucinated","status":"stale","reason":"out of scope","closeState":"Done"}
   ]
 }
-\`\`\``);
+\`\`\``, new Set(['id-1', 'id-2', 'id-3']));
     expect(result.success).toBe(true);
     expect(result.decisions.map(d => d.issueId)).toEqual(['id-1', 'id-3']);
     expect(result.decisions[0].closeState).toBe('Done');
@@ -63,10 +64,23 @@ describe('backlogGrooming (INT-1609)', () => {
         { issueId: 'id-2', status: 'needs_update', reason: 'drifted', evidence: ['src/a.ts:1'], updatedDescription: 'new body' },
         { issueId: 'id-3', status: 'stale', reason: 'implemented', evidence: ['src/b.ts:2'], closeState: 'Done' },
       ],
-    }, 'apply');
+    }, 'apply', new Set(['id-1', 'id-2', 'id-3']));
     expect(applied).toEqual({ commented: 2, failedComments: 0, updatedDescriptions: 1, moved: 1, movedIssueIds: ['id-3'], skippedUnknown: 0 });
     expect(src.updateDescription).toHaveBeenCalledWith('id-2', 'new body');
     expect(src.updateState).toHaveBeenCalledWith('id-3', 'Done');
+  });
+
+  it('refuses apply mutations when no scope Set is supplied', async () => {
+    const src = source();
+    const applied = await applyBacklogGrooming(src, {
+      success: true,
+      decisions: [
+        { issueId: 'id-1', status: 'stale', reason: 'implemented', evidence: ['src/a.ts:1'], closeState: 'Done' },
+      ],
+    }, 'apply');
+    expect(applied.moved).toBe(0);
+    expect(applied.skippedUnknown).toBe(1);
+    expect(src.updateState).not.toHaveBeenCalled();
   });
 
   it('does not count a stale issue as moved when state transition fails', async () => {
